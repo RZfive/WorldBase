@@ -1,4 +1,15 @@
 /**
+ * Validate that a SQL identifier (table/column name) is safe.
+ * Only allows alphanumeric characters and underscores.
+ */
+function validateIdentifier (name) {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+    throw new Error(`Invalid SQL identifier: ${name}`)
+  }
+  return name
+}
+
+/**
  * DataAnalyzer — 数据分析工具
  * 提供统计、聚合、趋势分析等功能
  */
@@ -47,6 +58,11 @@ export class DataAnalyzer {
       throw new Error('Trend analysis requires: table, dateColumn, valueColumn')
     }
 
+    validateIdentifier(table)
+    validateIdentifier(dateColumn)
+    validateIdentifier(valueColumn)
+    if (groupBy) validateIdentifier(groupBy)
+
     let sql = `SELECT "${dateColumn}", `
     if (groupBy) {
       sql += `"${groupBy}", `
@@ -80,6 +96,9 @@ export class DataAnalyzer {
       throw new Error('Distribution analysis requires: table, column')
     }
 
+    validateIdentifier(table)
+    validateIdentifier(column)
+
     const sql = `SELECT "${column}", COUNT(*) as count FROM "${table}" GROUP BY "${column}" ORDER BY count DESC`
     const rows = await dataAccess.queryDatabase(projectId, sql)
 
@@ -109,6 +128,10 @@ export class DataAnalyzer {
     if (!table || !groupColumn || !valueColumn) {
       throw new Error('Comparison analysis requires: table, groupColumn, valueColumn')
     }
+
+    validateIdentifier(table)
+    validateIdentifier(groupColumn)
+    validateIdentifier(valueColumn)
 
     const validAggregations = ['SUM', 'AVG', 'COUNT', 'MIN', 'MAX']
     const agg = validAggregations.includes(aggregation.toUpperCase())

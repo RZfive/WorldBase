@@ -82,7 +82,7 @@ export class RuntimeManager {
       projectInfo.logs.push({ type: 'stdout', text: line, time: Date.now() })
       // Keep only last 500 log lines
       if (projectInfo.logs.length > 500) {
-        projectInfo.logs = projectInfo.logs.slice(-250)
+        projectInfo.logs = projectInfo.logs.slice(-500)
       }
     })
 
@@ -90,7 +90,7 @@ export class RuntimeManager {
       const line = data.toString()
       projectInfo.logs.push({ type: 'stderr', text: line, time: Date.now() })
       if (projectInfo.logs.length > 500) {
-        projectInfo.logs = projectInfo.logs.slice(-250)
+        projectInfo.logs = projectInfo.logs.slice(-500)
       }
     })
 
