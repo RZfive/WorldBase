@@ -40,5 +40,35 @@ export function aiRouter (services) {
     }
   })
 
+  // Get AI settings
+  router.get('/settings', (_req, res) => {
+    try {
+      const { settingsStore } = services
+      if (settingsStore) {
+        res.json(settingsStore.getAISettings())
+      } else {
+        res.json({ apiKey: '', baseUrl: '', model: '' })
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message })
+    }
+  })
+
+  // Save AI settings
+  router.post('/settings', (req, res) => {
+    try {
+      const { apiKey, baseUrl, model } = req.body
+      const config = { apiKey, baseUrl, model }
+      const { settingsStore } = services
+      if (settingsStore) {
+        settingsStore.saveAISettings(config)
+      }
+      aiEngine.configure(config)
+      res.json({ success: true })
+    } catch (err) {
+      res.status(500).json({ error: err.message })
+    }
+  })
+
   return router
 }
