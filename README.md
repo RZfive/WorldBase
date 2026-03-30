@@ -1,21 +1,72 @@
-# Vue 3 + Vite
+# 🌍 The World
 
-This template should help get you started developing with Vue 3 in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+AI 驱动的项目生成器与管理平台。通过自然语言对话创建完整的 Web 应用，并持续管理、修改和分析项目数据。
 
-While this project uses Vue.js, Vite supports many popular JS frameworks. [See all the supported frameworks](https://vitejs.dev/guide/#scaffolding-your-first-vite-project).
+## 核心特性
 
-## Deploy Your Own
+- **AI 驱动的项目生成** — 通过对话创建完整的前端/全栈 Web 应用
+- **代码直接修改** — 主 AI 可以读写子项目的任何文件，直接修改后端代码
+- **API 调用与测试** — 主 AI 调用运行中子项目的 API，自动验证修改效果
+- **数据分析** — 直接查询子项目数据库，进行统计分析和趋势分析
+- **进程管理** — 自动管理子项目的启停和端口分配
+- **局域网访问** — 通过 LAN Server 在局域网内访问所有项目
 
-Deploy your own Vite project with Vercel.
+## 技术栈
 
-[![Deploy with Vercel](https://vercel.com/button)]([https://vercel.com/new/clone?repository-url=https://github.com/vercel/examples/tree/main/framework-boilerplates/vite&template=vite](https://vercel.com/new/clone?demo-description=Vite%2FVue.js%20site%20that%20can%20be%20deployed%20to%20Vercel&demo-image=%2F%2Fimages.ctfassets.net%2Fe5382hct74si%2F2T4BUF3mEBKPJF3jcjU6nS%2F0d4a02e7c48091d13814a4ab513e8734%2FScreen_Shot_2022-04-13_at_10.05.56_PM.png&demo-title=Vite%20-%20Vue&demo-url=https%3A%2F%2Fvite-vue-template.vercel.app%2F&from=templates&project-name=Vite%20-%20Vue&repository-name=vite-vue&repository-url=https%3A%2F%2Fgithub.com%2Fvercel%2Fvercel%2Ftree%2Fmain%2Fexamples%2Fvite&skippable-integrations=1))
+| 层级 | 技术 |
+|------|------|
+| 桌面壳 | Electron |
+| 前端 | Vue 3 + Vite |
+| 主进程后端 | Node.js (Electron main process) |
+| LAN 服务 | Express.js + http-proxy-middleware |
+| 数据库 | better-sqlite3 |
+| AI | OpenAI-compatible API (function calling) |
 
-_Live Example: https://vite-vue-template.vercel.app_
+## 项目结构
 
-### Deploying From Your Terminal
-
-You can deploy your new Vite project with a single command from your terminal using [Vercel CLI](https://vercel.com/download):
-
-```shell
-$ vercel
 ```
+the-world/
+├── docs/                      # 架构文档
+├── electron/                  # Electron 主进程入口
+├── src/
+│   ├── main/                  # 主进程业务逻辑
+│   │   ├── project-fs/        # 项目文件系统访问层
+│   │   ├── project-api-bridge/ # 子项目 API 桥接
+│   │   ├── project-data-access/ # 统一数据访问层
+│   │   ├── project-runtime/   # 项目运行时管理
+│   │   ├── ai-engine/         # AI 引擎 + Agent 系统
+│   │   └── lan-server/        # 局域网服务
+│   └── renderer/              # 前端 UI (Vue 3)
+├── package.json
+└── vite.config.js
+```
+
+详细架构文档请查看 [`docs/`](./docs/) 目录。
+
+## 开发
+
+```bash
+# 安装依赖
+pnpm install
+
+# 启动开发服务器 (仅前端)
+pnpm dev
+
+# 启动 Electron 开发
+pnpm electron:dev
+
+# 构建应用
+pnpm electron:build
+```
+
+## 环境变量
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `OPENAI_API_KEY` | OpenAI API 密钥 | - |
+| `OPENAI_BASE_URL` | API 基础 URL | `https://api.openai.com/v1` |
+| `OPENAI_MODEL` | 模型名称 | `gpt-4o` |
+
+## 许可证
+
+MIT
