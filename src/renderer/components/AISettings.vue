@@ -15,6 +15,7 @@ onMounted(async () => {
       settings = await window.electronAPI.getAISettings()
     } else {
       const res = await fetch('/api/ai/settings')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
       settings = await res.json()
     }
     apiKey.value = settings.apiKey || ''
@@ -37,11 +38,12 @@ async function saveSettings () {
     if (window.electronAPI) {
       await window.electronAPI.saveAISettings(config)
     } else {
-      await fetch('/api/ai/settings', {
+      const res = await fetch('/api/ai/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)
       })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }
     statusMsg.value = '✅ 设置已保存'
   } catch (err) {
