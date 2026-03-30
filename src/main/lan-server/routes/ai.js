@@ -57,8 +57,12 @@ export function aiRouter (services) {
   // Save AI settings
   router.post('/settings', (req, res) => {
     try {
-      const { apiKey, baseUrl, model } = req.body
-      const config = { apiKey, baseUrl, model }
+      const { apiKey, baseUrl, model } = req.body || {}
+      const config = {
+        apiKey: typeof apiKey === 'string' ? apiKey : undefined,
+        baseUrl: typeof baseUrl === 'string' ? baseUrl : undefined,
+        model: typeof model === 'string' ? model : undefined
+      }
       const { settingsStore } = services
       if (settingsStore) {
         settingsStore.saveAISettings(config)
