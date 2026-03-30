@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Electron build output
+release/
+
+# Runtime data (user projects)
+projects/
+snapshots/
