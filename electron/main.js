@@ -11,6 +11,22 @@ import { SettingsStore } from '../src/main/settings/settings-store.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+// Ensure only one instance of the app is running.
+// This prevents file lock conflicts when the installer tries to
+// uninstall or overwrite the old version while the app is still running.
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  app.quit()
+} else {
+  // When a second instance is launched, focus the existing window
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
+}
+
 let mainWindow = null
 let aiEngine = null
 let projectFS = null

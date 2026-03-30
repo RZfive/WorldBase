@@ -22,6 +22,17 @@
     "target": "nsis",
     "icon": "public/icon.png"
   },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "allowElevation": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "deleteAppDataOnUninstall": false,
+    "include": "build/installer.nsh",
+    "installerHeaderIcon": "public/icon.ico",
+    "uninstallerIcon": "public/icon.ico"
+  },
   "linux": {
     "target": "AppImage",
     "icon": "public/icon.png"
