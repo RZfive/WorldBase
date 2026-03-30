@@ -54,7 +54,7 @@ function selectProject (project: Record<string, unknown>) {
         @select="selectProject"
       />
       <ProjectDetail
-        v-else-if="currentView === 'project'"
+        v-else-if="currentView === 'project' && selectedProject"
         :project="selectedProject"
         @back="currentView = 'projects'"
       />

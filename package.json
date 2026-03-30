@@ -3,13 +3,15 @@
   "version": "0.1.0",
   "description": "AI-powered project generator and manager",
   "type": "module",
-  "main": "electron/main.js",
+  "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
     "preview": "vite preview",
-    "electron:dev": "vite build && electron .",
-    "electron:build": "vite build && electron-builder"
+    "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "electron:dev": "vite build && tsc -p tsconfig.electron.json && electron .",
+    "electron:build": "vite build && tsc -p tsconfig.electron.json && electron-builder"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",

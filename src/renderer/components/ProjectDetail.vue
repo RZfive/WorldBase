@@ -30,7 +30,7 @@ const isLoading = ref<boolean>(false)
 async function loadFileTree () {
   try {
     if (window.electronAPI) {
-      fileTree.value = await window.electronAPI.getFileTree(props.project.id as string) as FileTreeItem[]
+      fileTree.value = await window.electronAPI.getFileTree(props.project.id as string) as unknown as FileTreeItem[]
     } else {
       const res = await fetch(`/api/projects/${props.project.id}/files`)
       const data = await res.json()
