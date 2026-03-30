@@ -10,7 +10,12 @@
     "src/main/**/*"
   ],
   "mac": {
-    "target": "dmg",
+    "target": [
+      {
+        "target": "dmg",
+        "arch": ["arm64"]
+      }
+    ],
     "icon": "public/icon.png"
   },
   "win": {
