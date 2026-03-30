@@ -1,6 +1,13 @@
 import { getSystemPrompt } from './prompts/system-prompt.js'
 import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/openai-provider.js'
 
+export type StreamEvent =
+  | { type: 'token'; content: string }
+  | { type: 'tool_start'; name: string }
+  | { type: 'tool_end'; name: string; result: unknown }
+  | { type: 'done'; message: ChatMessage }
+  | { type: 'error'; error: string }
+
 interface RegisteredTool {
   definition: ToolDefinition
   handler: (args: Record<string, unknown>) => Promise<unknown>
@@ -36,7 +43,7 @@ export class AgentCore {
   }
 
   /**
-   * Run the agent loop with the given messages.
+   * Run the agent loop with the given messages (non-streaming, kept for compat).
    */
   async run (userMessages: ChatMessage[]): Promise<ChatMessage> {
     const systemMessage: ChatMessage = {
@@ -52,10 +59,8 @@ export class AgentCore {
     while (iterations < this.maxIterations) {
       iterations++
 
-      // Call the LLM
       const response = await this.provider.chatCompletion(messages, toolDefs)
 
-      // If no tool calls, we have the final response
       if (!response.tool_calls || response.tool_calls.length === 0) {
         return {
           role: 'assistant',
@@ -63,10 +68,8 @@ export class AgentCore {
         }
       }
 
-      // Add assistant message with tool calls to conversation
       messages.push(response)
 
-      // Execute each tool call
       for (const toolCall of response.tool_calls) {
         const toolName = toolCall.function.name
         const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
@@ -78,7 +81,6 @@ export class AgentCore {
           result = { error: (err as Error).message }
         }
 
-        // Add tool result to conversation
         messages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
@@ -87,10 +89,86 @@ export class AgentCore {
       }
     }
 
-    // Max iterations reached
     return {
       role: 'assistant',
       content: '我已经尝试了多个步骤但还没有得到最终结果。请告诉我还需要什么帮助。'
+    }
+  }
+
+  /**
+   * Run the agent loop in streaming mode.
+   * Yields tokens in real-time and tool execution events.
+   */
+  async * runStream (userMessages: ChatMessage[]): AsyncGenerator<StreamEvent> {
+    const systemMessage: ChatMessage = {
+      role: 'system',
+      content: getSystemPrompt()
+    }
+
+    const messages: ChatMessage[] = [systemMessage, ...userMessages]
+    const toolDefs = this.getToolDefinitions()
+    let iterations = 0
+    let fullContent = ''
+
+    while (iterations < this.maxIterations) {
+      iterations++
+
+      let assistantMessage: ChatMessage | null = null
+
+      for await (const event of this.provider.chatCompletionStream(messages, toolDefs)) {
+        if (event.type === 'token') {
+          fullContent += event.content
+          yield { type: 'token', content: event.content }
+        } else if (event.type === 'tool_calls') {
+          assistantMessage = event.message
+        } else if (event.type === 'done') {
+          if (!assistantMessage) {
+            assistantMessage = event.message
+          }
+        }
+      }
+
+      if (!assistantMessage) break
+
+      // No tool calls → final response
+      if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+        yield { type: 'done', message: { role: 'assistant', content: fullContent } }
+        return
+      }
+
+      // Execute tool calls
+      messages.push(assistantMessage)
+      fullContent = '' // reset for next iteration
+
+      for (const toolCall of assistantMessage.tool_calls) {
+        const toolName = toolCall.function.name
+        const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
+
+        yield { type: 'tool_start', name: toolName }
+
+        let result: unknown
+        try {
+          result = await this._executeTool(toolName, toolArgs)
+        } catch (err) {
+          result = { error: (err as Error).message }
+        }
+
+        yield { type: 'tool_end', name: toolName, result }
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result)
+        })
+      }
+    }
+
+    yield {
+      type: 'done',
+      message: {
+        role: 'assistant',
+        content: fullContent || '我已经尝试了多个步骤但还没有得到最终结果。请告诉我还需要什么帮助。'
+      }
     }
   }
 

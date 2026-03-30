@@ -1,8 +1,10 @@
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
+import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 
 interface ToolServices {
   projectFS: ProjectFS
+  runtimeManager: RuntimeManager
 }
 
 interface CreateProjectArgs {
@@ -69,10 +71,26 @@ export function toolCreateProject (services: ToolServices): Tool {
 
       const project = await services.projectFS.createProject(projectId, fullMeta, files)
 
+      // Auto-install dependencies if package.json exists
+      if (files['package.json']) {
+        try {
+          console.log(`[tool:create_project] Installing dependencies for ${projectId}...`)
+          await services.runtimeManager.installDeps(projectId)
+          console.log(`[tool:create_project] Dependencies installed for ${projectId}`)
+        } catch (err) {
+          console.warn(`[tool:create_project] Failed to install deps: ${(err as Error).message}`)
+          return {
+            success: true,
+            project,
+            message: `Project "${name}" created with ID: ${projectId}. Warning: npm install failed — ${(err as Error).message}`
+          }
+        }
+      }
+
       return {
         success: true,
         project,
-        message: `Project "${name}" created with ID: ${projectId}`
+        message: `Project "${name}" created with ID: ${projectId}. Dependencies installed.`
       }
     }
   }

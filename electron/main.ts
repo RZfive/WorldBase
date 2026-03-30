@@ -7,7 +7,8 @@ import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
 import { ProjectApiClient } from '../src/main/project-api-bridge/api-client.js'
 import { ProjectDataAccess } from '../src/main/project-data-access/data-access.js'
 import { LanServer } from '../src/main/lan-server/server.js'
-import { SettingsStore } from '../src/main/settings/settings-store.js'
+import { SettingsStore, type AIProvidersConfig } from '../src/main/settings/settings-store.js'
+import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -35,6 +36,7 @@ let apiClient: ProjectApiClient | null = null
 let dataAccess: ProjectDataAccess | null = null
 let lanServer: LanServer | null = null
 let settingsStore: SettingsStore | null = null
+let chatHistory: ChatHistoryStore | null = null
 
 function getProjectsDir (): string {
   const userDataPath = app.getPath('userData')
@@ -52,6 +54,7 @@ async function initializeServices (): Promise<void> {
   const userDataPath = app.getPath('userData')
 
   settingsStore = new SettingsStore(userDataPath)
+  chatHistory = new ChatHistoryStore(userDataPath)
 
   projectFS = new ProjectFS(projectsDir, snapshotsDir)
   runtimeManager = new RuntimeManager(projectsDir)
@@ -105,9 +108,43 @@ function createWindow (): void {
 }
 
 function setupIPC (): void {
-  // AI chat
+  // AI chat (non-streaming, kept for backward compat)
   ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: string }>) => {
     return aiEngine!.chat(messages)
+  })
+
+  // AI chat streaming — pushes events to renderer via webContents.send
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: string }>) => {
+    const sender = event.sender
+    try {
+      for await (const streamEvent of aiEngine!.chatStream(messages)) {
+        if (sender.isDestroyed()) break
+        sender.send('ai:stream-event', streamEvent)
+      }
+    } catch (err) {
+      if (!sender.isDestroyed()) {
+        sender.send('ai:stream-event', { type: 'error', error: (err as Error).message })
+      }
+    }
+    return { ok: true }
+  })
+
+  // Conversation history
+  ipcMain.handle('conversations:list', async () => {
+    return chatHistory!.list()
+  })
+
+  ipcMain.handle('conversations:get', async (_event: IpcMainInvokeEvent, id: string) => {
+    return chatHistory!.get(id)
+  })
+
+  ipcMain.handle('conversations:save', async (_event: IpcMainInvokeEvent, conversation: Conversation) => {
+    chatHistory!.save(conversation)
+    return { success: true }
+  })
+
+  ipcMain.handle('conversations:delete', async (_event: IpcMainInvokeEvent, id: string) => {
+    return chatHistory!.delete(id)
   })
 
   // Project management
@@ -149,7 +186,7 @@ function setupIPC (): void {
     return dataAccess!.getDataSummary(projectId)
   })
 
-  // Settings
+  // Settings — legacy flat AI settings
   ipcMain.handle('settings:getAI', async () => {
     return settingsStore!.getAISettings()
   })
@@ -157,6 +194,25 @@ function setupIPC (): void {
   ipcMain.handle('settings:saveAI', async (_event: IpcMainInvokeEvent, config: { apiKey?: string; baseUrl?: string; model?: string }) => {
     settingsStore!.saveAISettings(config)
     aiEngine!.configure(config)
+    return { success: true }
+  })
+
+  // Settings — multi-provider
+  ipcMain.handle('settings:getProviders', async () => {
+    return settingsStore!.getProviders()
+  })
+
+  ipcMain.handle('settings:saveProviders', async (_event: IpcMainInvokeEvent, config: AIProvidersConfig) => {
+    settingsStore!.saveProviders(config)
+    // Reconfigure AI engine with the active provider
+    const active = config.providers.find(p => p.id === config.activeProviderId)
+    if (active) {
+      aiEngine!.configure({
+        apiKey: active.apiKey,
+        baseUrl: active.baseUrl,
+        model: active.activeModel
+      })
+    }
     return { success: true }
   })
 }

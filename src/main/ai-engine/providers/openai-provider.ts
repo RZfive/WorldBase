@@ -23,8 +23,19 @@ interface ChatCompletionBody {
   model: string
   messages: ChatMessage[]
   temperature: number
+  stream?: boolean
   tools?: { type: string; function: { name: string; description: string; parameters: Record<string, unknown> } }[]
   tool_choice?: string
+}
+
+interface StreamDelta {
+  role?: string
+  content?: string | null
+  tool_calls?: Array<{
+    index: number
+    id?: string
+    function?: { name?: string; arguments?: string }
+  }>
 }
 
 /**
@@ -52,6 +63,10 @@ export class OpenAIProvider {
 
   setModel (model: string): void {
     this.model = model
+  }
+
+  getModel (): string {
+    return this.model
   }
 
   /**
@@ -92,5 +107,118 @@ export class OpenAIProvider {
 
     const data = await response.json() as { choices: { message: ChatMessage }[] }
     return data.choices[0].message
+  }
+
+  /**
+   * Streaming chat completion. Yields content tokens as they arrive.
+   * When tool_calls are present in the stream, they are accumulated
+   * and returned as a complete ChatMessage at the end.
+   */
+  async * chatCompletionStream (
+    messages: ChatMessage[],
+    tools: ToolDefinition[] = []
+  ): AsyncGenerator<{ type: 'token'; content: string } | { type: 'tool_calls'; message: ChatMessage } | { type: 'done'; message: ChatMessage }> {
+    const body: ChatCompletionBody = {
+      model: this.model,
+      messages,
+      temperature: 0.7,
+      stream: true
+    }
+
+    if (tools.length > 0) {
+      body.tools = tools.map(tool => ({
+        type: 'function',
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters
+        }
+      }))
+      body.tool_choice = 'auto'
+    }
+
+    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.apiKey}`
+      },
+      body: JSON.stringify(body)
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new Error(`OpenAI API error (${response.status}): ${errorText}`)
+    }
+
+    const reader = response.body?.getReader()
+    if (!reader) throw new Error('No response body')
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let fullContent = ''
+    const toolCallsMap = new Map<number, { id: string; function: { name: string; arguments: string } }>()
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed || !trimmed.startsWith('data: ')) continue
+          const jsonStr = trimmed.slice(6)
+          if (jsonStr === '[DONE]') continue
+
+          let parsed: { choices: Array<{ delta: StreamDelta; finish_reason?: string | null }> }
+          try {
+            parsed = JSON.parse(jsonStr)
+          } catch {
+            continue
+          }
+
+          const delta = parsed.choices?.[0]?.delta
+          if (!delta) continue
+
+          if (delta.content) {
+            fullContent += delta.content
+            yield { type: 'token', content: delta.content }
+          }
+
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              if (!toolCallsMap.has(tc.index)) {
+                toolCallsMap.set(tc.index, {
+                  id: tc.id || '',
+                  function: { name: '', arguments: '' }
+                })
+              }
+              const existing = toolCallsMap.get(tc.index)!
+              if (tc.id) existing.id = tc.id
+              if (tc.function?.name) existing.function.name += tc.function.name
+              if (tc.function?.arguments) existing.function.arguments += tc.function.arguments
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    const message: ChatMessage = {
+      role: 'assistant',
+      content: fullContent || ''
+    }
+
+    if (toolCallsMap.size > 0) {
+      message.tool_calls = Array.from(toolCallsMap.values())
+      yield { type: 'tool_calls', message }
+    }
+
+    yield { type: 'done', message }
   }
 }
