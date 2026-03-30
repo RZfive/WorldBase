@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import ChatPanel from './renderer/components/ChatPanel.vue'
 import ProjectList from './renderer/components/ProjectList.vue'
 import ProjectDetail from './renderer/components/ProjectDetail.vue'
+import AISettings from './renderer/components/AISettings.vue'
 
 const currentView = ref('chat')
 const selectedProject = ref(null)
@@ -33,6 +34,12 @@ function selectProject (project) {
         >
           📦 项目管理
         </button>
+        <button
+          :class="{ active: currentView === 'settings' }"
+          @click="currentView = 'settings'"
+        >
+          ⚙️ AI 设置
+        </button>
       </nav>
       <div class="sidebar-footer">
         <span class="version">v0.1.0</span>
@@ -51,6 +58,7 @@ function selectProject (project) {
         :project="selectedProject"
         @back="currentView = 'projects'"
       />
+      <AISettings v-else-if="currentView === 'settings'" />
     </main>
   </div>
 </template>

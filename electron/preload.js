@@ -17,5 +17,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Data
   queryData: (projectId, sql) => ipcRenderer.invoke('data:query', projectId, sql),
-  getDataSummary: (projectId) => ipcRenderer.invoke('data:summary', projectId)
+  getDataSummary: (projectId) => ipcRenderer.invoke('data:summary', projectId),
+
+  // Settings
+  getAISettings: () => ipcRenderer.invoke('settings:getAI'),
+  saveAISettings: (config) => ipcRenderer.invoke('settings:saveAI', config)
 })
