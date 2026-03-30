@@ -1,16 +1,22 @@
-<script setup>
+<script setup lang="ts">
 import { ref, onMounted } from 'vue'
 
-const apiKey = ref('')
-const baseUrl = ref('')
-const model = ref('')
-const saving = ref(false)
-const statusMsg = ref('')
-const showKey = ref(false)
+interface AISettingsConfig {
+  apiKey: string
+  baseUrl: string
+  model: string
+}
+
+const apiKey = ref<string>('')
+const baseUrl = ref<string>('')
+const model = ref<string>('')
+const saving = ref<boolean>(false)
+const statusMsg = ref<string>('')
+const showKey = ref<boolean>(false)
 
 onMounted(async () => {
   try {
-    let settings = {}
+    let settings: Partial<AISettingsConfig> = {}
     if (window.electronAPI) {
       settings = await window.electronAPI.getAISettings()
     } else {
@@ -22,7 +28,7 @@ onMounted(async () => {
     baseUrl.value = settings.baseUrl || ''
     model.value = settings.model || ''
   } catch (err) {
-    statusMsg.value = `加载失败: ${err.message}`
+    statusMsg.value = `加载失败: ${(err as Error).message}`
   }
 })
 
@@ -30,7 +36,7 @@ async function saveSettings () {
   saving.value = true
   statusMsg.value = ''
   try {
-    const config = {
+    const config: AISettingsConfig = {
       apiKey: apiKey.value.trim(),
       baseUrl: baseUrl.value.trim(),
       model: model.value.trim()
@@ -47,7 +53,7 @@ async function saveSettings () {
     }
     statusMsg.value = '✅ 设置已保存'
   } catch (err) {
-    statusMsg.value = `❌ 保存失败: ${err.message}`
+    statusMsg.value = `❌ 保存失败: ${(err as Error).message}`
   } finally {
     saving.value = false
   }

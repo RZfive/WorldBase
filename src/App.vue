@@ -1,14 +1,14 @@
-<script setup>
+<script setup lang="ts">
 import { ref } from 'vue'
 import ChatPanel from './renderer/components/ChatPanel.vue'
 import ProjectList from './renderer/components/ProjectList.vue'
 import ProjectDetail from './renderer/components/ProjectDetail.vue'
 import AISettings from './renderer/components/AISettings.vue'
 
-const currentView = ref('chat')
-const selectedProject = ref(null)
+const currentView = ref<string>('chat')
+const selectedProject = ref<Record<string, unknown> | null>(null)
 
-function selectProject (project) {
+function selectProject (project: Record<string, unknown>) {
   selectedProject.value = project
   currentView.value = 'project'
 }
@@ -54,7 +54,7 @@ function selectProject (project) {
         @select="selectProject"
       />
       <ProjectDetail
-        v-else-if="currentView === 'project'"
+        v-else-if="currentView === 'project' && selectedProject"
         :project="selectedProject"
         @back="currentView = 'projects'"
       />
