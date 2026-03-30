@@ -8,11 +8,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:electron": "tsc -p tsconfig.electron.json && node scripts/build-preload.mjs",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
-    "electron:dev": "vite build && tsc -p tsconfig.electron.json && electron .",
-    "electron:build": "vite build && tsc -p tsconfig.electron.json && electron-builder"
+    "electron:dev": "vite build && tsc -p tsconfig.electron.json && node scripts/build-preload.mjs && electron .",
+    "electron:build": "vite build && tsc -p tsconfig.electron.json && node scripts/build-preload.mjs && electron-builder"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",
