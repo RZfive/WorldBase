@@ -1,55 +1,124 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 
-interface AISettingsConfig {
-  apiKey: string
+interface AIProvider {
+  id: string
+  name: string
   baseUrl: string
-  model: string
+  apiKey: string
+  models: string[]
+  activeModel: string
 }
 
-const apiKey = ref<string>('')
-const baseUrl = ref<string>('')
-const model = ref<string>('')
-const saving = ref<boolean>(false)
-const statusMsg = ref<string>('')
-const showKey = ref<boolean>(false)
+const providers = ref<AIProvider[]>([])
+const activeProviderId = ref('')
+const saving = ref(false)
+const statusMsg = ref('')
+const editingProvider = ref<AIProvider | null>(null)
+const showKey = ref<Record<string, boolean>>({})
+const modelInput = ref('')
+
+const sortedProviders = computed(() => {
+  return [...providers.value].sort((a, b) => {
+    if (a.id === activeProviderId.value) return -1
+    if (b.id === activeProviderId.value) return 1
+    return a.name.localeCompare(b.name)
+  })
+})
 
 onMounted(async () => {
+  await loadProviders()
+})
+
+async function loadProviders () {
   try {
-    let settings: Partial<AISettingsConfig> = {}
     if (window.electronAPI) {
-      settings = await window.electronAPI.getAISettings()
-    } else {
-      const res = await fetch('/api/ai/settings')
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      settings = await res.json()
+      const config = await window.electronAPI.getProviders()
+      providers.value = config.providers
+      activeProviderId.value = config.activeProviderId
     }
-    apiKey.value = settings.apiKey || ''
-    baseUrl.value = settings.baseUrl || ''
-    model.value = settings.model || ''
   } catch (err) {
     statusMsg.value = `加载失败: ${(err as Error).message}`
   }
-})
+}
 
-async function saveSettings () {
+function addProvider () {
+  const id = 'provider_' + Date.now().toString(36)
+  editingProvider.value = {
+    id,
+    name: '',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: '',
+    models: ['gpt-4o'],
+    activeModel: 'gpt-4o'
+  }
+  modelInput.value = 'gpt-4o'
+}
+
+function editProvider (p: AIProvider) {
+  editingProvider.value = { ...p, models: [...p.models] }
+  modelInput.value = p.models.join(', ')
+}
+
+function cancelEdit () {
+  editingProvider.value = null
+  modelInput.value = ''
+}
+
+function saveEdit () {
+  if (!editingProvider.value) return
+  const ep = editingProvider.value
+  if (!ep.name.trim()) {
+    statusMsg.value = '请填写供应商名称'
+    return
+  }
+
+  // Parse models from comma-separated input
+  ep.models = modelInput.value
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+  if (ep.models.length === 0) ep.models = ['gpt-4o']
+  if (!ep.models.includes(ep.activeModel)) {
+    ep.activeModel = ep.models[0]
+  }
+
+  const idx = providers.value.findIndex(p => p.id === ep.id)
+  if (idx >= 0) {
+    providers.value[idx] = ep
+  } else {
+    providers.value.push(ep)
+  }
+
+  // If no active provider, set this one
+  if (!activeProviderId.value) {
+    activeProviderId.value = ep.id
+  }
+
+  editingProvider.value = null
+  modelInput.value = ''
+}
+
+function deleteProvider (id: string) {
+  providers.value = providers.value.filter(p => p.id !== id)
+  if (activeProviderId.value === id) {
+    activeProviderId.value = providers.value[0]?.id || ''
+  }
+}
+
+function setActive (id: string) {
+  activeProviderId.value = id
+}
+
+async function saveAll () {
   saving.value = true
   statusMsg.value = ''
   try {
-    const config: AISettingsConfig = {
-      apiKey: apiKey.value.trim(),
-      baseUrl: baseUrl.value.trim(),
-      model: model.value.trim()
-    }
     if (window.electronAPI) {
-      await window.electronAPI.saveAISettings(config)
-    } else {
-      const res = await fetch('/api/ai/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
+      await window.electronAPI.saveProviders({
+        providers: providers.value,
+        activeProviderId: activeProviderId.value
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }
     statusMsg.value = '✅ 设置已保存'
   } catch (err) {
@@ -58,64 +127,120 @@ async function saveSettings () {
     saving.value = false
   }
 }
+
+function toggleKey (id: string) {
+  showKey.value[id] = !showKey.value[id]
+}
+
+function maskKey (key: string): string {
+  if (!key) return ''
+  if (key.length <= 8) return '••••••••'
+  return key.substring(0, 4) + '••••' + key.substring(key.length - 4)
+}
 </script>
 
 <template>
   <div class="settings-panel">
     <div class="settings-header">
       <h2>⚙️ AI 设置</h2>
-      <span class="settings-hint">配置 AI 服务的 API 地址和密钥，支持 OpenAI 及兼容 API</span>
+      <span class="settings-hint">管理多个 AI 供应商，支持 OpenAI 及兼容 API</span>
     </div>
 
     <div class="settings-body">
-      <div class="settings-section">
-        <h3>AI 服务配置</h3>
-        <p class="section-desc">支持 OpenAI、Azure OpenAI、本地模型（如 Ollama）以及其他兼容 OpenAI API 的服务。</p>
+      <!-- Provider edit form -->
+      <div v-if="editingProvider" class="settings-section edit-form">
+        <h3>{{ providers.find(p => p.id === editingProvider!.id) ? '编辑' : '添加' }}供应商</h3>
 
         <div class="form-group">
-          <label for="baseUrl">API 地址 (Base URL)</label>
-          <input
-            id="baseUrl"
-            v-model="baseUrl"
-            type="text"
-            placeholder="https://api.openai.com/v1"
-          />
-          <span class="form-hint">留空则使用默认值 https://api.openai.com/v1</span>
+          <label>名称</label>
+          <input v-model="editingProvider.name" type="text" placeholder="例如: OpenAI, DeepSeek" />
         </div>
 
         <div class="form-group">
-          <label for="apiKey">API 密钥 (API Key)</label>
-          <div class="key-input-wrapper">
-            <input
-              id="apiKey"
-              v-model="apiKey"
-              :type="showKey ? 'text' : 'password'"
-              placeholder="sk-..."
-            />
-            <button class="toggle-key-btn" @click="showKey = !showKey" type="button">
-              {{ showKey ? '🙈' : '👁️' }}
-            </button>
-          </div>
-          <span class="form-hint">你的 API 密钥，仅保存在本地</span>
+          <label>API 地址 (Base URL)</label>
+          <input v-model="editingProvider.baseUrl" type="text" placeholder="https://api.openai.com/v1" />
         </div>
 
         <div class="form-group">
-          <label for="model">模型名称 (Model)</label>
-          <input
-            id="model"
-            v-model="model"
-            type="text"
-            placeholder="gpt-4o"
-          />
-          <span class="form-hint">留空则使用默认值 gpt-4o</span>
+          <label>API 密钥</label>
+          <input v-model="editingProvider.apiKey" type="password" placeholder="sk-..." />
+          <span class="form-hint">仅保存在本地</span>
+        </div>
+
+        <div class="form-group">
+          <label>模型列表 (逗号分隔)</label>
+          <input v-model="modelInput" type="text" placeholder="gpt-4o, gpt-4o-mini" />
+          <span class="form-hint">可用模型列表，第一个为默认模型</span>
+        </div>
+
+        <div class="form-group">
+          <label>默认模型</label>
+          <select v-model="editingProvider.activeModel" class="select-input">
+            <option v-for="m in modelInput.split(',').map(s => s.trim()).filter(Boolean)" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </div>
+
+        <div class="form-actions-edit">
+          <button class="save-btn" @click="saveEdit">确认</button>
+          <button class="cancel-btn" @click="cancelEdit">取消</button>
         </div>
       </div>
 
-      <div class="form-actions">
-        <button class="save-btn" @click="saveSettings" :disabled="saving">
-          {{ saving ? '保存中...' : '💾 保存设置' }}
-        </button>
-        <span v-if="statusMsg" class="status-msg">{{ statusMsg }}</span>
+      <!-- Providers list -->
+      <div v-else>
+        <div class="providers-header">
+          <h3>AI 供应商</h3>
+          <button class="add-btn" @click="addProvider">+ 添加供应商</button>
+        </div>
+
+        <div v-if="providers.length === 0" class="empty-providers">
+          <p>还没有配置供应商。点击"添加供应商"开始配置。</p>
+        </div>
+
+        <div
+          v-for="p in sortedProviders"
+          :key="p.id"
+          :class="['provider-card', { active: p.id === activeProviderId }]"
+        >
+          <div class="provider-header">
+            <div class="provider-name">
+              <span class="active-badge" v-if="p.id === activeProviderId">当前</span>
+              {{ p.name || '(未命名)' }}
+            </div>
+            <div class="provider-actions">
+              <button v-if="p.id !== activeProviderId" class="action-btn" @click="setActive(p.id)" title="设为活跃">✓</button>
+              <button class="action-btn" @click="editProvider(p)" title="编辑">✏️</button>
+              <button class="action-btn danger" @click="deleteProvider(p.id)" title="删除">🗑</button>
+            </div>
+          </div>
+          <div class="provider-details">
+            <div class="detail-row">
+              <span class="detail-label">地址:</span>
+              <span class="detail-value">{{ p.baseUrl }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">密钥:</span>
+              <span class="detail-value key-value" @click="toggleKey(p.id)">
+                {{ showKey[p.id] ? p.apiKey : maskKey(p.apiKey) }}
+              </span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">模型:</span>
+              <span class="detail-value">{{ p.models.join(', ') }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">默认:</span>
+              <span class="detail-value">{{ p.activeModel }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="save-btn" @click="saveAll" :disabled="saving">
+            {{ saving ? '保存中...' : '💾 保存设置' }}
+          </button>
+          <span v-if="statusMsg" class="status-msg">{{ statusMsg }}</span>
+        </div>
       </div>
 
       <div class="settings-section presets">
@@ -184,6 +309,143 @@ async function saveSettings () {
   padding: 24px;
 }
 
+/* Providers list header */
+.providers-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.providers-header h3 {
+  margin: 0;
+  font-size: 1em;
+  color: #e4e4e7;
+}
+
+.add-btn {
+  padding: 6px 14px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.82em;
+  cursor: pointer;
+}
+
+.add-btn:hover {
+  background: #2563eb;
+}
+
+.empty-providers {
+  text-align: center;
+  color: #52525b;
+  padding: 40px 0;
+  font-size: 0.9em;
+}
+
+/* Provider card */
+.provider-card {
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 12px;
+}
+
+.provider-card.active {
+  border-color: #3b82f6;
+}
+
+.provider-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.provider-name {
+  font-weight: 600;
+  font-size: 0.95em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.active-badge {
+  background: #3b82f6;
+  color: white;
+  font-size: 0.7em;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.provider-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.action-btn {
+  background: none;
+  border: 1px solid #3f3f46;
+  border-radius: 6px;
+  color: #a1a1aa;
+  padding: 4px 8px;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.action-btn:hover {
+  background: #27272a;
+  color: #e4e4e7;
+}
+
+.action-btn.danger:hover {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+.provider-details {
+  font-size: 0.82em;
+}
+
+.detail-row {
+  display: flex;
+  padding: 3px 0;
+  gap: 8px;
+}
+
+.detail-label {
+  color: #71717a;
+  min-width: 50px;
+}
+
+.detail-value {
+  color: #a1a1aa;
+  word-break: break-all;
+}
+
+.key-value {
+  cursor: pointer;
+  font-family: monospace;
+}
+
+/* Edit form */
+.edit-form {
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 20px;
+}
+
+.edit-form h3 {
+  margin: 0 0 16px 0;
+  font-size: 1em;
+  color: #e4e4e7;
+}
+
 .settings-section {
   background: #18181b;
   border: 1px solid #27272a;
@@ -198,14 +460,8 @@ async function saveSettings () {
   color: #e4e4e7;
 }
 
-.section-desc {
-  font-size: 0.85em;
-  color: #71717a;
-  margin-bottom: 20px;
-}
-
 .form-group {
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .form-group label {
@@ -216,7 +472,8 @@ async function saveSettings () {
   font-weight: 500;
 }
 
-.form-group input {
+.form-group input,
+.select-input {
   width: 100%;
   background: #27272a;
   border: 1px solid #3f3f46;
@@ -227,7 +484,8 @@ async function saveSettings () {
   font-family: inherit;
 }
 
-.form-group input:focus {
+.form-group input:focus,
+.select-input:focus {
   outline: none;
   border-color: #3b82f6;
 }
@@ -239,34 +497,17 @@ async function saveSettings () {
   margin-top: 4px;
 }
 
-.key-input-wrapper {
+.form-actions-edit {
   display: flex;
-  gap: 8px;
-}
-
-.key-input-wrapper input {
-  flex: 1;
-}
-
-.toggle-key-btn {
-  background: #27272a;
-  border: 1px solid #3f3f46;
-  border-radius: 8px;
-  color: #e4e4e7;
-  padding: 8px 12px;
-  cursor: pointer;
-  font-size: 1em;
-}
-
-.toggle-key-btn:hover {
-  background: #3f3f46;
+  gap: 10px;
+  margin-top: 16px;
 }
 
 .form-actions {
   display: flex;
   align-items: center;
   gap: 16px;
-  margin-bottom: 20px;
+  margin: 16px 0;
 }
 
 .save-btn {
@@ -287,6 +528,21 @@ async function saveSettings () {
 .save-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.cancel-btn {
+  padding: 10px 24px;
+  background: #27272a;
+  color: #a1a1aa;
+  border: 1px solid #3f3f46;
+  border-radius: 8px;
+  font-size: 0.9em;
+  cursor: pointer;
+}
+
+.cancel-btn:hover {
+  background: #3f3f46;
+  color: #e4e4e7;
 }
 
 .status-msg {

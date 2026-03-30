@@ -15,7 +15,7 @@
         "arch": ["arm64"]
       }
     ],
-    "icon": "public/icon.png"
+    "icon": "public/icon-mac.png"
   },
   "win": {
     "target": "nsis",

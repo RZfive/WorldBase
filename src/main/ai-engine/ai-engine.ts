@@ -1,4 +1,4 @@
-import { AgentCore } from './agent/agent-core.js'
+import { AgentCore, type StreamEvent } from './agent/agent-core.js'
 import { OpenAIProvider } from './providers/openai-provider.js'
 import { registerAllTools } from './agent/tools/index.js'
 import type { ChatMessage, ToolDefinition } from './providers/openai-provider.js'
@@ -6,6 +6,8 @@ import type { ProjectFS } from '../project-fs/project-fs.js'
 import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
 import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
+
+export type { StreamEvent }
 
 export interface AIEngineServices {
   projectFS: ProjectFS
@@ -34,16 +36,21 @@ export class AIEngine {
     this.provider = new OpenAIProvider()
     this.agent = new AgentCore(this.provider, services as unknown as Record<string, unknown>)
 
-    // Register all tools
     registerAllTools(this.agent, services)
   }
 
   /**
-   * Handle a chat message from the user.
-   * Runs the Agent loop: think → act → observe → respond.
+   * Handle a chat message from the user (non-streaming).
    */
   async chat (messages: ChatMessage[]): Promise<ChatMessage> {
     return this.agent.run(messages)
+  }
+
+  /**
+   * Handle a chat message with streaming response.
+   */
+  chatStream (messages: ChatMessage[]): AsyncGenerator<StreamEvent> {
+    return this.agent.runStream(messages)
   }
 
   /**
