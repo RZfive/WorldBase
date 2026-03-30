@@ -7,6 +7,17 @@ import { SchemaRegistry } from './schema-registry.js'
 import { DataAnalyzer } from './data-analyzer.js'
 
 /**
+ * Validate that a SQL identifier (table/column name) is safe.
+ * Only allows alphanumeric characters and underscores.
+ */
+function validateIdentifier (name) {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+    throw new Error(`Invalid SQL identifier: ${name}`)
+  }
+  return name
+}
+
+/**
  * ProjectDataAccess — 统一数据访问层
  * 支持通过不同适配器访问子项目数据
  */
@@ -98,6 +109,7 @@ export class ProjectDataAccess {
    * Get paginated data from a specific table.
    */
   async getTableData (projectId, tableName, { page = 1, pageSize = 50 } = {}) {
+    validateIdentifier(tableName)
     const config = await this._getDataConfig(projectId)
     if (!config || config.database !== 'sqlite') {
       throw new Error(`No SQLite database configured for project: ${projectId}`)
@@ -135,6 +147,7 @@ export class ProjectDataAccess {
 
       const tables = await this.sqliteAdapter.listTables(dbPath)
       for (const table of tables) {
+        validateIdentifier(table)
         const countResult = await this.sqliteAdapter.query(
           dbPath,
           `SELECT COUNT(*) as count FROM "${table}"`

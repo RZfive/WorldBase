@@ -15,7 +15,7 @@ export function toolCreateProject (services) {
           },
           type: {
             type: 'string',
-            enum: ['frontend', 'fullstack'],
+            enum: ['frontend', 'backend', 'fullstack'],
             description: '项目类型'
           },
           files: {
