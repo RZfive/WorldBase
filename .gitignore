@@ -25,6 +25,7 @@ dist-ssr
 
 # Electron build output
 release/
+dist-electron/
 
 # Runtime data (user projects)
 projects/

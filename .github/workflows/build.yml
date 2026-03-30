@@ -31,6 +31,9 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
+      - name: Compile Electron TypeScript
+        run: pnpm build:electron
+
       - name: Build Electron (Windows)
         run: pnpm exec electron-builder --win --publish never
 
@@ -61,6 +64,9 @@ jobs:
 
       - name: Build frontend
         run: pnpm build
+
+      - name: Compile Electron TypeScript
+        run: pnpm build:electron
 
       - name: Build Electron (macOS ARM)
         run: pnpm exec electron-builder --mac --arm64 --publish never
