@@ -1,22 +1,36 @@
-<script setup>
+<script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 
-const props = defineProps({
-  project: { type: Object, required: true }
-})
+interface FileTreeItem {
+  name: string
+  path: string
+  type: 'file' | 'directory'
+  children?: FileTreeItem[]
+}
 
-const emit = defineEmits(['back'])
+interface DataSummary {
+  hasData?: boolean
+  tables?: Array<{ name: string; rowCount: number }>
+}
 
-const fileTree = ref([])
-const selectedFile = ref(null)
-const fileContent = ref('')
-const dataSummary = ref(null)
-const isLoading = ref(false)
+const props = defineProps<{
+  project: Record<string, unknown>
+}>()
+
+const emit = defineEmits<{
+  (e: 'back'): void
+}>()
+
+const fileTree = ref<FileTreeItem[]>([])
+const selectedFile = ref<FileTreeItem | null>(null)
+const fileContent = ref<string>('')
+const dataSummary = ref<DataSummary | null>(null)
+const isLoading = ref<boolean>(false)
 
 async function loadFileTree () {
   try {
     if (window.electronAPI) {
-      fileTree.value = await window.electronAPI.getFileTree(props.project.id)
+      fileTree.value = await window.electronAPI.getFileTree(props.project.id as string) as FileTreeItem[]
     } else {
       const res = await fetch(`/api/projects/${props.project.id}/files`)
       const data = await res.json()
@@ -27,27 +41,27 @@ async function loadFileTree () {
   }
 }
 
-async function openFile (file) {
+async function openFile (file: FileTreeItem) {
   if (file.type !== 'file') return
   selectedFile.value = file
 
   try {
     if (window.electronAPI) {
-      fileContent.value = await window.electronAPI.readFile(props.project.id, file.path)
+      fileContent.value = await window.electronAPI.readFile(props.project.id as string, file.path)
     } else {
       const res = await fetch(`/api/projects/${props.project.id}/files/${file.path}`)
       const data = await res.json()
       fileContent.value = data.content || ''
     }
   } catch (err) {
-    fileContent.value = `Error: ${err.message}`
+    fileContent.value = `Error: ${(err as Error).message}`
   }
 }
 
 async function loadDataSummary () {
   try {
     if (window.electronAPI) {
-      dataSummary.value = await window.electronAPI.getDataSummary(props.project.id)
+      dataSummary.value = await window.electronAPI.getDataSummary(props.project.id as string) as DataSummary
     } else {
       const res = await fetch(`/api/projects/${props.project.id}/data/summary`)
       dataSummary.value = await res.json()
@@ -61,7 +75,7 @@ async function startProject () {
   isLoading.value = true
   try {
     if (window.electronAPI) {
-      await window.electronAPI.startProject(props.project.id)
+      await window.electronAPI.startProject(props.project.id as string)
     } else {
       await fetch(`/api/projects/${props.project.id}/start`, { method: 'POST' })
     }
@@ -76,7 +90,7 @@ async function stopProject () {
   isLoading.value = true
   try {
     if (window.electronAPI) {
-      await window.electronAPI.stopProject(props.project.id)
+      await window.electronAPI.stopProject(props.project.id as string)
     } else {
       await fetch(`/api/projects/${props.project.id}/stop`, { method: 'POST' })
     }
