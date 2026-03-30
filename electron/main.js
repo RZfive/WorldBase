@@ -7,6 +7,7 @@ import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
 import { ProjectApiClient } from '../src/main/project-api-bridge/api-client.js'
 import { ProjectDataAccess } from '../src/main/project-data-access/data-access.js'
 import { LanServer } from '../src/main/lan-server/server.js'
+import { SettingsStore } from '../src/main/settings/settings-store.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -17,6 +18,7 @@ let runtimeManager = null
 let apiClient = null
 let dataAccess = null
 let lanServer = null
+let settingsStore = null
 
 function getProjectsDir () {
   const userDataPath = app.getPath('userData')
@@ -31,6 +33,9 @@ function getSnapshotsDir () {
 async function initializeServices () {
   const projectsDir = getProjectsDir()
   const snapshotsDir = getSnapshotsDir()
+  const userDataPath = app.getPath('userData')
+
+  settingsStore = new SettingsStore(userDataPath)
 
   projectFS = new ProjectFS(projectsDir, snapshotsDir)
   runtimeManager = new RuntimeManager(projectsDir)
@@ -44,13 +49,21 @@ async function initializeServices () {
     dataAccess
   })
 
+  // Apply saved AI settings on startup
+  const savedAI = settingsStore.getAISettings()
+  if (savedAI.apiKey || savedAI.baseUrl || savedAI.model) {
+    aiEngine.configure(savedAI)
+    console.log('[main] Applied saved AI settings')
+  }
+
   lanServer = new LanServer({
     port: 19527,
     projectFS,
     runtimeManager,
     apiClient,
     dataAccess,
-    aiEngine
+    aiEngine,
+    settingsStore
   })
 
   await lanServer.start()
@@ -118,6 +131,17 @@ function setupIPC () {
 
   ipcMain.handle('data:summary', async (_event, projectId) => {
     return dataAccess.getDataSummary(projectId)
+  })
+
+  // Settings
+  ipcMain.handle('settings:getAI', async () => {
+    return settingsStore.getAISettings()
+  })
+
+  ipcMain.handle('settings:saveAI', async (_event, config) => {
+    settingsStore.saveAISettings(config)
+    aiEngine.configure(config)
+    return { success: true }
   })
 }
 
