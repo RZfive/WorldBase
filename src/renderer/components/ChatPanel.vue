@@ -1,9 +1,14 @@
-<script setup>
+<script setup lang="ts">
 import { ref } from 'vue'
 
-const messages = ref([])
-const inputText = ref('')
-const isLoading = ref(false)
+interface ChatMessage {
+  role: string
+  content: string
+}
+
+const messages = ref<ChatMessage[]>([])
+const inputText = ref<string>('')
+const isLoading = ref<boolean>(false)
 
 async function sendMessage () {
   const text = inputText.value.trim()
@@ -15,7 +20,7 @@ async function sendMessage () {
   isLoading.value = true
 
   try {
-    let response
+    let response: { role?: string; content?: string }
 
     // Use Electron IPC if available, otherwise fall back to HTTP API
     if (window.electronAPI) {
@@ -40,14 +45,14 @@ async function sendMessage () {
   } catch (err) {
     messages.value.push({
       role: 'assistant',
-      content: `错误: ${err.message}`
+      content: `错误: ${(err as Error).message}`
     })
   } finally {
     isLoading.value = false
   }
 }
 
-function handleKeydown (e) {
+function handleKeydown (e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     sendMessage()

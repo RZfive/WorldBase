@@ -1,11 +1,18 @@
-<script setup>
+<script setup lang="ts">
 import { ref, onMounted } from 'vue'
 
-const emit = defineEmits(['select'])
+interface StatusBadge {
+  text: string
+  class: string
+}
 
-const projects = ref([])
-const isLoading = ref(false)
-const error = ref(null)
+const emit = defineEmits<{
+  (e: 'select', project: Record<string, unknown>): void
+}>()
+
+const projects = ref<Array<Record<string, unknown>>>([])
+const isLoading = ref<boolean>(false)
+const error = ref<string | null>(null)
 
 async function loadProjects () {
   isLoading.value = true
@@ -20,14 +27,14 @@ async function loadProjects () {
       projects.value = data.projects || []
     }
   } catch (err) {
-    error.value = err.message
+    error.value = (err as Error).message
   } finally {
     isLoading.value = false
   }
 }
 
-function getStatusBadge (status) {
-  const badges = {
+function getStatusBadge (status: string): StatusBadge {
+  const badges: Record<string, StatusBadge> = {
     running: { text: '运行中', class: 'badge-green' },
     stopped: { text: '已停止', class: 'badge-gray' },
     crashed: { text: '已崩溃', class: 'badge-red' },
