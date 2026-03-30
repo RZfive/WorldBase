@@ -8,17 +8,15 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "jsx": "preserve",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "declaration": false,
+    "outDir": "dist-electron",
+    "rootDir": ".",
+    "lib": ["ES2022"],
     "types": ["node"]
   },
   "include": [
-    "src/**/*.ts",
-    "src/**/*.d.ts",
-    "src/**/*.vue",
-    "electron/**/*.ts"
+    "electron/**/*.ts",
+    "src/main/**/*.ts"
   ],
-  "exclude": ["node_modules", "dist", "release"]
+  "exclude": ["node_modules"]
 }

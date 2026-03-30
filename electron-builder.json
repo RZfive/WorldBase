@@ -6,8 +6,7 @@
   },
   "files": [
     "dist/**/*",
-    "electron/**/*",
-    "src/main/**/*"
+    "dist-electron/**/*"
   ],
   "mac": {
     "target": [

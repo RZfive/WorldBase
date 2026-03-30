@@ -6,12 +6,25 @@ interface StatusBadge {
   class: string
 }
 
+interface ProjectRuntime {
+  status?: string
+  port?: number
+}
+
+interface Project {
+  id: string
+  name?: string
+  type?: string
+  runtime?: ProjectRuntime
+  [key: string]: unknown
+}
+
 const emit = defineEmits<{
-  (e: 'select', project: Record<string, unknown>): void
+  (e: 'select', project: Project): void
 }>()
 
-const projects = ref<Array<Record<string, unknown>>>([])
-const isLoading = ref<boolean>(false)
+const projects = ref<Project[]>([])
+const isLoading = ref(false)
 const error = ref<string | null>(null)
 
 async function loadProjects () {
@@ -20,7 +33,7 @@ async function loadProjects () {
 
   try {
     if (window.electronAPI) {
-      projects.value = await window.electronAPI.listProjects()
+      projects.value = await window.electronAPI.listProjects() as Project[]
     } else {
       const res = await fetch('/api/projects')
       const data = await res.json()
@@ -33,7 +46,7 @@ async function loadProjects () {
   }
 }
 
-function getStatusBadge (status: string): StatusBadge {
+function getStatusBadge (status?: string): StatusBadge {
   const badges: Record<string, StatusBadge> = {
     running: { text: '运行中', class: 'badge-green' },
     stopped: { text: '已停止', class: 'badge-gray' },
@@ -41,7 +54,7 @@ function getStatusBadge (status: string): StatusBadge {
     starting: { text: '启动中', class: 'badge-yellow' },
     not_started: { text: '未启动', class: 'badge-gray' }
   }
-  return badges[status] || badges.not_started
+  return (status ? badges[status] : undefined) || badges.not_started
 }
 
 onMounted(() => {
