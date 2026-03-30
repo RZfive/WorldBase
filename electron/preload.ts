@@ -6,29 +6,33 @@ interface ChatMessage {
 }
 
 interface AISettings {
-  apiKey?: string
-  baseUrl?: string
-  model?: string
+  apiKey: string
+  baseUrl: string
+  model: string
 }
 
+/**
+ * API shape exposed to the renderer via contextBridge.
+ * Must stay in sync with the ElectronAPI declaration in src/env.d.ts.
+ */
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[]) => Promise<ChatMessage>
 
   // Projects
-  listProjects: () => Promise<unknown[]>
-  getProject: (projectId: string) => Promise<unknown>
-  getFileTree: (projectId: string) => Promise<unknown[]>
+  listProjects: () => Promise<Array<Record<string, unknown>>>
+  getProject: (projectId: string) => Promise<Record<string, unknown>>
+  getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
 
   // Runtime
-  startProject: (projectId: string) => Promise<unknown>
-  stopProject: (projectId: string) => Promise<unknown>
-  getProjectStatus: (projectId: string) => Promise<unknown>
+  startProject: (projectId: string) => Promise<Record<string, unknown>>
+  stopProject: (projectId: string) => Promise<Record<string, unknown>>
+  getProjectStatus: (projectId: string) => Promise<Record<string, unknown>>
 
   // Data
-  queryData: (projectId: string, sql: string) => Promise<unknown[]>
-  getDataSummary: (projectId: string) => Promise<unknown>
+  queryData: (projectId: string, sql: string) => Promise<Record<string, unknown>>
+  getDataSummary: (projectId: string) => Promise<Record<string, unknown>>
 
   // Settings
   getAISettings: () => Promise<AISettings>
