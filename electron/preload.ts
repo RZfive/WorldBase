@@ -12,11 +12,12 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'tool_start' | 'tool_end' | 'done' | 'error'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'done' | 'error'
   content?: string
   name?: string
   result?: unknown
   message?: ChatMessage
+  thinking?: string
   error?: string
 }
 
@@ -39,6 +40,7 @@ interface AIProvider {
   apiKey: string
   models: string[]
   activeModel: string
+  enableThinking?: boolean
 }
 
 interface AIProvidersConfig {

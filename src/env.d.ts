@@ -7,11 +7,12 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'tool_start' | 'tool_end' | 'done' | 'error'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'done' | 'error'
   content?: string
   name?: string
   result?: unknown
   message?: { role: string; content: string }
+  thinking?: string
   error?: string
 }
 
@@ -24,7 +25,7 @@ interface ConversationSummary {
 }
 
 interface ConversationData extends ConversationSummary {
-  messages: Array<{ role: string; content: string }>
+  messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>; thinking?: string }>
 }
 
 interface AIProviderConfig {
@@ -34,6 +35,7 @@ interface AIProviderConfig {
   apiKey: string
   models: string[]
   activeModel: string
+  enableThinking?: boolean
 }
 
 interface AIProvidersConfig {
@@ -41,10 +43,12 @@ interface AIProvidersConfig {
   activeProviderId: string
 }
 
+type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+
 interface ElectronAPI {
   // AI
-  chat: (messages: Array<{ role: string; content: string }>) => Promise<{ role: string; content: string }>
-  chatStream: (messages: Array<{ role: string; content: string }>) => Promise<{ ok: boolean }>
+  chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: string }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ ok: boolean }>
   onStreamEvent: (callback: (event: StreamEvent) => void) => () => void
 
   // Conversations
