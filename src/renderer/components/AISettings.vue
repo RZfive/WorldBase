@@ -145,10 +145,10 @@ async function saveAll () {
   statusMsg.value = ''
   try {
     if (window.electronAPI) {
-      await window.electronAPI.saveProviders({
+      await window.electronAPI.saveProviders(JSON.parse(JSON.stringify({
         providers: providers.value,
         activeProviderId: activeProviderId.value
-      })
+      })))
     }
     statusMsg.value = '✅ 设置已保存'
   } catch (err) {
