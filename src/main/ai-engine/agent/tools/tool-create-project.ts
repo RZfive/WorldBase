@@ -62,11 +62,55 @@ export function toolCreateProject (services: ToolServices): Tool {
         .substring(0, 30) +
         '_' + Date.now().toString(36)
 
+      // Auto-generate runtime configuration if not provided
+      const runtime = (meta.runtime as Record<string, unknown>) || {}
+      if (!runtime.backend) {
+        // Determine the start command based on project type and files
+        let command = 'node server.js'
+        let cwd: string | undefined
+
+        if (files['package.json']) {
+          try {
+            const pkg = JSON.parse(files['package.json']) as Record<string, unknown>
+            const scripts = pkg.scripts as Record<string, string> | undefined
+            if (scripts) {
+              if (scripts.start) {
+                command = 'npm start'
+              } else if (scripts.dev) {
+                command = 'npm run dev'
+              }
+            }
+          } catch (err) {
+            // package.json may have invalid JSON; continue with defaults
+            console.warn('[tool:create_project] Failed to parse package.json:', (err as Error).message)
+          }
+        }
+
+        if (type === 'fullstack' || type === 'backend') {
+          // Check for common entry points
+          if (files['server.js'] || files['src/server.js'] || files['index.js'] || files['app.js']) {
+            if (files['src/server.js'] && !files['server.js']) {
+              command = 'node src/server.js'
+            } else if (files['app.js'] && !files['server.js']) {
+              command = 'node app.js'
+            } else if (files['index.js'] && !files['server.js']) {
+              command = 'node index.js'
+            }
+          }
+        }
+
+        runtime.backend = {
+          command,
+          ...(cwd ? { cwd } : {})
+        }
+      }
+
       const fullMeta = {
         name,
         type,
         createdAt: new Date().toISOString(),
-        ...meta
+        ...meta,
+        runtime
       }
 
       const project = await services.projectFS.createProject(projectId, fullMeta, files)
@@ -90,7 +134,7 @@ export function toolCreateProject (services: ToolServices): Tool {
       return {
         success: true,
         project,
-        message: `Project "${name}" created with ID: ${projectId}. Dependencies installed.`
+        message: `Project "${name}" created with ID: ${projectId}. Dependencies installed. Runtime configured with command: ${(runtime.backend as Record<string, unknown>).command}`
       }
     }
   }

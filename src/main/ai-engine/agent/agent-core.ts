@@ -3,9 +3,10 @@ import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/o
 
 export type StreamEvent =
   | { type: 'token'; content: string }
+  | { type: 'thinking'; content: string }
   | { type: 'tool_start'; name: string }
   | { type: 'tool_end'; name: string; result: unknown }
-  | { type: 'done'; message: ChatMessage }
+  | { type: 'done'; message: ChatMessage; thinking?: string }
   | { type: 'error'; error: string }
 
 interface RegisteredTool {
@@ -109,6 +110,7 @@ export class AgentCore {
     const toolDefs = this.getToolDefinitions()
     let iterations = 0
     let fullContent = ''
+    let fullThinking = ''
 
     while (iterations < this.maxIterations) {
       iterations++
@@ -116,7 +118,10 @@ export class AgentCore {
       let assistantMessage: ChatMessage | null = null
 
       for await (const event of this.provider.chatCompletionStream(messages, toolDefs)) {
-        if (event.type === 'token') {
+        if (event.type === 'thinking') {
+          fullThinking += event.content
+          yield { type: 'thinking', content: event.content }
+        } else if (event.type === 'token') {
           fullContent += event.content
           yield { type: 'token', content: event.content }
         } else if (event.type === 'tool_calls') {
@@ -132,7 +137,11 @@ export class AgentCore {
 
       // No tool calls → final response
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
-        yield { type: 'done', message: { role: 'assistant', content: fullContent } }
+        yield {
+          type: 'done',
+          message: { role: 'assistant', content: fullContent },
+          thinking: fullThinking || undefined
+        }
         return
       }
 
@@ -168,7 +177,8 @@ export class AgentCore {
       message: {
         role: 'assistant',
         content: fullContent || '我已经尝试了多个步骤但还没有得到最终结果。请告诉我还需要什么帮助。'
-      }
+      },
+      thinking: fullThinking || undefined
     }
   }
 

@@ -8,6 +8,7 @@ interface AIProvider {
   apiKey: string
   models: string[]
   activeModel: string
+  enableThinking?: boolean
 }
 
 const providers = ref<AIProvider[]>([])
@@ -50,7 +51,8 @@ function addProvider () {
     baseUrl: 'https://api.openai.com/v1',
     apiKey: '',
     models: ['gpt-4o'],
-    activeModel: 'gpt-4o'
+    activeModel: 'gpt-4o',
+    enableThinking: false
   }
   modelInput.value = 'gpt-4o'
 }
@@ -180,6 +182,14 @@ function maskKey (key: string): string {
           </select>
         </div>
 
+        <div class="form-group">
+          <label class="toggle-label">
+            <input type="checkbox" v-model="editingProvider.enableThinking" class="toggle-checkbox" />
+            <span>启用思考模式 (Thinking)</span>
+          </label>
+          <span class="form-hint">开启后，支持的模型将展示思考过程 (如 DeepSeek-R1, o1 等)</span>
+        </div>
+
         <div class="form-actions-edit">
           <button class="save-btn" @click="saveEdit">确认</button>
           <button class="cancel-btn" @click="cancelEdit">取消</button>
@@ -231,6 +241,10 @@ function maskKey (key: string): string {
             <div class="detail-row">
               <span class="detail-label">默认:</span>
               <span class="detail-value">{{ p.activeModel }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">思考:</span>
+              <span class="detail-value">{{ p.enableThinking ? '✅ 已启用' : '❌ 未启用' }}</span>
             </div>
           </div>
         </div>
@@ -577,5 +591,21 @@ function maskKey (key: string): string {
   border-radius: 4px;
   font-size: 0.9em;
   color: #60a5fa;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.9em;
+  color: #e4e4e7;
+}
+
+.toggle-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: #3b82f6;
+  cursor: pointer;
 }
 </style>

@@ -210,7 +210,8 @@ function setupIPC (): void {
       aiEngine!.configure({
         apiKey: active.apiKey,
         baseUrl: active.baseUrl,
-        model: active.activeModel
+        model: active.activeModel,
+        enableThinking: active.enableThinking ?? false
       })
     }
     return { success: true }

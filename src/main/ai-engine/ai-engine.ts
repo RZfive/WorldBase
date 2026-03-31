@@ -20,6 +20,7 @@ export interface AIConfigInput {
   apiKey?: string
   baseUrl?: string
   model?: string
+  enableThinking?: boolean
 }
 
 /**
@@ -72,6 +73,9 @@ export class AIEngine {
     }
     if (config.model) {
       this.provider.setModel(config.model)
+    }
+    if (config.enableThinking !== undefined) {
+      this.provider.setEnableThinking(config.enableThinking)
     }
   }
 }
