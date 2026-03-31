@@ -95,6 +95,14 @@ interface ProviderOption {
 }
 
 // State
+const props = defineProps<{
+  projectContext?: Record<string, unknown> | null
+}>()
+
+const emit = defineEmits<{
+  (e: 'contextConsumed'): void
+}>()
+
 const messages = ref<ChatMessage[]>([])
 const inputText = ref('')
 const isLoading = ref(false)
@@ -397,6 +405,15 @@ onMounted(async () => {
   await loadConversations()
   await loadProviders()
 })
+
+// Watch for project context changes (e.g. "continue optimizing this app")
+watch(() => props.projectContext, (ctx) => {
+  if (ctx) {
+    const name = (ctx.name || ctx.id || '未知项目') as string
+    inputText.value = `请帮我继续优化项目"${name}"（项目ID: ${ctx.id}）。请先查看项目当前的代码结构，然后告诉我可以改进的地方。`
+    emit('contextConsumed')
+  }
+}, { immediate: true })
 
 onUnmounted(() => {
   if (streamCleanup.value) {
