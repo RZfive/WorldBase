@@ -13,6 +13,9 @@ import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-h
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+/** Default port for the LAN server. */
+const LAN_SERVER_PORT = 19527
+
 // Ensure only one instance of the app is running.
 // This prevents file lock conflicts when the installer tries to
 // uninstall or overwrite the old version while the app is still running.
@@ -78,7 +81,7 @@ async function initializeServices (): Promise<void> {
   }
 
   lanServer = new LanServer({
-    port: 19527,
+    port: LAN_SERVER_PORT,
     projectFS,
     runtimeManager,
     apiClient,
@@ -264,9 +267,9 @@ function setupIPC (): void {
       }
     }
     return {
-      port: 19527,
+      port: LAN_SERVER_PORT,
       addresses,
-      baseUrl: addresses.length > 0 ? `http://${addresses[0]}:19527` : `http://localhost:19527`
+      baseUrl: addresses.length > 0 ? `http://${addresses[0]}:${LAN_SERVER_PORT}` : `http://localhost:${LAN_SERVER_PORT}`
     }
   })
 
@@ -286,7 +289,7 @@ function setupIPC (): void {
     return {
       projectPort: port,
       lanUrl: port ? `http://${lanIp}:${port}` : null,
-      proxyUrl: `http://${lanIp}:19527/tool/${projectId}`,
+      proxyUrl: `http://${lanIp}:${LAN_SERVER_PORT}/tool/${projectId}`,
       lanIp
     }
   })
