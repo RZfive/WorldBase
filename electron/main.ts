@@ -93,6 +93,11 @@ function createWindow (): void {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
+    frame: false,
+    transparent: false,
+    backgroundColor: '#0f0f10',
+    minWidth: 800,
+    minHeight: 500,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -215,6 +220,27 @@ function setupIPC (): void {
       })
     }
     return { success: true }
+  })
+
+  // Window controls
+  ipcMain.handle('window:minimize', () => {
+    mainWindow?.minimize()
+  })
+
+  ipcMain.handle('window:maximize', () => {
+    if (mainWindow?.isMaximized()) {
+      mainWindow.unmaximize()
+    } else {
+      mainWindow?.maximize()
+    }
+  })
+
+  ipcMain.handle('window:close', () => {
+    mainWindow?.close()
+  })
+
+  ipcMain.handle('window:isMaximized', () => {
+    return mainWindow?.isMaximized() ?? false
   })
 }
 
