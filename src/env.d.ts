@@ -7,11 +7,12 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'tool_start' | 'tool_end' | 'done' | 'error'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'done' | 'error'
   content?: string
   name?: string
   result?: unknown
   message?: { role: string; content: string }
+  thinking?: string
   error?: string
 }
 
@@ -34,6 +35,7 @@ interface AIProviderConfig {
   apiKey: string
   models: string[]
   activeModel: string
+  enableThinking?: boolean
 }
 
 interface AIProvidersConfig {
