@@ -11,12 +11,14 @@ import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
 import type { ProjectApiClient } from '../../../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../../../project-data-access/data-access.js'
+import type { BrowserWindow } from 'electron'
 
 export interface ToolServices {
   projectFS: ProjectFS
   runtimeManager: RuntimeManager
   apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
+  getMainWindow?: () => BrowserWindow | null
 }
 
 /**
