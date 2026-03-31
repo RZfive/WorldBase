@@ -25,7 +25,7 @@ interface ConversationSummary {
 }
 
 interface ConversationData extends ConversationSummary {
-  messages: Array<{ role: string; content: string }>
+  messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>; thinking?: string }>
 }
 
 interface AIProviderConfig {
@@ -43,10 +43,12 @@ interface AIProvidersConfig {
   activeProviderId: string
 }
 
+type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+
 interface ElectronAPI {
   // AI
-  chat: (messages: Array<{ role: string; content: string }>) => Promise<{ role: string; content: string }>
-  chatStream: (messages: Array<{ role: string; content: string }>) => Promise<{ ok: boolean }>
+  chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: string }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ ok: boolean }>
   onStreamEvent: (callback: (event: StreamEvent) => void) => () => void
 
   // Conversations
