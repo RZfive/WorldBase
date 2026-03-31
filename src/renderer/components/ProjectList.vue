@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import QRCode from 'qrcode'
 
 interface StatusBadge {
   text: string
@@ -44,10 +45,11 @@ const contextMenu = ref<{ visible: boolean; x: number; y: number; project: Proje
 })
 
 // QR code modal state
-const qrModal = ref<{ visible: boolean; url: string; projectName: string }>({
+const qrModal = ref<{ visible: boolean; url: string; projectName: string; dataUrl: string }>({
   visible: false,
   url: '',
-  projectName: ''
+  projectName: '',
+  dataUrl: ''
 })
 
 // Project changes listener cleanup
@@ -117,13 +119,19 @@ async function showQrCode () {
   try {
     const lanInfo: LanUrlInfo = await window.electronAPI.getProjectLanUrl(project.id) as LanUrlInfo
     const url = lanInfo.lanUrl || lanInfo.proxyUrl
+    const dataUrl = await QRCode.toDataURL(url, {
+      width: 200,
+      margin: 2,
+      color: { dark: '#000000', light: '#ffffff' }
+    })
     qrModal.value = {
       visible: true,
       url,
-      projectName: (project.name || project.id) as string
+      projectName: (project.name || project.id) as string,
+      dataUrl
     }
   } catch (err) {
-    console.error('Failed to get LAN URL:', err)
+    console.error('Failed to generate QR code:', err)
   }
   hideContextMenu()
 }
@@ -158,103 +166,6 @@ function optimizeInChat () {
   if (!contextMenu.value.project) return
   emit('optimizeInChat', contextMenu.value.project)
   hideContextMenu()
-}
-
-/**
- * Generate QR code as SVG using a simple QR encoding approach.
- * Uses a lightweight canvas-based QR generation.
- */
-function generateQrSvg (text: string, size = 200): string {
-  // Simple QR code generation using a pattern-based approach
-  // This creates a visual representation that can be scanned
-  const modules = encodeToQrMatrix(text)
-  const moduleCount = modules.length
-  const cellSize = size / moduleCount
-
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">`
-  svg += `<rect width="${size}" height="${size}" fill="white"/>`
-
-  for (let row = 0; row < moduleCount; row++) {
-    for (let col = 0; col < moduleCount; col++) {
-      if (modules[row][col]) {
-        svg += `<rect x="${col * cellSize}" y="${row * cellSize}" width="${cellSize}" height="${cellSize}" fill="black"/>`
-      }
-    }
-  }
-
-  svg += '</svg>'
-  return svg
-}
-
-/**
- * Encode text to QR-like matrix.
- * Simple implementation — generates a scannable pattern.
- */
-function encodeToQrMatrix (text: string): boolean[][] {
-  const size = Math.max(21, Math.min(41, 21 + Math.ceil(text.length / 10) * 4))
-  const matrix: boolean[][] = Array.from({ length: size }, () => Array(size).fill(false))
-
-  // Add finder patterns (top-left, top-right, bottom-left)
-  addFinderPattern(matrix, 0, 0)
-  addFinderPattern(matrix, 0, size - 7)
-  addFinderPattern(matrix, size - 7, 0)
-
-  // Add timing patterns
-  for (let i = 8; i < size - 8; i++) {
-    matrix[6][i] = i % 2 === 0
-    matrix[i][6] = i % 2 === 0
-  }
-
-  // Encode data as binary pattern
-  const bytes: number[] = []
-  for (let i = 0; i < text.length; i++) {
-    bytes.push(text.charCodeAt(i))
-  }
-
-  let bitIndex = 0
-  // Fill data area (avoiding finder patterns and timing)
-  for (let col = size - 1; col >= 1; col -= 2) {
-    if (col === 6) col = 5 // Skip timing column
-    for (let row = 0; row < size; row++) {
-      for (let c = 0; c < 2; c++) {
-        const actualCol = col - c
-        if (isDataArea(row, actualCol, size)) {
-          if (bitIndex < bytes.length * 8) {
-            const byteIdx = Math.floor(bitIndex / 8)
-            const bitPos = 7 - (bitIndex % 8)
-            matrix[row][actualCol] = ((bytes[byteIdx] >> bitPos) & 1) === 1
-            bitIndex++
-          } else {
-            // Fill remaining with pattern
-            matrix[row][actualCol] = (row + actualCol) % 2 === 0
-          }
-        }
-      }
-    }
-  }
-
-  return matrix
-}
-
-function addFinderPattern (matrix: boolean[][], startRow: number, startCol: number) {
-  for (let r = 0; r < 7; r++) {
-    for (let c = 0; c < 7; c++) {
-      if (r === 0 || r === 6 || c === 0 || c === 6 ||
-          (r >= 2 && r <= 4 && c >= 2 && c <= 4)) {
-        matrix[startRow + r][startCol + c] = true
-      }
-    }
-  }
-}
-
-function isDataArea (row: number, col: number, size: number): boolean {
-  // Skip finder patterns
-  if (row < 9 && col < 9) return false
-  if (row < 9 && col >= size - 8) return false
-  if (row >= size - 8 && col < 9) return false
-  // Skip timing patterns
-  if (row === 6 || col === 6) return false
-  return true
 }
 
 function handleDocumentClick () {
@@ -380,7 +291,9 @@ onUnmounted(() => {
             <button class="qr-close-btn" @click="closeQrModal">×</button>
           </div>
           <div class="qr-modal-body">
-            <div class="qr-code" v-html="generateQrSvg(qrModal.url, 200)"></div>
+            <div class="qr-code">
+              <img v-if="qrModal.dataUrl" :src="qrModal.dataUrl" alt="QR Code" width="200" height="200" />
+            </div>
             <p class="qr-url">{{ qrModal.url }}</p>
             <p class="qr-hint">扫描二维码或在局域网浏览器中打开上方地址</p>
           </div>
