@@ -1,6 +1,7 @@
-import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { networkInterfaces } from 'node:os'
 import { AIEngine } from '../src/main/ai-engine/ai-engine.js'
 import { ProjectFS } from '../src/main/project-fs/project-fs.js'
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
@@ -11,6 +12,9 @@ import { SettingsStore, type AIProvidersConfig } from '../src/main/settings/sett
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+/** Default port for the LAN server. */
+const LAN_SERVER_PORT = 19527
 
 // Ensure only one instance of the app is running.
 // This prevents file lock conflicts when the installer tries to
@@ -65,7 +69,8 @@ async function initializeServices (): Promise<void> {
     projectFS,
     runtimeManager,
     apiClient,
-    dataAccess
+    dataAccess,
+    getMainWindow: () => mainWindow
   })
 
   // Apply saved AI settings on startup
@@ -76,7 +81,7 @@ async function initializeServices (): Promise<void> {
   }
 
   lanServer = new LanServer({
-    port: 19527,
+    port: LAN_SERVER_PORT,
     projectFS,
     runtimeManager,
     apiClient,
@@ -241,6 +246,52 @@ function setupIPC (): void {
 
   ipcMain.handle('window:isMaximized', () => {
     return mainWindow?.isMaximized() ?? false
+  })
+
+  // Open project folder in system file explorer
+  ipcMain.handle('projects:openFolder', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    const projectDir = path.join(getProjectsDir(), projectId)
+    await shell.openPath(projectDir)
+    return { success: true }
+  })
+
+  // Get LAN server info (local IP and port)
+  ipcMain.handle('lan:getInfo', async () => {
+    const nets = networkInterfaces()
+    const addresses: string[] = []
+    for (const name of Object.keys(nets)) {
+      for (const net of nets[name] || []) {
+        if (net.family === 'IPv4' && !net.internal) {
+          addresses.push(net.address)
+        }
+      }
+    }
+    return {
+      port: LAN_SERVER_PORT,
+      addresses,
+      baseUrl: addresses.length > 0 ? `http://${addresses[0]}:${LAN_SERVER_PORT}` : `http://localhost:${LAN_SERVER_PORT}`
+    }
+  })
+
+  // Get project LAN URL for QR code generation
+  ipcMain.handle('projects:getLanUrl', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    const port = runtimeManager!.getPort(projectId)
+    const nets = networkInterfaces()
+    const addresses: string[] = []
+    for (const name of Object.keys(nets)) {
+      for (const net of nets[name] || []) {
+        if (net.family === 'IPv4' && !net.internal) {
+          addresses.push(net.address)
+        }
+      }
+    }
+    const lanIp = addresses.length > 0 ? addresses[0] : 'localhost'
+    return {
+      projectPort: port,
+      lanUrl: port ? `http://${lanIp}:${port}` : null,
+      proxyUrl: `http://${lanIp}:${LAN_SERVER_PORT}/tool/${projectId}`,
+      lanIp
+    }
   })
 }
 

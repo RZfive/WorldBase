@@ -1,10 +1,12 @@
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { BrowserWindow } from 'electron'
 
 interface ToolServices {
   projectFS: ProjectFS
   runtimeManager: RuntimeManager
+  getMainWindow?: () => BrowserWindow | null
 }
 
 interface CreateProjectArgs {
@@ -115,6 +117,12 @@ export function toolCreateProject (services: ToolServices): Tool {
 
       const project = await services.projectFS.createProject(projectId, fullMeta, files)
 
+      // Notify renderer that a new project was created (refresh project list)
+      const win = services.getMainWindow?.()
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('projects:changed', { action: 'created', projectId })
+      }
+
       // Auto-install dependencies if package.json exists
       if (files['package.json']) {
         try {
@@ -131,10 +139,27 @@ export function toolCreateProject (services: ToolServices): Tool {
         }
       }
 
+      // Auto-start the project after creation
+      let startResult: { port?: number; status?: string } = {}
+      try {
+        console.log(`[tool:create_project] Auto-starting project ${projectId}...`)
+        startResult = await services.runtimeManager.start(projectId)
+        console.log(`[tool:create_project] Project ${projectId} started on port ${startResult.port}`)
+      } catch (err) {
+        console.warn(`[tool:create_project] Failed to auto-start: ${(err as Error).message}`)
+      }
+
+      // Notify renderer again with updated status
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('projects:changed', { action: 'started', projectId, port: startResult.port })
+      }
+
       return {
         success: true,
         project,
-        message: `Project "${name}" created with ID: ${projectId}. Dependencies installed. Runtime configured with command: ${(runtime.backend as Record<string, unknown>).command}`
+        port: startResult.port,
+        status: startResult.status || 'created',
+        message: `Project "${name}" created with ID: ${projectId}. Dependencies installed. Runtime configured with command: ${(runtime.backend as Record<string, unknown>).command}${startResult.port ? `. Running on port ${startResult.port}` : ''}`
       }
     }
   }
