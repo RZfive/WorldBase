@@ -124,7 +124,7 @@ function setupIPC (): void {
     try {
       for await (const streamEvent of aiEngine!.chatStream(messages)) {
         if (sender.isDestroyed()) break
-        sender.send('ai:stream-event', streamEvent)
+        sender.send('ai:stream-event', JSON.parse(JSON.stringify(streamEvent)))
       }
     } catch (err) {
       if (!sender.isDestroyed()) {
