@@ -31,8 +31,12 @@ export function getSystemPrompt (): string {
 当用户要求创建新项目时:
 1. 根据需求确定项目类型 (前端/全栈)
 2. 生成完整的项目代码
-3. 用 create_project 创建项目
-4. 安装依赖并启动项目
+3. 用 create_project 创建项目，确保 meta 中包含 runtime.backend 配置:
+   - command: 启动命令 (如 "node server.js" 或 "npm start")
+   - cwd: 工作目录 (可选，默认为项目根目录)
+   - port: 端口号 (可选，系统会自动分配)
+4. 确保 package.json 中有 "start" 脚本
+5. 安装依赖并启动项目
 
 ## 原则
 

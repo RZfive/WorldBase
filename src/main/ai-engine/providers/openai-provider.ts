@@ -1,8 +1,9 @@
 export interface ChatMessage {
   role: string
-  content: string
+  content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
   tool_calls?: ToolCall[]
   tool_call_id?: string
+  reasoning_content?: string
 }
 
 export interface ToolCall {
@@ -22,7 +23,7 @@ export interface ToolDefinition {
 interface ChatCompletionBody {
   model: string
   messages: ChatMessage[]
-  temperature: number
+  temperature?: number
   stream?: boolean
   tools?: { type: string; function: { name: string; description: string; parameters: Record<string, unknown> } }[]
   tool_choice?: string
@@ -31,6 +32,7 @@ interface ChatCompletionBody {
 interface StreamDelta {
   role?: string
   content?: string | null
+  reasoning_content?: string | null
   tool_calls?: Array<{
     index: number
     id?: string
@@ -46,11 +48,13 @@ export class OpenAIProvider {
   private apiKey: string
   private baseUrl: string
   private model: string
+  private enableThinking: boolean
 
   constructor () {
     this.apiKey = process.env.OPENAI_API_KEY || ''
     this.baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
     this.model = process.env.OPENAI_MODEL || 'gpt-4o'
+    this.enableThinking = false
   }
 
   setApiKey (key: string): void {
@@ -67,6 +71,10 @@ export class OpenAIProvider {
 
   getModel (): string {
     return this.model
+  }
+
+  setEnableThinking (enable: boolean): void {
+    this.enableThinking = enable
   }
 
   /**
@@ -113,11 +121,17 @@ export class OpenAIProvider {
    * Streaming chat completion. Yields content tokens as they arrive.
    * When tool_calls are present in the stream, they are accumulated
    * and returned as a complete ChatMessage at the end.
+   * Supports reasoning_content (thinking) from compatible models.
    */
   async * chatCompletionStream (
     messages: ChatMessage[],
     tools: ToolDefinition[] = []
-  ): AsyncGenerator<{ type: 'token'; content: string } | { type: 'tool_calls'; message: ChatMessage } | { type: 'done'; message: ChatMessage }> {
+  ): AsyncGenerator<
+    | { type: 'token'; content: string }
+    | { type: 'thinking'; content: string }
+    | { type: 'tool_calls'; message: ChatMessage }
+    | { type: 'done'; message: ChatMessage }
+  > {
     const body: ChatCompletionBody = {
       model: this.model,
       messages,
@@ -157,6 +171,7 @@ export class OpenAIProvider {
     const decoder = new TextDecoder()
     let buffer = ''
     let fullContent = ''
+    let fullReasoning = ''
     const toolCallsMap = new Map<number, { id: string; function: { name: string; arguments: string } }>()
 
     try {
@@ -183,6 +198,12 @@ export class OpenAIProvider {
 
           const delta = parsed.choices?.[0]?.delta
           if (!delta) continue
+
+          // Handle reasoning_content (thinking) from compatible models
+          if (delta.reasoning_content) {
+            fullReasoning += delta.reasoning_content
+            yield { type: 'thinking', content: delta.reasoning_content }
+          }
 
           if (delta.content) {
             fullContent += delta.content
@@ -212,6 +233,10 @@ export class OpenAIProvider {
     const message: ChatMessage = {
       role: 'assistant',
       content: fullContent || ''
+    }
+
+    if (fullReasoning) {
+      message.reasoning_content = fullReasoning
     }
 
     if (toolCallsMap.size > 0) {

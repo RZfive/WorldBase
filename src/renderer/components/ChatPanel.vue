@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, watch, computed } from 'vue'
+import { marked } from 'marked'
+
+// Configure marked for safe rendering
+marked.setOptions({
+  breaks: true,
+  gfm: true
+})
 
 interface ChatMessage {
   role: string
-  content: string
+  content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+  thinking?: string
 }
 
 interface ConversationSummary {
@@ -33,9 +41,43 @@ const selectedModel = ref('')
 const streamCleanup = ref<(() => void) | null>(null)
 const messagesContainer = ref<HTMLElement | null>(null)
 const toolStatus = ref('')
+const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
+const expandedThinking = ref<Record<number, boolean>>({})
+const currentThinking = ref('')
 
 function generateId (): string {
   return Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8)
+}
+
+/** Get displayable text from a message (handles string or multipart content). */
+function getMessageText (msg: ChatMessage): string {
+  if (typeof msg.content === 'string') return msg.content
+  if (Array.isArray(msg.content)) {
+    return msg.content
+      .filter(p => p.type === 'text')
+      .map(p => p.text || '')
+      .join('')
+  }
+  return ''
+}
+
+/** Get images from a multipart message. */
+function getMessageImages (msg: ChatMessage): string[] {
+  if (!Array.isArray(msg.content)) return []
+  return msg.content
+    .filter(p => p.type === 'image_url' && p.image_url?.url)
+    .map(p => p.image_url!.url)
+}
+
+/** Render markdown content to HTML. */
+function renderMarkdown (text: string): string {
+  if (!text) return ''
+  return marked.parse(text, { async: false }) as string
+}
+
+/** Toggle thinking block visibility. */
+function toggleThinking (index: number) {
+  expandedThinking.value[index] = !expandedThinking.value[index]
 }
 
 // Scroll to bottom of messages
@@ -79,6 +121,8 @@ function newConversation () {
   currentConversationId.value = null
   messages.value = []
   toolStatus.value = ''
+  pendingImages.value = []
+  currentThinking.value = ''
 }
 
 // Load a conversation
@@ -101,10 +145,9 @@ async function saveCurrentConversation () {
   currentConversationId.value = id
 
   const firstUserMsg = messages.value.find(m => m.role === 'user')
-  const title = firstUserMsg
-    ? (firstUserMsg.content.length > 40
-        ? firstUserMsg.content.substring(0, 40) + '...'
-        : firstUserMsg.content)
+  const titleText = firstUserMsg ? getMessageText(firstUserMsg) : ''
+  const title = titleText
+    ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
     : '新对话'
 
   await window.electronAPI.saveConversation({
@@ -130,26 +173,76 @@ async function deleteConversation (id: string, e: Event) {
   await loadConversations()
 }
 
+// Handle image upload
+function handleImageUpload (e: Event) {
+  const input = e.target as HTMLInputElement
+  if (!input.files || input.files.length === 0) return
+
+  for (const file of Array.from(input.files)) {
+    if (!file.type.startsWith('image/')) continue
+    if (file.size > 20 * 1024 * 1024) {
+      alert('图片大小不能超过 20MB')
+      continue
+    }
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      const base64 = reader.result as string
+      pendingImages.value.push({ base64, mimeType: file.type })
+    }
+    reader.readAsDataURL(file)
+  }
+
+  // Reset input so the same file can be selected again
+  input.value = ''
+}
+
+function removeImage (index: number) {
+  pendingImages.value.splice(index, 1)
+}
+
 // Send message with streaming
 async function sendMessage () {
   const text = inputText.value.trim()
-  if (!text || isLoading.value) return
+  if ((!text && pendingImages.value.length === 0) || isLoading.value) return
 
-  messages.value.push({ role: 'user', content: text })
+  // Build the message content (multipart if images present)
+  let messageContent: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+  if (pendingImages.value.length > 0) {
+    const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = []
+    if (text) {
+      parts.push({ type: 'text', text })
+    }
+    for (const img of pendingImages.value) {
+      parts.push({ type: 'image_url', image_url: { url: img.base64 } })
+    }
+    messageContent = parts
+  } else {
+    messageContent = text
+  }
+
+  messages.value.push({ role: 'user', content: messageContent })
   inputText.value = ''
+  pendingImages.value = []
   isLoading.value = true
   toolStatus.value = ''
+  currentThinking.value = ''
   scrollToBottom()
 
   // Add placeholder assistant message
-  messages.value.push({ role: 'assistant', content: '' })
+  messages.value.push({ role: 'assistant', content: '', thinking: '' })
   const assistantIdx = messages.value.length - 1
 
   try {
     if (window.electronAPI) {
       // Set up the stream listener
       const cleanup = window.electronAPI.onStreamEvent((event) => {
-        if (event.type === 'token' && event.content) {
+        if (event.type === 'thinking' && event.content) {
+          // Accumulate thinking content
+          currentThinking.value += event.content
+          messages.value[assistantIdx].thinking = currentThinking.value
+          scrollToBottom()
+        } else if (event.type === 'token' && event.content) {
           messages.value[assistantIdx].content += event.content
           scrollToBottom()
         } else if (event.type === 'tool_start' && event.name) {
@@ -161,16 +254,22 @@ async function sendMessage () {
           toolStatus.value = ''
           if (cleanup) cleanup()
           // If empty content, use done message
-          if (!messages.value[assistantIdx].content && event.message?.content) {
+          if (!getMessageText(messages.value[assistantIdx]) && event.message?.content) {
             messages.value[assistantIdx].content = event.message.content
           }
-          if (!messages.value[assistantIdx].content) {
+          if (!getMessageText(messages.value[assistantIdx])) {
             messages.value[assistantIdx].content = '(无响应)'
           }
+          // Set thinking from done event if available
+          if (event.thinking && !messages.value[assistantIdx].thinking) {
+            messages.value[assistantIdx].thinking = event.thinking
+          }
+          currentThinking.value = ''
           saveCurrentConversation()
         } else if (event.type === 'error') {
           isLoading.value = false
           toolStatus.value = ''
+          currentThinking.value = ''
           if (cleanup) cleanup()
           messages.value[assistantIdx].content = `错误: ${event.error}`
         }
@@ -178,13 +277,16 @@ async function sendMessage () {
       streamCleanup.value = cleanup
 
       // Send only user/assistant messages (not system)
-      const chatMessages = messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
+      const chatMessages = messages.value.slice(0, -1).map(m => ({
+        role: m.role,
+        content: m.content
+      }))
       await window.electronAPI.chatStream(chatMessages)
 
       // If stream finishes without a 'done' event
       if (isLoading.value) {
         isLoading.value = false
-        if (!messages.value[assistantIdx].content) {
+        if (!getMessageText(messages.value[assistantIdx])) {
           messages.value[assistantIdx].content = '(无响应)'
         }
         saveCurrentConversation()
@@ -290,9 +392,28 @@ onUnmounted(() => {
           <div class="message-role">
             {{ msg.role === 'user' ? '🧑 你' : '🤖 AI' }}
           </div>
-          <div class="message-content">
-            {{ msg.content }}<span v-if="isLoading && i === messages.length - 1 && msg.role === 'assistant'" class="cursor-blink">▍</span>
+
+          <!-- Thinking block (collapsible) -->
+          <div v-if="msg.thinking" class="thinking-block">
+            <div class="thinking-header" @click="toggleThinking(i)">
+              <span class="thinking-icon">💭</span>
+              <span class="thinking-label">思考过程</span>
+              <span class="thinking-toggle">{{ expandedThinking[i] ? '▼' : '▶' }}</span>
+            </div>
+            <div v-if="expandedThinking[i]" class="thinking-content" v-html="renderMarkdown(msg.thinking)"></div>
           </div>
+
+          <!-- User message with images -->
+          <div v-if="msg.role === 'user'" class="message-content">
+            <div v-if="getMessageImages(msg).length > 0" class="message-images">
+              <img v-for="(imgUrl, idx) in getMessageImages(msg)" :key="idx" :src="imgUrl" class="message-image" />
+            </div>
+            <div v-html="renderMarkdown(getMessageText(msg))"></div>
+          </div>
+
+          <!-- Assistant message with markdown -->
+          <div v-else class="message-content markdown-body" v-html="renderMarkdown(getMessageText(msg))"></div>
+          <span v-if="isLoading && i === messages.length - 1 && msg.role === 'assistant'" class="cursor-blink">▍</span>
         </div>
 
         <div v-if="toolStatus" class="tool-status">
@@ -301,16 +422,29 @@ onUnmounted(() => {
       </div>
 
       <div class="chat-input">
-        <textarea
-          v-model="inputText"
-          placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
-          @keydown="handleKeydown"
-          :disabled="isLoading"
-          rows="3"
-        />
-        <button @click="sendMessage" :disabled="isLoading || !inputText.trim()">
-          {{ isLoading ? '...' : '发送' }}
-        </button>
+        <!-- Image preview area -->
+        <div v-if="pendingImages.length > 0" class="image-preview-bar">
+          <div v-for="(img, idx) in pendingImages" :key="idx" class="image-preview-item">
+            <img :src="img.base64" class="image-thumb" />
+            <button class="image-remove" @click="removeImage(idx)">×</button>
+          </div>
+        </div>
+        <div class="input-row">
+          <label class="upload-btn" title="上传图片">
+            📎
+            <input type="file" accept="image/*" multiple hidden @change="handleImageUpload" />
+          </label>
+          <textarea
+            v-model="inputText"
+            placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
+            @keydown="handleKeydown"
+            :disabled="isLoading"
+            rows="3"
+          />
+          <button @click="sendMessage" :disabled="isLoading || (!inputText.trim() && pendingImages.length === 0)">
+            {{ isLoading ? '...' : '发送' }}
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -495,9 +629,175 @@ onUnmounted(() => {
 }
 
 .message-content {
-  white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.6;
+}
+
+/* Markdown content styles */
+.message-content :deep(p) {
+  margin: 0.4em 0;
+}
+
+.message-content :deep(p:first-child) {
+  margin-top: 0;
+}
+
+.message-content :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.message-content :deep(pre) {
+  background: #18181b;
+  border: 1px solid #3f3f46;
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  font-size: 0.85em;
+  line-height: 1.5;
+  margin: 8px 0;
+}
+
+.message-content :deep(code) {
+  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.9em;
+}
+
+.message-content :deep(:not(pre) > code) {
+  background: #3f3f46;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #60a5fa;
+}
+
+.message-content :deep(ul),
+.message-content :deep(ol) {
+  padding-left: 1.5em;
+  margin: 0.4em 0;
+}
+
+.message-content :deep(li) {
+  margin: 0.2em 0;
+}
+
+.message-content :deep(h1),
+.message-content :deep(h2),
+.message-content :deep(h3),
+.message-content :deep(h4) {
+  margin: 0.6em 0 0.3em;
+  line-height: 1.3;
+}
+
+.message-content :deep(h1) { font-size: 1.3em; }
+.message-content :deep(h2) { font-size: 1.15em; }
+.message-content :deep(h3) { font-size: 1.05em; }
+
+.message-content :deep(blockquote) {
+  border-left: 3px solid #3b82f6;
+  padding-left: 12px;
+  color: #a1a1aa;
+  margin: 0.5em 0;
+}
+
+.message-content :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  font-size: 0.9em;
+}
+
+.message-content :deep(th),
+.message-content :deep(td) {
+  border: 1px solid #3f3f46;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.message-content :deep(th) {
+  background: #27272a;
+  font-weight: 600;
+}
+
+.message-content :deep(a) {
+  color: #60a5fa;
+  text-decoration: none;
+}
+
+.message-content :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.message-content :deep(hr) {
+  border: none;
+  border-top: 1px solid #3f3f46;
+  margin: 0.8em 0;
+}
+
+/* User message images */
+.message-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.message-image {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 8px;
+  object-fit: cover;
+  border: 1px solid #3f3f46;
+}
+
+/* Thinking block */
+.thinking-block {
+  margin-bottom: 8px;
+  border: 1px solid #3f3f46;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #1a1a2e;
+}
+
+.thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.82em;
+  color: #a78bfa;
+  user-select: none;
+}
+
+.thinking-header:hover {
+  background: #1e1e35;
+}
+
+.thinking-icon {
+  font-size: 1em;
+}
+
+.thinking-label {
+  flex: 1;
+  font-weight: 500;
+}
+
+.thinking-toggle {
+  font-size: 0.7em;
+  color: #71717a;
+}
+
+.thinking-content {
+  padding: 8px 12px;
+  border-top: 1px solid #27272a;
+  font-size: 0.82em;
+  color: #a1a1aa;
+  line-height: 1.5;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.thinking-content :deep(p) {
+  margin: 0.3em 0;
 }
 
 .cursor-blink {
@@ -525,14 +825,73 @@ onUnmounted(() => {
   50% { opacity: 0.5; }
 }
 
+/* Chat input */
 .chat-input {
-  padding: 16px 24px;
+  padding: 12px 24px 16px;
   border-top: 1px solid #27272a;
-  display: flex;
-  gap: 12px;
 }
 
-.chat-input textarea {
+.image-preview-bar {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.image-preview-item {
+  position: relative;
+  display: inline-block;
+}
+
+.image-thumb {
+  width: 60px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #3f3f46;
+}
+
+.image-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ef4444;
+  color: white;
+  border: none;
+  font-size: 0.7em;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.input-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.upload-btn {
+  padding: 10px 8px;
+  cursor: pointer;
+  font-size: 1.2em;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.upload-btn:hover {
+  background: #27272a;
+}
+
+.input-row textarea {
   flex: 1;
   background: #27272a;
   border: 1px solid #3f3f46;
@@ -544,12 +903,12 @@ onUnmounted(() => {
   font-family: inherit;
 }
 
-.chat-input textarea:focus {
+.input-row textarea:focus {
   outline: none;
   border-color: #3b82f6;
 }
 
-.chat-input button {
+.input-row button {
   padding: 10px 20px;
   background: #3b82f6;
   color: white;
@@ -557,14 +916,14 @@ onUnmounted(() => {
   border-radius: 8px;
   font-size: 0.9em;
   cursor: pointer;
-  align-self: flex-end;
+  flex-shrink: 0;
 }
 
-.chat-input button:hover:not(:disabled) {
+.input-row button:hover:not(:disabled) {
   background: #2563eb;
 }
 
-.chat-input button:disabled {
+.input-row button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

@@ -22,6 +22,8 @@ export interface AIProvider {
   models: string[]
   /** Currently selected model for this provider */
   activeModel: string
+  /** Whether to enable thinking/reasoning mode for compatible models */
+  enableThinking?: boolean
 }
 
 export interface AIProvidersConfig {
