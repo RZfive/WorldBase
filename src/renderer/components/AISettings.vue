@@ -127,17 +127,17 @@ async function saveEdit () {
   await saveAll()
 }
 
-function deleteProvider (id: string) {
+async function deleteProvider (id: string) {
   providers.value = providers.value.filter(p => p.id !== id)
   if (activeProviderId.value === id) {
     activeProviderId.value = providers.value[0]?.id || ''
   }
-  saveAll()
+  await saveAll()
 }
 
-function setActive (id: string) {
+async function setActive (id: string) {
   activeProviderId.value = id
-  saveAll()
+  await saveAll()
 }
 
 async function saveAll () {
