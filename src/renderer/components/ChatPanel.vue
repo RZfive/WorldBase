@@ -9,19 +9,68 @@ marked.setOptions({
 })
 
 /**
- * Basic HTML sanitizer — strips dangerous tags and attributes from HTML output.
- * This prevents XSS when rendering markdown with v-html.
+ * DOM-based HTML sanitizer — uses the browser's DOMParser to properly parse
+ * HTML and remove dangerous elements/attributes. This is more robust than
+ * regex-based sanitization and prevents XSS in v-html rendering.
  */
+const ALLOWED_TAGS = new Set([
+  'p', 'br', 'b', 'i', 'em', 'strong', 'u', 's', 'del', 'ins', 'mark', 'sub', 'sup',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+  'blockquote', 'pre', 'code', 'kbd', 'samp', 'var',
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col',
+  'a', 'img', 'hr', 'div', 'span', 'details', 'summary',
+  'abbr', 'cite', 'dfn', 'q', 'small', 'time', 'wbr'
+])
+
+const ALLOWED_ATTRS = new Set([
+  'href', 'src', 'alt', 'title', 'class', 'id', 'width', 'height',
+  'colspan', 'rowspan', 'scope', 'align', 'valign',
+  'open', 'datetime', 'start', 'reversed', 'type'
+])
+
 function sanitizeHtml (html: string): string {
-  // Remove script/style/iframe/object/embed tags and their content
-  let clean = html.replace(/<(script|style|iframe|object|embed|form|meta|link)\b[^<]*(?:(?!<\/\1>)<[^<]*)*<\/\1>/gi, '')
-  // Remove self-closing dangerous tags
-  clean = clean.replace(/<(script|iframe|object|embed|form|meta|link)\b[^>]*\/?>/gi, '')
-  // Remove on* event handler attributes
-  clean = clean.replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-  // Remove javascript: protocol in href/src attributes
-  clean = clean.replace(/(href|src)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')/gi, '$1=""')
-  return clean
+  const parser = new DOMParser()
+  const doc = parser.parseFromString(`<div>${html}</div>`, 'text/html')
+  const root = doc.body.firstElementChild
+  if (!root) return ''
+
+  sanitizeNode(root)
+  return root.innerHTML
+}
+
+function sanitizeNode (node: Element): void {
+  const children = Array.from(node.childNodes)
+  for (const child of children) {
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      const el = child as Element
+      const tag = el.tagName.toLowerCase()
+
+      if (!ALLOWED_TAGS.has(tag)) {
+        // Replace disallowed element with its text content
+        const textNode = document.createTextNode(el.textContent || '')
+        node.replaceChild(textNode, el)
+        continue
+      }
+
+      // Remove disallowed attributes
+      const attrs = Array.from(el.attributes)
+      for (const attr of attrs) {
+        const name = attr.name.toLowerCase()
+        if (!ALLOWED_ATTRS.has(name) || name.startsWith('on')) {
+          el.removeAttribute(attr.name)
+          continue
+        }
+        // Block javascript: protocol in URLs
+        if ((name === 'href' || name === 'src') && attr.value.trim().toLowerCase().startsWith('javascript:')) {
+          el.removeAttribute(attr.name)
+        }
+      }
+
+      // Recursively sanitize children
+      sanitizeNode(el)
+    }
+  }
 }
 
 interface ChatMessage {
