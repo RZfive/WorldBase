@@ -77,6 +77,12 @@ interface ElectronAPI {
   saveAISettings: (config: { apiKey: string; baseUrl: string; model: string }) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
+
+  // Window controls
+  minimizeWindow: () => Promise<void>
+  maximizeWindow: () => Promise<void>
+  closeWindow: () => Promise<void>
+  isMaximized: () => Promise<boolean>
 }
 
 interface Window {
