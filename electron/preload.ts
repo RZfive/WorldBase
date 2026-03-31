@@ -69,11 +69,17 @@ export interface ElectronAPI {
   getProject: (projectId: string) => Promise<Record<string, unknown>>
   getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
+  openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
+  onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void
 
   // Runtime
   startProject: (projectId: string) => Promise<Record<string, unknown>>
   stopProject: (projectId: string) => Promise<Record<string, unknown>>
   getProjectStatus: (projectId: string) => Promise<Record<string, unknown>>
+
+  // LAN
+  getLanInfo: () => Promise<{ port: number; addresses: string[]; baseUrl: string }>
+  getProjectLanUrl: (projectId: string) => Promise<{ projectPort: number | null; lanUrl: string | null; proxyUrl: string; lanIp: string }>
 
   // Data
   queryData: (projectId: string, sql: string) => Promise<Record<string, unknown>>
@@ -114,11 +120,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getProject: (projectId: string) => ipcRenderer.invoke('projects:get', projectId),
   getFileTree: (projectId: string) => ipcRenderer.invoke('projects:getFileTree', projectId),
   readFile: (projectId: string, filePath: string) => ipcRenderer.invoke('projects:readFile', projectId, filePath),
+  openProjectFolder: (projectId: string) => ipcRenderer.invoke('projects:openFolder', projectId),
+  onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { action: string; projectId: string; port?: number }) => callback(event)
+    ipcRenderer.on('projects:changed', handler)
+    return () => { ipcRenderer.removeListener('projects:changed', handler) }
+  },
 
   // Runtime
   startProject: (projectId: string) => ipcRenderer.invoke('runtime:start', projectId),
   stopProject: (projectId: string) => ipcRenderer.invoke('runtime:stop', projectId),
   getProjectStatus: (projectId: string) => ipcRenderer.invoke('runtime:status', projectId),
+
+  // LAN
+  getLanInfo: () => ipcRenderer.invoke('lan:getInfo'),
+  getProjectLanUrl: (projectId: string) => ipcRenderer.invoke('projects:getLanUrl', projectId),
 
   // Data
   queryData: (projectId: string, sql: string) => ipcRenderer.invoke('data:query', projectId, sql),

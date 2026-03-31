@@ -19,6 +19,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'back'): void
+  (e: 'optimizeInChat', project: Record<string, unknown>): void
 }>()
 
 const fileTree = ref<FileTreeItem[]>([])
@@ -128,6 +129,9 @@ watch(() => props.project.id, () => {
         </button>
         <button @click="stopProject" :disabled="isLoading" class="btn-stop">
           ⏹ 停止
+        </button>
+        <button @click="emit('optimizeInChat', props.project)" class="btn-optimize">
+          💬 优化
         </button>
       </div>
     </div>
@@ -257,6 +261,20 @@ watch(() => props.project.id, () => {
 
 .btn-stop:hover:not(:disabled) {
   background: #7f1d1d;
+}
+
+.btn-optimize {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.8em;
+  cursor: pointer;
+  background: #1e3a5f;
+  color: #60a5fa;
+}
+
+.btn-optimize:hover {
+  background: #1e40af;
 }
 
 .detail-body {

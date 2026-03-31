@@ -8,10 +8,16 @@ import AISettings from './renderer/components/AISettings.vue'
 const currentView = ref<string>('chat')
 const selectedProject = ref<Record<string, unknown> | null>(null)
 const sidebarCollapsed = ref(false)
+const chatProjectContext = ref<Record<string, unknown> | null>(null)
 
 function selectProject (project: Record<string, unknown>) {
   selectedProject.value = project
   currentView.value = 'project'
+}
+
+function optimizeProjectInChat (project: Record<string, unknown>) {
+  chatProjectContext.value = project
+  currentView.value = 'chat'
 }
 
 function toggleSidebar () {
@@ -97,15 +103,17 @@ function closeWindow () {
 
       <!-- Main Content -->
       <main class="main-content">
-        <ChatPanel v-if="currentView === 'chat'" />
+        <ChatPanel v-if="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
         <ProjectList
           v-else-if="currentView === 'projects'"
           @select="selectProject"
+          @optimizeInChat="optimizeProjectInChat"
         />
         <ProjectDetail
           v-else-if="currentView === 'project' && selectedProject"
           :project="selectedProject"
           @back="currentView = 'projects'"
+          @optimizeInChat="optimizeProjectInChat"
         />
         <AISettings v-else-if="currentView === 'settings'" />
       </main>

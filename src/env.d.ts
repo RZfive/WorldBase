@@ -62,11 +62,17 @@ interface ElectronAPI {
   getProject: (projectId: string) => Promise<Record<string, unknown>>
   getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
+  openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
+  onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void
 
   // Runtime
   startProject: (projectId: string) => Promise<Record<string, unknown>>
   stopProject: (projectId: string) => Promise<Record<string, unknown>>
   getProjectStatus: (projectId: string) => Promise<Record<string, unknown>>
+
+  // LAN
+  getLanInfo: () => Promise<{ port: number; addresses: string[]; baseUrl: string }>
+  getProjectLanUrl: (projectId: string) => Promise<{ projectPort: number | null; lanUrl: string | null; proxyUrl: string; lanIp: string }>
 
   // Data
   queryData: (projectId: string, sql: string) => Promise<Record<string, unknown>>
