@@ -84,6 +84,12 @@ export interface ElectronAPI {
   saveAISettings: (config: AISettings) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
+
+  // Window controls
+  minimizeWindow: () => Promise<void>
+  maximizeWindow: () => Promise<void>
+  closeWindow: () => Promise<void>
+  isMaximized: () => Promise<boolean>
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -122,5 +128,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAISettings: () => ipcRenderer.invoke('settings:getAI'),
   saveAISettings: (config: AISettings) => ipcRenderer.invoke('settings:saveAI', config),
   getProviders: () => ipcRenderer.invoke('settings:getProviders'),
-  saveProviders: (config: AIProvidersConfig) => ipcRenderer.invoke('settings:saveProviders', config)
+  saveProviders: (config: AIProvidersConfig) => ipcRenderer.invoke('settings:saveProviders', config),
+
+  // Window controls
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
+  isMaximized: () => ipcRenderer.invoke('window:isMaximized')
 } satisfies ElectronAPI)

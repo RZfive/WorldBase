@@ -17,7 +17,7 @@ const saving = ref(false)
 const statusMsg = ref('')
 const editingProvider = ref<AIProvider | null>(null)
 const showKey = ref<Record<string, boolean>>({})
-const modelInput = ref('')
+const newModelInput = ref('')
 
 const sortedProviders = computed(() => {
   return [...providers.value].sort((a, b) => {
@@ -50,24 +50,48 @@ function addProvider () {
     name: '',
     baseUrl: 'https://api.openai.com/v1',
     apiKey: '',
-    models: ['gpt-4o'],
-    activeModel: 'gpt-4o',
+    models: [],
+    activeModel: '',
     enableThinking: false
   }
-  modelInput.value = 'gpt-4o'
+  newModelInput.value = ''
 }
 
 function editProvider (p: AIProvider) {
   editingProvider.value = { ...p, models: [...p.models] }
-  modelInput.value = p.models.join(', ')
+  newModelInput.value = ''
 }
 
 function cancelEdit () {
   editingProvider.value = null
-  modelInput.value = ''
+  newModelInput.value = ''
 }
 
-function saveEdit () {
+function addModel () {
+  if (!editingProvider.value) return
+  const model = newModelInput.value.trim()
+  if (!model) return
+  if (editingProvider.value.models.includes(model)) {
+    statusMsg.value = '该模型已存在'
+    return
+  }
+  editingProvider.value.models.push(model)
+  if (!editingProvider.value.activeModel) {
+    editingProvider.value.activeModel = model
+  }
+  newModelInput.value = ''
+  statusMsg.value = ''
+}
+
+function removeModel (index: number) {
+  if (!editingProvider.value) return
+  const removed = editingProvider.value.models.splice(index, 1)[0]
+  if (editingProvider.value.activeModel === removed) {
+    editingProvider.value.activeModel = editingProvider.value.models[0] || ''
+  }
+}
+
+async function saveEdit () {
   if (!editingProvider.value) return
   const ep = editingProvider.value
   if (!ep.name.trim()) {
@@ -75,12 +99,11 @@ function saveEdit () {
     return
   }
 
-  // Parse models from comma-separated input
-  ep.models = modelInput.value
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean)
-  if (ep.models.length === 0) ep.models = ['gpt-4o']
+  if (ep.models.length === 0) {
+    statusMsg.value = '请至少添加一个模型'
+    return
+  }
+
   if (!ep.models.includes(ep.activeModel)) {
     ep.activeModel = ep.models[0]
   }
@@ -98,7 +121,10 @@ function saveEdit () {
   }
 
   editingProvider.value = null
-  modelInput.value = ''
+  newModelInput.value = ''
+
+  // Auto-save to main process
+  await saveAll()
 }
 
 function deleteProvider (id: string) {
@@ -106,10 +132,12 @@ function deleteProvider (id: string) {
   if (activeProviderId.value === id) {
     activeProviderId.value = providers.value[0]?.id || ''
   }
+  saveAll()
 }
 
 function setActive (id: string) {
   activeProviderId.value = id
+  saveAll()
 }
 
 async function saveAll () {
@@ -170,28 +198,45 @@ function maskKey (key: string): string {
         </div>
 
         <div class="form-group">
-          <label>模型列表 (逗号分隔)</label>
-          <input v-model="modelInput" type="text" placeholder="gpt-4o, gpt-4o-mini" />
-          <span class="form-hint">可用模型列表，第一个为默认模型</span>
+          <label>模型列表</label>
+          <div class="model-tags">
+            <span v-for="(m, i) in editingProvider.models" :key="i" class="model-tag">
+              {{ m }}
+              <button class="model-tag-remove" @click="removeModel(i)" title="移除">×</button>
+            </span>
+          </div>
+          <div class="model-add-row">
+            <input
+              v-model="newModelInput"
+              type="text"
+              placeholder="输入模型名称，如 gpt-4o"
+              class="model-add-input"
+              @keydown.enter.prevent="addModel"
+            />
+            <button class="model-add-btn" @click="addModel">添加</button>
+          </div>
+          <span class="form-hint">逐个添加模型，列表中第一个为默认模型</span>
         </div>
 
-        <div class="form-group">
+        <div class="form-group" v-if="editingProvider.models.length > 0">
           <label>默认模型</label>
           <select v-model="editingProvider.activeModel" class="select-input">
-            <option v-for="m in modelInput.split(',').map(s => s.trim()).filter(Boolean)" :key="m" :value="m">{{ m }}</option>
+            <option v-for="m in editingProvider.models" :key="m" :value="m">{{ m }}</option>
           </select>
         </div>
 
         <div class="form-group">
-          <label class="toggle-label">
-            <input type="checkbox" v-model="editingProvider.enableThinking" class="toggle-checkbox" />
+          <label class="toggle-label" @click.prevent="editingProvider.enableThinking = !editingProvider.enableThinking">
+            <span :class="['custom-toggle', { on: editingProvider.enableThinking }]">
+              <span class="custom-toggle-thumb"></span>
+            </span>
             <span>启用思考模式 (Thinking)</span>
           </label>
           <span class="form-hint">开启后，支持的模型将展示思考过程 (如 DeepSeek-R1, o1 等)</span>
         </div>
 
         <div class="form-actions-edit">
-          <button class="save-btn" @click="saveEdit">确认</button>
+          <button class="save-btn" @click="saveEdit">确认保存</button>
           <button class="cancel-btn" @click="cancelEdit">取消</button>
         </div>
       </div>
@@ -249,12 +294,7 @@ function maskKey (key: string): string {
           </div>
         </div>
 
-        <div class="form-actions">
-          <button class="save-btn" @click="saveAll" :disabled="saving">
-            {{ saving ? '保存中...' : '💾 保存设置' }}
-          </button>
-          <span v-if="statusMsg" class="status-msg">{{ statusMsg }}</span>
-        </div>
+        <span v-if="statusMsg" class="status-msg">{{ statusMsg }}</span>
       </div>
 
       <div class="settings-section presets">
@@ -486,7 +526,8 @@ function maskKey (key: string): string {
   font-weight: 500;
 }
 
-.form-group input,
+.form-group input[type="text"],
+.form-group input[type="password"],
 .select-input {
   width: 100%;
   background: #27272a;
@@ -498,7 +539,8 @@ function maskKey (key: string): string {
   font-family: inherit;
 }
 
-.form-group input:focus,
+.form-group input[type="text"]:focus,
+.form-group input[type="password"]:focus,
 .select-input:focus {
   outline: none;
   border-color: #3b82f6;
@@ -509,6 +551,110 @@ function maskKey (key: string): string {
   font-size: 0.75em;
   color: #52525b;
   margin-top: 4px;
+}
+
+/* Model tags */
+.model-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  min-height: 8px;
+}
+
+.model-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.82em;
+  color: #e4e4e7;
+}
+
+.model-tag-remove {
+  background: none;
+  border: none;
+  color: #71717a;
+  font-size: 1.1em;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.model-tag-remove:hover {
+  color: #ef4444;
+}
+
+.model-add-row {
+  display: flex;
+  gap: 8px;
+}
+
+.model-add-input {
+  flex: 1;
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  border-radius: 8px;
+  color: #e4e4e7;
+  padding: 8px 12px;
+  font-size: 0.85em;
+  font-family: inherit;
+}
+
+.model-add-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.model-add-btn {
+  padding: 8px 16px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.82em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.model-add-btn:hover {
+  background: #2563eb;
+}
+
+/* Custom toggle switch */
+.custom-toggle {
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  background: #3f3f46;
+  border-radius: 10px;
+  position: relative;
+  transition: background 0.2s;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.custom-toggle.on {
+  background: #3b82f6;
+}
+
+.custom-toggle-thumb {
+  display: block;
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  transition: transform 0.2s;
+}
+
+.custom-toggle.on .custom-toggle-thumb {
+  transform: translateX(16px);
 }
 
 .form-actions-edit {
@@ -564,6 +710,15 @@ function maskKey (key: string): string {
   color: #a1a1aa;
 }
 
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.9em;
+  color: #e4e4e7;
+}
+
 .presets-table {
   width: 100%;
   border-collapse: collapse;
@@ -591,21 +746,5 @@ function maskKey (key: string): string {
   border-radius: 4px;
   font-size: 0.9em;
   color: #60a5fa;
-}
-
-.toggle-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  font-size: 0.9em;
-  color: #e4e4e7;
-}
-
-.toggle-checkbox {
-  width: 16px;
-  height: 16px;
-  accent-color: #3b82f6;
-  cursor: pointer;
 }
 </style>
