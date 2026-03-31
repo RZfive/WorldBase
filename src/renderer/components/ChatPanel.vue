@@ -216,14 +216,14 @@ async function saveCurrentConversation () {
     ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
     : '新对话'
 
-  await window.electronAPI.saveConversation({
+  await window.electronAPI.saveConversation(JSON.parse(JSON.stringify({
     id,
     title,
     messages: messages.value,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     providerId: activeProviderId.value || undefined
-  })
+  })))
 
   await loadConversations()
 }
