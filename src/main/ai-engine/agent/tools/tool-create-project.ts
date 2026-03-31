@@ -80,7 +80,10 @@ export function toolCreateProject (services: ToolServices): Tool {
                 command = 'npm run dev'
               }
             }
-          } catch { /* ignore parse errors */ }
+          } catch (err) {
+            // package.json may have invalid JSON; continue with defaults
+            console.warn('[tool:create_project] Failed to parse package.json:', (err as Error).message)
+          }
         }
 
         if (type === 'fullstack' || type === 'backend') {

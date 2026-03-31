@@ -8,6 +8,22 @@ marked.setOptions({
   gfm: true
 })
 
+/**
+ * Basic HTML sanitizer — strips dangerous tags and attributes from HTML output.
+ * This prevents XSS when rendering markdown with v-html.
+ */
+function sanitizeHtml (html: string): string {
+  // Remove script/style/iframe/object/embed tags and their content
+  let clean = html.replace(/<(script|style|iframe|object|embed|form|meta|link)\b[^<]*(?:(?!<\/\1>)<[^<]*)*<\/\1>/gi, '')
+  // Remove self-closing dangerous tags
+  clean = clean.replace(/<(script|iframe|object|embed|form|meta|link)\b[^>]*\/?>/gi, '')
+  // Remove on* event handler attributes
+  clean = clean.replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+  // Remove javascript: protocol in href/src attributes
+  clean = clean.replace(/(href|src)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')/gi, '$1=""')
+  return clean
+}
+
 interface ChatMessage {
   role: string
   content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
@@ -69,10 +85,11 @@ function getMessageImages (msg: ChatMessage): string[] {
     .map(p => p.image_url!.url)
 }
 
-/** Render markdown content to HTML. */
+/** Render markdown content to sanitized HTML. */
 function renderMarkdown (text: string): string {
   if (!text) return ''
-  return marked.parse(text, { async: false }) as string
+  const raw = marked.parse(text, { async: false }) as string
+  return sanitizeHtml(raw)
 }
 
 /** Toggle thinking block visibility. */
