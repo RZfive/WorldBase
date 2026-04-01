@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import fs from 'node:fs/promises'
-import { SqliteAdapter } from './adapters/sqlite-adapter.js'
+import { BridgeAdapter, type DatabaseDelegate } from './adapters/bridge-adapter.js'
 import { JsonAdapter } from './adapters/json-adapter.js'
 import { SchemaRegistry } from './schema-registry.js'
 import { DataAnalyzer } from './data-analyzer.js'
@@ -26,6 +26,15 @@ interface DataSummary {
   reason?: string
 }
 
+export interface DatabaseInfo {
+  projectId: string
+  projectName: string
+  database: string
+  dbPath: string
+  fullPath: string
+  tables: Array<{ name: string; rowCount: number; columns: Array<{ name: string; type: string; primaryKey: boolean }> }>
+}
+
 /**
  * Validate that a SQL identifier (table/column name) is safe.
  * Only allows alphanumeric characters and underscores.
@@ -39,21 +48,34 @@ function validateIdentifier (name: string): string {
 
 /**
  * ProjectDataAccess — 统一数据访问层
- * 支持通过不同适配器访问子项目数据
+ * 通过外部桥接适配器 (BridgeAdapter) 访问子项目数据，
+ * 不再内置 SQLite 驱动。
  */
 export class ProjectDataAccess {
   private projectsDir: string
-  private sqliteAdapter: SqliteAdapter
+  private bridgeAdapter: BridgeAdapter
   private jsonAdapter: JsonAdapter
   readonly schemaRegistry: SchemaRegistry
   private analyzer: DataAnalyzer
 
   constructor (projectsDir: string) {
     this.projectsDir = projectsDir
-    this.sqliteAdapter = new SqliteAdapter()
+    this.bridgeAdapter = new BridgeAdapter()
     this.jsonAdapter = new JsonAdapter()
     this.schemaRegistry = new SchemaRegistry()
     this.analyzer = new DataAnalyzer()
+  }
+
+  /**
+   * Set the external database delegate.
+   * Called by the shell/host to inject database access capabilities.
+   */
+  setDatabaseDelegate (delegate: DatabaseDelegate): void {
+    this.bridgeAdapter.setDelegate(delegate)
+  }
+
+  get hasDatabaseDelegate (): boolean {
+    return this.bridgeAdapter.hasDelegate
   }
 
   /**
@@ -92,7 +114,7 @@ export class ProjectDataAccess {
     }
 
     const dbPath = this._getDbPath(projectId, config.dbPath)
-    return this.sqliteAdapter.query(dbPath, sql)
+    return this.bridgeAdapter.query(dbPath, sql)
   }
 
   /**
@@ -110,9 +132,9 @@ export class ProjectDataAccess {
     }
 
     // Otherwise introspect the database
-    if (config.database === 'sqlite') {
+    if (config.database === 'sqlite' && this.bridgeAdapter.hasDelegate) {
       const dbPath = this._getDbPath(projectId, config.dbPath)
-      return this.sqliteAdapter.getSchema(dbPath)
+      return this.bridgeAdapter.getSchema(dbPath)
     }
 
     return null
@@ -123,12 +145,12 @@ export class ProjectDataAccess {
    */
   async listTables (projectId: string): Promise<string[]> {
     const config = await this._getDataConfig(projectId)
-    if (!config || config.database !== 'sqlite') {
+    if (!config || config.database !== 'sqlite' || !this.bridgeAdapter.hasDelegate) {
       return []
     }
 
     const dbPath = this._getDbPath(projectId, config.dbPath)
-    return this.sqliteAdapter.listTables(dbPath)
+    return this.bridgeAdapter.listTables(dbPath)
   }
 
   /**
@@ -143,7 +165,7 @@ export class ProjectDataAccess {
 
     const dbPath = this._getDbPath(projectId, config.dbPath)
     const offset = (page - 1) * pageSize
-    return this.sqliteAdapter.query(
+    return this.bridgeAdapter.query(
       dbPath,
       `SELECT * FROM "${tableName}" LIMIT ${Number(pageSize)} OFFSET ${Number(offset)}`
     )
@@ -171,10 +193,14 @@ export class ProjectDataAccess {
         return { projectId, hasData: false, reason: 'Database file not found' }
       }
 
-      const tables = this.sqliteAdapter.listTables(dbPath)
+      if (!this.bridgeAdapter.hasDelegate) {
+        return { projectId, hasData: false, reason: 'No database delegate configured' }
+      }
+
+      const tables = this.bridgeAdapter.listTables(dbPath)
       for (const table of tables) {
         validateIdentifier(table)
-        const countResult = this.sqliteAdapter.query(
+        const countResult = this.bridgeAdapter.query(
           dbPath,
           `SELECT COUNT(*) as count FROM "${table}"`
         )
@@ -219,5 +245,101 @@ export class ProjectDataAccess {
       }
     }
     return results
+  }
+
+  /**
+   * List all databases across all projects.
+   * Used by the settings "数据库管理" tab to display an overview.
+   */
+  async listAllDatabases (): Promise<DatabaseInfo[]> {
+    const result: DatabaseInfo[] = []
+
+    // Scan every project directory for .world-meta.json
+    if (!existsSync(this.projectsDir)) return result
+
+    const entries = await fs.readdir(this.projectsDir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const projectId = entry.name
+      try {
+        const config = await this._getDataConfig(projectId)
+        if (!config) continue
+
+        const metaPath = path.join(this.projectsDir, projectId, '.world-meta.json')
+        const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as Record<string, unknown>
+        const projectName = (meta.name as string) || projectId
+
+        const fullPath = this._getDbPath(projectId, config.dbPath)
+        const info: DatabaseInfo = {
+          projectId,
+          projectName,
+          database: config.database,
+          dbPath: config.dbPath,
+          fullPath,
+          tables: []
+        }
+
+        // If we have a delegate and the db file exists, introspect
+        if (config.database === 'sqlite' && this.bridgeAdapter.hasDelegate && existsSync(fullPath)) {
+          try {
+            const schema = this.bridgeAdapter.getSchema(fullPath)
+            for (const table of schema) {
+              const countResult = this.bridgeAdapter.query(fullPath, `SELECT COUNT(*) as count FROM "${validateIdentifier(table.name)}"`)
+              info.tables.push({
+                name: table.name,
+                rowCount: (countResult[0]?.count as number) || 0,
+                columns: table.columns.map(c => ({ name: c.name, type: c.type, primaryKey: c.primaryKey }))
+              })
+            }
+          } catch { /* db might be locked or corrupted — skip */ }
+        } else if (config.database === 'json') {
+          // For JSON-based data, show the config tables from meta
+          if (config.tables && Array.isArray(config.tables)) {
+            for (const t of config.tables) {
+              const tObj = t as Record<string, unknown>
+              info.tables.push({
+                name: (tObj.name as string) || 'unknown',
+                rowCount: -1, // unknown for JSON
+                columns: ((tObj.columns as Array<Record<string, unknown>>) || []).map(c => ({
+                  name: (c.name as string) || '',
+                  type: (c.type as string) || '',
+                  primaryKey: !!(c.primaryKey)
+                }))
+              })
+            }
+          }
+        }
+
+        result.push(info)
+      } catch { /* skip projects without valid config */ }
+    }
+
+    return result
+  }
+
+  /**
+   * Query a specific table's data for the database viewer.
+   */
+  async queryTableForViewer (
+    projectId: string,
+    tableName: string,
+    { page = 1, pageSize = 50 } = {}
+  ): Promise<{ rows: Record<string, unknown>[]; total: number }> {
+    validateIdentifier(tableName)
+    const config = await this._getDataConfig(projectId)
+    if (!config) {
+      throw new Error(`No data config for project: ${projectId}`)
+    }
+
+    if (config.database === 'sqlite' && this.bridgeAdapter.hasDelegate) {
+      const dbPath = this._getDbPath(projectId, config.dbPath)
+      const countResult = this.bridgeAdapter.query(dbPath, `SELECT COUNT(*) as count FROM "${tableName}"`)
+      const total = (countResult[0]?.count as number) || 0
+      const offset = (page - 1) * pageSize
+      const rows = this.bridgeAdapter.query(dbPath, `SELECT * FROM "${tableName}" LIMIT ${Number(pageSize)} OFFSET ${Number(offset)}`)
+      return { rows, total }
+    }
+
+    return { rows: [], total: 0 }
   }
 }
