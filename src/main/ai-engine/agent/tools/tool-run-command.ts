@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ProgressCallback } from '../agent-core.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -15,7 +16,7 @@ interface RunCommandArgs {
 
 export interface Tool {
   definition: ToolDefinition
-  handler: (args: Record<string, unknown>) => Promise<unknown>
+  handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>
 }
 
 /**
@@ -52,13 +53,15 @@ export function toolRunCommand (services: ToolServices): Tool {
         required: ['project_id', 'command']
       }
     },
-    handler: async (args) => {
+    handler: async (args, onProgress) => {
       const { project_id, command, cwd } = args as unknown as RunCommandArgs
       // Security: check command whitelist
       const baseCommand = command.split(' ')[0]
       if (!ALLOWED_COMMANDS.includes(baseCommand)) {
         throw new Error(`Command not allowed: ${baseCommand}. Allowed: ${ALLOWED_COMMANDS.join(', ')}`)
       }
+
+      onProgress?.('⚡ 正在执行命令...', command)
 
       const projectDir = path.join(services.projectFS.projectsDir, project_id)
       const workDir = cwd ? path.join(projectDir, cwd) : projectDir
@@ -85,6 +88,7 @@ export function toolRunCommand (services: ToolServices): Tool {
         child.stderr?.on('data', (data: Buffer) => { stderr += data.toString() })
 
         child.on('exit', (code) => {
+          onProgress?.('✅ 命令执行完成', `退出码: ${code}`)
           resolve({
             exitCode: code,
             stdout: stdout.substring(0, 5000), // Limit output size

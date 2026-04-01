@@ -1,6 +1,7 @@
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ProgressCallback } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 
 interface ToolServices {
@@ -18,7 +19,7 @@ interface CreateProjectArgs {
 
 export interface Tool {
   definition: ToolDefinition
-  handler: (args: Record<string, unknown>) => Promise<unknown>
+  handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>
 }
 
 /**
@@ -53,8 +54,11 @@ export function toolCreateProject (services: ToolServices): Tool {
         required: ['name', 'type', 'files']
       }
     },
-    handler: async (args) => {
+    handler: async (args, onProgress) => {
       const { name, type, files, meta = {} } = args as unknown as CreateProjectArgs
+
+      onProgress?.('🔧 正在初始化项目...', name)
+
       // Generate a project ID from the name
       const projectId = 'proj_' + name
         .toLowerCase()
@@ -115,7 +119,14 @@ export function toolCreateProject (services: ToolServices): Tool {
         runtime
       }
 
+      onProgress?.('📁 正在创建项目文件...', `共 ${Object.keys(files).length} 个文件`)
+
       const project = await services.projectFS.createProject(projectId, fullMeta, files)
+
+      // Emit each file name for real-time feedback
+      for (const filePath of Object.keys(files)) {
+        onProgress?.('📄 已创建', filePath)
+      }
 
       // Notify renderer that a new project was created (refresh project list)
       const win = services.getMainWindow?.()
@@ -126,10 +137,13 @@ export function toolCreateProject (services: ToolServices): Tool {
       // Auto-install dependencies if package.json exists
       if (files['package.json']) {
         try {
+          onProgress?.('📦 正在安装依赖...', 'npm install')
           console.log(`[tool:create_project] Installing dependencies for ${projectId}...`)
           await services.runtimeManager.installDeps(projectId)
+          onProgress?.('✅ 依赖安装完成')
           console.log(`[tool:create_project] Dependencies installed for ${projectId}`)
         } catch (err) {
+          onProgress?.('⚠️ 依赖安装失败', (err as Error).message)
           console.warn(`[tool:create_project] Failed to install deps: ${(err as Error).message}`)
           return {
             success: true,
@@ -142,10 +156,13 @@ export function toolCreateProject (services: ToolServices): Tool {
       // Auto-start the project after creation
       let startResult: { port?: number; status?: string } = {}
       try {
+        onProgress?.('🚀 正在启动项目...', projectId)
         console.log(`[tool:create_project] Auto-starting project ${projectId}...`)
         startResult = await services.runtimeManager.start(projectId)
+        onProgress?.('✅ 项目已启动', `端口: ${startResult.port}`)
         console.log(`[tool:create_project] Project ${projectId} started on port ${startResult.port}`)
       } catch (err) {
+        onProgress?.('⚠️ 启动失败', (err as Error).message)
         console.warn(`[tool:create_project] Failed to auto-start: ${(err as Error).message}`)
       }
 

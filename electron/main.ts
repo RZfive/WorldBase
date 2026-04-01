@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, type IpcMainInvokeEvent } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
@@ -10,6 +10,7 @@ import { ProjectDataAccess } from '../src/main/project-data-access/data-access.j
 import { LanServer } from '../src/main/lan-server/server.js'
 import { SettingsStore, type AIProvidersConfig } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
+import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -41,6 +42,10 @@ let dataAccess: ProjectDataAccess | null = null
 let lanServer: LanServer | null = null
 let settingsStore: SettingsStore | null = null
 let chatHistory: ChatHistoryStore | null = null
+let skillStore: SkillStore | null = null
+
+/** Track standalone project windows keyed by projectId */
+const projectWindows = new Map<string, BrowserWindow>()
 
 function getProjectsDir (): string {
   const userDataPath = app.getPath('userData')
@@ -59,6 +64,7 @@ async function initializeServices (): Promise<void> {
 
   settingsStore = new SettingsStore(userDataPath)
   chatHistory = new ChatHistoryStore(userDataPath)
+  skillStore = new SkillStore(userDataPath)
 
   projectFS = new ProjectFS(projectsDir, snapshotsDir)
   runtimeManager = new RuntimeManager(projectsDir)
@@ -123,17 +129,24 @@ function setupIPC (): void {
     return aiEngine!.chat(messages)
   })
 
-  // AI chat streaming — pushes events to renderer via webContents.send
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: string }>) => {
+  // AI chat streaming — pushes events to renderer via per-session channel
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: string }>, sessionId: string) => {
     const sender = event.sender
+    const channel = `ai:stream-event:${sessionId}`
+    // Progress callback: sends progress events directly to renderer in real-time
+    const onProgress = (stage: string, detail?: string) => {
+      if (!sender.isDestroyed()) {
+        sender.send(channel, { type: 'progress', stage, detail })
+      }
+    }
     try {
-      for await (const streamEvent of aiEngine!.chatStream(messages)) {
+      for await (const streamEvent of aiEngine!.chatStream(messages, onProgress)) {
         if (sender.isDestroyed()) break
-        sender.send('ai:stream-event', JSON.parse(JSON.stringify(streamEvent)))
+        sender.send(channel, JSON.parse(JSON.stringify(streamEvent)))
       }
     } catch (err) {
       if (!sender.isDestroyed()) {
-        sender.send('ai:stream-event', { type: 'error', error: (err as Error).message })
+        sender.send(channel, { type: 'error', error: (err as Error).message })
       }
     }
     return { ok: true }
@@ -292,6 +305,113 @@ function setupIPC (): void {
       proxyUrl: `http://${lanIp}:${LAN_SERVER_PORT}/tool/${projectId}`,
       lanIp
     }
+  })
+
+  // --- Skill management ---
+  ipcMain.handle('skills:list', async () => {
+    return skillStore!.list()
+  })
+
+  ipcMain.handle('skills:import', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: '导入 Skill 文件',
+      filters: [{ name: 'Markdown / Text', extensions: ['md', 'txt'] }],
+      properties: ['openFile', 'multiSelections']
+    })
+    if (result.canceled || result.filePaths.length === 0) return []
+    const imported: Skill[] = []
+    for (const filePath of result.filePaths) {
+      imported.push(skillStore!.importFromFile(filePath))
+    }
+    return imported
+  })
+
+  ipcMain.handle('skills:importContent', async (_event: IpcMainInvokeEvent, name: string, content: string, description?: string) => {
+    return skillStore!.importFromContent(name, content, description)
+  })
+
+  ipcMain.handle('skills:delete', async (_event: IpcMainInvokeEvent, id: string) => {
+    return skillStore!.delete(id)
+  })
+
+  ipcMain.handle('skills:setActive', async (_event: IpcMainInvokeEvent, skillIds: string[]) => {
+    const contents: string[] = []
+    for (const id of skillIds) {
+      const skill = skillStore!.get(id)
+      if (skill) contents.push(skill.content)
+    }
+    aiEngine!.setActiveSkills(contents)
+    return { success: true, count: contents.length }
+  })
+
+  // --- Launch mode preferences ---
+  ipcMain.handle('settings:getLaunchMode', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    return settingsStore!.getLaunchMode(projectId)
+  })
+
+  ipcMain.handle('settings:saveLaunchMode', async (_event: IpcMainInvokeEvent, projectId: string, mode: 'embed' | 'window') => {
+    settingsStore!.saveLaunchMode(projectId, mode)
+    return { success: true }
+  })
+
+  // --- Open project in standalone window ---
+  ipcMain.handle('runtime:openWindow', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    // Check if a window already exists for this project
+    const existing = projectWindows.get(projectId)
+    if (existing && !existing.isDestroyed()) {
+      existing.focus()
+      return { success: true, reused: true }
+    }
+
+    const port = runtimeManager!.getPort(projectId)
+    if (!port) return { success: false, error: 'Project not running' }
+
+    const meta = await projectFS!.getProjectMeta(projectId)
+    const projectName = (meta?.name as string) || projectId
+
+    const win = new BrowserWindow({
+      width: 1024,
+      height: 768,
+      title: projectName,
+      autoHideMenuBar: true,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true
+      }
+    })
+
+    win.loadURL(`http://localhost:${port}`)
+    projectWindows.set(projectId, win)
+
+    win.on('closed', () => {
+      projectWindows.delete(projectId)
+      // Notify renderer that standalone window was closed
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('project:windowClosed', { projectId })
+      }
+    })
+
+    return { success: true }
+  })
+
+  // --- Check which projects have standalone windows ---
+  ipcMain.handle('runtime:getOpenWindows', async () => {
+    const result: string[] = []
+    for (const [id, win] of projectWindows) {
+      if (!win.isDestroyed()) result.push(id)
+    }
+    return result
+  })
+
+  // --- Focus a standalone project window ---
+  ipcMain.handle('runtime:focusWindow', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    const win = projectWindows.get(projectId)
+    if (win && !win.isDestroyed()) {
+      win.focus()
+      return { success: true }
+    }
+    return { success: false }
   })
 }
 

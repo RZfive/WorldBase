@@ -1,17 +1,20 @@
 import { getSystemPrompt } from './prompts/system-prompt.js'
 import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/openai-provider.js'
 
+export type ProgressCallback = (stage: string, detail?: string) => void
+
 export type StreamEvent =
   | { type: 'token'; content: string }
   | { type: 'thinking'; content: string }
   | { type: 'tool_start'; name: string }
   | { type: 'tool_end'; name: string; result: unknown }
+  | { type: 'progress'; stage: string; detail?: string }
   | { type: 'done'; message: ChatMessage; thinking?: string }
   | { type: 'error'; error: string }
 
 interface RegisteredTool {
   definition: ToolDefinition
-  handler: (args: Record<string, unknown>) => Promise<unknown>
+  handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>
 }
 
 /**
@@ -23,16 +26,22 @@ export class AgentCore {
   private services: Record<string, unknown>
   private tools = new Map<string, RegisteredTool>()
   private maxIterations = 10
+  private activeSkillContents: string[] = []
 
   constructor (provider: OpenAIProvider, services: Record<string, unknown>) {
     this.provider = provider
     this.services = services
   }
 
+  /** Set skill contents to inject into the system prompt. */
+  setActiveSkills (contents: string[]): void {
+    this.activeSkillContents = contents
+  }
+
   /**
    * Register a tool for the agent to use.
    */
-  registerTool (name: string, definition: ToolDefinition, handler: (args: Record<string, unknown>) => Promise<unknown>): void {
+  registerTool (name: string, definition: ToolDefinition, handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>): void {
     this.tools.set(name, { definition, handler })
   }
 
@@ -49,7 +58,7 @@ export class AgentCore {
   async run (userMessages: ChatMessage[]): Promise<ChatMessage> {
     const systemMessage: ChatMessage = {
       role: 'system',
-      content: getSystemPrompt()
+      content: getSystemPrompt(this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined)
     }
 
     const messages: ChatMessage[] = [systemMessage, ...userMessages]
@@ -100,10 +109,10 @@ export class AgentCore {
    * Run the agent loop in streaming mode.
    * Yields tokens in real-time and tool execution events.
    */
-  async * runStream (userMessages: ChatMessage[]): AsyncGenerator<StreamEvent> {
+  async * runStream (userMessages: ChatMessage[], onProgress?: ProgressCallback): AsyncGenerator<StreamEvent> {
     const systemMessage: ChatMessage = {
       role: 'system',
-      content: getSystemPrompt()
+      content: getSystemPrompt(this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined)
     }
 
     const messages: ChatMessage[] = [systemMessage, ...userMessages]
@@ -157,7 +166,7 @@ export class AgentCore {
 
         let result: unknown
         try {
-          result = await this._executeTool(toolName, toolArgs)
+          result = await this._executeTool(toolName, toolArgs, onProgress)
         } catch (err) {
           result = { error: (err as Error).message }
         }
@@ -185,14 +194,14 @@ export class AgentCore {
   /**
    * Execute a tool by name with given arguments.
    */
-  async _executeTool (name: string, args: Record<string, unknown>): Promise<unknown> {
+  async _executeTool (name: string, args: Record<string, unknown>, onProgress?: ProgressCallback): Promise<unknown> {
     const tool = this.tools.get(name)
     if (!tool) {
       throw new Error(`Unknown tool: ${name}`)
     }
 
     console.log(`[Agent] Executing tool: ${name}`, args)
-    const result = await tool.handler(args)
+    const result = await tool.handler(args, onProgress)
     console.log(`[Agent] Tool result:`, typeof result === 'string' ? result.substring(0, 200) : result)
 
     return result

@@ -12,13 +12,15 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'done' | 'error'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'done' | 'error'
   content?: string
   name?: string
   result?: unknown
   message?: ChatMessage
   thinking?: string
   error?: string
+  stage?: string
+  detail?: string
 }
 
 interface ConversationSummary {
@@ -55,8 +57,8 @@ interface AIProvidersConfig {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[]) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[]) => Promise<{ ok: boolean }>
-  onStreamEvent: (callback: (event: StreamEvent) => void) => () => void
+  chatStream: (messages: ChatMessage[], sessionId: string) => Promise<{ ok: boolean }>
+  onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
   // Conversations
   listConversations: () => Promise<ConversationSummary[]>
@@ -76,6 +78,10 @@ export interface ElectronAPI {
   startProject: (projectId: string) => Promise<Record<string, unknown>>
   stopProject: (projectId: string) => Promise<Record<string, unknown>>
   getProjectStatus: (projectId: string) => Promise<Record<string, unknown>>
+  openProjectWindow: (projectId: string) => Promise<{ success: boolean; reused?: boolean; error?: string }>
+  getOpenWindows: () => Promise<string[]>
+  focusProjectWindow: (projectId: string) => Promise<{ success: boolean }>
+  onProjectWindowClosed: (callback: (event: { projectId: string }) => void) => () => void
 
   // LAN
   getLanInfo: () => Promise<{ port: number; addresses: string[]; baseUrl: string }>
@@ -90,6 +96,15 @@ export interface ElectronAPI {
   saveAISettings: (config: AISettings) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
+  getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
+  saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
+
+  // Skills
+  listSkills: () => Promise<Array<{ id: string; name: string; description: string; content: string; createdAt: string; updatedAt: string }>>
+  importSkills: () => Promise<Array<{ id: string; name: string; description: string }>>
+  importSkillContent: (name: string, content: string, description?: string) => Promise<{ id: string; name: string }>
+  deleteSkill: (id: string) => Promise<boolean>
+  setActiveSkills: (skillIds: string[]) => Promise<{ success: boolean; count: number }>
 
   // Window controls
   minimizeWindow: () => Promise<void>
@@ -101,12 +116,13 @@ export interface ElectronAPI {
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[]) => ipcRenderer.invoke('ai:chat', messages),
-  chatStream: (messages: ChatMessage[]) => ipcRenderer.invoke('ai:chatStream', messages),
-  onStreamEvent: (callback: (event: StreamEvent) => void) => {
+  chatStream: (messages: ChatMessage[], sessionId: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId),
+  onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
+    const channel = `ai:stream-event:${sessionId}`
     const handler = (_e: Electron.IpcRendererEvent, event: StreamEvent) => callback(event)
-    ipcRenderer.on('ai:stream-event', handler)
+    ipcRenderer.on(channel, handler)
     // Return cleanup function
-    return () => { ipcRenderer.removeListener('ai:stream-event', handler) }
+    return () => { ipcRenderer.removeListener(channel, handler) }
   },
 
   // Conversations
@@ -131,6 +147,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startProject: (projectId: string) => ipcRenderer.invoke('runtime:start', projectId),
   stopProject: (projectId: string) => ipcRenderer.invoke('runtime:stop', projectId),
   getProjectStatus: (projectId: string) => ipcRenderer.invoke('runtime:status', projectId),
+  openProjectWindow: (projectId: string) => ipcRenderer.invoke('runtime:openWindow', projectId),
+  getOpenWindows: () => ipcRenderer.invoke('runtime:getOpenWindows'),
+  focusProjectWindow: (projectId: string) => ipcRenderer.invoke('runtime:focusWindow', projectId),
+  onProjectWindowClosed: (callback: (event: { projectId: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { projectId: string }) => callback(event)
+    ipcRenderer.on('project:windowClosed', handler)
+    return () => { ipcRenderer.removeListener('project:windowClosed', handler) }
+  },
 
   // LAN
   getLanInfo: () => ipcRenderer.invoke('lan:getInfo'),
@@ -145,6 +169,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveAISettings: (config: AISettings) => ipcRenderer.invoke('settings:saveAI', config),
   getProviders: () => ipcRenderer.invoke('settings:getProviders'),
   saveProviders: (config: AIProvidersConfig) => ipcRenderer.invoke('settings:saveProviders', config),
+  getLaunchMode: (projectId: string) => ipcRenderer.invoke('settings:getLaunchMode', projectId),
+  saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => ipcRenderer.invoke('settings:saveLaunchMode', projectId, mode),
+
+  // Skills
+  listSkills: () => ipcRenderer.invoke('skills:list'),
+  importSkills: () => ipcRenderer.invoke('skills:import'),
+  importSkillContent: (name: string, content: string, description?: string) => ipcRenderer.invoke('skills:importContent', name, content, description),
+  deleteSkill: (id: string) => ipcRenderer.invoke('skills:delete', id),
+  setActiveSkills: (skillIds: string[]) => ipcRenderer.invoke('skills:setActive', skillIds),
 
   // Window controls
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
