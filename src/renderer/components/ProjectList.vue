@@ -143,9 +143,13 @@ function closeQrModal () {
 async function startProject (project: Project) {
   if (!window.electronAPI) return
   try {
-    await window.electronAPI.startProject(project.id)
+    const result = await window.electronAPI.startProject(project.id) as Record<string, unknown>
+    if (result.status === 'no_backend') {
+      alert('无法检测项目启动方式，请确保项目包含 package.json 或 index.html')
+    }
     await loadProjects()
   } catch (err) {
+    alert(`启动失败: ${(err as Error).message}`)
     console.error('Failed to start project:', err)
   }
   hideContextMenu()

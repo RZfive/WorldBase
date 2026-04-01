@@ -14,7 +14,7 @@ interface CallApiArgs {
 
 export interface Tool {
   definition: ToolDefinition
-  handler: (args: Record<string, unknown>) => Promise<unknown>
+  handler: (args: Record<string, unknown>, onProgress?: (stage: string, detail?: string) => void) => Promise<unknown>
 }
 
 /**

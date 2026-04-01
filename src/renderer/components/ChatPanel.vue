@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, watch, computed } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { marked } from 'marked'
 
 // Configure marked for safe rendering
@@ -105,18 +105,59 @@ const emit = defineEmits<{
 
 const messages = ref<ChatMessage[]>([])
 const inputText = ref('')
-const isLoading = ref(false)
 const conversations = ref<ConversationSummary[]>([])
 const currentConversationId = ref<string | null>(null)
 const providers = ref<ProviderOption[]>([])
 const activeProviderId = ref('')
 const selectedModel = ref('')
-const streamCleanup = ref<(() => void) | null>(null)
 const messagesContainer = ref<HTMLElement | null>(null)
 const toolStatus = ref('')
+const progressSteps = ref<Array<{ stage: string; detail?: string }>>([])
 const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
 const expandedThinking = ref<Record<number, boolean>>({})
 const currentThinking = ref('')
+
+// --- Skill selector state ---
+interface SkillItem { id: string; name: string; description?: string; content?: string }
+const availableSkills = ref<SkillItem[]>([])
+const activeSkillIds = ref<Set<string>>(new Set())
+const showSkillPicker = ref(false)
+
+async function loadSkills () {
+  if (!window.electronAPI?.listSkills) return
+  try {
+    availableSkills.value = await window.electronAPI.listSkills() as SkillItem[]
+  } catch { /* ignore */ }
+}
+
+function toggleSkill (id: string) {
+  if (activeSkillIds.value.has(id)) {
+    activeSkillIds.value.delete(id)
+  } else {
+    activeSkillIds.value.add(id)
+  }
+  // Sync to AI engine
+  syncActiveSkills()
+}
+
+async function syncActiveSkills () {
+  if (!window.electronAPI?.setActiveSkills) return
+  try {
+    await window.electronAPI.setActiveSkills(Array.from(activeSkillIds.value))
+  } catch { /* ignore */ }
+}
+
+// --- Concurrent stream tracking ---
+// Set of conversation IDs that are currently streaming
+const streamingConvIds = reactive(new Set<string>())
+// Background stream state: messages array for conversations that are streaming in background
+const backgroundStreamMessages = new Map<string, { messages: ChatMessage[]; assistantIdx: number }>()
+// Active cleanup functions keyed by sessionId
+const activeCleanups = new Map<string, () => void>()
+// Whether the CURRENT conversation is streaming
+const isLoading = computed(() => {
+  return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
+})
 
 function generateId (): string {
   return Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8)
@@ -192,9 +233,19 @@ async function loadProviders () {
 
 // Start a new conversation
 function newConversation () {
+  // If current conversation is streaming, move it to background
+  if (currentConversationId.value && streamingConvIds.has(currentConversationId.value)) {
+    backgroundStreamMessages.set(currentConversationId.value, {
+      messages: messages.value,
+      assistantIdx: messages.value.length - 1
+    })
+    // Save progress so far
+    doSaveConversation(currentConversationId.value, messages.value)
+  }
   currentConversationId.value = null
   messages.value = []
   toolStatus.value = ''
+  progressSteps.value = []
   pendingImages.value = []
   currentThinking.value = ''
 }
@@ -202,32 +253,56 @@ function newConversation () {
 // Load a conversation
 async function loadConversation (id: string) {
   if (!window.electronAPI) return
+
+  // If switching away from a streaming conversation, move it to background
+  if (currentConversationId.value && currentConversationId.value !== id && streamingConvIds.has(currentConversationId.value)) {
+    backgroundStreamMessages.set(currentConversationId.value, {
+      messages: messages.value,
+      assistantIdx: messages.value.length - 1
+    })
+    doSaveConversation(currentConversationId.value, messages.value)
+  }
+
+  // Check if target conversation has a background stream — restore it
+  const bg = backgroundStreamMessages.get(id)
+  if (bg) {
+    currentConversationId.value = id
+    messages.value = bg.messages
+    backgroundStreamMessages.delete(id)
+    toolStatus.value = ''
+    progressSteps.value = []
+    currentThinking.value = ''
+    scrollToBottom()
+    return
+  }
+
+  // Normal load from disk
   const conv = await window.electronAPI.getConversation(id)
   if (conv) {
     currentConversationId.value = conv.id
     messages.value = conv.messages
+    toolStatus.value = ''
+    progressSteps.value = []
+    currentThinking.value = ''
     scrollToBottom()
   }
 }
 
-// Save current conversation
-async function saveCurrentConversation () {
+// Save a conversation by explicit ID and messages array
+async function doSaveConversation (convId: string, msgs: ChatMessage[]) {
   if (!window.electronAPI) return
-  if (messages.value.length === 0) return
+  if (msgs.length === 0) return
 
-  const id = currentConversationId.value || generateId()
-  currentConversationId.value = id
-
-  const firstUserMsg = messages.value.find(m => m.role === 'user')
+  const firstUserMsg = msgs.find(m => m.role === 'user')
   const titleText = firstUserMsg ? getMessageText(firstUserMsg) : ''
   const title = titleText
     ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
     : '新对话'
 
   await window.electronAPI.saveConversation(JSON.parse(JSON.stringify({
-    id,
+    id: convId,
     title,
-    messages: messages.value,
+    messages: msgs,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     providerId: activeProviderId.value || undefined
@@ -275,7 +350,7 @@ function removeImage (index: number) {
   pendingImages.value.splice(index, 1)
 }
 
-// Send message with streaming
+// Send message with streaming (supports concurrent background streams)
 async function sendMessage () {
   const text = inputText.value.trim()
   if ((!text && pendingImages.value.length === 0) || isLoading.value) return
@@ -295,92 +370,139 @@ async function sendMessage () {
     messageContent = text
   }
 
+  const convId = currentConversationId.value || generateId()
+  currentConversationId.value = convId
+
   messages.value.push({ role: 'user', content: messageContent })
   inputText.value = ''
   pendingImages.value = []
-  isLoading.value = true
   toolStatus.value = ''
+  progressSteps.value = []
   currentThinking.value = ''
   scrollToBottom()
 
   // Add placeholder assistant message
   messages.value.push({ role: 'assistant', content: '', thinking: '' })
-  const assistantIdx = messages.value.length - 1
+
+  // Capture state for the stream callback closure
+  const targetMessages = messages.value
+  const assistantIdx = targetMessages.length - 1
+  const sessionId = generateId()
+  let thinkingAccum = ''
+
+  // Mark this conversation as streaming
+  streamingConvIds.add(convId)
 
   try {
     if (window.electronAPI) {
-      // Set up the stream listener
-      const cleanup = window.electronAPI.onStreamEvent((event) => {
+      // Set up per-session stream listener
+      const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {
+        const isForeground = currentConversationId.value === convId
+
         if (event.type === 'thinking' && event.content) {
-          // Accumulate thinking content
-          currentThinking.value += event.content
-          messages.value[assistantIdx].thinking = currentThinking.value
-          scrollToBottom()
+          thinkingAccum += event.content
+          targetMessages[assistantIdx].thinking = thinkingAccum
+          if (isForeground) {
+            currentThinking.value = thinkingAccum
+            scrollToBottom()
+          }
         } else if (event.type === 'token' && event.content) {
-          messages.value[assistantIdx].content += event.content
-          scrollToBottom()
+          targetMessages[assistantIdx].content =
+            ((targetMessages[assistantIdx].content as string) || '') + event.content
+          if (isForeground) scrollToBottom()
         } else if (event.type === 'tool_start' && event.name) {
-          toolStatus.value = `正在执行: ${event.name}...`
+          if (isForeground) {
+            toolStatus.value = `正在执行: ${event.name}...`
+            progressSteps.value = []
+          }
+        } else if (event.type === 'progress' && event.stage) {
+          if (isForeground) {
+            progressSteps.value.push({ stage: event.stage, detail: event.detail })
+            scrollToBottom()
+          }
         } else if (event.type === 'tool_end') {
-          toolStatus.value = ''
+          if (isForeground) {
+            toolStatus.value = ''
+            progressSteps.value = []
+          }
         } else if (event.type === 'done') {
-          isLoading.value = false
-          toolStatus.value = ''
-          if (cleanup) cleanup()
-          // If empty content, use done message
-          if (!getMessageText(messages.value[assistantIdx]) && event.message?.content) {
-            messages.value[assistantIdx].content = event.message.content
+          // Finalize content
+          if (!getMessageText(targetMessages[assistantIdx]) && event.message?.content) {
+            targetMessages[assistantIdx].content = event.message.content
           }
-          if (!getMessageText(messages.value[assistantIdx])) {
-            messages.value[assistantIdx].content = '(无响应)'
+          if (!getMessageText(targetMessages[assistantIdx])) {
+            targetMessages[assistantIdx].content = '(无响应)'
           }
-          // Set thinking from done event if available
-          if (event.thinking && !messages.value[assistantIdx].thinking) {
-            messages.value[assistantIdx].thinking = event.thinking
+          if (event.thinking && !targetMessages[assistantIdx].thinking) {
+            targetMessages[assistantIdx].thinking = event.thinking
           }
-          currentThinking.value = ''
-          saveCurrentConversation()
+
+          // Cleanup
+          cleanup()
+          activeCleanups.delete(sessionId)
+          streamingConvIds.delete(convId)
+          backgroundStreamMessages.delete(convId)
+
+          // Auto-save
+          doSaveConversation(convId, targetMessages)
+
+          if (isForeground) {
+            toolStatus.value = ''
+            progressSteps.value = []
+            currentThinking.value = ''
+          }
         } else if (event.type === 'error') {
-          isLoading.value = false
-          toolStatus.value = ''
-          currentThinking.value = ''
-          if (cleanup) cleanup()
-          messages.value[assistantIdx].content = `错误: ${event.error}`
+          targetMessages[assistantIdx].content = `错误: ${event.error}`
+
+          cleanup()
+          activeCleanups.delete(sessionId)
+          streamingConvIds.delete(convId)
+          backgroundStreamMessages.delete(convId)
+
+          if (isForeground) {
+            toolStatus.value = ''
+            progressSteps.value = []
+            currentThinking.value = ''
+          }
         }
       })
-      streamCleanup.value = cleanup
 
-      // Send only user/assistant messages (not system)
-      const chatMessages = messages.value.slice(0, -1).map(m => ({
+      activeCleanups.set(sessionId, cleanup)
+
+      // Send only user/assistant messages (not the placeholder)
+      const chatMessages = targetMessages.slice(0, -1).map(m => ({
         role: m.role,
         content: m.content
       }))
-      await window.electronAPI.chatStream(chatMessages)
+      await window.electronAPI.chatStream(chatMessages, sessionId)
 
-      // If stream finishes without a 'done' event
-      if (isLoading.value) {
-        isLoading.value = false
-        if (!getMessageText(messages.value[assistantIdx])) {
-          messages.value[assistantIdx].content = '(无响应)'
+      // Safety fallback: if stream finished without a 'done' event
+      if (streamingConvIds.has(convId)) {
+        streamingConvIds.delete(convId)
+        backgroundStreamMessages.delete(convId)
+        const pendingCleanup = activeCleanups.get(sessionId)
+        if (pendingCleanup) { pendingCleanup(); activeCleanups.delete(sessionId) }
+        if (!getMessageText(targetMessages[assistantIdx])) {
+          targetMessages[assistantIdx].content = '(无响应)'
         }
-        saveCurrentConversation()
+        doSaveConversation(convId, targetMessages)
       }
     } else {
       // HTTP fallback (non-streaming)
-      const chatMessages = messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
+      const chatMessages = targetMessages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
       const res = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: chatMessages })
       })
       const response = await res.json() as { content?: string }
-      messages.value[assistantIdx].content = response.content || '(无响应)'
-      isLoading.value = false
-      saveCurrentConversation()
+      targetMessages[assistantIdx].content = response.content || '(无响应)'
+      streamingConvIds.delete(convId)
+      doSaveConversation(convId, targetMessages)
     }
   } catch (err) {
-    messages.value[assistantIdx].content = `错误: ${(err as Error).message}`
-    isLoading.value = false
+    targetMessages[assistantIdx].content = `错误: ${(err as Error).message}`
+    streamingConvIds.delete(convId)
   }
 
   scrollToBottom()
@@ -404,6 +526,7 @@ watch(activeProviderId, (newId) => {
 onMounted(async () => {
   await loadConversations()
   await loadProviders()
+  await loadSkills()
 })
 
 // Watch for project context changes (e.g. "continue optimizing this app")
@@ -416,9 +539,10 @@ watch(() => props.projectContext, (ctx) => {
 }, { immediate: true })
 
 onUnmounted(() => {
-  if (streamCleanup.value) {
-    streamCleanup.value()
+  for (const cleanup of activeCleanups.values()) {
+    cleanup()
   }
+  activeCleanups.clear()
 })
 </script>
 
@@ -435,6 +559,7 @@ onUnmounted(() => {
           @click="loadConversation(conv.id)"
         >
           <span class="conv-title">{{ conv.title }}</span>
+          <span v-if="streamingConvIds.has(conv.id)" class="conv-streaming" title="生成中">⟳</span>
           <button class="conv-delete" @click="deleteConversation(conv.id, $event)" title="删除">×</button>
         </div>
         <div v-if="conversations.length === 0" class="conv-empty">暂无对话记录</div>
@@ -445,13 +570,31 @@ onUnmounted(() => {
     <div class="chat-panel">
       <div class="chat-header">
         <h2>💬 AI 对话</h2>
-        <div class="provider-selector" v-if="providers.length > 0">
-          <select v-model="activeProviderId" class="select-input">
-            <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
-          </select>
-          <select v-model="selectedModel" class="select-input" v-if="providers.find(p => p.id === activeProviderId)?.models?.length">
-            <option v-for="m in (providers.find(p => p.id === activeProviderId)?.models || [])" :key="m" :value="m">{{ m }}</option>
-          </select>
+        <div class="header-controls">
+          <div class="provider-selector" v-if="providers.length > 0">
+            <select v-model="activeProviderId" class="select-input">
+              <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+            <select v-model="selectedModel" class="select-input" v-if="providers.find(p => p.id === activeProviderId)?.models?.length">
+              <option v-for="m in (providers.find(p => p.id === activeProviderId)?.models || [])" :key="m" :value="m">{{ m }}</option>
+            </select>
+          </div>
+          <div v-if="availableSkills.length > 0" class="skill-selector">
+            <button class="skill-toggle-btn" @click="showSkillPicker = !showSkillPicker" :class="{ 'has-active': activeSkillIds.size > 0 }">
+              🧠 Skills{{ activeSkillIds.size > 0 ? ` (${activeSkillIds.size})` : '' }}
+            </button>
+            <div v-if="showSkillPicker" class="skill-dropdown">
+              <div
+                v-for="skill in availableSkills"
+                :key="skill.id"
+                :class="['skill-option', { selected: activeSkillIds.has(skill.id) }]"
+                @click="toggleSkill(skill.id)"
+              >
+                <span class="skill-check">{{ activeSkillIds.has(skill.id) ? '✅' : '⬜' }}</span>
+                <span class="skill-option-name">{{ skill.name }}</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -499,12 +642,37 @@ onUnmounted(() => {
           <span v-if="isLoading && i === messages.length - 1 && msg.role === 'assistant'" class="cursor-blink">▍</span>
         </div>
 
-        <div v-if="toolStatus" class="tool-status">
-          🔧 {{ toolStatus }}
+        <div v-if="toolStatus || progressSteps.length > 0" class="tool-progress-panel">
+          <div v-if="toolStatus" class="tool-status-header">
+            <span class="tool-status-icon">🔧</span>
+            <span class="tool-status-text">{{ toolStatus }}</span>
+            <span class="tool-status-spinner"></span>
+          </div>
+          <div v-if="progressSteps.length > 0" class="progress-steps">
+            <div
+              v-for="(step, idx) in progressSteps"
+              :key="idx"
+              :class="['progress-step', { 'step-latest': idx === progressSteps.length - 1 }]"
+            >
+              <span class="step-stage">{{ step.stage }}</span>
+              <span v-if="step.detail" class="step-detail">{{ step.detail }}</span>
+            </div>
+          </div>
         </div>
       </div>
 
       <div class="chat-input">
+        <!-- Active skill badges -->
+        <div v-if="activeSkillIds.size > 0" class="active-skills-bar">
+          <span
+            v-for="skill in availableSkills.filter(s => activeSkillIds.has(s.id))"
+            :key="skill.id"
+            class="skill-badge"
+          >
+            🧠 {{ skill.name }}
+            <button class="skill-badge-remove" @click="toggleSkill(skill.id)">×</button>
+          </span>
+        </div>
         <!-- Image preview area -->
         <div v-if="pendingImages.length > 0" class="image-preview-bar">
           <div v-for="(img, idx) in pendingImages" :key="idx" class="image-preview-item">
@@ -611,6 +779,18 @@ onUnmounted(() => {
 
 .conv-delete:hover {
   color: #ef4444;
+}
+
+.conv-streaming {
+  flex-shrink: 0;
+  font-size: 0.85em;
+  color: #3b82f6;
+  animation: spin 1.2s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .conv-empty {
@@ -892,20 +1072,89 @@ onUnmounted(() => {
   50% { opacity: 0; }
 }
 
-.tool-status {
-  padding: 8px 16px;
+.tool-progress-panel {
   margin: 8px 0;
   background: #1a1a2e;
   border: 1px solid #27272a;
-  border-radius: 8px;
-  color: #60a5fa;
-  font-size: 0.82em;
-  animation: pulse 1.5s infinite;
+  border-radius: 10px;
+  overflow: hidden;
+  animation: fadeIn 0.2s ease;
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.tool-status-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-size: 0.82em;
+  color: #60a5fa;
+  border-bottom: 1px solid #27272a;
+}
+
+.tool-status-icon {
+  flex-shrink: 0;
+}
+
+.tool-status-text {
+  flex: 1;
+}
+
+.tool-status-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #3f3f46;
+  border-top-color: #60a5fa;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.progress-steps {
+  padding: 6px 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.progress-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 14px;
+  font-size: 0.78em;
+  color: #71717a;
+  animation: stepSlideIn 0.25s ease;
+}
+
+.progress-step.step-latest {
+  color: #a1a1aa;
+}
+
+@keyframes stepSlideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.step-stage {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.step-detail {
+  color: #52525b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.92em;
+}
+
+.progress-step.step-latest .step-detail {
+  color: #71717a;
 }
 
 /* Chat input */
@@ -1009,5 +1258,120 @@ onUnmounted(() => {
 .input-row button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Header controls */
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Skill selector */
+.skill-selector {
+  position: relative;
+}
+
+.skill-toggle-btn {
+  padding: 4px 12px;
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  border-radius: 6px;
+  color: #a1a1aa;
+  font-size: 0.8em;
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+
+.skill-toggle-btn:hover {
+  border-color: #6366f1;
+  color: #e4e4e7;
+}
+
+.skill-toggle-btn.has-active {
+  border-color: #6366f1;
+  color: #c7d2fe;
+  background: #1e1b4b40;
+}
+
+.skill-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  min-width: 200px;
+  background: #1e1e22;
+  border: 1px solid #3f3f46;
+  border-radius: 8px;
+  padding: 6px;
+  z-index: 50;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.skill-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.82em;
+  color: #a1a1aa;
+  transition: background 0.1s;
+}
+
+.skill-option:hover {
+  background: #27272a;
+  color: #e4e4e7;
+}
+
+.skill-option.selected {
+  color: #c7d2fe;
+}
+
+.skill-check {
+  font-size: 0.9em;
+}
+
+.skill-option-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Active skills bar in input area */
+.active-skills-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 8px;
+}
+
+.skill-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background: #1e1b4b60;
+  border: 1px solid #6366f140;
+  border-radius: 999px;
+  font-size: 0.75em;
+  color: #c7d2fe;
+}
+
+.skill-badge-remove {
+  background: none;
+  border: none;
+  color: #a5b4fc;
+  cursor: pointer;
+  font-size: 1em;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.skill-badge-remove:hover {
+  color: #ef4444;
 }
 </style>

@@ -1,4 +1,4 @@
-import { AgentCore, type StreamEvent } from './agent/agent-core.js'
+import { AgentCore, type StreamEvent, type ProgressCallback } from './agent/agent-core.js'
 import { OpenAIProvider } from './providers/openai-provider.js'
 import { registerAllTools } from './agent/tools/index.js'
 import type { ChatMessage, ToolDefinition } from './providers/openai-provider.js'
@@ -8,7 +8,7 @@ import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { BrowserWindow } from 'electron'
 
-export type { StreamEvent }
+export type { StreamEvent, ProgressCallback }
 
 export interface AIEngineServices {
   projectFS: ProjectFS
@@ -52,8 +52,8 @@ export class AIEngine {
   /**
    * Handle a chat message with streaming response.
    */
-  chatStream (messages: ChatMessage[]): AsyncGenerator<StreamEvent> {
-    return this.agent.runStream(messages)
+  chatStream (messages: ChatMessage[], onProgress?: ProgressCallback): AsyncGenerator<StreamEvent> {
+    return this.agent.runStream(messages, onProgress)
   }
 
   /**
@@ -61,6 +61,13 @@ export class AIEngine {
    */
   getAvailableTools (): ToolDefinition[] {
     return this.agent.getToolDefinitions()
+  }
+
+  /**
+   * Set active skill contents for the agent.
+   */
+  setActiveSkills (contents: string[]): void {
+    this.agent.setActiveSkills(contents)
   }
 
   /**

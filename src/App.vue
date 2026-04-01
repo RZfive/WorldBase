@@ -1,14 +1,31 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import ChatPanel from './renderer/components/ChatPanel.vue'
 import ProjectList from './renderer/components/ProjectList.vue'
 import ProjectDetail from './renderer/components/ProjectDetail.vue'
 import AISettings from './renderer/components/AISettings.vue'
+import SkillManager from './renderer/components/SkillManager.vue'
+
+interface RunningApp {
+  id: string
+  name: string
+  type: string
+  port?: number
+  isWindow: boolean // opened in standalone window
+}
 
 const currentView = ref<string>('chat')
 const selectedProject = ref<Record<string, unknown> | null>(null)
 const sidebarCollapsed = ref(false)
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
+/** Embedded project view — projectId being viewed in the main content area */
+const embeddedProjectId = ref<string | null>(null)
+
+/** Running apps registry */
+const runningApps = reactive(new Map<string, RunningApp>())
+
+let projectChangedCleanup: (() => void) | null = null
+let windowClosedCleanup: (() => void) | null = null
 
 function selectProject (project: Record<string, unknown>) {
   selectedProject.value = project
@@ -24,6 +41,47 @@ function toggleSidebar () {
   sidebarCollapsed.value = !sidebarCollapsed.value
 }
 
+/** Switch to a running app (embedded or focus its window). */
+function switchToApp (app: RunningApp) {
+  if (app.isWindow) {
+    window.electronAPI?.focusProjectWindow(app.id)
+  } else {
+    // Switch to embedded preview of this project
+    const project = { id: app.id, name: app.name, type: app.type }
+    selectedProject.value = project
+    embeddedProjectId.value = app.id
+    currentView.value = 'project'
+  }
+}
+
+/** Refresh the running apps list from the runtime statuses. */
+async function refreshRunningApps () {
+  if (!window.electronAPI) return
+  try {
+    const projects = await window.electronAPI.listProjects()
+    const openWindows = await window.electronAPI.getOpenWindows()
+    const openSet = new Set(openWindows)
+
+    // Check each project status
+    for (const proj of projects) {
+      const id = proj.id as string
+      const status = await window.electronAPI.getProjectStatus(id) as { status: string; port?: number }
+      if (status.status === 'running') {
+        const existing = runningApps.get(id)
+        runningApps.set(id, {
+          id,
+          name: (proj.name as string) || id,
+          type: (proj.type as string) || 'unknown',
+          port: status.port,
+          isWindow: openSet.has(id) || (existing?.isWindow ?? false)
+        })
+      } else {
+        runningApps.delete(id)
+      }
+    }
+  } catch { /* ignore */ }
+}
+
 function minimizeWindow () {
   window.electronAPI?.minimizeWindow()
 }
@@ -35,6 +93,32 @@ function maximizeWindow () {
 function closeWindow () {
   window.electronAPI?.closeWindow()
 }
+
+onMounted(async () => {
+  await refreshRunningApps()
+
+  // Listen for project status changes
+  if (window.electronAPI?.onProjectChanged) {
+    projectChangedCleanup = window.electronAPI.onProjectChanged(() => {
+      refreshRunningApps()
+    })
+  }
+
+  // Listen for standalone window close events
+  if (window.electronAPI?.onProjectWindowClosed) {
+    windowClosedCleanup = window.electronAPI.onProjectWindowClosed((event) => {
+      const app = runningApps.get(event.projectId)
+      if (app) {
+        app.isWindow = false
+      }
+    })
+  }
+})
+
+onUnmounted(() => {
+  projectChangedCleanup?.()
+  windowClosedCleanup?.()
+})
 </script>
 
 <template>
@@ -58,13 +142,25 @@ function closeWindow () {
     </div>
 
     <div class="app-layout">
+      <!-- App Dock — running apps icons -->
+      <div v-if="runningApps.size > 0" class="app-dock">
+        <div
+          v-for="[appId, app] in runningApps"
+          :key="appId"
+          :class="['dock-item', { 'dock-active': currentView === 'project' && embeddedProjectId === appId, 'dock-windowed': app.isWindow }]"
+          :title="app.name + (app.isWindow ? ' (独立窗口)' : '') + (app.port ? ` :${app.port}` : '')"
+          @click="switchToApp(app)"
+        >
+          <span class="dock-icon">{{ app.type === 'frontend' ? '🎨' : app.type === 'backend' ? '⚙️' : '📦' }}</span>
+          <span v-if="app.isWindow" class="dock-window-badge" title="独立窗口">↗</span>
+          <span class="dock-indicator"></span>
+        </div>
+      </div>
+
       <!-- Sidebar -->
       <aside :class="['sidebar', { collapsed: sidebarCollapsed }]">
         <div class="sidebar-toggle" @click="toggleSidebar">
-          <svg v-if="!sidebarCollapsed" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M2 3h12v1.5H2zm0 4.25h12v1.5H2zm0 4.25h12v1.5H2z"/>
-          </svg>
-          <svg v-else width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <path d="M2 3h12v1.5H2zm0 4.25h12v1.5H2zm0 4.25h12v1.5H2z"/>
           </svg>
         </div>
@@ -86,6 +182,14 @@ function closeWindow () {
             <span class="nav-icon">📦</span>
             <span v-if="!sidebarCollapsed" class="nav-text">项目管理</span>
           </button>
+          <button
+            :class="{ active: currentView === 'skills' }"
+            @click="currentView = 'skills'"
+            :title="sidebarCollapsed ? 'Skill 管理' : ''"
+          >
+            <span class="nav-icon">🧠</span>
+            <span v-if="!sidebarCollapsed" class="nav-text">Skill 管理</span>
+          </button>
         </nav>
 
         <div class="sidebar-footer">
@@ -103,19 +207,22 @@ function closeWindow () {
 
       <!-- Main Content -->
       <main class="main-content">
-        <ChatPanel v-if="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
+        <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
         <ProjectList
-          v-else-if="currentView === 'projects'"
+          v-if="currentView === 'projects'"
           @select="selectProject"
           @optimizeInChat="optimizeProjectInChat"
         />
         <ProjectDetail
-          v-else-if="currentView === 'project' && selectedProject"
+          v-if="currentView === 'project' && selectedProject"
           :project="selectedProject"
-          @back="currentView = 'projects'"
+          @back="currentView = 'projects'; embeddedProjectId = null"
           @optimizeInChat="optimizeProjectInChat"
+          @appStarted="refreshRunningApps()"
+          @appStopped="refreshRunningApps()"
         />
-        <AISettings v-else-if="currentView === 'settings'" />
+        <SkillManager v-if="currentView === 'skills'" />
+        <AISettings v-if="currentView === 'settings'" />
       </main>
     </div>
   </div>
@@ -325,6 +432,76 @@ function closeWindow () {
   color: #3f3f46;
   text-align: center;
   padding: 2px 0;
+}
+
+/* App Dock — running apps strip */
+.app-dock {
+  width: 48px;
+  background: #111113;
+  border-right: 1px solid #27272a;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0;
+  gap: 6px;
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+
+.dock-item {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  cursor: pointer;
+  background: #1e1e22;
+  transition: all 0.15s;
+}
+
+.dock-item:hover {
+  background: #2a2a30;
+  transform: scale(1.08);
+}
+
+.dock-item.dock-active {
+  background: #3f3f46;
+  box-shadow: 0 0 0 2px #6366f1;
+}
+
+.dock-item.dock-windowed {
+  border: 1px dashed #6366f180;
+}
+
+.dock-icon {
+  font-size: 1.15em;
+}
+
+.dock-window-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  font-size: 0.6em;
+  background: #6366f1;
+  color: #fff;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.dock-indicator {
+  position: absolute;
+  bottom: -3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #22c55e;
 }
 
 /* Main Content */

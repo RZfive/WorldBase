@@ -80,14 +80,32 @@ export class RuntimeManager {
     }
 
     const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as Record<string, unknown>
-    const runtime = meta.runtime as Record<string, unknown> | undefined
-    const backendConfig = runtime?.backend as Record<string, unknown> | undefined
+    let runtime = (meta.runtime as Record<string, unknown>) || {}
+    let backendConfig = runtime.backend as Record<string, unknown> | undefined
 
+    // Auto-detect runtime config if missing
     if (!backendConfig) {
-      throw new Error(`No backend configuration for project: ${projectId}`)
+      backendConfig = await this._detectRuntimeConfig(projectDir) ?? undefined
+      if (backendConfig) {
+        runtime.backend = backendConfig
+        meta.runtime = runtime
+        await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8')
+        console.log(`[RuntimeManager] Auto-detected runtime config for ${projectId}:`, backendConfig)
+      } else {
+        return { projectId, port: 0, status: 'no_backend' } as StartResult
+      }
     }
 
-    // Allocate a port
+    // Auto-install dependencies if node_modules is missing
+    const packageJsonPath = path.join(projectDir, 'package.json')
+    const nodeModulesPath = path.join(projectDir, 'node_modules')
+    if (existsSync(packageJsonPath) && !existsSync(nodeModulesPath)) {
+      console.log(`[RuntimeManager] Auto-installing dependencies for ${projectId}...`)
+      await this.installDeps(projectId)
+      console.log(`[RuntimeManager] Dependencies installed for ${projectId}`)
+    }
+
+    // Allocate a port (prefer the port detected from the project's scripts)
     const port = await this.portManager.allocate(projectId, backendConfig.port as number | undefined)
 
     // Determine working directory and command
@@ -279,5 +297,67 @@ export class RuntimeManager {
 
       child.on('error', reject)
     })
+  }
+
+  /**
+   * Auto-detect runtime configuration from project files.
+   */
+  private async _detectRuntimeConfig (projectDir: string): Promise<Record<string, unknown> | null> {
+    const packageJsonPath = path.join(projectDir, 'package.json')
+
+    if (existsSync(packageJsonPath)) {
+      try {
+        const pkg = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8')) as Record<string, unknown>
+        const scripts = (pkg.scripts || {}) as Record<string, string>
+
+        if (scripts.start) {
+          const port = this._extractPortFromScript(scripts.start)
+          return { command: 'npm start', ...(port ? { port } : {}) }
+        }
+
+        if (scripts.dev) {
+          const port = this._extractPortFromScript(scripts.dev)
+          return { command: 'npm run dev', ...(port ? { port } : {}) }
+        }
+      } catch {
+        // Invalid package.json, fall through
+      }
+    }
+
+    // Check common entry points
+    if (existsSync(path.join(projectDir, 'server.js'))) {
+      return { command: 'node server.js' }
+    }
+    if (existsSync(path.join(projectDir, 'index.js'))) {
+      return { command: 'node index.js' }
+    }
+    if (existsSync(path.join(projectDir, 'app.js'))) {
+      return { command: 'node app.js' }
+    }
+
+    // Pure static site — serve with http-server
+    if (existsSync(path.join(projectDir, 'index.html'))) {
+      return { command: 'npx http-server . -p $PORT -c-1 --cors' }
+    }
+
+    return null
+  }
+
+  /**
+   * Extract a port number from a script command string.
+   * Handles patterns like: -p 8080, --port 8080, --port=8080, -p8080
+   */
+  private _extractPortFromScript (script: string): number | null {
+    // Match -p 8080, --port 8080, --port=8080
+    const match = script.match(/(?:-p|--port)[=\s]+(\d+)/)
+    if (match) {
+      return parseInt(match[1], 10)
+    }
+    // Match -p8080 (no space)
+    const shortMatch = script.match(/-p(\d+)/)
+    if (shortMatch) {
+      return parseInt(shortMatch[1], 10)
+    }
+    return null
   }
 }

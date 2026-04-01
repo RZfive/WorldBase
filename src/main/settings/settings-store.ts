@@ -145,4 +145,19 @@ export class SettingsStore {
       })
     }
   }
+
+  /** Get project launch mode preference: 'embed' or 'window'. */
+  getLaunchMode (projectId: string): 'embed' | 'window' {
+    const settings = this.read()
+    const modes = (settings.projectLaunchModes as Record<string, string>) || {}
+    return (modes[projectId] as 'embed' | 'window') || 'embed'
+  }
+
+  /** Save project launch mode preference. */
+  saveLaunchMode (projectId: string, mode: 'embed' | 'window'): void {
+    const settings = this.read()
+    const modes = (settings.projectLaunchModes as Record<string, string>) || {}
+    modes[projectId] = mode
+    this.write({ projectLaunchModes: modes })
+  }
 }
