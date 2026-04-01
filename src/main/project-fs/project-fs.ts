@@ -138,6 +138,16 @@ export class ProjectFS {
   }
 
   /**
+   * Delete an entire project directory.
+   */
+  async deleteProject (projectId: string): Promise<void> {
+    const projectDir = this._resolveProjectPath(projectId)
+    if (existsSync(projectDir)) {
+      await fs.rm(projectDir, { recursive: true, force: true })
+    }
+  }
+
+  /**
    * Check if a file exists in a project.
    */
   async fileExists (projectId: string, relativePath: string): Promise<boolean> {

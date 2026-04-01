@@ -72,6 +72,7 @@ export interface ElectronAPI {
   getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
   openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
+  deleteProject: (projectId: string) => Promise<{ success: boolean }>
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void
 
   // Runtime
@@ -90,6 +91,9 @@ export interface ElectronAPI {
   // Data
   queryData: (projectId: string, sql: string) => Promise<Record<string, unknown>>
   getDataSummary: (projectId: string) => Promise<Record<string, unknown>>
+  listAllDatabases: () => Promise<Array<Record<string, unknown>>>
+  queryTable: (projectId: string, tableName: string, page: number, pageSize: number) => Promise<{ rows: Record<string, unknown>[]; total: number }>
+  getTableSchema: (projectId: string) => Promise<unknown[] | null>
 
   // Settings
   getAISettings: () => Promise<AISettings>
@@ -137,6 +141,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getFileTree: (projectId: string) => ipcRenderer.invoke('projects:getFileTree', projectId),
   readFile: (projectId: string, filePath: string) => ipcRenderer.invoke('projects:readFile', projectId, filePath),
   openProjectFolder: (projectId: string) => ipcRenderer.invoke('projects:openFolder', projectId),
+  deleteProject: (projectId: string) => ipcRenderer.invoke('projects:delete', projectId),
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, event: { action: string; projectId: string; port?: number }) => callback(event)
     ipcRenderer.on('projects:changed', handler)
@@ -163,6 +168,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Data
   queryData: (projectId: string, sql: string) => ipcRenderer.invoke('data:query', projectId, sql),
   getDataSummary: (projectId: string) => ipcRenderer.invoke('data:summary', projectId),
+  listAllDatabases: () => ipcRenderer.invoke('data:listAll'),
+  queryTable: (projectId: string, tableName: string, page: number, pageSize: number) => ipcRenderer.invoke('data:queryTable', projectId, tableName, page, pageSize),
+  getTableSchema: (projectId: string) => ipcRenderer.invoke('data:getSchema', projectId),
 
   // Settings
   getAISettings: () => ipcRenderer.invoke('settings:getAI'),

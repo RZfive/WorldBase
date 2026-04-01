@@ -7,6 +7,7 @@ import { ProjectFS } from '../src/main/project-fs/project-fs.js'
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
 import { ProjectApiClient } from '../src/main/project-api-bridge/api-client.js'
 import { ProjectDataAccess } from '../src/main/project-data-access/data-access.js'
+import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-adapter.js'
 import { LanServer } from '../src/main/lan-server/server.js'
 import { SettingsStore, type AIProvidersConfig } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
@@ -70,6 +71,18 @@ async function initializeServices (): Promise<void> {
   runtimeManager = new RuntimeManager(projectsDir)
   apiClient = new ProjectApiClient(runtimeManager)
   dataAccess = new ProjectDataAccess(projectsDir)
+
+  // Wire up the external database delegate.
+  // The SqliteAdapter is loaded here (in the shell) so that the data layer
+  // itself doesn't depend on native modules directly.
+  const sqliteDelegate = new SqliteAdapter()
+  dataAccess.setDatabaseDelegate({
+    query: (dbPath: string, sql: string) => sqliteDelegate.query(dbPath, sql),
+    listTables: (dbPath: string) => sqliteDelegate.listTables(dbPath),
+    getSchema: (dbPath: string) => sqliteDelegate.getSchema(dbPath),
+    close: (dbPath: string) => sqliteDelegate.close(dbPath),
+    closeAll: () => sqliteDelegate.closeAll()
+  })
 
   aiEngine = new AIEngine({
     projectFS,
@@ -187,6 +200,14 @@ function setupIPC (): void {
     return projectFS!.readFile(projectId, filePath)
   })
 
+  ipcMain.handle('projects:delete', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    // Stop the project first if running
+    try { await runtimeManager!.stop(projectId) } catch { /* ignore */ }
+    await projectFS!.deleteProject(projectId)
+    mainWindow?.webContents.send('projects:changed', { action: 'deleted', projectId })
+    return { success: true }
+  })
+
   // Runtime management
   ipcMain.handle('runtime:start', async (_event: IpcMainInvokeEvent, projectId: string) => {
     return runtimeManager!.start(projectId)
@@ -207,6 +228,21 @@ function setupIPC (): void {
 
   ipcMain.handle('data:summary', async (_event: IpcMainInvokeEvent, projectId: string) => {
     return dataAccess!.getDataSummary(projectId)
+  })
+
+  // List all databases across all projects (for the settings DB viewer)
+  ipcMain.handle('data:listAll', async () => {
+    return dataAccess!.listAllDatabases()
+  })
+
+  // Query a table for the DB viewer with pagination
+  ipcMain.handle('data:queryTable', async (_event: IpcMainInvokeEvent, projectId: string, tableName: string, page: number, pageSize: number) => {
+    return dataAccess!.queryTableForViewer(projectId, tableName, { page, pageSize })
+  })
+
+  // Get table schema for a project
+  ipcMain.handle('data:getSchema', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    return dataAccess!.getTableSchema(projectId)
   })
 
   // Settings — legacy flat AI settings

@@ -54,6 +54,41 @@ export function getSystemPrompt (skillContents?: string[]): string {
 3. 确保 package.json 中有 "start" 脚本
 4. 项目会自动安装依赖并启动
 
+## 项目模板规范（重要！必须严格遵守）
+
+生成的项目**严禁**使用简单单文件模板。所有项目必须有完整的多文件结构。
+
+### 前端项目最低要求
+- package.json (含 scripts.start / scripts.dev)
+- server.js (Express 静态服务器，用于托管前端文件)
+- public/index.html (主入口 HTML)
+- public/css/style.css (独立的样式文件)
+- public/js/app.js (主逻辑文件)
+- public/js/ 目录下按功能拆分多个 JS 模块文件
+- 如有需要，额外创建 public/components/ 目录存放 UI 组件
+
+### 后端项目最低要求
+- package.json (含 scripts.start)
+- server.js 或 src/server.js (入口文件)
+- src/routes/ 目录 (路由模块，按功能拆分)
+- src/models/ 或 src/data/ 目录 (数据模型)
+- src/middleware/ 目录 (中间件)
+- src/utils/ 目录 (工具函数)
+
+### 全栈项目最低要求
+- 同时满足前端和后端要求
+- server.js (后端入口，同时托管前端静态文件)
+- public/ 或 client/ 目录 (前端文件)
+- src/ 目录 (后端代码)
+- 前后端通过 REST API 通信
+
+### 数据库使用规范
+**严禁**在生成的项目中自行安装或初始化 SQLite。如果项目需要持久化数据存储：
+- 使用 JSON 文件作为简单数据存储 (推荐 data/ 目录)
+- 或在 meta 的 dataSchema 中声明数据模型，由外部宿主提供数据库接口
+- 可以使用 lowdb 或类似的 JSON 数据库方案
+- 需要数据库时在 meta.dataSchema 中声明 database: "json"，dbPath 指向 JSON 数据文件
+
 ## 修改项目代码的工作流程
 
 当用户要求修改项目代码时:

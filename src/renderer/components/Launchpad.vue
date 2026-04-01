@@ -1,0 +1,1007 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
+
+interface ProjectRuntime { status?: string; port?: number }
+
+interface Project {
+  id: string
+  name?: string
+  type?: string
+  runtime?: ProjectRuntime
+  [key: string]: unknown
+}
+
+interface LaunchFolder {
+  id: string
+  name: string
+  projectIds: string[]
+}
+
+const emit = defineEmits<{
+  (e: 'select', project: Project): void
+  (e: 'optimizeInChat', project: Project): void
+  (e: 'appStarted'): void
+  (e: 'close'): void
+}>()
+
+/* ------------------------------------------------------------------ */
+/* State                                                               */
+/* ------------------------------------------------------------------ */
+
+const projects = ref<Project[]>([])
+const folders = ref<LaunchFolder[]>([])
+const isLoading = ref(false)
+const error = ref<string | null>(null)
+const searchQuery = ref('')
+const searchRef = ref<HTMLInputElement | null>(null)
+
+// Folder popup
+const openFolderId = ref<string | null>(null)
+const folderPopupAnchor = ref<{ x: number; y: number }>({ x: 0, y: 0 })
+
+// Drag state
+const dragItem = ref<{ id: string; type: 'project' } | null>(null)
+const dropTarget = ref<{ id: string; type: 'project' | 'folder' } | null>(null)
+const dragOverlay = ref<{ x: number; y: number; label: string } | null>(null)
+
+// Context menu
+const ctxMenu = ref<{ visible: boolean; x: number; y: number; target: Project | LaunchFolder | null; kind: 'project' | 'folder' | 'blank' }>({
+  visible: false, x: 0, y: 0, target: null, kind: 'blank'
+})
+
+// Rename state
+const renamingId = ref<string | null>(null)
+const renameInput = ref('')
+const renameRef = ref<HTMLInputElement | null>(null)
+
+// Confirm dialog
+const confirmDialog = ref<{ visible: boolean; message: string; onConfirm: (() => void) | null }>({
+  visible: false, message: '', onConfirm: null
+})
+
+let projectChangedCleanup: (() => void) | null = null
+
+/* ------------------------------------------------------------------ */
+/* Computed                                                            */
+/* ------------------------------------------------------------------ */
+
+const folderedIds = computed(() => {
+  const s = new Set<string>()
+  folders.value.forEach(f => f.projectIds.forEach(id => s.add(id)))
+  return s
+})
+
+const unfolderedProjects = computed(() =>
+  projects.value.filter(p => !folderedIds.value.has(p.id))
+)
+
+const filteredUnfoldered = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return unfolderedProjects.value
+  return unfolderedProjects.value.filter(p =>
+    (p.name || p.id).toLowerCase().includes(q) || (p.type || '').toLowerCase().includes(q)
+  )
+})
+
+const filteredFolders = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return folders.value
+  return folders.value.filter(f => {
+    if (f.name.toLowerCase().includes(q)) return true
+    return f.projectIds.some(id => {
+      const p = projects.value.find(pr => pr.id === id)
+      return p && (p.name || p.id).toLowerCase().includes(q)
+    })
+  })
+})
+
+/** All items in display order: folders first, then unfoldered projects */
+const gridItems = computed(() => {
+  const items: Array<{ kind: 'folder'; data: LaunchFolder } | { kind: 'project'; data: Project }> = []
+  filteredFolders.value.forEach(f => items.push({ kind: 'folder', data: f }))
+  filteredUnfoldered.value.forEach(p => items.push({ kind: 'project', data: p }))
+  return items
+})
+
+const openFolderData = computed(() => {
+  if (!openFolderId.value) return null
+  return folders.value.find(f => f.id === openFolderId.value) || null
+})
+
+const openFolderProjects = computed(() => {
+  if (!openFolderData.value) return []
+  return openFolderData.value.projectIds
+    .map(id => projects.value.find(p => p.id === id))
+    .filter(Boolean) as Project[]
+})
+
+/* ------------------------------------------------------------------ */
+/* Data                                                                */
+/* ------------------------------------------------------------------ */
+
+async function loadProjects () {
+  isLoading.value = true
+  error.value = null
+  try {
+    if (window.electronAPI) {
+      projects.value = await window.electronAPI.listProjects() as Project[]
+    }
+  } catch (err) {
+    error.value = (err as Error).message
+  } finally {
+    isLoading.value = false
+  }
+}
+
+function saveFolders () {
+  try { localStorage.setItem('launchpad-folders', JSON.stringify(folders.value)) } catch { /* ignore */ }
+}
+
+function loadFolders () {
+  try {
+    const raw = localStorage.getItem('launchpad-folders')
+    if (raw) folders.value = JSON.parse(raw)
+  } catch { /* ignore */ }
+}
+
+/* ------------------------------------------------------------------ */
+/* Folder CRUD                                                         */
+/* ------------------------------------------------------------------ */
+
+function createFolderWith (projIdA: string, projIdB: string) {
+  const projA = projects.value.find(p => p.id === projIdA)
+  const projB = projects.value.find(p => p.id === projIdB)
+  const name = '新文件夹'
+  const id = 'folder_' + Date.now().toString(36)
+  // Remove from any existing folder
+  folders.value.forEach(f => {
+    f.projectIds = f.projectIds.filter(pid => pid !== projIdA && pid !== projIdB)
+  })
+  folders.value.push({ id, name, projectIds: [projIdA, projIdB] })
+  saveFolders()
+  return id
+}
+
+function createEmptyFolder () {
+  const id = 'folder_' + Date.now().toString(36)
+  folders.value.push({ id, name: '新文件夹', projectIds: [] })
+  saveFolders()
+  // Start renaming
+  renamingId.value = id
+  renameInput.value = '新文件夹'
+  nextTick(() => renameRef.value?.focus())
+}
+
+function deleteFolder (folderId: string) {
+  folders.value = folders.value.filter(f => f.id !== folderId)
+  saveFolders()
+  openFolderId.value = null
+}
+
+function startRenameFolder (folder: LaunchFolder) {
+  renamingId.value = folder.id
+  renameInput.value = folder.name
+  nextTick(() => renameRef.value?.focus())
+}
+
+function commitRename (folderId: string) {
+  const folder = folders.value.find(f => f.id === folderId)
+  if (folder && renameInput.value.trim()) {
+    folder.name = renameInput.value.trim()
+    saveFolders()
+  }
+  renamingId.value = null
+}
+
+function moveToFolder (projectId: string, folderId: string) {
+  folders.value.forEach(f => { f.projectIds = f.projectIds.filter(id => id !== projectId) })
+  const folder = folders.value.find(f => f.id === folderId)
+  if (folder) folder.projectIds.push(projectId)
+  saveFolders()
+}
+
+function removeFromFolder (projectId: string) {
+  folders.value.forEach(f => { f.projectIds = f.projectIds.filter(id => id !== projectId) })
+  saveFolders()
+}
+
+/* ------------------------------------------------------------------ */
+/* Project actions                                                     */
+/* ------------------------------------------------------------------ */
+
+function getIcon (type?: string) {
+  if (type === 'frontend') return '🎨'
+  if (type === 'backend') return '⚙️'
+  if (type === 'fullstack') return '🚀'
+  return '📦'
+}
+
+async function startProject (project: Project) {
+  if (!window.electronAPI) return
+  try {
+    await window.electronAPI.startProject(project.id)
+    emit('appStarted')
+    await loadProjects()
+  } catch (err) { console.error('Failed to start project:', err) }
+}
+
+async function stopProject (project: Project) {
+  if (!window.electronAPI) return
+  try {
+    await window.electronAPI.stopProject(project.id)
+    await loadProjects()
+  } catch (err) { console.error('Failed to stop project:', err) }
+}
+
+async function openInWindow (project: Project) {
+  if (!window.electronAPI) return
+  const status = await window.electronAPI.getProjectStatus(project.id) as { status: string }
+  if (status.status !== 'running') {
+    await window.electronAPI.startProject(project.id)
+    emit('appStarted')
+    await loadProjects()
+  }
+  await window.electronAPI.openProjectWindow(project.id)
+}
+
+async function openSourceCode (project: Project) {
+  if (!window.electronAPI) return
+  await window.electronAPI.openProjectFolder(project.id)
+}
+
+async function deleteProject (project: Project) {
+  confirmDialog.value = {
+    visible: true,
+    message: `确定删除项目「${project.name || project.id}」？此操作不可撤销。`,
+    onConfirm: async () => {
+      if (window.electronAPI?.deleteProject) {
+        try { await window.electronAPI.deleteProject(project.id) } catch (err) { console.error('Failed to delete project:', err) }
+      }
+      removeFromFolder(project.id)
+      await loadProjects()
+      confirmDialog.value.visible = false
+    }
+  }
+}
+
+function confirmDialogCancel () {
+  confirmDialog.value.visible = false
+  confirmDialog.value.onConfirm = null
+}
+
+/* ------------------------------------------------------------------ */
+/* Drag & Drop — merge into folder                                     */
+/* ------------------------------------------------------------------ */
+
+function onDragStart (e: DragEvent, projectId: string) {
+  dragItem.value = { id: projectId, type: 'project' }
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', projectId)
+  }
+}
+
+function onDragOver (e: DragEvent, targetId: string, targetType: 'project' | 'folder') {
+  e.preventDefault()
+  if (!dragItem.value || dragItem.value.id === targetId) {
+    dropTarget.value = null
+    return
+  }
+  dropTarget.value = { id: targetId, type: targetType }
+}
+
+function onDragLeave () {
+  dropTarget.value = null
+}
+
+function onDrop (e: DragEvent, targetId: string, targetType: 'project' | 'folder') {
+  e.preventDefault()
+  if (!dragItem.value || dragItem.value.id === targetId) {
+    dragItem.value = null
+    dropTarget.value = null
+    return
+  }
+
+  const draggedId = dragItem.value.id
+
+  if (targetType === 'folder') {
+    // Drop project into existing folder
+    moveToFolder(draggedId, targetId)
+  } else {
+    // Drop project onto another project — create new folder
+    createFolderWith(draggedId, targetId)
+  }
+
+  dragItem.value = null
+  dropTarget.value = null
+}
+
+function onDragEnd () {
+  dragItem.value = null
+  dropTarget.value = null
+}
+
+/* ------------------------------------------------------------------ */
+/* Context Menu                                                        */
+/* ------------------------------------------------------------------ */
+
+function showCtxMenu (e: MouseEvent, target: Project | LaunchFolder | null, kind: 'project' | 'folder' | 'blank') {
+  e.preventDefault()
+  e.stopPropagation()
+  ctxMenu.value = { visible: true, x: e.clientX, y: e.clientY, target, kind }
+}
+
+function hideCtxMenu () { ctxMenu.value.visible = false }
+
+/* ------------------------------------------------------------------ */
+/* Folder overlay                                                      */
+/* ------------------------------------------------------------------ */
+
+function openFolder (folder: LaunchFolder, e: MouseEvent) {
+  const el = e.currentTarget as HTMLElement
+  const rect = el.getBoundingClientRect()
+  folderPopupAnchor.value = { x: rect.left + rect.width / 2, y: rect.top }
+  openFolderId.value = folder.id
+}
+
+function closeFolder () { openFolderId.value = null }
+
+/* ------------------------------------------------------------------ */
+/* Keyboard / Lifecycle                                                */
+/* ------------------------------------------------------------------ */
+
+function onKeydown (e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    if (confirmDialog.value.visible) { confirmDialogCancel(); return }
+    if (openFolderId.value) { closeFolder(); return }
+    if (ctxMenu.value.visible) { hideCtxMenu(); return }
+    emit('close')
+  }
+}
+
+function onDocClick () { hideCtxMenu() }
+
+onMounted(() => {
+  loadFolders()
+  loadProjects()
+  document.addEventListener('click', onDocClick)
+  document.addEventListener('keydown', onKeydown)
+  nextTick(() => searchRef.value?.focus())
+  if (window.electronAPI?.onProjectChanged) {
+    projectChangedCleanup = window.electronAPI.onProjectChanged(() => loadProjects())
+  }
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
+  document.removeEventListener('keydown', onKeydown)
+  projectChangedCleanup?.()
+})
+</script>
+
+<template>
+  <!-- Full-screen overlay like macOS Launchpad -->
+  <div class="lp-overlay" @click.self="emit('close')">
+    <div class="lp-content" @click.self="emit('close')">
+      <!-- Search bar -->
+      <div class="lp-search-bar">
+        <div class="lp-search-box">
+          <span class="lp-search-icon">🔍</span>
+          <input
+            ref="searchRef"
+            v-model="searchQuery"
+            type="text"
+            placeholder="搜索应用…"
+            class="lp-search-input"
+            @click.stop
+          />
+        </div>
+      </div>
+
+      <!-- Loading -->
+      <div v-if="isLoading && projects.length === 0" class="lp-status">
+        <span class="lp-spinner">⏳</span> 加载中…
+      </div>
+      <div v-else-if="error" class="lp-status lp-error">❌ {{ error }}</div>
+
+      <!-- Grid -->
+      <div v-else class="lp-grid-container" @contextmenu="showCtxMenu($event, null, 'blank')">
+        <div v-if="gridItems.length === 0" class="lp-empty">
+          <div class="lp-empty-icon">🚀</div>
+          <p>还没有应用</p>
+          <p class="lp-empty-hint">在 AI 对话中输入需求即可创建新应用</p>
+        </div>
+
+        <div v-else class="lp-grid">
+          <!-- Folder items -->
+          <div
+            v-for="item in gridItems"
+            :key="item.kind + '-' + (item.data as any).id"
+            :class="[
+              'lp-cell',
+              item.kind === 'folder' ? 'lp-cell-folder' : 'lp-cell-app',
+              { 'drop-hover': dropTarget && dropTarget.id === (item.data as any).id }
+            ]"
+            :draggable="item.kind === 'project'"
+            @dragstart="item.kind === 'project' ? onDragStart($event, (item.data as Project).id) : undefined"
+            @dragover="onDragOver($event, (item.data as any).id, item.kind === 'folder' ? 'folder' : 'project')"
+            @dragleave="onDragLeave"
+            @drop="onDrop($event, (item.data as any).id, item.kind === 'folder' ? 'folder' : 'project')"
+            @dragend="onDragEnd"
+            @click="item.kind === 'folder' ? openFolder(item.data as LaunchFolder, $event) : emit('select', item.data as Project)"
+            @contextmenu="showCtxMenu($event, item.data as any, item.kind === 'folder' ? 'folder' : 'project')"
+          >
+            <!-- Folder visual -->
+            <template v-if="item.kind === 'folder'">
+              <div class="lp-folder-icon">
+                <div class="folder-mini-grid">
+                  <span
+                    v-for="pid in (item.data as LaunchFolder).projectIds.slice(0, 9)"
+                    :key="pid"
+                    class="folder-mini"
+                  >{{ getIcon(projects.find(p => p.id === pid)?.type) }}</span>
+                  <span
+                    v-for="n in Math.max(0, 4 - Math.min((item.data as LaunchFolder).projectIds.length, 9))"
+                    :key="'e'+n" class="folder-mini empty"
+                  ></span>
+                </div>
+              </div>
+              <template v-if="renamingId === (item.data as LaunchFolder).id">
+                <input
+                  ref="renameRef"
+                  v-model="renameInput"
+                  class="lp-rename-input"
+                  @keydown.enter.prevent="commitRename((item.data as LaunchFolder).id)"
+                  @keydown.escape="renamingId = null"
+                  @blur="commitRename((item.data as LaunchFolder).id)"
+                  @click.stop
+                />
+              </template>
+              <span v-else class="lp-cell-name">{{ (item.data as LaunchFolder).name }}</span>
+            </template>
+
+            <!-- App visual -->
+            <template v-else>
+              <div class="lp-app-icon">
+                <span class="lp-app-emoji">{{ getIcon((item.data as Project).type) }}</span>
+                <span
+                  v-if="(item.data as Project).runtime?.status === 'running'"
+                  class="lp-running-badge"
+                ></span>
+              </div>
+              <span class="lp-cell-name">{{ (item.data as Project).name || (item.data as Project).id }}</span>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Page dots (decorative) -->
+      <div class="lp-page-dots">
+        <span class="lp-dot active"></span>
+      </div>
+    </div>
+
+    <!-- Folder popup bubble -->
+    <Teleport to="body">
+      <Transition name="folder-pop">
+        <div
+          v-if="openFolderData"
+          class="folder-bubble-overlay"
+          @click.self="closeFolder"
+        >
+          <div
+            class="folder-bubble"
+            :style="{
+              '--anchor-x': folderPopupAnchor.x + 'px',
+              '--anchor-y': folderPopupAnchor.y + 'px'
+            }"
+          >
+            <div class="folder-bubble-arrow"></div>
+            <div class="folder-bubble-header">
+              <template v-if="renamingId === openFolderData.id">
+                <input
+                  ref="renameRef"
+                  v-model="renameInput"
+                  class="folder-rename-input"
+                  @keydown.enter.prevent="commitRename(openFolderData.id)"
+                  @keydown.escape="renamingId = null"
+                  @blur="commitRename(openFolderData.id)"
+                />
+              </template>
+              <h3 v-else @dblclick="startRenameFolder(openFolderData)" class="folder-bubble-title">
+                {{ openFolderData.name }}
+              </h3>
+            </div>
+            <div class="folder-bubble-body">
+              <div v-if="openFolderProjects.length === 0" class="folder-empty">
+                文件夹为空，拖拽应用到此文件夹
+              </div>
+              <div v-else class="folder-bubble-grid">
+                <div
+                  v-for="project in openFolderProjects"
+                  :key="project.id"
+                  class="lp-cell lp-cell-app"
+                  @click="emit('select', project)"
+                  @contextmenu="showCtxMenu($event, project, 'project')"
+                >
+                  <div class="lp-app-icon">
+                    <span class="lp-app-emoji">{{ getIcon(project.type) }}</span>
+                    <span v-if="project.runtime?.status === 'running'" class="lp-running-badge"></span>
+                  </div>
+                  <span class="lp-cell-name">{{ project.name || project.id }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Context Menu -->
+    <Teleport to="body">
+      <div
+        v-if="ctxMenu.visible"
+        class="lp-ctx-menu"
+        :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+        @click.stop
+      >
+        <template v-if="ctxMenu.kind === 'project' && ctxMenu.target">
+          <div class="ctx-item" @click="emit('select', ctxMenu.target as Project); hideCtxMenu()">🪄 打开应用</div>
+          <div class="ctx-item" @click="openSourceCode(ctxMenu.target as Project); hideCtxMenu()">💻 打开源码</div>
+          <div class="ctx-item" @click="openInWindow(ctxMenu.target as Project); hideCtxMenu()">↗️ 独立窗口运行</div>
+          <div class="ctx-divider"></div>
+          <div v-if="(ctxMenu.target as Project).runtime?.status !== 'running'" class="ctx-item" @click="startProject(ctxMenu.target as Project); hideCtxMenu()">▶️ 启动</div>
+          <div v-if="(ctxMenu.target as Project).runtime?.status === 'running'" class="ctx-item" @click="stopProject(ctxMenu.target as Project); hideCtxMenu()">⏹️ 停止</div>
+          <div class="ctx-divider"></div>
+          <div class="ctx-item" @click="emit('optimizeInChat', ctxMenu.target as Project); hideCtxMenu()">💬 继续优化</div>
+          <div v-if="folders.length > 0" class="ctx-divider"></div>
+          <div v-for="folder in folders" :key="folder.id" class="ctx-item" @click="moveToFolder((ctxMenu.target as Project).id, folder.id); hideCtxMenu()">
+            📁 移入「{{ folder.name }}」
+          </div>
+          <div v-if="folderedIds.has((ctxMenu.target as Project).id)" class="ctx-item" @click="removeFromFolder((ctxMenu.target as Project).id); hideCtxMenu()">📤 移出文件夹</div>
+          <div class="ctx-divider"></div>
+          <div class="ctx-item ctx-danger" @click="deleteProject(ctxMenu.target as Project); hideCtxMenu()">🗑️ 删除项目</div>
+        </template>
+        <template v-if="ctxMenu.kind === 'folder' && ctxMenu.target">
+          <div class="ctx-item" @click="startRenameFolder(ctxMenu.target as LaunchFolder); hideCtxMenu()">✏️ 重命名</div>
+          <div class="ctx-item ctx-danger" @click="deleteFolder((ctxMenu.target as LaunchFolder).id); hideCtxMenu()">🗑️ 删除文件夹</div>
+        </template>
+        <template v-if="ctxMenu.kind === 'blank'">
+          <div class="ctx-item" @click="createEmptyFolder(); hideCtxMenu()">📁 新建文件夹</div>
+          <div class="ctx-item" @click="loadProjects(); hideCtxMenu()">🔄 刷新</div>
+        </template>
+      </div>
+    </Teleport>
+
+    <!-- Confirm dialog -->
+    <Teleport to="body">
+      <div v-if="confirmDialog.visible" class="confirm-overlay" @click.self="confirmDialogCancel">
+        <div class="confirm-box">
+          <p>{{ confirmDialog.message }}</p>
+          <div class="confirm-actions">
+            <button class="confirm-btn danger" @click="confirmDialog.onConfirm?.()">确认删除</button>
+            <button class="confirm-btn" @click="confirmDialogCancel">取消</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+  </div>
+</template>
+
+<style scoped>
+/* ============ Full-screen overlay ============ */
+.lp-overlay {
+  --lp-accent: #38bdf8;
+  --lp-accent-soft: rgba(56, 189, 248, 0.16);
+  --lp-accent-strong: rgba(14, 165, 233, 0.42);
+  --lp-folder-soft: rgba(245, 158, 11, 0.18);
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5000;
+  background:
+    radial-gradient(circle at 18% 18%, rgba(56, 189, 248, 0.14), transparent 24%),
+    radial-gradient(circle at 82% 12%, rgba(245, 158, 11, 0.12), transparent 20%),
+    linear-gradient(180deg, rgba(6, 10, 16, 0.78), rgba(4, 7, 12, 0.94));
+  backdrop-filter: blur(40px) saturate(1.2);
+  display: flex;
+  flex-direction: column;
+  animation: lp-fade-in 0.25s ease;
+}
+
+@keyframes lp-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.lp-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 55px; /* below titlebar */
+  overflow: hidden;
+}
+
+/* ============ Search ============ */
+.lp-search-bar {
+  flex-shrink: 0;
+  margin-bottom: 32px;
+}
+.lp-search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  padding: 8px 16px;
+  width: 300px;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
+}
+.lp-search-box:focus-within {
+  border-color: var(--lp-accent-strong);
+  background: rgba(255, 255, 255, 0.1);
+  width: 360px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--lp-accent-soft);
+}
+.lp-search-icon { font-size: 0.85em; opacity: 0.5; }
+.lp-search-input {
+  flex: 1;
+  background: none;
+  border: none;
+  color: #e4e4e7;
+  font-size: 0.9em;
+  outline: none;
+}
+.lp-search-input::placeholder { color: rgba(255, 255, 255, 0.3); }
+
+/* ============ Status / empty ============ */
+.lp-status {
+  color: #71717a;
+  font-size: 0.92em;
+  margin-top: 80px;
+}
+.lp-error { color: #f87171; }
+.lp-spinner { animation: spin 1s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.lp-empty {
+  text-align: center;
+  margin-top: 100px;
+  color: #71717a;
+}
+.lp-empty-icon { font-size: 3em; margin-bottom: 16px; }
+.lp-empty-hint { font-size: 0.82em; color: #52525b; margin-top: 8px; }
+
+/* ============ Grid container ============ */
+.lp-grid-container {
+  flex: 1;
+  width: 100%;
+  max-width: 840px;
+  padding: 0 40px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.lp-grid-container::-webkit-scrollbar { width: 4px; }
+.lp-grid-container::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+
+.lp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 24px 20px;
+  justify-items: center;
+}
+
+/* ============ Grid cell (shared) ============ */
+.lp-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 12px 8px;
+  border-radius: 16px;
+  transition: all 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+  user-select: none;
+  position: relative;
+  width: 96px;
+}
+.lp-cell:hover {
+  background: rgba(255, 255, 255, 0.06);
+  transform: translateY(-3px) scale(1.06);
+}
+.lp-cell:active {
+  transform: scale(0.96);
+}
+.lp-cell.drop-hover {
+  background: var(--lp-accent-soft);
+  box-shadow: 0 0 0 2px var(--lp-accent-strong);
+  transform: scale(1.08);
+}
+
+/* ============ App icon ============ */
+.lp-app-icon {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  background: linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255,255,255,0.05);
+  transition: all 0.18s;
+}
+.lp-cell:hover .lp-app-icon {
+  border-color: rgba(56, 189, 248, 0.28);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(56, 189, 248, 0.18);
+}
+.lp-app-emoji { font-size: 1.8em; }
+.lp-running-badge {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #22c55e;
+  border: 2px solid #0f0f10;
+  box-shadow: 0 0 8px #22c55e80;
+}
+
+.lp-cell-name {
+  font-size: 0.75em;
+  color: rgba(255, 255, 255, 0.8);
+  text-align: center;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+/* ============ Folder icon ============ */
+.lp-folder-icon {
+  width: 64px;
+  height: 64px;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.18) 0%, rgba(251, 191, 36, 0.08) 100%);
+  border: 1px solid rgba(245, 158, 11, 0.18);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  transition: all 0.18s;
+}
+.lp-cell:hover .lp-folder-icon {
+  border-color: rgba(245, 158, 11, 0.32);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(245, 158, 11, 0.14);
+}
+
+.folder-mini-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+}
+.folder-mini {
+  font-size: 0.7em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.folder-mini.empty { opacity: 0; }
+
+.lp-rename-input {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--lp-accent-strong);
+  border-radius: 6px;
+  color: #e4e4e7;
+  padding: 3px 8px;
+  font-size: 0.75em;
+  outline: none;
+  width: 80px;
+  text-align: center;
+}
+
+/* ============ Page dots ============ */
+.lp-page-dots {
+  flex-shrink: 0;
+  padding: 16px 0 24px;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+.lp-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+}
+.lp-dot.active { background: rgba(255, 255, 255, 0.6); }
+
+/* ============ Folder popup bubble ============ */
+.folder-bubble-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.folder-bubble {
+  position: relative;
+  background: rgba(13, 18, 26, 0.94);
+  backdrop-filter: blur(30px);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 24px;
+  width: 420px;
+  max-height: 50vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255,255,255,0.03);
+  transform-origin: var(--anchor-x, 50%) var(--anchor-y, 50%);
+}
+
+.folder-bubble-arrow {
+  position: absolute;
+  top: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 16px;
+  height: 8px;
+  overflow: hidden;
+}
+.folder-bubble-arrow::before {
+  content: '';
+  display: block;
+  width: 12px;
+  height: 12px;
+  background: rgba(13, 18, 26, 0.94);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  transform: rotate(45deg);
+  margin: 4px auto 0;
+}
+
+.folder-bubble-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.folder-bubble-title {
+  margin: 0;
+  font-size: 0.95em;
+  font-weight: 600;
+  color: #e4e4e7;
+  cursor: text;
+}
+.folder-rename-input {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--lp-accent-strong);
+  border-radius: 8px;
+  color: #e4e4e7;
+  padding: 6px 12px;
+  font-size: 0.95em;
+  outline: none;
+  text-align: center;
+}
+
+.folder-bubble-body {
+  padding: 16px 20px 20px;
+  overflow-y: auto;
+}
+.folder-empty {
+  text-align: center;
+  color: #52525b;
+  font-size: 0.85em;
+  padding: 20px 0;
+}
+.folder-bubble-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  justify-items: center;
+}
+
+/* Folder popup transition */
+.folder-pop-enter-active {
+  animation: folder-pop-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.folder-pop-leave-active {
+  animation: folder-pop-out 0.18s ease-in;
+}
+@keyframes folder-pop-in {
+  from { opacity: 0; transform: scale(0.7); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes folder-pop-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.7); }
+}
+
+/* ============ Context menu ============ */
+.lp-ctx-menu {
+  position: fixed;
+  z-index: 10000;
+  background: rgba(15, 23, 42, 0.96);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 14px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42);
+}
+.ctx-item {
+  padding: 8px 16px;
+  font-size: 0.85em;
+  color: #e4e4e7;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+.ctx-item:hover { background: var(--lp-accent-soft); color: white; }
+.ctx-item.ctx-danger { color: #f87171; }
+.ctx-item.ctx-danger:hover { background: #dc2626; color: #fff; }
+.ctx-divider { height: 1px; background: rgba(255, 255, 255, 0.06); margin: 4px 0; }
+
+/* ============ Confirm dialog ============ */
+.confirm-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10001;
+}
+.confirm-box {
+  background: #1e1e22;
+  border: 1px solid #3f3f46;
+  border-radius: 16px;
+  padding: 28px;
+  width: 380px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.confirm-box p {
+  margin: 0 0 20px;
+  font-size: 0.92em;
+  color: #e4e4e7;
+  line-height: 1.5;
+}
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.confirm-btn {
+  padding: 8px 18px;
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  border-radius: 10px;
+  color: #e4e4e7;
+  font-size: 0.85em;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.confirm-btn:hover { background: #3f3f46; }
+.confirm-btn.danger { background: #dc2626; border-color: #dc2626; color: #fff; }
+.confirm-btn.danger:hover { background: #b91c1c; }
+</style>

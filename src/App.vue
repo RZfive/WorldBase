@@ -1,71 +1,226 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import ChatPanel from './renderer/components/ChatPanel.vue'
-import ProjectList from './renderer/components/ProjectList.vue'
-import ProjectDetail from './renderer/components/ProjectDetail.vue'
+import Launchpad from './renderer/components/Launchpad.vue'
 import AISettings from './renderer/components/AISettings.vue'
-import SkillManager from './renderer/components/SkillManager.vue'
 
 interface RunningApp {
   id: string
   name: string
   type: string
   port?: number
-  isWindow: boolean // opened in standalone window
+  isWindow: boolean
 }
 
-const currentView = ref<string>('chat')
-const selectedProject = ref<Record<string, unknown> | null>(null)
-const sidebarCollapsed = ref(false)
-const chatProjectContext = ref<Record<string, unknown> | null>(null)
-/** Embedded project view — projectId being viewed in the main content area */
-const embeddedProjectId = ref<string | null>(null)
+interface ProjectStatus {
+  status: string
+  port?: number
+}
 
-/** Running apps registry */
+type MainView = 'chat' | 'project' | 'settings'
+type EmbeddedState = 'idle' | 'loading' | 'ready' | 'unavailable'
+
+const currentView = ref<MainView>('chat')
+const selectedProject = ref<Record<string, unknown> | null>(null)
+const chatProjectContext = ref<Record<string, unknown> | null>(null)
+const embeddedProjectId = ref<string | null>(null)
+const embeddedProjectUrl = ref('')
+const embeddedProjectState = ref<EmbeddedState>('idle')
+const embeddedProjectHint = ref('')
+const showLaunchpad = ref(false)
+
 const runningApps = reactive(new Map<string, RunningApp>())
+
+const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | null }>({
+  visible: false,
+  x: 0,
+  y: 0,
+  app: null
+})
 
 let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
 
-function selectProject (project: Record<string, unknown>) {
-  selectedProject.value = project
-  currentView.value = 'project'
+function clearEmbeddedProject () {
+  selectedProject.value = null
+  embeddedProjectId.value = null
+  embeddedProjectUrl.value = ''
+  embeddedProjectState.value = 'idle'
+  embeddedProjectHint.value = ''
+}
+
+async function fetchProjectMeta (projectId: string) {
+  if (!window.electronAPI) return { id: projectId }
+  return await window.electronAPI.getProject(projectId)
+}
+
+async function getRuntimeStatus (projectId: string) {
+  if (!window.electronAPI) return { status: 'unknown' } as ProjectStatus
+  return await window.electronAPI.getProjectStatus(projectId) as unknown as ProjectStatus
+}
+
+function openChat () {
+  currentView.value = 'chat'
+  showLaunchpad.value = false
+  hideDockCtx()
+}
+
+function openSettings () {
+  currentView.value = 'settings'
+  showLaunchpad.value = false
+  hideDockCtx()
 }
 
 function optimizeProjectInChat (project: Record<string, unknown>) {
   chatProjectContext.value = project
   currentView.value = 'chat'
+  showLaunchpad.value = false
 }
 
-function toggleSidebar () {
-  sidebarCollapsed.value = !sidebarCollapsed.value
+function toggleLaunchpad () {
+  showLaunchpad.value = !showLaunchpad.value
+  hideDockCtx()
 }
 
-/** Switch to a running app (embedded or focus its window). */
-function switchToApp (app: RunningApp) {
-  if (app.isWindow) {
-    window.electronAPI?.focusProjectWindow(app.id)
-  } else {
-    // Switch to embedded preview of this project
-    const project = { id: app.id, name: app.name, type: app.type }
-    selectedProject.value = project
-    embeddedProjectId.value = app.id
-    currentView.value = 'project'
+function applyEmbeddedStatus (status: ProjectStatus) {
+  if (status.status === 'running' && status.port) {
+    embeddedProjectUrl.value = `http://localhost:${status.port}`
+    embeddedProjectState.value = 'ready'
+    embeddedProjectHint.value = ''
+    return
+  }
+
+  embeddedProjectUrl.value = ''
+  embeddedProjectState.value = 'unavailable'
+  embeddedProjectHint.value = status.status === 'running'
+    ? '应用已启动，但当前没有可嵌入的预览地址。右键左侧应用图标继续操作。'
+    : '应用未运行。可从启动台点击打开，或在左侧图标上右键操作。'
+}
+
+async function syncEmbeddedProject () {
+  if (!embeddedProjectId.value || !window.electronAPI) return
+  try {
+    const status = await getRuntimeStatus(embeddedProjectId.value)
+    applyEmbeddedStatus(status)
+  } catch {
+    embeddedProjectUrl.value = ''
+    embeddedProjectState.value = 'unavailable'
+    embeddedProjectHint.value = '应用状态暂时不可用，请稍后重试。'
   }
 }
 
-/** Refresh the running apps list from the runtime statuses. */
+async function openEmbeddedProject (projectId: string, project?: Record<string, unknown>) {
+  if (!window.electronAPI) return
+
+  showLaunchpad.value = false
+  currentView.value = 'project'
+  selectedProject.value = project ?? await fetchProjectMeta(projectId)
+  embeddedProjectId.value = projectId
+  embeddedProjectUrl.value = ''
+  embeddedProjectState.value = 'loading'
+  embeddedProjectHint.value = '正在准备应用预览…'
+
+  try {
+    let status = await getRuntimeStatus(projectId)
+    if (status.status !== 'running') {
+      await window.electronAPI.startProject(projectId)
+      await refreshRunningApps()
+      status = await getRuntimeStatus(projectId)
+    }
+    applyEmbeddedStatus(status)
+  } catch (error) {
+    embeddedProjectUrl.value = ''
+    embeddedProjectState.value = 'unavailable'
+    embeddedProjectHint.value = `打开失败：${(error as Error).message}`
+  }
+}
+
+async function openProjectFromLaunchpad (project: Record<string, unknown>) {
+  const projectId = project.id as string | undefined
+  if (!projectId || !window.electronAPI) return
+
+  const openWindows = await window.electronAPI.getOpenWindows()
+  if (openWindows.includes(projectId)) {
+    showLaunchpad.value = false
+    await window.electronAPI.focusProjectWindow(projectId)
+    return
+  }
+
+  await openEmbeddedProject(projectId, project)
+}
+
+async function switchToApp (app: RunningApp) {
+  if (app.isWindow) {
+    showLaunchpad.value = false
+    await window.electronAPI?.focusProjectWindow(app.id)
+    return
+  }
+
+  await openEmbeddedProject(app.id)
+}
+
+function showDockCtx (e: MouseEvent, app: RunningApp) {
+  e.preventDefault()
+  e.stopPropagation()
+  dockCtx.value = { visible: true, x: e.clientX, y: e.clientY, app }
+}
+
+function hideDockCtx () {
+  dockCtx.value.visible = false
+}
+
+async function dockOpenEmbedded (app: RunningApp) {
+  hideDockCtx()
+  await openEmbeddedProject(app.id)
+}
+
+async function dockOpenWindow (app: RunningApp) {
+  hideDockCtx()
+  if (!window.electronAPI) return
+
+  const status = await getRuntimeStatus(app.id)
+  if (status.status !== 'running') {
+    await window.electronAPI.startProject(app.id)
+  }
+  await window.electronAPI.openProjectWindow(app.id)
+  await refreshRunningApps()
+}
+
+async function dockOpenSource (app: RunningApp) {
+  hideDockCtx()
+  await window.electronAPI?.openProjectFolder(app.id)
+}
+
+async function dockOptimizeInChat (app: RunningApp) {
+  hideDockCtx()
+  const project = await fetchProjectMeta(app.id)
+  optimizeProjectInChat(project)
+}
+
+async function dockStopApp (app: RunningApp) {
+  hideDockCtx()
+  await window.electronAPI?.stopProject(app.id)
+
+  if (embeddedProjectId.value === app.id) {
+    clearEmbeddedProject()
+    currentView.value = 'chat'
+  }
+
+  await refreshRunningApps()
+}
+
 async function refreshRunningApps () {
   if (!window.electronAPI) return
+
   try {
     const projects = await window.electronAPI.listProjects()
     const openWindows = await window.electronAPI.getOpenWindows()
     const openSet = new Set(openWindows)
+    const nextIds = new Set<string>()
 
-    // Check each project status
     for (const proj of projects) {
       const id = proj.id as string
-      const status = await window.electronAPI.getProjectStatus(id) as { status: string; port?: number }
+      const status = await getRuntimeStatus(id)
       if (status.status === 'running') {
         const existing = runningApps.get(id)
         runningApps.set(id, {
@@ -75,47 +230,49 @@ async function refreshRunningApps () {
           port: status.port,
           isWindow: openSet.has(id) || (existing?.isWindow ?? false)
         })
-      } else {
-        runningApps.delete(id)
+        nextIds.add(id)
       }
     }
-  } catch { /* ignore */ }
+
+    for (const id of Array.from(runningApps.keys())) {
+      if (!nextIds.has(id)) runningApps.delete(id)
+    }
+
+    await syncEmbeddedProject()
+  } catch {
+    // ignore transient runtime errors
+  }
 }
 
-function minimizeWindow () {
-  window.electronAPI?.minimizeWindow()
-}
-
-function maximizeWindow () {
-  window.electronAPI?.maximizeWindow()
-}
-
-function closeWindow () {
-  window.electronAPI?.closeWindow()
-}
+function minimizeWindow () { window.electronAPI?.minimizeWindow() }
+function maximizeWindow () { window.electronAPI?.maximizeWindow() }
+function closeWindow () { window.electronAPI?.closeWindow() }
+function onDocClickGlobal () { hideDockCtx() }
 
 onMounted(async () => {
   await refreshRunningApps()
+  document.addEventListener('click', onDocClickGlobal)
 
-  // Listen for project status changes
   if (window.electronAPI?.onProjectChanged) {
-    projectChangedCleanup = window.electronAPI.onProjectChanged(() => {
-      refreshRunningApps()
+    projectChangedCleanup = window.electronAPI.onProjectChanged((event) => {
+      if (event.action === 'deleted' && embeddedProjectId.value === event.projectId) {
+        clearEmbeddedProject()
+        currentView.value = 'chat'
+      }
+      void refreshRunningApps()
     })
   }
 
-  // Listen for standalone window close events
   if (window.electronAPI?.onProjectWindowClosed) {
     windowClosedCleanup = window.electronAPI.onProjectWindowClosed((event) => {
       const app = runningApps.get(event.projectId)
-      if (app) {
-        app.isWindow = false
-      }
+      if (app) app.isWindow = false
     })
   }
 })
 
 onUnmounted(() => {
+  document.removeEventListener('click', onDocClickGlobal)
   projectChangedCleanup?.()
   windowClosedCleanup?.()
 })
@@ -123,7 +280,6 @@ onUnmounted(() => {
 
 <template>
   <div class="app-root">
-    <!-- Custom Title Bar -->
     <div class="titlebar">
       <div class="titlebar-drag">
         <span class="titlebar-title">🌍 The World</span>
@@ -142,111 +298,129 @@ onUnmounted(() => {
     </div>
 
     <div class="app-layout">
-      <!-- App Dock — running apps icons -->
-      <div v-if="runningApps.size > 0" class="app-dock">
-        <div
-          v-for="[appId, app] in runningApps"
-          :key="appId"
-          :class="['dock-item', { 'dock-active': currentView === 'project' && embeddedProjectId === appId, 'dock-windowed': app.isWindow }]"
-          :title="app.name + (app.isWindow ? ' (独立窗口)' : '') + (app.port ? ` :${app.port}` : '')"
-          @click="switchToApp(app)"
-        >
-          <span class="dock-icon">{{ app.type === 'frontend' ? '🎨' : app.type === 'backend' ? '⚙️' : '📦' }}</span>
-          <span v-if="app.isWindow" class="dock-window-badge" title="独立窗口">↗</span>
-          <span class="dock-indicator"></span>
-        </div>
-      </div>
-
-      <!-- Sidebar -->
-      <aside :class="['sidebar', { collapsed: sidebarCollapsed }]">
-        <div class="sidebar-toggle" @click="toggleSidebar">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M2 3h12v1.5H2zm0 4.25h12v1.5H2zm0 4.25h12v1.5H2z"/>
-          </svg>
+      <aside class="dock-bar">
+        <div class="dock-top">
+          <div
+            :class="['dock-item', { 'dock-active': currentView === 'chat' && !showLaunchpad }]"
+            title="AI 对话"
+            data-tip="对话"
+            @click="openChat"
+          >
+            <span class="dock-item-icon">💬</span>
+          </div>
         </div>
 
-        <nav class="sidebar-nav">
-          <button
-            :class="{ active: currentView === 'chat' }"
-            @click="currentView = 'chat'"
-            :title="sidebarCollapsed ? 'AI 对话' : ''"
+        <div class="dock-apps">
+          <div
+            v-for="[appId, app] in runningApps"
+            :key="appId"
+            :class="['dock-item', 'dock-app', { 'dock-active': currentView === 'project' && embeddedProjectId === appId, 'dock-windowed': app.isWindow }]"
+            :title="app.name + (app.isWindow ? ' (独立窗口)' : '')"
+            :data-tip="app.name"
+            @click="switchToApp(app)"
+            @contextmenu="showDockCtx($event, app)"
           >
-            <span class="nav-icon">💬</span>
-            <span v-if="!sidebarCollapsed" class="nav-text">AI 对话</span>
-          </button>
-          <button
-            :class="{ active: currentView === 'projects' }"
-            @click="currentView = 'projects'"
-            :title="sidebarCollapsed ? '项目管理' : ''"
-          >
-            <span class="nav-icon">📦</span>
-            <span v-if="!sidebarCollapsed" class="nav-text">项目管理</span>
-          </button>
-          <button
-            :class="{ active: currentView === 'skills' }"
-            @click="currentView = 'skills'"
-            :title="sidebarCollapsed ? 'Skill 管理' : ''"
-          >
-            <span class="nav-icon">🧠</span>
-            <span v-if="!sidebarCollapsed" class="nav-text">Skill 管理</span>
-          </button>
-        </nav>
+            <span class="dock-item-icon">{{ app.type === 'frontend' ? '🎨' : app.type === 'backend' ? '⚙️' : '📦' }}</span>
+            <span v-if="app.isWindow" class="dock-window-badge">↗</span>
+            <span class="dock-running-dot"></span>
+          </div>
+        </div>
 
-        <div class="sidebar-footer">
-          <button
-            :class="['settings-btn', { active: currentView === 'settings' }]"
-            @click="currentView = 'settings'"
-            :title="sidebarCollapsed ? 'AI 设置' : ''"
+        <div class="dock-bottom">
+          <div
+            :class="['dock-item', { 'dock-active': showLaunchpad }]"
+            title="启动台"
+            data-tip="启动台"
+            @click="toggleLaunchpad"
           >
-            <span class="nav-icon">⚙️</span>
-            <span v-if="!sidebarCollapsed" class="nav-text">设置</span>
-          </button>
-          <span v-if="!sidebarCollapsed" class="version">v0.1.0</span>
+            <span class="dock-item-icon">🚀</span>
+          </div>
+
+          <div
+            :class="['dock-item', { 'dock-active': currentView === 'settings' && !showLaunchpad }]"
+            title="设置"
+            data-tip="设置"
+            @click="openSettings"
+          >
+            <span class="dock-item-icon">⚙️</span>
+          </div>
         </div>
       </aside>
 
-      <!-- Main Content -->
       <main class="main-content">
         <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
-        <ProjectList
-          v-if="currentView === 'projects'"
-          @select="selectProject"
-          @optimizeInChat="optimizeProjectInChat"
-        />
-        <ProjectDetail
-          v-if="currentView === 'project' && selectedProject"
-          :project="selectedProject"
-          @back="currentView = 'projects'; embeddedProjectId = null"
-          @optimizeInChat="optimizeProjectInChat"
-          @appStarted="refreshRunningApps()"
-          @appStopped="refreshRunningApps()"
-        />
-        <SkillManager v-if="currentView === 'skills'" />
+        <section v-if="currentView === 'project'" class="project-stage">
+          <iframe
+            v-if="embeddedProjectUrl"
+            :src="embeddedProjectUrl"
+            class="project-stage-frame"
+            title="应用预览"
+          ></iframe>
+
+          <div v-else class="project-stage-empty">
+            <div class="project-stage-card">
+              <span class="project-stage-kicker">运行中的应用</span>
+              <h2 class="project-stage-title">{{ (selectedProject?.name as string) || embeddedProjectId || '应用预览' }}</h2>
+              <p class="project-stage-text">
+                {{ embeddedProjectState === 'loading' ? '正在准备应用预览…' : embeddedProjectHint }}
+              </p>
+            </div>
+          </div>
+        </section>
         <AISettings v-if="currentView === 'settings'" />
       </main>
     </div>
+
+    <Launchpad
+      v-if="showLaunchpad"
+      @select="openProjectFromLaunchpad"
+      @optimizeInChat="optimizeProjectInChat"
+      @appStarted="refreshRunningApps()"
+      @close="showLaunchpad = false"
+    />
+
+    <Teleport to="body">
+      <div
+        v-if="dockCtx.visible && dockCtx.app"
+        class="dock-ctx-menu"
+        :style="{ left: dockCtx.x + 'px', top: dockCtx.y + 'px' }"
+        @click.stop
+      >
+        <div class="dock-ctx-item" @click="dockOpenEmbedded(dockCtx.app!)">🪄 在主区打开</div>
+        <div class="dock-ctx-item" @click="dockOpenWindow(dockCtx.app!)">↗️ 独立窗口打开</div>
+        <div class="dock-ctx-item" @click="dockOpenSource(dockCtx.app!)">📁 打开源码</div>
+        <div class="dock-ctx-item" @click="dockOptimizeInChat(dockCtx.app!)">💬 继续优化</div>
+        <div class="dock-ctx-divider"></div>
+        <div class="dock-ctx-item dock-ctx-danger" @click="dockStopApp(dockCtx.app!)">⏹️ 停止</div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <style scoped>
 .app-root {
+  --dock-accent: #38bdf8;
+  --dock-accent-soft: rgba(56, 189, 248, 0.16);
+  --dock-accent-glow: rgba(56, 189, 248, 0.3);
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: #0f0f10;
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.08), transparent 22%),
+    radial-gradient(circle at bottom left, rgba(245, 158, 11, 0.06), transparent 18%),
+    #090b0f;
   color: #e4e4e7;
   border-radius: 10px;
   overflow: hidden;
 }
 
-/* Custom Title Bar */
 .titlebar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   height: 38px;
-  background: #141416;
-  border-bottom: 1px solid #27272a;
+  background: rgba(15, 18, 24, 0.92);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
   flex-shrink: 0;
   user-select: none;
 }
@@ -262,8 +436,9 @@ onUnmounted(() => {
 
 .titlebar-title {
   font-size: 0.82em;
-  color: #71717a;
-  font-weight: 500;
+  color: #7dd3fc;
+  font-weight: 600;
+  letter-spacing: 0.04em;
 }
 
 .titlebar-controls {
@@ -280,233 +455,257 @@ onUnmounted(() => {
   justify-content: center;
   background: none;
   border: none;
-  color: #a1a1aa;
+  color: #94a3b8;
   cursor: pointer;
   transition: all 0.12s;
 }
 
-.titlebar-btn:hover {
-  background: #27272a;
-  color: #e4e4e7;
-}
+.titlebar-btn:hover { background: rgba(30, 41, 59, 0.65); color: #e2e8f0; }
+.titlebar-btn.close:hover { background: #dc2626; color: #fff; }
 
-.titlebar-btn.close:hover {
-  background: #dc2626;
-  color: #fff;
-}
-
-/* App Layout */
 .app-layout {
   display: flex;
   flex: 1;
-  overflow: hidden;
+  min-height: 0;
 }
 
-/* Sidebar */
-.sidebar {
-  width: 200px;
-  background: #18181b;
-  border-right: 1px solid #27272a;
+.dock-bar {
+  width: 82px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
-  transition: width 0.2s ease;
-}
-
-.sidebar.collapsed {
-  width: 54px;
-}
-
-.sidebar-toggle {
-  padding: 12px;
-  display: flex;
   align-items: center;
-  justify-content: center;
-  color: #71717a;
-  cursor: pointer;
-  transition: color 0.15s;
-  border-bottom: 1px solid #27272a;
+  gap: 14px;
+  padding: 14px 10px 16px;
+  background: linear-gradient(180deg, rgba(10, 14, 20, 0.96), rgba(7, 10, 15, 0.92));
+  border-right: 1px solid rgba(148, 163, 184, 0.12);
 }
 
-.sidebar-toggle:hover {
-  color: #e4e4e7;
+.dock-top,
+.dock-bottom,
+.dock-apps {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
 }
 
-.sidebar-nav {
+.dock-apps {
   flex: 1;
-  padding: 8px 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.sidebar-nav button {
-  display: flex;
-  align-items: center;
   gap: 10px;
-  width: 100%;
-  padding: 10px 12px;
-  background: transparent;
-  border: none;
-  border-radius: 8px;
-  color: #a1a1aa;
-  font-size: 0.88em;
-  text-align: left;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.sidebar.collapsed .sidebar-nav button {
-  justify-content: center;
-  padding: 10px;
-}
-
-.sidebar-nav button:hover {
-  background: #27272a;
-  color: #e4e4e7;
-}
-
-.sidebar-nav button.active {
-  background: #3f3f46;
-  color: #ffffff;
-}
-
-.nav-icon {
-  flex-shrink: 0;
-  font-size: 1.1em;
-  width: 22px;
-  text-align: center;
-}
-
-.nav-text {
-  overflow: hidden;
-}
-
-/* Sidebar Footer */
-.sidebar-footer {
-  padding: 8px 6px;
-  border-top: 1px solid #27272a;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  align-items: stretch;
-}
-
-.settings-btn {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 10px 12px;
-  background: transparent;
-  border: none;
-  border-radius: 8px;
-  color: #a1a1aa;
-  font-size: 0.88em;
-  text-align: left;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.sidebar.collapsed .settings-btn {
-  justify-content: center;
-  padding: 10px;
-}
-
-.settings-btn:hover {
-  background: #27272a;
-  color: #e4e4e7;
-}
-
-.settings-btn.active {
-  background: #3f3f46;
-  color: #ffffff;
-}
-
-.version {
-  font-size: 0.7em;
-  color: #3f3f46;
-  text-align: center;
-  padding: 2px 0;
-}
-
-/* App Dock — running apps strip */
-.app-dock {
-  width: 48px;
-  background: #111113;
-  border-right: 1px solid #27272a;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
   padding: 8px 0;
-  gap: 6px;
-  flex-shrink: 0;
   overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.dock-apps::-webkit-scrollbar {
+  width: 0;
+}
+
+.dock-bottom {
+  gap: 10px;
+}
+
+.main-content {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  background: rgba(6, 10, 16, 0.72);
 }
 
 .dock-item {
   position: relative;
-  width: 36px;
-  height: 36px;
+  width: 56px;
+  height: 56px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
+  border-radius: 18px;
   cursor: pointer;
-  background: #1e1e22;
-  transition: all 0.15s;
+  user-select: none;
+  transition: transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .dock-item:hover {
-  background: #2a2a30;
-  transform: scale(1.08);
+  transform: translateX(3px) scale(1.05);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
+}
+
+.dock-item:active {
+  transform: translateX(1px) scale(0.98);
 }
 
 .dock-item.dock-active {
-  background: #3f3f46;
-  box-shadow: 0 0 0 2px #6366f1;
+  background: var(--dock-accent-soft);
+  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.18), 0 12px 30px rgba(0, 0, 0, 0.28);
 }
 
-.dock-item.dock-windowed {
-  border: 1px dashed #6366f180;
+.dock-item.dock-active::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  width: 3px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--dock-accent);
+  box-shadow: 0 0 10px var(--dock-accent-glow);
 }
 
-.dock-icon {
-  font-size: 1.15em;
+.dock-item::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-4px);
+  background: rgba(15, 23, 42, 0.96);
+  color: #e2e8f0;
+  font-size: 0.72em;
+  line-height: 1;
+  white-space: nowrap;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.dock-item:hover::after {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+.dock-item-icon {
+  font-size: 1.5em;
+  line-height: 1;
+  filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.26));
+}
+
+.dock-app.dock-windowed {
+  outline: 1px dashed rgba(125, 211, 252, 0.34);
+  outline-offset: -2px;
 }
 
 .dock-window-badge {
   position: absolute;
-  top: -2px;
-  right: -2px;
-  font-size: 0.6em;
-  background: #6366f1;
-  color: #fff;
+  top: 4px;
+  right: 4px;
+  font-size: 0.56em;
+  background: var(--dock-accent);
+  color: #082f49;
   width: 14px;
   height: 14px;
-  border-radius: 50%;
+  border-radius: 999px;
   display: flex;
   align-items: center;
   justify-content: center;
   line-height: 1;
+  font-weight: 700;
 }
 
-.dock-indicator {
+.dock-running-dot {
   position: absolute;
-  bottom: -3px;
+  bottom: 6px;
   width: 5px;
   height: 5px;
-  border-radius: 50%;
+  border-radius: 999px;
   background: #22c55e;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.55);
 }
 
-/* Main Content */
-.main-content {
-  flex: 1;
-  overflow: hidden;
+.project-stage {
+  width: 100%;
+  height: 100%;
+  background: #05070b;
+}
+
+.project-stage-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+
+.project-stage-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.project-stage-card {
+  max-width: 420px;
+  padding: 28px 30px;
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.84), rgba(10, 15, 24, 0.92));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+}
+
+.project-stage-kicker {
+  display: inline-block;
+  font-size: 0.74em;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #7dd3fc;
+  margin-bottom: 10px;
+}
+
+.project-stage-title {
+  margin: 0;
+  font-size: 1.4em;
+  color: #f8fafc;
+}
+
+.project-stage-text {
+  margin: 12px 0 0;
+  color: #94a3b8;
+  line-height: 1.7;
+}
+
+.dock-ctx-menu {
+  position: fixed;
+  z-index: 10000;
+  background: rgba(15, 23, 42, 0.96);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+}
+
+.dock-ctx-item {
+  padding: 9px 16px;
+  font-size: 0.85em;
+  color: #e2e8f0;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.dock-ctx-item:hover {
+  background: var(--dock-accent-soft);
+  color: #f8fafc;
+}
+
+.dock-ctx-item.dock-ctx-danger {
+  color: #fda4af;
+}
+
+.dock-ctx-item.dock-ctx-danger:hover {
+  background: rgba(220, 38, 38, 0.92);
+  color: #fff;
+}
+
+.dock-ctx-divider {
+  height: 1px;
+  background: rgba(148, 163, 184, 0.14);
+  margin: 4px 0;
 }
 </style>

@@ -74,6 +74,7 @@ interface ElectronAPI {
   getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
   openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
+  deleteProject: (projectId: string) => Promise<{ success: boolean }>
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void
 
   // Runtime
@@ -92,6 +93,9 @@ interface ElectronAPI {
   // Data
   queryData: (projectId: string, sql: string) => Promise<Record<string, unknown>>
   getDataSummary: (projectId: string) => Promise<Record<string, unknown>>
+  listAllDatabases: () => Promise<Array<Record<string, unknown>>>
+  queryTable: (projectId: string, tableName: string, page: number, pageSize: number) => Promise<{ rows: Record<string, unknown>[]; total: number }>
+  getTableSchema: (projectId: string) => Promise<unknown[] | null>
 
   // Settings
   getAISettings: () => Promise<{ apiKey: string; baseUrl: string; model: string }>
