@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
+import QRCode from 'qrcode'
 import ChatPanel from './renderer/components/chat/ChatPanel.vue'
 import Launchpad from './renderer/components/launchpad/Launchpad.vue'
 import AISettings from './renderer/components/settings/AISettings.vue'
@@ -36,15 +37,20 @@ interface EmbeddedAppState {
 
 /** Maximum seconds to wait for a project's port to become available after starting. */
 const START_TIMEOUT_SECONDS = 15
+/** QR code image dimensions. */
+const QR_CODE_WIDTH = 220
+const QR_CODE_MARGIN = 2
+/** Duration in ms for the "copied" feedback after copying a LAN URL. */
+const COPY_FEEDBACK_MS = 2000
 
 const currentView = ref<MainView>('chat')
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
-const embeddedApps = reactive(new Map<string, EmbeddedAppState>())
+const embeddedApps = ref(new Map<string, EmbeddedAppState>())
 const activeEmbeddedProjectId = ref<string | null>(null)
 const sourceProject = ref<Record<string, unknown> | null>(null)
 const showLaunchpad = ref(false)
 
-const runningApps = reactive(new Map<string, RunningApp>())
+const runningApps = ref(new Map<string, RunningApp>())
 
 const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | null }>({
   visible: false,
@@ -59,15 +65,15 @@ let runningAppsRefreshToken = 0
 
 function clearEmbeddedProject (projectId?: string) {
   if (projectId) {
-    embeddedApps.delete(projectId)
+    embeddedApps.value.delete(projectId)
     if (activeEmbeddedProjectId.value === projectId) {
       // Switch to another open app, or clear
-      const remaining = [...embeddedApps.keys()]
+      const remaining = [...embeddedApps.value.keys()]
       activeEmbeddedProjectId.value = remaining.length > 0 ? remaining[remaining.length - 1] : null
     }
-    if (embeddedApps.size === 0) currentView.value = 'chat'
+    if (embeddedApps.value.size === 0) currentView.value = 'chat'
   } else {
-    embeddedApps.clear()
+    embeddedApps.value.clear()
     activeEmbeddedProjectId.value = null
   }
 }
@@ -118,9 +124,9 @@ async function openEmbeddedProject (projectId: string) {
   activeEmbeddedProjectId.value = projectId
 
   // If already open, just bring it to the front
-  if (embeddedApps.has(projectId)) return
+  if (embeddedApps.value.has(projectId)) return
 
-  embeddedApps.set(projectId, { url: '', loading: true })
+  embeddedApps.value.set(projectId, { url: '', loading: true })
 
   try {
     let status = await getRuntimeStatus(projectId)
@@ -142,7 +148,7 @@ async function openEmbeddedProject (projectId: string) {
       }
     }
 
-    const appState = embeddedApps.get(projectId)
+    const appState = embeddedApps.value.get(projectId)
     if (appState && status.status === 'running' && status.port) {
       appState.url = `http://localhost:${status.port}`
     }
@@ -151,7 +157,7 @@ async function openEmbeddedProject (projectId: string) {
   } catch {
     // keep the view, will show placeholder
   } finally {
-    const appState = embeddedApps.get(projectId)
+    const appState = embeddedApps.value.get(projectId)
     if (appState) appState.loading = false
   }
 }
@@ -235,6 +241,56 @@ async function dockStopApp (app: RunningApp) {
   await refreshRunningApps()
 }
 
+/* ---- LAN Access modal ---- */
+const lanModal = ref<{
+  visible: boolean
+  appName: string
+  lanUrl: string | null
+  proxyUrl: string
+  qrDataUrl: string
+  copied: boolean
+}>({ visible: false, appName: '', lanUrl: null, proxyUrl: '', qrDataUrl: '', copied: false })
+
+async function dockShowLanAccess (app: RunningApp) {
+  hideDockCtx()
+  if (!window.electronAPI) return
+
+  const info = await window.electronAPI.getProjectLanUrl(app.id)
+  const url = info.lanUrl || info.proxyUrl
+
+  let qrDataUrl = ''
+  try {
+    qrDataUrl = await QRCode.toDataURL(url, { width: QR_CODE_WIDTH, margin: QR_CODE_MARGIN })
+  } catch {
+    // QR generation failed; modal will still show the link
+  }
+
+  lanModal.value = {
+    visible: true,
+    appName: app.name,
+    lanUrl: info.lanUrl,
+    proxyUrl: info.proxyUrl,
+    qrDataUrl,
+    copied: false
+  }
+}
+
+async function copyLanUrl () {
+  const url = lanModal.value.lanUrl || lanModal.value.proxyUrl
+  if (!url) return
+  try {
+    await navigator.clipboard.writeText(url)
+    lanModal.value.copied = true
+    setTimeout(() => { lanModal.value.copied = false }, COPY_FEEDBACK_MS)
+  } catch {
+    // Clipboard write may fail without user gesture; ignore
+  }
+}
+
+function closeLanModal () {
+  lanModal.value.visible = false
+}
+
 async function refreshRunningApps () {
   if (!window.electronAPI) return
 
@@ -249,13 +305,14 @@ async function refreshRunningApps () {
     if (refreshToken !== runningAppsRefreshToken) return
 
     const openSet = new Set(openWindows)
+    const oldRunningApps = runningApps.value
     const nextRunningApps = new Map<string, RunningApp>()
 
     for (const proj of projects) {
       const id = proj.id as string
       const status = proj.runtime ?? { status: 'unknown' }
       if (status.status === 'running') {
-        const existing = runningApps.get(id)
+        const existing = oldRunningApps.get(id)
         nextRunningApps.set(id, {
           id,
           name: (proj.name as string) || id,
@@ -266,10 +323,8 @@ async function refreshRunningApps () {
       }
     }
 
-    runningApps.clear()
-    for (const [id, app] of nextRunningApps) {
-      runningApps.set(id, app)
-    }
+    // Atomic replacement ensures Vue detects the change reliably
+    runningApps.value = nextRunningApps
   } catch {
     // ignore transient runtime errors
   }
@@ -295,8 +350,14 @@ onMounted(async () => {
 
   if (window.electronAPI?.onProjectWindowClosed) {
     windowClosedCleanup = window.electronAPI.onProjectWindowClosed((event) => {
-      const app = runningApps.get(event.projectId)
-      if (app) app.isWindow = false
+      const app = runningApps.value.get(event.projectId)
+      if (app) {
+        // Create a new Map to trigger reliable reactive update
+        const next = new Map(runningApps.value)
+        const entry = next.get(event.projectId)
+        if (entry) entry.isWindow = false
+        runningApps.value = next
+      }
     })
   }
 })
@@ -333,7 +394,7 @@ onUnmounted(() => {
         <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
 
         <!-- Embedded apps: each app keeps its iframe alive, only the active one is visible -->
-        <div v-if="currentView === 'app'" class="embedded-app">
+        <div v-show="currentView === 'app'" class="embedded-app">
           <template v-for="[appId, appState] in embeddedApps" :key="appId">
             <div v-show="activeEmbeddedProjectId === appId" class="embedded-slot">
               <div v-if="appState.loading" class="embedded-loading">
@@ -385,8 +446,31 @@ onUnmounted(() => {
         <div class="dock-ctx-item" @click="dockOpenWindow(dockCtx.app!)">↗️ 独立窗口打开</div>
         <div class="dock-ctx-item" @click="dockOpenSource(dockCtx.app!)">📁 打开源码</div>
         <div class="dock-ctx-item" @click="dockOptimizeInChat(dockCtx.app!)">💬 继续优化</div>
+        <div class="dock-ctx-item" @click="dockShowLanAccess(dockCtx.app!)">📱 局域网访问</div>
         <div class="dock-ctx-divider"></div>
         <div class="dock-ctx-item dock-ctx-danger" @click="dockStopApp(dockCtx.app!)">⏹️ 停止</div>
+      </div>
+    </Teleport>
+    <Teleport to="body">
+      <div
+        v-if="lanModal.visible"
+        class="lan-modal-overlay"
+        @click.self="closeLanModal"
+      >
+        <div class="lan-modal">
+          <div class="lan-modal-header">
+            <span>📱 局域网访问 — {{ lanModal.appName }}</span>
+            <button class="lan-modal-close" @click="closeLanModal">✕</button>
+          </div>
+          <div class="lan-modal-body">
+            <img v-if="lanModal.qrDataUrl" :src="lanModal.qrDataUrl" class="lan-qr-img" alt="QR Code" />
+            <p class="lan-modal-hint">手机扫描二维码或复制下方链接</p>
+            <div class="lan-url-row">
+              <code class="lan-url-text" @click="copyLanUrl">{{ lanModal.lanUrl || lanModal.proxyUrl }}</code>
+              <button class="lan-copy-btn" @click="copyLanUrl">{{ lanModal.copied ? '✅ 已复制' : '📋 复制' }}</button>
+            </div>
+          </div>
+        </div>
       </div>
     </Teleport>
   </div>
@@ -532,5 +616,118 @@ onUnmounted(() => {
   height: 1px;
   background: rgba(148, 163, 184, 0.14);
   margin: 4px 0;
+}
+
+/* LAN Access Modal */
+.lan-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+}
+
+.lan-modal {
+  background: rgba(15, 23, 42, 0.97);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 18px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  width: 340px;
+  overflow: hidden;
+}
+
+.lan-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  font-size: 0.92em;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.lan-modal-close {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 1em;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 8px;
+  transition: background 0.12s;
+}
+
+.lan-modal-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+}
+
+.lan-modal-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 22px 18px 20px;
+  gap: 14px;
+}
+
+.lan-qr-img {
+  border-radius: 12px;
+  background: #fff;
+  padding: 6px;
+}
+
+.lan-modal-hint {
+  margin: 0;
+  font-size: 0.82em;
+  color: #94a3b8;
+}
+
+.lan-url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.lan-url-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82em;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
+  color: #7dd3fc;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.lan-url-text:hover {
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.lan-copy-btn {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+  color: #e2e8f0;
+  font-size: 0.82em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.12s;
+}
+
+.lan-copy-btn:hover {
+  background: var(--dock-accent-soft);
+  border-color: rgba(56, 189, 248, 0.3);
 }
 </style>
