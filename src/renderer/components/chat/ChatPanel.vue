@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
-import ConversationSidebar from './chat/ConversationSidebar.vue'
-import MessageList from './chat/MessageList.vue'
-import ChatInput from './chat/ChatInput.vue'
+import ConversationSidebar from './ConversationSidebar.vue'
+import MessageList from './MessageList.vue'
+import ChatInput from './ChatInput.vue'
+import ChatHeader from './ChatHeader.vue'
 
 interface ChatMessage {
   role: string
@@ -93,7 +94,13 @@ const isLoading = computed(() => {
 })
 
 function generateId (): string {
-  return Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8)
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID()
+  }
+
+  const randomBytes = new Uint32Array(2)
+  globalThis.crypto.getRandomValues(randomBytes)
+  return `${Date.now().toString(36)}_${Array.from(randomBytes, value => value.toString(36)).join('')}`
 }
 
 /** Get displayable text from a message (handles string or multipart content). */
@@ -454,35 +461,18 @@ onUnmounted(() => {
     />
 
     <div class="chat-panel">
-      <div class="chat-header">
-        <h2>💬 AI 对话</h2>
-        <div class="header-controls">
-          <div class="provider-selector" v-if="providers.length > 0">
-            <select v-model="activeProviderId" class="select-input">
-              <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
-            <select v-model="selectedModel" class="select-input" v-if="providers.find(p => p.id === activeProviderId)?.models?.length">
-              <option v-for="m in (providers.find(p => p.id === activeProviderId)?.models || [])" :key="m" :value="m">{{ m }}</option>
-            </select>
-          </div>
-          <div v-if="availableSkills.length > 0" class="skill-selector">
-            <button class="skill-toggle-btn" @click="showSkillPicker = !showSkillPicker" :class="{ 'has-active': activeSkillIds.size > 0 }">
-              🧠 Skills{{ activeSkillIds.size > 0 ? ` (${activeSkillIds.size})` : '' }}
-            </button>
-            <div v-if="showSkillPicker" class="skill-dropdown">
-              <div
-                v-for="skill in availableSkills"
-                :key="skill.id"
-                :class="['skill-option', { selected: activeSkillIds.has(skill.id) }]"
-                @click="toggleSkill(skill.id)"
-              >
-                <span class="skill-check">{{ activeSkillIds.has(skill.id) ? '✅' : '⬜' }}</span>
-                <span class="skill-option-name">{{ skill.name }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <ChatHeader
+        :providers="providers"
+        :active-provider-id="activeProviderId"
+        :selected-model="selectedModel"
+        :available-skills="availableSkills"
+        :active-skill-ids="activeSkillIds"
+        :show-skill-picker="showSkillPicker"
+        @update:active-provider-id="activeProviderId = $event"
+        @update:selected-model="selectedModel = $event"
+        @toggle-skill-picker="showSkillPicker = !showSkillPicker"
+        @toggle-skill="toggleSkill"
+      />
 
       <MessageList
         :messages="messages"
@@ -518,116 +508,5 @@ onUnmounted(() => {
   flex-direction: column;
   flex: 1;
   min-width: 0;
-}
-
-.chat-header {
-  padding: 12px 24px;
-  border-bottom: 1px solid #27272a;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.chat-header h2 {
-  margin: 0;
-  font-size: 1.1em;
-  white-space: nowrap;
-}
-
-.header-controls {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-/* Provider selector */
-.provider-selector {
-  display: flex;
-  gap: 8px;
-}
-
-.select-input {
-  background: #27272a;
-  border: 1px solid #3f3f46;
-  border-radius: 6px;
-  color: #e4e4e7;
-  padding: 4px 8px;
-  font-size: 0.8em;
-  cursor: pointer;
-}
-
-.select-input:focus {
-  outline: none;
-  border-color: #3b82f6;
-}
-
-/* Skill selector */
-.skill-selector {
-  position: relative;
-}
-
-.skill-toggle-btn {
-  padding: 4px 12px;
-  background: #27272a;
-  border: 1px solid #3f3f46;
-  border-radius: 6px;
-  color: #a1a1aa;
-  font-size: 0.8em;
-  cursor: pointer;
-  transition: all 0.12s;
-  white-space: nowrap;
-}
-
-.skill-toggle-btn:hover {
-  border-color: #6366f1;
-  color: #e4e4e7;
-}
-
-.skill-toggle-btn.has-active {
-  border-color: #6366f1;
-  color: #c7d2fe;
-  background: #1e1b4b40;
-}
-
-.skill-dropdown {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 6px;
-  min-width: 200px;
-  background: #1e1e22;
-  border: 1px solid #3f3f46;
-  border-radius: 8px;
-  padding: 6px;
-  z-index: 50;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-
-.skill-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 0.82em;
-  color: #a1a1aa;
-  transition: background 0.1s;
-}
-
-.skill-option:hover {
-  background: #27272a;
-  color: #e4e4e7;
-}
-
-.skill-option.selected { color: #c7d2fe; }
-.skill-check { font-size: 0.9em; }
-
-.skill-option-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 </style>
