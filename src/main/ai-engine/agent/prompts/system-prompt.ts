@@ -98,7 +98,7 @@ export function getSystemPrompt (skillContents?: string[]): string {
 ## 修改项目代码的工作流程
 
 当用户要求修改项目代码时:
-1. 先用 read_project_file 了解现有代码结构
+1. 先用 read_project_file 了解现有代码结构；如果文件较大，优先使用 start_line / max_lines 分段读取
 2. 用 write_project_file 写入修改后的代码
 3. 如果可能，用 call_project_api 测试修改是否正常
 4. 向用户报告修改结果
