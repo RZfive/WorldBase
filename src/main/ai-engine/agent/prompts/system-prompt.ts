@@ -83,11 +83,17 @@ export function getSystemPrompt (skillContents?: string[]): string {
 - 前后端通过 REST API 通信
 
 ### 数据库使用规范
-**严禁**在生成的项目中自行安装或初始化 SQLite。如果项目需要持久化数据存储：
-- 使用 JSON 文件作为简单数据存储 (推荐 data/ 目录)
-- 或在 meta 的 dataSchema 中声明数据模型，由外部宿主提供数据库接口
-- 可以使用 lowdb 或类似的 JSON 数据库方案
-- 需要数据库时在 meta.dataSchema 中声明 database: "json"，dbPath 指向 JSON 数据文件
+**严禁**在生成的项目中自行安装、直连或自行初始化 SQLite。所有正式业务数据都必须走 The World 框架提供的标准 SQLite 数据接口：
+- 在 meta.dataSchema 中声明 `database: "sqlite"` 和 `dbPath`（例如 `data/app.sqlite`）
+- 在 `meta.dataSchema.tables` 中完整声明表结构，让宿主自动初始化 SQLite 表
+- 生成的项目运行时通过环境变量 `THE_WORLD_PROJECT_ID`、`THE_WORLD_LAN_BASE_URL`、`THE_WORLD_PROJECT_DATA_BASE_URL` 发现宿主接口
+- 生成的项目后端统一调用宿主接口：
+  - `POST {THE_WORLD_PROJECT_DATA_BASE_URL}/records/save`
+  - `POST {THE_WORLD_PROJECT_DATA_BASE_URL}/records/query`
+  - `GET {THE_WORLD_PROJECT_DATA_BASE_URL}/schema`
+  - `GET {THE_WORLD_PROJECT_DATA_BASE_URL}/tables`
+- 项目的业务数据、项目设计数据、后续要给 AI 分析的数据，都必须保存到这个 SQLite 接口，不要把 JSON 文件当正式数据库
+- AI 后续会通过 `query_project_database` 和 `analyze_project_data` 直接读取并分析同一份 SQLite 数据
 
 ## 修改项目代码的工作流程
 

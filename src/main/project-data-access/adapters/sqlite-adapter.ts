@@ -1,7 +1,10 @@
 import { existsSync } from 'node:fs'
 
 interface SqliteDatabase {
-  prepare(sql: string): { all(): Record<string, unknown>[] }
+  prepare(sql: string): {
+    all(...params: unknown[]): Record<string, unknown>[]
+    run(...params: unknown[]): { changes: number, lastInsertRowid?: number | bigint }
+  }
   close(): void
 }
 
@@ -29,13 +32,9 @@ export class SqliteAdapter {
   private _connections = new Map<string, SqliteDatabase>()
 
   /**
-   * Get or create a read-only database connection.
+   * Get or create a database connection.
    */
   _getDb (dbPath: string): SqliteDatabase {
-    if (!existsSync(dbPath)) {
-      throw new Error(`Database file not found: ${dbPath}`)
-    }
-
     if (this._connections.has(dbPath)) {
       return this._connections.get(dbPath)!
     }
@@ -43,7 +42,7 @@ export class SqliteAdapter {
     // Dynamic import to avoid bundling issues in renderer
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const Database = require('better-sqlite3')
-    const db = new Database(dbPath, { readonly: true }) as SqliteDatabase
+    const db = new Database(dbPath) as SqliteDatabase
     this._connections.set(dbPath, db)
     return db
   }
@@ -51,10 +50,22 @@ export class SqliteAdapter {
   /**
    * Execute a read-only query and return all rows.
    */
-  query (dbPath: string, sql: string): Record<string, unknown>[] {
+  query (dbPath: string, sql: string, params: unknown[] = []): Record<string, unknown>[] {
+    if (!existsSync(dbPath)) {
+      throw new Error(`Database file not found: ${dbPath}`)
+    }
     const db = this._getDb(dbPath)
     const stmt = db.prepare(sql)
-    return stmt.all() as Record<string, unknown>[]
+    return stmt.all(...params) as Record<string, unknown>[]
+  }
+
+  /**
+   * Execute a write query and return mutation metadata.
+   */
+  execute (dbPath: string, sql: string, params: unknown[] = []): { changes: number, lastInsertRowid?: number | bigint } {
+    const db = this._getDb(dbPath)
+    const stmt = db.prepare(sql)
+    return stmt.run(...params)
   }
 
   /**
