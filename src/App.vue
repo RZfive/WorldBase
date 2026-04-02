@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import ChatPanel from './renderer/components/chat/ChatPanel.vue'
 import Launchpad from './renderer/components/launchpad/Launchpad.vue'
 import AISettings from './renderer/components/settings/AISettings.vue'
@@ -39,12 +39,12 @@ const START_TIMEOUT_SECONDS = 15
 
 const currentView = ref<MainView>('chat')
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
-const embeddedApps = reactive(new Map<string, EmbeddedAppState>())
+const embeddedApps = ref(new Map<string, EmbeddedAppState>())
 const activeEmbeddedProjectId = ref<string | null>(null)
 const sourceProject = ref<Record<string, unknown> | null>(null)
 const showLaunchpad = ref(false)
 
-const runningApps = reactive(new Map<string, RunningApp>())
+const runningApps = ref(new Map<string, RunningApp>())
 
 const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | null }>({
   visible: false,
@@ -59,15 +59,15 @@ let runningAppsRefreshToken = 0
 
 function clearEmbeddedProject (projectId?: string) {
   if (projectId) {
-    embeddedApps.delete(projectId)
+    embeddedApps.value.delete(projectId)
     if (activeEmbeddedProjectId.value === projectId) {
       // Switch to another open app, or clear
-      const remaining = [...embeddedApps.keys()]
+      const remaining = [...embeddedApps.value.keys()]
       activeEmbeddedProjectId.value = remaining.length > 0 ? remaining[remaining.length - 1] : null
     }
-    if (embeddedApps.size === 0) currentView.value = 'chat'
+    if (embeddedApps.value.size === 0) currentView.value = 'chat'
   } else {
-    embeddedApps.clear()
+    embeddedApps.value.clear()
     activeEmbeddedProjectId.value = null
   }
 }
@@ -118,9 +118,9 @@ async function openEmbeddedProject (projectId: string) {
   activeEmbeddedProjectId.value = projectId
 
   // If already open, just bring it to the front
-  if (embeddedApps.has(projectId)) return
+  if (embeddedApps.value.has(projectId)) return
 
-  embeddedApps.set(projectId, { url: '', loading: true })
+  embeddedApps.value.set(projectId, { url: '', loading: true })
 
   try {
     let status = await getRuntimeStatus(projectId)
@@ -142,7 +142,7 @@ async function openEmbeddedProject (projectId: string) {
       }
     }
 
-    const appState = embeddedApps.get(projectId)
+    const appState = embeddedApps.value.get(projectId)
     if (appState && status.status === 'running' && status.port) {
       appState.url = `http://localhost:${status.port}`
     }
@@ -151,7 +151,7 @@ async function openEmbeddedProject (projectId: string) {
   } catch {
     // keep the view, will show placeholder
   } finally {
-    const appState = embeddedApps.get(projectId)
+    const appState = embeddedApps.value.get(projectId)
     if (appState) appState.loading = false
   }
 }
@@ -249,13 +249,14 @@ async function refreshRunningApps () {
     if (refreshToken !== runningAppsRefreshToken) return
 
     const openSet = new Set(openWindows)
+    const oldRunningApps = runningApps.value
     const nextRunningApps = new Map<string, RunningApp>()
 
     for (const proj of projects) {
       const id = proj.id as string
       const status = proj.runtime ?? { status: 'unknown' }
       if (status.status === 'running') {
-        const existing = runningApps.get(id)
+        const existing = oldRunningApps.get(id)
         nextRunningApps.set(id, {
           id,
           name: (proj.name as string) || id,
@@ -266,10 +267,8 @@ async function refreshRunningApps () {
       }
     }
 
-    runningApps.clear()
-    for (const [id, app] of nextRunningApps) {
-      runningApps.set(id, app)
-    }
+    // Atomic replacement ensures Vue detects the change reliably
+    runningApps.value = nextRunningApps
   } catch {
     // ignore transient runtime errors
   }
@@ -295,8 +294,14 @@ onMounted(async () => {
 
   if (window.electronAPI?.onProjectWindowClosed) {
     windowClosedCleanup = window.electronAPI.onProjectWindowClosed((event) => {
-      const app = runningApps.get(event.projectId)
-      if (app) app.isWindow = false
+      const app = runningApps.value.get(event.projectId)
+      if (app) {
+        // Create a new Map to trigger reliable reactive update
+        const next = new Map(runningApps.value)
+        const entry = next.get(event.projectId)
+        if (entry) entry.isWindow = false
+        runningApps.value = next
+      }
     })
   }
 })
@@ -333,7 +338,7 @@ onUnmounted(() => {
         <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
 
         <!-- Embedded apps: each app keeps its iframe alive, only the active one is visible -->
-        <div v-if="currentView === 'app'" class="embedded-app">
+        <div v-show="currentView === 'app'" class="embedded-app">
           <template v-for="[appId, appState] in embeddedApps" :key="appId">
             <div v-show="activeEmbeddedProjectId === appId" class="embedded-slot">
               <div v-if="appState.loading" class="embedded-loading">
