@@ -22,7 +22,8 @@ interface TableSchema {
 }
 
 export interface DatabaseDelegate {
-  query: (dbPath: string, sql: string) => Record<string, unknown>[]
+  query: (dbPath: string, sql: string, params?: unknown[]) => Record<string, unknown>[]
+  execute?: (dbPath: string, sql: string, params?: unknown[]) => { changes: number, lastInsertRowid?: number | bigint }
   listTables: (dbPath: string) => string[]
   getSchema: (dbPath: string) => TableSchema[]
   close?: (dbPath: string) => void
@@ -47,11 +48,18 @@ export class BridgeAdapter {
     return this._delegate !== null
   }
 
-  query (dbPath: string, sql: string): Record<string, unknown>[] {
+  query (dbPath: string, sql: string, params?: unknown[]): Record<string, unknown>[] {
     if (!this._delegate) {
       throw new Error('No database delegate configured. Use setDelegate() to inject an external DB interface.')
     }
-    return this._delegate.query(dbPath, sql)
+    return this._delegate.query(dbPath, sql, params)
+  }
+
+  execute (dbPath: string, sql: string, params?: unknown[]): { changes: number, lastInsertRowid?: number | bigint } {
+    if (!this._delegate?.execute) {
+      throw new Error('No writable database delegate configured.')
+    }
+    return this._delegate.execute(dbPath, sql, params)
   }
 
   listTables (dbPath: string): string[] {

@@ -9,14 +9,12 @@ import { ProjectApiClient } from '../src/main/project-api-bridge/api-client.js'
 import { ProjectDataAccess } from '../src/main/project-data-access/data-access.js'
 import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-adapter.js'
 import { LanServer } from '../src/main/lan-server/server.js'
+import { LAN_SERVER_PORT } from '../src/main/constants.js'
 import { SettingsStore, type AIProvidersConfig } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-
-/** Default port for the LAN server. */
-const LAN_SERVER_PORT = 19527
 
 // Ensure only one instance of the app is running.
 // This prevents file lock conflicts when the installer tries to
@@ -77,7 +75,8 @@ async function initializeServices (): Promise<void> {
   // itself doesn't depend on native modules directly.
   const sqliteDelegate = new SqliteAdapter()
   dataAccess.setDatabaseDelegate({
-    query: (dbPath: string, sql: string) => sqliteDelegate.query(dbPath, sql),
+    query: (dbPath: string, sql: string, params?: unknown[]) => sqliteDelegate.query(dbPath, sql, params),
+    execute: (dbPath: string, sql: string, params?: unknown[]) => sqliteDelegate.execute(dbPath, sql, params),
     listTables: (dbPath: string) => sqliteDelegate.listTables(dbPath),
     getSchema: (dbPath: string) => sqliteDelegate.getSchema(dbPath),
     close: (dbPath: string) => sqliteDelegate.close(dbPath),

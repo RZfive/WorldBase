@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { PortManager } from './port-manager.js'
 import { ProcessMonitor } from './process-monitor.js'
+import { LAN_SERVER_PORT } from '../constants.js'
 
 interface LogEntry {
   type: 'stdout' | 'stderr'
@@ -120,7 +121,11 @@ export class RuntimeManager {
     const env = {
       ...process.env,
       PORT: String(port),
-      NODE_ENV: 'development'
+      NODE_ENV: 'development',
+      THE_WORLD_PROJECT_ID: projectId,
+      THE_WORLD_PROJECT_ROOT: projectDir,
+      THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
+      THE_WORLD_PROJECT_DATA_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/projects/${projectId}/data`
     }
 
     const childProcess = spawn(cmd, args, {

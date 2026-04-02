@@ -136,6 +136,84 @@ export function projectsRouter (services: ProjectServices): Router {
     }
   })
 
+  // Get declared/introspected table schema
+  router.get('/:projectId/data/schema', async (req: Request<ProjectIdParams>, res: Response) => {
+    try {
+      const schema = await dataAccess.getTableSchema(req.params.projectId)
+      res.json({ schema })
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message })
+    }
+  })
+
+  // List data tables for generated project use
+  router.get('/:projectId/data/tables', async (req: Request<ProjectIdParams>, res: Response) => {
+    try {
+      const tables = await dataAccess.listTables(req.params.projectId)
+      res.json({ tables })
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message })
+    }
+  })
+
+  // Standard record query interface for generated projects
+  router.post('/:projectId/data/records/query', async (req: Request<ProjectIdParams>, res: Response) => {
+    try {
+      const {
+        table,
+        filters,
+        limit,
+        offset,
+        orderBy,
+        orderDirection,
+        columns
+      } = req.body as {
+        table: string
+        filters?: Record<string, unknown>
+        limit?: number
+        offset?: number
+        orderBy?: string
+        orderDirection?: 'asc' | 'desc'
+        columns?: string[]
+      }
+
+      const rows = await dataAccess.readRecords(req.params.projectId, table, {
+        filters,
+        limit,
+        offset,
+        orderBy,
+        orderDirection,
+        columns
+      })
+      res.json({ rows })
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message })
+    }
+  })
+
+  // Standard record save interface for generated projects
+  router.post('/:projectId/data/records/save', async (req: Request<ProjectIdParams>, res: Response) => {
+    try {
+      const {
+        table,
+        record,
+        records,
+        mode
+      } = req.body as {
+        table: string
+        record?: Record<string, unknown>
+        records?: Array<Record<string, unknown>>
+        mode?: 'insert' | 'upsert'
+      }
+
+      const payload = records || (record ? [record] : [])
+      const result = await dataAccess.saveRecords(req.params.projectId, table, payload, { mode })
+      res.json({ success: true, ...result })
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message })
+    }
+  })
+
   // Analyze project structure
   router.get('/:projectId/analyze', async (req: Request<ProjectIdParams>, res: Response) => {
     try {
