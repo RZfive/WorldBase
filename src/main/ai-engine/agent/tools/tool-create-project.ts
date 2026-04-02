@@ -1,5 +1,6 @@
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
+import type { ProjectDataAccess } from '../../../project-data-access/data-access.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
@@ -7,6 +8,7 @@ import type { BrowserWindow } from 'electron'
 interface ToolServices {
   projectFS: ProjectFS
   runtimeManager: RuntimeManager
+  dataAccess: ProjectDataAccess
   getMainWindow?: () => BrowserWindow | null
 }
 
@@ -122,6 +124,11 @@ export function toolCreateProject (services: ToolServices): Tool {
       onProgress?.('📁 正在创建项目文件...', `共 ${Object.keys(files).length} 个文件`)
 
       const project = await services.projectFS.createProject(projectId, fullMeta, files)
+
+      if ((fullMeta as { dataSchema?: { database?: string } }).dataSchema?.database === 'sqlite') {
+        onProgress?.('🗄️ 正在初始化 SQLite 数据接口...', projectId)
+        await services.dataAccess.ensureProjectDatabase(projectId)
+      }
 
       // Emit each file name for real-time feedback
       for (const filePath of Object.keys(files)) {
