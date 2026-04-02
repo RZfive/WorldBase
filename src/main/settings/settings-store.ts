@@ -20,6 +20,8 @@ export interface AIProvider {
   baseUrl: string
   apiKey: string
   models: string[]
+  /** Context window per model name */
+  modelContextWindows?: Record<string, number>
   /** Currently selected model for this provider */
   activeModel: string
   /** Whether to enable thinking/reasoning mode for compatible models */
@@ -30,6 +32,62 @@ export interface AIProvidersConfig {
   providers: AIProvider[]
   /** ID of the currently active provider */
   activeProviderId: string
+}
+
+export const DEFAULT_MODEL_CONTEXT_WINDOW = 32000
+type RawModelItem = string | { name?: string; contextWindow?: number }
+
+function normalizeContextWindow (value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value)
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed
+    }
+  }
+  return DEFAULT_MODEL_CONTEXT_WINDOW
+}
+
+function normalizeProvider (input: AIProvider): AIProvider {
+  const rawModels = Array.isArray(input.models) ? input.models : []
+  const models: string[] = []
+  const modelContextWindows: Record<string, number> = {}
+  const savedContextWindows = input.modelContextWindows || {}
+
+  for (const item of rawModels as RawModelItem[]) {
+    if (typeof item === 'string') {
+      if (item.trim()) {
+        const name = item.trim()
+        models.push(name)
+        modelContextWindows[name] = normalizeContextWindow(savedContextWindows[name])
+      }
+      continue
+    }
+
+    const name = typeof item?.name === 'string' ? item.name.trim() : ''
+    if (!name) continue
+    models.push(name)
+    modelContextWindows[name] = normalizeContextWindow(item.contextWindow ?? savedContextWindows[name])
+  }
+
+  for (const modelName of models) {
+    modelContextWindows[modelName] = normalizeContextWindow(modelContextWindows[modelName])
+  }
+
+  const activeModel = models.includes(input.activeModel) ? input.activeModel : (models[0] || '')
+
+  return {
+    id: input.id,
+    name: input.name,
+    baseUrl: input.baseUrl,
+    apiKey: input.apiKey,
+    models,
+    modelContextWindows,
+    activeModel,
+    enableThinking: input.enableThinking ?? false
+  }
 }
 
 /**
@@ -109,7 +167,11 @@ export class SettingsStore {
     const settings = this.read()
     const saved = settings.aiProviders as AIProvidersConfig | undefined
     if (saved && saved.providers && saved.providers.length > 0) {
-      return saved
+      const providers = saved.providers.map(provider => normalizeProvider(provider))
+      const activeProviderId = providers.some(p => p.id === saved.activeProviderId)
+        ? saved.activeProviderId
+        : (providers[0]?.id || '')
+      return { providers, activeProviderId }
     }
 
     // Migrate from legacy single-provider config
@@ -121,6 +183,9 @@ export class SettingsStore {
         baseUrl: legacy.baseUrl || 'https://api.openai.com/v1',
         apiKey: legacy.apiKey,
         models: legacy.model ? [legacy.model] : ['gpt-4o'],
+        modelContextWindows: {
+          [legacy.model || 'gpt-4o']: DEFAULT_MODEL_CONTEXT_WINDOW
+        },
         activeModel: legacy.model || 'gpt-4o'
       }
       return { providers: [migrated], activeProviderId: 'default' }
@@ -133,10 +198,16 @@ export class SettingsStore {
    * Save multi-provider configuration.
    */
   saveProviders (config: AIProvidersConfig): void {
-    this.write({ aiProviders: config })
+    const normalized: AIProvidersConfig = {
+      providers: config.providers.map(provider => normalizeProvider(provider)),
+      activeProviderId: config.providers.some(p => p.id === config.activeProviderId)
+        ? config.activeProviderId
+        : (config.providers[0]?.id || '')
+    }
+    this.write({ aiProviders: normalized })
 
     // Also keep legacy fields in sync with the active provider
-    const active = config.providers.find(p => p.id === config.activeProviderId)
+    const active = normalized.providers.find(p => p.id === normalized.activeProviderId)
     if (active) {
       this.saveAISettings({
         apiKey: active.apiKey,

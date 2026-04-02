@@ -23,6 +23,7 @@ export interface AIConfigInput {
   baseUrl?: string
   model?: string
   enableThinking?: boolean
+  contextWindow?: number
 }
 
 /**
@@ -85,6 +86,9 @@ export class AIEngine {
     }
     if (config.enableThinking !== undefined) {
       this.provider.setEnableThinking(config.enableThinking)
+    }
+    if (config.contextWindow !== undefined) {
+      this.provider.setContextWindow(config.contextWindow)
     }
   }
 }

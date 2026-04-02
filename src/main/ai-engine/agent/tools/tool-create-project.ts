@@ -154,7 +154,11 @@ export function toolCreateProject (services: ToolServices): Tool {
           console.warn(`[tool:create_project] Failed to install deps: ${(err as Error).message}`)
           return {
             success: true,
+            ready: false,
+            recoverable: true,
+            stage: 'install',
             project,
+            projectId,
             message: `Project "${name}" created with ID: ${projectId}. Warning: npm install failed — ${(err as Error).message}`
           }
         }
@@ -171,6 +175,16 @@ export function toolCreateProject (services: ToolServices): Tool {
       } catch (err) {
         onProgress?.('⚠️ 启动失败', (err as Error).message)
         console.warn(`[tool:create_project] Failed to auto-start: ${(err as Error).message}`)
+        return {
+          success: true,
+          ready: false,
+          recoverable: true,
+          stage: 'start',
+          project,
+          projectId,
+          logs: services.runtimeManager.getLogs(projectId, 40),
+          message: `Project "${name}" created with ID: ${projectId}, but failed to start automatically — ${(err as Error).message}`
+        }
       }
 
       // Notify renderer again with updated status
