@@ -90,8 +90,12 @@ interface ConversationSummary {
 interface ProviderOption {
   id: string
   name: string
+  baseUrl: string
+  apiKey: string
   models: string[]
+  modelContextWindows?: Record<string, number>
   activeModel: string
+  enableThinking?: boolean
 }
 
 // State
@@ -111,6 +115,8 @@ const providers = ref<ProviderOption[]>([])
 const activeProviderId = ref('')
 const selectedModel = ref('')
 const messagesContainer = ref<HTMLElement | null>(null)
+const streamingLineRef = ref<HTMLElement | null>(null)
+const progressLineRef = ref<HTMLElement | null>(null)
 const toolStatus = ref('')
 const progressSteps = ref<Array<{ stage: string; detail?: string }>>([])
 const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
@@ -190,6 +196,61 @@ function renderMarkdown (text: string): string {
   return sanitizeHtml(raw)
 }
 
+function collapseWhitespace (text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function scrollLineToEnd (target: HTMLElement | null) {
+  nextTick(() => {
+    if (target) {
+      target.scrollLeft = target.scrollWidth
+    }
+  })
+}
+
+function toHTMLElement (target: Element | { $el?: Element } | null): HTMLElement | null {
+  if (!target) return null
+  if (target instanceof HTMLElement) return target
+  if ('$el' in target && target.$el instanceof HTMLElement) return target.$el
+  return null
+}
+
+function setStreamingLineRef (element: Element | { $el?: Element } | null) {
+  streamingLineRef.value = toHTMLElement(element)
+}
+
+function setProgressLineRef (element: Element | { $el?: Element } | null) {
+  progressLineRef.value = toHTMLElement(element)
+}
+
+const latestProgressText = computed(() => {
+  const latest = progressSteps.value[progressSteps.value.length - 1]
+  if (!latest) return ''
+  return latest.detail ? `${latest.stage} ${latest.detail}` : latest.stage
+})
+
+async function persistProviderSelection () {
+  if (!window.electronAPI || !activeProviderId.value) return
+  const providerIndex = providers.value.findIndex(provider => provider.id === activeProviderId.value)
+  if (providerIndex < 0) return
+
+  const nextProviders = providers.value.map((provider, index) => {
+    if (index !== providerIndex) {
+      return provider
+    }
+    return {
+      ...provider,
+      activeModel: selectedModel.value || provider.activeModel || provider.models[0] || ''
+    }
+  })
+
+  providers.value = nextProviders
+  await window.electronAPI.saveProviders({
+    providers: nextProviders,
+    activeProviderId: activeProviderId.value
+  })
+}
+
 /** Toggle thinking block visibility. */
 function toggleThinking (index: number) {
   expandedThinking.value[index] = !expandedThinking.value[index]
@@ -217,12 +278,7 @@ async function loadProviders () {
   if (!window.electronAPI) return
   try {
     const config = await window.electronAPI.getProviders()
-    providers.value = config.providers.map(p => ({
-      id: p.id,
-      name: p.name,
-      models: p.models,
-      activeModel: p.activeModel
-    }))
+    providers.value = config.providers.map(p => ({ ...p }))
     activeProviderId.value = config.activeProviderId
     const active = providers.value.find(p => p.id === activeProviderId.value)
     if (active) {
@@ -395,6 +451,7 @@ async function sendMessage () {
 
   try {
     if (window.electronAPI) {
+      await persistProviderSelection()
       // Set up per-session stream listener
       const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {
         const isForeground = currentConversationId.value === convId
@@ -406,10 +463,21 @@ async function sendMessage () {
             currentThinking.value = thinkingAccum
             scrollToBottom()
           }
+        } else if (event.type === 'reset') {
+          thinkingAccum = ''
+          targetMessages[assistantIdx].content = ''
+          targetMessages[assistantIdx].thinking = ''
+          if (isForeground) {
+            currentThinking.value = ''
+            scrollLineToEnd(streamingLineRef.value)
+          }
         } else if (event.type === 'token' && event.content) {
           targetMessages[assistantIdx].content =
             ((targetMessages[assistantIdx].content as string) || '') + event.content
-          if (isForeground) scrollToBottom()
+          if (isForeground) {
+            scrollToBottom()
+            scrollLineToEnd(streamingLineRef.value)
+          }
         } else if (event.type === 'tool_start' && event.name) {
           if (isForeground) {
             toolStatus.value = `正在执行: ${event.name}...`
@@ -419,6 +487,7 @@ async function sendMessage () {
           if (isForeground) {
             progressSteps.value.push({ stage: event.stage, detail: event.detail })
             scrollToBottom()
+            scrollLineToEnd(progressLineRef.value)
           }
         } else if (event.type === 'tool_end') {
           if (isForeground) {
@@ -638,6 +707,13 @@ onUnmounted(() => {
           </div>
 
           <!-- Assistant message with markdown -->
+          <div
+            v-else-if="isLoading && i === messages.length - 1"
+            :ref="setStreamingLineRef"
+            class="message-content streaming-line"
+          >
+            {{ collapseWhitespace(getMessageText(msg)) || 'AI 正在生成内容…' }}
+          </div>
           <div v-else class="message-content markdown-body" v-html="renderMarkdown(getMessageText(msg))"></div>
           <span v-if="isLoading && i === messages.length - 1 && msg.role === 'assistant'" class="cursor-blink">▍</span>
         </div>
@@ -649,13 +725,8 @@ onUnmounted(() => {
             <span class="tool-status-spinner"></span>
           </div>
           <div v-if="progressSteps.length > 0" class="progress-steps">
-            <div
-              v-for="(step, idx) in progressSteps"
-              :key="idx"
-              :class="['progress-step', { 'step-latest': idx === progressSteps.length - 1 }]"
-            >
-              <span class="step-stage">{{ step.stage }}</span>
-              <span v-if="step.detail" class="step-detail">{{ step.detail }}</span>
+            <div :ref="setProgressLineRef" class="progress-step step-latest">
+              {{ latestProgressText }}
             </div>
           </div>
         </div>
@@ -896,6 +967,18 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 
+.streaming-line {
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: none;
+  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+}
+
+.streaming-line::-webkit-scrollbar {
+  display: none;
+}
+
 /* Markdown content styles */
 .message-content :deep(p) {
   margin: 0.4em 0;
@@ -1116,18 +1199,22 @@ onUnmounted(() => {
 
 .progress-steps {
   padding: 6px 0;
-  max-height: 200px;
-  overflow-y: auto;
 }
 
 .progress-step {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+  display: block;
   padding: 3px 14px;
   font-size: 0.78em;
   color: #71717a;
   animation: stepSlideIn 0.25s ease;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.progress-step::-webkit-scrollbar {
+  display: none;
 }
 
 .progress-step.step-latest {
@@ -1137,24 +1224,6 @@ onUnmounted(() => {
 @keyframes stepSlideIn {
   from { opacity: 0; transform: translateX(-8px); }
   to { opacity: 1; transform: translateX(0); }
-}
-
-.step-stage {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.step-detail {
-  color: #52525b;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-  font-size: 0.92em;
-}
-
-.progress-step.step-latest .step-detail {
-  color: #71717a;
 }
 
 /* Chat input */
