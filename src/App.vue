@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
-import ChatPanel from './renderer/components/ChatPanel.vue'
-import Launchpad from './renderer/components/Launchpad.vue'
-import AISettings from './renderer/components/AISettings.vue'
-import SourceViewer from './renderer/components/SourceViewer.vue'
+import ChatPanel from './renderer/components/chat/ChatPanel.vue'
+import Launchpad from './renderer/components/launchpad/Launchpad.vue'
+import AISettings from './renderer/components/settings/AISettings.vue'
+import SourceViewer from './renderer/components/viewer/SourceViewer.vue'
 import TitleBar from './renderer/components/app/TitleBar.vue'
 import DockBar from './renderer/components/app/DockBar.vue'
 
@@ -495,4 +495,3 @@ onUnmounted(() => {
   margin: 4px 0;
 }
 </style>
-
