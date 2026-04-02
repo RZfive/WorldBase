@@ -20,6 +20,9 @@ interface ProjectStatus {
 
 type MainView = 'chat' | 'app' | 'source' | 'settings'
 
+/** Maximum seconds to wait for a project's port to become available after starting. */
+const START_TIMEOUT_SECONDS = 15
+
 const currentView = ref<MainView>('chat')
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
 const embeddedProjectId = ref<string | null>(null)
@@ -96,15 +99,16 @@ async function openEmbeddedProject (projectId: string) {
     let status = await getRuntimeStatus(projectId)
 
     if (status.status !== 'running') {
-      const result = await window.electronAPI.startProject(projectId) as Record<string, unknown>
-      if (result.status === 'running' || result.status === 'already_running') {
-        status = { status: 'running', port: result.port as number | undefined }
+      const result = await window.electronAPI.startProject(projectId)
+      const runtimeResult = result as { status?: string; port?: number }
+      if (runtimeResult.status === 'running' || runtimeResult.status === 'already_running') {
+        status = { status: 'running', port: runtimeResult.port }
       }
     }
 
-    // If still not ready, poll for up to 15 seconds
+    // If still not ready, poll for up to START_TIMEOUT_SECONDS
     if (!status.port) {
-      for (let i = 0; i < 15; i++) {
+      for (let i = 0; i < START_TIMEOUT_SECONDS; i++) {
         await new Promise(r => setTimeout(r, 1000))
         status = await getRuntimeStatus(projectId)
         if (status.status === 'running' && status.port) break
