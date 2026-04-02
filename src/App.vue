@@ -3,7 +3,7 @@ import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import ChatPanel from './renderer/components/ChatPanel.vue'
 import Launchpad from './renderer/components/Launchpad.vue'
 import AISettings from './renderer/components/AISettings.vue'
-import ProjectDetail from './renderer/components/ProjectDetail.vue'
+import SourceViewer from './renderer/components/SourceViewer.vue'
 
 interface RunningApp {
   id: string
@@ -18,14 +18,14 @@ interface ProjectStatus {
   port?: number
 }
 
-type MainView = 'chat' | 'project' | 'settings'
-type EmbeddedState = 'idle' | 'loading' | 'ready' | 'unavailable'
+type MainView = 'chat' | 'app' | 'source' | 'settings'
 
 const currentView = ref<MainView>('chat')
-const selectedProject = ref<Record<string, unknown> | null>(null)
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
 const embeddedProjectId = ref<string | null>(null)
-const currentProjectTab = ref<'preview' | 'files'>('preview')
+const embeddedAppUrl = ref<string>('')
+const embeddedAppLoading = ref(false)
+const sourceProject = ref<Record<string, unknown> | null>(null)
 const showLaunchpad = ref(false)
 
 const runningApps = reactive(new Map<string, RunningApp>())
@@ -41,9 +41,9 @@ let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
 
 function clearEmbeddedProject () {
-  selectedProject.value = null
   embeddedProjectId.value = null
-  currentProjectTab.value = 'preview'
+  embeddedAppUrl.value = ''
+  embeddedAppLoading.value = false
 }
 
 async function fetchProjectMeta (projectId: string) {
@@ -79,32 +79,56 @@ function toggleLaunchpad () {
   hideDockCtx()
 }
 
-async function openEmbeddedProject (projectId: string, project?: Record<string, unknown>) {
+/**
+ * Open a project embedded in the main area.
+ * Starts the project if not running, then shows its iframe directly.
+ */
+async function openEmbeddedProject (projectId: string) {
   if (!window.electronAPI) return
 
   showLaunchpad.value = false
-  currentView.value = 'project'
-  selectedProject.value = project ?? await fetchProjectMeta(projectId)
   embeddedProjectId.value = projectId
-  currentProjectTab.value = 'preview'
+  embeddedAppUrl.value = ''
+  embeddedAppLoading.value = true
+  currentView.value = 'app'
 
   try {
-    const status = await getRuntimeStatus(projectId)
+    let status = await getRuntimeStatus(projectId)
+
     if (status.status !== 'running') {
-      await window.electronAPI.startProject(projectId)
-      await refreshRunningApps()
+      const result = await window.electronAPI.startProject(projectId) as Record<string, unknown>
+      if (result.status === 'running' || result.status === 'already_running') {
+        status = { status: 'running', port: result.port as number | undefined }
+      }
     }
-  } catch {}
+
+    // If still not ready, poll for up to 15 seconds
+    if (!status.port) {
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 1000))
+        status = await getRuntimeStatus(projectId)
+        if (status.status === 'running' && status.port) break
+      }
+    }
+
+    if (status.status === 'running' && status.port) {
+      embeddedAppUrl.value = `http://localhost:${status.port}`
+    }
+
+    await refreshRunningApps()
+  } catch {
+    // keep the view, will show placeholder
+  } finally {
+    embeddedAppLoading.value = false
+  }
 }
 
 async function openProjectSource (project: Record<string, unknown>) {
   const projectId = project.id as string | undefined
   if (!projectId) return
   showLaunchpad.value = false
-  currentView.value = 'project'
-  selectedProject.value = project
-  embeddedProjectId.value = projectId
-  currentProjectTab.value = 'files'
+  sourceProject.value = project
+  currentView.value = 'source'
 }
 
 async function openProjectFromLaunchpad (project: Record<string, unknown>) {
@@ -118,7 +142,7 @@ async function openProjectFromLaunchpad (project: Record<string, unknown>) {
     return
   }
 
-  await openEmbeddedProject(projectId, project)
+  await openEmbeddedProject(projectId)
 }
 
 async function switchToApp (app: RunningApp) {
@@ -141,11 +165,6 @@ function hideDockCtx () {
   dockCtx.value.visible = false
 }
 
-async function dockOpenEmbedded (app: RunningApp) {
-  hideDockCtx()
-  await openEmbeddedProject(app.id)
-}
-
 async function dockOpenWindow (app: RunningApp) {
   hideDockCtx()
   if (!window.electronAPI) return
@@ -155,6 +174,13 @@ async function dockOpenWindow (app: RunningApp) {
     await window.electronAPI.startProject(app.id)
   }
   await window.electronAPI.openProjectWindow(app.id)
+
+  // When opened in a standalone window, base shows chat
+  if (embeddedProjectId.value === app.id) {
+    clearEmbeddedProject()
+  }
+  currentView.value = 'chat'
+
   await refreshRunningApps()
 }
 
@@ -286,7 +312,7 @@ onUnmounted(() => {
           <div
             v-for="[appId, app] in runningApps"
             :key="appId"
-            :class="['dock-item', 'dock-app', { 'dock-active': currentView === 'project' && embeddedProjectId === appId, 'dock-windowed': app.isWindow }]"
+            :class="['dock-item', 'dock-app', { 'dock-active': currentView === 'app' && embeddedProjectId === appId, 'dock-windowed': app.isWindow }]"
             :title="app.name + (app.isWindow ? ' (独立窗口)' : '')"
             :data-tip="app.name"
             @click="switchToApp(app)"
@@ -321,15 +347,33 @@ onUnmounted(() => {
 
       <main class="main-content">
         <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
-        <ProjectDetail
-          v-if="currentView === 'project' && selectedProject"
-          :project="selectedProject"
-          :defaultTab="currentProjectTab"
-          @back="clearEmbeddedProject(); currentView = 'chat'"
-          @optimizeInChat="optimizeProjectInChat"
-          @appStarted="refreshRunningApps()"
-          @appStopped="refreshRunningApps()"
+
+        <!-- Embedded app: full-area iframe, no controls -->
+        <div v-if="currentView === 'app'" class="embedded-app">
+          <div v-if="embeddedAppLoading" class="embedded-loading">
+            <span class="embedded-spinner">⏳</span>
+            <p>应用启动中…</p>
+          </div>
+          <iframe
+            v-else-if="embeddedAppUrl"
+            :src="embeddedAppUrl"
+            class="embedded-frame"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+            allow="clipboard-read; clipboard-write"
+          ></iframe>
+          <div v-else class="embedded-unavailable">
+            <p>应用未能启动</p>
+            <button class="embedded-retry-btn" @click="embeddedProjectId && openEmbeddedProject(embeddedProjectId)">🔄 重试</button>
+          </div>
+        </div>
+
+        <!-- Source code viewer -->
+        <SourceViewer
+          v-if="currentView === 'source' && sourceProject"
+          :project="sourceProject"
+          @back="sourceProject = null; currentView = 'chat'"
         />
+
         <AISettings v-if="currentView === 'settings'" />
       </main>
     </div>
@@ -350,7 +394,6 @@ onUnmounted(() => {
         :style="{ left: dockCtx.x + 'px', top: dockCtx.y + 'px' }"
         @click.stop
       >
-        <div class="dock-ctx-item" @click="dockOpenEmbedded(dockCtx.app!)">🪄 在主区打开</div>
         <div class="dock-ctx-item" @click="dockOpenWindow(dockCtx.app!)">↗️ 独立窗口打开</div>
         <div class="dock-ctx-item" @click="dockOpenSource(dockCtx.app!)">📁 打开源码</div>
         <div class="dock-ctx-item" @click="dockOptimizeInChat(dockCtx.app!)">💬 继续优化</div>
@@ -591,6 +634,74 @@ onUnmounted(() => {
   height: 100%;
   border: none;
   background: #fff;
+}
+
+.embedded-app {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #05070b;
+}
+
+.embedded-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+
+.embedded-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: #94a3b8;
+}
+
+.embedded-spinner {
+  font-size: 2em;
+  animation: spin 1.2s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.embedded-loading p {
+  margin: 0;
+  font-size: 0.9em;
+}
+
+.embedded-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: #64748b;
+}
+
+.embedded-unavailable p {
+  margin: 0;
+  font-size: 0.95em;
+}
+
+.embedded-retry-btn {
+  padding: 8px 18px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+  color: #e2e8f0;
+  cursor: pointer;
+  font-size: 0.85em;
+  transition: all 0.12s;
+}
+
+.embedded-retry-btn:hover {
+  background: rgba(56, 189, 248, 0.14);
+  border-color: rgba(56, 189, 248, 0.3);
 }
 
 .project-stage-empty {
