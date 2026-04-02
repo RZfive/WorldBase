@@ -41,7 +41,7 @@ function sanitizeNode (node: Element): void {
           el.removeAttribute(attr.name)
           continue
         }
-        if ((name === 'href' || name === 'src') && attr.value.trim().toLowerCase().startsWith('javascript:')) {
+        if ((name === 'href' || name === 'src') && /^\s*(javascript|data|vbscript):/i.test(attr.value)) {
           el.removeAttribute(attr.name)
         }
       }
