@@ -10,14 +10,16 @@
 
 ### 1. `read_project_file` — 读取项目文件
 
-读取指定项目的文件内容，用于 AI 理解代码结构。
+读取指定项目的文件内容，用于 AI 理解代码结构。大文件支持按行分段读取。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `project_id` | string | 项目 ID |
 | `file_path` | string | 相对于项目根目录的路径 |
+| `start_line` | integer? | 起始行号，从 1 开始 |
+| `max_lines` | integer? | 最多读取的行数，默认 200，最大 400 |
 
-**返回**: 文件内容 (string)
+**返回**: 包含 `content`、`total_lines`、`start_line`、`end_line`、`has_more`、`next_start_line` 等字段的对象。
 
 ---
 

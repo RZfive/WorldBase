@@ -20,6 +20,13 @@ interface ProjectStatus {
   port?: number
 }
 
+interface ProjectListItem {
+  id: string
+  name?: string
+  type?: string
+  runtime?: ProjectStatus
+}
+
 type MainView = 'chat' | 'app' | 'source' | 'settings'
 
 /** Maximum seconds to wait for a project's port to become available after starting. */
@@ -44,6 +51,7 @@ const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | 
 
 let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
+let runningAppsRefreshToken = 0
 
 function clearEmbeddedProject () {
   embeddedProjectId.value = null
@@ -217,32 +225,38 @@ async function dockStopApp (app: RunningApp) {
 async function refreshRunningApps () {
   if (!window.electronAPI) return
 
+  const refreshToken = ++runningAppsRefreshToken
+
   try {
-    const projects = await window.electronAPI.listProjects()
-    const openWindows = await window.electronAPI.getOpenWindows()
+    const [projects, openWindows] = await Promise.all([
+      window.electronAPI.listProjects() as unknown as Promise<ProjectListItem[]>,
+      window.electronAPI.getOpenWindows()
+    ])
+
+    if (refreshToken !== runningAppsRefreshToken) return
+
     const openSet = new Set(openWindows)
-    const nextIds = new Set<string>()
+    const nextRunningApps = new Map<string, RunningApp>()
 
     for (const proj of projects) {
       const id = proj.id as string
-      const status = await getRuntimeStatus(id)
+      const status = proj.runtime ?? { status: 'unknown' }
       if (status.status === 'running') {
         const existing = runningApps.get(id)
-        runningApps.set(id, {
+        nextRunningApps.set(id, {
           id,
           name: (proj.name as string) || id,
           type: (proj.type as string) || 'unknown',
           port: status.port,
           isWindow: openSet.has(id) || (existing?.isWindow ?? false)
         })
-        nextIds.add(id)
       }
     }
 
-    for (const id of Array.from(runningApps.keys())) {
-      if (!nextIds.has(id)) runningApps.delete(id)
+    runningApps.clear()
+    for (const [id, app] of nextRunningApps) {
+      runningApps.set(id, app)
     }
-
   } catch {
     // ignore transient runtime errors
   }
@@ -333,17 +347,17 @@ onUnmounted(() => {
         />
 
         <AISettings v-if="currentView === 'settings'" />
+
+        <Launchpad
+          v-if="showLaunchpad"
+          @select="openProjectFromLaunchpad"
+          @viewSource="openProjectSource"
+          @optimizeInChat="optimizeProjectInChat"
+          @appStarted="refreshRunningApps()"
+          @close="showLaunchpad = false"
+        />
       </main>
     </div>
-
-    <Launchpad
-      v-if="showLaunchpad"
-      @select="openProjectFromLaunchpad"
-      @viewSource="openProjectSource"
-      @optimizeInChat="optimizeProjectInChat"
-      @appStarted="refreshRunningApps()"
-      @close="showLaunchpad = false"
-    />
 
     <Teleport to="body">
       <div
@@ -389,6 +403,7 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   overflow: hidden;
+  position: relative;
   background: rgba(6, 10, 16, 0.72);
 }
 
