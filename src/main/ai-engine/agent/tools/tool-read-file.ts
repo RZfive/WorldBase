@@ -60,7 +60,7 @@ export function toolReadFile (services: ToolServices): Tool {
 
       return {
         file_path,
-        content: `${head}\n\n...[中间省略 ${content.length - (EDGE_RETURN_CHARS * 2)} 个字符]...\n\n${tail}`,
+        content: `${head}\n\n...[truncated ${content.length - (EDGE_RETURN_CHARS * 2)} characters]...\n\n${tail}`,
         truncated: true,
         total_chars: content.length
       }
