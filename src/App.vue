@@ -240,7 +240,7 @@ async function refreshRunningApps () {
 
     for (const proj of projects) {
       const id = proj.id as string
-      const status = proj.runtime ?? await getRuntimeStatus(id)
+      const status = proj.runtime ?? { status: 'unknown' }
       if (status.status === 'running') {
         const existing = runningApps.get(id)
         nextRunningApps.set(id, {
