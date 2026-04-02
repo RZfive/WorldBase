@@ -56,6 +56,7 @@ const tableColumns = computed(() => {
 
 const totalPages = computed(() => Math.max(1, Math.ceil(tableTotal.value / tablePageSize.value)))
 
+// Watch active prop to trigger lazy loading on first tab visit
 watch(() => props.active, (val) => {
   if (val && databases.value.length === 0) {
     loadDatabases()
