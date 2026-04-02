@@ -196,7 +196,7 @@ function renderMarkdown (text: string): string {
   return sanitizeHtml(raw)
 }
 
-function toSingleLineText (text: string): string {
+function collapseWhitespace (text: string): string {
   return text.replace(/\s+/g, ' ').trim()
 }
 
@@ -712,7 +712,7 @@ onUnmounted(() => {
             :ref="setStreamingLineRef"
             class="message-content streaming-line"
           >
-            {{ toSingleLineText(getMessageText(msg)) || 'AI 正在生成内容…' }}
+            {{ collapseWhitespace(getMessageText(msg)) || 'AI 正在生成内容…' }}
           </div>
           <div v-else class="message-content markdown-body" v-html="renderMarkdown(getMessageText(msg))"></div>
           <span v-if="isLoading && i === messages.length - 1 && msg.role === 'assistant'" class="cursor-blink">▍</span>

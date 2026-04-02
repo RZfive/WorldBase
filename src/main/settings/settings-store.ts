@@ -35,6 +35,7 @@ export interface AIProvidersConfig {
 }
 
 export const DEFAULT_MODEL_CONTEXT_WINDOW = 32000
+type RawModelItem = string | { name?: string; contextWindow?: number }
 
 function normalizeContextWindow (value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
@@ -55,7 +56,7 @@ function normalizeProvider (input: AIProvider): AIProvider {
   const modelContextWindows: Record<string, number> = {}
   const savedContextWindows = input.modelContextWindows || {}
 
-  for (const item of rawModels as Array<string | { name?: string; contextWindow?: number }>) {
+  for (const item of rawModels as RawModelItem[]) {
     if (typeof item === 'string') {
       if (item.trim()) {
         const name = item.trim()
