@@ -106,20 +106,46 @@ export class RuntimeManager {
       console.log(`[RuntimeManager] Dependencies installed for ${projectId}`)
     }
 
-    // Allocate a port (prefer the port detected from the project's scripts)
-    const port = await this.portManager.allocate(projectId, backendConfig.port as number | undefined)
+    // Allocate a port dynamically; the configured port is a preference only
+    const configuredPort = backendConfig.port as number | undefined
+    const port = await this.portManager.allocate(projectId, configuredPort)
 
     // Determine working directory and command
     const cwd = backendConfig.cwd
       ? path.join(projectDir, backendConfig.cwd as string)
       : projectDir
 
-    const command = (backendConfig.command as string) || 'node server.js'
+    let command = (backendConfig.command as string) || 'node server.js'
+
+    // If allocated port differs from the configured port and the command is an
+    // npm script wrapper, extract the raw script and replace the hardcoded port
+    // with $PORT so the dynamically allocated port is always used.
+    if (configuredPort && port !== configuredPort &&
+        (command === 'npm start' || command === 'npm run dev')) {
+      try {
+        const pkgRaw = await fs.readFile(packageJsonPath, 'utf-8')
+        const pkg = JSON.parse(pkgRaw) as Record<string, unknown>
+        const scripts = (pkg.scripts || {}) as Record<string, string>
+        const scriptKey = command === 'npm start' ? 'start' : 'dev'
+        const rawScript = scripts[scriptKey]
+        if (rawScript) {
+          const replaced = this._replacePortInCommand(rawScript, configuredPort)
+          if (replaced !== rawScript) {
+            command = replaced
+          }
+        }
+      } catch {
+        // If reading package.json fails, continue with original command
+      }
+    }
+
     const [cmd, ...args] = command.split(' ')
 
-    // Spawn the process
+    // Spawn the process — include node_modules/.bin in PATH so that raw
+    // commands extracted from npm scripts can resolve locally-installed binaries.
     const env = {
       ...process.env,
+      PATH: `${path.join(cwd, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH || ''}`,
       PORT: String(port),
       NODE_ENV: 'development',
       THE_WORLD_PROJECT_ID: projectId,
@@ -326,12 +352,20 @@ export class RuntimeManager {
 
         if (scripts.start) {
           const port = this._extractPortFromScript(scripts.start)
-          return { command: 'npm start', ...(port ? { port } : {}) }
+          if (port) {
+            // Replace the hardcoded port with $PORT (shell-expanded) so each
+            // project always uses the dynamically allocated port.
+            return { command: this._replacePortInCommand(scripts.start, port) }
+          }
+          return { command: 'npm start' }
         }
 
         if (scripts.dev) {
           const port = this._extractPortFromScript(scripts.dev)
-          return { command: 'npm run dev', ...(port ? { port } : {}) }
+          if (port) {
+            return { command: this._replacePortInCommand(scripts.dev, port) }
+          }
+          return { command: 'npm run dev' }
         }
       } catch {
         // Invalid package.json, fall through
@@ -373,5 +407,21 @@ export class RuntimeManager {
       return parseInt(shortMatch[1], 10)
     }
     return null
+  }
+
+  /**
+   * Replace a hardcoded port number in a command with the `$PORT` shell variable.
+   * Only replaces port values that appear directly after known port flags to avoid
+   * accidental substitutions in other parts of the command.
+   */
+  private _replacePortInCommand (command: string, port: number): string {
+    const p = String(port)
+    // --port=3000, --port 3000
+    let result = command.replace(new RegExp(`(--port[=\\s])${p}\\b`), '$1$PORT')
+    // -p 3000
+    result = result.replace(new RegExp(`(-p\\s)${p}\\b`), '$1$PORT')
+    // -p3000 (no space)
+    result = result.replace(new RegExp(`(-p)${p}\\b`), '$1$PORT')
+    return result
   }
 }
