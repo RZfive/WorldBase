@@ -10,6 +10,9 @@ interface ReadFileArgs {
   file_path: string
 }
 
+const MAX_RETURN_CHARS = 40000
+const EDGE_RETURN_CHARS = 20000
+
 export interface Tool {
   definition: ToolDefinition
   handler: (args: Record<string, unknown>, onProgress?: (stage: string, detail?: string) => void) => Promise<unknown>
@@ -41,7 +44,19 @@ export function toolReadFile (services: ToolServices): Tool {
     handler: async (args) => {
       const { project_id, file_path } = args as unknown as ReadFileArgs
       const content = await services.projectFS.readFile(project_id, file_path)
-      return { file_path, content }
+      if (content.length <= MAX_RETURN_CHARS) {
+        return { file_path, content, truncated: false, total_chars: content.length }
+      }
+
+      const head = content.slice(0, EDGE_RETURN_CHARS)
+      const tail = content.slice(-EDGE_RETURN_CHARS)
+
+      return {
+        file_path,
+        content: `${head}\n\n...[中间省略 ${content.length - (EDGE_RETURN_CHARS * 2)} 个字符]...\n\n${tail}`,
+        truncated: true,
+        total_chars: content.length
+      }
     }
   }
 }

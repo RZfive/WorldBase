@@ -7,7 +7,7 @@ export type StreamEvent =
   | { type: 'token'; content: string }
   | { type: 'thinking'; content: string }
   | { type: 'tool_start'; name: string }
-  | { type: 'tool_end'; name: string; result: unknown }
+  | { type: 'tool_end'; name: string }
   | { type: 'progress'; stage: string; detail?: string }
   | { type: 'reset' }
   | { type: 'done'; message: ChatMessage; thinking?: string }
@@ -212,7 +212,7 @@ export class AgentCore {
           result = { error: (err as Error).message }
         }
 
-        yield { type: 'tool_end', name: toolName, result }
+        yield { type: 'tool_end', name: toolName }
 
         messages.push({
           role: 'tool',
