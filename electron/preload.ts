@@ -71,6 +71,7 @@ export interface ElectronAPI {
   getProject: (projectId: string) => Promise<Record<string, unknown>>
   getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
+  writeFile: (projectId: string, filePath: string, content: string) => Promise<{ success: boolean }>
   openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
   deleteProject: (projectId: string) => Promise<{ success: boolean }>
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void
@@ -140,6 +141,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getProject: (projectId: string) => ipcRenderer.invoke('projects:get', projectId),
   getFileTree: (projectId: string) => ipcRenderer.invoke('projects:getFileTree', projectId),
   readFile: (projectId: string, filePath: string) => ipcRenderer.invoke('projects:readFile', projectId, filePath),
+  writeFile: (projectId: string, filePath: string, content: string) => ipcRenderer.invoke('projects:writeFile', projectId, filePath, content),
   openProjectFolder: (projectId: string) => ipcRenderer.invoke('projects:openFolder', projectId),
   deleteProject: (projectId: string) => ipcRenderer.invoke('projects:delete', projectId),
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => {
