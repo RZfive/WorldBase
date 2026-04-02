@@ -70,8 +70,8 @@ export function toolReadFile (services: ToolServices): Tool {
     handler: async (args): Promise<ReadFileResult> => {
       const { project_id, file_path, start_line, max_lines } = args as unknown as ReadFileArgs
       const content = await services.projectFS.readFile(project_id, file_path)
-      const lines = content.split('\n')
-      const totalLines = content === '' ? 0 : lines.length
+      const lines = content === '' ? [] : content.split('\n')
+      const totalLines = lines.length
       const normalizedStartLine = Math.max(1, Math.floor(start_line || 1))
       const requestedMaxLines = Math.min(
         MAX_SEGMENT_LINES,
@@ -112,7 +112,7 @@ export function toolReadFile (services: ToolServices): Tool {
 
       return {
         file_path,
-        content: `${head}\n\n...[truncated ${truncatedChars} characters from lines ${startLineNumber}-${endLineNumber}]...\n\n${tail}`,
+        content: `${head}\n\n...[truncated ${truncatedChars} characters within requested segment lines ${startLineNumber}-${endLineNumber}]...\n\n${tail}`,
         truncated: true,
         total_chars: content.length,
         total_lines: totalLines,
