@@ -94,7 +94,13 @@ const isLoading = computed(() => {
 })
 
 function generateId (): string {
-  return Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8)
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID()
+  }
+
+  const randomBytes = new Uint32Array(2)
+  globalThis.crypto.getRandomValues(randomBytes)
+  return `${Date.now().toString(36)}_${Array.from(randomBytes, value => value.toString(36)).join('')}`
 }
 
 /** Get displayable text from a message (handles string or multipart content). */
