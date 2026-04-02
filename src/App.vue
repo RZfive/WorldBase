@@ -37,6 +37,11 @@ interface EmbeddedAppState {
 
 /** Maximum seconds to wait for a project's port to become available after starting. */
 const START_TIMEOUT_SECONDS = 15
+/** QR code image dimensions. */
+const QR_CODE_WIDTH = 220
+const QR_CODE_MARGIN = 2
+/** Duration in ms for the "copied" feedback after copying a LAN URL. */
+const COPY_FEEDBACK_MS = 2000
 
 const currentView = ref<MainView>('chat')
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
@@ -255,7 +260,7 @@ async function dockShowLanAccess (app: RunningApp) {
 
   let qrDataUrl = ''
   try {
-    qrDataUrl = await QRCode.toDataURL(url, { width: 220, margin: 2 })
+    qrDataUrl = await QRCode.toDataURL(url, { width: QR_CODE_WIDTH, margin: QR_CODE_MARGIN })
   } catch {
     // QR generation failed; modal will still show the link
   }
@@ -276,7 +281,7 @@ async function copyLanUrl () {
   try {
     await navigator.clipboard.writeText(url)
     lanModal.value.copied = true
-    setTimeout(() => { lanModal.value.copied = false }, 2000)
+    setTimeout(() => { lanModal.value.copied = false }, COPY_FEEDBACK_MS)
   } catch {
     // Clipboard write may fail without user gesture; ignore
   }

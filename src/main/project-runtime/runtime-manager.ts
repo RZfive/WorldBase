@@ -352,20 +352,12 @@ export class RuntimeManager {
 
         if (scripts.start) {
           const port = this._extractPortFromScript(scripts.start)
-          if (port) {
-            // Replace the hardcoded port with $PORT (shell-expanded) so each
-            // project always uses the dynamically allocated port.
-            return { command: this._replacePortInCommand(scripts.start, port) }
-          }
-          return { command: 'npm start' }
+          return { command: 'npm start', ...(port ? { port } : {}) }
         }
 
         if (scripts.dev) {
           const port = this._extractPortFromScript(scripts.dev)
-          if (port) {
-            return { command: this._replacePortInCommand(scripts.dev, port) }
-          }
-          return { command: 'npm run dev' }
+          return { command: 'npm run dev', ...(port ? { port } : {}) }
         }
       } catch {
         // Invalid package.json, fall through
