@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { LaunchFolder, LaunchpadGridItem, Project } from './types'
+import { getProjectIcon } from '../../utils/project-icon'
 
 const props = defineProps<{
   gridItems: LaunchpadGridItem[]
@@ -29,13 +30,6 @@ function asFolder (item: LaunchpadGridItem): LaunchFolder {
 
 function asProject (item: LaunchpadGridItem): Project {
   return item.data as Project
-}
-
-function getIcon (type?: string) {
-  if (type === 'frontend') return '🎨'
-  if (type === 'backend') return '⚙️'
-  if (type === 'fullstack') return '🚀'
-  return '📦'
 }
 
 function updateRenameInput (event: Event) {
@@ -69,7 +63,7 @@ function updateRenameInput (event: Event) {
               v-for="projectId in asFolder(item).projectIds.slice(0, 9)"
               :key="projectId"
               class="folder-mini"
-            >{{ getIcon(props.projects.find(project => project.id === projectId)?.type) }}</span>
+            >{{ getProjectIcon(props.projects.find(project => project.id === projectId)?.type) }}</span>
             <span
               v-for="n in Math.max(0, 4 - Math.min(asFolder(item).projectIds.length, 9))"
               :key="'empty-' + n"
@@ -93,7 +87,7 @@ function updateRenameInput (event: Event) {
 
       <template v-else>
         <div class="lp-app-icon">
-          <span class="lp-app-emoji">{{ getIcon(asProject(item).type) }}</span>
+          <span class="lp-app-emoji">{{ getProjectIcon(asProject(item).type) }}</span>
           <span v-if="asProject(item).runtime?.status === 'running'" class="lp-running-badge"></span>
         </div>
         <span class="lp-cell-name">{{ asProject(item).name || asProject(item).id }}</span>
