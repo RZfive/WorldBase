@@ -49,12 +49,14 @@ export class OpenAIProvider {
   private baseUrl: string
   private model: string
   private enableThinking: boolean
+  private contextWindow: number
 
   constructor () {
     this.apiKey = process.env.OPENAI_API_KEY || ''
     this.baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
     this.model = process.env.OPENAI_MODEL || 'gpt-4o'
     this.enableThinking = false
+    this.contextWindow = 32000
   }
 
   setApiKey (key: string): void {
@@ -71,6 +73,16 @@ export class OpenAIProvider {
 
   getModel (): string {
     return this.model
+  }
+
+  setContextWindow (contextWindow: number): void {
+    if (Number.isFinite(contextWindow) && contextWindow > 0) {
+      this.contextWindow = Math.floor(contextWindow)
+    }
+  }
+
+  getContextWindow (): number {
+    return this.contextWindow
   }
 
   setEnableThinking (enable: boolean): void {
@@ -99,19 +111,7 @@ export class OpenAIProvider {
       body.tool_choice = 'auto'
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`
-      },
-      body: JSON.stringify(body)
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`OpenAI API error (${response.status}): ${errorText}`)
-    }
+    const response = await this.fetchWithRetry(body, false)
 
     const data = await response.json() as { choices: { message: ChatMessage }[] }
     return data.choices[0].message
@@ -151,19 +151,7 @@ export class OpenAIProvider {
       body.tool_choice = 'auto'
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`
-      },
-      body: JSON.stringify(body)
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`OpenAI API error (${response.status}): ${errorText}`)
-    }
+    const response = await this.fetchWithRetry(body, true)
 
     const reader = response.body?.getReader()
     if (!reader) throw new Error('No response body')
@@ -245,5 +233,85 @@ export class OpenAIProvider {
     }
 
     yield { type: 'done', message }
+  }
+
+  private async fetchWithRetry (body: ChatCompletionBody, stream: boolean): Promise<Response> {
+    const maxAttempts = 3
+    let lastError: Error | null = null
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), stream ? 90000 : 60000)
+
+      try {
+        const response = await fetch(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.apiKey}`
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        })
+
+        if (response.ok) {
+          clearTimeout(timeout)
+          return response
+        }
+
+        const errorText = await response.text()
+        const error = new Error(`OpenAI API error (${response.status}): ${errorText}`)
+        clearTimeout(timeout)
+
+        if (!this.isRetryableStatus(response.status) || attempt === maxAttempts) {
+          throw error
+        }
+
+        lastError = error
+      } catch (err) {
+        clearTimeout(timeout)
+        const normalized = this.normalizeRequestError(err)
+        if (!this.isRetryableError(normalized) || attempt === maxAttempts) {
+          throw normalized
+        }
+        lastError = normalized
+      }
+
+      await this.delay(Math.min(1000 * (2 ** (attempt - 1)), 5000))
+    }
+
+    throw lastError || new Error('AI request failed')
+  }
+
+  private isRetryableStatus (status: number): boolean {
+    return status === 408 || status === 409 || status === 429 || (status >= 500 && status <= 504)
+  }
+
+  private isRetryableError (error: Error): boolean {
+    const message = error.message.toLowerCase()
+    return message.includes('terminated') ||
+      message.includes('timeout') ||
+      message.includes('timed out') ||
+      message.includes('network') ||
+      message.includes('fetch failed') ||
+      message.includes('socket hang up') ||
+      message.includes('econnreset') ||
+      message.includes('eai_again') ||
+      message.includes('aborted') ||
+      message.includes('unexpected end of json input')
+  }
+
+  private normalizeRequestError (error: unknown): Error {
+    if (error instanceof Error) {
+      if (error.name === 'AbortError') {
+        return new Error('AI request timed out')
+      }
+      return error
+    }
+    return new Error(String(error))
+  }
+
+  private async delay (ms: number): Promise<void> {
+    await new Promise(resolve => setTimeout(resolve, ms))
   }
 }

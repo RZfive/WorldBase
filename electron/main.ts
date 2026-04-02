@@ -92,8 +92,19 @@ async function initializeServices (): Promise<void> {
   })
 
   // Apply saved AI settings on startup
+  const providersConfig = settingsStore.getProviders()
+  const activeProvider = providersConfig.providers.find(p => p.id === providersConfig.activeProviderId)
   const savedAI = settingsStore.getAISettings()
-  if (savedAI.apiKey || savedAI.baseUrl || savedAI.model) {
+  if (activeProvider) {
+    aiEngine.configure({
+      apiKey: activeProvider.apiKey,
+      baseUrl: activeProvider.baseUrl,
+      model: activeProvider.activeModel,
+      enableThinking: activeProvider.enableThinking ?? false,
+      contextWindow: activeProvider.modelContextWindows?.[activeProvider.activeModel]
+    })
+    console.log('[main] Applied active AI provider settings')
+  } else if (savedAI.apiKey || savedAI.baseUrl || savedAI.model) {
     aiEngine.configure(savedAI)
     console.log('[main] Applied saved AI settings')
   }
@@ -274,7 +285,8 @@ function setupIPC (): void {
         apiKey: active.apiKey,
         baseUrl: active.baseUrl,
         model: active.activeModel,
-        enableThinking: active.enableThinking ?? false
+        enableThinking: active.enableThinking ?? false,
+        contextWindow: active.modelContextWindows?.[active.activeModel]
       })
     }
     return { success: true }
