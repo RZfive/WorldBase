@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import ContextMenu from './launchpad/ContextMenu.vue'
+import ConfirmDialog from './launchpad/ConfirmDialog.vue'
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -585,53 +587,37 @@ onUnmounted(() => {
     </Teleport>
 
     <!-- Context Menu -->
-    <Teleport to="body">
-      <div
-        v-if="ctxMenu.visible"
-        class="lp-ctx-menu"
-        :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
-        @click.stop
-      >
-        <template v-if="ctxMenu.kind === 'project' && ctxMenu.target">
-          <div class="ctx-item" @click="emit('select', ctxMenu.target as Project); hideCtxMenu()">🪄 打开应用</div>
-          <div class="ctx-item" @click="openSourceCode(ctxMenu.target as Project); hideCtxMenu()">💻 查看源码</div>
-          <div class="ctx-item" @click="openInWindow(ctxMenu.target as Project); hideCtxMenu()">↗️ 独立窗口运行</div>
-          <div class="ctx-divider"></div>
-          <div v-if="(ctxMenu.target as Project).runtime?.status !== 'running'" class="ctx-item" @click="startProject(ctxMenu.target as Project); hideCtxMenu()">▶️ 启动</div>
-          <div v-if="(ctxMenu.target as Project).runtime?.status === 'running'" class="ctx-item" @click="stopProject(ctxMenu.target as Project); hideCtxMenu()">⏹️ 停止</div>
-          <div class="ctx-divider"></div>
-          <div class="ctx-item" @click="emit('optimizeInChat', ctxMenu.target as Project); hideCtxMenu()">💬 继续优化</div>
-          <div v-if="folders.length > 0" class="ctx-divider"></div>
-          <div v-for="folder in folders" :key="folder.id" class="ctx-item" @click="moveToFolder((ctxMenu.target as Project).id, folder.id); hideCtxMenu()">
-            📁 移入「{{ folder.name }}」
-          </div>
-          <div v-if="folderedIds.has((ctxMenu.target as Project).id)" class="ctx-item" @click="removeFromFolder((ctxMenu.target as Project).id); hideCtxMenu()">📤 移出文件夹</div>
-          <div class="ctx-divider"></div>
-          <div class="ctx-item ctx-danger" @click="deleteProject(ctxMenu.target as Project); hideCtxMenu()">🗑️ 删除项目</div>
-        </template>
-        <template v-if="ctxMenu.kind === 'folder' && ctxMenu.target">
-          <div class="ctx-item" @click="startRenameFolder(ctxMenu.target as LaunchFolder); hideCtxMenu()">✏️ 重命名</div>
-          <div class="ctx-item ctx-danger" @click="deleteFolder((ctxMenu.target as LaunchFolder).id); hideCtxMenu()">🗑️ 删除文件夹</div>
-        </template>
-        <template v-if="ctxMenu.kind === 'blank'">
-          <div class="ctx-item" @click="createEmptyFolder(); hideCtxMenu()">📁 新建文件夹</div>
-          <div class="ctx-item" @click="loadProjects(); hideCtxMenu()">🔄 刷新</div>
-        </template>
-      </div>
-    </Teleport>
+    <ContextMenu
+      :visible="ctxMenu.visible"
+      :x="ctxMenu.x"
+      :y="ctxMenu.y"
+      :target="ctxMenu.target"
+      :kind="ctxMenu.kind"
+      :folders="folders"
+      :foldered-ids="folderedIds"
+      @hide="hideCtxMenu"
+      @open-project="emit('select', $event)"
+      @view-source="openSourceCode($event)"
+      @open-in-window="openInWindow($event)"
+      @start-project="startProject($event)"
+      @stop-project="stopProject($event)"
+      @optimize-in-chat="emit('optimizeInChat', $event)"
+      @move-to-folder="(projectId, folderId) => moveToFolder(projectId, folderId)"
+      @remove-from-folder="removeFromFolder($event)"
+      @delete-project="deleteProject($event)"
+      @rename-folder="startRenameFolder($event)"
+      @delete-folder="deleteFolder($event)"
+      @create-folder="createEmptyFolder"
+      @refresh="loadProjects"
+    />
 
     <!-- Confirm dialog -->
-    <Teleport to="body">
-      <div v-if="confirmDialog.visible" class="confirm-overlay" @click.self="confirmDialogCancel">
-        <div class="confirm-box">
-          <p>{{ confirmDialog.message }}</p>
-          <div class="confirm-actions">
-            <button class="confirm-btn danger" @click="confirmDialog.onConfirm?.()">确认删除</button>
-            <button class="confirm-btn" @click="confirmDialogCancel">取消</button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <ConfirmDialog
+      :visible="confirmDialog.visible"
+      :message="confirmDialog.message"
+      @confirm="confirmDialog.onConfirm?.()"
+      @cancel="confirmDialogCancel"
+    />
   </div>
 </template>
 
@@ -979,72 +965,4 @@ onUnmounted(() => {
   from { opacity: 1; transform: scale(1); }
   to { opacity: 0; transform: scale(0.7); }
 }
-
-/* ============ Context menu ============ */
-.lp-ctx-menu {
-  position: fixed;
-  z-index: 10000;
-  background: rgba(15, 23, 42, 0.96);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 14px;
-  padding: 4px 0;
-  min-width: 180px;
-  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42);
-}
-.ctx-item {
-  padding: 8px 16px;
-  font-size: 0.85em;
-  color: #e4e4e7;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.1s;
-}
-.ctx-item:hover { background: var(--lp-accent-soft); color: white; }
-.ctx-item.ctx-danger { color: #f87171; }
-.ctx-item.ctx-danger:hover { background: #dc2626; color: #fff; }
-.ctx-divider { height: 1px; background: rgba(255, 255, 255, 0.06); margin: 4px 0; }
-
-/* ============ Confirm dialog ============ */
-.confirm-overlay {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 10001;
-}
-.confirm-box {
-  background: #1e1e22;
-  border: 1px solid #3f3f46;
-  border-radius: 16px;
-  padding: 28px;
-  width: 380px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-}
-.confirm-box p {
-  margin: 0 0 20px;
-  font-size: 0.92em;
-  color: #e4e4e7;
-  line-height: 1.5;
-}
-.confirm-actions {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
-}
-.confirm-btn {
-  padding: 8px 18px;
-  background: #27272a;
-  border: 1px solid #3f3f46;
-  border-radius: 10px;
-  color: #e4e4e7;
-  font-size: 0.85em;
-  cursor: pointer;
-  transition: all 0.12s;
-}
-.confirm-btn:hover { background: #3f3f46; }
-.confirm-btn.danger { background: #dc2626; border-color: #dc2626; color: #fff; }
-.confirm-btn.danger:hover { background: #b91c1c; }
 </style>
