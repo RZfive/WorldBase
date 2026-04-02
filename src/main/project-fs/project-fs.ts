@@ -80,7 +80,10 @@ export class ProjectFS {
         const metaPath = path.join(this.projectsDir, entry.name, '.world-meta.json')
         try {
           const metaContent = await fs.readFile(metaPath, 'utf-8')
-          projects.push(JSON.parse(metaContent) as ProjectMeta)
+          const meta = JSON.parse(metaContent) as ProjectMeta
+          // Ensure id is always set; fall back to the directory name
+          if (!meta.id) meta.id = entry.name
+          projects.push(meta)
         } catch {
           // Directory exists but no meta file — skip
           projects.push({ id: entry.name, name: entry.name, type: 'unknown' })
