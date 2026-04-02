@@ -10,6 +10,13 @@ interface ReadFileArgs {
   file_path: string
 }
 
+interface ReadFileResult {
+  file_path: string
+  content: string
+  truncated: boolean
+  total_chars: number
+}
+
 const MAX_RETURN_CHARS = 40000
 const EDGE_RETURN_CHARS = 20000
 
@@ -41,7 +48,7 @@ export function toolReadFile (services: ToolServices): Tool {
         required: ['project_id', 'file_path']
       }
     },
-    handler: async (args) => {
+    handler: async (args): Promise<ReadFileResult> => {
       const { project_id, file_path } = args as unknown as ReadFileArgs
       const content = await services.projectFS.readFile(project_id, file_path)
       if (content.length <= MAX_RETURN_CHARS) {
