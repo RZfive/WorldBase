@@ -1,27 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import ContextMenu from './launchpad/ContextMenu.vue'
-import ConfirmDialog from './launchpad/ConfirmDialog.vue'
+import ContextMenu from './ContextMenu.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
+import LaunchpadGrid from './LaunchpadGrid.vue'
+import FolderBubble from './FolderBubble.vue'
+import type { LaunchFolder, Project, ProjectRuntime } from './types'
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
-
-interface ProjectRuntime { status?: string; port?: number }
-
-interface Project {
-  id: string
-  name?: string
-  type?: string
-  runtime?: ProjectRuntime
-  [key: string]: unknown
-}
-
-interface LaunchFolder {
-  id: string
-  name: string
-  projectIds: string[]
-}
 
 const emit = defineEmits<{
   (e: 'select', project: Project): void
@@ -59,7 +46,6 @@ const ctxMenu = ref<{ visible: boolean; x: number; y: number; target: Project | 
 // Rename state
 const renamingId = ref<string | null>(null)
 const renameInput = ref('')
-const renameRef = ref<HTMLInputElement | null>(null)
 
 // Confirm dialog
 const confirmDialog = ref<{ visible: boolean; message: string; onConfirm: (() => void) | null }>({
@@ -170,7 +156,6 @@ function createFolderWith (projIdA: string, projIdB: string) {
   openFolderId.value = id
   renamingId.value = id
   renameInput.value = name
-  nextTick(() => renameRef.value?.focus())
   return id
 }
 
@@ -181,7 +166,6 @@ function createEmptyFolder () {
   // Start renaming
   renamingId.value = id
   renameInput.value = '新文件夹'
-  nextTick(() => renameRef.value?.focus())
 }
 
 function deleteFolder (folderId: string) {
@@ -193,7 +177,6 @@ function deleteFolder (folderId: string) {
 function startRenameFolder (folder: LaunchFolder) {
   renamingId.value = folder.id
   renameInput.value = folder.name
-  nextTick(() => renameRef.value?.focus())
 }
 
 function commitRename (folderId: string) {
@@ -374,6 +357,10 @@ function openFolder (folder: LaunchFolder, e: MouseEvent) {
 
 function closeFolder () { openFolderId.value = null }
 
+function cancelRename () {
+  renamingId.value = null
+}
+
 function onFolderOverlayDragOver (e: DragEvent) {
   if (!dragItem.value || !openFolderData.value) return
   if (!openFolderData.value.projectIds.includes(dragItem.value.id)) return
@@ -456,67 +443,25 @@ onUnmounted(() => {
           <p class="lp-empty-hint">在 AI 对话中输入需求即可创建新应用</p>
         </div>
 
-        <div v-else class="lp-grid">
-          <!-- Folder items -->
-          <div
-            v-for="item in gridItems"
-            :key="item.kind + '-' + (item.data as any).id"
-            :class="[
-              'lp-cell',
-              item.kind === 'folder' ? 'lp-cell-folder' : 'lp-cell-app',
-              { 'drop-hover': dropTarget && dropTarget.id === (item.data as any).id }
-            ]"
-            :draggable="item.kind === 'project'"
-            @dragstart="item.kind === 'project' ? onDragStart($event, (item.data as Project).id) : undefined"
-            @dragover="onDragOver($event, (item.data as any).id, item.kind === 'folder' ? 'folder' : 'project')"
-            @dragleave="onDragLeave"
-            @drop="onDrop($event, (item.data as any).id, item.kind === 'folder' ? 'folder' : 'project')"
-            @dragend="onDragEnd"
-            @click="item.kind === 'folder' ? openFolder(item.data as LaunchFolder, $event) : emit('select', item.data as Project)"
-            @contextmenu="showCtxMenu($event, item.data as any, item.kind === 'folder' ? 'folder' : 'project')"
-          >
-            <!-- Folder visual -->
-            <template v-if="item.kind === 'folder'">
-              <div class="lp-folder-icon">
-                <div class="folder-mini-grid">
-                  <span
-                    v-for="pid in (item.data as LaunchFolder).projectIds.slice(0, 9)"
-                    :key="pid"
-                    class="folder-mini"
-                  >{{ getIcon(projects.find(p => p.id === pid)?.type) }}</span>
-                  <span
-                    v-for="n in Math.max(0, 4 - Math.min((item.data as LaunchFolder).projectIds.length, 9))"
-                    :key="'e'+n" class="folder-mini empty"
-                  ></span>
-                </div>
-              </div>
-              <template v-if="renamingId === (item.data as LaunchFolder).id">
-                <input
-                  ref="renameRef"
-                  v-model="renameInput"
-                  class="lp-rename-input"
-                  @keydown.enter.prevent="commitRename((item.data as LaunchFolder).id)"
-                  @keydown.escape="renamingId = null"
-                  @blur="commitRename((item.data as LaunchFolder).id)"
-                  @click.stop
-                />
-              </template>
-              <span v-else class="lp-cell-name">{{ (item.data as LaunchFolder).name }}</span>
-            </template>
-
-            <!-- App visual -->
-            <template v-else>
-              <div class="lp-app-icon">
-                <span class="lp-app-emoji">{{ getIcon((item.data as Project).type) }}</span>
-                <span
-                  v-if="(item.data as Project).runtime?.status === 'running'"
-                  class="lp-running-badge"
-                ></span>
-              </div>
-              <span class="lp-cell-name">{{ (item.data as Project).name || (item.data as Project).id }}</span>
-            </template>
-          </div>
-        </div>
+        <LaunchpadGrid
+          v-else
+          :grid-items="gridItems"
+          :projects="projects"
+          :drop-target="dropTarget"
+          :renaming-id="renamingId"
+          :rename-input="renameInput"
+          @dragstart="onDragStart($event.event, $event.projectId)"
+          @dragover="onDragOver($event.event, $event.targetId, $event.targetType)"
+          @dragleave="onDragLeave"
+          @drop="onDrop($event.event, $event.targetId, $event.targetType)"
+          @dragend="onDragEnd"
+          @open-folder="openFolder($event.folder, $event.event)"
+          @select-project="emit('select', $event)"
+          @show-menu="showCtxMenu($event.event, $event.target, $event.kind)"
+          @update:rename-input="renameInput = $event"
+          @commit-rename="commitRename"
+          @cancel-rename="cancelRename"
+        />
       </div>
 
       <!-- Page dots (decorative) -->
@@ -525,66 +470,24 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Folder popup bubble -->
-    <Teleport to="body">
-      <Transition name="folder-pop">
-        <div
-          v-if="openFolderData"
-          class="folder-bubble-overlay"
-          @click.self="closeFolder"
-          @dragover="onFolderOverlayDragOver"
-          @drop="onFolderOverlayDrop"
-        >
-          <div
-            class="folder-bubble"
-            :style="{
-              '--anchor-x': folderPopupAnchor.x + 'px',
-              '--anchor-y': folderPopupAnchor.y + 'px'
-            }"
-          >
-            <div class="folder-bubble-arrow"></div>
-            <div class="folder-bubble-header">
-              <template v-if="renamingId === openFolderData.id">
-                <input
-                  ref="renameRef"
-                  v-model="renameInput"
-                  class="folder-rename-input"
-                  @keydown.enter.prevent="commitRename(openFolderData.id)"
-                  @keydown.escape="renamingId = null"
-                  @blur="commitRename(openFolderData.id)"
-                />
-              </template>
-              <h3 v-else @dblclick="startRenameFolder(openFolderData)" class="folder-bubble-title">
-                {{ openFolderData.name }}
-              </h3>
-            </div>
-            <div class="folder-bubble-body">
-              <div v-if="openFolderProjects.length === 0" class="folder-empty">
-                文件夹为空，拖拽应用到此文件夹
-              </div>
-              <div v-else class="folder-bubble-grid">
-                <div
-                  v-for="project in openFolderProjects"
-                  :key="project.id"
-                  class="lp-cell lp-cell-app"
-                  draggable="true"
-                  @dragstart="onDragStart($event, project.id)"
-                  @dragend="onDragEnd"
-                  @click="emit('select', project)"
-                  @contextmenu="showCtxMenu($event, project, 'project')"
-                >
-                  <div class="lp-app-icon">
-                    <span class="lp-app-emoji">{{ getIcon(project.type) }}</span>
-                    <span v-if="project.runtime?.status === 'running'" class="lp-running-badge"></span>
-                  </div>
-                  <span class="lp-cell-name">{{ project.name || project.id }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
+    <FolderBubble
+      :open-folder-data="openFolderData"
+      :open-folder-projects="openFolderProjects"
+      :folder-popup-anchor="folderPopupAnchor"
+      :renaming-id="renamingId"
+      :rename-input="renameInput"
+      @close="closeFolder"
+      @dragover-overlay="onFolderOverlayDragOver"
+      @drop-overlay="onFolderOverlayDrop"
+      @dragstart="onDragStart($event.event, $event.projectId)"
+      @dragend="onDragEnd"
+      @select-project="emit('select', $event)"
+      @show-menu="showCtxMenu($event.event, $event.target, $event.kind)"
+      @update:rename-input="renameInput = $event"
+      @commit-rename="commitRename"
+      @cancel-rename="cancelRename"
+      @start-rename="startRenameFolder"
+    />
 
     <!-- Context Menu -->
     <ContextMenu
@@ -621,7 +524,7 @@ onUnmounted(() => {
   </div>
 </template>
 
-<style scoped>
+<style>
 /* ============ Full-screen overlay ============ */
 .lp-overlay {
   --lp-accent: #38bdf8;

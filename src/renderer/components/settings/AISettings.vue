@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import SkillManager from './SkillManager.vue'
-import ProviderPanel from './settings/ProviderPanel.vue'
-import DatabaseViewer from './settings/DatabaseViewer.vue'
+import ProviderPanel from './ProviderPanel.vue'
+import DatabaseViewer from './DatabaseViewer.vue'
 
 const activeTab = ref('ai')
 </script>
