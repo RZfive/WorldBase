@@ -165,7 +165,27 @@ function setupIPC (): void {
     try {
       for await (const streamEvent of aiEngine!.chatStream(messages, onProgress)) {
         if (sender.isDestroyed()) break
-        sender.send(channel, JSON.parse(JSON.stringify(streamEvent)))
+        try {
+          sender.send(channel, JSON.parse(JSON.stringify(streamEvent)))
+        } catch {
+          // Fallback: send a safe subset if serialization fails (e.g. circular refs in tool results)
+          const safe: Record<string, unknown> = { type: (streamEvent as { type: string }).type }
+          if ('content' in streamEvent) safe.content = String((streamEvent as { content?: string }).content || '')
+          if ('name' in streamEvent) safe.name = String((streamEvent as { name?: string }).name || '')
+          if ('error' in streamEvent) safe.error = String((streamEvent as { error?: string }).error || '')
+          if ('stage' in streamEvent) safe.stage = String((streamEvent as { stage?: string }).stage || '')
+          if ('detail' in streamEvent) safe.detail = String((streamEvent as { detail?: string }).detail || '')
+          if ('message' in streamEvent) {
+            const msg = (streamEvent as { message?: { role: string; content: unknown } }).message
+            if (msg) {
+              safe.message = {
+                role: msg.role,
+                content: typeof msg.content === 'string' ? msg.content : ''
+              }
+            }
+          }
+          sender.send(channel, safe)
+        }
       }
     } catch (err) {
       if (!sender.isDestroyed()) {
