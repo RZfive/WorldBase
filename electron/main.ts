@@ -167,7 +167,8 @@ function setupIPC (): void {
         if (sender.isDestroyed()) break
         try {
           sender.send(channel, JSON.parse(JSON.stringify(streamEvent)))
-        } catch {
+        } catch (serErr) {
+          console.error('[ai:chatStream] Stream event serialization failed:', serErr)
           // Fallback: send a safe subset if serialization fails (e.g. circular refs in tool results)
           const safe: Record<string, unknown> = { type: (streamEvent as { type: string }).type }
           if ('content' in streamEvent) safe.content = String((streamEvent as { content?: string }).content || '')
