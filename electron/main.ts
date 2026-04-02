@@ -200,6 +200,11 @@ function setupIPC (): void {
     return projectFS!.readFile(projectId, filePath)
   })
 
+  ipcMain.handle('projects:writeFile', async (_event: IpcMainInvokeEvent, projectId: string, filePath: string, content: string) => {
+    await projectFS!.writeFile(projectId, filePath, content)
+    return { success: true }
+  })
+
   ipcMain.handle('projects:delete', async (_event: IpcMainInvokeEvent, projectId: string) => {
     // Stop the project first if running
     try { await runtimeManager!.stop(projectId) } catch { /* ignore */ }

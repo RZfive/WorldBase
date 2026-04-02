@@ -73,6 +73,7 @@ interface ElectronAPI {
   getProject: (projectId: string) => Promise<Record<string, unknown>>
   getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
+  writeFile: (projectId: string, filePath: string, content: string) => Promise<{ success: boolean }>
   openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
   deleteProject: (projectId: string) => Promise<{ success: boolean }>
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void

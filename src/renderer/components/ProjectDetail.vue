@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, onUnmounted } from 'vue'
+import { ref, onMounted, watch, onUnmounted, computed } from 'vue'
 
 interface FileTreeItem {
   name: string
@@ -20,6 +20,7 @@ interface ProjectStatus {
 
 const props = defineProps<{
   project: Record<string, unknown>
+  defaultTab?: 'preview' | 'files'
 }>()
 
 const emit = defineEmits<{
@@ -32,18 +33,36 @@ const emit = defineEmits<{
 const fileTree = ref<FileTreeItem[]>([])
 const selectedFile = ref<FileTreeItem | null>(null)
 const fileContent = ref<string>('')
+const editorContent = ref<string>('')
 const dataSummary = ref<DataSummary | null>(null)
 const isLoading = ref<boolean>(false)
+const isSaving = ref<boolean>(false)
 const projectStatus = ref<ProjectStatus>({ status: 'not_started' })
 const previewUrl = ref<string>('')
-const activeTab = ref<'preview' | 'files'>('preview')
+const activeTab = ref<'preview' | 'files'>(props.defaultTab ?? 'preview')
 const startError = ref<string>('')
+const fileError = ref<string>('')
+const saveMessage = ref<string>('')
 const showLaunchPicker = ref<boolean>(false)
 const launchMode = ref<'embed' | 'window'>('embed')
 const isStandaloneOpen = ref<boolean>(false)
 
 let statusInterval: ReturnType<typeof setInterval> | null = null
 let projectChangedCleanup: (() => void) | null = null
+
+const flatFileTree = computed(() => flattenFileTree(fileTree.value))
+const isDirty = computed(() => selectedFile.value?.type === 'file' && editorContent.value !== fileContent.value)
+
+function flattenFileTree (items: FileTreeItem[], depth = 0): Array<FileTreeItem & { depth: number }> {
+  const flat: Array<FileTreeItem & { depth: number }> = []
+  for (const item of items) {
+    flat.push({ ...item, depth })
+    if (item.children?.length) {
+      flat.push(...flattenFileTree(item.children, depth + 1))
+    }
+  }
+  return flat
+}
 
 async function refreshStatus () {
   try {
@@ -78,17 +97,39 @@ async function loadFileTree () {
 async function openFile (file: FileTreeItem) {
   if (file.type !== 'file') return
   selectedFile.value = file
+  fileError.value = ''
+  saveMessage.value = ''
 
   try {
     if (window.electronAPI) {
       fileContent.value = await window.electronAPI.readFile(props.project.id as string, file.path)
+      editorContent.value = fileContent.value
     } else {
       const res = await fetch(`/api/projects/${props.project.id}/files/${file.path}`)
       const data = await res.json()
       fileContent.value = data.content || ''
+      editorContent.value = fileContent.value
     }
   } catch (err) {
-    fileContent.value = `Error: ${(err as Error).message}`
+    fileError.value = `读取失败：${(err as Error).message}`
+    fileContent.value = ''
+    editorContent.value = ''
+  }
+}
+
+async function saveFile () {
+  if (!selectedFile.value || selectedFile.value.type !== 'file' || !window.electronAPI || !isDirty.value) return
+  isSaving.value = true
+  fileError.value = ''
+  saveMessage.value = ''
+  try {
+    await window.electronAPI.writeFile(props.project.id as string, selectedFile.value.path, editorContent.value)
+    fileContent.value = editorContent.value
+    saveMessage.value = '已保存'
+  } catch (err) {
+    fileError.value = `保存失败：${(err as Error).message}`
+  } finally {
+    isSaving.value = false
   }
 }
 
@@ -216,9 +257,17 @@ watch(() => props.project.id, () => {
   loadFileTree()
   loadDataSummary()
   refreshStatus()
+  activeTab.value = props.defaultTab ?? 'preview'
   selectedFile.value = null
   fileContent.value = ''
+  editorContent.value = ''
   startError.value = ''
+  fileError.value = ''
+  saveMessage.value = ''
+})
+
+watch(() => props.defaultTab, (tab) => {
+  activeTab.value = tab ?? 'preview'
 })
 </script>
 
@@ -344,25 +393,15 @@ watch(() => props.project.id, () => {
       <div class="file-explorer">
         <h3>📁 文件结构</h3>
         <div class="file-tree">
-          <template v-for="item in fileTree" :key="item.path">
+          <template v-for="item in flatFileTree" :key="item.path">
             <div
-              :class="['tree-item', { active: selectedFile?.path === item.path }]"
+              :class="['tree-item', `depth-${item.depth}`, { active: selectedFile?.path === item.path, 'tree-dir': item.type === 'directory' }]"
+              :style="{ paddingLeft: `${8 + item.depth * 18}px` }"
               @click="openFile(item)"
             >
               {{ item.type === 'directory' ? '📁' : '📄' }}
               {{ item.name }}
             </div>
-            <template v-if="item.children">
-              <div
-                v-for="child in item.children"
-                :key="child.path"
-                :class="['tree-item indent', { active: selectedFile?.path === child.path }]"
-                @click="openFile(child)"
-              >
-                {{ child.type === 'directory' ? '📁' : '📄' }}
-                {{ child.name }}
-              </div>
-            </template>
           </template>
         </div>
       </div>
@@ -370,8 +409,24 @@ watch(() => props.project.id, () => {
       <!-- File Content / Data Summary -->
       <div class="content-area">
         <div v-if="selectedFile" class="file-viewer">
-          <h3>📄 {{ selectedFile.path }}</h3>
-          <pre class="code-block">{{ fileContent }}</pre>
+          <div class="file-toolbar">
+            <h3>📄 {{ selectedFile.path }}</h3>
+            <div class="file-actions">
+              <span v-if="fileError" class="file-status file-error">{{ fileError }}</span>
+              <span v-else-if="saveMessage" class="file-status file-success">{{ saveMessage }}</span>
+              <span v-else-if="isDirty" class="file-status">未保存</span>
+              <button class="btn-save" :disabled="!isDirty || isSaving" @click="saveFile">
+                {{ isSaving ? '保存中...' : '保存' }}
+              </button>
+            </div>
+          </div>
+          <textarea
+            v-model="editorContent"
+            class="code-editor"
+            spellcheck="false"
+            @keydown.meta.s.prevent="saveFile"
+            @keydown.ctrl.s.prevent="saveFile"
+          ></textarea>
         </div>
 
         <div v-else-if="dataSummary?.hasData" class="data-summary">
@@ -670,8 +725,8 @@ watch(() => props.project.id, () => {
   background: #3f3f46;
 }
 
-.tree-item.indent {
-  padding-left: 24px;
+.tree-item.tree-dir {
+  color: #a1a1aa;
 }
 
 .content-area {
@@ -685,17 +740,72 @@ watch(() => props.project.id, () => {
   margin: 0 0 12px 0;
 }
 
-.code-block {
+.file-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.file-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.file-status {
+  font-size: 0.78em;
+  color: #a1a1aa;
+}
+
+.file-status.file-error {
+  color: #fca5a5;
+}
+
+.file-status.file-success {
+  color: #86efac;
+}
+
+.btn-save {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background: #0f766e;
+  color: #ecfeff;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.btn-save:hover:not(:disabled) {
+  background: #0d9488;
+}
+
+.btn-save:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.code-editor {
   background: #18181b;
   border: 1px solid #27272a;
   border-radius: 8px;
   padding: 16px;
+  color: #e4e4e7;
   font-size: 0.8em;
+  width: 100%;
+  min-height: 520px;
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;
   font-family: 'Fira Code', 'Cascadia Code', monospace;
   line-height: 1.6;
+  resize: vertical;
+}
+
+.code-editor:focus {
+  outline: 1px solid #38bdf8;
+  border-color: #38bdf8;
 }
 
 .summary-cards {
