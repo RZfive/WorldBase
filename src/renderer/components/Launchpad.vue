@@ -23,6 +23,7 @@ interface LaunchFolder {
 
 const emit = defineEmits<{
   (e: 'select', project: Project): void
+  (e: 'viewSource', project: Project): void
   (e: 'optimizeInChat', project: Project): void
   (e: 'appStarted'): void
   (e: 'close'): void
@@ -153,16 +154,21 @@ function loadFolders () {
 /* ------------------------------------------------------------------ */
 
 function createFolderWith (projIdA: string, projIdB: string) {
-  const projA = projects.value.find(p => p.id === projIdA)
-  const projB = projects.value.find(p => p.id === projIdB)
+  const sourceFolderIds = folders.value
+    .filter(f => f.projectIds.includes(projIdA) || f.projectIds.includes(projIdB))
+    .map(f => f.id)
   const name = '新文件夹'
   const id = 'folder_' + Date.now().toString(36)
-  // Remove from any existing folder
   folders.value.forEach(f => {
     f.projectIds = f.projectIds.filter(pid => pid !== projIdA && pid !== projIdB)
   })
   folders.value.push({ id, name, projectIds: [projIdA, projIdB] })
+  sourceFolderIds.forEach(cleanupFolderAfterMove)
   saveFolders()
+  openFolderId.value = id
+  renamingId.value = id
+  renameInput.value = name
+  nextTick(() => renameRef.value?.focus())
   return id
 }
 
@@ -197,15 +203,32 @@ function commitRename (folderId: string) {
   renamingId.value = null
 }
 
+function cleanupFolderAfterMove (folderId: string) {
+  const folder = folders.value.find(f => f.id === folderId)
+  if (!folder || folder.projectIds.length > 1) return
+  folders.value = folders.value.filter(f => f.id !== folderId)
+  if (openFolderId.value === folderId) openFolderId.value = null
+}
+
 function moveToFolder (projectId: string, folderId: string) {
+  const sourceFolderIds = folders.value
+    .filter(f => f.projectIds.includes(projectId))
+    .map(f => f.id)
   folders.value.forEach(f => { f.projectIds = f.projectIds.filter(id => id !== projectId) })
   const folder = folders.value.find(f => f.id === folderId)
-  if (folder) folder.projectIds.push(projectId)
+  if (folder && !folder.projectIds.includes(projectId)) folder.projectIds.push(projectId)
+  sourceFolderIds
+    .filter(id => id !== folderId)
+    .forEach(cleanupFolderAfterMove)
   saveFolders()
 }
 
 function removeFromFolder (projectId: string) {
+  const sourceFolderIds = folders.value
+    .filter(f => f.projectIds.includes(projectId))
+    .map(f => f.id)
   folders.value.forEach(f => { f.projectIds = f.projectIds.filter(id => id !== projectId) })
+  sourceFolderIds.forEach(cleanupFolderAfterMove)
   saveFolders()
 }
 
@@ -248,9 +271,8 @@ async function openInWindow (project: Project) {
   await window.electronAPI.openProjectWindow(project.id)
 }
 
-async function openSourceCode (project: Project) {
-  if (!window.electronAPI) return
-  await window.electronAPI.openProjectFolder(project.id)
+function openSourceCode (project: Project) {
+  emit('viewSource', project)
 }
 
 async function deleteProject (project: Project) {
@@ -349,6 +371,22 @@ function openFolder (folder: LaunchFolder, e: MouseEvent) {
 }
 
 function closeFolder () { openFolderId.value = null }
+
+function onFolderOverlayDragOver (e: DragEvent) {
+  if (!dragItem.value || !openFolderData.value) return
+  if (!openFolderData.value.projectIds.includes(dragItem.value.id)) return
+  e.preventDefault()
+}
+
+function onFolderOverlayDrop (e: DragEvent) {
+  if (e.target !== e.currentTarget || !dragItem.value || !openFolderData.value) return
+  if (!openFolderData.value.projectIds.includes(dragItem.value.id)) return
+  e.preventDefault()
+  removeFromFolder(dragItem.value.id)
+  dragItem.value = null
+  dropTarget.value = null
+  closeFolder()
+}
 
 /* ------------------------------------------------------------------ */
 /* Keyboard / Lifecycle                                                */
@@ -492,6 +530,8 @@ onUnmounted(() => {
           v-if="openFolderData"
           class="folder-bubble-overlay"
           @click.self="closeFolder"
+          @dragover="onFolderOverlayDragOver"
+          @drop="onFolderOverlayDrop"
         >
           <div
             class="folder-bubble"
@@ -525,6 +565,9 @@ onUnmounted(() => {
                   v-for="project in openFolderProjects"
                   :key="project.id"
                   class="lp-cell lp-cell-app"
+                  draggable="true"
+                  @dragstart="onDragStart($event, project.id)"
+                  @dragend="onDragEnd"
                   @click="emit('select', project)"
                   @contextmenu="showCtxMenu($event, project, 'project')"
                 >
@@ -551,7 +594,7 @@ onUnmounted(() => {
       >
         <template v-if="ctxMenu.kind === 'project' && ctxMenu.target">
           <div class="ctx-item" @click="emit('select', ctxMenu.target as Project); hideCtxMenu()">🪄 打开应用</div>
-          <div class="ctx-item" @click="openSourceCode(ctxMenu.target as Project); hideCtxMenu()">💻 打开源码</div>
+          <div class="ctx-item" @click="openSourceCode(ctxMenu.target as Project); hideCtxMenu()">💻 查看源码</div>
           <div class="ctx-item" @click="openInWindow(ctxMenu.target as Project); hideCtxMenu()">↗️ 独立窗口运行</div>
           <div class="ctx-divider"></div>
           <div v-if="(ctxMenu.target as Project).runtime?.status !== 'running'" class="ctx-item" @click="startProject(ctxMenu.target as Project); hideCtxMenu()">▶️ 启动</div>

@@ -3,6 +3,7 @@ import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import ChatPanel from './renderer/components/ChatPanel.vue'
 import Launchpad from './renderer/components/Launchpad.vue'
 import AISettings from './renderer/components/AISettings.vue'
+import ProjectDetail from './renderer/components/ProjectDetail.vue'
 
 interface RunningApp {
   id: string
@@ -24,9 +25,7 @@ const currentView = ref<MainView>('chat')
 const selectedProject = ref<Record<string, unknown> | null>(null)
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
 const embeddedProjectId = ref<string | null>(null)
-const embeddedProjectUrl = ref('')
-const embeddedProjectState = ref<EmbeddedState>('idle')
-const embeddedProjectHint = ref('')
+const currentProjectTab = ref<'preview' | 'files'>('preview')
 const showLaunchpad = ref(false)
 
 const runningApps = reactive(new Map<string, RunningApp>())
@@ -44,9 +43,7 @@ let windowClosedCleanup: (() => void) | null = null
 function clearEmbeddedProject () {
   selectedProject.value = null
   embeddedProjectId.value = null
-  embeddedProjectUrl.value = ''
-  embeddedProjectState.value = 'idle'
-  embeddedProjectHint.value = ''
+  currentProjectTab.value = 'preview'
 }
 
 async function fetchProjectMeta (projectId: string) {
@@ -82,33 +79,6 @@ function toggleLaunchpad () {
   hideDockCtx()
 }
 
-function applyEmbeddedStatus (status: ProjectStatus) {
-  if (status.status === 'running' && status.port) {
-    embeddedProjectUrl.value = `http://localhost:${status.port}`
-    embeddedProjectState.value = 'ready'
-    embeddedProjectHint.value = ''
-    return
-  }
-
-  embeddedProjectUrl.value = ''
-  embeddedProjectState.value = 'unavailable'
-  embeddedProjectHint.value = status.status === 'running'
-    ? '应用已启动，但当前没有可嵌入的预览地址。右键左侧应用图标继续操作。'
-    : '应用未运行。可从启动台点击打开，或在左侧图标上右键操作。'
-}
-
-async function syncEmbeddedProject () {
-  if (!embeddedProjectId.value || !window.electronAPI) return
-  try {
-    const status = await getRuntimeStatus(embeddedProjectId.value)
-    applyEmbeddedStatus(status)
-  } catch {
-    embeddedProjectUrl.value = ''
-    embeddedProjectState.value = 'unavailable'
-    embeddedProjectHint.value = '应用状态暂时不可用，请稍后重试。'
-  }
-}
-
 async function openEmbeddedProject (projectId: string, project?: Record<string, unknown>) {
   if (!window.electronAPI) return
 
@@ -116,23 +86,25 @@ async function openEmbeddedProject (projectId: string, project?: Record<string, 
   currentView.value = 'project'
   selectedProject.value = project ?? await fetchProjectMeta(projectId)
   embeddedProjectId.value = projectId
-  embeddedProjectUrl.value = ''
-  embeddedProjectState.value = 'loading'
-  embeddedProjectHint.value = '正在准备应用预览…'
+  currentProjectTab.value = 'preview'
 
   try {
-    let status = await getRuntimeStatus(projectId)
+    const status = await getRuntimeStatus(projectId)
     if (status.status !== 'running') {
       await window.electronAPI.startProject(projectId)
       await refreshRunningApps()
-      status = await getRuntimeStatus(projectId)
     }
-    applyEmbeddedStatus(status)
-  } catch (error) {
-    embeddedProjectUrl.value = ''
-    embeddedProjectState.value = 'unavailable'
-    embeddedProjectHint.value = `打开失败：${(error as Error).message}`
-  }
+  } catch {}
+}
+
+async function openProjectSource (project: Record<string, unknown>) {
+  const projectId = project.id as string | undefined
+  if (!projectId) return
+  showLaunchpad.value = false
+  currentView.value = 'project'
+  selectedProject.value = project
+  embeddedProjectId.value = projectId
+  currentProjectTab.value = 'files'
 }
 
 async function openProjectFromLaunchpad (project: Record<string, unknown>) {
@@ -188,7 +160,8 @@ async function dockOpenWindow (app: RunningApp) {
 
 async function dockOpenSource (app: RunningApp) {
   hideDockCtx()
-  await window.electronAPI?.openProjectFolder(app.id)
+  const project = await fetchProjectMeta(app.id)
+  await openProjectSource(project)
 }
 
 async function dockOptimizeInChat (app: RunningApp) {
@@ -238,7 +211,6 @@ async function refreshRunningApps () {
       if (!nextIds.has(id)) runningApps.delete(id)
     }
 
-    await syncEmbeddedProject()
   } catch {
     // ignore transient runtime errors
   }
@@ -349,24 +321,15 @@ onUnmounted(() => {
 
       <main class="main-content">
         <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
-        <section v-if="currentView === 'project'" class="project-stage">
-          <iframe
-            v-if="embeddedProjectUrl"
-            :src="embeddedProjectUrl"
-            class="project-stage-frame"
-            title="应用预览"
-          ></iframe>
-
-          <div v-else class="project-stage-empty">
-            <div class="project-stage-card">
-              <span class="project-stage-kicker">运行中的应用</span>
-              <h2 class="project-stage-title">{{ (selectedProject?.name as string) || embeddedProjectId || '应用预览' }}</h2>
-              <p class="project-stage-text">
-                {{ embeddedProjectState === 'loading' ? '正在准备应用预览…' : embeddedProjectHint }}
-              </p>
-            </div>
-          </div>
-        </section>
+        <ProjectDetail
+          v-if="currentView === 'project' && selectedProject"
+          :project="selectedProject"
+          :defaultTab="currentProjectTab"
+          @back="clearEmbeddedProject(); currentView = 'chat'"
+          @optimizeInChat="optimizeProjectInChat"
+          @appStarted="refreshRunningApps()"
+          @appStopped="refreshRunningApps()"
+        />
         <AISettings v-if="currentView === 'settings'" />
       </main>
     </div>
@@ -374,6 +337,7 @@ onUnmounted(() => {
     <Launchpad
       v-if="showLaunchpad"
       @select="openProjectFromLaunchpad"
+      @viewSource="openProjectSource"
       @optimizeInChat="optimizeProjectInChat"
       @appStarted="refreshRunningApps()"
       @close="showLaunchpad = false"
