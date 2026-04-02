@@ -227,7 +227,11 @@ function setupIPC (): void {
 
   // Project management
   ipcMain.handle('projects:list', async () => {
-    return projectFS!.listProjects()
+    const projects = await projectFS!.listProjects()
+    return projects.map(project => ({
+      ...project,
+      runtime: runtimeManager!.getStatus(project.id)
+    }))
   })
 
   ipcMain.handle('projects:get', async (_event: IpcMainInvokeEvent, projectId: string) => {
@@ -257,11 +261,19 @@ function setupIPC (): void {
 
   // Runtime management
   ipcMain.handle('runtime:start', async (_event: IpcMainInvokeEvent, projectId: string) => {
-    return runtimeManager!.start(projectId)
+    const result = await runtimeManager!.start(projectId)
+    if (result.status === 'running' || result.status === 'already_running') {
+      mainWindow?.webContents.send('projects:changed', { action: 'started', projectId, port: result.port })
+    }
+    return result
   })
 
   ipcMain.handle('runtime:stop', async (_event: IpcMainInvokeEvent, projectId: string) => {
-    return runtimeManager!.stop(projectId)
+    const result = await runtimeManager!.stop(projectId)
+    if (result.status === 'stopped') {
+      mainWindow?.webContents.send('projects:changed', { action: 'stopped', projectId })
+    }
+    return result
   })
 
   ipcMain.handle('runtime:status', async (_event: IpcMainInvokeEvent, projectId: string) => {

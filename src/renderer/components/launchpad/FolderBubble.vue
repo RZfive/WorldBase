@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { LaunchFolder, Project } from './types'
+import { getProjectIcon } from '../../utils/project-icon'
 
 const props = defineProps<{
   openFolderData: LaunchFolder | null
@@ -22,13 +23,6 @@ const emit = defineEmits<{
   (e: 'cancelRename'): void
   (e: 'startRename', folder: LaunchFolder): void
 }>()
-
-function getIcon (type?: string) {
-  if (type === 'frontend') return '🎨'
-  if (type === 'backend') return '⚙️'
-  if (type === 'fullstack') return '🚀'
-  return '📦'
-}
 
 function updateRenameInput (event: Event) {
   emit('update:renameInput', (event.target as HTMLInputElement).value)
@@ -88,7 +82,7 @@ function updateRenameInput (event: Event) {
                 @contextmenu="emit('showMenu', { event: $event, target: project, kind: 'project' })"
               >
                 <div class="lp-app-icon">
-                  <span class="lp-app-emoji">{{ getIcon(project.type) }}</span>
+                  <span class="lp-app-emoji">{{ getProjectIcon(project.type) }}</span>
                   <span v-if="project.runtime?.status === 'running'" class="lp-running-badge"></span>
                 </div>
                 <span class="lp-cell-name">{{ project.name || project.id }}</span>

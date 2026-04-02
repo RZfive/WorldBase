@@ -117,13 +117,47 @@ async function loadProjects () {
   error.value = null
   try {
     if (window.electronAPI) {
-      projects.value = await window.electronAPI.listProjects() as Project[]
+      const nextProjects = await window.electronAPI.listProjects() as Project[]
+      projects.value = nextProjects
+      syncFoldersWithProjects(nextProjects)
     }
   } catch (err) {
     error.value = (err as Error).message
   } finally {
     isLoading.value = false
   }
+}
+
+function syncFoldersWithProjects (nextProjects: Project[]) {
+  const validIds = new Set(nextProjects.map(project => project.id))
+  const assigned = new Set<string>()
+  let changed = false
+
+  folders.value = folders.value.map(folder => {
+    const projectIds = folder.projectIds.filter((projectId) => {
+      if (!validIds.has(projectId) || assigned.has(projectId)) {
+        changed = true
+        return false
+      }
+      assigned.add(projectId)
+      return true
+    })
+
+    if (projectIds.length !== folder.projectIds.length) {
+      changed = true
+    }
+
+    return {
+      ...folder,
+      projectIds
+    }
+  })
+
+  if (openFolderId.value && !folders.value.some(folder => folder.id === openFolderId.value)) {
+    openFolderId.value = null
+  }
+
+  if (changed) saveFolders()
 }
 
 function saveFolders () {
@@ -220,13 +254,6 @@ function removeFromFolder (projectId: string) {
 /* ------------------------------------------------------------------ */
 /* Project actions                                                     */
 /* ------------------------------------------------------------------ */
-
-function getIcon (type?: string) {
-  if (type === 'frontend') return '🎨'
-  if (type === 'backend') return '⚙️'
-  if (type === 'fullstack') return '🚀'
-  return '📦'
-}
 
 async function startProject (project: Project) {
   if (!window.electronAPI) return
@@ -411,7 +438,6 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <!-- Full-screen overlay like macOS Launchpad -->
   <div class="lp-overlay" @click.self="emit('close')">
     <div class="lp-content" @click.self="emit('close')">
       <!-- Search bar -->
@@ -525,18 +551,14 @@ onUnmounted(() => {
 </template>
 
 <style>
-/* ============ Full-screen overlay ============ */
 .lp-overlay {
   --lp-accent: #38bdf8;
   --lp-accent-soft: rgba(56, 189, 248, 0.16);
   --lp-accent-strong: rgba(14, 165, 233, 0.42);
   --lp-folder-soft: rgba(245, 158, 11, 0.18);
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 5000;
+  position: absolute;
+  inset: 0;
+  z-index: 20;
   background:
     radial-gradient(circle at 18% 18%, rgba(56, 189, 248, 0.14), transparent 24%),
     radial-gradient(circle at 82% 12%, rgba(245, 158, 11, 0.12), transparent 20%),
@@ -545,6 +567,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   animation: lp-fade-in 0.25s ease;
+  overflow: hidden;
 }
 
 @keyframes lp-fade-in {
@@ -557,14 +580,15 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-top: 55px; /* below titlebar */
+  padding: 24px 24px 16px;
+  box-sizing: border-box;
   overflow: hidden;
 }
 
 /* ============ Search ============ */
 .lp-search-bar {
   flex-shrink: 0;
-  margin-bottom: 32px;
+  margin-bottom: 20px;
 }
 .lp-search-box {
   display: flex;
@@ -599,7 +623,7 @@ onUnmounted(() => {
 .lp-status {
   color: #71717a;
   font-size: 0.92em;
-  margin-top: 80px;
+  margin-top: 40px;
 }
 .lp-error { color: #f87171; }
 .lp-spinner { animation: spin 1s linear infinite; display: inline-block; }
@@ -607,7 +631,7 @@ onUnmounted(() => {
 
 .lp-empty {
   text-align: center;
-  margin-top: 100px;
+  margin-top: 40px;
   color: #71717a;
 }
 .lp-empty-icon { font-size: 3em; margin-bottom: 16px; }
@@ -617,8 +641,8 @@ onUnmounted(() => {
 .lp-grid-container {
   flex: 1;
   width: 100%;
-  max-width: 840px;
-  padding: 0 40px;
+  max-width: 100%;
+  padding: 0 8px 8px;
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -750,7 +774,7 @@ onUnmounted(() => {
 /* ============ Page dots ============ */
 .lp-page-dots {
   flex-shrink: 0;
-  padding: 16px 0 24px;
+  padding: 12px 0 8px;
   display: flex;
   gap: 6px;
   justify-content: center;

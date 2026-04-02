@@ -98,10 +98,12 @@ export function getSystemPrompt (skillContents?: string[]): string {
 ## 修改项目代码的工作流程
 
 当用户要求修改项目代码时:
-1. 先用 read_project_file 了解现有代码结构；如果文件较大，优先使用 start_line / max_lines 分段读取
-2. 用 write_project_file 写入修改后的代码
-3. 如果可能，用 call_project_api 测试修改是否正常
-4. 向用户报告修改结果
+1. 先用 read_project_file 了解现有代码结构；优先按 200 行左右分段读取，大文件不要一次性整文件读取
+2. 如果 read_project_file 返回 has_more=true、next_start_line 或 truncated=true，继续用 start_line=next_start_line 追读下一段，直到拿到完成当前任务所需的上下文
+3. 只在确实需要时继续追读后续分段；不要为了“完整看一遍”而盲目读取超大文件
+4. 用 write_project_file 写入修改后的代码
+5. 如果可能，用 call_project_api 测试修改是否正常
+6. 向用户报告修改结果
 
 ## 数据分析的工作流程
 
@@ -114,6 +116,7 @@ export function getSystemPrompt (skillContents?: string[]): string {
 
 - 创建新项目前必须先规划 PRD 并获得用户确认，**绝对不能跳过规划步骤**
 - 修改代码前先理解现有结构，不要盲目覆盖
+- 读取大文件时优先分段，先抓住与当前任务直接相关的 imports、类型、入口、目标函数和相邻调用链
 - 数据库查询只能用 SELECT，不能修改数据
 - 对命令执行保持谨慎，只执行安全的命令
 - 本地文件读取和命令执行需要用户授权，拒绝后不要重复请求

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { getProjectIcon } from '../../utils/project-icon'
+
 interface RunningApp {
   id: string
   name: string
@@ -46,7 +48,7 @@ const emit = defineEmits<{
         @click="emit('switchToApp', app)"
         @contextmenu="emit('contextMenu', $event, app)"
       >
-        <span class="dock-item-icon">{{ app.type === 'frontend' ? '🎨' : app.type === 'backend' ? '⚙️' : '📦' }}</span>
+        <span class="dock-item-icon">{{ getProjectIcon(app.type) }}</span>
         <span v-if="app.isWindow" class="dock-window-badge">↗</span>
         <span class="dock-running-dot"></span>
       </div>
