@@ -246,10 +246,11 @@ async function persistProviderSelection () {
   })
 
   providers.value = nextProviders
-  await window.electronAPI.saveProviders({
+  // Use JSON round-trip to strip Vue reactive proxies before IPC
+  await window.electronAPI.saveProviders(JSON.parse(JSON.stringify({
     providers: nextProviders,
     activeProviderId: activeProviderId.value
-  })
+  })))
 }
 
 /** Toggle thinking block visibility. */
