@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch, toRaw } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { marked } from 'marked'
 
 // Configure marked for safe rendering
@@ -540,10 +540,10 @@ async function sendMessage () {
       activeCleanups.set(sessionId, cleanup)
 
       // Send only user/assistant messages (not the placeholder)
-      // Use toRaw + JSON round-trip to strip Vue reactive proxies before IPC
+      // Use JSON round-trip to strip Vue reactive proxies before IPC
       const chatMessages = JSON.parse(JSON.stringify(targetMessages.slice(0, -1).map(m => ({
         role: m.role,
-        content: toRaw(m.content)
+        content: m.content
       }))))
       await window.electronAPI.chatStream(chatMessages, sessionId)
 
@@ -560,7 +560,7 @@ async function sendMessage () {
       }
     } else {
       // HTTP fallback (non-streaming)
-      const chatMessages = JSON.parse(JSON.stringify(targetMessages.slice(0, -1).map(m => ({ role: m.role, content: toRaw(m.content) }))))
+      const chatMessages = JSON.parse(JSON.stringify(targetMessages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))))
       const res = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
