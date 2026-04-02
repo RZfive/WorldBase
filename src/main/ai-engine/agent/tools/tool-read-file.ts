@@ -71,7 +71,7 @@ export function toolReadFile (services: ToolServices): Tool {
       const { project_id, file_path, start_line, max_lines } = args as unknown as ReadFileArgs
       const content = await services.projectFS.readFile(project_id, file_path)
       const lines = content.split('\n')
-      const totalLines = lines.length
+      const totalLines = content === '' ? 0 : lines.length
       const normalizedStartLine = Math.max(1, Math.floor(start_line || 1))
       const requestedMaxLines = Math.min(
         MAX_SEGMENT_LINES,
@@ -85,10 +85,10 @@ export function toolReadFile (services: ToolServices): Tool {
       )
       const startIndex = Math.min(normalizedStartLine - 1, Math.max(0, totalLines - 1))
       const endIndexExclusive = Math.min(totalLines, startIndex + requestedMaxLines)
-      const selectedLines = lines.slice(startIndex, endIndexExclusive)
+      const selectedLines = totalLines === 0 ? [] : lines.slice(startIndex, endIndexExclusive)
       const selectedContent = selectedLines.join('\n')
-      const startLineNumber = totalLines === 0 ? 1 : startIndex + 1
-      const endLineNumber = totalLines === 0 ? 1 : startIndex + selectedLines.length
+      const startLineNumber = totalLines === 0 ? 0 : startIndex + 1
+      const endLineNumber = totalLines === 0 ? 0 : startIndex + selectedLines.length
       const hasMore = endIndexExclusive < totalLines
       const nextStartLine = hasMore ? endIndexExclusive + 1 : null
 
@@ -108,10 +108,11 @@ export function toolReadFile (services: ToolServices): Tool {
 
       const head = selectedContent.slice(0, EDGE_RETURN_CHARS)
       const tail = selectedContent.slice(-EDGE_RETURN_CHARS)
+      const truncatedChars = Math.max(0, selectedContent.length - (EDGE_RETURN_CHARS * 2))
 
       return {
         file_path,
-        content: `${head}\n\n...[truncated ${selectedContent.length - (EDGE_RETURN_CHARS * 2)} characters from lines ${startLineNumber}-${endLineNumber}]...\n\n${tail}`,
+        content: `${head}\n\n...[truncated ${truncatedChars} characters from lines ${startLineNumber}-${endLineNumber}]...\n\n${tail}`,
         truncated: true,
         total_chars: content.length,
         total_lines: totalLines,
