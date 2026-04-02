@@ -8,6 +8,7 @@ interface AIProvider {
   baseUrl: string
   apiKey: string
   models: string[]
+  modelContextWindows?: Record<string, number>
   activeModel: string
   enableThinking?: boolean
 }
@@ -41,6 +42,7 @@ const editingProvider = ref<AIProvider | null>(null)
 const showKey = ref<Record<string, boolean>>({})
 const newModelInput = ref('')
 const activeTab = ref('ai')
+const DEFAULT_CONTEXT_WINDOW = 32000
 
 // DB viewer state
 const databases = ref<DatabaseInfo[]>([])
@@ -87,6 +89,7 @@ function addProvider () {
     baseUrl: 'https://api.openai.com/v1',
     apiKey: '',
     models: [],
+    modelContextWindows: {},
     activeModel: '',
     enableThinking: false
   }
@@ -94,7 +97,11 @@ function addProvider () {
 }
 
 function editProvider (p: AIProvider) {
-  editingProvider.value = { ...p, models: [...p.models] }
+  editingProvider.value = {
+    ...p,
+    models: [...p.models],
+    modelContextWindows: { ...(p.modelContextWindows || {}) }
+  }
   newModelInput.value = ''
 }
 
@@ -112,6 +119,10 @@ function addModel () {
     return
   }
   editingProvider.value.models.push(model)
+  if (!editingProvider.value.modelContextWindows) {
+    editingProvider.value.modelContextWindows = {}
+  }
+  editingProvider.value.modelContextWindows[model] = DEFAULT_CONTEXT_WINDOW
   if (!editingProvider.value.activeModel) {
     editingProvider.value.activeModel = model
   }
@@ -122,9 +133,33 @@ function addModel () {
 function removeModel (index: number) {
   if (!editingProvider.value) return
   const removed = editingProvider.value.models.splice(index, 1)[0]
+  if (editingProvider.value.modelContextWindows) {
+    delete editingProvider.value.modelContextWindows[removed]
+  }
   if (editingProvider.value.activeModel === removed) {
     editingProvider.value.activeModel = editingProvider.value.models[0] || ''
   }
+}
+
+function getModelContextWindow (provider: AIProvider, model: string): number {
+  const value = provider.modelContextWindows?.[model]
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_CONTEXT_WINDOW
+}
+
+function setModelContextWindow (provider: AIProvider, model: string, value: string) {
+  const parsed = Number.parseInt(value, 10)
+  if (!provider.modelContextWindows) {
+    provider.modelContextWindows = {}
+  }
+  provider.modelContextWindows[model] = Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_CONTEXT_WINDOW
+}
+
+function handleModelContextInput (provider: AIProvider, model: string, event: Event) {
+  setModelContextWindow(provider, model, (event.target as HTMLInputElement).value)
 }
 
 async function saveEdit () {
@@ -142,6 +177,13 @@ async function saveEdit () {
 
   if (!ep.models.includes(ep.activeModel)) {
     ep.activeModel = ep.models[0]
+  }
+
+  if (!ep.modelContextWindows) {
+    ep.modelContextWindows = {}
+  }
+  for (const model of ep.models) {
+    ep.modelContextWindows[model] = getModelContextWindow(ep, model)
   }
 
   const idx = providers.value.findIndex(p => p.id === ep.id)
@@ -328,10 +370,19 @@ function backToDbList () {
         <div class="form-group">
           <label>模型列表</label>
           <div class="model-tags">
-            <span v-for="(m, i) in editingProvider.models" :key="i" class="model-tag">
-              {{ m }}
+            <div v-for="(m, i) in editingProvider.models" :key="i" class="model-tag">
+              <span class="model-name">{{ m }}</span>
+              <input
+                :value="getModelContextWindow(editingProvider, m)"
+                type="number"
+                min="1000"
+                step="1000"
+                class="model-context-input"
+                placeholder="上下文窗口"
+                @input="handleModelContextInput(editingProvider, m, $event)"
+              />
               <button class="model-tag-remove" @click="removeModel(i)" title="移除">×</button>
-            </span>
+            </div>
           </div>
           <div class="model-add-row">
             <input
@@ -343,7 +394,7 @@ function backToDbList () {
             />
             <button class="model-add-btn" @click="addModel">添加</button>
           </div>
-          <span class="form-hint">逐个添加模型，列表中第一个为默认模型</span>
+          <span class="form-hint">逐个添加模型，并填写每个模型的上下文窗口大小</span>
         </div>
 
         <div class="form-group" v-if="editingProvider.models.length > 0">
@@ -409,7 +460,7 @@ function backToDbList () {
             </div>
             <div class="detail-row">
               <span class="detail-label">模型:</span>
-              <span class="detail-value">{{ p.models.join(', ') }}</span>
+              <span class="detail-value">{{ p.models.map(model => `${model} (${p.modelContextWindows?.[model] || DEFAULT_CONTEXT_WINDOW})`).join(', ') }}</span>
             </div>
             <div class="detail-row">
               <span class="detail-label">默认:</span>
@@ -830,13 +881,34 @@ function backToDbList () {
 .model-tag {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   background: #27272a;
   border: 1px solid #3f3f46;
   border-radius: 6px;
   padding: 4px 10px;
   font-size: 0.82em;
   color: #e4e4e7;
+}
+
+.model-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-context-input {
+  width: 110px;
+  background: #18181b;
+  border: 1px solid #3f3f46;
+  border-radius: 6px;
+  color: #e4e4e7;
+  padding: 4px 8px;
+  font-size: 0.82em;
+}
+
+.model-context-input:focus {
+  outline: none;
+  border-color: #3b82f6;
 }
 
 .model-tag-remove {

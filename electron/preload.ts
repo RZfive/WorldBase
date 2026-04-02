@@ -12,7 +12,7 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'done' | 'error'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'reset' | 'done' | 'error'
   content?: string
   name?: string
   result?: unknown
@@ -41,6 +41,7 @@ interface AIProvider {
   baseUrl: string
   apiKey: string
   models: string[]
+  modelContextWindows?: Record<string, number>
   activeModel: string
   enableThinking?: boolean
 }
