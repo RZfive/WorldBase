@@ -29,14 +29,18 @@ interface ProjectListItem {
 
 type MainView = 'chat' | 'app' | 'source' | 'settings'
 
+interface EmbeddedAppState {
+  url: string
+  loading: boolean
+}
+
 /** Maximum seconds to wait for a project's port to become available after starting. */
 const START_TIMEOUT_SECONDS = 15
 
 const currentView = ref<MainView>('chat')
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
-const embeddedProjectId = ref<string | null>(null)
-const embeddedAppUrl = ref<string>('')
-const embeddedAppLoading = ref(false)
+const embeddedApps = reactive(new Map<string, EmbeddedAppState>())
+const activeEmbeddedProjectId = ref<string | null>(null)
 const sourceProject = ref<Record<string, unknown> | null>(null)
 const showLaunchpad = ref(false)
 
@@ -53,10 +57,19 @@ let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
 let runningAppsRefreshToken = 0
 
-function clearEmbeddedProject () {
-  embeddedProjectId.value = null
-  embeddedAppUrl.value = ''
-  embeddedAppLoading.value = false
+function clearEmbeddedProject (projectId?: string) {
+  if (projectId) {
+    embeddedApps.delete(projectId)
+    if (activeEmbeddedProjectId.value === projectId) {
+      // Switch to another open app, or clear
+      const remaining = [...embeddedApps.keys()]
+      activeEmbeddedProjectId.value = remaining.length > 0 ? remaining[remaining.length - 1] : null
+    }
+    if (embeddedApps.size === 0) currentView.value = 'chat'
+  } else {
+    embeddedApps.clear()
+    activeEmbeddedProjectId.value = null
+  }
 }
 
 async function fetchProjectMeta (projectId: string) {
@@ -95,15 +108,19 @@ function toggleLaunchpad () {
 /**
  * Open a project embedded in the main area.
  * Starts the project if not running, then shows its iframe directly.
+ * Keeps other already-open embedded apps alive for instant switching.
  */
 async function openEmbeddedProject (projectId: string) {
   if (!window.electronAPI) return
 
   showLaunchpad.value = false
-  embeddedProjectId.value = projectId
-  embeddedAppUrl.value = ''
-  embeddedAppLoading.value = true
   currentView.value = 'app'
+  activeEmbeddedProjectId.value = projectId
+
+  // If already open, just bring it to the front
+  if (embeddedApps.has(projectId)) return
+
+  embeddedApps.set(projectId, { url: '', loading: true })
 
   try {
     let status = await getRuntimeStatus(projectId)
@@ -125,15 +142,17 @@ async function openEmbeddedProject (projectId: string) {
       }
     }
 
-    if (status.status === 'running' && status.port) {
-      embeddedAppUrl.value = `http://localhost:${status.port}`
+    const appState = embeddedApps.get(projectId)
+    if (appState && status.status === 'running' && status.port) {
+      appState.url = `http://localhost:${status.port}`
     }
 
     await refreshRunningApps()
   } catch {
     // keep the view, will show placeholder
   } finally {
-    embeddedAppLoading.value = false
+    const appState = embeddedApps.get(projectId)
+    if (appState) appState.loading = false
   }
 }
 
@@ -189,11 +208,8 @@ async function dockOpenWindow (app: RunningApp) {
   }
   await window.electronAPI.openProjectWindow(app.id)
 
-  // When opened in a standalone window, base shows chat
-  if (embeddedProjectId.value === app.id) {
-    clearEmbeddedProject()
-  }
-  currentView.value = 'chat'
+  // Remove from embedded panel; if no apps remain, switch to chat
+  clearEmbeddedProject(app.id)
 
   await refreshRunningApps()
 }
@@ -214,10 +230,7 @@ async function dockStopApp (app: RunningApp) {
   hideDockCtx()
   await window.electronAPI?.stopProject(app.id)
 
-  if (embeddedProjectId.value === app.id) {
-    clearEmbeddedProject()
-    currentView.value = 'chat'
-  }
+  clearEmbeddedProject(app.id)
 
   await refreshRunningApps()
 }
@@ -273,9 +286,8 @@ onMounted(async () => {
 
   if (window.electronAPI?.onProjectChanged) {
     projectChangedCleanup = window.electronAPI.onProjectChanged((event) => {
-      if (event.action === 'deleted' && embeddedProjectId.value === event.projectId) {
-        clearEmbeddedProject()
-        currentView.value = 'chat'
+      if (event.action === 'deleted') {
+        clearEmbeddedProject(event.projectId)
       }
       void refreshRunningApps()
     })
@@ -309,7 +321,7 @@ onUnmounted(() => {
         :current-view="currentView"
         :show-launchpad="showLaunchpad"
         :running-apps="runningApps"
-        :embedded-project-id="embeddedProjectId"
+        :embedded-project-id="activeEmbeddedProjectId"
         @open-chat="openChat"
         @toggle-launchpad="toggleLaunchpad"
         @open-settings="openSettings"
@@ -320,23 +332,27 @@ onUnmounted(() => {
       <main class="main-content">
         <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
 
-        <!-- Embedded app: full-area iframe, no controls -->
+        <!-- Embedded apps: each app keeps its iframe alive, only the active one is visible -->
         <div v-if="currentView === 'app'" class="embedded-app">
-          <div v-if="embeddedAppLoading" class="embedded-loading">
-            <span class="embedded-spinner">⏳</span>
-            <p>应用启动中…</p>
-          </div>
-          <iframe
-            v-else-if="embeddedAppUrl"
-            :src="embeddedAppUrl"
-            class="embedded-frame"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
-            allow="clipboard-read; clipboard-write"
-          ></iframe>
-          <div v-else class="embedded-unavailable">
-            <p>应用未能启动</p>
-            <button class="embedded-retry-btn" @click="embeddedProjectId && openEmbeddedProject(embeddedProjectId)">🔄 重试</button>
-          </div>
+          <template v-for="[appId, appState] in embeddedApps" :key="appId">
+            <div v-show="activeEmbeddedProjectId === appId" class="embedded-slot">
+              <div v-if="appState.loading" class="embedded-loading">
+                <span class="embedded-spinner">⏳</span>
+                <p>应用启动中…</p>
+              </div>
+              <iframe
+                v-else-if="appState.url"
+                :src="appState.url"
+                class="embedded-frame"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+                allow="clipboard-read; clipboard-write"
+              ></iframe>
+              <div v-else class="embedded-unavailable">
+                <p>应用未能启动</p>
+                <button class="embedded-retry-btn" @click="openEmbeddedProject(appId)">🔄 重试</button>
+              </div>
+            </div>
+          </template>
         </div>
 
         <!-- Source code viewer -->
@@ -415,6 +431,14 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   background: #05070b;
+}
+
+.embedded-slot {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .embedded-frame {

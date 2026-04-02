@@ -252,6 +252,9 @@ function setupIPC (): void {
   })
 
   ipcMain.handle('projects:delete', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    if (!projectId || typeof projectId !== 'string') {
+      throw new TypeError(`Invalid project ID: ${String(projectId)}`)
+    }
     // Stop the project first if running
     try { await runtimeManager!.stop(projectId) } catch { /* ignore */ }
     await projectFS!.deleteProject(projectId)
