@@ -10,7 +10,6 @@ interface StreamEvent {
   type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'reset' | 'done' | 'error'
   content?: string
   name?: string
-  result?: unknown
   message?: { role: string; content: string }
   thinking?: string
   error?: string
