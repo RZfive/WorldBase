@@ -15,7 +15,6 @@ interface StreamEvent {
   type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'reset' | 'done' | 'error'
   content?: string
   name?: string
-  result?: unknown
   message?: ChatMessage
   thinking?: string
   error?: string
