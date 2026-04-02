@@ -284,7 +284,7 @@ export class OpenAIProvider {
   }
 
   private isRetryableStatus (status: number): boolean {
-    return status === 408 || status === 409 || status === 429 || (status >= 500 && status <= 504)
+    return status === 408 || status === 429 || (status >= 500 && status <= 504)
   }
 
   private isRetryableError (error: Error): boolean {

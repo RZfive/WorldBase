@@ -153,7 +153,8 @@ export function toolCreateProject (services: ToolServices): Tool {
           onProgress?.('⚠️ 依赖安装失败', (err as Error).message)
           console.warn(`[tool:create_project] Failed to install deps: ${(err as Error).message}`)
           return {
-            success: false,
+            success: true,
+            ready: false,
             recoverable: true,
             stage: 'install',
             project,
@@ -175,7 +176,8 @@ export function toolCreateProject (services: ToolServices): Tool {
         onProgress?.('⚠️ 启动失败', (err as Error).message)
         console.warn(`[tool:create_project] Failed to auto-start: ${(err as Error).message}`)
         return {
-          success: false,
+          success: true,
+          ready: false,
           recoverable: true,
           stage: 'start',
           project,

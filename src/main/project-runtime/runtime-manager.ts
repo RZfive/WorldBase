@@ -175,7 +175,8 @@ export class RuntimeManager {
 
     this.runningProjects.set(projectId, projectInfo)
 
-    // Wait for the process to be ready (simple delay + port check)
+    // Give generated projects a bit more time because first boot often includes
+    // dependency warmup and framework startup before the port becomes reachable.
     const ready = await this.processMonitor.waitForReady(port, 15000)
     if (projectInfo.status === 'crashed' || projectInfo.status === 'error') {
       const recentLogs = this.getLogs(projectId, 40).map(log => log.text).join('\n')

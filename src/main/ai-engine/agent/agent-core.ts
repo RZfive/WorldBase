@@ -23,9 +23,16 @@ interface RegisteredTool {
  * 实现 思考 → 行动 → 观察 的循环
  */
 export class AgentCore {
+  // Keep summaries short enough to fit comfortably back into the prompt.
+  private static readonly CONTEXT_SUMMARY_PREFIX = '[CONTEXT_SUMMARY]'
+  private static readonly CONTEXT_SUMMARY_CHAR_LIMIT = 1500
+  // Lightweight heuristic for providers without tokenizer access.
+  private static readonly ESTIMATED_CHARS_PER_TOKEN = 4
+  private static readonly ESTIMATED_MESSAGE_OVERHEAD_TOKENS = 12
   private provider: OpenAIProvider
   private services: Record<string, unknown>
   private tools = new Map<string, RegisteredTool>()
+  // Allow a few extra repair attempts after create/edit/start tool loops.
   private maxIterations = 16
   private maxStreamRetries = 3
   private activeSkillContents: string[] = []
@@ -121,8 +128,8 @@ export class AgentCore {
     let messages: ChatMessage[] = [systemMessage, ...userMessages]
     const toolDefs = this.getToolDefinitions()
     let iterations = 0
+    let renderedContent = ''
     let fullThinking = ''
-    let lastAssistantContent = ''
 
     while (iterations < this.maxIterations) {
       iterations++
@@ -175,7 +182,7 @@ export class AgentCore {
       }
 
       fullThinking += iterationThinking
-      lastAssistantContent = iterationContent
+      renderedContent += iterationContent
 
       if (!assistantMessage) break
 
@@ -183,7 +190,7 @@ export class AgentCore {
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
         yield {
           type: 'done',
-          message: { role: 'assistant', content: iterationContent },
+          message: { role: 'assistant', content: renderedContent },
           thinking: fullThinking || undefined
         }
         return
@@ -219,7 +226,7 @@ export class AgentCore {
       type: 'done',
       message: {
         role: 'assistant',
-        content: lastAssistantContent || '我已经尝试了多个步骤但还没有得到最终结果。请告诉我还需要什么帮助。'
+        content: renderedContent || '我已经尝试了多个步骤但还没有得到最终结果。请告诉我还需要什么帮助。'
       },
       thinking: fullThinking || undefined
     }
@@ -253,7 +260,9 @@ export class AgentCore {
     onProgress?.('🧠 正在压缩上下文...', `${currentTokens}/${contextWindow}`)
 
     const systemMessage = messages[0]
-    const existingSummaryIndex = messages.findIndex((message, index) => index > 0 && typeof message.content === 'string' && message.role === 'system' && message.content.startsWith('[CONTEXT_SUMMARY]'))
+    const existingSummaryIndex = messages.findIndex((message, index) => {
+      return index > 0 && this._isExistingSummaryMessage(message)
+    })
     const summaryOffset = existingSummaryIndex >= 0 ? 1 : 0
     const keepCount = 6
     const recentMessages = messages.slice(Math.max(1 + summaryOffset, messages.length - keepCount))
@@ -267,7 +276,7 @@ export class AgentCore {
     const summaryResponse = await this.provider.chatCompletion(summaryPrompt)
     const summaryMessage: ChatMessage = {
       role: 'system',
-      content: `[CONTEXT_SUMMARY]\n${typeof summaryResponse.content === 'string' ? summaryResponse.content : ''}`
+      content: `${AgentCore.CONTEXT_SUMMARY_PREFIX}\n${typeof summaryResponse.content === 'string' ? summaryResponse.content : ''}`
     }
 
     const compressed = [systemMessage, summaryMessage, ...recentMessages]
@@ -288,7 +297,7 @@ export class AgentCore {
     return [
       {
         role: 'system',
-        content: '你是上下文压缩助手。请把对话压缩成简洁但完整的中文摘要，长度尽量控制在 1500 字以内，保留需求、已完成工作、失败原因、关键文件路径、项目ID、命令、端口、下一步待办，避免丢失会影响继续任务的信息。'
+        content: `你是上下文压缩助手。请把对话压缩成简洁但完整的中文摘要，长度尽量控制在 ${AgentCore.CONTEXT_SUMMARY_CHAR_LIMIT} 字以内，保留需求、已完成工作、失败原因、关键文件路径、项目ID、命令、端口、下一步待办，避免丢失会影响继续任务的信息。`
       },
       {
         role: 'user',
@@ -302,8 +311,14 @@ export class AgentCore {
       const content = typeof message.content === 'string'
         ? message.content
         : JSON.stringify(message.content)
-      return total + Math.ceil(content.length / 4) + 12
+      return total + Math.ceil(content.length / AgentCore.ESTIMATED_CHARS_PER_TOKEN) + AgentCore.ESTIMATED_MESSAGE_OVERHEAD_TOKENS
     }, 0)
+  }
+
+  private _isExistingSummaryMessage (message: ChatMessage): boolean {
+    return message.role === 'system' &&
+      typeof message.content === 'string' &&
+      message.content.startsWith(AgentCore.CONTEXT_SUMMARY_PREFIX)
   }
 
   private async _sleep (ms: number): Promise<void> {
