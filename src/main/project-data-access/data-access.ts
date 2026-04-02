@@ -9,8 +9,25 @@ import { DataAnalyzer } from './data-analyzer.js'
 interface DataConfig {
   database: string
   dbPath: string
-  tables?: unknown[]
+  tables?: SchemaTable[]
   [key: string]: unknown
+}
+
+interface SchemaColumn {
+  name: string
+  type: string
+  primaryKey?: boolean
+  notNull?: boolean
+  unique?: boolean
+  autoIncrement?: boolean
+  defaultValue?: unknown
+  defaultSql?: string
+}
+
+interface SchemaTable {
+  name: string
+  columns?: SchemaColumn[]
+  description?: string
 }
 
 interface TableSummary {
@@ -24,6 +41,19 @@ interface DataSummary {
   database?: string
   tables?: TableSummary[]
   reason?: string
+}
+
+interface ReadRecordsOptions {
+  filters?: Record<string, unknown>
+  limit?: number
+  offset?: number
+  orderBy?: string
+  orderDirection?: 'asc' | 'desc'
+  columns?: string[]
+}
+
+interface SaveRecordsOptions {
+  mode?: 'insert' | 'upsert'
 }
 
 export interface DatabaseInfo {
@@ -44,6 +74,13 @@ function validateIdentifier (name: string): string {
     throw new Error(`Invalid SQL identifier: ${name}`)
   }
   return name
+}
+
+function toSqlLiteral (value: unknown): string {
+  if (value === null) return 'NULL'
+  if (typeof value === 'number') return String(value)
+  if (typeof value === 'boolean') return value ? '1' : '0'
+  return `'${String(value).replace(/'/g, "''")}'`
 }
 
 /**
@@ -97,6 +134,88 @@ export class ProjectDataAccess {
     return path.join(this.projectsDir, projectId, dbRelativePath)
   }
 
+  private async _getSqliteConfig (projectId: string): Promise<DataConfig> {
+    const config = await this._getDataConfig(projectId)
+    if (!config || config.database !== 'sqlite') {
+      throw new Error(`No SQLite database configured for project: ${projectId}`)
+    }
+    return config
+  }
+
+  private _getTableConfig (config: DataConfig, tableName: string): SchemaTable {
+    const table = config.tables?.find(item => item.name === tableName)
+    if (!table) {
+      throw new Error(`Table not declared in dataSchema: ${tableName}`)
+    }
+    if (!table.columns || table.columns.length === 0) {
+      throw new Error(`Table schema has no columns: ${tableName}`)
+    }
+    return table
+  }
+
+  private _getAllowedColumns (table: SchemaTable): Map<string, SchemaColumn> {
+    return new Map((table.columns || []).map(column => [column.name, column]))
+  }
+
+  private _buildColumnDefinition (column: SchemaColumn, useInlinePrimaryKey: boolean): string {
+    const parts = [`"${validateIdentifier(column.name)}"`, column.type || 'TEXT']
+    const isInlinePrimaryKey = useInlinePrimaryKey && column.primaryKey
+    if (isInlinePrimaryKey) {
+      parts.push('PRIMARY KEY')
+      if (column.autoIncrement) {
+        parts.push('AUTOINCREMENT')
+      }
+    }
+    if (column.notNull) {
+      parts.push('NOT NULL')
+    }
+    if (column.unique) {
+      parts.push('UNIQUE')
+    }
+    if (column.defaultSql) {
+      parts.push(`DEFAULT ${column.defaultSql}`)
+    } else if (column.defaultValue !== undefined) {
+      parts.push(`DEFAULT ${toSqlLiteral(column.defaultValue)}`)
+    }
+    return parts.join(' ')
+  }
+
+  async ensureProjectDatabase (projectId: string): Promise<{ dbPath: string, createdTables: string[] }> {
+    const config = await this._getSqliteConfig(projectId)
+    const dbPath = this._getDbPath(projectId, config.dbPath)
+    await fs.mkdir(path.dirname(dbPath), { recursive: true })
+
+    const tables = config.tables || []
+    for (const table of tables) {
+      const tableName = validateIdentifier(table.name)
+      const columns = table.columns || []
+      if (columns.length === 0) {
+        throw new Error(`Table schema has no columns: ${tableName}`)
+      }
+
+      const primaryKeys = columns
+        .filter(column => column.primaryKey)
+        .map(column => validateIdentifier(column.name))
+
+      const useInlinePrimaryKey = primaryKeys.length <= 1
+      const sqlParts = columns.map(column => this._buildColumnDefinition(column, useInlinePrimaryKey))
+
+      if (!useInlinePrimaryKey && primaryKeys.length > 0) {
+        sqlParts.push(`PRIMARY KEY (${primaryKeys.map(name => `"${name}"`).join(', ')})`)
+      }
+
+      this.bridgeAdapter.execute(
+        dbPath,
+        `CREATE TABLE IF NOT EXISTS "${tableName}" (${sqlParts.join(', ')})`
+      )
+    }
+
+    return {
+      dbPath,
+      createdTables: tables.map(table => table.name)
+    }
+  }
+
   /**
    * Execute a read-only SQL query on a project's database.
    * Only SELECT statements are allowed.
@@ -108,11 +227,7 @@ export class ProjectDataAccess {
       throw new Error('Only SELECT queries are allowed for direct database access')
     }
 
-    const config = await this._getDataConfig(projectId)
-    if (!config || config.database !== 'sqlite') {
-      throw new Error(`No SQLite database configured for project: ${projectId}`)
-    }
-
+    const config = await this._getSqliteConfig(projectId)
     const dbPath = this._getDbPath(projectId, config.dbPath)
     return this.bridgeAdapter.query(dbPath, sql)
   }
@@ -158,11 +273,7 @@ export class ProjectDataAccess {
    */
   async getTableData (projectId: string, tableName: string, { page = 1, pageSize = 50 } = {}): Promise<Record<string, unknown>[]> {
     validateIdentifier(tableName)
-    const config = await this._getDataConfig(projectId)
-    if (!config || config.database !== 'sqlite') {
-      throw new Error(`No SQLite database configured for project: ${projectId}`)
-    }
-
+    const config = await this._getSqliteConfig(projectId)
     const dbPath = this._getDbPath(projectId, config.dbPath)
     const offset = (page - 1) * pageSize
     return this.bridgeAdapter.query(
@@ -227,6 +338,131 @@ export class ProjectDataAccess {
    */
   async analyzeData (projectId: string, analysisType: string, options: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     return this.analyzer.analyze(this, projectId, analysisType, options)
+  }
+
+  async readRecords (projectId: string, tableName: string, options: ReadRecordsOptions = {}): Promise<Record<string, unknown>[]> {
+    const config = await this._getSqliteConfig(projectId)
+    await this.ensureProjectDatabase(projectId)
+
+    const validatedTableName = validateIdentifier(tableName)
+    const table = this._getTableConfig(config, validatedTableName)
+    const allowedColumns = this._getAllowedColumns(table)
+    const selectedColumns = options.columns?.length
+      ? options.columns.map(column => {
+          const validated = validateIdentifier(column)
+          if (!allowedColumns.has(validated)) {
+            throw new Error(`Column not declared in schema: ${validated}`)
+          }
+          return `"${validated}"`
+        })
+      : ['*']
+
+    const filters = options.filters || {}
+    const whereParts: string[] = []
+    const params: unknown[] = []
+
+    for (const [column, value] of Object.entries(filters)) {
+      const validatedColumn = validateIdentifier(column)
+      if (!allowedColumns.has(validatedColumn)) {
+        throw new Error(`Column not declared in schema: ${validatedColumn}`)
+      }
+      if (value === null) {
+        whereParts.push(`"${validatedColumn}" IS NULL`)
+      } else {
+        whereParts.push(`"${validatedColumn}" = ?`)
+        params.push(value)
+      }
+    }
+
+    let sql = `SELECT ${selectedColumns.join(', ')} FROM "${validatedTableName}"`
+    if (whereParts.length > 0) {
+      sql += ` WHERE ${whereParts.join(' AND ')}`
+    }
+
+    if (options.orderBy) {
+      const orderBy = validateIdentifier(options.orderBy)
+      if (!allowedColumns.has(orderBy)) {
+        throw new Error(`Column not declared in schema: ${orderBy}`)
+      }
+      const direction = options.orderDirection?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC'
+      sql += ` ORDER BY "${orderBy}" ${direction}`
+    }
+
+    if (options.limit !== undefined) {
+      sql += ` LIMIT ${Math.max(1, Math.min(1000, Number(options.limit) || 1))}`
+    }
+
+    if (options.offset !== undefined) {
+      sql += ` OFFSET ${Math.max(0, Number(options.offset) || 0)}`
+    }
+
+    const dbPath = this._getDbPath(projectId, config.dbPath)
+    return this.bridgeAdapter.query(dbPath, sql, params)
+  }
+
+  async saveRecords (
+    projectId: string,
+    tableName: string,
+    recordsInput: Array<Record<string, unknown>> | Record<string, unknown>,
+    options: SaveRecordsOptions = {}
+  ): Promise<{ table: string, count: number, mode: 'insert' | 'upsert' }> {
+    const config = await this._getSqliteConfig(projectId)
+    await this.ensureProjectDatabase(projectId)
+
+    const validatedTableName = validateIdentifier(tableName)
+    const table = this._getTableConfig(config, validatedTableName)
+    const allowedColumns = this._getAllowedColumns(table)
+    const primaryKeys = (table.columns || [])
+      .filter(column => column.primaryKey)
+      .map(column => validateIdentifier(column.name))
+
+    const records = Array.isArray(recordsInput) ? recordsInput : [recordsInput]
+    if (records.length === 0) {
+      return { table: validatedTableName, count: 0, mode: options.mode || 'upsert' }
+    }
+
+    const dbPath = this._getDbPath(projectId, config.dbPath)
+    let savedCount = 0
+
+    for (const record of records) {
+      const entries = Object.entries(record)
+        .filter(([, value]) => value !== undefined)
+        .map(([column, value]) => {
+          const validatedColumn = validateIdentifier(column)
+          if (!allowedColumns.has(validatedColumn)) {
+            throw new Error(`Column not declared in schema: ${validatedColumn}`)
+          }
+          return [validatedColumn, value] as const
+        })
+
+      if (entries.length === 0) {
+        throw new Error(`Record for table ${validatedTableName} has no writable fields`)
+      }
+
+      const columns = entries.map(([column]) => column)
+      const placeholders = columns.map(() => '?').join(', ')
+      const values = entries.map(([, value]) => value)
+      const mode = options.mode || 'upsert'
+      let sql = `INSERT INTO "${validatedTableName}" (${columns.map(column => `"${column}"`).join(', ')}) VALUES (${placeholders})`
+
+      if (mode === 'upsert' && primaryKeys.length > 0 && primaryKeys.every(primaryKey => columns.includes(primaryKey))) {
+        const updatableColumns = columns.filter(column => !primaryKeys.includes(column))
+        if (updatableColumns.length > 0) {
+          sql += ` ON CONFLICT (${primaryKeys.map(column => `"${column}"`).join(', ')}) DO UPDATE SET ${updatableColumns.map(column => `"${column}" = excluded."${column}"`).join(', ')}`
+        } else {
+          sql += ` ON CONFLICT (${primaryKeys.map(column => `"${column}"`).join(', ')}) DO NOTHING`
+        }
+      }
+
+      this.bridgeAdapter.execute(dbPath, sql, values)
+      savedCount += 1
+    }
+
+    return {
+      table: validatedTableName,
+      count: savedCount,
+      mode: options.mode || 'upsert'
+    }
   }
 
   /**

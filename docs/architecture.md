@@ -140,8 +140,22 @@ class ProjectApiClient {
 
 | 路径 | 说明 | 适用场景 |
 |------|------|---------|
-| 通过 API | 主 AI → ApiClient → 子项目后端 → 数据库 | 常规读写 |
-| 直接访问 | 主 AI → DataAccess → 直接打开数据库文件 | 数据分析（只读） |
+| 通过宿主标准数据接口 | 生成项目 → The World `/api/projects/:projectId/data/*` → SQLite | 应用运行时标准读写 |
+| 直接访问 | 主 AI → DataAccess → 直接打开数据库文件 | AI 数据分析（只读） |
+
+**生成项目的数据接口约定**:
+- 生成项目不能自行管理 SQLite 驱动或自行建库
+- 必须在 `.world-meta.json` 的 `dataSchema` 中声明 `database: "sqlite"`、`dbPath` 和 `tables`
+- The World 在创建项目时自动初始化 SQLite 表
+- 运行中的项目通过环境变量获取接口地址：
+  - `THE_WORLD_PROJECT_ID`
+  - `THE_WORLD_LAN_BASE_URL`
+  - `THE_WORLD_PROJECT_DATA_BASE_URL`
+- 标准接口：
+  - `POST /api/projects/:projectId/data/records/save`
+  - `POST /api/projects/:projectId/data/records/query`
+  - `GET /api/projects/:projectId/data/schema`
+  - `GET /api/projects/:projectId/data/tables`
 
 ---
 
