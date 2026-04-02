@@ -229,7 +229,7 @@ async function refreshRunningApps () {
 
   try {
     const [projects, openWindows] = await Promise.all([
-      window.electronAPI.listProjects() as Promise<ProjectListItem[]>,
+      window.electronAPI.listProjects() as unknown as Promise<ProjectListItem[]>,
       window.electronAPI.getOpenWindows()
     ])
 
