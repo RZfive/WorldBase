@@ -5,6 +5,8 @@ import { networkInterfaces } from 'node:os'
 import { AIEngine } from '../src/main/ai-engine/ai-engine.js'
 import { ProjectFS } from '../src/main/project-fs/project-fs.js'
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
+import { BuilderService } from '../src/main/project-runtime/builder-service.js'
+import { AppGateway } from '../src/main/project-runtime/app-gateway.js'
 import { ProjectApiClient } from '../src/main/project-api-bridge/api-client.js'
 import { ProjectDataAccess } from '../src/main/project-data-access/data-access.js'
 import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-adapter.js'
@@ -36,6 +38,8 @@ let mainWindow: BrowserWindow | null = null
 let aiEngine: AIEngine | null = null
 let projectFS: ProjectFS | null = null
 let runtimeManager: RuntimeManager | null = null
+let builderService: BuilderService | null = null
+let appGateway: AppGateway | null = null
 let apiClient: ProjectApiClient | null = null
 let dataAccess: ProjectDataAccess | null = null
 let lanServer: LanServer | null = null
@@ -67,6 +71,7 @@ async function initializeServices (): Promise<void> {
 
   projectFS = new ProjectFS(projectsDir, snapshotsDir)
   runtimeManager = new RuntimeManager(projectsDir)
+  builderService = new BuilderService(projectsDir)
   apiClient = new ProjectApiClient(runtimeManager)
   dataAccess = new ProjectDataAccess(projectsDir)
 
@@ -86,6 +91,7 @@ async function initializeServices (): Promise<void> {
   aiEngine = new AIEngine({
     projectFS,
     runtimeManager,
+    builderService,
     apiClient,
     dataAccess,
     getMainWindow: () => mainWindow
@@ -121,6 +127,11 @@ async function initializeServices (): Promise<void> {
 
   await lanServer.start()
   console.log('[main] LAN server started on port 19527')
+
+  // Initialize AppGateway and start health checks
+  appGateway = new AppGateway(runtimeManager, projectFS, builderService)
+  appGateway.startHealthChecks()
+  console.log('[main] AppGateway health checks started')
 }
 
 function createWindow (): void {
@@ -281,6 +292,42 @@ function setupIPC (): void {
 
   ipcMain.handle('runtime:status', async (_event: IpcMainInvokeEvent, projectId: string) => {
     return runtimeManager!.getStatus(projectId)
+  })
+
+  // Build management
+  ipcMain.handle('build:run', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    return builderService!.build(projectId)
+  })
+
+  ipcMain.handle('build:cleanup', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    return builderService!.cleanup(projectId)
+  })
+
+  ipcMain.handle('build:rebuild', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    return builderService!.rebuild(projectId)
+  })
+
+  ipcMain.handle('build:needsRebuild', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    return builderService!.needsRebuild(projectId)
+  })
+
+  // Gateway / service management
+  ipcMain.handle('gateway:serviceMap', async () => {
+    return appGateway!.getServiceMap()
+  })
+
+  ipcMain.handle('gateway:startAll', async () => {
+    return appGateway!.startAll()
+  })
+
+  ipcMain.handle('gateway:stopAll', async () => {
+    await appGateway!.stopAll()
+    return { success: true }
+  })
+
+  ipcMain.handle('gateway:setRestartPolicy', async (_event: IpcMainInvokeEvent, projectId: string, policy: 'always' | 'on-failure' | 'never') => {
+    appGateway!.setRestartPolicy(projectId, policy)
+    return { success: true }
   })
 
   // Data access
