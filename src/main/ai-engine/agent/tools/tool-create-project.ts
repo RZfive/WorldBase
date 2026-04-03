@@ -1,5 +1,6 @@
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
+import type { BuilderService } from '../../../project-runtime/builder-service.js'
 import type { ProjectDataAccess } from '../../../project-data-access/data-access.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
@@ -8,6 +9,7 @@ import type { BrowserWindow } from 'electron'
 interface ToolServices {
   projectFS: ProjectFS
   runtimeManager: RuntimeManager
+  builderService: BuilderService
   dataAccess: ProjectDataAccess
   getMainWindow?: () => BrowserWindow | null
 }
@@ -77,11 +79,23 @@ export function toolCreateProject (services: ToolServices): Tool {
         let command = 'node server.js'
         let cwd: string | undefined
 
-        if (files['package.json']) {
+        // Detect Next.js projects — use standalone mode command
+        const isNextProject = !!files['next.config.js'] || (meta.framework === 'nextjs')
+        if (isNextProject) {
+          command = 'node .next/standalone/server.js'
+        } else if (files['package.json']) {
           try {
             const pkg = JSON.parse(files['package.json']) as Record<string, unknown>
             const scripts = pkg.scripts as Record<string, string> | undefined
-            if (scripts) {
+            const deps: Record<string, string> = {
+              ...((pkg.dependencies || {}) as Record<string, string>),
+              ...((pkg.devDependencies || {}) as Record<string, string>)
+            }
+
+            // Auto-detect Next.js from dependencies
+            if (deps.next) {
+              command = 'node .next/standalone/server.js'
+            } else if (scripts) {
               if (scripts.start) {
                 command = 'npm start'
               } else if (scripts.dev) {
@@ -94,8 +108,8 @@ export function toolCreateProject (services: ToolServices): Tool {
           }
         }
 
-        if (type === 'fullstack' || type === 'backend') {
-          // Check for common entry points
+        if (!isNextProject && (type === 'fullstack' || type === 'backend')) {
+          // Check for common entry points (legacy non-Next.js projects)
           if (files['server.js'] || files['src/server.js'] || files['index.js'] || files['app.js']) {
             if (files['src/server.js'] && !files['server.js']) {
               command = 'node src/server.js'
@@ -113,10 +127,14 @@ export function toolCreateProject (services: ToolServices): Tool {
         }
       }
 
+      // Auto-detect framework from files
+      const detectedFramework = files['next.config.js'] ? 'nextjs' : (meta.framework as string | undefined)
+
       const fullMeta = {
         name,
         type,
         createdAt: new Date().toISOString(),
+        ...(detectedFramework ? { framework: detectedFramework } : {}),
         ...meta,
         runtime
       }
@@ -161,6 +179,37 @@ export function toolCreateProject (services: ToolServices): Tool {
             projectId,
             message: `Project "${name}" created with ID: ${projectId}. Warning: npm install failed — ${(err as Error).message}`
           }
+        }
+      }
+
+      // Build step for Next.js projects — compile to standalone mode
+      const isNextJS = (fullMeta.framework === 'nextjs') || !!files['next.config.js']
+      if (isNextJS && files['package.json']) {
+        try {
+          onProgress?.('🔨 正在编译项目...', 'npm run build (standalone)')
+          console.log(`[tool:create_project] Building standalone for ${projectId}...`)
+          const buildResult = await services.builderService.build(projectId)
+          if (buildResult.success) {
+            onProgress?.('✅ 编译完成', `耗时 ${Math.round(buildResult.duration / 1000)}s`)
+            console.log(`[tool:create_project] Build succeeded for ${projectId} in ${buildResult.duration}ms`)
+
+            // Cleanup node_modules to save disk space
+            onProgress?.('🧹 正在清理依赖缓存...', '删除 node_modules')
+            const cleanResult = await services.builderService.cleanup(projectId)
+            if (cleanResult.success && cleanResult.freedBytes) {
+              const freedMB = Math.round(cleanResult.freedBytes / 1024 / 1024)
+              onProgress?.('✅ 清理完成', `释放 ${freedMB}MB 磁盘空间`)
+              console.log(`[tool:create_project] Cleanup freed ${freedMB}MB for ${projectId}`)
+            }
+          } else {
+            onProgress?.('⚠️ 编译失败，将以开发模式启动', buildResult.error || '')
+            console.warn(`[tool:create_project] Build failed: ${buildResult.error}`)
+            // Fall through — will start in legacy dev mode
+          }
+        } catch (err) {
+          onProgress?.('⚠️ 编译出错，将以开发模式启动', (err as Error).message)
+          console.warn(`[tool:create_project] Build error: ${(err as Error).message}`)
+          // Fall through — will start in legacy dev mode
         }
       }
 

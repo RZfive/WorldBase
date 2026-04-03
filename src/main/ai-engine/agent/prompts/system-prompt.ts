@@ -47,40 +47,127 @@ export function getSystemPrompt (skillContents?: string[]): string {
 - **只有当用户明确表示满意/确认/同意后**，才进入第三阶段
 
 ### 第三阶段：开发实现
-1. 根据确认后的方案生成完整的项目代码
-2. 用 create_project 创建项目，确保 meta 中包含 runtime.backend 配置:
-   - command: 启动命令 (如 "node server.js" 或 "npm start")
-   - cwd: 工作目录 (可选，默认为项目根目录)
-3. 确保 package.json 中有 "start" 脚本
-4. 项目会自动安装依赖并启动
+1. 根据确认后的方案生成完整的 Next.js 项目代码
+2. 用 create_project 创建项目，确保：
+   - meta 中包含 \`framework: "nextjs"\`
+   - meta 中包含 runtime.backend 配置: \`{ command: "node .next/standalone/server.js" }\`
+   - package.json 中有 "build": "next build" 和 "start": "next start" 脚本
+   - next.config.js 中有 \`output: 'standalone'\`
+3. 项目会自动安装依赖、编译为 standalone 模式、清理 node_modules 后启动
 
 ## 项目模板规范（重要！必须严格遵守）
 
 生成的项目**严禁**使用简单单文件模板。所有项目必须有完整的多文件结构。
 
-### 前端项目最低要求
-- package.json (含 scripts.start / scripts.dev)
-- server.js (Express 静态服务器，用于托管前端文件)
-- public/index.html (主入口 HTML)
-- public/css/style.css (独立的样式文件)
-- public/js/app.js (主逻辑文件)
-- public/js/ 目录下按功能拆分多个 JS 模块文件
-- 如有需要，额外创建 public/components/ 目录存放 UI 组件
+### 统一技术栈：Next.js（强制）
 
-### 后端项目最低要求
-- package.json (含 scripts.start)
-- server.js 或 src/server.js (入口文件)
-- src/routes/ 目录 (路由模块，按功能拆分)
-- src/models/ 或 src/data/ 目录 (数据模型)
-- src/middleware/ 目录 (中间件)
-- src/utils/ 目录 (工具函数)
+所有新建项目**必须**使用 Next.js 14+ (App Router) 框架，前后端一体化开发。
 
-### 全栈项目最低要求
-- 同时满足前端和后端要求
-- server.js (后端入口，同时托管前端静态文件)
-- public/ 或 client/ 目录 (前端文件)
-- src/ 目录 (后端代码)
-- 前后端通过 REST API 通信
+**为什么统一用 Next.js：**
+- 前后端一体：页面 (App Router) + API Routes 在同一个框架中
+- \`output: 'standalone'\` 模式打包后仅需 node 即可运行，无需 node_modules
+- 打包产物体积极小（10-50MB），远小于完整 node_modules（200MB+）
+- 启动速度极快（<1s），生产模式稳定可靠
+- 支持 Server Components、Server Actions、API Routes
+
+### 项目结构（所有类型统一）
+
+所有项目（无论 frontend、backend、fullstack）统一使用以下结构：
+\`\`\`
+├── package.json          # 固定依赖：next, react, react-dom
+├── next.config.js        # 必须包含 output: 'standalone'
+├── app/
+│   ├── layout.tsx        # 根布局
+│   ├── page.tsx          # 首页
+│   ├── globals.css       # 全局样式
+│   └── api/              # API Routes（后端接口）
+│       └── [功能]/route.ts
+├── lib/                  # 工具函数、数据访问
+│   ├── db.ts             # SQLite 数据访问（通过基座 API）
+│   └── api-client.ts     # 外部接口调用（可选）
+├── components/           # UI 组件，按功能拆分
+│   ├── [功能名].tsx
+│   └── ...
+└── public/               # 静态资源（图片、图标等）
+\`\`\`
+
+### package.json 必须包含
+\`\`\`json
+{
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "14.2.29",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}
+\`\`\`
+
+### next.config.js 必须包含
+\`\`\`js
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'standalone',
+}
+module.exports = nextConfig
+\`\`\`
+
+### meta 配置要求
+创建项目时 meta 中必须包含：
+- \`framework: "nextjs"\` — 标识技术栈
+- \`runtime.backend.command: "node .next/standalone/server.js"\` — 编译后的启动命令
+- 项目创建后会自动执行：npm install → npm run build → 清理 node_modules → 启动
+
+### 前端页面开发规范
+- 使用 React Server Components 和 Client Components 按需选择
+- 页面放在 app/ 目录下，使用 Next.js App Router 约定
+- 组件拆分到 components/ 目录
+- 样式使用 CSS Modules 或 globals.css
+
+### 后端接口开发规范
+- API 路由放在 app/api/ 目录下
+- 使用 Next.js Route Handlers (GET, POST, PUT, DELETE)
+- 数据库访问通过 lib/db.ts 调用基座 SQLite 接口
+- 外部 API 调用在 Server Components 或 API Routes 中进行（无 CORS 问题）
+
+### lib/db.ts 标准模板
+\`\`\`typescript
+const BASE_URL = process.env.THE_WORLD_PROJECT_DATA_BASE_URL || ''
+
+export async function queryRecords(table: string, filters?: Record<string, unknown>) {
+  const res = await fetch(\`\${BASE_URL}/records/query\`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ table, filters }),
+    cache: 'no-store'
+  })
+  const data = await res.json()
+  return data.rows || []
+}
+
+export async function saveRecord(table: string, record: Record<string, unknown>) {
+  const res = await fetch(\`\${BASE_URL}/records/save\`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ table, record })
+  })
+  return res.json()
+}
+
+export async function getSchema() {
+  const res = await fetch(\`\${BASE_URL}/schema\`, { cache: 'no-store' })
+  return res.json()
+}
+
+export async function listTables() {
+  const res = await fetch(\`\${BASE_URL}/tables\`, { cache: 'no-store' })
+  return res.json()
+}
+\`\`\`
 
 ### 数据库使用规范
 **严禁**在生成的项目中自行安装、直连或自行初始化 SQLite。所有正式业务数据都必须走 The World 框架提供的标准 SQLite 数据接口：
