@@ -47,6 +47,11 @@ interface InstallResult {
   output: string
 }
 
+/** Check whether a project has a Next.js standalone build output. */
+function _hasStandaloneBuild (projectDir: string): boolean {
+  return existsSync(path.join(projectDir, '.next', 'standalone', 'server.js'))
+}
+
 /**
  * RuntimeManager — 子项目进程生命周期管理
  */
@@ -97,13 +102,18 @@ export class RuntimeManager {
       }
     }
 
-    // Auto-install dependencies if node_modules is missing
+    // If a Next.js standalone build exists, prefer it over the legacy dev flow.
+    const isStandalone = _hasStandaloneBuild(projectDir)
     const packageJsonPath = path.join(projectDir, 'package.json')
-    const nodeModulesPath = path.join(projectDir, 'node_modules')
-    if (existsSync(packageJsonPath) && !existsSync(nodeModulesPath)) {
-      console.log(`[RuntimeManager] Auto-installing dependencies for ${projectId}...`)
-      await this.installDeps(projectId)
-      console.log(`[RuntimeManager] Dependencies installed for ${projectId}`)
+
+    if (!isStandalone) {
+      // Legacy path: auto-install dependencies if node_modules is missing
+      const nodeModulesPath = path.join(projectDir, 'node_modules')
+      if (existsSync(packageJsonPath) && !existsSync(nodeModulesPath)) {
+        console.log(`[RuntimeManager] Auto-installing dependencies for ${projectId}...`)
+        await this.installDeps(projectId)
+        console.log(`[RuntimeManager] Dependencies installed for ${projectId}`)
+      }
     }
 
     // Allocate a port dynamically; the configured port is a preference only
@@ -111,31 +121,42 @@ export class RuntimeManager {
     const port = await this.portManager.allocate(projectId, configuredPort)
 
     // Determine working directory and command
-    const cwd = backendConfig.cwd
-      ? path.join(projectDir, backendConfig.cwd as string)
-      : projectDir
+    let cwd: string
+    let command: string
 
-    let command = (backendConfig.command as string) || 'node server.js'
+    if (isStandalone) {
+      // Next.js standalone mode — run the pre-built server directly
+      cwd = path.join(projectDir, '.next', 'standalone')
+      command = 'node server.js'
+      console.log(`[RuntimeManager] Starting ${projectId} in standalone mode`)
+    } else {
+      // Legacy mode — use configured command
+      cwd = backendConfig.cwd
+        ? path.join(projectDir, backendConfig.cwd as string)
+        : projectDir
 
-    // If allocated port differs from the configured port and the command is an
-    // npm script wrapper, extract the raw script and replace the hardcoded port
-    // with $PORT so the dynamically allocated port is always used.
-    if (configuredPort && port !== configuredPort &&
-        (command === 'npm start' || command === 'npm run dev')) {
-      try {
-        const pkgRaw = await fs.readFile(packageJsonPath, 'utf-8')
-        const pkg = JSON.parse(pkgRaw) as Record<string, unknown>
-        const scripts = (pkg.scripts || {}) as Record<string, string>
-        const scriptKey = command === 'npm start' ? 'start' : 'dev'
-        const rawScript = scripts[scriptKey]
-        if (rawScript) {
-          const replaced = this._replacePortInCommand(rawScript, configuredPort)
-          if (replaced !== rawScript) {
-            command = replaced
+      command = (backendConfig.command as string) || 'node server.js'
+
+      // If allocated port differs from the configured port and the command is an
+      // npm script wrapper, extract the raw script and replace the hardcoded port
+      // with $PORT so the dynamically allocated port is always used.
+      if (configuredPort && port !== configuredPort &&
+          (command === 'npm start' || command === 'npm run dev')) {
+        try {
+          const pkgRaw = await fs.readFile(packageJsonPath, 'utf-8')
+          const pkg = JSON.parse(pkgRaw) as Record<string, unknown>
+          const scripts = (pkg.scripts || {}) as Record<string, string>
+          const scriptKey = command === 'npm start' ? 'start' : 'dev'
+          const rawScript = scripts[scriptKey]
+          if (rawScript) {
+            const replaced = this._replacePortInCommand(rawScript, configuredPort)
+            if (replaced !== rawScript) {
+              command = replaced
+            }
           }
+        } catch {
+          // If reading package.json fails, continue with original command
         }
-      } catch {
-        // If reading package.json fails, continue with original command
       }
     }
 
@@ -147,7 +168,8 @@ export class RuntimeManager {
       ...process.env,
       PATH: `${path.join(cwd, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH || ''}`,
       PORT: String(port),
-      NODE_ENV: 'development',
+      HOSTNAME: '0.0.0.0',
+      NODE_ENV: isStandalone ? 'production' : 'development',
       THE_WORLD_PROJECT_ID: projectId,
       THE_WORLD_PROJECT_ROOT: projectDir,
       THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
@@ -345,10 +367,24 @@ export class RuntimeManager {
   private async _detectRuntimeConfig (projectDir: string): Promise<Record<string, unknown> | null> {
     const packageJsonPath = path.join(projectDir, 'package.json')
 
+    // Prefer Next.js standalone build if available
+    if (_hasStandaloneBuild(projectDir)) {
+      return { command: 'node .next/standalone/server.js' }
+    }
+
     if (existsSync(packageJsonPath)) {
       try {
         const pkg = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8')) as Record<string, unknown>
         const scripts = (pkg.scripts || {}) as Record<string, string>
+        const deps: Record<string, string> = {
+          ...((pkg.dependencies || {}) as Record<string, string>),
+          ...((pkg.devDependencies || {}) as Record<string, string>)
+        }
+
+        // Detect Next.js — prefer build script for standalone mode
+        if (deps.next && scripts.build) {
+          return { command: 'npm start' }
+        }
 
         if (scripts.start) {
           const port = this._extractPortFromScript(scripts.start)

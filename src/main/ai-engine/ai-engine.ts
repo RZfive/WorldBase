@@ -4,6 +4,7 @@ import { registerAllTools } from './agent/tools/index.js'
 import type { ChatMessage, ToolDefinition } from './providers/openai-provider.js'
 import type { ProjectFS } from '../project-fs/project-fs.js'
 import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
+import type { BuilderService } from '../project-runtime/builder-service.js'
 import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { BrowserWindow } from 'electron'
@@ -13,6 +14,7 @@ export type { StreamEvent, ProgressCallback }
 export interface AIEngineServices {
   projectFS: ProjectFS
   runtimeManager: RuntimeManager
+  builderService: BuilderService
   apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
   getMainWindow?: () => BrowserWindow | null
