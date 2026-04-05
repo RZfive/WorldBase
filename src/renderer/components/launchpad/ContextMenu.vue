@@ -25,6 +25,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'hide'): void
+  (e: 'editProject', project: Project): void
   (e: 'openProject', project: Project): void
   (e: 'viewSource', project: Project): void
   (e: 'openInWindow', project: Project): void
@@ -59,6 +60,7 @@ function asFolder (target: Project | LaunchFolder | null): LaunchFolder {
     >
       <template v-if="props.kind === 'project' && props.target">
         <div class="ctx-item" @click="emit('openProject', asProject(props.target)); emit('hide')">🪄 打开应用</div>
+        <div class="ctx-item" @click="emit('editProject', asProject(props.target)); emit('hide')">✏️ 修改名称与图标</div>
         <div class="ctx-item" @click="emit('viewSource', asProject(props.target)); emit('hide')">💻 查看源码</div>
         <div class="ctx-item" @click="emit('openInWindow', asProject(props.target)); emit('hide')">↗️ 独立窗口运行</div>
         <div class="ctx-divider"></div>

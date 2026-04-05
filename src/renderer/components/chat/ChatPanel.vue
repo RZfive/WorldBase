@@ -30,7 +30,20 @@ interface ProviderOption {
   enableThinking?: boolean
 }
 
-// State
+interface FilePreviewState {
+  active: boolean
+  filePath: string
+  content: string
+  truncated: boolean
+}
+
+interface SkillItem {
+  id: string
+  name: string
+  description?: string
+  content?: string
+}
+
 const props = defineProps<{
   projectContext?: Record<string, unknown> | null
 }>()
@@ -50,12 +63,24 @@ const toolStatus = ref('')
 const progressSteps = ref<Array<{ stage: string; detail?: string }>>([])
 const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
 const currentThinking = ref('')
+const filePreview = ref<FilePreviewState>({
+  active: false,
+  filePath: '',
+  content: '',
+  truncated: false
+})
 
-// --- Skill selector state ---
-interface SkillItem { id: string; name: string; description?: string; content?: string }
 const availableSkills = ref<SkillItem[]>([])
 const activeSkillIds = ref<Set<string>>(new Set())
 const showSkillPicker = ref(false)
+
+const streamingConvIds = reactive(new Set<string>())
+const backgroundStreamMessages = new Map<string, { messages: ChatMessage[]; assistantIdx: number }>()
+const activeCleanups = new Map<string, () => void>()
+
+const isLoading = computed(() => {
+  return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
+})
 
 async function loadSkills () {
   if (!window.electronAPI?.listSkills) return
@@ -70,8 +95,7 @@ function toggleSkill (id: string) {
   } else {
     activeSkillIds.value.add(id)
   }
-  // Sync to AI engine
-  syncActiveSkills()
+  void syncActiveSkills()
 }
 
 async function syncActiveSkills () {
@@ -80,18 +104,6 @@ async function syncActiveSkills () {
     await window.electronAPI.setActiveSkills(Array.from(activeSkillIds.value))
   } catch { /* ignore */ }
 }
-
-// --- Concurrent stream tracking ---
-// Set of conversation IDs that are currently streaming
-const streamingConvIds = reactive(new Set<string>())
-// Background stream state: messages array for conversations that are streaming in background
-const backgroundStreamMessages = new Map<string, { messages: ChatMessage[]; assistantIdx: number }>()
-// Active cleanup functions keyed by sessionId
-const activeCleanups = new Map<string, () => void>()
-// Whether the CURRENT conversation is streaming
-const isLoading = computed(() => {
-  return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
-})
 
 function generateId (): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') {
@@ -103,7 +115,6 @@ function generateId (): string {
   return `${Date.now().toString(36)}_${Array.from(randomBytes, value => value.toString(36)).join('')}`
 }
 
-/** Get displayable text from a message (handles string or multipart content). */
 function getMessageText (msg: ChatMessage): string {
   if (typeof msg.content === 'string') return msg.content
   if (Array.isArray(msg.content)) {
@@ -113,6 +124,18 @@ function getMessageText (msg: ChatMessage): string {
       .join('')
   }
   return ''
+}
+
+function resetTransientStreamState () {
+  toolStatus.value = ''
+  progressSteps.value = []
+  currentThinking.value = ''
+  filePreview.value = {
+    active: false,
+    filePath: '',
+    content: '',
+    truncated: false
+  }
 }
 
 async function persistProviderSelection () {
@@ -131,14 +154,12 @@ async function persistProviderSelection () {
   })
 
   providers.value = nextProviders
-  // Use JSON round-trip to strip Vue reactive proxies before IPC
   await window.electronAPI.saveProviders(JSON.parse(JSON.stringify({
     providers: nextProviders,
     activeProviderId: activeProviderId.value
   })))
 }
 
-// Load conversations list
 async function loadConversations () {
   if (!window.electronAPI) return
   try {
@@ -146,7 +167,6 @@ async function loadConversations () {
   } catch { /* ignore */ }
 }
 
-// Load providers
 async function loadProviders () {
   if (!window.electronAPI) return
   try {
@@ -160,62 +180,49 @@ async function loadProviders () {
   } catch { /* ignore */ }
 }
 
-// Start a new conversation
 function newConversation () {
-  // If current conversation is streaming, move it to background
   if (currentConversationId.value && streamingConvIds.has(currentConversationId.value)) {
     backgroundStreamMessages.set(currentConversationId.value, {
       messages: messages.value,
       assistantIdx: messages.value.length - 1
     })
-    // Save progress so far
-    doSaveConversation(currentConversationId.value, messages.value)
+    void doSaveConversation(currentConversationId.value, messages.value)
   }
+
   currentConversationId.value = null
   messages.value = []
-  toolStatus.value = ''
-  progressSteps.value = []
+  resetTransientStreamState()
   pendingImages.value = []
-  currentThinking.value = ''
 }
 
-// Load a conversation
 async function loadConversation (id: string) {
   if (!window.electronAPI) return
 
-  // If switching away from a streaming conversation, move it to background
   if (currentConversationId.value && currentConversationId.value !== id && streamingConvIds.has(currentConversationId.value)) {
     backgroundStreamMessages.set(currentConversationId.value, {
       messages: messages.value,
       assistantIdx: messages.value.length - 1
     })
-    doSaveConversation(currentConversationId.value, messages.value)
+    void doSaveConversation(currentConversationId.value, messages.value)
   }
 
-  // Check if target conversation has a background stream — restore it
   const bg = backgroundStreamMessages.get(id)
   if (bg) {
     currentConversationId.value = id
     messages.value = bg.messages
     backgroundStreamMessages.delete(id)
-    toolStatus.value = ''
-    progressSteps.value = []
-    currentThinking.value = ''
+    resetTransientStreamState()
     return
   }
 
-  // Normal load from disk
   const conv = await window.electronAPI.getConversation(id)
   if (conv) {
     currentConversationId.value = conv.id
     messages.value = conv.messages
-    toolStatus.value = ''
-    progressSteps.value = []
-    currentThinking.value = ''
+    resetTransientStreamState()
   }
 }
 
-// Save a conversation by explicit ID and messages array
 async function doSaveConversation (convId: string, msgs: ChatMessage[]) {
   if (!window.electronAPI) return
   if (msgs.length === 0) return
@@ -238,7 +245,6 @@ async function doSaveConversation (convId: string, msgs: ChatMessage[]) {
   await loadConversations()
 }
 
-// Delete a conversation
 async function deleteConversation (id: string) {
   if (!window.electronAPI) return
   await window.electronAPI.deleteConversation(id)
@@ -256,12 +262,10 @@ function removeImage (index: number) {
   pendingImages.value.splice(index, 1)
 }
 
-// Send message with streaming (supports concurrent background streams)
 async function sendMessage () {
   const text = inputText.value.trim()
   if ((!text && pendingImages.value.length === 0) || isLoading.value) return
 
-  // Build the message content (multipart if images present)
   let messageContent: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
   if (pendingImages.value.length > 0) {
     const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = []
@@ -282,26 +286,21 @@ async function sendMessage () {
   messages.value.push({ role: 'user', content: messageContent })
   inputText.value = ''
   pendingImages.value = []
-  toolStatus.value = ''
-  progressSteps.value = []
-  currentThinking.value = ''
+  resetTransientStreamState()
 
-  // Add placeholder assistant message
   messages.value.push({ role: 'assistant', content: '', thinking: '' })
 
-  // Capture state for the stream callback closure
   const targetMessages = messages.value
   const assistantIdx = targetMessages.length - 1
   const sessionId = generateId()
   let thinkingAccum = ''
 
-  // Mark this conversation as streaming
   streamingConvIds.add(convId)
 
   try {
     if (window.electronAPI) {
       await persistProviderSelection()
-      // Set up per-session stream listener
+
       const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {
         const isForeground = currentConversationId.value === convId
 
@@ -316,11 +315,35 @@ async function sendMessage () {
           targetMessages[assistantIdx].content = ''
           targetMessages[assistantIdx].thinking = ''
           if (isForeground) {
-            currentThinking.value = ''
+            resetTransientStreamState()
           }
         } else if (event.type === 'token' && event.content) {
           targetMessages[assistantIdx].content =
             ((targetMessages[assistantIdx].content as string) || '') + event.content
+        } else if (event.type === 'file_preview_start' && event.filePath) {
+          if (isForeground) {
+            filePreview.value = {
+              active: true,
+              filePath: event.filePath,
+              content: '',
+              truncated: Boolean(event.truncated)
+            }
+          }
+        } else if (event.type === 'file_preview_chunk' && event.content) {
+          if (isForeground && filePreview.value.filePath === event.filePath) {
+            filePreview.value = {
+              ...filePreview.value,
+              content: filePreview.value.content + event.content
+            }
+          }
+        } else if (event.type === 'file_preview_end') {
+          if (isForeground) {
+            filePreview.value = {
+              ...filePreview.value,
+              active: false,
+              truncated: Boolean(event.truncated ?? filePreview.value.truncated)
+            }
+          }
         } else if (event.type === 'tool_start' && event.name) {
           if (isForeground) {
             toolStatus.value = `正在执行: ${event.name}...`
@@ -336,7 +359,6 @@ async function sendMessage () {
             progressSteps.value = []
           }
         } else if (event.type === 'done') {
-          // Finalize content
           if (!getMessageText(targetMessages[assistantIdx]) && event.message?.content) {
             targetMessages[assistantIdx].content = event.message.content
           }
@@ -347,19 +369,15 @@ async function sendMessage () {
             targetMessages[assistantIdx].thinking = event.thinking
           }
 
-          // Cleanup
           cleanup()
           activeCleanups.delete(sessionId)
           streamingConvIds.delete(convId)
           backgroundStreamMessages.delete(convId)
 
-          // Auto-save
-          doSaveConversation(convId, targetMessages)
+          void doSaveConversation(convId, targetMessages)
 
           if (isForeground) {
-            toolStatus.value = ''
-            progressSteps.value = []
-            currentThinking.value = ''
+            resetTransientStreamState()
           }
         } else if (event.type === 'error') {
           targetMessages[assistantIdx].content = `错误: ${event.error}`
@@ -370,36 +388,36 @@ async function sendMessage () {
           backgroundStreamMessages.delete(convId)
 
           if (isForeground) {
-            toolStatus.value = ''
-            progressSteps.value = []
-            currentThinking.value = ''
+            resetTransientStreamState()
           }
         }
       })
 
       activeCleanups.set(sessionId, cleanup)
 
-      // Send only user/assistant messages (not the placeholder)
-      // Use JSON round-trip to strip Vue reactive proxies before IPC
       const chatMessages = JSON.parse(JSON.stringify(targetMessages.slice(0, -1).map(m => ({
         role: m.role,
         content: m.content
       }))))
       await window.electronAPI.chatStream(chatMessages, sessionId)
 
-      // Safety fallback: if stream finished without a 'done' event
       if (streamingConvIds.has(convId)) {
         streamingConvIds.delete(convId)
         backgroundStreamMessages.delete(convId)
         const pendingCleanup = activeCleanups.get(sessionId)
-        if (pendingCleanup) { pendingCleanup(); activeCleanups.delete(sessionId) }
+        if (pendingCleanup) {
+          pendingCleanup()
+          activeCleanups.delete(sessionId)
+        }
         if (!getMessageText(targetMessages[assistantIdx])) {
           targetMessages[assistantIdx].content = '(无响应)'
         }
-        doSaveConversation(convId, targetMessages)
+        void doSaveConversation(convId, targetMessages)
+        if (currentConversationId.value === convId) {
+          resetTransientStreamState()
+        }
       }
     } else {
-      // HTTP fallback (non-streaming)
       const chatMessages = JSON.parse(JSON.stringify(targetMessages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))))
       const res = await fetch('/api/ai/chat', {
         method: 'POST',
@@ -409,30 +427,23 @@ async function sendMessage () {
       const response = await res.json() as { content?: string }
       targetMessages[assistantIdx].content = response.content || '(无响应)'
       streamingConvIds.delete(convId)
-      doSaveConversation(convId, targetMessages)
+      void doSaveConversation(convId, targetMessages)
+      resetTransientStreamState()
     }
   } catch (err) {
     targetMessages[assistantIdx].content = `错误: ${(err as Error).message}`
     streamingConvIds.delete(convId)
+    resetTransientStreamState()
   }
-
 }
 
-// When provider changes, update the selected model
 watch(activeProviderId, (newId) => {
-  const p = providers.value.find(pr => pr.id === newId)
-  if (p) {
-    selectedModel.value = p.activeModel || p.models[0] || ''
+  const provider = providers.value.find(item => item.id === newId)
+  if (provider) {
+    selectedModel.value = provider.activeModel || provider.models[0] || ''
   }
 })
 
-onMounted(async () => {
-  await loadConversations()
-  await loadProviders()
-  await loadSkills()
-})
-
-// Watch for project context changes (e.g. "continue optimizing this app")
 watch(() => props.projectContext, (ctx) => {
   if (ctx) {
     const name = (ctx.name || ctx.id || '未知项目') as string
@@ -440,6 +451,12 @@ watch(() => props.projectContext, (ctx) => {
     emit('contextConsumed')
   }
 }, { immediate: true })
+
+onMounted(async () => {
+  await loadConversations()
+  await loadProviders()
+  await loadSkills()
+})
 
 onUnmounted(() => {
   for (const cleanup of activeCleanups.values()) {
@@ -479,6 +496,7 @@ onUnmounted(() => {
         :is-loading="isLoading"
         :tool-status="toolStatus"
         :progress-steps="progressSteps"
+        :file-preview="filePreview"
       />
 
       <ChatInput
@@ -502,7 +520,6 @@ onUnmounted(() => {
   height: 100%;
 }
 
-/* Chat panel column */
 .chat-panel {
   display: flex;
   flex-direction: column;

@@ -5,6 +5,7 @@ import type { ProjectDataAccess } from '../../../project-data-access/data-access
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
+import { streamFilePreview } from './file-preview-progress.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -139,6 +140,10 @@ export function toolCreateProject (services: ToolServices): Tool {
         runtime
       }
 
+      for (const [filePath, content] of Object.entries(files)) {
+        await streamFilePreview(filePath, content, onProgress)
+      }
+
       onProgress?.('📁 正在创建项目文件...', `共 ${Object.keys(files).length} 个文件`)
 
       const project = await services.projectFS.createProject(projectId, fullMeta, files)
@@ -202,14 +207,31 @@ export function toolCreateProject (services: ToolServices): Tool {
               console.log(`[tool:create_project] Cleanup freed ${freedMB}MB for ${projectId}`)
             }
           } else {
-            onProgress?.('⚠️ 编译失败，将以开发模式启动', buildResult.error || '')
+            onProgress?.('❌ 编译失败，项目未启动', buildResult.error || '')
             console.warn(`[tool:create_project] Build failed: ${buildResult.error}`)
-            // Fall through — will start in legacy dev mode
+            return {
+              success: true,
+              ready: false,
+              recoverable: true,
+              stage: 'build',
+              project,
+              projectId,
+              output: buildResult.output,
+              message: `Project "${name}" created with ID: ${projectId}, but build failed — ${buildResult.error || 'unknown build error'}`
+            }
           }
         } catch (err) {
-          onProgress?.('⚠️ 编译出错，将以开发模式启动', (err as Error).message)
+          onProgress?.('❌ 编译出错，项目未启动', (err as Error).message)
           console.warn(`[tool:create_project] Build error: ${(err as Error).message}`)
-          // Fall through — will start in legacy dev mode
+          return {
+            success: true,
+            ready: false,
+            recoverable: true,
+            stage: 'build',
+            project,
+            projectId,
+            message: `Project "${name}" created with ID: ${projectId}, but build failed — ${(err as Error).message}`
+          }
         }
       }
 

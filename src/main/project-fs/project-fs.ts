@@ -9,6 +9,7 @@ export interface ProjectMeta {
   id: string
   name: string
   type: string
+  icon?: string
   [key: string]: unknown
 }
 
@@ -108,6 +109,34 @@ export class ProjectFS {
   async saveProjectMeta (projectId: string, meta: ProjectMeta): Promise<void> {
     const metaPath = this._resolveProjectPath(projectId, '.world-meta.json')
     await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8')
+  }
+
+  /**
+   * Update a subset of project metadata while preserving existing fields.
+   */
+  async updateProjectMeta (projectId: string, updates: Partial<ProjectMeta>): Promise<ProjectMeta> {
+    const currentMeta = await this.getProjectMeta(projectId)
+    const nextMeta: ProjectMeta = {
+      ...currentMeta,
+      ...updates,
+      id: currentMeta.id
+    }
+
+    nextMeta.name = typeof nextMeta.name === 'string' && nextMeta.name.trim()
+      ? nextMeta.name.trim()
+      : currentMeta.name || projectId
+
+    if (typeof updates.icon === 'string') {
+      const normalizedIcon = updates.icon.trim()
+      if (normalizedIcon) {
+        nextMeta.icon = normalizedIcon
+      } else {
+        delete nextMeta.icon
+      }
+    }
+
+    await this.saveProjectMeta(projectId, nextMeta)
+    return nextMeta
   }
 
   /**

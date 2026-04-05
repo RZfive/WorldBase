@@ -9,11 +9,6 @@ const activeTab = ref('ai')
 
 <template>
   <div class="settings-panel">
-    <div class="settings-header">
-      <h2>⚙️ AI 设置</h2>
-      <span class="settings-hint">管理多个 AI 供应商，支持 OpenAI 及兼容 API</span>
-    </div>
-
     <div class="settings-tabs">
       <button :class="['tab-btn', { active: activeTab === 'ai' }]" @click="activeTab = 'ai'">AI 供应商</button>
       <button :class="['tab-btn', { active: activeTab === 'skills' }]" @click="activeTab = 'skills'">Skill 管理</button>
@@ -39,16 +34,6 @@ const activeTab = ref('ai')
   display: flex;
   flex-direction: column;
   height: 100%;
-}
-
-.settings-header {
-  padding: 16px 24px;
-  border-bottom: 1px solid #27272a;
-}
-
-.settings-header h2 {
-  margin: 0 0 4px 0;
-  font-size: 1.1em;
 }
 
 .settings-hint {

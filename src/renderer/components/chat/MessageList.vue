@@ -13,11 +13,13 @@ const props = defineProps<{
   isLoading: boolean
   toolStatus: string
   progressSteps: Array<{ stage: string; detail?: string }>
+  filePreview: { active: boolean; filePath: string; content: string; truncated: boolean }
 }>()
 
 const messagesContainer = ref<HTMLElement | null>(null)
 const streamingLineRef = ref<HTMLElement | null>(null)
 const progressLineRef = ref<HTMLElement | null>(null)
+const filePreviewRef = ref<HTMLElement | null>(null)
 const expandedThinking = ref<Record<number, boolean>>({})
 
 const latestProgressText = computed(() => {
@@ -90,6 +92,18 @@ watch(
     })
   }
 )
+
+watch(
+  () => [props.filePreview.active, props.filePreview.content],
+  () => {
+    scrollToBottom()
+    nextTick(() => {
+      if (filePreviewRef.value) {
+        filePreviewRef.value.scrollTop = filePreviewRef.value.scrollHeight
+      }
+    })
+  }
+)
 </script>
 
 <template>
@@ -145,7 +159,16 @@ watch(
       <span v-if="props.isLoading && i === props.messages.length - 1 && msg.role === 'assistant'" class="cursor-blink">▍</span>
     </div>
 
-    <div v-if="props.toolStatus || props.progressSteps.length > 0" class="tool-progress-panel">
+    <div v-if="props.filePreview.active" class="file-preview-panel" :class="{ active: props.filePreview.active }">
+      <div class="file-preview-header">
+        <span class="file-preview-label">正在生成</span>
+        <span class="file-preview-path">{{ props.filePreview.filePath }}</span>
+        <span v-if="props.filePreview.truncated" class="file-preview-truncated">预览已截断</span>
+      </div>
+      <pre ref="filePreviewRef" class="file-preview-body">{{ props.filePreview.content }}</pre>
+    </div>
+
+    <div v-if="!props.filePreview.active && (props.toolStatus || props.progressSteps.length > 0)" class="tool-progress-panel">
       <div v-if="props.toolStatus" class="tool-status-header">
         <span class="tool-status-icon">🔧</span>
         <span class="tool-status-text">{{ props.toolStatus }}</span>
@@ -435,5 +458,63 @@ watch(
 @keyframes stepSlideIn {
   from { opacity: 0; transform: translateX(-8px); }
   to { opacity: 1; transform: translateX(0); }
+}
+
+.file-preview-panel {
+  margin: 8px 0;
+  border: 1px solid #3f3f46;
+  border-radius: 12px;
+  background: #232326;
+  overflow: hidden;
+  animation: fadeIn 0.2s ease;
+}
+
+.file-preview-panel.active {
+  border-color: #52525b;
+}
+
+.file-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #3f3f46;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.78em;
+  color: #d4d4d8;
+}
+
+.file-preview-label {
+  color: #a1a1aa;
+  flex-shrink: 0;
+}
+
+.file-preview-path {
+  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  color: #e4e4e7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-preview-truncated {
+  margin-left: auto;
+  color: #f4c58b;
+  flex-shrink: 0;
+}
+
+.file-preview-body {
+  margin: 0;
+  padding: 12px 14px;
+  background: #2b2b2f;
+  color: #d4d4d8;
+  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.83em;
+  line-height: 1.45;
+  max-height: calc(1.45em * 5 + 24px);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  scrollbar-width: thin;
 }
 </style>

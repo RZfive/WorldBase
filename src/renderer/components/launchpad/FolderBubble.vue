@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import type { LaunchFolder, Project } from './types'
+import type { LaunchFolder, LaunchpadDropTarget, Project } from './types'
 import { getProjectIcon } from '../../utils/project-icon'
 
 const props = defineProps<{
   openFolderData: LaunchFolder | null
   openFolderProjects: Project[]
   folderPopupAnchor: { x: number; y: number }
+  dropTarget: LaunchpadDropTarget | null
   renamingId: string | null
   renameInput: string
 }>()
@@ -14,8 +15,12 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'dragoverOverlay', event: DragEvent): void
   (e: 'dropOverlay', event: DragEvent): void
-  (e: 'dragstart', payload: { event: DragEvent; projectId: string }): void
+  (e: 'dragstart', payload: { event: DragEvent; itemId: string; itemType: 'project'; source: 'folder'; folderId: string }): void
   (e: 'dragend'): void
+  (e: 'dragoverProject', payload: { event: DragEvent; targetProjectId: string; folderId: string }): void
+  (e: 'dropProject', payload: { event: DragEvent; targetProjectId: string; folderId: string }): void
+  (e: 'dragoverBody', event: DragEvent): void
+  (e: 'dropBody', event: DragEvent): void
   (e: 'selectProject', project: Project): void
   (e: 'showMenu', payload: { event: MouseEvent; target: Project; kind: 'project' }): void
   (e: 'update:renameInput', value: string): void
@@ -26,6 +31,11 @@ const emit = defineEmits<{
 
 function updateRenameInput (event: Event) {
   emit('update:renameInput', (event.target as HTMLInputElement).value)
+}
+
+function dropClass (projectId: string): string | null {
+  if (!props.dropTarget || props.dropTarget.id !== projectId) return null
+  return `drop-${props.dropTarget.action}`
 }
 </script>
 
@@ -66,7 +76,7 @@ function updateRenameInput (event: Event) {
               {{ openFolderData.name }}
             </h3>
           </div>
-          <div class="folder-bubble-body">
+          <div class="folder-bubble-body" @dragover="emit('dragoverBody', $event)" @drop="emit('dropBody', $event)">
             <div v-if="openFolderProjects.length === 0" class="folder-empty">
               文件夹为空，拖拽应用到此文件夹
             </div>
@@ -74,15 +84,17 @@ function updateRenameInput (event: Event) {
               <div
                 v-for="project in openFolderProjects"
                 :key="project.id"
-                class="lp-cell lp-cell-app"
+                :class="['lp-cell', 'lp-cell-app', dropClass(project.id)]"
                 draggable="true"
-                @dragstart="emit('dragstart', { event: $event, projectId: project.id })"
+                @dragstart="emit('dragstart', { event: $event, itemId: project.id, itemType: 'project', source: 'folder', folderId: openFolderData.id })"
+                @dragover="emit('dragoverProject', { event: $event, targetProjectId: project.id, folderId: openFolderData.id })"
+                @drop="emit('dropProject', { event: $event, targetProjectId: project.id, folderId: openFolderData.id })"
                 @dragend="emit('dragend')"
                 @click="emit('selectProject', project)"
                 @contextmenu="emit('showMenu', { event: $event, target: project, kind: 'project' })"
               >
                 <div class="lp-app-icon">
-                  <span class="lp-app-emoji">{{ getProjectIcon(project.type) }}</span>
+                  <span class="lp-app-emoji">{{ getProjectIcon(project.type, project.icon) }}</span>
                   <span v-if="project.runtime?.status === 'running'" class="lp-running-badge"></span>
                 </div>
                 <span class="lp-cell-name">{{ project.name || project.id }}</span>

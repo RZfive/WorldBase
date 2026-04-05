@@ -1,4 +1,5 @@
 import { toolReadFile } from './tool-read-file.js'
+import { toolDeleteFile } from './tool-delete-file.js'
 import { toolWriteFile } from './tool-write-file.js'
 import { toolCallApi } from './tool-call-api.js'
 import { toolQueryDb } from './tool-query-db.js'
@@ -31,6 +32,7 @@ export interface ToolServices {
 export function registerAllTools (agent: AgentCore, services: ToolServices): void {
   const tools = [
     toolReadFile(services),
+    toolDeleteFile(services),
     toolWriteFile(services),
     toolCallApi(services),
     toolQueryDb(services),

@@ -1,6 +1,7 @@
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
+import { streamFilePreview } from './file-preview-progress.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -46,6 +47,7 @@ export function toolWriteFile (services: ToolServices): Tool {
     },
     handler: async (args, onProgress) => {
       const { project_id, file_path, content } = args as unknown as WriteFileArgs
+      await streamFilePreview(file_path, content, onProgress)
       onProgress?.('📝 正在写入文件...', file_path)
       await services.projectFS.writeFile(project_id, file_path, content)
       onProgress?.('✅ 文件已保存', file_path)

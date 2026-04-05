@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, shell, dialog, type IpcMainInvokeEvent } f
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
-import { AIEngine } from '../src/main/ai-engine/ai-engine.js'
+import { AIEngine, type ProgressEvent } from '../src/main/ai-engine/ai-engine.js'
 import { ProjectFS } from '../src/main/project-fs/project-fs.js'
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
 import { BuilderService } from '../src/main/project-runtime/builder-service.js'
@@ -12,7 +12,7 @@ import { ProjectDataAccess } from '../src/main/project-data-access/data-access.j
 import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-adapter.js'
 import { LanServer } from '../src/main/lan-server/server.js'
 import { LAN_SERVER_PORT } from '../src/main/constants.js'
-import { SettingsStore, type AIProvidersConfig } from '../src/main/settings/settings-store.js'
+import { SettingsStore, type AIProvidersConfig, type LaunchpadLayout } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 
@@ -50,6 +50,41 @@ let skillStore: SkillStore | null = null
 /** Track standalone project windows keyed by projectId */
 const projectWindows = new Map<string, BrowserWindow>()
 
+function broadcastToAppWindows (channel: string, payload: unknown): void {
+  const windows = new Set<BrowserWindow>()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    windows.add(mainWindow)
+  }
+  for (const win of projectWindows.values()) {
+    if (!win.isDestroyed()) {
+      windows.add(win)
+    }
+  }
+  for (const win of windows) {
+    win.webContents.send(channel, payload)
+  }
+}
+
+function getSenderWindow (event: IpcMainInvokeEvent): BrowserWindow | null {
+  return BrowserWindow.fromWebContents(event.sender)
+}
+
+function buildRendererWindowUrl (projectId?: string): { devUrl?: string; filePath?: string; query?: Record<string, string> } {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const url = new URL(process.env.VITE_DEV_SERVER_URL)
+    if (projectId) {
+      url.searchParams.set('projectWindow', projectId)
+    }
+    return { devUrl: url.toString() }
+  }
+
+  const query = projectId ? { projectWindow: projectId } : undefined
+  return {
+    filePath: path.join(__dirname, '../../dist/index.html'),
+    query
+  }
+}
+
 function getProjectsDir (): string {
   const userDataPath = app.getPath('userData')
   return path.join(userDataPath, 'projects')
@@ -72,6 +107,7 @@ async function initializeServices (): Promise<void> {
   projectFS = new ProjectFS(projectsDir, snapshotsDir)
   runtimeManager = new RuntimeManager(projectsDir)
   builderService = new BuilderService(projectsDir)
+  runtimeManager.setBuilderService(builderService)
   apiClient = new ProjectApiClient(runtimeManager)
   dataAccess = new ProjectDataAccess(projectsDir)
 
@@ -168,9 +204,13 @@ function setupIPC (): void {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
     // Progress callback: sends progress events directly to renderer in real-time
-    const onProgress = (stage: string, detail?: string) => {
+    const onProgress = (stageOrEvent: string | ProgressEvent, detail?: string) => {
       if (!sender.isDestroyed()) {
-        sender.send(channel, { type: 'progress', stage, detail })
+        if (typeof stageOrEvent === 'string') {
+          sender.send(channel, { type: 'progress', stage: stageOrEvent, detail })
+          return
+        }
+        sender.send(channel, stageOrEvent)
       }
     }
     try {
@@ -188,6 +228,8 @@ function setupIPC (): void {
             if ('error' in streamEvent) safe.error = String((streamEvent as { error?: string }).error || '')
             if ('stage' in streamEvent) safe.stage = String((streamEvent as { stage?: string }).stage || '')
             if ('detail' in streamEvent) safe.detail = String((streamEvent as { detail?: string }).detail || '')
+            if ('filePath' in streamEvent) safe.filePath = String((streamEvent as { filePath?: string }).filePath || '')
+            if ('truncated' in streamEvent) safe.truncated = Boolean((streamEvent as { truncated?: boolean }).truncated)
             if ('result' in streamEvent) {
               try {
                 safe.result = JSON.parse(JSON.stringify((streamEvent as { result?: unknown }).result))
@@ -262,6 +304,18 @@ function setupIPC (): void {
     return { success: true }
   })
 
+  ipcMain.handle('projects:updateAppearance', async (_event: IpcMainInvokeEvent, projectId: string, updates: { name?: string; icon?: string }) => {
+    const meta = await projectFS!.updateProjectMeta(projectId, updates)
+
+    const projectWindow = projectWindows.get(projectId)
+    if (projectWindow && !projectWindow.isDestroyed()) {
+      projectWindow.setTitle((meta.name as string) || projectId)
+    }
+
+    broadcastToAppWindows('projects:changed', { action: 'updated', projectId })
+    return meta
+  })
+
   ipcMain.handle('projects:delete', async (_event: IpcMainInvokeEvent, projectId: string) => {
     if (!projectId || typeof projectId !== 'string') {
       throw new TypeError(`Invalid project ID: ${String(projectId)}`)
@@ -269,7 +323,7 @@ function setupIPC (): void {
     // Stop the project first if running
     try { await runtimeManager!.stop(projectId) } catch { /* ignore */ }
     await projectFS!.deleteProject(projectId)
-    mainWindow?.webContents.send('projects:changed', { action: 'deleted', projectId })
+    broadcastToAppWindows('projects:changed', { action: 'deleted', projectId })
     return { success: true }
   })
 
@@ -277,7 +331,7 @@ function setupIPC (): void {
   ipcMain.handle('runtime:start', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const result = await runtimeManager!.start(projectId)
     if (result.status === 'running' || result.status === 'already_running') {
-      mainWindow?.webContents.send('projects:changed', { action: 'started', projectId, port: result.port })
+      broadcastToAppWindows('projects:changed', { action: 'started', projectId, port: result.port })
     }
     return result
   })
@@ -285,7 +339,7 @@ function setupIPC (): void {
   ipcMain.handle('runtime:stop', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const result = await runtimeManager!.stop(projectId)
     if (result.status === 'stopped') {
-      mainWindow?.webContents.send('projects:changed', { action: 'stopped', projectId })
+      broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
     }
     return result
   })
@@ -387,24 +441,27 @@ function setupIPC (): void {
   })
 
   // Window controls
-  ipcMain.handle('window:minimize', () => {
-    mainWindow?.minimize()
+  ipcMain.handle('window:minimize', (event: IpcMainInvokeEvent) => {
+    getSenderWindow(event)?.minimize()
   })
 
-  ipcMain.handle('window:maximize', () => {
-    if (mainWindow?.isMaximized()) {
-      mainWindow.unmaximize()
+  ipcMain.handle('window:maximize', (event: IpcMainInvokeEvent) => {
+    const targetWindow = getSenderWindow(event)
+    if (!targetWindow) return
+
+    if (targetWindow.isMaximized()) {
+      targetWindow.unmaximize()
     } else {
-      mainWindow?.maximize()
+      targetWindow.maximize()
     }
   })
 
-  ipcMain.handle('window:close', () => {
-    mainWindow?.close()
+  ipcMain.handle('window:close', (event: IpcMainInvokeEvent) => {
+    getSenderWindow(event)?.close()
   })
 
-  ipcMain.handle('window:isMaximized', () => {
-    return mainWindow?.isMaximized() ?? false
+  ipcMain.handle('window:isMaximized', (event: IpcMainInvokeEvent) => {
+    return getSenderWindow(event)?.isMaximized() ?? false
   })
 
   // Open project folder in system file explorer
@@ -500,6 +557,15 @@ function setupIPC (): void {
     return { success: true }
   })
 
+  ipcMain.handle('settings:getLaunchpadLayout', async () => {
+    return settingsStore!.getLaunchpadLayout()
+  })
+
+  ipcMain.handle('settings:saveLaunchpadLayout', async (_event: IpcMainInvokeEvent, layout: LaunchpadLayout) => {
+    settingsStore!.saveLaunchpadLayout(layout)
+    return { success: true }
+  })
+
   // --- Open project in standalone window ---
   ipcMain.handle('runtime:openWindow', async (_event: IpcMainInvokeEvent, projectId: string) => {
     // Check if a window already exists for this project
@@ -519,15 +585,25 @@ function setupIPC (): void {
       width: 1024,
       height: 768,
       title: projectName,
+      minWidth: 760,
+      minHeight: 480,
+      frame: false,
+      backgroundColor: '#081018',
       autoHideMenuBar: true,
       webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true
+        nodeIntegration: false
       }
     })
 
-    win.loadURL(`http://localhost:${port}`)
+    const target = buildRendererWindowUrl(projectId)
+    if (target.devUrl) {
+      win.loadURL(target.devUrl)
+    } else if (target.filePath) {
+      win.loadFile(target.filePath, { query: target.query })
+    }
+
     projectWindows.set(projectId, win)
 
     win.on('closed', () => {

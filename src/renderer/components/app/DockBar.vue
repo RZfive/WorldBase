@@ -5,6 +5,7 @@ interface RunningApp {
   id: string
   name: string
   type: string
+  icon?: string
   port?: number
   isWindow: boolean
 }
@@ -48,7 +49,7 @@ const emit = defineEmits<{
         @click="emit('switchToApp', app)"
         @contextmenu="emit('contextMenu', $event, app)"
       >
-        <span class="dock-item-icon">{{ getProjectIcon(app.type) }}</span>
+        <span class="dock-item-icon">{{ getProjectIcon(app.type, app.icon) }}</span>
         <span v-if="app.isWindow" class="dock-window-badge">↗</span>
         <span class="dock-running-dot"></span>
       </div>

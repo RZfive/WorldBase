@@ -12,7 +12,7 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'reset' | 'done' | 'error'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'reset' | 'done' | 'error'
   content?: string
   name?: string
   message?: ChatMessage
@@ -20,6 +20,8 @@ interface StreamEvent {
   error?: string
   stage?: string
   detail?: string
+  filePath?: string
+  truncated?: boolean
 }
 
 interface ConversationSummary {
@@ -50,6 +52,17 @@ interface AIProvidersConfig {
   activeProviderId: string
 }
 
+interface LaunchpadFolderLayout {
+  id: string
+  name: string
+  projectIds: string[]
+}
+
+interface LaunchpadLayout {
+  folders: LaunchpadFolderLayout[]
+  topLevelOrder: string[]
+}
+
 /**
  * API shape exposed to the renderer via contextBridge.
  * Must stay in sync with the ElectronAPI declaration in src/env.d.ts.
@@ -72,6 +85,7 @@ export interface ElectronAPI {
   getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
   writeFile: (projectId: string, filePath: string, content: string) => Promise<{ success: boolean }>
+  updateProjectAppearance: (projectId: string, updates: { name?: string; icon?: string }) => Promise<Record<string, unknown>>
   openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
   deleteProject: (projectId: string) => Promise<{ success: boolean }>
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void
@@ -103,6 +117,8 @@ export interface ElectronAPI {
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
+  getLaunchpadLayout: () => Promise<LaunchpadLayout>
+  saveLaunchpadLayout: (layout: LaunchpadLayout) => Promise<{ success: boolean }>
 
   // Skills
   listSkills: () => Promise<Array<{ id: string; name: string; description: string; content: string; createdAt: string; updatedAt: string }>>
@@ -142,6 +158,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getFileTree: (projectId: string) => ipcRenderer.invoke('projects:getFileTree', projectId),
   readFile: (projectId: string, filePath: string) => ipcRenderer.invoke('projects:readFile', projectId, filePath),
   writeFile: (projectId: string, filePath: string, content: string) => ipcRenderer.invoke('projects:writeFile', projectId, filePath, content),
+  updateProjectAppearance: (projectId: string, updates: { name?: string; icon?: string }) => ipcRenderer.invoke('projects:updateAppearance', projectId, updates),
   openProjectFolder: (projectId: string) => ipcRenderer.invoke('projects:openFolder', projectId),
   deleteProject: (projectId: string) => ipcRenderer.invoke('projects:delete', projectId),
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => {
@@ -181,6 +198,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveProviders: (config: AIProvidersConfig) => ipcRenderer.invoke('settings:saveProviders', config),
   getLaunchMode: (projectId: string) => ipcRenderer.invoke('settings:getLaunchMode', projectId),
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => ipcRenderer.invoke('settings:saveLaunchMode', projectId, mode),
+  getLaunchpadLayout: () => ipcRenderer.invoke('settings:getLaunchpadLayout'),
+  saveLaunchpadLayout: (layout: LaunchpadLayout) => ipcRenderer.invoke('settings:saveLaunchpadLayout', layout),
 
   // Skills
   listSkills: () => ipcRenderer.invoke('skills:list'),

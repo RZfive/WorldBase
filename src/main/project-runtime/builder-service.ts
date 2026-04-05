@@ -4,6 +4,42 @@ import fs from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import crypto from 'node:crypto'
 
+const NEXT_CONFIG_TEMPLATE = `/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'standalone'
+}
+
+module.exports = nextConfig
+`
+
+const NEXT_ENV_TEMPLATE = `/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+
+// NOTE: This file should not be edited.
+// See https://nextjs.org/docs/app/api-reference/config/typescript for more information.
+`
+
+const NEXT_TS_CONFIG_TEMPLATE = {
+  compilerOptions: {
+    target: 'ES2017',
+    lib: ['dom', 'dom.iterable', 'esnext'],
+    allowJs: true,
+    skipLibCheck: true,
+    strict: false,
+    noEmit: true,
+    esModuleInterop: true,
+    module: 'esnext',
+    moduleResolution: 'bundler',
+    resolveJsonModule: true,
+    isolatedModules: true,
+    jsx: 'preserve',
+    incremental: true,
+    plugins: [{ name: 'next' }]
+  },
+  include: ['next-env.d.ts', '**/*.ts', '**/*.tsx', '**/*.d.ts', '.next/types/**/*.ts'],
+  exclude: ['node_modules']
+}
+
 export type BuildStatus = 'none' | 'building' | 'built' | 'failed'
 
 export interface BuildResult {
@@ -40,6 +76,11 @@ export class BuilderService {
     const projectDir = path.join(this.projectsDir, projectId)
     const metaPath = path.join(projectDir, '.world-meta.json')
     const startTime = Date.now()
+    const isNextProject = await this._isNextProject(projectDir)
+
+    if (isNextProject) {
+      await this._normalizeNextProjectFiles(projectDir)
+    }
 
     // Update build status in meta
     await this._updateBuildStatus(metaPath, 'building')
@@ -65,6 +106,18 @@ export class BuilderService {
         if (code === 0) {
           // Post-build: copy static assets for Next.js standalone mode
           await this._copyNextStaticAssets(projectDir)
+
+          if (isNextProject && !this._hasStandaloneOutput(projectDir)) {
+            await this._updateBuildStatus(metaPath, 'failed')
+            resolve({
+              success: false,
+              buildStatus: 'failed',
+              duration,
+              error: 'Next.js build completed but did not generate .next/standalone/server.js. Ensure next.config.js sets output: \'standalone\'.',
+              output
+            })
+            return
+          }
 
           const buildHash = await this._computeSourceHash(projectDir)
           await this._updateBuildMeta(metaPath, 'built', buildHash)
@@ -180,8 +233,29 @@ export class BuilderService {
    */
   hasStandaloneBuild (projectId: string): boolean {
     const projectDir = path.join(this.projectsDir, projectId)
-    const standalonePath = path.join(projectDir, '.next', 'standalone', 'server.js')
-    return existsSync(standalonePath)
+    return this._hasStandaloneOutput(projectDir)
+  }
+
+  private _hasStandaloneOutput (projectDir: string): boolean {
+    return existsSync(path.join(projectDir, '.next', 'standalone', 'server.js'))
+  }
+
+  private async _isNextProject (projectDir: string): Promise<boolean> {
+    const packageJsonPath = path.join(projectDir, 'package.json')
+    if (!existsSync(packageJsonPath)) {
+      return false
+    }
+
+    try {
+      const pkg = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8')) as Record<string, unknown>
+      const deps: Record<string, string> = {
+        ...((pkg.dependencies || {}) as Record<string, string>),
+        ...((pkg.devDependencies || {}) as Record<string, string>)
+      }
+      return typeof deps.next === 'string'
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -206,6 +280,116 @@ export class BuilderService {
     if (existsSync(staticSrc) && !existsSync(staticDest)) {
       await fs.mkdir(path.join(standalonePath, '.next'), { recursive: true })
       await fs.cp(staticSrc, staticDest, { recursive: true })
+    }
+  }
+
+  private async _normalizeNextProjectFiles (projectDir: string): Promise<void> {
+    await this._removeDuplicateScriptVariants(projectDir)
+    await this._ensureNextStandaloneConfig(projectDir)
+
+    const hasTypeScriptSources = await this._hasTypeScriptSources(projectDir)
+    if (!hasTypeScriptSources) {
+      return
+    }
+
+    await this._ensureNextTypeScriptSupport(projectDir)
+  }
+
+  private async _removeDuplicateScriptVariants (projectDir: string): Promise<void> {
+    const files = await this._getSourceFiles(projectDir, '')
+    const groups = new Map<string, Set<string>>()
+
+    for (const relativeFile of files) {
+      if (relativeFile.endsWith('.d.ts')) {
+        continue
+      }
+
+      const parsed = path.parse(relativeFile)
+      if (!['.js', '.jsx', '.ts', '.tsx'].includes(parsed.ext)) {
+        continue
+      }
+
+      const baseKey = parsed.dir ? path.join(parsed.dir, parsed.name) : parsed.name
+      const variants = groups.get(baseKey) ?? new Set<string>()
+      variants.add(parsed.ext)
+      groups.set(baseKey, variants)
+    }
+
+    for (const [baseKey, variants] of groups) {
+      const hasJsVariant = variants.has('.js') || variants.has('.jsx')
+      if (!hasJsVariant) {
+        continue
+      }
+
+      for (const staleExtension of ['.ts', '.tsx']) {
+        if (!variants.has(staleExtension)) {
+          continue
+        }
+
+        const staleFile = path.join(projectDir, `${baseKey}${staleExtension}`)
+        if (existsSync(staleFile)) {
+          await fs.rm(staleFile, { force: true })
+        }
+      }
+    }
+  }
+
+  private async _ensureNextStandaloneConfig (projectDir: string): Promise<void> {
+    const nextConfigCandidates = [
+      'next.config.js',
+      'next.config.mjs',
+      'next.config.cjs',
+      'next.config.ts'
+    ]
+
+    const hasExistingConfig = nextConfigCandidates.some(file => existsSync(path.join(projectDir, file)))
+    if (!hasExistingConfig) {
+      await fs.writeFile(path.join(projectDir, 'next.config.js'), NEXT_CONFIG_TEMPLATE, 'utf-8')
+    }
+  }
+
+  private async _hasTypeScriptSources (projectDir: string): Promise<boolean> {
+    const files = await this._getSourceFiles(projectDir, '')
+    return files.some(file => file.endsWith('.ts') || file.endsWith('.tsx'))
+  }
+
+  private async _ensureNextTypeScriptSupport (projectDir: string): Promise<void> {
+    const nextEnvPath = path.join(projectDir, 'next-env.d.ts')
+    if (!existsSync(nextEnvPath)) {
+      await fs.writeFile(nextEnvPath, NEXT_ENV_TEMPLATE, 'utf-8')
+    }
+
+    const tsconfigPath = path.join(projectDir, 'tsconfig.json')
+    if (!existsSync(tsconfigPath)) {
+      await fs.writeFile(tsconfigPath, JSON.stringify(NEXT_TS_CONFIG_TEMPLATE, null, 2), 'utf-8')
+      return
+    }
+
+    try {
+      const raw = await fs.readFile(tsconfigPath, 'utf-8')
+      const tsconfig = JSON.parse(raw) as {
+        include?: string[]
+        compilerOptions?: Record<string, unknown>
+      }
+
+      const include = Array.isArray(tsconfig.include) ? [...tsconfig.include] : []
+      if (!include.includes('next-env.d.ts')) {
+        include.unshift('next-env.d.ts')
+      }
+      if (!include.includes('**/*.d.ts')) {
+        include.push('**/*.d.ts')
+      }
+
+      tsconfig.include = include
+      tsconfig.compilerOptions = {
+        allowJs: true,
+        jsx: 'preserve',
+        ...(tsconfig.compilerOptions || {})
+      }
+
+      await fs.writeFile(tsconfigPath, JSON.stringify(tsconfig, null, 2), 'utf-8')
+    } catch {
+      // Leave user-provided tsconfig untouched if it isn't valid JSON.
     }
   }
 

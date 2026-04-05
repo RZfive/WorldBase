@@ -4,11 +4,14 @@ import ContextMenu from './ContextMenu.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import LaunchpadGrid from './LaunchpadGrid.vue'
 import FolderBubble from './FolderBubble.vue'
-import type { LaunchFolder, Project, ProjectRuntime } from './types'
-
-/* ------------------------------------------------------------------ */
-/* Types                                                               */
-/* ------------------------------------------------------------------ */
+import ProjectAppearanceDialog from './ProjectAppearanceDialog.vue'
+import type {
+  LaunchFolder,
+  LaunchpadDragItem,
+  LaunchpadDropTarget,
+  LaunchpadGridItem,
+  Project
+} from './types'
 
 const emit = defineEmits<{
   (e: 'select', project: Project): void
@@ -18,123 +21,210 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
-/* ------------------------------------------------------------------ */
-/* State                                                               */
-/* ------------------------------------------------------------------ */
-
 const projects = ref<Project[]>([])
 const folders = ref<LaunchFolder[]>([])
+const topLevelOrder = ref<string[]>([])
 const isLoading = ref(false)
 const error = ref<string | null>(null)
 const searchQuery = ref('')
 const searchRef = ref<HTMLInputElement | null>(null)
 
-// Folder popup
 const openFolderId = ref<string | null>(null)
 const folderPopupAnchor = ref<{ x: number; y: number }>({ x: 0, y: 0 })
 
-// Drag state
-const dragItem = ref<{ id: string; type: 'project' } | null>(null)
-const dropTarget = ref<{ id: string; type: 'project' | 'folder' } | null>(null)
-const dragOverlay = ref<{ x: number; y: number; label: string } | null>(null)
+const dragItem = ref<LaunchpadDragItem | null>(null)
+const dropTarget = ref<LaunchpadDropTarget | null>(null)
 
-// Context menu
 const ctxMenu = ref<{ visible: boolean; x: number; y: number; target: Project | LaunchFolder | null; kind: 'project' | 'folder' | 'blank' }>({
   visible: false, x: 0, y: 0, target: null, kind: 'blank'
 })
 
-// Rename state
 const renamingId = ref<string | null>(null)
 const renameInput = ref('')
 
-// Confirm dialog
 const confirmDialog = ref<{ visible: boolean; message: string; onConfirm: (() => void) | null }>({
   visible: false, message: '', onConfirm: null
 })
 
+const appearanceDialog = ref<{ visible: boolean; project: Project | null }>({
+  visible: false,
+  project: null
+})
+
 let projectChangedCleanup: (() => void) | null = null
 
-/* ------------------------------------------------------------------ */
-/* Computed                                                            */
-/* ------------------------------------------------------------------ */
+function projectKey (projectId: string): string {
+  return `project:${projectId}`
+}
+
+function folderKey (folderId: string): string {
+  return `folder:${folderId}`
+}
+
+function getFolderById (folderId: string): LaunchFolder | null {
+  return folders.value.find(folder => folder.id === folderId) || null
+}
+
+function getFolderByProject (projectId: string): LaunchFolder | null {
+  return folders.value.find(folder => folder.projectIds.includes(projectId)) || null
+}
+
+function sameArray (left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function dedupeOrder (order: string[]): string[] {
+  const seen = new Set<string>()
+  return order.filter((key) => {
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
 
 const folderedIds = computed(() => {
-  const s = new Set<string>()
-  folders.value.forEach(f => f.projectIds.forEach(id => s.add(id)))
-  return s
+  const ids = new Set<string>()
+  folders.value.forEach(folder => folder.projectIds.forEach(projectId => ids.add(projectId)))
+  return ids
 })
 
-const unfolderedProjects = computed(() =>
-  projects.value.filter(p => !folderedIds.value.has(p.id))
-)
+const orderedTopLevelItems = computed<LaunchpadGridItem[]>(() => {
+  const items = new Map<string, LaunchpadGridItem>()
+  const unfolderedProjects = projects.value.filter(project => !folderedIds.value.has(project.id))
 
-const filteredUnfoldered = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase()
-  if (!q) return unfolderedProjects.value
-  return unfolderedProjects.value.filter(p =>
-    (p.name || p.id).toLowerCase().includes(q) || (p.type || '').toLowerCase().includes(q)
-  )
-})
-
-const filteredFolders = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase()
-  if (!q) return folders.value
-  return folders.value.filter(f => {
-    if (f.name.toLowerCase().includes(q)) return true
-    return f.projectIds.some(id => {
-      const p = projects.value.find(pr => pr.id === id)
-      return p && (p.name || p.id).toLowerCase().includes(q)
-    })
+  folders.value.forEach(folder => {
+    items.set(folderKey(folder.id), { kind: 'folder', data: folder })
   })
+
+  unfolderedProjects.forEach(project => {
+    items.set(projectKey(project.id), { kind: 'project', data: project })
+  })
+
+  const ordered: LaunchpadGridItem[] = []
+  const used = new Set<string>()
+
+  topLevelOrder.value.forEach((key) => {
+    const item = items.get(key)
+    if (!item) return
+    ordered.push(item)
+    used.add(key)
+  })
+
+  folders.value.forEach((folder) => {
+    const key = folderKey(folder.id)
+    if (used.has(key)) return
+    ordered.push({ kind: 'folder', data: folder })
+  })
+
+  unfolderedProjects.forEach((project) => {
+    const key = projectKey(project.id)
+    if (used.has(key)) return
+    ordered.push({ kind: 'project', data: project })
+  })
+
+  return ordered
 })
 
-/** All items in display order: folders first, then unfoldered projects */
+function matchesProjectQuery (project: Project, query: string): boolean {
+  return (project.name || project.id).toLowerCase().includes(query) || (project.type || '').toLowerCase().includes(query)
+}
+
+function matchesFolderQuery (folder: LaunchFolder, query: string): boolean {
+  if (folder.name.toLowerCase().includes(query)) return true
+  return folder.projectIds.some((projectId) => {
+    const project = projects.value.find(entry => entry.id === projectId)
+    return project ? matchesProjectQuery(project, query) : false
+  })
+}
+
 const gridItems = computed(() => {
-  const items: Array<{ kind: 'folder'; data: LaunchFolder } | { kind: 'project'; data: Project }> = []
-  filteredFolders.value.forEach(f => items.push({ kind: 'folder', data: f }))
-  filteredUnfoldered.value.forEach(p => items.push({ kind: 'project', data: p }))
-  return items
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) return orderedTopLevelItems.value
+  return orderedTopLevelItems.value.filter((item) => {
+    return item.kind === 'folder'
+      ? matchesFolderQuery(item.data, query)
+      : matchesProjectQuery(item.data, query)
+  })
 })
 
 const openFolderData = computed(() => {
   if (!openFolderId.value) return null
-  return folders.value.find(f => f.id === openFolderId.value) || null
+  return getFolderById(openFolderId.value)
 })
 
 const openFolderProjects = computed(() => {
   if (!openFolderData.value) return []
   return openFolderData.value.projectIds
-    .map(id => projects.value.find(p => p.id === id))
+    .map(projectId => projects.value.find(project => project.id === projectId))
     .filter(Boolean) as Project[]
 })
 
-/* ------------------------------------------------------------------ */
-/* Data                                                                */
-/* ------------------------------------------------------------------ */
+function persistLayout () {
+  const layout = {
+    folders: folders.value.map(folder => ({
+      id: folder.id,
+      name: folder.name,
+      projectIds: [...folder.projectIds]
+    })),
+    topLevelOrder: [...topLevelOrder.value]
+  }
 
-async function loadProjects () {
-  isLoading.value = true
-  error.value = null
   try {
-    if (window.electronAPI) {
-      const nextProjects = await window.electronAPI.listProjects() as Project[]
-      projects.value = nextProjects
-      syncFoldersWithProjects(nextProjects)
-    }
-  } catch (err) {
-    error.value = (err as Error).message
-  } finally {
-    isLoading.value = false
+    localStorage.setItem('launchpad-layout', JSON.stringify(layout))
+    localStorage.setItem('launchpad-folders', JSON.stringify(layout.folders))
+  } catch {
+    // Ignore local persistence failures.
+  }
+
+  if (window.electronAPI?.saveLaunchpadLayout) {
+    void window.electronAPI.saveLaunchpadLayout(layout).catch((err) => {
+      console.error('Failed to persist launchpad layout:', err)
+    })
   }
 }
 
-function syncFoldersWithProjects (nextProjects: Project[]) {
+async function loadLayout () {
+  if (window.electronAPI?.getLaunchpadLayout) {
+    try {
+      const layout = await window.electronAPI.getLaunchpadLayout()
+      folders.value = Array.isArray(layout?.folders) ? layout.folders : []
+      topLevelOrder.value = Array.isArray(layout?.topLevelOrder) ? layout.topLevelOrder : []
+      if (folders.value.length > 0 || topLevelOrder.value.length > 0) {
+        return
+      }
+    } catch (err) {
+      console.error('Failed to load launchpad layout:', err)
+    }
+  }
+
+  try {
+    const rawLayout = localStorage.getItem('launchpad-layout')
+    if (rawLayout) {
+      const layout = JSON.parse(rawLayout) as { folders?: LaunchFolder[]; topLevelOrder?: string[] }
+      folders.value = Array.isArray(layout.folders) ? layout.folders : []
+      topLevelOrder.value = Array.isArray(layout.topLevelOrder) ? layout.topLevelOrder : []
+      return
+    }
+
+    const rawFolders = localStorage.getItem('launchpad-folders')
+    if (rawFolders) {
+      folders.value = JSON.parse(rawFolders) as LaunchFolder[]
+      topLevelOrder.value = []
+      persistLayout()
+    }
+  } catch {
+    folders.value = []
+    topLevelOrder.value = []
+  }
+}
+
+function syncLayoutWithProjects (nextProjects: Project[]) {
   const validIds = new Set(nextProjects.map(project => project.id))
   const assigned = new Set<string>()
   let changed = false
 
-  folders.value = folders.value.map(folder => {
-    const projectIds = folder.projectIds.filter((projectId) => {
+  const nextFolders = folders.value.map((folder) => {
+    const nextProjectIds = folder.projectIds.filter((projectId) => {
       if (!validIds.has(projectId) || assigned.has(projectId)) {
         changed = true
         return false
@@ -143,68 +233,167 @@ function syncFoldersWithProjects (nextProjects: Project[]) {
       return true
     })
 
-    if (projectIds.length !== folder.projectIds.length) {
+    if (nextProjectIds.length !== folder.projectIds.length) {
       changed = true
     }
 
     return {
       ...folder,
-      projectIds
+      projectIds: nextProjectIds
     }
   })
+
+  folders.value = nextFolders
 
   if (openFolderId.value && !folders.value.some(folder => folder.id === openFolderId.value)) {
     openFolderId.value = null
   }
 
-  if (changed) saveFolders()
-}
+  const nextFolderedIds = new Set<string>()
+  folders.value.forEach(folder => folder.projectIds.forEach(projectId => nextFolderedIds.add(projectId)))
 
-function saveFolders () {
-  try { localStorage.setItem('launchpad-folders', JSON.stringify(folders.value)) } catch { /* ignore */ }
-}
-
-function loadFolders () {
-  try {
-    const raw = localStorage.getItem('launchpad-folders')
-    if (raw) folders.value = JSON.parse(raw)
-  } catch { /* ignore */ }
-}
-
-/* ------------------------------------------------------------------ */
-/* Folder CRUD                                                         */
-/* ------------------------------------------------------------------ */
-
-function createFolderWith (projIdA: string, projIdB: string) {
-  const sourceFolderIds = folders.value
-    .filter(f => f.projectIds.includes(projIdA) || f.projectIds.includes(projIdB))
-    .map(f => f.id)
-  const name = '新文件夹'
-  const id = 'folder_' + Date.now().toString(36)
-  folders.value.forEach(f => {
-    f.projectIds = f.projectIds.filter(pid => pid !== projIdA && pid !== projIdB)
+  const validTopLevelKeys = new Set<string>()
+  folders.value.forEach(folder => validTopLevelKeys.add(folderKey(folder.id)))
+  nextProjects.forEach((project) => {
+    if (!nextFolderedIds.has(project.id)) {
+      validTopLevelKeys.add(projectKey(project.id))
+    }
   })
-  folders.value.push({ id, name, projectIds: [projIdA, projIdB] })
-  sourceFolderIds.forEach(cleanupFolderAfterMove)
-  saveFolders()
+
+  const nextOrder = topLevelOrder.value.filter(key => validTopLevelKeys.has(key))
+  const seen = new Set(nextOrder)
+
+  folders.value.forEach((folder) => {
+    const key = folderKey(folder.id)
+    if (!seen.has(key)) {
+      nextOrder.push(key)
+      seen.add(key)
+      changed = true
+    }
+  })
+
+  nextProjects.forEach((project) => {
+    if (nextFolderedIds.has(project.id)) return
+    const key = projectKey(project.id)
+    if (!seen.has(key)) {
+      nextOrder.push(key)
+      seen.add(key)
+      changed = true
+    }
+  })
+
+  const dedupedOrder = dedupeOrder(nextOrder)
+  if (!sameArray(topLevelOrder.value, dedupedOrder)) {
+    topLevelOrder.value = dedupedOrder
+    changed = true
+  }
+
+  if (changed) persistLayout()
+}
+
+async function loadProjects () {
+  isLoading.value = true
+  error.value = null
+  try {
+    if (!window.electronAPI) return
+    const nextProjects = await window.electronAPI.listProjects() as Project[]
+    projects.value = nextProjects
+    syncLayoutWithProjects(nextProjects)
+  } catch (err) {
+    error.value = (err as Error).message
+  } finally {
+    isLoading.value = false
+  }
+}
+
+function cleanupFolderAfterMove (folderId: string): { collapsed: boolean; remainingProjectIds: string[] } {
+  const folder = getFolderById(folderId)
+  if (!folder || folder.projectIds.length > 1) {
+    return { collapsed: false, remainingProjectIds: folder ? [...folder.projectIds] : [] }
+  }
+
+  const remainingProjectIds = [...folder.projectIds]
+  const key = folderKey(folderId)
+  const orderIndex = topLevelOrder.value.indexOf(key)
+  folders.value = folders.value.filter(entry => entry.id !== folderId)
+
+  const nextOrder = topLevelOrder.value.filter(entryKey => entryKey !== key)
+  if (remainingProjectIds.length === 1) {
+    const remainingKey = projectKey(remainingProjectIds[0])
+    if (!nextOrder.includes(remainingKey)) {
+      const insertIndex = orderIndex >= 0 ? Math.min(orderIndex, nextOrder.length) : nextOrder.length
+      nextOrder.splice(insertIndex, 0, remainingKey)
+    }
+  }
+
+  topLevelOrder.value = dedupeOrder(nextOrder)
+
+  if (openFolderId.value === folderId) {
+    openFolderId.value = null
+  }
+
+  return { collapsed: true, remainingProjectIds }
+}
+
+function detachProjectFromCurrentLocation (projectId: string) {
+  const sourceFolder = getFolderByProject(projectId)
+  if (sourceFolder) {
+    sourceFolder.projectIds = sourceFolder.projectIds.filter(id => id !== projectId)
+    cleanupFolderAfterMove(sourceFolder.id)
+    return
+  }
+
+  topLevelOrder.value = topLevelOrder.value.filter(key => key !== projectKey(projectId))
+}
+
+function createFolderWith (draggedProjectId: string, targetProjectId: string) {
+  const targetKey = projectKey(targetProjectId)
+  const targetIndex = topLevelOrder.value.indexOf(targetKey)
+  const id = 'folder_' + Date.now().toString(36)
+  const name = '新文件夹'
+
+  detachProjectFromCurrentLocation(draggedProjectId)
+
+  topLevelOrder.value = topLevelOrder.value.filter(key => key !== targetKey)
+  folders.value.push({ id, name, projectIds: [targetProjectId, draggedProjectId] })
+
+  const nextOrder = [...topLevelOrder.value]
+  const insertIndex = targetIndex >= 0 ? Math.min(targetIndex, nextOrder.length) : nextOrder.length
+  nextOrder.splice(insertIndex, 0, folderKey(id))
+  topLevelOrder.value = dedupeOrder(nextOrder)
+
+  persistLayout()
   openFolderId.value = id
   renamingId.value = id
   renameInput.value = name
-  return id
 }
 
 function createEmptyFolder () {
   const id = 'folder_' + Date.now().toString(36)
   folders.value.push({ id, name: '新文件夹', projectIds: [] })
-  saveFolders()
-  // Start renaming
+  topLevelOrder.value = dedupeOrder([...topLevelOrder.value, folderKey(id)])
+  persistLayout()
   renamingId.value = id
   renameInput.value = '新文件夹'
 }
 
 function deleteFolder (folderId: string) {
-  folders.value = folders.value.filter(f => f.id !== folderId)
-  saveFolders()
+  const folder = getFolderById(folderId)
+  if (!folder) return
+
+  const key = folderKey(folderId)
+  const orderIndex = topLevelOrder.value.indexOf(key)
+  folders.value = folders.value.filter(entry => entry.id !== folderId)
+
+  const nextOrder = topLevelOrder.value.filter(entryKey => entryKey !== key)
+  const projectKeys = folder.projectIds
+    .map(projectId => projectKey(projectId))
+    .filter(entryKey => !nextOrder.includes(entryKey))
+  const insertIndex = orderIndex >= 0 ? Math.min(orderIndex, nextOrder.length) : nextOrder.length
+  nextOrder.splice(insertIndex, 0, ...projectKeys)
+  topLevelOrder.value = dedupeOrder(nextOrder)
+
+  persistLayout()
   openFolderId.value = null
 }
 
@@ -214,46 +403,62 @@ function startRenameFolder (folder: LaunchFolder) {
 }
 
 function commitRename (folderId: string) {
-  const folder = folders.value.find(f => f.id === folderId)
+  const folder = getFolderById(folderId)
   if (folder && renameInput.value.trim()) {
     folder.name = renameInput.value.trim()
-    saveFolders()
+    persistLayout()
   }
   renamingId.value = null
 }
 
-function cleanupFolderAfterMove (folderId: string) {
-  const folder = folders.value.find(f => f.id === folderId)
-  if (!folder || folder.projectIds.length > 1) return
-  folders.value = folders.value.filter(f => f.id !== folderId)
-  if (openFolderId.value === folderId) openFolderId.value = null
-}
-
 function moveToFolder (projectId: string, folderId: string) {
-  const sourceFolderIds = folders.value
-    .filter(f => f.projectIds.includes(projectId))
-    .map(f => f.id)
-  folders.value.forEach(f => { f.projectIds = f.projectIds.filter(id => id !== projectId) })
-  const folder = folders.value.find(f => f.id === folderId)
-  if (folder && !folder.projectIds.includes(projectId)) folder.projectIds.push(projectId)
-  sourceFolderIds
-    .filter(id => id !== folderId)
-    .forEach(cleanupFolderAfterMove)
-  saveFolders()
+  const targetFolder = getFolderById(folderId)
+  if (!targetFolder) return
+
+  const sourceFolder = getFolderByProject(projectId)
+  if (sourceFolder?.id === folderId) {
+    if (targetFolder.projectIds[targetFolder.projectIds.length - 1] !== projectId) {
+      targetFolder.projectIds = targetFolder.projectIds.filter(id => id !== projectId)
+      targetFolder.projectIds.push(projectId)
+      persistLayout()
+    }
+    return
+  }
+
+  if (sourceFolder) {
+    sourceFolder.projectIds = sourceFolder.projectIds.filter(id => id !== projectId)
+    cleanupFolderAfterMove(sourceFolder.id)
+  } else {
+    topLevelOrder.value = topLevelOrder.value.filter(key => key !== projectKey(projectId))
+  }
+
+  targetFolder.projectIds = targetFolder.projectIds.filter(id => id !== projectId)
+  targetFolder.projectIds.push(projectId)
+  persistLayout()
 }
 
 function removeFromFolder (projectId: string) {
-  const sourceFolderIds = folders.value
-    .filter(f => f.projectIds.includes(projectId))
-    .map(f => f.id)
-  folders.value.forEach(f => { f.projectIds = f.projectIds.filter(id => id !== projectId) })
-  sourceFolderIds.forEach(cleanupFolderAfterMove)
-  saveFolders()
-}
+  const sourceFolder = getFolderByProject(projectId)
+  if (!sourceFolder) return
 
-/* ------------------------------------------------------------------ */
-/* Project actions                                                     */
-/* ------------------------------------------------------------------ */
+  const sourceOrderIndex = topLevelOrder.value.indexOf(folderKey(sourceFolder.id))
+  const nextCount = sourceFolder.projectIds.filter(id => id !== projectId).length
+
+  sourceFolder.projectIds = sourceFolder.projectIds.filter(id => id !== projectId)
+  cleanupFolderAfterMove(sourceFolder.id)
+
+  const nextOrder = [...topLevelOrder.value]
+  const entryKey = projectKey(projectId)
+  if (!nextOrder.includes(entryKey)) {
+    const insertIndex = sourceOrderIndex >= 0
+      ? Math.min(sourceOrderIndex + (nextCount > 0 ? 1 : 0), nextOrder.length)
+      : nextOrder.length
+    nextOrder.splice(insertIndex, 0, entryKey)
+    topLevelOrder.value = dedupeOrder(nextOrder)
+  }
+
+  persistLayout()
+}
 
 async function startProject (project: Project) {
   if (!window.electronAPI) return
@@ -261,7 +466,9 @@ async function startProject (project: Project) {
     await window.electronAPI.startProject(project.id)
     emit('appStarted')
     await loadProjects()
-  } catch (err) { console.error('Failed to start project:', err) }
+  } catch (err) {
+    console.error('Failed to start project:', err)
+  }
 }
 
 async function stopProject (project: Project) {
@@ -269,7 +476,9 @@ async function stopProject (project: Project) {
   try {
     await window.electronAPI.stopProject(project.id)
     await loadProjects()
-  } catch (err) { console.error('Failed to stop project:', err) }
+  } catch (err) {
+    console.error('Failed to stop project:', err)
+  }
 }
 
 async function openInWindow (project: Project) {
@@ -293,12 +502,46 @@ async function deleteProject (project: Project) {
     message: `确定删除项目「${project.name || project.id}」？此操作不可撤销。`,
     onConfirm: async () => {
       if (window.electronAPI?.deleteProject) {
-        try { await window.electronAPI.deleteProject(project.id) } catch (err) { console.error('Failed to delete project:', err) }
+        try {
+          await window.electronAPI.deleteProject(project.id)
+        } catch (err) {
+          console.error('Failed to delete project:', err)
+        }
       }
       removeFromFolder(project.id)
+      topLevelOrder.value = topLevelOrder.value.filter(key => key !== projectKey(project.id))
       await loadProjects()
       confirmDialog.value.visible = false
     }
+  }
+}
+
+function openEditProject (project: Project) {
+  appearanceDialog.value = {
+    visible: true,
+    project
+  }
+}
+
+function closeEditProject () {
+  appearanceDialog.value = {
+    visible: false,
+    project: null
+  }
+}
+
+async function saveProjectAppearance (payload: { projectId: string; name: string; icon: string }) {
+  if (!window.electronAPI?.updateProjectAppearance) return
+  try {
+    await window.electronAPI.updateProjectAppearance(payload.projectId, {
+      name: payload.name,
+      icon: payload.icon
+    })
+    await loadProjects()
+  } catch (err) {
+    console.error('Failed to update project appearance:', err)
+  } finally {
+    closeEditProject()
   }
 }
 
@@ -307,25 +550,190 @@ function confirmDialogCancel () {
   confirmDialog.value.onConfirm = null
 }
 
-/* ------------------------------------------------------------------ */
-/* Drag & Drop — merge into folder                                     */
-/* ------------------------------------------------------------------ */
+function resolveTopLevelDropTarget (e: DragEvent, targetId: string, targetType: 'project' | 'folder'): LaunchpadDropTarget | null {
+  if (!dragItem.value) return null
+  if (dragItem.value.id === targetId && dragItem.value.type === targetType) return null
 
-function onDragStart (e: DragEvent, projectId: string) {
-  dragItem.value = { id: projectId, type: 'project' }
+  const element = e.currentTarget as HTMLElement | null
+  if (!element) return null
+  const rect = element.getBoundingClientRect()
+  const relativeX = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5
+
+  if (relativeX <= 0.24) {
+    return { id: targetId, type: targetType, action: 'before' }
+  }
+
+  if (relativeX >= 0.76) {
+    return { id: targetId, type: targetType, action: 'after' }
+  }
+
+  if (dragItem.value.type === 'project') {
+    return {
+      id: targetId,
+      type: targetType,
+      action: targetType === 'folder' ? 'into-folder' : 'merge'
+    }
+  }
+
+  return {
+    id: targetId,
+    type: targetType,
+    action: relativeX < 0.5 ? 'before' : 'after'
+  }
+}
+
+function resolveFolderDropTarget (e: DragEvent, targetProjectId: string, folderId: string): LaunchpadDropTarget | null {
+  if (!dragItem.value || dragItem.value.type !== 'project') return null
+  if (dragItem.value.id === targetProjectId && dragItem.value.folderId === folderId) return null
+
+  const element = e.currentTarget as HTMLElement | null
+  if (!element) return null
+  const rect = element.getBoundingClientRect()
+  const relativeX = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5
+
+  return {
+    id: targetProjectId,
+    type: 'project',
+    action: relativeX < 0.5 ? 'before' : 'after',
+    folderId
+  }
+}
+
+function reorderTopLevelItem (item: LaunchpadDragItem, targetId: string, targetType: 'project' | 'folder', position: 'before' | 'after') {
+  const movingKey = item.type === 'folder' ? folderKey(item.id) : projectKey(item.id)
+  const targetKey = targetType === 'folder' ? folderKey(targetId) : projectKey(targetId)
+  if (movingKey === targetKey) return
+
+  if (item.type === 'project' && item.source === 'folder' && item.folderId) {
+    const sourceFolder = getFolderById(item.folderId)
+    if (!sourceFolder) return
+    sourceFolder.projectIds = sourceFolder.projectIds.filter(projectId => projectId !== item.id)
+    cleanupFolderAfterMove(sourceFolder.id)
+  }
+
+  const nextOrder = topLevelOrder.value.filter(key => key !== movingKey)
+  let targetIndex = nextOrder.indexOf(targetKey)
+  if (targetIndex === -1) targetIndex = nextOrder.length
+  if (position === 'after') targetIndex += 1
+  nextOrder.splice(targetIndex, 0, movingKey)
+  topLevelOrder.value = dedupeOrder(nextOrder)
+  persistLayout()
+}
+
+function reorderProjectWithinFolder (item: LaunchpadDragItem, targetProjectId: string, folderId: string, position: 'before' | 'after') {
+  if (item.type !== 'project') return
+
+  const targetFolder = getFolderById(folderId)
+  if (!targetFolder) return
+
+  if (item.source === 'folder' && item.folderId === folderId) {
+    const reorderedIds = targetFolder.projectIds.filter(projectId => projectId !== item.id)
+    let targetIndex = reorderedIds.indexOf(targetProjectId)
+    if (targetIndex === -1) targetIndex = reorderedIds.length
+    if (position === 'after') targetIndex += 1
+    reorderedIds.splice(targetIndex, 0, item.id)
+    targetFolder.projectIds = reorderedIds
+    persistLayout()
+    return
+  }
+
+  if (item.source === 'folder' && item.folderId) {
+    const sourceFolder = getFolderById(item.folderId)
+    if (!sourceFolder) return
+    sourceFolder.projectIds = sourceFolder.projectIds.filter(projectId => projectId !== item.id)
+    cleanupFolderAfterMove(sourceFolder.id)
+  } else {
+    topLevelOrder.value = topLevelOrder.value.filter(key => key !== projectKey(item.id))
+  }
+
+  const nextIds = targetFolder.projectIds.filter(projectId => projectId !== item.id)
+  let targetIndex = nextIds.indexOf(targetProjectId)
+  if (targetIndex === -1) targetIndex = nextIds.length
+  if (position === 'after') targetIndex += 1
+  nextIds.splice(targetIndex, 0, item.id)
+  targetFolder.projectIds = nextIds
+  persistLayout()
+}
+
+function appendToTopLevel (item: LaunchpadDragItem) {
+  const key = item.type === 'folder' ? folderKey(item.id) : projectKey(item.id)
+
+  if (item.type === 'project' && item.source === 'folder' && item.folderId) {
+    const sourceFolder = getFolderById(item.folderId)
+    if (!sourceFolder) return
+    sourceFolder.projectIds = sourceFolder.projectIds.filter(projectId => projectId !== item.id)
+    cleanupFolderAfterMove(sourceFolder.id)
+  }
+
+  const nextOrder = topLevelOrder.value.filter(entryKey => entryKey !== key)
+  nextOrder.push(key)
+  topLevelOrder.value = dedupeOrder(nextOrder)
+  persistLayout()
+}
+
+function appendProjectToFolderEnd (item: LaunchpadDragItem, folderId: string) {
+  if (item.type !== 'project') return
+
+  const targetFolder = getFolderById(folderId)
+  if (!targetFolder) return
+
+  if (item.source === 'folder' && item.folderId === folderId) {
+    targetFolder.projectIds = targetFolder.projectIds.filter(projectId => projectId !== item.id)
+    targetFolder.projectIds.push(item.id)
+    persistLayout()
+    return
+  }
+
+  if (item.source === 'folder' && item.folderId) {
+    const sourceFolder = getFolderById(item.folderId)
+    if (!sourceFolder) return
+    sourceFolder.projectIds = sourceFolder.projectIds.filter(projectId => projectId !== item.id)
+    cleanupFolderAfterMove(sourceFolder.id)
+  } else {
+    topLevelOrder.value = topLevelOrder.value.filter(key => key !== projectKey(item.id))
+  }
+
+  targetFolder.projectIds = targetFolder.projectIds.filter(projectId => projectId !== item.id)
+  targetFolder.projectIds.push(item.id)
+  persistLayout()
+}
+
+function resetDragState () {
+  dragItem.value = null
+  dropTarget.value = null
+}
+
+function onDragStart (e: DragEvent, itemId: string, itemType: 'project' | 'folder', source: 'top-level' | 'folder' = 'top-level', folderId: string | null = null) {
+  dragItem.value = { id: itemId, type: itemType, source, folderId }
   if (e.dataTransfer) {
     e.dataTransfer.effectAllowed = 'move'
-    e.dataTransfer.setData('text/plain', projectId)
+    e.dataTransfer.setData('text/plain', itemId)
   }
+}
+
+function onGridContainerDragOver (e: DragEvent) {
+  if (!dragItem.value) return
+  e.preventDefault()
+  dropTarget.value = { id: '__grid__', type: 'grid', action: 'append' }
+}
+
+function onGridContainerDrop (e: DragEvent) {
+  if (!dragItem.value) return
+  e.preventDefault()
+  appendToTopLevel(dragItem.value)
+  resetDragState()
 }
 
 function onDragOver (e: DragEvent, targetId: string, targetType: 'project' | 'folder') {
   e.preventDefault()
-  if (!dragItem.value || dragItem.value.id === targetId) {
-    dropTarget.value = null
-    return
-  }
-  dropTarget.value = { id: targetId, type: targetType }
+  e.stopPropagation()
+  dropTarget.value = resolveTopLevelDropTarget(e, targetId, targetType)
+}
+
+function onFolderProjectDragOver (e: DragEvent, targetProjectId: string, folderId: string) {
+  e.preventDefault()
+  e.stopPropagation()
+  dropTarget.value = resolveFolderDropTarget(e, targetProjectId, folderId)
 }
 
 function onDragLeave () {
@@ -333,35 +741,78 @@ function onDragLeave () {
 }
 
 function onDrop (e: DragEvent, targetId: string, targetType: 'project' | 'folder') {
+  if (!dragItem.value) return
   e.preventDefault()
-  if (!dragItem.value || dragItem.value.id === targetId) {
-    dragItem.value = null
-    dropTarget.value = null
+  e.stopPropagation()
+
+  const target = dropTarget.value && dropTarget.value.id === targetId
+    ? dropTarget.value
+    : resolveTopLevelDropTarget(e, targetId, targetType)
+
+  if (!target) {
+    resetDragState()
     return
   }
 
-  const draggedId = dragItem.value.id
-
-  if (targetType === 'folder') {
-    // Drop project into existing folder
-    moveToFolder(draggedId, targetId)
-  } else {
-    // Drop project onto another project — create new folder
-    createFolderWith(draggedId, targetId)
+  switch (target.action) {
+    case 'before':
+    case 'after':
+      reorderTopLevelItem(dragItem.value, targetId, targetType, target.action)
+      break
+    case 'into-folder':
+      moveToFolder(dragItem.value.id, targetId)
+      break
+    case 'merge':
+      if (dragItem.value.type === 'project' && targetType === 'project') {
+        createFolderWith(dragItem.value.id, targetId)
+      }
+      break
   }
 
-  dragItem.value = null
-  dropTarget.value = null
+  resetDragState()
+}
+
+function onFolderProjectDrop (e: DragEvent, targetProjectId: string, folderId: string) {
+  if (!dragItem.value) return
+  e.preventDefault()
+  e.stopPropagation()
+
+  const target = dropTarget.value && dropTarget.value.id === targetProjectId
+    ? dropTarget.value
+    : resolveFolderDropTarget(e, targetProjectId, folderId)
+
+  if (!target || (target.action !== 'before' && target.action !== 'after')) {
+    resetDragState()
+    return
+  }
+
+  reorderProjectWithinFolder(dragItem.value, targetProjectId, folderId, target.action)
+  resetDragState()
+}
+
+function onFolderBodyDragOver (e: DragEvent) {
+  if (!dragItem.value || !openFolderData.value || dragItem.value.type !== 'project') return
+  e.preventDefault()
+  e.stopPropagation()
+  dropTarget.value = {
+    id: openFolderData.value.id,
+    type: 'folder',
+    action: 'append',
+    folderId: openFolderData.value.id
+  }
+}
+
+function onFolderBodyDrop (e: DragEvent) {
+  if (!dragItem.value || !openFolderData.value || dragItem.value.type !== 'project') return
+  e.preventDefault()
+  e.stopPropagation()
+  appendProjectToFolderEnd(dragItem.value, openFolderData.value.id)
+  resetDragState()
 }
 
 function onDragEnd () {
-  dragItem.value = null
-  dropTarget.value = null
+  resetDragState()
 }
-
-/* ------------------------------------------------------------------ */
-/* Context Menu                                                        */
-/* ------------------------------------------------------------------ */
 
 function showCtxMenu (e: MouseEvent, target: Project | LaunchFolder | null, kind: 'project' | 'folder' | 'blank') {
   e.preventDefault()
@@ -369,64 +820,83 @@ function showCtxMenu (e: MouseEvent, target: Project | LaunchFolder | null, kind
   ctxMenu.value = { visible: true, x: e.clientX, y: e.clientY, target, kind }
 }
 
-function hideCtxMenu () { ctxMenu.value.visible = false }
-
-/* ------------------------------------------------------------------ */
-/* Folder overlay                                                      */
-/* ------------------------------------------------------------------ */
+function hideCtxMenu () {
+  ctxMenu.value.visible = false
+}
 
 function openFolder (folder: LaunchFolder, e: MouseEvent) {
-  const el = e.currentTarget as HTMLElement
-  const rect = el.getBoundingClientRect()
+  const element = e.currentTarget as HTMLElement
+  const rect = element.getBoundingClientRect()
   folderPopupAnchor.value = { x: rect.left + rect.width / 2, y: rect.top }
   openFolderId.value = folder.id
 }
 
-function closeFolder () { openFolderId.value = null }
+function closeFolder () {
+  openFolderId.value = null
+}
 
 function cancelRename () {
   renamingId.value = null
 }
 
 function onFolderOverlayDragOver (e: DragEvent) {
-  if (!dragItem.value || !openFolderData.value) return
+  if (!dragItem.value || !openFolderData.value || dragItem.value.type !== 'project') return
   if (!openFolderData.value.projectIds.includes(dragItem.value.id)) return
   e.preventDefault()
 }
 
 function onFolderOverlayDrop (e: DragEvent) {
   if (e.target !== e.currentTarget || !dragItem.value || !openFolderData.value) return
+  if (dragItem.value.type !== 'project') return
   if (!openFolderData.value.projectIds.includes(dragItem.value.id)) return
+
   e.preventDefault()
   removeFromFolder(dragItem.value.id)
-  dragItem.value = null
-  dropTarget.value = null
+  resetDragState()
   closeFolder()
 }
 
-/* ------------------------------------------------------------------ */
-/* Keyboard / Lifecycle                                                */
-/* ------------------------------------------------------------------ */
-
 function onKeydown (e: KeyboardEvent) {
   if (e.key === 'Escape') {
-    if (confirmDialog.value.visible) { confirmDialogCancel(); return }
-    if (openFolderId.value) { closeFolder(); return }
-    if (ctxMenu.value.visible) { hideCtxMenu(); return }
+    if (appearanceDialog.value.visible) {
+      closeEditProject()
+      return
+    }
+    if (confirmDialog.value.visible) {
+      confirmDialogCancel()
+      return
+    }
+    if (openFolderId.value) {
+      closeFolder()
+      return
+    }
+    if (ctxMenu.value.visible) {
+      hideCtxMenu()
+      return
+    }
     emit('close')
   }
 }
 
-function onDocClick () { hideCtxMenu() }
+function onDocClick () {
+  hideCtxMenu()
+}
+
+async function initializeLaunchpad () {
+  await loadLayout()
+  await loadProjects()
+  await nextTick()
+  searchRef.value?.focus()
+}
 
 onMounted(() => {
-  loadFolders()
-  loadProjects()
+  void initializeLaunchpad()
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onKeydown)
-  nextTick(() => searchRef.value?.focus())
   if (window.electronAPI?.onProjectChanged) {
-    projectChangedCleanup = window.electronAPI.onProjectChanged(() => loadProjects())
+    projectChangedCleanup = window.electronAPI.onProjectChanged(() => {
+      void loadProjects()
+    })
   }
 })
 
@@ -462,7 +932,13 @@ onUnmounted(() => {
       <div v-else-if="error" class="lp-status lp-error">❌ {{ error }}</div>
 
       <!-- Grid -->
-      <div v-else class="lp-grid-container" @contextmenu="showCtxMenu($event, null, 'blank')">
+      <div
+        v-else
+        class="lp-grid-container"
+        @contextmenu="showCtxMenu($event, null, 'blank')"
+        @dragover="onGridContainerDragOver"
+        @drop="onGridContainerDrop"
+      >
         <div v-if="gridItems.length === 0" class="lp-empty">
           <div class="lp-empty-icon">🚀</div>
           <p>还没有应用</p>
@@ -476,7 +952,7 @@ onUnmounted(() => {
           :drop-target="dropTarget"
           :renaming-id="renamingId"
           :rename-input="renameInput"
-          @dragstart="onDragStart($event.event, $event.projectId)"
+          @dragstart="onDragStart($event.event, $event.itemId, $event.itemType)"
           @dragover="onDragOver($event.event, $event.targetId, $event.targetType)"
           @dragleave="onDragLeave"
           @drop="onDrop($event.event, $event.targetId, $event.targetType)"
@@ -500,12 +976,17 @@ onUnmounted(() => {
       :open-folder-data="openFolderData"
       :open-folder-projects="openFolderProjects"
       :folder-popup-anchor="folderPopupAnchor"
+      :drop-target="dropTarget"
       :renaming-id="renamingId"
       :rename-input="renameInput"
       @close="closeFolder"
       @dragover-overlay="onFolderOverlayDragOver"
       @drop-overlay="onFolderOverlayDrop"
-      @dragstart="onDragStart($event.event, $event.projectId)"
+      @dragstart="onDragStart($event.event, $event.itemId, $event.itemType, $event.source, $event.folderId)"
+      @dragover-project="onFolderProjectDragOver($event.event, $event.targetProjectId, $event.folderId)"
+      @drop-project="onFolderProjectDrop($event.event, $event.targetProjectId, $event.folderId)"
+      @dragover-body="onFolderBodyDragOver"
+      @drop-body="onFolderBodyDrop"
       @dragend="onDragEnd"
       @select-project="emit('select', $event)"
       @show-menu="showCtxMenu($event.event, $event.target, $event.kind)"
@@ -525,6 +1006,7 @@ onUnmounted(() => {
       :folders="folders"
       :foldered-ids="folderedIds"
       @hide="hideCtxMenu"
+      @edit-project="openEditProject($event)"
       @open-project="emit('select', $event)"
       @view-source="openSourceCode($event)"
       @open-in-window="openInWindow($event)"
@@ -538,6 +1020,13 @@ onUnmounted(() => {
       @delete-folder="deleteFolder($event)"
       @create-folder="createEmptyFolder"
       @refresh="loadProjects"
+    />
+
+    <ProjectAppearanceDialog
+      :visible="appearanceDialog.visible"
+      :project="appearanceDialog.project"
+      @save="saveProjectAppearance"
+      @cancel="closeEditProject"
     />
 
     <!-- Confirm dialog -->
@@ -677,10 +1166,28 @@ onUnmounted(() => {
 .lp-cell:active {
   transform: scale(0.96);
 }
-.lp-cell.drop-hover {
+.lp-cell.drop-merge,
+.lp-cell.drop-into-folder {
   background: var(--lp-accent-soft);
   box-shadow: 0 0 0 2px var(--lp-accent-strong);
   transform: scale(1.08);
+}
+.lp-cell.drop-before::before,
+.lp-cell.drop-after::after {
+  content: '';
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  width: 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(125, 211, 252, 0.95), rgba(14, 165, 233, 0.95));
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.22), 0 0 14px rgba(56, 189, 248, 0.35);
+}
+.lp-cell.drop-before::before {
+  left: -8px;
+}
+.lp-cell.drop-after::after {
+  right: -8px;
 }
 
 /* ============ App icon ============ */

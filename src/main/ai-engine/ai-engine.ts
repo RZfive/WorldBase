@@ -1,4 +1,4 @@
-import { AgentCore, type StreamEvent, type ProgressCallback } from './agent/agent-core.js'
+import { AgentCore, type StreamEvent, type ProgressCallback, type ProgressEvent } from './agent/agent-core.js'
 import { OpenAIProvider } from './providers/openai-provider.js'
 import { registerAllTools } from './agent/tools/index.js'
 import type { ChatMessage, ToolDefinition } from './providers/openai-provider.js'
@@ -9,7 +9,7 @@ import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { BrowserWindow } from 'electron'
 
-export type { StreamEvent, ProgressCallback }
+export type { StreamEvent, ProgressCallback, ProgressEvent }
 
 export interface AIEngineServices {
   projectFS: ProjectFS
