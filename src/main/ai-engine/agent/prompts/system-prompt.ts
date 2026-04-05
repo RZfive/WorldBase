@@ -77,16 +77,16 @@ export function getSystemPrompt (skillContents?: string[]): string {
 ├── package.json          # 固定依赖：next, react, react-dom
 ├── next.config.js        # 必须包含 output: 'standalone'
 ├── app/
-│   ├── layout.tsx        # 根布局
-│   ├── page.tsx          # 首页
+│   ├── layout.js         # 根布局
+│   ├── page.js           # 首页
 │   ├── globals.css       # 全局样式
 │   └── api/              # API Routes（后端接口）
-│       └── [功能]/route.ts
+│       └── [功能]/route.js
 ├── lib/                  # 工具函数、数据访问
-│   ├── db.ts             # SQLite 数据访问（通过基座 API）
-│   └── api-client.ts     # 外部接口调用（可选）
+│   ├── db.js             # SQLite 数据访问（通过基座 API）
+│   └── api-client.js     # 外部接口调用（可选）
 ├── components/           # UI 组件，按功能拆分
-│   ├── [功能名].tsx
+│   ├── [功能名].jsx
 │   └── ...
 └── public/               # 静态资源（图片、图标等）
 \`\`\`
@@ -123,10 +123,16 @@ module.exports = nextConfig
 - 项目创建后会自动执行：npm install → npm run build → 清理 node_modules → 启动
 
 ### 前端页面开发规范
+- 默认使用 JavaScript / JSX 文件（\`.js\`、\`.jsx\`），除非用户明确要求 TypeScript，否则不要生成 \`.ts\`、\`.tsx\`
 - 使用 React Server Components 和 Client Components 按需选择
 - 页面放在 app/ 目录下，使用 Next.js App Router 约定
 - 组件拆分到 components/ 目录
 - 样式使用 CSS Modules 或 globals.css
+- app/layout.tsx 或 app/layout.js 只能返回原生 \`<html>\` 和 \`<body>\` 标签，不要从 \`next/document\` 导入 \`Html\`、\`Head\`、\`Main\`、\`NextScript\`
+- 使用 App Router 时不要生成 \`pages/_document.*\`，也不要在 \`app/\` 目录里的任何文件使用 \`next/document\`
+- 绝对不要同时保留同一路径的 JS/TS 双份文件，例如 \`app/page.js\` 和 \`app/page.tsx\` 不能并存
+- 如果你把某个文件从 TypeScript 改成 JavaScript，写入新文件后必须立即用 \`delete_project_file\` 删除旧的 \`.ts\` 或 \`.tsx\` 文件
+- 交付前必须保证 \`npm run build\` 可以成功，并且实际生成 \`.next/standalone/server.js\`
 
 ### 后端接口开发规范
 - API 路由放在 app/api/ 目录下

@@ -34,6 +34,17 @@ export interface AIProvidersConfig {
   activeProviderId: string
 }
 
+export interface LaunchpadFolderLayout {
+  id: string
+  name: string
+  projectIds: string[]
+}
+
+export interface LaunchpadLayout {
+  folders: LaunchpadFolderLayout[]
+  topLevelOrder: string[]
+}
+
 export const DEFAULT_MODEL_CONTEXT_WINDOW = 32000
 type RawModelItem = string | { name?: string; contextWindow?: number }
 
@@ -87,6 +98,54 @@ function normalizeProvider (input: AIProvider): AIProvider {
     modelContextWindows,
     activeModel,
     enableThinking: input.enableThinking ?? false
+  }
+}
+
+function normalizeLaunchpadLayout (value: unknown): LaunchpadLayout {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+
+  const folders = Array.isArray(input.folders)
+    ? input.folders
+      .map((folder) => {
+        if (!folder || typeof folder !== 'object') return null
+        const record = folder as Record<string, unknown>
+        const id = typeof record.id === 'string' ? record.id.trim() : ''
+        if (!id) return null
+        const name = typeof record.name === 'string' && record.name.trim()
+          ? record.name.trim()
+          : '新文件夹'
+        const seenProjectIds = new Set<string>()
+        const projectIds = Array.isArray(record.projectIds)
+          ? record.projectIds
+            .filter((projectId): projectId is string => typeof projectId === 'string' && projectId.trim().length > 0)
+            .map(projectId => projectId.trim())
+            .filter((projectId) => {
+              if (seenProjectIds.has(projectId)) return false
+              seenProjectIds.add(projectId)
+              return true
+            })
+          : []
+
+        return { id, name, projectIds }
+      })
+      .filter((folder): folder is LaunchpadFolderLayout => Boolean(folder))
+    : []
+
+  const seenOrderKeys = new Set<string>()
+  const topLevelOrder = Array.isArray(input.topLevelOrder)
+    ? input.topLevelOrder
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map(item => item.trim())
+      .filter((item) => {
+        if (seenOrderKeys.has(item)) return false
+        seenOrderKeys.add(item)
+        return true
+      })
+    : []
+
+  return {
+    folders,
+    topLevelOrder
   }
 }
 
@@ -230,5 +289,16 @@ export class SettingsStore {
     const modes = (settings.projectLaunchModes as Record<string, string>) || {}
     modes[projectId] = mode
     this.write({ projectLaunchModes: modes })
+  }
+
+  /** Get persisted launchpad layout preferences. */
+  getLaunchpadLayout (): LaunchpadLayout {
+    const settings = this.read()
+    return normalizeLaunchpadLayout(settings.launchpadLayout)
+  }
+
+  /** Save launchpad layout preferences. */
+  saveLaunchpadLayout (layout: LaunchpadLayout): void {
+    this.write({ launchpadLayout: normalizeLaunchpadLayout(layout) })
   }
 }

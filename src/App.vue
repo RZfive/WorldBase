@@ -7,11 +7,13 @@ import AISettings from './renderer/components/settings/AISettings.vue'
 import SourceViewer from './renderer/components/viewer/SourceViewer.vue'
 import TitleBar from './renderer/components/app/TitleBar.vue'
 import DockBar from './renderer/components/app/DockBar.vue'
+import ProjectWindowShell from './renderer/components/app/ProjectWindowShell.vue'
 
 interface RunningApp {
   id: string
   name: string
   type: string
+  icon?: string
   port?: number
   isWindow: boolean
 }
@@ -25,8 +27,12 @@ interface ProjectListItem {
   id: string
   name?: string
   type?: string
+  icon?: string
   runtime?: ProjectStatus
 }
+
+const standaloneProjectId = new URLSearchParams(window.location.search).get('projectWindow')
+const isStandaloneProjectWindow = Boolean(standaloneProjectId)
 
 type MainView = 'chat' | 'app' | 'source' | 'settings'
 
@@ -317,6 +323,7 @@ async function refreshRunningApps () {
           id,
           name: (proj.name as string) || id,
           type: (proj.type as string) || 'unknown',
+          icon: proj.icon as string | undefined,
           port: status.port,
           isWindow: openSet.has(id) || (existing?.isWindow ?? false)
         })
@@ -336,6 +343,8 @@ function closeWindow () { window.electronAPI?.closeWindow() }
 function onDocClickGlobal () { hideDockCtx() }
 
 onMounted(async () => {
+  if (isStandaloneProjectWindow) return
+
   await refreshRunningApps()
   document.addEventListener('click', onDocClickGlobal)
 
@@ -363,6 +372,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (isStandaloneProjectWindow) return
+
   document.removeEventListener('click', onDocClickGlobal)
   projectChangedCleanup?.()
   windowClosedCleanup?.()
@@ -370,109 +381,113 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-root">
-    <TitleBar
-      @minimize="minimizeWindow"
-      @maximize="maximizeWindow"
-      @close="closeWindow"
-    />
+  <div :class="['app-root', { 'app-root-standalone': isStandaloneProjectWindow }]">
+    <ProjectWindowShell v-if="standaloneProjectId" :project-id="standaloneProjectId" />
 
-    <div class="app-layout">
-      <DockBar
-        :current-view="currentView"
-        :show-launchpad="showLaunchpad"
-        :running-apps="runningApps"
-        :embedded-project-id="activeEmbeddedProjectId"
-        @open-chat="openChat"
-        @toggle-launchpad="toggleLaunchpad"
-        @open-settings="openSettings"
-        @switch-to-app="switchToApp"
-        @context-menu="showDockCtx"
+    <template v-else>
+      <TitleBar
+        @minimize="minimizeWindow"
+        @maximize="maximizeWindow"
+        @close="closeWindow"
       />
 
-      <main class="main-content">
-        <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
-
-        <!-- Embedded apps: each app keeps its iframe alive, only the active one is visible -->
-        <div v-show="currentView === 'app'" class="embedded-app">
-          <template v-for="[appId, appState] in embeddedApps" :key="appId">
-            <div v-show="activeEmbeddedProjectId === appId" class="embedded-slot">
-              <div v-if="appState.loading" class="embedded-loading">
-                <span class="embedded-spinner">⏳</span>
-                <p>应用启动中…</p>
-              </div>
-              <iframe
-                v-else-if="appState.url"
-                :src="appState.url"
-                class="embedded-frame"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
-                allow="clipboard-read; clipboard-write"
-              ></iframe>
-              <div v-else class="embedded-unavailable">
-                <p>应用未能启动</p>
-                <button class="embedded-retry-btn" @click="openEmbeddedProject(appId)">🔄 重试</button>
-              </div>
-            </div>
-          </template>
-        </div>
-
-        <!-- Source code viewer -->
-        <SourceViewer
-          v-if="currentView === 'source' && sourceProject"
-          :project="sourceProject"
-          @back="sourceProject = null; currentView = 'chat'"
+      <div class="app-layout">
+        <DockBar
+          :current-view="currentView"
+          :show-launchpad="showLaunchpad"
+          :running-apps="runningApps"
+          :embedded-project-id="activeEmbeddedProjectId"
+          @open-chat="openChat"
+          @toggle-launchpad="toggleLaunchpad"
+          @open-settings="openSettings"
+          @switch-to-app="switchToApp"
+          @context-menu="showDockCtx"
         />
 
-        <AISettings v-if="currentView === 'settings'" />
+        <main class="main-content">
+          <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
 
-        <Launchpad
-          v-if="showLaunchpad"
-          @select="openProjectFromLaunchpad"
-          @viewSource="openProjectSource"
-          @optimizeInChat="optimizeProjectInChat"
-          @appStarted="refreshRunningApps()"
-          @close="showLaunchpad = false"
-        />
-      </main>
-    </div>
-
-    <Teleport to="body">
-      <div
-        v-if="dockCtx.visible && dockCtx.app"
-        class="dock-ctx-menu"
-        :style="{ left: dockCtx.x + 'px', top: dockCtx.y + 'px' }"
-        @click.stop
-      >
-        <div class="dock-ctx-item" @click="dockOpenWindow(dockCtx.app!)">↗️ 独立窗口打开</div>
-        <div class="dock-ctx-item" @click="dockOpenSource(dockCtx.app!)">📁 打开源码</div>
-        <div class="dock-ctx-item" @click="dockOptimizeInChat(dockCtx.app!)">💬 继续优化</div>
-        <div class="dock-ctx-item" @click="dockShowLanAccess(dockCtx.app!)">📱 局域网访问</div>
-        <div class="dock-ctx-divider"></div>
-        <div class="dock-ctx-item dock-ctx-danger" @click="dockStopApp(dockCtx.app!)">⏹️ 停止</div>
-      </div>
-    </Teleport>
-    <Teleport to="body">
-      <div
-        v-if="lanModal.visible"
-        class="lan-modal-overlay"
-        @click.self="closeLanModal"
-      >
-        <div class="lan-modal">
-          <div class="lan-modal-header">
-            <span>📱 局域网访问 — {{ lanModal.appName }}</span>
-            <button class="lan-modal-close" @click="closeLanModal">✕</button>
+          <!-- Embedded apps: each app keeps its iframe alive, only the active one is visible -->
+          <div v-show="currentView === 'app'" class="embedded-app">
+            <template v-for="[appId, appState] in embeddedApps" :key="appId">
+              <div v-show="activeEmbeddedProjectId === appId" class="embedded-slot">
+                <div v-if="appState.loading" class="embedded-loading">
+                  <span class="embedded-spinner">⏳</span>
+                  <p>应用启动中…</p>
+                </div>
+                <iframe
+                  v-else-if="appState.url"
+                  :src="appState.url"
+                  class="embedded-frame"
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+                  allow="clipboard-read; clipboard-write"
+                ></iframe>
+                <div v-else class="embedded-unavailable">
+                  <p>应用未能启动</p>
+                  <button class="embedded-retry-btn" @click="openEmbeddedProject(appId)">🔄 重试</button>
+                </div>
+              </div>
+            </template>
           </div>
-          <div class="lan-modal-body">
-            <img v-if="lanModal.qrDataUrl" :src="lanModal.qrDataUrl" class="lan-qr-img" alt="QR Code" />
-            <p class="lan-modal-hint">手机扫描二维码或复制下方链接</p>
-            <div class="lan-url-row">
-              <code class="lan-url-text" @click="copyLanUrl">{{ lanModal.lanUrl || lanModal.proxyUrl }}</code>
-              <button class="lan-copy-btn" @click="copyLanUrl">{{ lanModal.copied ? '✅ 已复制' : '📋 复制' }}</button>
+
+          <!-- Source code viewer -->
+          <SourceViewer
+            v-if="currentView === 'source' && sourceProject"
+            :project="sourceProject"
+            @back="sourceProject = null; currentView = 'chat'"
+          />
+
+          <AISettings v-if="currentView === 'settings'" />
+
+          <Launchpad
+            v-if="showLaunchpad"
+            @select="openProjectFromLaunchpad"
+            @viewSource="openProjectSource"
+            @optimizeInChat="optimizeProjectInChat"
+            @appStarted="refreshRunningApps()"
+            @close="showLaunchpad = false"
+          />
+        </main>
+      </div>
+
+      <Teleport to="body">
+        <div
+          v-if="dockCtx.visible && dockCtx.app"
+          class="dock-ctx-menu"
+          :style="{ left: dockCtx.x + 'px', top: dockCtx.y + 'px' }"
+          @click.stop
+        >
+          <div class="dock-ctx-item" @click="dockOpenWindow(dockCtx.app!)">↗️ 独立窗口打开</div>
+          <div class="dock-ctx-item" @click="dockOpenSource(dockCtx.app!)">📁 打开源码</div>
+          <div class="dock-ctx-item" @click="dockOptimizeInChat(dockCtx.app!)">💬 继续优化</div>
+          <div class="dock-ctx-item" @click="dockShowLanAccess(dockCtx.app!)">📱 局域网访问</div>
+          <div class="dock-ctx-divider"></div>
+          <div class="dock-ctx-item dock-ctx-danger" @click="dockStopApp(dockCtx.app!)">⏹️ 停止</div>
+        </div>
+      </Teleport>
+      <Teleport to="body">
+        <div
+          v-if="lanModal.visible"
+          class="lan-modal-overlay"
+          @click.self="closeLanModal"
+        >
+          <div class="lan-modal">
+            <div class="lan-modal-header">
+              <span>📱 局域网访问 — {{ lanModal.appName }}</span>
+              <button class="lan-modal-close" @click="closeLanModal">✕</button>
+            </div>
+            <div class="lan-modal-body">
+              <img v-if="lanModal.qrDataUrl" :src="lanModal.qrDataUrl" class="lan-qr-img" alt="QR Code" />
+              <p class="lan-modal-hint">手机扫描二维码或复制下方链接</p>
+              <div class="lan-url-row">
+                <code class="lan-url-text" @click="copyLanUrl">{{ lanModal.lanUrl || lanModal.proxyUrl }}</code>
+                <button class="lan-copy-btn" @click="copyLanUrl">{{ lanModal.copied ? '✅ 已复制' : '📋 复制' }}</button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </Teleport>
+      </Teleport>
+    </template>
   </div>
 </template>
 
@@ -491,6 +506,10 @@ onUnmounted(() => {
   color: #e4e4e7;
   border-radius: 10px;
   overflow: hidden;
+}
+
+.app-root-standalone {
+  border-radius: 0;
 }
 
 .app-layout {

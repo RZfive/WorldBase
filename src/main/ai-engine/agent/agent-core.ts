@@ -1,7 +1,16 @@
 import { getSystemPrompt } from './prompts/system-prompt.js'
 import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/openai-provider.js'
 
-export type ProgressCallback = (stage: string, detail?: string) => void
+export type ProgressEvent =
+  | { type: 'progress'; stage: string; detail?: string }
+  | { type: 'file_preview_start'; filePath: string; truncated?: boolean }
+  | { type: 'file_preview_chunk'; filePath: string; content: string }
+  | { type: 'file_preview_end'; filePath: string; truncated?: boolean }
+
+export interface ProgressCallback {
+  (stage: string, detail?: string): void
+  (event: ProgressEvent): void
+}
 
 export type StreamEvent =
   | { type: 'token'; content: string }
@@ -9,6 +18,9 @@ export type StreamEvent =
   | { type: 'tool_start'; name: string }
   | { type: 'tool_end'; name: string }
   | { type: 'progress'; stage: string; detail?: string }
+  | { type: 'file_preview_start'; filePath: string; truncated?: boolean }
+  | { type: 'file_preview_chunk'; filePath: string; content: string }
+  | { type: 'file_preview_end'; filePath: string; truncated?: boolean }
   | { type: 'reset' }
   | { type: 'done'; message: ChatMessage; thinking?: string }
   | { type: 'error'; error: string }

@@ -58,7 +58,10 @@ export function toolRunCommand (services: ToolServices): Tool {
       // Security: check command whitelist
       const baseCommand = command.split(' ')[0]
       if (!ALLOWED_COMMANDS.includes(baseCommand)) {
-        throw new Error(`Command not allowed: ${baseCommand}. Allowed: ${ALLOWED_COMMANDS.join(', ')}`)
+        const hint = baseCommand === 'rm'
+          ? ' Use delete_project_file to remove files inside the project.'
+          : ''
+        throw new Error(`Command not allowed: ${baseCommand}. Allowed: ${ALLOWED_COMMANDS.join(', ')}.${hint}`)
       }
 
       onProgress?.('⚡ 正在执行命令...', command)

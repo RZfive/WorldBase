@@ -7,7 +7,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'reset' | 'done' | 'error'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'reset' | 'done' | 'error'
   content?: string
   name?: string
   message?: { role: string; content: string }
@@ -15,6 +15,8 @@ interface StreamEvent {
   error?: string
   stage?: string
   detail?: string
+  filePath?: string
+  truncated?: boolean
 }
 
 interface ConversationSummary {
@@ -43,6 +45,17 @@ interface AIProviderConfig {
 interface AIProvidersConfig {
   providers: AIProviderConfig[]
   activeProviderId: string
+}
+
+interface LaunchpadFolderLayout {
+  id: string
+  name: string
+  projectIds: string[]
+}
+
+interface LaunchpadLayout {
+  folders: LaunchpadFolderLayout[]
+  topLevelOrder: string[]
 }
 
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
@@ -74,6 +87,7 @@ interface ElectronAPI {
   getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
   writeFile: (projectId: string, filePath: string, content: string) => Promise<{ success: boolean }>
+  updateProjectAppearance: (projectId: string, updates: { name?: string; icon?: string }) => Promise<Record<string, unknown>>
   openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
   deleteProject: (projectId: string) => Promise<{ success: boolean }>
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void
@@ -105,6 +119,8 @@ interface ElectronAPI {
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
+  getLaunchpadLayout: () => Promise<LaunchpadLayout>
+  saveLaunchpadLayout: (layout: LaunchpadLayout) => Promise<{ success: boolean }>
 
   // Skills
   listSkills: () => Promise<SkillInfo[]>

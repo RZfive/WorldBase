@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 import { PortManager } from './port-manager.js'
 import { ProcessMonitor } from './process-monitor.js'
 import { LAN_SERVER_PORT } from '../constants.js'
+import type { BuilderService } from './builder-service.js'
 
 interface LogEntry {
   type: 'stdout' | 'stderr'
@@ -59,12 +60,17 @@ export class RuntimeManager {
   private projectsDir: string
   private portManager: PortManager
   private processMonitor: ProcessMonitor
+  private builderService: Pick<BuilderService, 'build'> | null = null
   private runningProjects = new Map<string, ProjectRunInfo>()
 
   constructor (projectsDir: string) {
     this.projectsDir = projectsDir
     this.portManager = new PortManager()
     this.processMonitor = new ProcessMonitor()
+  }
+
+  setBuilderService (builderService: Pick<BuilderService, 'build'>): void {
+    this.builderService = builderService
   }
 
   /**
@@ -76,10 +82,22 @@ export class RuntimeManager {
       if (existing.status === 'running') {
         return { projectId, port: existing.port, status: 'already_running' }
       }
+
+      if (existing.process.exitCode == null && !existing.process.killed) {
+        try {
+          existing.process.kill('SIGTERM')
+        } catch {
+          // Best effort: stale process will be replaced by a fresh start attempt.
+        }
+      }
+
+      this.runningProjects.delete(projectId)
+      this.portManager.release(projectId)
     }
 
     const projectDir = path.join(this.projectsDir, projectId)
     const metaPath = path.join(projectDir, '.world-meta.json')
+    const packageJsonPath = path.join(projectDir, 'package.json')
 
     if (!existsSync(metaPath)) {
       throw new Error(`Project meta not found: ${projectId}`)
@@ -102,9 +120,13 @@ export class RuntimeManager {
       }
     }
 
+    const isNextProject = await this._isNextProject(projectDir, meta, backendConfig)
+    if (isNextProject) {
+      await this._ensureNextProjectReady(projectId, projectDir, packageJsonPath)
+    }
+
     // If a Next.js standalone build exists, prefer it over the legacy dev flow.
     const isStandalone = _hasStandaloneBuild(projectDir)
-    const packageJsonPath = path.join(projectDir, 'package.json')
 
     if (!isStandalone) {
       // Legacy path: auto-install dependencies if node_modules is missing
@@ -169,7 +191,7 @@ export class RuntimeManager {
       PATH: `${path.join(cwd, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH || ''}`,
       PORT: String(port),
       HOSTNAME: '0.0.0.0',
-      NODE_ENV: isStandalone ? 'production' : 'development',
+      NODE_ENV: this._resolveNodeEnv(command, isStandalone, isNextProject),
       THE_WORLD_PROJECT_ID: projectId,
       THE_WORLD_PROJECT_ROOT: projectDir,
       THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
@@ -417,6 +439,84 @@ export class RuntimeManager {
     }
 
     return null
+  }
+
+  private async _isNextProject (
+    projectDir: string,
+    meta?: Record<string, unknown>,
+    backendConfig?: Record<string, unknown>
+  ): Promise<boolean> {
+    if (meta?.framework === 'nextjs') {
+      return true
+    }
+
+    const command = backendConfig?.command
+    if (typeof command === 'string' && command.includes('.next/standalone/server.js')) {
+      return true
+    }
+
+    const packageJsonPath = path.join(projectDir, 'package.json')
+    if (!existsSync(packageJsonPath)) {
+      return false
+    }
+
+    try {
+      const pkg = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8')) as Record<string, unknown>
+      const deps: Record<string, string> = {
+        ...((pkg.dependencies || {}) as Record<string, string>),
+        ...((pkg.devDependencies || {}) as Record<string, string>)
+      }
+      return typeof deps.next === 'string'
+    } catch {
+      return false
+    }
+  }
+
+  private async _ensureNextProjectReady (
+    projectId: string,
+    projectDir: string,
+    packageJsonPath: string
+  ): Promise<void> {
+    if (_hasStandaloneBuild(projectDir)) {
+      return
+    }
+
+    if (!existsSync(packageJsonPath)) {
+      throw new Error('Next.js project is missing package.json, cannot rebuild standalone output.')
+    }
+
+    const nodeModulesPath = path.join(projectDir, 'node_modules')
+    if (!existsSync(nodeModulesPath)) {
+      console.log(`[RuntimeManager] Installing dependencies for Next.js project ${projectId} before build...`)
+      await this.installDeps(projectId)
+    }
+
+    if (!this.builderService) {
+      throw new Error('Next.js project is missing standalone output and no builder service is configured.')
+    }
+
+    console.log(`[RuntimeManager] Standalone build missing for ${projectId}, rebuilding before start...`)
+    const buildResult = await this.builderService.build(projectId)
+    if (!buildResult.success || !_hasStandaloneBuild(projectDir)) {
+      const buildOutput = buildResult.output?.trim()
+      throw new Error(`Next.js standalone build failed before start.${buildOutput ? `\n${buildOutput}` : ''}`)
+    }
+  }
+
+  private _resolveNodeEnv (command: string, isStandalone: boolean, isNextProject: boolean): string {
+    if (isStandalone) {
+      return 'production'
+    }
+
+    if (command.includes('npm run dev') || command.includes('next dev')) {
+      return 'development'
+    }
+
+    if (isNextProject) {
+      return 'production'
+    }
+
+    return 'development'
   }
 
   /**
