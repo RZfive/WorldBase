@@ -184,8 +184,8 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   background:
-    radial-gradient(circle at top left, rgba(56, 189, 248, 0.1), transparent 22%),
-    linear-gradient(180deg, #071019, #050a11 55%, #04080e);
+    radial-gradient(circle at top left, var(--app-shell-tint-1), transparent 22%),
+    linear-gradient(180deg, var(--app-panel-strong), var(--app-shell-bg) 55%, var(--app-shell-bg));
 }
 
 .project-window-body {
@@ -209,15 +209,15 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   gap: 14px;
-  color: #cbd5e1;
+  color: var(--app-text-soft);
 }
 
 .project-window-spinner {
   width: 34px;
   height: 34px;
   border-radius: 999px;
-  border: 3px solid rgba(125, 211, 252, 0.18);
-  border-top-color: #38bdf8;
+  border: 3px solid var(--app-border);
+  border-top-color: var(--app-accent);
   animation: project-window-spin 0.9s linear infinite;
 }
 
@@ -240,9 +240,9 @@ onUnmounted(() => {
   height: 42px;
   padding: 0 16px;
   border-radius: 14px;
-  border: 1px solid rgba(56, 189, 248, 0.28);
-  background: rgba(56, 189, 248, 0.12);
-  color: #e0f2fe;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
   cursor: pointer;
 }
 

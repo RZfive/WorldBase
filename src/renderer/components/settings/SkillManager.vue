@@ -45,41 +45,43 @@ onMounted(loadSkills)
 </script>
 
 <template>
-  <div class="skill-manager">
-    <header class="skill-header">
-      <h2>🧠 Skill 管理</h2>
-      <p class="skill-desc">导入 Skill 文件让 AI 掌握专业技能，在聊天中选择激活</p>
-      <button class="import-btn" @click="importSkill">
-        <span>📥</span> 导入 Skill
-      </button>
-    </header>
-
-    <div v-if="loading" class="skill-loading">加载中...</div>
-
-    <div v-else-if="skills.length === 0" class="skill-empty">
-      <div class="empty-icon">🧩</div>
-      <p>还没有导入任何 Skill</p>
-      <p class="empty-hint">点击「导入 Skill」添加 .md 或 .txt 格式的技能文件</p>
+  <div class="sm-root">
+    <div class="sm-header">
+      <div>
+        <h3 class="sm-title">Skill 管理</h3>
+        <p class="sm-desc">导入 Skill 文件让 AI 掌握专业技能，在聊天中选择激活</p>
+      </div>
+      <button class="sm-import" @click="importSkill">📥 导入 Skill</button>
     </div>
 
-    <div v-else class="skill-list">
+    <div class="sm-separator" />
+
+    <div v-if="loading" class="sm-empty">加载中...</div>
+
+    <div v-else-if="skills.length === 0" class="sm-empty">
+      <p>还没有导入任何 Skill</p>
+      <p class="sm-empty-hint">点击「导入 Skill」添加 .md 或 .txt 格式的技能文件</p>
+    </div>
+
+    <div v-else class="sm-list">
       <div
         v-for="skill in skills"
         :key="skill.id"
-        :class="['skill-card', { expanded: expandedSkillId === skill.id }]"
+        class="sm-item"
       >
-        <div class="skill-card-header" @click="toggleExpand(skill.id)">
-          <div class="skill-info">
-            <span class="skill-name">{{ skill.name }}</span>
-            <span class="skill-date">{{ formatDate(skill.createdAt) }}</span>
+        <div class="sm-item-row" @click="toggleExpand(skill.id)">
+          <div class="sm-item-info">
+            <span class="sm-item-name">{{ skill.name }}</span>
+            <span class="sm-item-date">{{ formatDate(skill.createdAt) }}</span>
           </div>
-          <div class="skill-actions">
-            <button class="action-btn delete-btn" @click.stop="deleteSkill(skill.id)" title="删除">🗑️</button>
-            <span class="expand-arrow">{{ expandedSkillId === skill.id ? '▾' : '▸' }}</span>
+          <div class="sm-item-actions">
+            <button class="sm-del" @click.stop="deleteSkill(skill.id)" title="删除">×</button>
+            <span class="sm-arrow">{{ expandedSkillId === skill.id ? '▾' : '▸' }}</span>
           </div>
         </div>
-        <div v-if="skill.description" class="skill-description">{{ skill.description }}</div>
-        <div v-if="expandedSkillId === skill.id" class="skill-content">
+        <div v-if="skill.description && expandedSkillId !== skill.id" class="sm-item-desc">{{ skill.description }}</div>
+        <div v-if="expandedSkillId === skill.id" class="sm-item-content">
+          <div v-if="skill.description" class="sm-item-desc-inner">{{ skill.description }}</div>
           <pre>{{ skill.content }}</pre>
         </div>
       </div>
@@ -88,166 +90,151 @@ onMounted(loadSkills)
 </template>
 
 <style scoped>
-.skill-manager {
+.sm-root {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 24px;
+  padding: 20px 28px;
   overflow-y: auto;
+  color: var(--app-text);
 }
 
-.skill-header {
-  margin-bottom: 24px;
+.sm-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
 }
 
-.skill-header h2 {
-  font-size: 1.3em;
-  font-weight: 600;
-  color: #f4f4f5;
-  margin: 0 0 6px 0;
+.sm-title {
+  margin: 0 0 4px;
+  font-size: 1.1em;
+  color: var(--app-text-strong);
 }
 
-.skill-desc {
-  color: #71717a;
+.sm-desc {
+  margin: 0;
   font-size: 0.85em;
-  margin: 0 0 16px 0;
+  color: var(--app-text-muted);
 }
 
-.import-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 18px;
-  background: #6366f1;
+.sm-import {
+  flex-shrink: 0;
+  padding: 7px 16px;
+  background: var(--app-accent);
   color: #fff;
   border: none;
   border-radius: 8px;
-  font-size: 0.88em;
+  font-size: 0.85em;
   cursor: pointer;
-  transition: background 0.15s;
+}
+.sm-import:hover { background: var(--app-accent-strong); }
+
+.sm-separator {
+  height: 1px;
+  background: var(--app-border);
+  margin: 16px 0;
 }
 
-.import-btn:hover {
-  background: #4f46e5;
-}
-
-.skill-loading {
-  color: #71717a;
+.sm-empty {
   text-align: center;
-  padding: 40px 0;
+  padding: 40px 20px;
+  color: var(--app-text-muted);
+  font-size: 0.9em;
 }
-
-.skill-empty {
-  text-align: center;
-  padding: 60px 20px;
-  color: #71717a;
-}
-
-.empty-icon {
-  font-size: 2.5em;
-  margin-bottom: 12px;
-}
-
-.empty-hint {
+.sm-empty-hint {
   font-size: 0.82em;
-  color: #52525b;
-  margin-top: 8px;
+  color: var(--app-text-faint);
+  margin-top: 6px;
 }
 
-.skill-list {
+.sm-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
 
-.skill-card {
-  background: #1e1e22;
-  border: 1px solid #27272a;
-  border-radius: 10px;
-  overflow: hidden;
-  transition: border-color 0.15s;
+.sm-item {
+  border-bottom: 1px solid var(--app-border);
 }
+.sm-item:last-child { border-bottom: none; }
 
-.skill-card:hover {
-  border-color: #3f3f46;
-}
-
-.skill-card.expanded {
-  border-color: #6366f180;
-}
-
-.skill-card-header {
+.sm-item-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
+  padding: 12px 0;
   cursor: pointer;
   user-select: none;
 }
 
-.skill-info {
+.sm-item-info {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.skill-name {
-  font-size: 0.95em;
+.sm-item-name {
+  font-size: 0.92em;
   font-weight: 500;
-  color: #e4e4e7;
+  color: var(--app-text);
 }
 
-.skill-date {
+.sm-item-date {
   font-size: 0.75em;
-  color: #52525b;
+  color: var(--app-text-faint);
 }
 
-.skill-actions {
+.sm-item-actions {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.action-btn {
+.sm-del {
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 0.85em;
-  padding: 4px;
-  border-radius: 4px;
-  transition: background 0.12s;
+  font-size: 1.1em;
+  color: var(--app-text-faint);
+  padding: 2px 4px;
 }
+.sm-del:hover { color: var(--app-danger, #ef4444); }
 
-.delete-btn:hover {
-  background: #3f3f46;
-}
-
-.expand-arrow {
-  color: #52525b;
+.sm-arrow {
+  color: var(--app-text-faint);
   font-size: 0.8em;
 }
 
-.skill-description {
-  padding: 0 16px 10px;
+.sm-item-desc {
+  padding: 0 0 10px;
   font-size: 0.82em;
-  color: #a1a1aa;
+  color: var(--app-text-soft);
   line-height: 1.4;
 }
 
-.skill-content {
-  border-top: 1px solid #27272a;
-  padding: 12px 16px;
-  max-height: 400px;
-  overflow-y: auto;
+.sm-item-content {
+  padding: 0 0 12px;
 }
 
-.skill-content pre {
-  margin: 0;
+.sm-item-desc-inner {
   font-size: 0.82em;
-  color: #a1a1aa;
+  color: var(--app-text-soft);
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.sm-item-content pre {
+  margin: 0;
+  padding: 12px;
+  background: var(--app-panel-muted);
+  border-radius: 8px;
+  font-size: 0.82em;
+  color: var(--app-text-soft);
   white-space: pre-wrap;
   word-break: break-word;
   font-family: 'SF Mono', 'Menlo', monospace;
   line-height: 1.5;
+  max-height: 400px;
+  overflow-y: auto;
 }
 </style>

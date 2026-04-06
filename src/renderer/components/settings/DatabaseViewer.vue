@@ -132,110 +132,108 @@ function backToDbList () {
 </script>
 
 <template>
-  <div class="db-viewer">
+  <div class="dv-root">
     <!-- DB List view -->
-    <div v-if="!selectedDb" class="db-list-view">
-      <div class="db-list-header">
-        <h3>📊 数据库总览</h3>
-        <div class="db-list-actions">
+    <div v-if="!selectedDb" class="dv-list">
+      <div class="dv-list-header">
+        <div>
+          <h3 class="dv-title">数据库总览</h3>
+          <p class="dv-desc">浏览所有项目的数据库及表结构</p>
+        </div>
+        <div class="dv-list-actions">
           <input
             v-model="dbSearchQuery"
             type="text"
             placeholder="搜索项目或表名…"
-            class="db-search-input"
+            class="dv-search"
           />
-          <button class="lp-btn" @click="loadDatabases" :disabled="dbLoading">🔄 刷新</button>
+          <button class="dv-btn" @click="loadDatabases" :disabled="dbLoading">刷新</button>
         </div>
       </div>
 
-      <div v-if="dbLoading" class="db-empty">加载中…</div>
-      <div v-else-if="dbError" class="db-empty db-error">❌ {{ dbError }}</div>
-      <div v-else-if="filteredDatabases.length === 0" class="db-empty">
-        <div class="db-empty-icon">🗄️</div>
+      <div class="dv-separator" />
+
+      <div v-if="dbLoading" class="dv-empty">加载中…</div>
+      <div v-else-if="dbError" class="dv-empty dv-error">{{ dbError }}</div>
+      <div v-else-if="filteredDatabases.length === 0" class="dv-empty">
         <p>暂无数据库</p>
-        <p class="db-empty-hint">当项目配置了数据存储后，这里将展示所有数据库信息</p>
+        <p class="dv-empty-hint">当项目配置了数据存储后，这里将展示所有数据库信息</p>
       </div>
 
-      <div v-else class="db-cards">
+      <div v-else class="dv-items">
         <div
           v-for="db in filteredDatabases"
           :key="db.projectId"
-          class="db-card"
+          class="dv-item"
           @click="selectDatabase(db)"
         >
-          <div class="db-card-header">
-            <span class="db-card-icon">{{ db.database === 'sqlite' ? '🗃️' : '📄' }}</span>
-            <div class="db-card-info">
-              <div class="db-card-name">{{ db.projectName }}</div>
-              <div class="db-card-type">{{ db.database }} · {{ db.dbPath }}</div>
+          <div class="dv-item-top">
+            <span class="dv-item-icon">{{ db.database === 'sqlite' ? '🗃️' : '📄' }}</span>
+            <div class="dv-item-info">
+              <span class="dv-item-name">{{ db.projectName }}</span>
+              <span class="dv-item-type">{{ db.database }} · {{ db.dbPath }}</span>
             </div>
+            <span class="dv-item-arrow">›</span>
           </div>
-          <div class="db-card-tables">
+          <div class="dv-item-tables" v-if="db.tables.length">
             <span
               v-for="table in db.tables.slice(0, 5)"
               :key="table.name"
-              class="db-table-badge"
-            >
-              {{ table.name }}
-              <small v-if="table.rowCount >= 0">({{ table.rowCount }})</small>
-            </span>
-            <span v-if="db.tables.length > 5" class="db-table-badge more">+{{ db.tables.length - 5 }}</span>
-            <span v-if="db.tables.length === 0" class="db-no-tables">无表</span>
+              class="dv-tag"
+            >{{ table.name }}<small v-if="table.rowCount >= 0"> ({{ table.rowCount }})</small></span>
+            <span v-if="db.tables.length > 5" class="dv-tag dv-tag-more">+{{ db.tables.length - 5 }}</span>
           </div>
+          <div v-else class="dv-item-no-tables">无表</div>
         </div>
       </div>
     </div>
 
     <!-- DB Detail / Table viewer -->
-    <div v-else class="db-detail-view">
-      <div class="db-detail-header">
-        <button class="db-back-btn" @click="backToDbList">← 返回</button>
+    <div v-else class="dv-detail">
+      <div class="dv-detail-header">
+        <button class="dv-back" @click="backToDbList">← 返回</button>
         <div>
-          <h3>{{ selectedDb.projectName }}</h3>
-          <span class="db-detail-sub">{{ selectedDb.database }} · {{ selectedDb.dbPath }}</span>
+          <h3 class="dv-title">{{ selectedDb.projectName }}</h3>
+          <span class="dv-detail-sub">{{ selectedDb.database }} · {{ selectedDb.dbPath }}</span>
         </div>
       </div>
 
-      <div class="db-detail-layout">
+      <div class="dv-detail-layout">
         <!-- Table list sidebar -->
-        <div class="db-tables-sidebar">
-          <div class="db-tables-title">表 ({{ selectedDb.tables.length }})</div>
+        <div class="dv-sidebar">
+          <div class="dv-sidebar-title">表 ({{ selectedDb.tables.length }})</div>
           <div
             v-for="table in selectedDb.tables"
             :key="table.name"
-            :class="['db-table-item', { active: selectedTable === table.name }]"
+            :class="['dv-sidebar-item', { active: selectedTable === table.name }]"
             @click="selectTable(table.name)"
           >
-            <span class="db-table-name">{{ table.name }}</span>
-            <span class="db-table-count" v-if="table.rowCount >= 0">{{ table.rowCount }} 行</span>
+            <span class="dv-sidebar-name">{{ table.name }}</span>
+            <span class="dv-sidebar-count" v-if="table.rowCount >= 0">{{ table.rowCount }}</span>
           </div>
-          <div v-if="selectedDb.tables.length === 0" class="db-tables-empty">此数据库暂无表</div>
+          <div v-if="selectedDb.tables.length === 0" class="dv-sidebar-empty">暂无表</div>
         </div>
 
         <!-- Table data -->
-        <div class="db-table-content">
-          <div v-if="!selectedTable" class="db-table-placeholder">
-            <span>👈 选择一个表查看数据</span>
+        <div class="dv-content">
+          <div v-if="!selectedTable" class="dv-placeholder">
+            <span>← 选择一个表查看数据</span>
           </div>
           <template v-else>
-            <!-- Column schema -->
-            <div class="db-schema-bar">
-              <span class="db-schema-label">字段:</span>
+            <div class="dv-schema">
+              <span class="dv-schema-label">字段:</span>
               <span
                 v-for="col in tableColumns"
                 :key="col.name"
-                :class="['db-col-badge', { pk: col.primaryKey }]"
+                :class="['dv-col', { pk: col.primaryKey }]"
                 :title="col.type + (col.primaryKey ? ' [PK]' : '')"
-              >
-                {{ col.name }}<small>{{ col.type }}</small>
-              </span>
+              >{{ col.name }}<small>{{ col.type }}</small></span>
             </div>
 
-            <!-- Data table -->
-            <div v-if="tableLoading" class="db-table-loading">加载中…</div>
-            <div v-else-if="tableRows.length === 0" class="db-table-empty-data">无数据</div>
-            <div v-else class="db-data-table-wrapper">
-              <table class="db-data-table">
+            <div v-if="tableLoading" class="dv-loading">加载中…</div>
+            <div v-else-if="tableRows.length === 0" class="dv-loading">无数据</div>
+            <div v-else class="dv-table-wrap">
+              <table class="dv-table">
                 <thead>
                   <tr>
                     <th v-for="col in tableColumns" :key="col.name">{{ col.name }}</th>
@@ -243,20 +241,17 @@ function backToDbList () {
                 </thead>
                 <tbody>
                   <tr v-for="(row, i) in tableRows" :key="i">
-                    <td v-for="col in tableColumns" :key="col.name">
-                      {{ row[col.name] ?? '' }}
-                    </td>
+                    <td v-for="col in tableColumns" :key="col.name">{{ row[col.name] ?? '' }}</td>
                   </tr>
                 </tbody>
               </table>
             </div>
 
-            <!-- Pagination -->
-            <div class="db-pagination">
-              <span class="db-page-info">共 {{ tableTotal }} 条 · 第 {{ tablePage }}/{{ totalPages }} 页</span>
-              <div class="db-page-btns">
-                <button class="db-page-btn" :disabled="tablePage <= 1" @click="prevPage">‹ 上一页</button>
-                <button class="db-page-btn" :disabled="tablePage >= totalPages" @click="nextPage">下一页 ›</button>
+            <div class="dv-pagination">
+              <span class="dv-page-info">共 {{ tableTotal }} 条 · 第 {{ tablePage }}/{{ totalPages }} 页</span>
+              <div class="dv-page-btns">
+                <button class="dv-page-btn" :disabled="tablePage <= 1" @click="prevPage">‹ 上一页</button>
+                <button class="dv-page-btn" :disabled="tablePage >= totalPages" @click="nextPage">下一页 ›</button>
               </div>
             </div>
           </template>
@@ -267,144 +262,149 @@ function backToDbList () {
 </template>
 
 <style scoped>
-.db-viewer { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.dv-root { flex: 1; display: flex; flex-direction: column; overflow: hidden; color: var(--app-text); }
 
-.db-list-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-.db-list-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 24px 12px; flex-shrink: 0;
+/* ── List View ── */
+.dv-list { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.dv-list-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 20px 28px 0; flex-shrink: 0; gap: 16px;
 }
-.db-list-header h3 { margin: 0; font-size: 1.05em; color: #f4f4f5; }
-.db-list-actions { display: flex; gap: 8px; align-items: center; }
-.db-search-input {
-  background: #1e1e22; border: 1px solid #27272a; border-radius: 8px;
-  color: #e4e4e7; padding: 7px 14px; font-size: 0.85em; outline: none;
+.dv-title { margin: 0 0 4px; font-size: 1.1em; color: var(--app-text-strong); }
+.dv-desc { margin: 0; font-size: 0.85em; color: var(--app-text-muted); }
+.dv-list-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+
+.dv-search {
+  background: var(--app-input-bg); border: 1px solid var(--app-border); border-radius: 8px;
+  color: var(--app-text); padding: 7px 14px; font-size: 0.85em; outline: none;
   width: 200px; transition: border-color 0.15s;
 }
-.db-search-input:focus { border-color: #6366f1; }
-.db-search-input::placeholder { color: #52525b; }
+.dv-search:focus { border-color: var(--app-accent); }
+.dv-search::placeholder { color: var(--app-text-faint); }
 
-.lp-btn {
-  padding: 6px 14px; background: #27272a; border: 1px solid #3f3f46;
-  border-radius: 8px; color: #e4e4e7; font-size: 0.82em; cursor: pointer;
-  white-space: nowrap; transition: all 0.12s;
+.dv-btn {
+  padding: 7px 14px; background: var(--app-panel-muted); border: 1px solid var(--app-border);
+  border-radius: 8px; color: var(--app-text); font-size: 0.82em; cursor: pointer;
 }
-.lp-btn:hover { background: #3f3f46; }
-.lp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.dv-btn:hover { background: var(--app-panel); }
+.dv-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.db-empty {
-  text-align: center; padding: 60px 20px; color: #71717a; flex: 1;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-}
-.db-error { color: #f87171; }
-.db-empty-icon { font-size: 2.5em; margin-bottom: 12px; }
-.db-empty-hint { font-size: 0.82em; color: #52525b; margin-top: 6px; }
+.dv-separator { height: 1px; background: var(--app-border); margin: 16px 28px; flex-shrink: 0; }
 
-.db-cards {
-  flex: 1; overflow-y: auto; padding: 0 24px 24px;
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 12px; align-content: start;
+.dv-empty {
+  text-align: center; padding: 40px 20px; color: var(--app-text-muted); flex: 1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 0.9em;
 }
-.db-card {
-  background: #18181b; border: 1px solid #27272a; border-radius: 12px;
-  padding: 16px 18px; cursor: pointer; transition: all 0.15s;
-}
-.db-card:hover { border-color: #6366f1; background: #1c1c20; }
-.db-card-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.db-card-icon { font-size: 1.8em; }
-.db-card-name { font-weight: 600; font-size: 0.95em; color: #e4e4e7; }
-.db-card-type { font-size: 0.78em; color: #71717a; margin-top: 2px; }
-.db-card-tables { display: flex; flex-wrap: wrap; gap: 6px; }
-.db-table-badge {
-  background: #27272a; border: 1px solid #3f3f46; border-radius: 6px;
-  padding: 3px 8px; font-size: 0.75em; color: #a1a1aa;
-}
-.db-table-badge small { color: #71717a; margin-left: 3px; }
-.db-table-badge.more { background: #1e1e22; color: #6366f1; border-color: #6366f180; }
-.db-no-tables { font-size: 0.78em; color: #52525b; }
+.dv-error { color: var(--app-danger, #ef4444); }
+.dv-empty-hint { font-size: 0.82em; color: var(--app-text-faint); margin-top: 6px; }
 
-/* DB Detail */
-.db-detail-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-.db-detail-header {
+.dv-items { flex: 1; overflow-y: auto; padding: 0 28px 20px; display: flex; flex-direction: column; }
+
+.dv-item {
+  padding: 12px 4px; border-bottom: 1px solid var(--app-border);
+  cursor: pointer; transition: background 0.12s;
+}
+.dv-item:last-child { border-bottom: none; }
+.dv-item:hover { background: var(--app-panel-muted); }
+
+.dv-item-top { display: flex; align-items: center; gap: 12px; }
+.dv-item-icon { font-size: 1.3em; flex-shrink: 0; }
+.dv-item-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.dv-item-name { font-size: 0.92em; font-weight: 500; color: var(--app-text); }
+.dv-item-type { font-size: 0.78em; color: var(--app-text-muted); }
+.dv-item-arrow { font-size: 1.1em; color: var(--app-text-faint); flex-shrink: 0; }
+
+.dv-item-tables { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding-left: 44px; }
+.dv-tag {
+  background: var(--app-panel-muted); border-radius: 6px;
+  padding: 2px 8px; font-size: 0.75em; color: var(--app-text-soft);
+}
+.dv-tag small { color: var(--app-text-faint); margin-left: 2px; }
+.dv-tag-more { color: var(--app-accent); }
+.dv-item-no-tables { font-size: 0.78em; color: var(--app-text-faint); margin-top: 6px; padding-left: 44px; }
+
+/* ── Detail View ── */
+.dv-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.dv-detail-header {
   display: flex; align-items: center; gap: 14px;
-  padding: 14px 24px; border-bottom: 1px solid #27272a; flex-shrink: 0;
+  padding: 14px 28px; border-bottom: 1px solid var(--app-border); flex-shrink: 0;
 }
-.db-detail-header h3 { margin: 0; font-size: 1em; color: #f4f4f5; }
-.db-detail-sub { font-size: 0.78em; color: #71717a; }
-.db-back-btn {
-  background: #27272a; border: 1px solid #3f3f46; border-radius: 8px;
-  color: #a1a1aa; padding: 6px 14px; font-size: 0.82em; cursor: pointer;
+.dv-detail-sub { font-size: 0.78em; color: var(--app-text-muted); }
+.dv-back {
+  background: none; border: 1px solid var(--app-border); border-radius: 8px;
+  color: var(--app-text); padding: 6px 14px; font-size: 0.82em; cursor: pointer;
 }
-.db-back-btn:hover { background: #3f3f46; color: #e4e4e7; }
+.dv-back:hover { background: var(--app-panel-muted); color: var(--app-text-strong); }
 
-.db-detail-layout { flex: 1; display: flex; overflow: hidden; }
+.dv-detail-layout { flex: 1; display: flex; overflow: hidden; }
 
-.db-tables-sidebar {
-  width: 200px; background: #141416; border-right: 1px solid #27272a;
+.dv-sidebar {
+  width: 200px; border-right: 1px solid var(--app-border);
   overflow-y: auto; flex-shrink: 0;
 }
-.db-tables-title {
-  padding: 12px 16px; font-size: 0.82em; color: #71717a; font-weight: 500;
-  border-bottom: 1px solid #27272a;
+.dv-sidebar-title {
+  padding: 12px 16px; font-size: 0.82em; color: var(--app-text-muted); font-weight: 500;
+  border-bottom: 1px solid var(--app-border);
 }
-.db-table-item {
-  padding: 10px 16px; cursor: pointer; transition: all 0.12s;
+.dv-sidebar-item {
+  padding: 10px 16px; cursor: pointer; transition: background 0.12s;
   display: flex; justify-content: space-between; align-items: center;
-  border-bottom: 1px solid #1f1f23;
+  border-bottom: 1px solid var(--app-border);
 }
-.db-table-item:hover { background: #1e1e22; }
-.db-table-item.active { background: #27272a; }
-.db-table-name { font-size: 0.85em; color: #e4e4e7; }
-.db-table-count { font-size: 0.72em; color: #71717a; }
-.db-tables-empty { padding: 20px 16px; text-align: center; color: #52525b; font-size: 0.82em; }
+.dv-sidebar-item:hover { background: var(--app-panel-muted); }
+.dv-sidebar-item.active { background: var(--app-panel-muted); color: var(--app-accent); }
+.dv-sidebar-name { font-size: 0.85em; color: var(--app-text); }
+.dv-sidebar-item.active .dv-sidebar-name { color: var(--app-accent); }
+.dv-sidebar-count { font-size: 0.72em; color: var(--app-text-muted); }
+.dv-sidebar-empty { padding: 20px 16px; text-align: center; color: var(--app-text-faint); font-size: 0.82em; }
 
-.db-table-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-.db-table-placeholder {
+.dv-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.dv-placeholder {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  color: #52525b; font-size: 0.9em;
+  color: var(--app-text-faint); font-size: 0.9em;
 }
 
-.db-schema-bar {
+.dv-schema {
   display: flex; align-items: center; gap: 6px; padding: 10px 16px;
-  border-bottom: 1px solid #27272a; flex-shrink: 0;
+  border-bottom: 1px solid var(--app-border); flex-shrink: 0;
   flex-wrap: wrap; overflow-x: auto;
 }
-.db-schema-label { font-size: 0.78em; color: #71717a; margin-right: 4px; }
-.db-col-badge {
-  background: #27272a; border: 1px solid #3f3f46; border-radius: 4px;
-  padding: 2px 8px; font-size: 0.75em; color: #a1a1aa; white-space: nowrap;
+.dv-schema-label { font-size: 0.78em; color: var(--app-text-muted); margin-right: 4px; }
+.dv-col {
+  background: var(--app-panel-muted); border-radius: 6px;
+  padding: 2px 8px; font-size: 0.75em; color: var(--app-text-soft); white-space: nowrap;
 }
-.db-col-badge.pk { border-color: #6366f180; color: #818cf8; }
-.db-col-badge small { color: #52525b; margin-left: 4px; font-size: 0.9em; }
+.dv-col.pk { color: var(--app-accent); }
+.dv-col small { color: var(--app-text-faint); margin-left: 4px; font-size: 0.9em; }
 
-.db-table-loading, .db-table-empty-data {
+.dv-loading {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  color: #71717a; font-size: 0.88em;
+  color: var(--app-text-muted); font-size: 0.88em;
 }
 
-.db-data-table-wrapper { flex: 1; overflow: auto; }
-.db-data-table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
-.db-data-table th {
-  text-align: left; padding: 8px 12px; color: #71717a;
-  border-bottom: 1px solid #27272a; font-weight: 500;
-  position: sticky; top: 0; background: #141416; z-index: 1;
+.dv-table-wrap { flex: 1; overflow: auto; }
+.dv-table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
+.dv-table th {
+  text-align: left; padding: 8px 12px; color: var(--app-text-muted);
+  border-bottom: 1px solid var(--app-border); font-weight: 500;
+  position: sticky; top: 0; background: var(--app-panel); z-index: 1;
 }
-.db-data-table td {
-  padding: 7px 12px; border-bottom: 1px solid #1f1f23; color: #a1a1aa;
+.dv-table td {
+  padding: 7px 12px; border-bottom: 1px solid var(--app-border); color: var(--app-text-soft);
   max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.db-data-table tr:hover td { background: #1a1a1e; }
+.dv-table tr:hover td { background: var(--app-panel-muted); }
 
-.db-pagination {
+.dv-pagination {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 16px; border-top: 1px solid #27272a; flex-shrink: 0;
+  padding: 10px 16px; border-top: 1px solid var(--app-border); flex-shrink: 0;
 }
-.db-page-info { font-size: 0.78em; color: #71717a; }
-.db-page-btns { display: flex; gap: 6px; }
-.db-page-btn {
-  padding: 4px 12px; background: #27272a; border: 1px solid #3f3f46;
-  border-radius: 6px; color: #a1a1aa; font-size: 0.78em; cursor: pointer;
+.dv-page-info { font-size: 0.78em; color: var(--app-text-muted); }
+.dv-page-btns { display: flex; gap: 6px; }
+.dv-page-btn {
+  padding: 4px 12px; background: var(--app-panel-muted); border: 1px solid var(--app-border);
+  border-radius: 8px; color: var(--app-text); font-size: 0.78em; cursor: pointer;
 }
-.db-page-btn:hover:not(:disabled) { background: #3f3f46; color: #e4e4e7; }
-.db-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.dv-page-btn:hover:not(:disabled) { background: var(--app-panel); color: var(--app-text-strong); }
+.dv-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

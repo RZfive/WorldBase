@@ -39,7 +39,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolRunCommand(services),
     toolListProjects(services),
     toolAnalyzeData(services),
-    toolCreateProject(services),
+    toolCreateProject(services, () => agent.sessionState),
     toolLocalFileRead(services),
     toolLocalCommand(services)
   ]

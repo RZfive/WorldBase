@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import ConversationSidebar from './ConversationSidebar.vue'
 import MessageList from './MessageList.vue'
 import ChatInput from './ChatInput.vue'
@@ -17,6 +17,7 @@ interface ConversationSummary {
   createdAt: string
   updatedAt: string
   providerId?: string
+  targetProjectId?: string
 }
 
 interface ProviderOption {
@@ -28,6 +29,12 @@ interface ProviderOption {
   modelContextWindows?: Record<string, number>
   activeModel: string
   enableThinking?: boolean
+}
+
+interface ProvidersConfig {
+  providers: ProviderOption[]
+  activeProviderId: string
+  enabledProviderIds: string[]
 }
 
 interface FilePreviewState {
@@ -56,7 +63,14 @@ const messages = ref<ChatMessage[]>([])
 const inputText = ref('')
 const conversations = ref<ConversationSummary[]>([])
 const currentConversationId = ref<string | null>(null)
+/** The project being edited/optimized in this conversation. */
+const targetProjectId = ref<string | null>(null)
 const providers = ref<ProviderOption[]>([])
+const providersConfig = ref<ProvidersConfig>({
+  providers: [],
+  activeProviderId: '',
+  enabledProviderIds: []
+})
 const activeProviderId = ref('')
 const selectedModel = ref('')
 const toolStatus = ref('')
@@ -73,10 +87,22 @@ const filePreview = ref<FilePreviewState>({
 const availableSkills = ref<SkillItem[]>([])
 const activeSkillIds = ref<Set<string>>(new Set())
 const showSkillPicker = ref(false)
+const syncingProviderOptions = ref(false)
 
 const streamingConvIds = reactive(new Set<string>())
-const backgroundStreamMessages = new Map<string, { messages: ChatMessage[]; assistantIdx: number }>()
+const backgroundStreamMessages = new Map<string, { messages: ChatMessage[]; assistantIdx: number; targetProjectId: string | null }>()
 const activeCleanups = new Map<string, () => void>()
+const conversationTargets = new Map<string, string | null>()
+let providerChangeCleanup: (() => void) | null = null
+
+function getEnabledProviders (config: ProvidersConfig): ProviderOption[] {
+  const enabledIds = new Set(
+    (config.enabledProviderIds.length > 0 ? config.enabledProviderIds : [config.activeProviderId])
+      .filter(Boolean)
+  )
+  const enabledProviders = config.providers.filter(provider => enabledIds.has(provider.id))
+  return enabledProviders.length > 0 ? enabledProviders : config.providers
+}
 
 const isLoading = computed(() => {
   return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
@@ -126,6 +152,19 @@ function getMessageText (msg: ChatMessage): string {
   return ''
 }
 
+function hasRenderableContent (msg: ChatMessage): boolean {
+  if (typeof msg.content === 'string') {
+    return msg.content.trim().length > 0
+  }
+
+  return msg.content.some(part => {
+    if (part.type === 'text') {
+      return Boolean(part.text?.trim())
+    }
+    return Boolean(part.image_url?.url)
+  })
+}
+
 function resetTransientStreamState () {
   toolStatus.value = ''
   progressSteps.value = []
@@ -138,12 +177,61 @@ function resetTransientStreamState () {
   }
 }
 
-async function persistProviderSelection () {
+function setConversationTarget (convId: string, projectId: string | null | undefined) {
+  if (!projectId) {
+    conversationTargets.delete(convId)
+    return
+  }
+  conversationTargets.set(convId, projectId)
+}
+
+function getConversationTarget (convId: string | null | undefined): string | null {
+  if (!convId) return null
+  return conversationTargets.get(convId) ?? null
+}
+
+function getConversationCreatedAt (convId: string): string {
+  return conversations.value.find(conversation => conversation.id === convId)?.createdAt || new Date().toISOString()
+}
+
+function stashCurrentConversationForNavigation () {
+  if (currentConversationId.value && streamingConvIds.has(currentConversationId.value)) {
+    backgroundStreamMessages.set(currentConversationId.value, {
+      messages: messages.value,
+      assistantIdx: messages.value.length - 1,
+      targetProjectId: targetProjectId.value
+    })
+    void doSaveConversation(currentConversationId.value, messages.value, { targetProjectId: targetProjectId.value })
+  }
+}
+
+async function startOptimizationConversation (ctx: Record<string, unknown>) {
+  const projectId = typeof ctx.id === 'string' ? ctx.id : null
+  const name = String(ctx.name || ctx.id || '未知项目')
+  const conversationId = generateId()
+
+  stashCurrentConversationForNavigation()
+
+  currentConversationId.value = conversationId
+  messages.value = []
+  targetProjectId.value = projectId
+  inputText.value = `请帮我继续优化项目"${name}"（项目ID: ${ctx.id}）。请先查看项目当前的代码结构，然后告诉我可以改进的地方。`
+  pendingImages.value = []
+  resetTransientStreamState()
+  setConversationTarget(conversationId, projectId)
+
+  await doSaveConversation(conversationId, [], {
+    titleOverride: `优化 · ${name}`,
+    targetProjectId: projectId
+  })
+}
+
+async function persistProviderModelSelection () {
   if (!window.electronAPI || !activeProviderId.value) return
-  const providerIndex = providers.value.findIndex(provider => provider.id === activeProviderId.value)
+  const providerIndex = providersConfig.value.providers.findIndex(provider => provider.id === activeProviderId.value)
   if (providerIndex < 0) return
 
-  const nextProviders = providers.value.map((provider, index) => {
+  const nextProviders = providersConfig.value.providers.map((provider, index) => {
     if (index !== providerIndex) {
       return provider
     }
@@ -153,11 +241,71 @@ async function persistProviderSelection () {
     }
   })
 
-  providers.value = nextProviders
+  providersConfig.value = {
+    ...providersConfig.value,
+    providers: nextProviders
+  }
+  providers.value = getEnabledProviders(providersConfig.value)
   await window.electronAPI.saveProviders(JSON.parse(JSON.stringify({
     providers: nextProviders,
-    activeProviderId: activeProviderId.value
+    activeProviderId: providersConfig.value.activeProviderId,
+    enabledProviderIds: providersConfig.value.enabledProviderIds
   })))
+}
+
+async function applyProvidersConfig (
+  config: ProvidersConfig,
+  preferredProviderId?: string | null
+) {
+  syncingProviderOptions.value = true
+  providersConfig.value = {
+    providers: config.providers.map(provider => ({ ...provider })),
+    activeProviderId: config.activeProviderId,
+    enabledProviderIds: [...config.enabledProviderIds]
+  }
+  providers.value = getEnabledProviders(providersConfig.value)
+
+  const candidateIds = [
+    preferredProviderId,
+    currentConversationId.value ? conversations.value.find(item => item.id === currentConversationId.value)?.providerId : null,
+    activeProviderId.value,
+    config.activeProviderId
+  ]
+
+  const nextProviderId = candidateIds.find(id => id && providers.value.some(provider => provider.id === id))
+    || providers.value[0]?.id
+    || ''
+
+  activeProviderId.value = nextProviderId
+  const active = providers.value.find(provider => provider.id === nextProviderId)
+  selectedModel.value = active?.activeModel || active?.models[0] || ''
+
+  await nextTick()
+  syncingProviderOptions.value = false
+}
+
+async function persistConversationProviderMeta () {
+  if (!currentConversationId.value) return
+  await doSaveConversation(currentConversationId.value, messages.value, {
+    targetProjectId: targetProjectId.value,
+    allowEmpty: true
+  })
+}
+
+async function handleProviderSelectionChange (providerId: string) {
+  activeProviderId.value = providerId
+  const provider = providers.value.find(item => item.id === providerId)
+  selectedModel.value = provider?.activeModel || provider?.models[0] || ''
+
+  if (syncingProviderOptions.value) return
+  await persistConversationProviderMeta()
+}
+
+async function handleModelSelectionChange (model: string) {
+  selectedModel.value = model
+  if (syncingProviderOptions.value) return
+  await persistProviderModelSelection()
+  await persistConversationProviderMeta()
 }
 
 async function loadConversations () {
@@ -167,30 +315,21 @@ async function loadConversations () {
   } catch { /* ignore */ }
 }
 
-async function loadProviders () {
+async function loadProviders (preferredProviderId?: string | null) {
   if (!window.electronAPI) return
   try {
     const config = await window.electronAPI.getProviders()
-    providers.value = config.providers.map(p => ({ ...p }))
-    activeProviderId.value = config.activeProviderId
-    const active = providers.value.find(p => p.id === activeProviderId.value)
-    if (active) {
-      selectedModel.value = active.activeModel
-    }
+    await applyProvidersConfig(config, preferredProviderId)
   } catch { /* ignore */ }
 }
 
 function newConversation () {
-  if (currentConversationId.value && streamingConvIds.has(currentConversationId.value)) {
-    backgroundStreamMessages.set(currentConversationId.value, {
-      messages: messages.value,
-      assistantIdx: messages.value.length - 1
-    })
-    void doSaveConversation(currentConversationId.value, messages.value)
-  }
+  stashCurrentConversationForNavigation()
 
   currentConversationId.value = null
   messages.value = []
+  targetProjectId.value = null
+  inputText.value = ''
   resetTransientStreamState()
   pendingImages.value = []
 }
@@ -198,20 +337,19 @@ function newConversation () {
 async function loadConversation (id: string) {
   if (!window.electronAPI) return
 
-  if (currentConversationId.value && currentConversationId.value !== id && streamingConvIds.has(currentConversationId.value)) {
-    backgroundStreamMessages.set(currentConversationId.value, {
-      messages: messages.value,
-      assistantIdx: messages.value.length - 1
-    })
-    void doSaveConversation(currentConversationId.value, messages.value)
+  if (currentConversationId.value && currentConversationId.value !== id) {
+    stashCurrentConversationForNavigation()
   }
 
   const bg = backgroundStreamMessages.get(id)
   if (bg) {
     currentConversationId.value = id
     messages.value = bg.messages
+    targetProjectId.value = bg.targetProjectId
+    setConversationTarget(id, bg.targetProjectId)
     backgroundStreamMessages.delete(id)
     resetTransientStreamState()
+    await loadProviders(conversations.value.find(item => item.id === id)?.providerId || null)
     return
   }
 
@@ -219,27 +357,41 @@ async function loadConversation (id: string) {
   if (conv) {
     currentConversationId.value = conv.id
     messages.value = conv.messages
+    targetProjectId.value = conv.targetProjectId || null
+    setConversationTarget(conv.id, conv.targetProjectId || null)
     resetTransientStreamState()
+    await loadProviders(conv.providerId || null)
   }
 }
 
-async function doSaveConversation (convId: string, msgs: ChatMessage[]) {
+async function doSaveConversation (
+  convId: string,
+  msgs: ChatMessage[],
+  options?: { titleOverride?: string; targetProjectId?: string | null; allowEmpty?: boolean }
+) {
   if (!window.electronAPI) return
-  if (msgs.length === 0) return
+  const existingConversation = conversations.value.find(conversation => conversation.id === convId)
+  if (msgs.length === 0 && !options?.titleOverride && !options?.allowEmpty && !existingConversation) return
 
   const firstUserMsg = msgs.find(m => m.role === 'user')
   const titleText = firstUserMsg ? getMessageText(firstUserMsg) : ''
-  const title = titleText
+  const resolvedTitle = options?.titleOverride || (titleText
     ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
-    : '新对话'
+    : (existingConversation?.title || '新对话'))
+  const resolvedTargetProjectId = options && Object.prototype.hasOwnProperty.call(options, 'targetProjectId')
+    ? (options.targetProjectId ?? null)
+    : getConversationTarget(convId)
+
+  setConversationTarget(convId, resolvedTargetProjectId)
 
   await window.electronAPI.saveConversation(JSON.parse(JSON.stringify({
     id: convId,
-    title,
+    title: resolvedTitle,
     messages: msgs,
-    createdAt: new Date().toISOString(),
+    createdAt: getConversationCreatedAt(convId),
     updatedAt: new Date().toISOString(),
-    providerId: activeProviderId.value || undefined
+    providerId: activeProviderId.value || undefined,
+    targetProjectId: resolvedTargetProjectId || undefined
   })))
 
   await loadConversations()
@@ -248,6 +400,8 @@ async function doSaveConversation (convId: string, msgs: ChatMessage[]) {
 async function deleteConversation (id: string) {
   if (!window.electronAPI) return
   await window.electronAPI.deleteConversation(id)
+  conversationTargets.delete(id)
+  backgroundStreamMessages.delete(id)
   if (currentConversationId.value === id) {
     newConversation()
   }
@@ -299,7 +453,7 @@ async function sendMessage () {
 
   try {
     if (window.electronAPI) {
-      await persistProviderSelection()
+      await persistProviderModelSelection()
 
       const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {
         const isForeground = currentConversationId.value === convId
@@ -359,10 +513,14 @@ async function sendMessage () {
             progressSteps.value = []
           }
         } else if (event.type === 'done') {
-          if (!getMessageText(targetMessages[assistantIdx]) && event.message?.content) {
-            targetMessages[assistantIdx].content = event.message.content
+          if (event.message?.content !== undefined) {
+            if (Array.isArray(event.message.content)) {
+              targetMessages[assistantIdx].content = event.message.content
+            } else if (!getMessageText(targetMessages[assistantIdx]) && event.message.content) {
+              targetMessages[assistantIdx].content = event.message.content
+            }
           }
-          if (!getMessageText(targetMessages[assistantIdx])) {
+          if (!hasRenderableContent(targetMessages[assistantIdx])) {
             targetMessages[assistantIdx].content = '(无响应)'
           }
           if (event.thinking && !targetMessages[assistantIdx].thinking) {
@@ -399,7 +557,12 @@ async function sendMessage () {
         role: m.role,
         content: m.content
       }))))
-      await window.electronAPI.chatStream(chatMessages, sessionId)
+      await window.electronAPI.chatStream(
+        chatMessages,
+        sessionId,
+        activeProviderId.value || undefined,
+        targetProjectId.value ?? undefined
+      )
 
       if (streamingConvIds.has(convId)) {
         streamingConvIds.delete(convId)
@@ -409,7 +572,7 @@ async function sendMessage () {
           pendingCleanup()
           activeCleanups.delete(sessionId)
         }
-        if (!getMessageText(targetMessages[assistantIdx])) {
+        if (!hasRenderableContent(targetMessages[assistantIdx])) {
           targetMessages[assistantIdx].content = '(无响应)'
         }
         void doSaveConversation(convId, targetMessages)
@@ -445,17 +608,23 @@ watch(activeProviderId, (newId) => {
 })
 
 watch(() => props.projectContext, (ctx) => {
-  if (ctx) {
-    const name = (ctx.name || ctx.id || '未知项目') as string
-    inputText.value = `请帮我继续优化项目"${name}"（项目ID: ${ctx.id}）。请先查看项目当前的代码结构，然后告诉我可以改进的地方。`
+  if (!ctx) return
+
+  void startOptimizationConversation(ctx).finally(() => {
     emit('contextConsumed')
-  }
+  })
 }, { immediate: true })
 
 onMounted(async () => {
   await loadConversations()
   await loadProviders()
   await loadSkills()
+
+  if (window.electronAPI?.onProvidersChanged) {
+    providerChangeCleanup = window.electronAPI.onProvidersChanged((config) => {
+      void applyProvidersConfig(config)
+    })
+  }
 })
 
 onUnmounted(() => {
@@ -463,6 +632,8 @@ onUnmounted(() => {
     cleanup()
   }
   activeCleanups.clear()
+  providerChangeCleanup?.()
+  providerChangeCleanup = null
 })
 </script>
 
@@ -485,8 +656,8 @@ onUnmounted(() => {
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
         :show-skill-picker="showSkillPicker"
-        @update:active-provider-id="activeProviderId = $event"
-        @update:selected-model="selectedModel = $event"
+        @update:active-provider-id="handleProviderSelectionChange"
+        @update:selected-model="handleModelSelectionChange"
         @toggle-skill-picker="showSkillPicker = !showSkillPicker"
         @toggle-skill="toggleSkill"
       />

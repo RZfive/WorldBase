@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, session, type IpcMainInvokeEvent } from 'electron'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
@@ -15,6 +16,7 @@ import { LAN_SERVER_PORT } from '../src/main/constants.js'
 import { SettingsStore, type AIProvidersConfig, type LaunchpadLayout } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
+import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -50,6 +52,110 @@ let skillStore: SkillStore | null = null
 /** Track standalone project windows keyed by projectId */
 const projectWindows = new Map<string, BrowserWindow>()
 
+const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
+
+function getUrlHostname (value?: string): string | null {
+  if (!value || value === 'null') return null
+  try {
+    return new URL(value).hostname
+  } catch {
+    return null
+  }
+}
+
+function isLocalAppOrigin (value?: string): boolean {
+  const hostname = getUrlHostname(value)
+  return hostname ? LOCAL_APP_HOSTS.has(hostname) : false
+}
+
+function getOriginFromUrl (value?: string): string | null {
+  if (!value || value === 'null') return null
+  try {
+    return new URL(value).origin
+  } catch {
+    return null
+  }
+}
+
+function isRemoteSubresourceRequest (value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+    return !LOCAL_APP_HOSTS.has(parsed.hostname)
+  } catch {
+    return false
+  }
+}
+
+function isLanResourceProxyRequest (value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    return LOCAL_APP_HOSTS.has(parsed.hostname) && parsed.port === String(LAN_SERVER_PORT) && parsed.pathname.startsWith('/api/resource-proxy')
+  } catch {
+    return false
+  }
+}
+
+function getResourceProxyUrl (resourceUrl: string): string {
+  const parsed = new URL(resourceUrl)
+  const protocol = parsed.protocol.replace(':', '')
+  const host = encodeURIComponent(parsed.host)
+  const pathname = parsed.pathname || '/'
+  return `http://127.0.0.1:${LAN_SERVER_PORT}/api/resource-proxy/${protocol}/${host}${pathname}${parsed.search}`
+}
+
+function upsertHeader (headers: Record<string, string[]>, name: string, value: string): void {
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === name.toLowerCase()) {
+      headers[key] = [value]
+      return
+    }
+  }
+  headers[name] = [value]
+}
+
+function setupEmbeddedAppCorsWorkaround (): void {
+  session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+    const referrer = typeof details.referrer === 'string' ? details.referrer : undefined
+    const isFromLocalApp = isLocalAppOrigin(referrer)
+    const isFrameRequest = details.resourceType === 'mainFrame' || details.resourceType === 'subFrame'
+    const method = (details.method || 'GET').toUpperCase()
+
+    if (
+      !isFromLocalApp ||
+      isFrameRequest ||
+      !isRemoteSubresourceRequest(details.url) ||
+      isLanResourceProxyRequest(details.url) ||
+      (method !== 'GET' && method !== 'HEAD')
+    ) {
+      callback({})
+      return
+    }
+
+    callback({ redirectURL: getResourceProxyUrl(details.url) })
+  })
+
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const referrer = typeof details.referrer === 'string' ? details.referrer : undefined
+    const isFromLocalApp = isLocalAppOrigin(referrer)
+    const isFrameRequest = details.resourceType === 'mainFrame' || details.resourceType === 'subFrame'
+
+    if (!isFromLocalApp || isFrameRequest || !isRemoteSubresourceRequest(details.url)) {
+      callback({ responseHeaders: details.responseHeaders })
+      return
+    }
+
+    const headers = { ...(details.responseHeaders || {}) }
+    const allowOrigin = getOriginFromUrl(referrer) || '*'
+    upsertHeader(headers, 'Access-Control-Allow-Origin', allowOrigin)
+    upsertHeader(headers, 'Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+    upsertHeader(headers, 'Cross-Origin-Resource-Policy', 'cross-origin')
+    upsertHeader(headers, 'Vary', 'Origin')
+
+    callback({ responseHeaders: headers })
+  })
+}
+
 function broadcastToAppWindows (channel: string, payload: unknown): void {
   const windows = new Set<BrowserWindow>()
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -67,6 +173,42 @@ function broadcastToAppWindows (channel: string, payload: unknown): void {
 
 function getSenderWindow (event: IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(event.sender)
+}
+
+function guessImageExtension (mimeType: string): string {
+  const normalized = mimeType.toLowerCase()
+  if (normalized.includes('png')) return 'png'
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg'
+  if (normalized.includes('webp')) return 'webp'
+  if (normalized.includes('gif')) return 'gif'
+  if (normalized.includes('svg')) return 'svg'
+  return 'png'
+}
+
+async function resolveImageBuffer (imageUrl: string): Promise<{ buffer: Buffer; mimeType: string }> {
+  if (imageUrl.startsWith('data:')) {
+    const match = imageUrl.match(/^data:([^;]+);base64,(.+)$/)
+    if (!match) {
+      throw new Error('不支持的图片数据格式')
+    }
+
+    return {
+      mimeType: match[1],
+      buffer: Buffer.from(match[2], 'base64')
+    }
+  }
+
+  const response = await fetch(imageUrl)
+  if (!response.ok) {
+    throw new Error(`下载图片失败 (${response.status})`)
+  }
+
+  const mimeType = response.headers.get('content-type') || 'image/png'
+  const arrayBuffer = await response.arrayBuffer()
+  return {
+    mimeType,
+    buffer: Buffer.from(arrayBuffer)
+  }
 }
 
 function buildRendererWindowUrl (projectId?: string): { devUrl?: string; filePath?: string; query?: Record<string, string> } {
@@ -194,13 +336,39 @@ function createWindow (): void {
 }
 
 function setupIPC (): void {
+  const resolveProviderConfig = (requestedProviderId?: string) => {
+    const providersConfig = settingsStore!.getProviders()
+    const enabledProviderIds = new Set(providersConfig.enabledProviderIds)
+    const enabledProviders = providersConfig.providers.filter(provider => enabledProviderIds.has(provider.id))
+    const requestedProvider = requestedProviderId
+      ? enabledProviders.find(provider => provider.id === requestedProviderId)
+      : null
+    const defaultProvider = enabledProviders.find(provider => provider.id === providersConfig.activeProviderId)
+      || enabledProviders[0]
+      || providersConfig.providers.find(provider => provider.id === providersConfig.activeProviderId)
+      || providersConfig.providers[0]
+
+    const provider = requestedProvider || defaultProvider
+    if (!provider) return undefined
+
+    return {
+      apiKey: provider.apiKey,
+      baseUrl: provider.baseUrl,
+      model: provider.activeModel,
+      enableThinking: provider.enableThinking ?? false,
+      contextWindow: provider.modelContextWindows?.[provider.activeModel]
+    }
+  }
+
   // AI chat (non-streaming, kept for backward compat)
-  ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: string }>) => {
-    return aiEngine!.chat(messages)
+  ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string) => {
+    return aiEngine!.chat(messages, {
+      providerConfig: resolveProviderConfig(providerId)
+    })
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: string }>, sessionId: string) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, targetProjectId?: string) => {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
     // Progress callback: sends progress events directly to renderer in real-time
@@ -214,7 +382,10 @@ function setupIPC (): void {
       }
     }
     try {
-      for await (const streamEvent of aiEngine!.chatStream(messages, onProgress)) {
+      for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
+        targetProjectId: targetProjectId ?? null,
+        providerConfig: resolveProviderConfig(providerId)
+      })) {
         if (sender.isDestroyed()) break
         try {
           sender.send(channel, JSON.parse(JSON.stringify(streamEvent)))
@@ -276,6 +447,36 @@ function setupIPC (): void {
 
   ipcMain.handle('conversations:delete', async (_event: IpcMainInvokeEvent, id: string) => {
     return chatHistory!.delete(id)
+  })
+
+  ipcMain.handle('media:saveImage', async (event: IpcMainInvokeEvent, imageUrl: string, defaultName?: string) => {
+    const senderWindow = getSenderWindow(event) || mainWindow
+    const { buffer, mimeType } = await resolveImageBuffer(imageUrl)
+    const extension = guessImageExtension(mimeType)
+    const safeDefaultName = (defaultName && defaultName.trim()) || `the-world-image.${extension}`
+    const finalDefaultName = safeDefaultName.includes('.') ? safeDefaultName : `${safeDefaultName}.${extension}`
+
+    const dialogOptions = {
+      title: '保存图片',
+      defaultPath: finalDefaultName,
+      filters: [
+        {
+          name: 'Image',
+          extensions: [extension]
+        }
+      ]
+    }
+
+    const result = senderWindow
+      ? await dialog.showSaveDialog(senderWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
+
+    if (result.canceled || !result.filePath) {
+      return { canceled: true }
+    }
+
+    await fs.writeFile(result.filePath, buffer)
+    return { success: true, filePath: result.filePath }
   })
 
   // Project management
@@ -426,8 +627,9 @@ function setupIPC (): void {
 
   ipcMain.handle('settings:saveProviders', async (_event: IpcMainInvokeEvent, config: AIProvidersConfig) => {
     settingsStore!.saveProviders(config)
+    const normalizedConfig = settingsStore!.getProviders()
     // Reconfigure AI engine with the active provider
-    const active = config.providers.find(p => p.id === config.activeProviderId)
+    const active = normalizedConfig.providers.find(p => p.id === normalizedConfig.activeProviderId)
     if (active) {
       aiEngine!.configure({
         apiKey: active.apiKey,
@@ -437,6 +639,16 @@ function setupIPC (): void {
         contextWindow: active.modelContextWindows?.[active.activeModel]
       })
     }
+    broadcastToAppWindows('settings:providersChanged', normalizedConfig)
+    return { success: true }
+  })
+
+  ipcMain.handle('settings:getThemePreference', async () => {
+    return settingsStore!.getThemePreference()
+  })
+
+  ipcMain.handle('settings:saveThemePreference', async (_event: IpcMainInvokeEvent, preference: 'system' | 'light' | 'dark') => {
+    settingsStore!.saveThemePreference(preference)
     return { success: true }
   })
 
@@ -639,6 +851,7 @@ function setupIPC (): void {
 
 app.whenReady().then(async () => {
   await initializeServices()
+  setupEmbeddedAppCorsWorkaround()
   setupIPC()
   createWindow()
 

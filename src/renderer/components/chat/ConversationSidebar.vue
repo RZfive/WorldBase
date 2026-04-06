@@ -42,8 +42,8 @@ const emit = defineEmits<{
 <style scoped>
 .conv-sidebar {
   width: 220px;
-  background: #111113;
-  border-right: 1px solid #27272a;
+  background: var(--app-panel);
+  border-right: 1px solid var(--app-border);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -52,16 +52,19 @@ const emit = defineEmits<{
 .new-conv-btn {
   margin: 12px;
   padding: 8px 0;
-  background: #3b82f6;
-  color: white;
+  background: var(--app-accent);
+  color: #ffffff;
   border: none;
   border-radius: 8px;
   font-size: 0.85em;
   cursor: pointer;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+  transition: background 0.18s ease, transform 0.18s ease;
 }
 
 .new-conv-btn:hover {
-  background: #2563eb;
+  background: var(--app-accent-strong);
+  transform: translateY(-1px);
 }
 
 .conv-list {
@@ -76,19 +79,23 @@ const emit = defineEmits<{
   padding: 8px 10px;
   border-radius: 6px;
   cursor: pointer;
-  color: #a1a1aa;
+  color: var(--app-text-muted);
   font-size: 0.82em;
   margin-bottom: 2px;
+  border: 1px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .conv-item:hover {
-  background: #1e1e22;
-  color: #e4e4e7;
+  background: var(--app-panel-muted);
+  border-color: var(--app-border);
+  color: var(--app-text);
 }
 
 .conv-item.active {
-  background: #27272a;
-  color: #ffffff;
+  background: var(--app-accent-soft);
+  border-color: var(--app-accent-glow);
+  color: var(--app-text-strong);
 }
 
 .conv-title {
@@ -101,7 +108,7 @@ const emit = defineEmits<{
 .conv-delete {
   background: none;
   border: none;
-  color: #52525b;
+  color: var(--app-text-faint);
   font-size: 1.1em;
   cursor: pointer;
   padding: 0 4px;
@@ -110,13 +117,13 @@ const emit = defineEmits<{
 }
 
 .conv-delete:hover {
-  color: #ef4444;
+  color: var(--app-danger);
 }
 
 .conv-streaming {
   flex-shrink: 0;
   font-size: 0.85em;
-  color: #3b82f6;
+  color: var(--app-accent);
   animation: spin 1.2s linear infinite;
 }
 
@@ -127,7 +134,7 @@ const emit = defineEmits<{
 
 .conv-empty {
   text-align: center;
-  color: #52525b;
+  color: var(--app-text-faint);
   font-size: 0.8em;
   padding: 20px 0;
 }

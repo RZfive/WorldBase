@@ -92,29 +92,43 @@ function asFolder (target: Project | LaunchFolder | null): LaunchFolder {
 
 <style scoped>
 .lp-ctx-menu {
-  --lp-accent-soft: rgba(56, 189, 248, 0.16);
   position: fixed;
   z-index: 10000;
-  background: rgba(15, 23, 42, 0.96);
+  background: var(--app-panel-strong);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  border: 1px solid var(--app-border-strong);
   border-radius: 14px;
   padding: 4px 0;
   min-width: 180px;
-  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42);
+  box-shadow: var(--app-shadow);
 }
 
 .ctx-item {
   padding: 8px 16px;
   font-size: 0.85em;
-  color: #e4e4e7;
+  color: var(--app-text);
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.1s;
+  transition: background 0.1s ease, color 0.1s ease;
 }
 
-.ctx-item:hover { background: var(--lp-accent-soft); color: white; }
-.ctx-item.ctx-danger { color: #f87171; }
-.ctx-item.ctx-danger:hover { background: #dc2626; color: #fff; }
-.ctx-divider { height: 1px; background: rgba(255, 255, 255, 0.06); margin: 4px 0; }
+.ctx-item:hover {
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
+}
+
+.ctx-item.ctx-danger {
+  color: var(--app-danger);
+}
+
+.ctx-item.ctx-danger:hover {
+  background: color-mix(in srgb, var(--app-danger) 18%, transparent);
+  color: var(--app-danger);
+}
+
+.ctx-divider {
+  height: 1px;
+  background: var(--app-border);
+  margin: 4px 0;
+}
 </style>

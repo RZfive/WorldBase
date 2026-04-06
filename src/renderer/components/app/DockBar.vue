@@ -35,7 +35,10 @@ const emit = defineEmits<{
         data-tip="对话"
         @click="emit('openChat')"
       >
-        <span class="dock-item-icon">💬</span>
+        <span class="dock-item-surface">
+          <span class="dock-item-icon">💬</span>
+        </span>
+        <span class="dock-tooltip">对话</span>
       </div>
     </div>
 
@@ -49,9 +52,12 @@ const emit = defineEmits<{
         @click="emit('switchToApp', app)"
         @contextmenu="emit('contextMenu', $event, app)"
       >
-        <span class="dock-item-icon">{{ getProjectIcon(app.type, app.icon) }}</span>
-        <span v-if="app.isWindow" class="dock-window-badge">↗</span>
-        <span class="dock-running-dot"></span>
+        <span class="dock-item-surface">
+          <span class="dock-item-icon">{{ getProjectIcon(app.type, app.icon) }}</span>
+          <span v-if="app.isWindow" class="dock-window-badge">↗</span>
+          <span class="dock-running-dot"></span>
+        </span>
+        <span class="dock-tooltip">{{ app.name }}</span>
       </div>
     </div>
 
@@ -62,7 +68,10 @@ const emit = defineEmits<{
         data-tip="启动台"
         @click="emit('toggleLaunchpad')"
       >
-        <span class="dock-item-icon">🚀</span>
+        <span class="dock-item-surface">
+          <span class="dock-item-icon">🚀</span>
+        </span>
+        <span class="dock-tooltip">启动台</span>
       </div>
 
       <div
@@ -71,7 +80,10 @@ const emit = defineEmits<{
         data-tip="设置"
         @click="emit('openSettings')"
       >
-        <span class="dock-item-icon">⚙️</span>
+        <span class="dock-item-surface">
+          <span class="dock-item-icon">⚙️</span>
+        </span>
+        <span class="dock-tooltip">设置</span>
       </div>
     </div>
   </aside>
@@ -79,18 +91,18 @@ const emit = defineEmits<{
 
 <style scoped>
 .dock-bar {
-  --dock-accent: #38bdf8;
-  --dock-accent-soft: rgba(56, 189, 248, 0.16);
-  --dock-accent-glow: rgba(56, 189, 248, 0.3);
-  width: 82px;
+  --dock-accent: var(--app-accent);
+  --dock-accent-soft: var(--app-accent-soft);
+  --dock-accent-glow: var(--app-accent-glow);
+  width: 90px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
-  padding: 14px 10px 16px;
-  background: linear-gradient(180deg, rgba(10, 14, 20, 0.96), rgba(7, 10, 15, 0.92));
-  border-right: 1px solid rgba(148, 163, 184, 0.12);
+  gap: 12px;
+  padding: 16px 12px 18px;
+  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
+  border-right: 1px solid var(--app-border);
 }
 
 .dock-top,
@@ -105,7 +117,7 @@ const emit = defineEmits<{
 .dock-apps {
   flex: 1;
   gap: 10px;
-  padding: 8px 0;
+  padding: 10px 0;
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -116,76 +128,141 @@ const emit = defineEmits<{
 
 .dock-item {
   position: relative;
+  width: 60px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  isolation: isolate;
+}
+
+.dock-item::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  width: 4px;
+  height: 22px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--dock-accent), var(--app-accent-strong));
+  box-shadow: 0 0 14px var(--dock-accent-glow);
+  transform: translateY(-50%) scaleY(0.4);
+  transform-origin: center;
+  opacity: 0;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.dock-item-surface {
+  position: relative;
   width: 56px;
   height: 56px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 18px;
-  cursor: pointer;
-  user-select: none;
-  transition: transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: 20px;
+  border: 1px solid transparent;
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+  transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.dock-item:hover {
-  transform: translateX(3px) scale(1.05);
-  background: rgba(255, 255, 255, 0.06);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
+.dock-item-surface::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(circle at 50% 12%, rgba(255, 255, 255, 0.16), transparent 56%);
+  opacity: 0.6;
+  pointer-events: none;
 }
 
-.dock-item:active { transform: translateX(1px) scale(0.98); }
+.dock-item:hover .dock-item-surface {
+  transform: translateY(-2px);
+  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel-muted));
+  border-color: var(--app-border-strong);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -14px 22px rgba(255, 255, 255, 0.02);
+}
 
-.dock-item.dock-active {
-  background: var(--dock-accent-soft);
-  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.18), 0 12px 30px rgba(0, 0, 0, 0.28);
+.dock-item:active .dock-item-surface {
+  transform: translateY(0) scale(0.98);
 }
 
 .dock-item.dock-active::before {
-  content: '';
-  position: absolute;
-  left: -6px;
-  width: 3px;
-  height: 24px;
-  border-radius: 999px;
-  background: var(--dock-accent);
-  box-shadow: 0 0 10px var(--dock-accent-glow);
+  opacity: 1;
+  transform: translateY(-50%) scaleY(1);
 }
 
-.dock-item::after {
-  content: attr(data-tip);
+.dock-item.dock-active .dock-item-surface {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent),
+    linear-gradient(180deg, var(--dock-accent-soft), rgba(255, 255, 255, 0.02));
+  border-color: var(--dock-accent-glow);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    inset 0 -18px 28px rgba(255, 255, 255, 0.03);
+}
+
+.dock-item.dock-active .dock-item-surface::after {
+  content: '';
+  position: absolute;
+  inset: 7px;
+  border-radius: 15px;
+  background: radial-gradient(circle at 50% 12%, var(--dock-accent-glow), transparent 68%);
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.dock-tooltip {
   position: absolute;
   left: calc(100% + 12px);
   top: 50%;
   transform: translateY(-50%) translateX(-4px);
-  background: rgba(15, 23, 42, 0.96);
-  color: #e2e8f0;
+  background: var(--app-panel-strong);
+  color: var(--app-text-soft);
   font-size: 0.72em;
   line-height: 1;
   white-space: nowrap;
   padding: 7px 10px;
   border-radius: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid var(--app-border);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
   opacity: 0;
   pointer-events: none;
+  z-index: 4;
   transition: opacity 0.14s ease, transform 0.14s ease;
 }
 
-.dock-item:hover::after {
+.dock-item:hover .dock-tooltip {
   opacity: 1;
   transform: translateY(-50%) translateX(0);
 }
 
 .dock-item-icon {
+  position: relative;
+  z-index: 1;
   font-size: 1.5em;
   line-height: 1;
-  filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.26));
+  transition: transform 0.18s ease, filter 0.18s ease;
+  filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.22));
 }
 
-.dock-app.dock-windowed {
-  outline: 1px dashed rgba(125, 211, 252, 0.34);
-  outline-offset: -2px;
+.dock-item:hover .dock-item-icon {
+  transform: scale(1.08);
+  filter: drop-shadow(0 12px 16px rgba(0, 0, 0, 0.22));
+}
+
+.dock-item.dock-active .dock-item-icon {
+  transform: scale(1.08);
+  filter: drop-shadow(0 0 10px var(--dock-accent-glow));
+}
+
+.dock-app.dock-windowed .dock-item-surface {
+  border-style: dashed;
 }
 
 .dock-window-badge {
@@ -194,7 +271,7 @@ const emit = defineEmits<{
   right: 4px;
   font-size: 0.56em;
   background: var(--dock-accent);
-  color: #082f49;
+  color: var(--app-text-strong);
   width: 14px;
   height: 14px;
   border-radius: 999px;
@@ -211,7 +288,7 @@ const emit = defineEmits<{
   width: 5px;
   height: 5px;
   border-radius: 999px;
-  background: #22c55e;
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.55);
+  background: var(--app-success);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.36);
 }
 </style>

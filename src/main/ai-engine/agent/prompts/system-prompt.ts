@@ -48,7 +48,8 @@ export function getSystemPrompt (skillContents?: string[]): string {
 
 ### 第三阶段：开发实现
 1. 根据确认后的方案生成完整的 Next.js 项目代码
-2. 用 create_project 创建项目，确保：
+2. **一次对话只能创建一个项目**——调用一次 create_project 后，本次对话后续的所有代码修改必须使用 write_project_file 指向已创建的项目 ID
+3. 用 create_project 创建项目，确保：
    - meta 中包含 \`framework: "nextjs"\`
    - meta 中包含 runtime.backend 配置: \`{ command: "node .next/standalone/server.js" }\`
    - package.json 中有 "build": "next build" 和 "start": "next start" 脚本
@@ -128,6 +129,9 @@ module.exports = nextConfig
 - 页面放在 app/ 目录下，使用 Next.js App Router 约定
 - 组件拆分到 components/ 目录
 - 样式使用 CSS Modules 或 globals.css
+- 浏览器端页面、Canvas、WebGL、Three.js 纹理、\`<img>\`、字体、音视频等静态资源不要直接热链第三方 URL；优先把资源放到 \`public/\`，或通过同源 API Route / 服务端代理转发后再给前端使用
+- 如果确实需要远程资源，必须通过服务端下载、缓存或代理，前端不要直接请求 unpkg、jsdelivr、GitHub raw、第三方 CDN 图片地址，否则内嵌 iframe 环境会触发浏览器 CORS 限制
+- 浏览器端确实要访问远程静态资源时，优先使用宿主提供的代理：\`\${process.env.THE_WORLD_RESOURCE_PROXY_BASE_URL}?url=\${encodeURIComponent(remoteUrl)}\`
 - app/layout.tsx 或 app/layout.js 只能返回原生 \`<html>\` 和 \`<body>\` 标签，不要从 \`next/document\` 导入 \`Html\`、\`Head\`、\`Main\`、\`NextScript\`
 - 使用 App Router 时不要生成 \`pages/_document.*\`，也不要在 \`app/\` 目录里的任何文件使用 \`next/document\`
 - 绝对不要同时保留同一路径的 JS/TS 双份文件，例如 \`app/page.js\` 和 \`app/page.tsx\` 不能并存
@@ -179,7 +183,7 @@ export async function listTables() {
 **严禁**在生成的项目中自行安装、直连或自行初始化 SQLite。所有正式业务数据都必须走 The World 框架提供的标准 SQLite 数据接口：
 - 在 meta.dataSchema 中声明 \`database: "sqlite"\` 和 \`dbPath\`（例如 \`data/app.sqlite\`）
 - 在 \`meta.dataSchema.tables\` 中完整声明表结构，让宿主自动初始化 SQLite 表
-- 生成的项目运行时通过环境变量 \`THE_WORLD_PROJECT_ID\`、\`THE_WORLD_LAN_BASE_URL\`、\`THE_WORLD_PROJECT_DATA_BASE_URL\` 发现宿主接口
+- 生成的项目运行时通过环境变量 \`THE_WORLD_PROJECT_ID\`、\`THE_WORLD_LAN_BASE_URL\`、\`THE_WORLD_RESOURCE_PROXY_BASE_URL\`、\`THE_WORLD_PROJECT_DATA_BASE_URL\` 发现宿主接口
 - 生成的项目后端统一调用宿主接口：
   - \`POST {THE_WORLD_PROJECT_DATA_BASE_URL}/records/save\`
   - \`POST {THE_WORLD_PROJECT_DATA_BASE_URL}/records/query\`
@@ -190,13 +194,19 @@ export async function listTables() {
 
 ## 修改项目代码的工作流程
 
-当用户要求修改项目代码时:
+当用户要求修改或优化现有项目代码时:
+- **严禁调用 create_project 创建新项目**——必须使用 write_project_file 写入原有项目
+- 如果用户消息中包含项目 ID（如"项目ID: proj_xxx"），所有文件操作必须以该 project_id 为目标
 1. 先用 read_project_file 了解现有代码结构；优先按 200 行左右分段读取，大文件不要一次性整文件读取
 2. 如果 read_project_file 返回 has_more=true、next_start_line 或 truncated=true，继续用 start_line=next_start_line 追读下一段，直到拿到完成当前任务所需的上下文
-3. 只在确实需要时继续追读后续分段；不要为了“完整看一遍”而盲目读取超大文件
+3. 只在确实需要时继续追读后续分段；不要为了"完整看一遍"而盲目读取超大文件
 4. 用 write_project_file 写入修改后的代码
 5. 如果可能，用 call_project_api 测试修改是否正常
 6. 向用户报告修改结果
+
+## 重要约束（必须遵守）
+- **一次对话最多创建一个应用**：调用 create_project 成功后，本次对话中不得再次调用 create_project。如果需要修改刚创建的项目，使用 write_project_file
+- **优化对话禁止创建新项目**：当用户要求"继续优化"或"改进"某个已有项目时，只能用 write_project_file 修改该项目的文件，不得创建新项目
 
 ## 数据分析的工作流程
 

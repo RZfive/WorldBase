@@ -3,80 +3,116 @@ import { ref } from 'vue'
 import SkillManager from './SkillManager.vue'
 import ProviderPanel from './ProviderPanel.vue'
 import DatabaseViewer from './DatabaseViewer.vue'
+import AppearancePanel from './AppearancePanel.vue'
 
-const activeTab = ref('ai')
+type CategoryId = 'providers' | 'skills' | 'appearance' | 'database'
+
+interface Category {
+  id: CategoryId
+  icon: string
+  label: string
+}
+
+const categories: Category[] = [
+  { id: 'providers', icon: '🤖', label: '模型服务' },
+  { id: 'skills', icon: '✦', label: 'Skill 管理' },
+  { id: 'appearance', icon: '🎨', label: '显示设置' },
+  { id: 'database', icon: '🗄', label: '数据设置' }
+]
+
+const activeCategoryId = ref<CategoryId>('providers')
 </script>
 
 <template>
-  <div class="settings-panel">
-    <div class="settings-tabs">
-      <button :class="['tab-btn', { active: activeTab === 'ai' }]" @click="activeTab = 'ai'">AI 供应商</button>
-      <button :class="['tab-btn', { active: activeTab === 'skills' }]" @click="activeTab = 'skills'">Skill 管理</button>
-      <button :class="['tab-btn', { active: activeTab === 'db' }]" @click="activeTab = 'db'">数据库管理</button>
-    </div>
+  <div class="settings-root">
+    <!-- Left category nav -->
+    <nav class="cat-nav">
+      <button
+        v-for="cat in categories"
+        :key="cat.id"
+        :class="['cat-item', { active: activeCategoryId === cat.id }]"
+        @click="activeCategoryId = cat.id"
+      >
+        <span class="cat-icon">{{ cat.icon }}</span>
+        <span class="cat-label">{{ cat.label }}</span>
+      </button>
+    </nav>
 
-    <div v-show="activeTab === 'ai'" class="settings-body">
-      <ProviderPanel />
-    </div>
-
-    <div v-show="activeTab === 'skills'" class="skills-tab-body">
-      <SkillManager />
-    </div>
-
-    <div v-show="activeTab === 'db'" class="db-tab-body">
-      <DatabaseViewer :active="activeTab === 'db'" />
+    <!-- Right content -->
+    <div class="cat-content">
+      <ProviderPanel v-if="activeCategoryId === 'providers'" />
+      <SkillManager v-else-if="activeCategoryId === 'skills'" />
+      <AppearancePanel v-else-if="activeCategoryId === 'appearance'" />
+      <DatabaseViewer v-else :active="activeCategoryId === 'database'" />
     </div>
   </div>
 </template>
 
 <style scoped>
-.settings-panel {
+.settings-root {
+  display: flex;
+  height: 100%;
+  background: var(--app-main-surface);
+  color: var(--app-text);
+}
+
+/* ── Left category nav ── */
+.cat-nav {
+  width: 180px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  height: 100%;
-}
-
-.settings-hint {
-  font-size: 0.8em;
-  color: #71717a;
-}
-
-.settings-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 10px 24px;
-  border-bottom: 1px solid #27272a;
-  background: #141416;
-}
-
-.tab-btn {
-  padding: 8px 18px;
-  background: transparent;
-  color: #a1a1aa;
-  border: 1px solid transparent;
-  cursor: pointer;
-  border-radius: 8px;
-  font-size: 0.85em;
-  transition: all 0.15s;
-}
-
-.tab-btn:hover { background: #27272a; color: #e4e4e7; }
-.tab-btn.active { background: #3f3f46; color: #ffffff; border-color: #52525b; }
-
-.settings-body {
-  flex: 1;
+  gap: 2px;
+  padding: 16px 10px;
+  border-right: 1px solid var(--app-border);
   overflow-y: auto;
 }
 
-.skills-tab-body {
-  flex: 1;
-  overflow: hidden;
+.cat-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--app-text-soft);
+  font-size: 0.88em;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
 }
 
-.db-tab-body {
+.cat-item:hover {
+  background: var(--app-panel-subtle);
+  color: var(--app-text);
+}
+
+.cat-item.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+  font-weight: 600;
+}
+
+.cat-icon {
+  width: 22px;
+  text-align: center;
+  font-size: 1em;
+  flex-shrink: 0;
+}
+
+.cat-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Right content area ── */
+.cat-content {
   flex: 1;
-  display: flex;
-  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
 }
 </style>

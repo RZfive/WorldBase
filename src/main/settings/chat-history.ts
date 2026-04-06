@@ -1,9 +1,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+export type ChatMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+
 export interface ChatMessage {
   role: string
-  content: string
+  content: ChatMessageContent
 }
 
 export interface Conversation {
@@ -14,6 +16,8 @@ export interface Conversation {
   updatedAt: string
   /** Provider ID used for this conversation */
   providerId?: string
+  /** Existing project locked to this conversation for optimization/editing. */
+  targetProjectId?: string
 }
 
 /**
@@ -52,7 +56,8 @@ export class ChatHistoryStore {
           title: data.title,
           createdAt: data.createdAt,
           updatedAt: data.updatedAt,
-          providerId: data.providerId
+          providerId: data.providerId,
+          targetProjectId: data.targetProjectId
         })
       } catch {
         // skip corrupted files
@@ -101,7 +106,14 @@ export class ChatHistoryStore {
   static generateTitle (messages: ChatMessage[]): string {
     const firstUser = messages.find(m => m.role === 'user')
     if (!firstUser) return '新对话'
-    const text = firstUser.content.trim()
+    const text = typeof firstUser.content === 'string'
+      ? firstUser.content.trim()
+      : firstUser.content
+        .filter(part => part.type === 'text')
+        .map(part => part.text || '')
+        .join(' ')
+        .trim()
+    if (!text) return '新对话'
     return text.length > 40 ? text.substring(0, 40) + '...' : text
   }
 }

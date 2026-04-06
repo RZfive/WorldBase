@@ -1,6 +1,19 @@
+export interface ChatContentTextPart {
+  type: 'text'
+  text: string
+}
+
+export interface ChatContentImagePart {
+  type: 'image_url'
+  image_url: { url: string }
+}
+
+export type ChatContentPart = ChatContentTextPart | ChatContentImagePart
+export type MessageContent = string | ChatContentPart[]
+
 export interface ChatMessage {
   role: string
-  content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+  content: MessageContent
   tool_calls?: ToolCall[]
   tool_call_id?: string
   reasoning_content?: string
@@ -25,8 +38,26 @@ interface ChatCompletionBody {
   messages: ChatMessage[]
   temperature?: number
   stream?: boolean
+  modalities?: string[]
   tools?: { type: string; function: { name: string; description: string; parameters: Record<string, unknown> } }[]
   tool_choice?: string
+}
+
+interface MultiModalContentPart {
+  text?: string
+  inline_data?: {
+    data: string
+    mime_type?: string
+  }
+}
+
+interface ApiChatMessage {
+  role?: string
+  content?: MessageContent | null
+  tool_calls?: ToolCall[]
+  tool_call_id?: string
+  reasoning_content?: string
+  multi_mod_content?: MultiModalContentPart[]
 }
 
 interface StreamDelta {
@@ -59,12 +90,141 @@ export class OpenAIProvider {
     this.contextWindow = 32000
   }
 
+  private isImageOutputModel (): boolean {
+    const normalized = this.model.toLowerCase()
+    return normalized.includes('image-preview') ||
+      normalized.includes('gpt-image') ||
+      normalized.includes('imagen') ||
+      normalized.includes('-image') ||
+      normalized.includes('image-') ||
+      normalized.includes('flux')
+  }
+
+  private buildRequestBody (messages: ChatMessage[], tools: ToolDefinition[], stream: boolean): ChatCompletionBody {
+    const body: ChatCompletionBody = {
+      model: this.model,
+      messages,
+      temperature: 0.7,
+      stream
+    }
+
+    if (this.isImageOutputModel()) {
+      body.stream = false
+      body.modalities = ['text', 'image']
+      return body
+    }
+
+    if (tools.length > 0) {
+      body.tools = tools.map(tool => ({
+        type: 'function',
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters
+        }
+      }))
+      body.tool_choice = 'auto'
+    }
+
+    return body
+  }
+
+  private normalizeMessageContent (message: ApiChatMessage): MessageContent {
+    const multiModalContent = this.normalizeMultiModalContent(message.multi_mod_content)
+    if (multiModalContent !== null) {
+      return multiModalContent
+    }
+
+    if (Array.isArray(message.content)) {
+      return message.content
+    }
+
+    return typeof message.content === 'string' ? message.content : ''
+  }
+
+  private normalizeMultiModalContent (parts?: MultiModalContentPart[]): MessageContent | null {
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return null
+    }
+
+    const normalizedParts: ChatContentPart[] = []
+    let hasImage = false
+
+    for (const part of parts) {
+      if (typeof part.text === 'string' && part.text.length > 0) {
+        normalizedParts.push({
+          type: 'text',
+          text: part.text
+        })
+      }
+
+      if (part.inline_data?.data) {
+        hasImage = true
+        const mimeType = part.inline_data.mime_type?.trim() || 'image/png'
+        normalizedParts.push({
+          type: 'image_url',
+          image_url: {
+            url: `data:${mimeType};base64,${part.inline_data.data}`
+          }
+        })
+      }
+    }
+
+    if (normalizedParts.length === 0) {
+      return ''
+    }
+
+    if (!hasImage && normalizedParts.every(part => part.type === 'text')) {
+      return normalizedParts
+        .map(part => part.type === 'text' ? part.text : '')
+        .join('')
+    }
+
+    return normalizedParts
+  }
+
+  private normalizeAssistantMessage (message: ApiChatMessage): ChatMessage {
+    return {
+      role: message.role || 'assistant',
+      content: this.normalizeMessageContent(message),
+      tool_calls: message.tool_calls,
+      tool_call_id: message.tool_call_id,
+      reasoning_content: message.reasoning_content
+    }
+  }
+
+  private normalizeBaseUrl (url: string): string {
+    const trimmed = url.trim()
+    if (!trimmed) return ''
+    return trimmed.replace(/\/+$/, '')
+  }
+
+  private getChatCompletionUrl (): string {
+    const normalized = this.normalizeBaseUrl(this.baseUrl)
+    if (normalized.endsWith('/chat/completions')) {
+      return normalized
+    }
+    return `${normalized}/chat/completions`
+  }
+
+  private validateConfig (): void {
+    if (!this.apiKey.trim()) {
+      throw new Error('当前供应商未配置 API Key')
+    }
+    if (!this.baseUrl.trim()) {
+      throw new Error('当前供应商未配置 API 地址')
+    }
+    if (!this.model.trim()) {
+      throw new Error('当前供应商未选择模型')
+    }
+  }
+
   setApiKey (key: string): void {
     this.apiKey = key
   }
 
   setBaseUrl (url: string): void {
-    this.baseUrl = url
+    this.baseUrl = this.normalizeBaseUrl(url)
   }
 
   setModel (model: string): void {
@@ -93,28 +253,12 @@ export class OpenAIProvider {
    * Make a chat completion request with function calling support.
    */
   async chatCompletion (messages: ChatMessage[], tools: ToolDefinition[] = []): Promise<ChatMessage> {
-    const body: ChatCompletionBody = {
-      model: this.model,
-      messages,
-      temperature: 0.7
-    }
-
-    if (tools.length > 0) {
-      body.tools = tools.map(tool => ({
-        type: 'function',
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters
-        }
-      }))
-      body.tool_choice = 'auto'
-    }
+    const body = this.buildRequestBody(messages, tools, false)
 
     const response = await this.fetchWithRetry(body, false)
 
-    const data = await response.json() as { choices: { message: ChatMessage }[] }
-    return data.choices[0].message
+    const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
+    return this.normalizeAssistantMessage(data.choices[0].message)
   }
 
   /**
@@ -132,23 +276,14 @@ export class OpenAIProvider {
     | { type: 'tool_calls'; message: ChatMessage }
     | { type: 'done'; message: ChatMessage }
   > {
-    const body: ChatCompletionBody = {
-      model: this.model,
-      messages,
-      temperature: 0.7,
-      stream: true
-    }
+    const body = this.buildRequestBody(messages, tools, true)
 
-    if (tools.length > 0) {
-      body.tools = tools.map(tool => ({
-        type: 'function',
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters
-        }
-      }))
-      body.tool_choice = 'auto'
+    if (this.isImageOutputModel()) {
+      const response = await this.fetchWithRetry(body, false)
+      const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
+      const message = this.normalizeAssistantMessage(data.choices[0].message)
+      yield { type: 'done', message }
+      return
     }
 
     const response = await this.fetchWithRetry(body, true)
@@ -236,6 +371,8 @@ export class OpenAIProvider {
   }
 
   private async fetchWithRetry (body: ChatCompletionBody, stream: boolean): Promise<Response> {
+    this.validateConfig()
+
     const maxAttempts = 3
     let lastError: Error | null = null
 
@@ -244,7 +381,7 @@ export class OpenAIProvider {
       const timeout = setTimeout(() => controller.abort(), stream ? 90000 : 60000)
 
       try {
-        const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        const response = await fetch(this.getChatCompletionUrl(), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

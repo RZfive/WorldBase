@@ -111,20 +111,22 @@ function handleImageUpload (e: Event) {
 <style scoped>
 .chat-input {
   padding: 12px 24px 16px;
-  border-top: 1px solid #27272a;
+  border-top: 1px solid var(--app-border);
+  background: linear-gradient(180deg, transparent, var(--app-panel-subtle));
 }
 
 .input-container {
-  background: #1a1a1d;
-  border: 1px solid #3f3f46;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-input-border);
   border-radius: 12px;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
   overflow: hidden;
+  box-shadow: var(--app-shadow);
 }
 
 .input-container.focused {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-soft);
 }
 
 .image-preview-bar {
@@ -144,7 +146,7 @@ function handleImageUpload (e: Event) {
   height: 56px;
   object-fit: cover;
   border-radius: 8px;
-  border: 1px solid #3f3f46;
+  border: 1px solid var(--app-border-strong);
 }
 
 .image-remove {
@@ -154,8 +156,8 @@ function handleImageUpload (e: Event) {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: #ef4444;
-  color: white;
+  background: var(--app-danger);
+  color: #ffffff;
   border: none;
   font-size: 0.7em;
   cursor: pointer;
@@ -174,7 +176,7 @@ function handleImageUpload (e: Event) {
   width: 100%;
   background: transparent;
   border: none;
-  color: #e4e4e7;
+  color: var(--app-text);
   padding: 12px 14px 4px;
   font-size: 0.92em;
   line-height: 1.5;
@@ -183,13 +185,13 @@ function handleImageUpload (e: Event) {
   outline: none;
   box-sizing: border-box;
   scrollbar-width: thin;
-  scrollbar-color: #3f3f46 transparent;
+  scrollbar-color: var(--app-scrollbar) transparent;
 }
 
 .input-container textarea::-webkit-scrollbar { width: 5px; }
 .input-container textarea::-webkit-scrollbar-track { background: transparent; }
-.input-container textarea::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
-.input-container textarea::placeholder { color: #52525b; }
+.input-container textarea::-webkit-scrollbar-thumb { background: var(--app-scrollbar); border-radius: 3px; }
+.input-container textarea::placeholder { color: var(--app-text-faint); }
 
 .input-actions {
   display: flex;
@@ -208,25 +210,25 @@ function handleImageUpload (e: Event) {
   border-radius: 8px;
   border: none;
   background: transparent;
-  color: #71717a;
+  color: var(--app-text-muted);
   cursor: pointer;
   transition: all 0.15s;
   flex-shrink: 0;
 }
 
-.action-btn:hover { background: #27272a; color: #a1a1aa; }
+.action-btn:hover { background: var(--app-panel-muted); color: var(--app-text); }
 .action-btn.upload-btn { cursor: pointer; }
 
 .action-btn.send-btn {
-  background: #3b82f6;
-  color: white;
+  background: var(--app-accent);
+  color: #ffffff;
 }
 
-.action-btn.send-btn:hover:not(:disabled) { background: #2563eb; }
+.action-btn.send-btn:hover:not(:disabled) { background: var(--app-accent-strong); }
 
 .action-btn.send-btn:disabled {
-  background: #27272a;
-  color: #52525b;
+  background: var(--app-panel-muted);
+  color: var(--app-text-faint);
   cursor: not-allowed;
 }
 
@@ -234,7 +236,7 @@ function handleImageUpload (e: Event) {
   width: 14px;
   height: 14px;
   border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
+  border-top-color: #ffffff;
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
@@ -257,22 +259,22 @@ function handleImageUpload (e: Event) {
   align-items: center;
   gap: 4px;
   padding: 3px 10px;
-  background: #1e1b4b60;
-  border: 1px solid #6366f140;
+  background: var(--app-accent-soft);
+  border: 1px solid var(--app-accent-glow);
   border-radius: 999px;
   font-size: 0.75em;
-  color: #c7d2fe;
+  color: var(--app-text-soft);
 }
 
 .skill-badge-remove {
   background: none;
   border: none;
-  color: #a5b4fc;
+  color: var(--app-accent);
   cursor: pointer;
   font-size: 1em;
   padding: 0 2px;
   line-height: 1;
 }
 
-.skill-badge-remove:hover { color: #ef4444; }
+.skill-badge-remove:hover { color: var(--app-danger); }
 </style>
