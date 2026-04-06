@@ -30,11 +30,24 @@ interface ConversationSummary {
   createdAt: string
   updatedAt: string
   providerId?: string
+  selectedModel?: string
   targetProjectId?: string
 }
 
+interface ToolProgressEntry {
+  stage: string
+  detail?: string
+}
+
+interface ToolRun {
+  id: string
+  name: string
+  status: 'running' | 'completed' | 'failed'
+  progress: ToolProgressEntry[]
+}
+
 interface Conversation extends ConversationSummary {
-  messages: ChatMessage[]
+  messages: Array<ChatMessage & { thinking?: string; modelLabel?: string; toolRuns?: ToolRun[] }>
 }
 
 interface AIProvider {
@@ -74,7 +87,7 @@ type ThemePreference = 'system' | 'light' | 'dark'
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[]) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
   // Conversations
@@ -145,7 +158,7 @@ export interface ElectronAPI {
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[]) => ipcRenderer.invoke('ai:chat', messages),
-  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, targetProjectId?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, providerId, targetProjectId),
+  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, providerId, modelId, targetProjectId),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
     const channel = `ai:stream-event:${sessionId}`
     const handler = (_e: Electron.IpcRendererEvent, event: StreamEvent) => callback(event)

@@ -5,10 +5,33 @@ import MessageList from './MessageList.vue'
 import ChatInput from './ChatInput.vue'
 import ChatHeader from './ChatHeader.vue'
 
+type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+
+type ChatMessageBlock =
+  | { id: string; kind: 'content'; content: MessageContent }
+  | { id: string; kind: 'thinking'; text: string }
+  | { id: string; kind: 'tool'; toolRun: ToolRun }
+  | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+
 interface ChatMessage {
   role: string
-  content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+  content: MessageContent
   thinking?: string
+  modelLabel?: string
+  toolRuns?: ToolRun[]
+  blocks?: ChatMessageBlock[]
+}
+
+interface ToolProgressEntry {
+  stage: string
+  detail?: string
+}
+
+interface ToolRun {
+  id: string
+  name: string
+  status: 'running' | 'completed' | 'failed'
+  progress: ToolProgressEntry[]
 }
 
 interface ConversationSummary {
@@ -17,6 +40,7 @@ interface ConversationSummary {
   createdAt: string
   updatedAt: string
   providerId?: string
+  selectedModel?: string
   targetProjectId?: string
 }
 
@@ -73,10 +97,7 @@ const providersConfig = ref<ProvidersConfig>({
 })
 const activeProviderId = ref('')
 const selectedModel = ref('')
-const toolStatus = ref('')
-const progressSteps = ref<Array<{ stage: string; detail?: string }>>([])
 const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
-const currentThinking = ref('')
 const filePreview = ref<FilePreviewState>({
   active: false,
   filePath: '',
@@ -90,7 +111,13 @@ const showSkillPicker = ref(false)
 const syncingProviderOptions = ref(false)
 
 const streamingConvIds = reactive(new Set<string>())
-const backgroundStreamMessages = new Map<string, { messages: ChatMessage[]; assistantIdx: number; targetProjectId: string | null }>()
+const backgroundStreamMessages = new Map<string, {
+  messages: ChatMessage[]
+  assistantIdx: number
+  targetProjectId: string | null
+  providerId: string | null
+  selectedModel: string | null
+}>()
 const activeCleanups = new Map<string, () => void>()
 const conversationTargets = new Map<string, string | null>()
 let providerChangeCleanup: (() => void) | null = null
@@ -106,6 +133,12 @@ function getEnabledProviders (config: ProvidersConfig): ProviderOption[] {
 
 const isLoading = computed(() => {
   return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
+})
+
+const currentModelLabel = computed(() => {
+  const provider = providers.value.find(item => item.id === activeProviderId.value)
+  const labelParts = [selectedModel.value, provider?.name].filter(Boolean)
+  return labelParts.length > 0 ? labelParts.join(' · ') : 'The World AI'
 })
 
 async function loadSkills () {
@@ -141,6 +174,144 @@ function generateId (): string {
   return `${Date.now().toString(36)}_${Array.from(randomBytes, value => value.toString(36)).join('')}`
 }
 
+function createBlockId (prefix: string): string {
+  return `${prefix}_${generateId()}`
+}
+
+function cloneToolRuns (toolRuns: ToolRun[]): ToolRun[] {
+  return toolRuns.map(toolRun => ({
+    ...toolRun,
+    progress: toolRun.progress.map(step => ({ ...step }))
+  }))
+}
+
+function createToolRun (name: string): ToolRun {
+  return {
+    id: generateId(),
+    name,
+    status: 'running',
+    progress: []
+  }
+}
+
+function ensureBlocks (message: ChatMessage): ChatMessageBlock[] {
+  if (!Array.isArray(message.blocks)) {
+    message.blocks = []
+  }
+  return message.blocks
+}
+
+function createContentBlock (content: MessageContent = ''): ChatMessageBlock {
+  return {
+    id: createBlockId('content'),
+    kind: 'content',
+    content
+  }
+}
+
+function createThinkingBlock (text = ''): ChatMessageBlock {
+  return {
+    id: createBlockId('thinking'),
+    kind: 'thinking',
+    text
+  }
+}
+
+function createToolBlock (toolRun: ToolRun): ChatMessageBlock {
+  return {
+    id: createBlockId('tool'),
+    kind: 'tool',
+    toolRun
+  }
+}
+
+function createFilePreviewBlock (filePath: string, truncated = false): ChatMessageBlock {
+  return {
+    id: createBlockId('preview'),
+    kind: 'file_preview',
+    filePath,
+    previewContent: '',
+    truncated,
+    active: true
+  }
+}
+
+function getLastBlock (blocks: ChatMessageBlock[]): ChatMessageBlock | null {
+  return blocks.length > 0 ? blocks[blocks.length - 1] : null
+}
+
+function ensureStreamingContentBlock (message: ChatMessage): Extract<ChatMessageBlock, { kind: 'content' }> {
+  const blocks = ensureBlocks(message)
+  const lastBlock = getLastBlock(blocks)
+  if (lastBlock?.kind === 'content' && typeof lastBlock.content === 'string') {
+    return lastBlock
+  }
+
+  const created = createContentBlock('') as Extract<ChatMessageBlock, { kind: 'content' }>
+  blocks.push(created)
+  return created
+}
+
+function ensureThinkingBlock (message: ChatMessage): Extract<ChatMessageBlock, { kind: 'thinking' }> {
+  const blocks = ensureBlocks(message)
+  const lastBlock = getLastBlock(blocks)
+  if (lastBlock?.kind === 'thinking') {
+    return lastBlock
+  }
+
+  const created = createThinkingBlock('') as Extract<ChatMessageBlock, { kind: 'thinking' }>
+  blocks.push(created)
+  return created
+}
+
+function getLastActivePreviewBlock (message: ChatMessage, filePath?: string): Extract<ChatMessageBlock, { kind: 'file_preview' }> | null {
+  const blocks = ensureBlocks(message)
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    const block = blocks[index]
+    if (block.kind !== 'file_preview' || !block.active) continue
+    if (!filePath || block.filePath === filePath) {
+      return block
+    }
+  }
+  return null
+}
+
+function syncLegacyToolRuns (message: ChatMessage, toolRuns: ToolRun[]): void {
+  message.toolRuns = cloneToolRuns(toolRuns)
+}
+
+function appendFinalContentBlock (message: ChatMessage, finalContent: MessageContent | undefined): void {
+  if (finalContent === undefined) return
+
+  const blocks = ensureBlocks(message)
+  const hasContentBlock = blocks.some(block => block.kind === 'content' && (typeof block.content === 'string'
+    ? block.content.trim().length > 0
+    : block.content.length > 0))
+
+  if (!hasContentBlock) {
+    blocks.push(createContentBlock(finalContent))
+    return
+  }
+
+  if (Array.isArray(finalContent)) {
+    const imageParts = finalContent.filter(part => part.type === 'image_url')
+    if (imageParts.length > 0) {
+      blocks.push(createContentBlock(imageParts))
+    }
+  }
+}
+
+function findLastRunningToolRun (toolRuns: ToolRun[], preferredName?: string): ToolRun | null {
+  for (let index = toolRuns.length - 1; index >= 0; index--) {
+    const toolRun = toolRuns[index]
+    if (toolRun.status !== 'running') continue
+    if (!preferredName || toolRun.name === preferredName) {
+      return toolRun
+    }
+  }
+  return null
+}
+
 function getMessageText (msg: ChatMessage): string {
   if (typeof msg.content === 'string') return msg.content
   if (Array.isArray(msg.content)) {
@@ -166,9 +337,6 @@ function hasRenderableContent (msg: ChatMessage): boolean {
 }
 
 function resetTransientStreamState () {
-  toolStatus.value = ''
-  progressSteps.value = []
-  currentThinking.value = ''
   filePreview.value = {
     active: false,
     filePath: '',
@@ -199,7 +367,9 @@ function stashCurrentConversationForNavigation () {
     backgroundStreamMessages.set(currentConversationId.value, {
       messages: messages.value,
       assistantIdx: messages.value.length - 1,
-      targetProjectId: targetProjectId.value
+      targetProjectId: targetProjectId.value,
+      providerId: activeProviderId.value || null,
+      selectedModel: selectedModel.value || null
     })
     void doSaveConversation(currentConversationId.value, messages.value, { targetProjectId: targetProjectId.value })
   }
@@ -226,36 +396,10 @@ async function startOptimizationConversation (ctx: Record<string, unknown>) {
   })
 }
 
-async function persistProviderModelSelection () {
-  if (!window.electronAPI || !activeProviderId.value) return
-  const providerIndex = providersConfig.value.providers.findIndex(provider => provider.id === activeProviderId.value)
-  if (providerIndex < 0) return
-
-  const nextProviders = providersConfig.value.providers.map((provider, index) => {
-    if (index !== providerIndex) {
-      return provider
-    }
-    return {
-      ...provider,
-      activeModel: selectedModel.value || provider.activeModel || provider.models[0] || ''
-    }
-  })
-
-  providersConfig.value = {
-    ...providersConfig.value,
-    providers: nextProviders
-  }
-  providers.value = getEnabledProviders(providersConfig.value)
-  await window.electronAPI.saveProviders(JSON.parse(JSON.stringify({
-    providers: nextProviders,
-    activeProviderId: providersConfig.value.activeProviderId,
-    enabledProviderIds: providersConfig.value.enabledProviderIds
-  })))
-}
-
 async function applyProvidersConfig (
   config: ProvidersConfig,
-  preferredProviderId?: string | null
+  preferredProviderId?: string | null,
+  preferredModelId?: string | null
 ) {
   syncingProviderOptions.value = true
   providersConfig.value = {
@@ -278,7 +422,10 @@ async function applyProvidersConfig (
 
   activeProviderId.value = nextProviderId
   const active = providers.value.find(provider => provider.id === nextProviderId)
-  selectedModel.value = active?.activeModel || active?.models[0] || ''
+  const nextModelId = preferredModelId && active?.models.includes(preferredModelId)
+    ? preferredModelId
+    : active?.activeModel || active?.models[0] || ''
+  selectedModel.value = nextModelId
 
   await nextTick()
   syncingProviderOptions.value = false
@@ -304,7 +451,6 @@ async function handleProviderSelectionChange (providerId: string) {
 async function handleModelSelectionChange (model: string) {
   selectedModel.value = model
   if (syncingProviderOptions.value) return
-  await persistProviderModelSelection()
   await persistConversationProviderMeta()
 }
 
@@ -315,11 +461,18 @@ async function loadConversations () {
   } catch { /* ignore */ }
 }
 
-async function loadProviders (preferredProviderId?: string | null) {
+async function loadProviders (preferredProviderId?: string | null, preferredModelId?: string | null) {
   if (!window.electronAPI) return
   try {
     const config = await window.electronAPI.getProviders()
-    await applyProvidersConfig(config, preferredProviderId)
+    const currentConversation = currentConversationId.value
+      ? conversations.value.find(item => item.id === currentConversationId.value)
+      : null
+    await applyProvidersConfig(
+      config,
+      preferredProviderId,
+      preferredModelId || currentConversation?.selectedModel || selectedModel.value || null
+    )
   } catch { /* ignore */ }
 }
 
@@ -349,7 +502,7 @@ async function loadConversation (id: string) {
     setConversationTarget(id, bg.targetProjectId)
     backgroundStreamMessages.delete(id)
     resetTransientStreamState()
-    await loadProviders(conversations.value.find(item => item.id === id)?.providerId || null)
+    await loadProviders(bg.providerId || null, bg.selectedModel || null)
     return
   }
 
@@ -360,7 +513,7 @@ async function loadConversation (id: string) {
     targetProjectId.value = conv.targetProjectId || null
     setConversationTarget(conv.id, conv.targetProjectId || null)
     resetTransientStreamState()
-    await loadProviders(conv.providerId || null)
+    await loadProviders(conv.providerId || null, conv.selectedModel || null)
   }
 }
 
@@ -391,6 +544,7 @@ async function doSaveConversation (
     createdAt: getConversationCreatedAt(convId),
     updatedAt: new Date().toISOString(),
     providerId: activeProviderId.value || undefined,
+    selectedModel: selectedModel.value || undefined,
     targetProjectId: resolvedTargetProjectId || undefined
   })))
 
@@ -442,39 +596,68 @@ async function sendMessage () {
   pendingImages.value = []
   resetTransientStreamState()
 
-  messages.value.push({ role: 'assistant', content: '', thinking: '' })
+  messages.value.push({
+    role: 'assistant',
+    content: '',
+    thinking: '',
+    modelLabel: currentModelLabel.value,
+    toolRuns: [],
+    blocks: []
+  })
 
   const targetMessages = messages.value
   const assistantIdx = targetMessages.length - 1
+  const assistantMessage = targetMessages[assistantIdx]
   const sessionId = generateId()
   let thinkingAccum = ''
+  const toolRuns: ToolRun[] = []
+
+  const syncAssistantToolRuns = () => {
+    syncLegacyToolRuns(assistantMessage, toolRuns)
+  }
+
+  const ensureActiveToolRun = (name = '执行中') => {
+    const existing = findLastRunningToolRun(toolRuns, name) || findLastRunningToolRun(toolRuns)
+    if (existing) return existing
+    const created = createToolRun(name)
+    toolRuns.push(created)
+    syncAssistantToolRuns()
+    return created
+  }
 
   streamingConvIds.add(convId)
 
   try {
     if (window.electronAPI) {
-      await persistProviderModelSelection()
-
       const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {
         const isForeground = currentConversationId.value === convId
 
         if (event.type === 'thinking' && event.content) {
           thinkingAccum += event.content
-          targetMessages[assistantIdx].thinking = thinkingAccum
-          if (isForeground) {
-            currentThinking.value = thinkingAccum
-          }
+          assistantMessage.thinking = thinkingAccum
+          const thinkingBlock = ensureThinkingBlock(assistantMessage)
+          thinkingBlock.text += event.content
         } else if (event.type === 'reset') {
           thinkingAccum = ''
-          targetMessages[assistantIdx].content = ''
-          targetMessages[assistantIdx].thinking = ''
+          assistantMessage.content = ''
+          assistantMessage.thinking = ''
+          assistantMessage.blocks = []
           if (isForeground) {
             resetTransientStreamState()
           }
         } else if (event.type === 'token' && event.content) {
-          targetMessages[assistantIdx].content =
-            ((targetMessages[assistantIdx].content as string) || '') + event.content
+          assistantMessage.content =
+            ((assistantMessage.content as string) || '') + event.content
+          const contentBlock = ensureStreamingContentBlock(assistantMessage)
+          contentBlock.content = `${typeof contentBlock.content === 'string' ? contentBlock.content : ''}${event.content}`
         } else if (event.type === 'file_preview_start' && event.filePath) {
+          const activeToolRun = ensureActiveToolRun('文件生成')
+          const alreadyLogged = activeToolRun.progress.some(step => step.stage === '文件预览' && step.detail === event.filePath)
+          if (!alreadyLogged) {
+            activeToolRun.progress.push({ stage: '文件预览', detail: event.filePath })
+            syncAssistantToolRuns()
+          }
+          ensureBlocks(assistantMessage).push(createFilePreviewBlock(event.filePath, Boolean(event.truncated)))
           if (isForeground) {
             filePreview.value = {
               active: true,
@@ -484,6 +667,10 @@ async function sendMessage () {
             }
           }
         } else if (event.type === 'file_preview_chunk' && event.content) {
+          const previewBlock = getLastActivePreviewBlock(assistantMessage, event.filePath)
+          if (previewBlock) {
+            previewBlock.previewContent += event.content
+          }
           if (isForeground && filePreview.value.filePath === event.filePath) {
             filePreview.value = {
               ...filePreview.value,
@@ -491,6 +678,11 @@ async function sendMessage () {
             }
           }
         } else if (event.type === 'file_preview_end') {
+          const previewBlock = getLastActivePreviewBlock(assistantMessage, event.filePath)
+          if (previewBlock) {
+            previewBlock.active = false
+            previewBlock.truncated = Boolean(event.truncated ?? previewBlock.truncated)
+          }
           if (isForeground) {
             filePreview.value = {
               ...filePreview.value,
@@ -499,32 +691,43 @@ async function sendMessage () {
             }
           }
         } else if (event.type === 'tool_start' && event.name) {
-          if (isForeground) {
-            toolStatus.value = `正在执行: ${event.name}...`
-            progressSteps.value = []
-          }
+          const toolRun = createToolRun(event.name)
+          toolRuns.push(toolRun)
+          ensureBlocks(assistantMessage).push(createToolBlock(toolRun))
+          syncAssistantToolRuns()
         } else if (event.type === 'progress' && event.stage) {
-          if (isForeground) {
-            progressSteps.value.push({ stage: event.stage, detail: event.detail })
-          }
+          const activeToolRun = ensureActiveToolRun()
+          activeToolRun.progress.push({ stage: event.stage, detail: event.detail })
+          syncAssistantToolRuns()
         } else if (event.type === 'tool_end') {
-          if (isForeground) {
-            toolStatus.value = ''
-            progressSteps.value = []
+          const activeToolRun = findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
+          if (activeToolRun) {
+            activeToolRun.status = 'completed'
+            syncAssistantToolRuns()
           }
         } else if (event.type === 'done') {
-          if (event.message?.content !== undefined) {
-            if (Array.isArray(event.message.content)) {
-              targetMessages[assistantIdx].content = event.message.content
-            } else if (!getMessageText(targetMessages[assistantIdx]) && event.message.content) {
-              targetMessages[assistantIdx].content = event.message.content
+          for (const toolRun of toolRuns) {
+            if (toolRun.status === 'running') {
+              toolRun.status = 'completed'
             }
           }
-          if (!hasRenderableContent(targetMessages[assistantIdx])) {
-            targetMessages[assistantIdx].content = '(无响应)'
+          syncAssistantToolRuns()
+
+          if (event.message?.content !== undefined) {
+            if (Array.isArray(event.message.content)) {
+              assistantMessage.content = event.message.content
+            } else if (!getMessageText(assistantMessage) && event.message.content) {
+              assistantMessage.content = event.message.content
+            }
+            appendFinalContentBlock(assistantMessage, event.message.content)
           }
-          if (event.thinking && !targetMessages[assistantIdx].thinking) {
-            targetMessages[assistantIdx].thinking = event.thinking
+          if (!hasRenderableContent(assistantMessage)) {
+            assistantMessage.content = '(无响应)'
+            ensureBlocks(assistantMessage).push(createContentBlock('(无响应)'))
+          }
+          if (event.thinking && !assistantMessage.thinking) {
+            assistantMessage.thinking = event.thinking
+            ensureBlocks(assistantMessage).push(createThinkingBlock(event.thinking))
           }
 
           cleanup()
@@ -538,7 +741,14 @@ async function sendMessage () {
             resetTransientStreamState()
           }
         } else if (event.type === 'error') {
-          targetMessages[assistantIdx].content = `错误: ${event.error}`
+          const activeToolRun = findLastRunningToolRun(toolRuns)
+          if (activeToolRun) {
+            activeToolRun.status = 'failed'
+            activeToolRun.progress.push({ stage: '错误', detail: event.error })
+            syncAssistantToolRuns()
+          }
+          assistantMessage.content = `错误: ${event.error}`
+          ensureBlocks(assistantMessage).push(createContentBlock(`错误: ${event.error}`))
 
           cleanup()
           activeCleanups.delete(sessionId)
@@ -561,6 +771,7 @@ async function sendMessage () {
         chatMessages,
         sessionId,
         activeProviderId.value || undefined,
+        selectedModel.value || undefined,
         targetProjectId.value ?? undefined
       )
 
@@ -572,8 +783,9 @@ async function sendMessage () {
           pendingCleanup()
           activeCleanups.delete(sessionId)
         }
-        if (!hasRenderableContent(targetMessages[assistantIdx])) {
-          targetMessages[assistantIdx].content = '(无响应)'
+        if (!hasRenderableContent(assistantMessage)) {
+          assistantMessage.content = '(无响应)'
+          ensureBlocks(assistantMessage).push(createContentBlock('(无响应)'))
         }
         void doSaveConversation(convId, targetMessages)
         if (currentConversationId.value === convId) {
@@ -588,24 +800,19 @@ async function sendMessage () {
         body: JSON.stringify({ messages: chatMessages })
       })
       const response = await res.json() as { content?: string }
-      targetMessages[assistantIdx].content = response.content || '(无响应)'
+      assistantMessage.content = response.content || '(无响应)'
+      ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
       streamingConvIds.delete(convId)
       void doSaveConversation(convId, targetMessages)
       resetTransientStreamState()
     }
   } catch (err) {
-    targetMessages[assistantIdx].content = `错误: ${(err as Error).message}`
+    assistantMessage.content = `错误: ${(err as Error).message}`
+    ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
     streamingConvIds.delete(convId)
     resetTransientStreamState()
   }
 }
-
-watch(activeProviderId, (newId) => {
-  const provider = providers.value.find(item => item.id === newId)
-  if (provider) {
-    selectedModel.value = provider.activeModel || provider.models[0] || ''
-  }
-})
 
 watch(() => props.projectContext, (ctx) => {
   if (!ctx) return
@@ -622,7 +829,7 @@ onMounted(async () => {
 
   if (window.electronAPI?.onProvidersChanged) {
     providerChangeCleanup = window.electronAPI.onProvidersChanged((config) => {
-      void applyProvidersConfig(config)
+      void applyProvidersConfig(config, activeProviderId.value, selectedModel.value)
     })
   }
 })
@@ -665,8 +872,6 @@ onUnmounted(() => {
       <MessageList
         :messages="messages"
         :is-loading="isLoading"
-        :tool-status="toolStatus"
-        :progress-steps="progressSteps"
         :file-preview="filePreview"
       />
 

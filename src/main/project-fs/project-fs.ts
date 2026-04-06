@@ -3,6 +3,7 @@ import path from 'node:path'
 import { existsSync, mkdirSync } from 'node:fs'
 import { SafeWriter } from './safe-write.js'
 import { ProjectAnalyzer } from './project-analyzer.js'
+import { normalizeProjectMeta } from './project-meta.js'
 import type { FileTreeItem, ProjectAnalysis } from './project-analyzer.js'
 
 export interface ProjectMeta {
@@ -81,7 +82,7 @@ export class ProjectFS {
         const metaPath = path.join(this.projectsDir, entry.name, '.world-meta.json')
         try {
           const metaContent = await fs.readFile(metaPath, 'utf-8')
-          const meta = JSON.parse(metaContent) as ProjectMeta
+          const meta = normalizeProjectMeta(JSON.parse(metaContent)) as ProjectMeta
           // Ensure id is always set; fall back to the directory name
           if (!meta.id) meta.id = entry.name
           projects.push(meta)
@@ -100,7 +101,7 @@ export class ProjectFS {
   async getProjectMeta (projectId: string): Promise<ProjectMeta> {
     const metaPath = this._resolveProjectPath(projectId, '.world-meta.json')
     const content = await fs.readFile(metaPath, 'utf-8')
-    return JSON.parse(content) as ProjectMeta
+    return normalizeProjectMeta(JSON.parse(content)) as ProjectMeta
   }
 
   /**
@@ -108,7 +109,8 @@ export class ProjectFS {
    */
   async saveProjectMeta (projectId: string, meta: ProjectMeta): Promise<void> {
     const metaPath = this._resolveProjectPath(projectId, '.world-meta.json')
-    await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8')
+    const normalizedMeta = normalizeProjectMeta(meta) as ProjectMeta
+    await fs.writeFile(metaPath, JSON.stringify(normalizedMeta, null, 2), 'utf-8')
   }
 
   /**
@@ -304,7 +306,7 @@ export class ProjectFS {
 
     mkdirSync(projectDir, { recursive: true })
 
-    const fullMeta = { id: projectId, name: '', type: 'unknown', ...meta } as ProjectMeta
+    const fullMeta = normalizeProjectMeta({ id: projectId, name: '', type: 'unknown', ...meta }) as ProjectMeta
 
     // Write .world-meta.json
     await this.saveProjectMeta(projectId, fullMeta)

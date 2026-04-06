@@ -336,7 +336,7 @@ function createWindow (): void {
 }
 
 function setupIPC (): void {
-  const resolveProviderConfig = (requestedProviderId?: string) => {
+  const resolveProviderConfig = (requestedProviderId?: string, requestedModelId?: string) => {
     const providersConfig = settingsStore!.getProviders()
     const enabledProviderIds = new Set(providersConfig.enabledProviderIds)
     const enabledProviders = providersConfig.providers.filter(provider => enabledProviderIds.has(provider.id))
@@ -351,24 +351,28 @@ function setupIPC (): void {
     const provider = requestedProvider || defaultProvider
     if (!provider) return undefined
 
+    const resolvedModel = requestedModelId && provider.models.includes(requestedModelId)
+      ? requestedModelId
+      : provider.activeModel
+
     return {
       apiKey: provider.apiKey,
       baseUrl: provider.baseUrl,
-      model: provider.activeModel,
+      model: resolvedModel,
       enableThinking: provider.enableThinking ?? false,
-      contextWindow: provider.modelContextWindows?.[provider.activeModel]
+      contextWindow: provider.modelContextWindows?.[resolvedModel]
     }
   }
 
   // AI chat (non-streaming, kept for backward compat)
-  ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string) => {
+  ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string) => {
     return aiEngine!.chat(messages, {
-      providerConfig: resolveProviderConfig(providerId)
+      providerConfig: resolveProviderConfig(providerId, modelId)
     })
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, targetProjectId?: string) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
     // Progress callback: sends progress events directly to renderer in real-time
@@ -384,7 +388,7 @@ function setupIPC (): void {
     try {
       for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
         targetProjectId: targetProjectId ?? null,
-        providerConfig: resolveProviderConfig(providerId)
+        providerConfig: resolveProviderConfig(providerId, modelId)
       })) {
         if (sender.isDestroyed()) break
         try {

@@ -1,4 +1,7 @@
 import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
+
+const nodeRequire = createRequire(import.meta.url)
 
 interface SqliteDatabase {
   prepare(sql: string): {
@@ -39,9 +42,7 @@ export class SqliteAdapter {
       return this._connections.get(dbPath)!
     }
 
-    // Dynamic import to avoid bundling issues in renderer
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Database = require('better-sqlite3')
+    const Database = nodeRequire('better-sqlite3') as new (dbPath: string) => SqliteDatabase
     const db = new Database(dbPath) as SqliteDatabase
     this._connections.set(dbPath, db)
     return db

@@ -2,38 +2,57 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { renderMarkdown } from './markdown'
 
+type MessageContent = string | ChatContentPart[]
+
 interface ChatContentPart {
   type: string
   text?: string
   image_url?: { url: string }
 }
 
+interface ToolProgressEntry {
+  stage: string
+  detail?: string
+}
+
+interface ToolRun {
+  id: string
+  name: string
+  status: 'running' | 'completed' | 'failed'
+  progress: ToolProgressEntry[]
+}
+
+type ChatMessageBlock =
+  | { id: string; kind: 'content'; content: MessageContent }
+  | { id: string; kind: 'thinking'; text: string }
+  | { id: string; kind: 'tool'; toolRun: ToolRun }
+  | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+
 interface ChatMessage {
   role: string
-  content: string | ChatContentPart[]
+  content: MessageContent
   thinking?: string
+  modelLabel?: string
+  toolRuns?: ToolRun[]
+  blocks?: ChatMessageBlock[]
 }
 
 interface GalleryImage {
   url: string
   messageIndex: number
+  blockIndex: number
   partIndex: number
 }
 
 const props = defineProps<{
   messages: ChatMessage[]
   isLoading: boolean
-  toolStatus: string
-  progressSteps: Array<{ stage: string; detail?: string }>
   filePreview: { active: boolean; filePath: string; content: string; truncated: boolean }
 }>()
 
 const messagesContainer = ref<HTMLElement | null>(null)
-const streamingLineRef = ref<HTMLElement | null>(null)
-const progressLineRef = ref<HTMLElement | null>(null)
 const filePreviewRef = ref<HTMLElement | null>(null)
 const lightboxBodyRef = ref<HTMLElement | null>(null)
-const expandedThinking = ref<Record<number, boolean>>({})
 const lightboxIndex = ref<number | null>(null)
 const lightboxZoom = ref(1)
 const lightboxNaturalSize = ref({ width: 0, height: 0 })
@@ -43,24 +62,32 @@ const MIN_LIGHTBOX_ZOOM = 1
 const MAX_LIGHTBOX_ZOOM = 4
 const LIGHTBOX_ZOOM_STEP = 0.25
 
-const latestProgressText = computed(() => {
-  const latest = props.progressSteps[props.progressSteps.length - 1]
-  if (!latest) return ''
-  return latest.detail ? `${latest.stage} ${latest.detail}` : latest.stage
+const latestAssistantMessageIndex = computed(() => {
+  for (let index = props.messages.length - 1; index >= 0; index--) {
+    if (props.messages[index].role === 'assistant') {
+      return index
+    }
+  }
+  return -1
 })
 
 const galleryImages = computed<GalleryImage[]>(() => {
   const images: GalleryImage[] = []
 
   props.messages.forEach((message, messageIndex) => {
-    getMessageParts(message).forEach((part, partIndex) => {
-      if (part.type === 'image_url' && part.image_url?.url) {
-        images.push({
-          url: part.image_url.url,
-          messageIndex,
-          partIndex
-        })
-      }
+    getMessageBlocks(message, messageIndex).forEach((block, blockIndex) => {
+      if (block.kind !== 'content') return
+
+      getContentParts(block.content).forEach((part, partIndex) => {
+        if (part.type === 'image_url' && part.image_url?.url) {
+          images.push({
+            url: part.image_url.url,
+            messageIndex,
+            blockIndex,
+            partIndex
+          })
+        }
+      })
     })
   })
 
@@ -106,9 +133,7 @@ const lightboxMetrics = computed(() => {
 
 const lightboxStageStyle = computed(() => {
   const metrics = lightboxMetrics.value
-  if (!metrics) {
-    return {}
-  }
+  if (!metrics) return {}
 
   return {
     width: `${metrics.stageWidth}px`,
@@ -118,9 +143,7 @@ const lightboxStageStyle = computed(() => {
 
 const lightboxImageStyle = computed(() => {
   const metrics = lightboxMetrics.value
-  if (!metrics) {
-    return {}
-  }
+  if (!metrics) return {}
 
   return {
     width: `${metrics.renderedWidth}px`,
@@ -128,10 +151,10 @@ const lightboxImageStyle = computed(() => {
   }
 })
 
-function getMessageText (msg: ChatMessage): string {
-  if (typeof msg.content === 'string') return msg.content
-  if (Array.isArray(msg.content)) {
-    return msg.content
+function getContentText (content: MessageContent): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
       .filter(part => part.type === 'text')
       .map(part => part.text || '')
       .join('')
@@ -139,23 +162,159 @@ function getMessageText (msg: ChatMessage): string {
   return ''
 }
 
-function getMessageParts (msg: ChatMessage): ChatContentPart[] {
-  if (typeof msg.content === 'string') {
-    return msg.content ? [{ type: 'text', text: msg.content }] : []
+function getMessageText (msg: ChatMessage): string {
+  return getContentText(msg.content)
+}
+
+function getContentParts (content: MessageContent): ChatContentPart[] {
+  if (typeof content === 'string') {
+    return content ? [{ type: 'text', text: content }] : []
   }
-  return msg.content
+  return content
+}
+
+function getMessageParts (msg: ChatMessage): ChatContentPart[] {
+  return getContentParts(msg.content)
+}
+
+function hasRenderableContent (content: MessageContent): boolean {
+  return getContentParts(content).some(part => {
+    if (part.type === 'text') {
+      return Boolean(part.text?.length)
+    }
+    return Boolean(part.image_url?.url)
+  })
+}
+
+function getMessageBlocks (msg: ChatMessage, index: number): ChatMessageBlock[] {
+  if (Array.isArray(msg.blocks) && msg.blocks.length > 0) {
+    return msg.blocks
+  }
+
+  const blocks: ChatMessageBlock[] = []
+
+  if (msg.role === 'assistant' && msg.thinking) {
+    blocks.push({
+      id: `legacy-thinking-${index}`,
+      kind: 'thinking',
+      text: msg.thinking
+    })
+  }
+
+  if (msg.role === 'assistant' && Array.isArray(msg.toolRuns)) {
+    for (const toolRun of msg.toolRuns) {
+      blocks.push({
+        id: `legacy-tool-${toolRun.id}`,
+        kind: 'tool',
+        toolRun
+      })
+    }
+  }
+
+  if (hasRenderableContent(msg.content) || isStreamingAssistant(index, msg)) {
+    blocks.push({
+      id: `legacy-content-${index}`,
+      kind: 'content',
+      content: msg.content
+    })
+  }
+
+  if (shouldShowFilePreview(index, msg)) {
+    blocks.push({
+      id: `legacy-preview-${index}`,
+      kind: 'file_preview',
+      filePath: props.filePreview.filePath,
+      previewContent: props.filePreview.content,
+      truncated: props.filePreview.truncated,
+      active: props.filePreview.active
+    })
+  }
+
+  return blocks
+}
+
+function getMessageSignature (msg?: ChatMessage): string {
+  if (!msg) return ''
+
+  const blockSignature = (msg.blocks || getMessageBlocks(msg, -1))
+    .map(block => {
+      if (block.kind === 'content') {
+        return `content:${getContentParts(block.content)
+          .map(part => part.type === 'image_url' ? part.image_url?.url || '' : part.text || '')
+          .join('|')}`
+      }
+      if (block.kind === 'thinking') {
+        return `thinking:${block.text}`
+      }
+      if (block.kind === 'file_preview') {
+        return `preview:${block.filePath}:${block.previewContent}:${block.truncated}:${block.active}`
+      }
+      return `tool:${block.toolRun.id}:${block.toolRun.status}:${block.toolRun.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`
+    })
+    .join('|')
+
+  return [blockSignature, msg.thinking || '', msg.modelLabel || ''].join('::')
 }
 
 function collapseWhitespace (text: string): string {
   return text.replace(/\s+/g, ' ').trim()
 }
 
-function toggleThinking (index: number) {
-  expandedThinking.value[index] = !expandedThinking.value[index]
+function getGalleryIndex (messageIndex: number, blockIndex: number, partIndex: number): number {
+  return galleryImages.value.findIndex(image => image.messageIndex === messageIndex && image.blockIndex === blockIndex && image.partIndex === partIndex)
 }
 
-function getGalleryIndex (messageIndex: number, partIndex: number): number {
-  return galleryImages.value.findIndex(image => image.messageIndex === messageIndex && image.partIndex === partIndex)
+function getMessageAuthor (msg: ChatMessage): string {
+  return msg.role === 'assistant' ? 'The World AI' : '你'
+}
+
+function getAvatarLabel (msg: ChatMessage): string {
+  return msg.role === 'assistant' ? 'AI' : '你'
+}
+
+function getModelLabel (msg: ChatMessage): string {
+  return msg.modelLabel || 'The World AI'
+}
+
+function getBlockParts (block: Extract<ChatMessageBlock, { kind: 'content' }>): ChatContentPart[] {
+  return getContentParts(block.content)
+}
+
+function isStreamingAssistant (index: number, msg: ChatMessage): boolean {
+  return props.isLoading && msg.role === 'assistant' && index === latestAssistantMessageIndex.value
+}
+
+function hasRenderableBlock (block: ChatMessageBlock): boolean {
+  if (block.kind === 'content') {
+    return hasRenderableContent(block.content)
+  }
+  if (block.kind === 'thinking') {
+    return block.text.trim().length > 0
+  }
+  return true
+}
+
+function getLastContentBlockIndex (blocks: ChatMessageBlock[]): number {
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    if (blocks[index].kind === 'content') {
+      return index
+    }
+  }
+  return -1
+}
+
+function isStreamingContentBlock (messageIndex: number, msg: ChatMessage, blockIndex: number, blocks: ChatMessageBlock[]): boolean {
+  return isStreamingAssistant(messageIndex, msg) && blockIndex === getLastContentBlockIndex(blocks)
+}
+
+function shouldShowFilePreview (index: number, msg: ChatMessage): boolean {
+  return msg.role === 'assistant' && index === latestAssistantMessageIndex.value && props.filePreview.active
+}
+
+function getToolRunStatusLabel (status: ToolRun['status']): string {
+  if (status === 'completed') return '已完成'
+  if (status === 'failed') return '失败'
+  return '执行中'
 }
 
 function updateLightboxViewport () {
@@ -185,11 +344,7 @@ function syncLightboxScroll (previousZoom: number, nextZoom: number) {
     if (!lightboxBodyRef.value) return
 
     const metrics = lightboxMetrics.value
-    if (!metrics) return
-
-    if (previousZoom === nextZoom) {
-      return
-    }
+    if (!metrics || previousZoom === nextZoom) return
 
     const { clientWidth, clientHeight, scrollLeft, scrollTop } = lightboxBodyRef.value
     const previousRenderedWidth = metrics.fittedWidth * previousZoom
@@ -218,9 +373,7 @@ function setLightboxZoom (zoom: number) {
   const nextZoom = Math.min(MAX_LIGHTBOX_ZOOM, Math.max(MIN_LIGHTBOX_ZOOM, Number(zoom.toFixed(2))))
   const previousZoom = lightboxZoom.value
 
-  if (nextZoom === previousZoom) {
-    return
-  }
+  if (nextZoom === previousZoom) return
 
   lightboxZoom.value = nextZoom
   syncLightboxScroll(previousZoom, nextZoom)
@@ -246,8 +399,8 @@ function selectLightboxImage (index: number) {
   updateLightboxViewport()
 }
 
-function openLightbox (messageIndex: number, partIndex: number) {
-  const index = getGalleryIndex(messageIndex, partIndex)
+function openLightbox (messageIndex: number, blockIndex: number, partIndex: number) {
+  const index = getGalleryIndex(messageIndex, blockIndex, partIndex)
   if (index === -1) return
   selectLightboxImage(index)
 }
@@ -284,11 +437,7 @@ function handleLightboxImageLoad (event: Event) {
 }
 
 function handleLightboxWheel (event: WheelEvent) {
-  if (!lightboxImage.value) return
-
-  if (!event.ctrlKey) {
-    return
-  }
+  if (!lightboxImage.value || !event.ctrlKey) return
 
   event.preventDefault()
   const nextZoom = lightboxZoom.value * Math.exp(-event.deltaY * 0.003)
@@ -372,28 +521,9 @@ function scrollToBottom () {
 watch(() => props.messages.length, scrollToBottom)
 
 watch(
-  () => {
-    const last = props.messages[props.messages.length - 1]
-    return last?.content
-  },
+  () => getMessageSignature(props.messages[props.messages.length - 1]),
   () => {
     scrollToBottom()
-    nextTick(() => {
-      if (streamingLineRef.value) {
-        streamingLineRef.value.scrollLeft = streamingLineRef.value.scrollWidth
-      }
-    })
-  }
-)
-
-watch(
-  () => props.progressSteps.length,
-  () => {
-    nextTick(() => {
-      if (progressLineRef.value) {
-        progressLineRef.value.scrollLeft = progressLineRef.value.scrollWidth
-      }
-    })
   }
 )
 
@@ -410,7 +540,7 @@ watch(
 )
 
 watch(
-  () => galleryImages.value.map(image => `${image.messageIndex}:${image.partIndex}:${image.url}`).join('|'),
+  () => galleryImages.value.map(image => `${image.messageIndex}:${image.blockIndex}:${image.partIndex}:${image.url}`).join('|'),
   () => {
     if (lightboxIndex.value == null) return
 
@@ -441,85 +571,120 @@ onUnmounted(() => {
 <template>
   <div class="chat-messages" ref="messagesContainer">
     <div v-if="props.messages.length === 0" class="empty-state">
-      <p>👋 你好！我是 The World AI 助手。</p>
-      <p>你可以让我：</p>
-      <ul>
-        <li>创建一个新的 Web 应用项目</li>
-        <li>修改现有项目的后端代码</li>
-        <li>分析项目中的数据</li>
-        <li>调用项目的 API 进行测试</li>
-      </ul>
+      <div class="empty-state-card">
+        <div class="empty-state-icon">AI</div>
+        <h3>开始一段新对话</h3>
+        <p>我可以为你创建应用、修改项目、分析数据，或者直接协助调试现有代码。</p>
+        <ul>
+          <li>创建一个新的 Web 应用项目</li>
+          <li>修改现有项目的前后端逻辑</li>
+          <li>分析项目中的数据库与业务数据</li>
+          <li>调用运行中项目的 API 进行排查</li>
+        </ul>
+      </div>
     </div>
 
     <div
       v-for="(msg, i) in props.messages"
       :key="i"
-      :class="['message', msg.role]"
+      class="message-row"
+      :class="msg.role"
     >
-      <div class="message-role">
-        {{ msg.role === 'user' ? '🧑 你' : '🤖 AI' }}
-      </div>
+      <div v-if="msg.role === 'assistant'" class="message-avatar assistant-avatar">{{ getAvatarLabel(msg) }}</div>
 
-      <div v-if="msg.thinking" class="thinking-block">
-        <div class="thinking-header" @click="toggleThinking(i)">
-          <span class="thinking-icon">💭</span>
-          <span class="thinking-label">思考过程</span>
-          <span class="thinking-toggle">{{ expandedThinking[i] ? '▼' : '▶' }}</span>
+      <div class="message-column" :class="msg.role">
+        <div class="message-meta" :class="msg.role">
+          <span class="message-author">{{ getMessageAuthor(msg) }}</span>
+          <span v-if="msg.role === 'assistant'" class="message-model-chip">{{ getModelLabel(msg) }}</span>
         </div>
-        <div v-if="expandedThinking[i]" class="thinking-content" v-html="renderMarkdown(msg.thinking)"></div>
-      </div>
 
-      <div
-        v-if="props.isLoading && i === props.messages.length - 1 && msg.role === 'assistant'"
-        ref="streamingLineRef"
-        class="message-content streaming-line"
-      >
-        {{ collapseWhitespace(getMessageText(msg)) || 'AI 正在生成内容…' }}
-      </div>
+        <div class="message-flow" :class="msg.role">
+          <template v-for="(block, blockIndex) in getMessageBlocks(msg, i)" :key="block.id">
+            <div
+              v-if="block.kind === 'thinking' && hasRenderableBlock(block)"
+              class="message-event-card thinking-card"
+            >
+              <!-- <div class="message-event-header">
+                <span class="message-event-kicker">思考过程</span>
+                <span class="message-event-status">按顺序输出</span>
+              </div> -->
+              <div class="message-event-body markdown-body" v-html="renderMarkdown(block.text)"></div>
+            </div>
 
-      <div v-else class="message-content">
-        <template v-for="(part, partIndex) in getMessageParts(msg)" :key="`${i}-${partIndex}`">
-          <div
-            v-if="part.type === 'text' && part.text"
-            class="message-text markdown-body"
-            v-html="renderMarkdown(part.text)"
-          ></div>
+            <div
+              v-else-if="block.kind === 'tool'"
+              class="message-event-card tool-event-card"
+              :class="block.toolRun.status"
+            >
+              <div class="tool-run-header">
+                <div class="tool-run-name">{{ block.toolRun.name }}</div>
+                <span class="tool-run-status" :class="block.toolRun.status">{{ getToolRunStatusLabel(block.toolRun.status) }}</span>
+              </div>
 
-          <button
-            v-else-if="part.type === 'image_url' && part.image_url?.url"
-            class="message-image-card"
-            type="button"
-            @click="openLightbox(i, partIndex)"
-          >
-            <img :src="part.image_url.url" class="message-image" />
-            <span class="message-image-action">点击放大</span>
-          </button>
-        </template>
-      </div>
+              <div v-if="block.toolRun.progress.length > 0" class="tool-run-steps">
+                <div
+                  v-for="(step, stepIndex) in block.toolRun.progress"
+                  :key="`${block.toolRun.id}-${stepIndex}`"
+                  class="tool-run-step"
+                >
+                  <span class="tool-run-step-index">{{ stepIndex + 1 }}</span>
+                  <div class="tool-run-step-body">
+                    <div class="tool-run-step-stage">{{ step.stage }}</div>
+                    <div v-if="step.detail" class="tool-run-step-detail">{{ step.detail }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
 
-      <span v-if="props.isLoading && i === props.messages.length - 1 && msg.role === 'assistant'" class="cursor-blink">▍</span>
-    </div>
+            <div
+              v-else-if="block.kind === 'file_preview'"
+              class="message-event-card file-preview-panel"
+              :class="{ active: block.active }"
+            >
+              <div class="file-preview-header">
+                <span class="file-preview-label">正在生成</span>
+                <span class="file-preview-path">{{ block.filePath }}</span>
+                <span v-if="block.truncated" class="file-preview-truncated">预览已截断</span>
+              </div>
+              <pre ref="filePreviewRef" class="file-preview-body">{{ block.previewContent }}</pre>
+            </div>
 
-    <div v-if="props.filePreview.active" class="file-preview-panel" :class="{ active: props.filePreview.active }">
-      <div class="file-preview-header">
-        <span class="file-preview-label">正在生成</span>
-        <span class="file-preview-path">{{ props.filePreview.filePath }}</span>
-        <span v-if="props.filePreview.truncated" class="file-preview-truncated">预览已截断</span>
-      </div>
-      <pre ref="filePreviewRef" class="file-preview-body">{{ props.filePreview.content }}</pre>
-    </div>
+            <div
+              v-else-if="block.kind === 'content' && (hasRenderableBlock(block) || isStreamingContentBlock(i, msg, blockIndex, getMessageBlocks(msg, i)))"
+              class="message-bubble"
+              :class="[msg.role, { streaming: isStreamingContentBlock(i, msg, blockIndex, getMessageBlocks(msg, i)) }]"
+            >
+              <template v-if="hasRenderableBlock(block)">
+                <template v-for="(part, partIndex) in getBlockParts(block)" :key="`${block.id}-${partIndex}`">
+                  <div
+                    v-if="part.type === 'text' && part.text"
+                    class="message-text markdown-body"
+                    v-html="renderMarkdown(part.text)"
+                  ></div>
 
-    <div v-if="!props.filePreview.active && (props.toolStatus || props.progressSteps.length > 0)" class="tool-progress-panel">
-      <div v-if="props.toolStatus" class="tool-status-header">
-        <span class="tool-status-icon">🔧</span>
-        <span class="tool-status-text">{{ props.toolStatus }}</span>
-        <span class="tool-status-spinner"></span>
-      </div>
-      <div v-if="props.progressSteps.length > 0" class="progress-steps">
-        <div ref="progressLineRef" class="progress-step step-latest">
-          {{ latestProgressText }}
+                  <button
+                    v-else-if="part.type === 'image_url' && part.image_url?.url"
+                    class="message-image-card"
+                    type="button"
+                    @click="openLightbox(i, blockIndex, partIndex)"
+                  >
+                    <img :src="part.image_url.url" class="message-image" />
+                    <span class="message-image-action">点击查看大图</span>
+                  </button>
+                </template>
+              </template>
+              <div v-else class="message-placeholder">{{ msg.role === 'assistant' ? '正在流式输出…' : collapseWhitespace(getMessageText(msg)) }}</div>
+
+              <!-- <div v-if="isStreamingContentBlock(i, msg, blockIndex, getMessageBlocks(msg, i))" class="bubble-status">
+                <span class="bubble-status-dot"></span>
+                <span class="bubble-status-text">实时输出中</span>
+              </div> -->
+            </div>
+          </template>
         </div>
       </div>
+
+      <div v-if="msg.role === 'user'" class="message-avatar user-avatar">{{ getAvatarLabel(msg) }}</div>
     </div>
 
     <div v-if="lightboxImage" class="image-lightbox" @click.self="closeLightbox">
@@ -555,7 +720,7 @@ onUnmounted(() => {
         <div v-if="galleryImages.length > 1" class="image-lightbox-strip">
           <button
             v-for="(image, imageIndex) in galleryImages"
-            :key="`${image.messageIndex}-${image.partIndex}-${imageIndex}`"
+            :key="`${image.messageIndex}-${image.blockIndex}-${image.partIndex}-${imageIndex}`"
             class="image-lightbox-thumb"
             :class="{ active: imageIndex === lightboxIndex }"
             type="button"
@@ -573,162 +738,364 @@ onUnmounted(() => {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 16px 24px;
+  padding: 24px 28px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .empty-state {
-  color: var(--app-text-muted);
-  padding: 40px 0;
-  text-align: center;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 0;
 }
 
-.empty-state ul {
-  list-style: none;
-  padding: 0;
-}
-
-.empty-state li {
-  padding: 4px 0;
-}
-
-.empty-state li::before {
-  content: "• ";
-  color: var(--app-accent);
-}
-
-.message {
-  margin-bottom: 16px;
-  padding: 12px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--app-border);
+.empty-state-card {
+  width: min(560px, 100%);
+  padding: 28px 30px;
+  border-radius: 24px;
+  border: 1px solid var(--app-border-strong);
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  box-shadow: var(--app-shadow);
   color: var(--app-text);
 }
 
-.message.user {
-  background: var(--app-accent-soft);
-  border-color: var(--app-accent-glow);
-  margin-left: 40px;
+.empty-state-icon {
+  width: 48px;
+  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--app-accent), var(--app-accent-strong));
+  color: #ffffff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
 }
 
-.message.assistant {
-  background: var(--app-panel-subtle);
-  margin-right: 40px;
+.empty-state-card h3 {
+  margin: 18px 0 8px;
+  color: var(--app-text-strong);
 }
 
-.message-role {
-  font-size: 0.75em;
+.empty-state-card p {
+  margin: 0;
   color: var(--app-text-muted);
-  margin-bottom: 4px;
+  line-height: 1.7;
 }
 
-.message-content {
-  word-break: break-word;
-  line-height: 1.6;
+.empty-state-card ul {
+  margin: 18px 0 0;
+  padding-left: 1.25rem;
+  color: var(--app-text-soft);
+  line-height: 1.8;
+}
+
+.message-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+}
+
+.message-row.user {
+  justify-content: flex-end;
+}
+
+.message-row.assistant {
+  justify-content: flex-start;
+}
+
+.message-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.12);
+}
+
+.assistant-avatar {
+  background: linear-gradient(135deg, var(--app-accent), #7aa7ff);
+  color: #ffffff;
+}
+
+.user-avatar {
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  color: #ffffff;
+}
+
+.message-column {
+  width: min(820px, calc(100% - 54px));
+  max-width: calc(100% - 54px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.message-column.user {
+  align-items: flex-end;
+}
+
+.message-column.assistant {
+  align-items: flex-start;
+}
+
+.message-flow {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.message-flow.user {
+  align-items: flex-end;
+}
+
+.message-flow.assistant {
+  align-items: flex-start;
+}
+
+.message-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+}
+
+.message-meta.user {
+  justify-content: flex-end;
+}
+
+.message-author {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.message-model-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-strong);
+  color: var(--app-text-muted);
+  font-size: 0.76rem;
+}
+
+.message-event-card {
+  width: min(100%, 760px);
+  border: 1px solid var(--app-border-strong);
+  border-radius: 18px;
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
+  overflow: hidden;
+}
+
+.message-event-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-panel-muted);
+}
+
+.message-event-kicker {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.message-event-status {
+  font-size: 0.74rem;
+  color: var(--app-text-muted);
+}
+
+.message-event-body {
+  padding: 14px 16px 16px;
+  color: var(--app-text-muted);
+  line-height: 1.68;
+}
+
+.tool-event-card.running {
+  border-color: var(--app-accent-glow);
+}
+
+.tool-event-card {
+  padding: 14px 16px;
+}
+
+.tool-event-card.completed {
+  border-color: rgba(34, 197, 94, 0.22);
+}
+
+.tool-event-card.failed {
+  border-color: rgba(239, 68, 68, 0.22);
+}
+
+.message-bubble {
+  width: fit-content;
+  max-width: 100%;
+  padding: 16px 18px;
+  border-radius: 22px;
+  border: 1px solid var(--app-border-strong);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.08);
+}
+
+.message-bubble.assistant {
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  color: var(--app-text);
+  border-top-left-radius: 10px;
+}
+
+.message-bubble.user {
+  background: linear-gradient(180deg, var(--app-accent-soft), rgba(91, 140, 255, 0.12));
+  color: var(--app-text-strong);
+  border-color: var(--app-accent-glow);
+  border-top-right-radius: 10px;
+}
+
+.message-bubble.streaming {
+  border-color: var(--app-accent-glow);
+  box-shadow: 0 18px 40px rgba(91, 140, 255, 0.12);
+}
+
+.message-placeholder {
+  color: var(--app-text-muted);
+  min-width: 160px;
+}
+
+.bubble-status {
+  margin-top: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--app-text-faint);
+  font-size: 0.78rem;
+}
+
+.bubble-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--app-accent);
+  box-shadow: 0 0 0 0 rgba(91, 140, 255, 0.4);
+  animation: pulseDot 1.4s ease infinite;
+}
+
+@keyframes pulseDot {
+  0% { box-shadow: 0 0 0 0 rgba(91, 140, 255, 0.38); }
+  70% { box-shadow: 0 0 0 10px rgba(91, 140, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(91, 140, 255, 0); }
 }
 
 .message-text + .message-text {
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
 .message-text + .message-image-card,
 .message-image-card + .message-text,
 .message-image-card + .message-image-card {
-  margin-top: 10px;
+  margin-top: 12px;
 }
 
-.streaming-line {
-  overflow-x: auto;
-  overflow-y: hidden;
-  white-space: nowrap;
-  scrollbar-width: none;
-  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-}
+.message-bubble :deep(p) { margin: 0.45em 0; }
+.message-bubble :deep(p:first-child) { margin-top: 0; }
+.message-bubble :deep(p:last-child) { margin-bottom: 0; }
 
-.streaming-line::-webkit-scrollbar {
-  display: none;
-}
-
-/* Markdown content styles */
-.message-content :deep(p) { margin: 0.4em 0; }
-.message-content :deep(p:first-child) { margin-top: 0; }
-.message-content :deep(p:last-child) { margin-bottom: 0; }
-
-.message-content :deep(pre) {
+.message-bubble :deep(pre) {
   background: var(--app-panel-strong);
   border: 1px solid var(--app-border-strong);
-  border-radius: 8px;
-  padding: 12px 16px;
+  border-radius: 12px;
+  padding: 12px 14px;
   overflow-x: auto;
   font-size: 0.85em;
-  line-height: 1.5;
-  margin: 8px 0;
+  line-height: 1.55;
+  margin: 10px 0;
 }
 
-.message-content :deep(code) {
+.message-bubble :deep(code) {
   font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   font-size: 0.9em;
 }
 
-.message-content :deep(:not(pre) > code) {
+.message-bubble :deep(:not(pre) > code) {
   background: var(--app-panel-muted);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: 6px;
   color: var(--app-accent-strong);
 }
 
-.message-content :deep(ul),
-.message-content :deep(ol) {
-  padding-left: 1.5em;
-  margin: 0.4em 0;
+.message-bubble :deep(ul),
+.message-bubble :deep(ol) {
+  padding-left: 1.45em;
+  margin: 0.45em 0;
 }
 
-.message-content :deep(li) { margin: 0.2em 0; }
+.message-bubble :deep(li) { margin: 0.24em 0; }
 
-.message-content :deep(h1),
-.message-content :deep(h2),
-.message-content :deep(h3),
-.message-content :deep(h4) {
-  margin: 0.6em 0 0.3em;
-  line-height: 1.3;
+.message-bubble :deep(h1),
+.message-bubble :deep(h2),
+.message-bubble :deep(h3),
+.message-bubble :deep(h4) {
+  margin: 0.65em 0 0.32em;
+  line-height: 1.35;
 }
 
-.message-content :deep(h1) { font-size: 1.3em; }
-.message-content :deep(h2) { font-size: 1.15em; }
-.message-content :deep(h3) { font-size: 1.05em; }
+.message-bubble :deep(h1) { font-size: 1.22em; }
+.message-bubble :deep(h2) { font-size: 1.12em; }
+.message-bubble :deep(h3) { font-size: 1.02em; }
 
-.message-content :deep(blockquote) {
+.message-bubble :deep(blockquote) {
   border-left: 3px solid var(--app-accent);
   padding-left: 12px;
   color: var(--app-text-muted);
-  margin: 0.5em 0;
+  margin: 0.55em 0;
 }
 
-.message-content :deep(table) {
+.message-bubble :deep(table) {
   border-collapse: collapse;
   width: 100%;
-  margin: 0.5em 0;
+  margin: 0.55em 0;
   font-size: 0.9em;
 }
 
-.message-content :deep(th),
-.message-content :deep(td) {
+.message-bubble :deep(th),
+.message-bubble :deep(td) {
   border: 1px solid var(--app-border-strong);
   padding: 6px 10px;
   text-align: left;
 }
 
-.message-content :deep(th) {
+.message-bubble :deep(th) {
   background: var(--app-panel-muted);
   font-weight: 600;
 }
 
-.message-content :deep(a) { color: var(--app-accent-strong); text-decoration: none; }
-.message-content :deep(a:hover) { text-decoration: underline; }
+.message-bubble :deep(a) {
+  color: var(--app-accent-strong);
+  text-decoration: none;
+}
 
-.message-content :deep(hr) {
+.message-bubble :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.message-bubble :deep(hr) {
   border: none;
   border-top: 1px solid var(--app-border-strong);
-  margin: 0.8em 0;
+  margin: 0.9em 0;
 }
 
 .message-image-card {
@@ -736,11 +1103,11 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 8px;
   align-items: flex-start;
-  max-width: min(320px, 100%);
+  max-width: min(340px, 100%);
   padding: 8px;
   background: var(--app-panel);
   border: 1px solid var(--app-border-strong);
-  border-radius: 14px;
+  border-radius: 16px;
   cursor: zoom-in;
   transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
@@ -748,144 +1115,115 @@ onUnmounted(() => {
 .message-image-card:hover {
   transform: translateY(-1px);
   border-color: var(--app-accent-glow);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.12);
 }
 
 .message-image {
   display: block;
   width: 100%;
-  max-width: 304px;
-  max-height: 304px;
+  max-width: 324px;
+  max-height: 324px;
   object-fit: cover;
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid var(--app-border-strong);
   background: var(--app-panel-strong);
 }
 
 .message-image-action {
-  font-size: 0.78em;
+  font-size: 0.78rem;
   color: var(--app-text-muted);
 }
 
-/* Thinking block */
-.thinking-block {
-  margin-bottom: 8px;
+.tool-run-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tool-run-name {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.tool-run-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.74rem;
   border: 1px solid var(--app-border-strong);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--app-panel-strong);
-}
-
-.thinking-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  cursor: pointer;
-  font-size: 0.82em;
-  color: var(--app-accent);
-  user-select: none;
-}
-
-.thinking-header:hover { background: var(--app-panel-muted); }
-.thinking-icon { font-size: 1em; }
-.thinking-label { flex: 1; font-weight: 500; }
-.thinking-toggle { font-size: 0.7em; color: var(--app-text-faint); }
-
-.thinking-content {
-  padding: 8px 12px;
-  border-top: 1px solid var(--app-border);
-  font-size: 0.82em;
   color: var(--app-text-muted);
-  line-height: 1.5;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-.thinking-content :deep(p) { margin: 0.3em 0; }
-
-.cursor-blink {
-  animation: blink 0.8s infinite;
-}
-
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-
-/* Tool progress panel */
-.tool-progress-panel {
-  margin: 8px 0;
   background: var(--app-panel-strong);
-  border: 1px solid var(--app-border);
-  border-radius: 10px;
-  overflow: hidden;
-  animation: fadeIn 0.2s ease;
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+.tool-run-status.running {
+  border-color: var(--app-accent-glow);
+  color: var(--app-accent-strong);
+  background: var(--app-accent-soft);
 }
 
-.tool-status-header {
+.tool-run-status.completed {
+  border-color: rgba(34, 197, 94, 0.26);
+  color: #15803d;
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.tool-run-status.failed {
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #dc2626;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.tool-run-steps {
+  margin-top: 12px;
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tool-run-step {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.tool-run-step-index {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  font-size: 0.82em;
-  color: var(--app-accent);
-  border-bottom: 1px solid var(--app-border);
-}
-
-.tool-status-icon { flex-shrink: 0; }
-.tool-status-text { flex: 1; }
-
-.tool-status-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--app-border-strong);
-  border-top-color: var(--app-accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  justify-content: center;
   flex-shrink: 0;
+  background: var(--app-panel-strong);
+  border: 1px solid var(--app-border-strong);
+  color: var(--app-text-muted);
+  font-size: 0.72rem;
 }
 
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+.tool-run-step-body {
+  min-width: 0;
 }
 
-.progress-steps { padding: 6px 0; }
-
-.progress-step {
-  display: block;
-  padding: 3px 14px;
-  font-size: 0.78em;
-  color: var(--app-text-faint);
-  animation: stepSlideIn 0.25s ease;
-  overflow-x: auto;
-  overflow-y: hidden;
-  white-space: nowrap;
-  scrollbar-width: none;
+.tool-run-step-stage {
+  font-size: 0.82rem;
+  color: var(--app-text);
 }
 
-.progress-step::-webkit-scrollbar { display: none; }
-
-.progress-step.step-latest { color: var(--app-text-muted); }
-
-@keyframes stepSlideIn {
-  from { opacity: 0; transform: translateX(-8px); }
-  to { opacity: 1; transform: translateX(0); }
+.tool-run-step-detail {
+  margin-top: 3px;
+  font-size: 0.76rem;
+  color: var(--app-text-muted);
+  word-break: break-word;
 }
 
 .file-preview-panel {
-  margin: 8px 0;
   border: 1px solid var(--app-border-strong);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--app-panel);
   overflow: hidden;
-  animation: fadeIn 0.2s ease;
 }
 
 .file-preview-panel.active {
@@ -899,7 +1237,7 @@ onUnmounted(() => {
   padding: 10px 14px;
   border-bottom: 1px solid var(--app-border-strong);
   background: var(--app-panel-muted);
-  font-size: 0.78em;
+  font-size: 0.78rem;
   color: var(--app-text-soft);
 }
 
@@ -928,9 +1266,9 @@ onUnmounted(() => {
   background: var(--app-panel-strong);
   color: var(--app-text-soft);
   font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-  font-size: 0.83em;
+  font-size: 0.83rem;
   line-height: 1.45;
-  max-height: calc(1.45em * 5 + 24px);
+  max-height: calc(1.45em * 6 + 28px);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
@@ -978,13 +1316,13 @@ onUnmounted(() => {
 }
 
 .image-lightbox-title {
-  font-size: 0.95em;
+  font-size: 0.95rem;
   color: var(--app-text-strong);
   font-weight: 600;
 }
 
 .image-lightbox-counter {
-  font-size: 0.82em;
+  font-size: 0.82rem;
   color: var(--app-text-muted);
 }
 
@@ -1002,7 +1340,7 @@ onUnmounted(() => {
   border: 1px solid var(--app-border-strong);
   background: var(--app-panel-strong);
   color: var(--app-text-muted);
-  font-size: 0.82em;
+  font-size: 0.82rem;
   text-align: center;
 }
 
@@ -1125,5 +1463,25 @@ onUnmounted(() => {
   height: 100%;
   object-fit: cover;
   border-radius: 8px;
+}
+
+@media (max-width: 860px) {
+  .chat-messages {
+    padding: 20px 16px 16px;
+  }
+
+  .message-column {
+    width: min(100%, calc(100% - 50px));
+    max-width: calc(100% - 50px);
+  }
+
+  .message-bubble {
+    width: 100%;
+  }
+
+  .image-lightbox-dialog {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
 }
 </style>

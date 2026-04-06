@@ -25,11 +25,37 @@ interface ConversationSummary {
   createdAt: string
   updatedAt: string
   providerId?: string
+  selectedModel?: string
   targetProjectId?: string
 }
 
+interface ToolProgressEntry {
+  stage: string
+  detail?: string
+}
+
+interface ToolRun {
+  id: string
+  name: string
+  status: 'running' | 'completed' | 'failed'
+  progress: ToolProgressEntry[]
+}
+
+type ChatMessageBlock =
+  | { id: string; kind: 'content'; content: MessageContent }
+  | { id: string; kind: 'thinking'; text: string }
+  | { id: string; kind: 'tool'; toolRun: ToolRun }
+  | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+
 interface ConversationData extends ConversationSummary {
-  messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>; thinking?: string }>
+  messages: Array<{
+    role: string
+    content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+    thinking?: string
+    modelLabel?: string
+    toolRuns?: ToolRun[]
+    blocks?: ChatMessageBlock[]
+  }>
 }
 
 interface AIProviderConfig {
@@ -76,7 +102,7 @@ interface SkillInfo {
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
   // Conversations

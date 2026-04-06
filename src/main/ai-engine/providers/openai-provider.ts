@@ -21,6 +21,7 @@ export interface ChatMessage {
 
 export interface ToolCall {
   id: string
+  type: 'function'
   function: {
     name: string
     arguments: string
@@ -67,6 +68,7 @@ interface StreamDelta {
   tool_calls?: Array<{
     index: number
     id?: string
+    type?: string
     function?: { name?: string; arguments?: string }
   }>
 }
@@ -103,7 +105,7 @@ export class OpenAIProvider {
   private buildRequestBody (messages: ChatMessage[], tools: ToolDefinition[], stream: boolean): ChatCompletionBody {
     const body: ChatCompletionBody = {
       model: this.model,
-      messages,
+      messages: this.normalizeOutgoingMessages(messages),
       temperature: 0.7,
       stream
     }
@@ -187,10 +189,38 @@ export class OpenAIProvider {
     return {
       role: message.role || 'assistant',
       content: this.normalizeMessageContent(message),
-      tool_calls: message.tool_calls,
+      tool_calls: this.normalizeToolCalls(message.tool_calls),
       tool_call_id: message.tool_call_id,
       reasoning_content: message.reasoning_content
     }
+  }
+
+  private normalizeToolCalls (toolCalls?: ToolCall[]): ToolCall[] | undefined {
+    if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+      return undefined
+    }
+
+    return toolCalls.map(toolCall => ({
+      id: toolCall.id || '',
+      type: 'function',
+      function: {
+        name: toolCall.function?.name || '',
+        arguments: toolCall.function?.arguments || ''
+      }
+    }))
+  }
+
+  private normalizeOutgoingMessages (messages: ChatMessage[]): ChatMessage[] {
+    return messages.map(message => {
+      if (!message.tool_calls || message.tool_calls.length === 0) {
+        return message
+      }
+
+      return {
+        ...message,
+        tool_calls: this.normalizeToolCalls(message.tool_calls)
+      }
+    })
   }
 
   private normalizeBaseUrl (url: string): string {
@@ -295,7 +325,7 @@ export class OpenAIProvider {
     let buffer = ''
     let fullContent = ''
     let fullReasoning = ''
-    const toolCallsMap = new Map<number, { id: string; function: { name: string; arguments: string } }>()
+    const toolCallsMap = new Map<number, ToolCall>()
 
     try {
       while (true) {
@@ -338,6 +368,7 @@ export class OpenAIProvider {
               if (!toolCallsMap.has(tc.index)) {
                 toolCallsMap.set(tc.index, {
                   id: tc.id || '',
+                  type: 'function',
                   function: { name: '', arguments: '' }
                 })
               }

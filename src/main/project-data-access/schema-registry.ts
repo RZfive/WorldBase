@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
+import { normalizeProjectMeta } from '../project-fs/project-meta.js'
 
 interface SchemaColumn {
   name: string
@@ -39,7 +40,7 @@ export class SchemaRegistry {
       return null
     }
 
-    const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as Record<string, unknown>
+    const meta = normalizeProjectMeta(JSON.parse(await fs.readFile(metaPath, 'utf-8')))
     const schema = (meta.dataSchema as DataSchema) || null
 
     if (schema) {

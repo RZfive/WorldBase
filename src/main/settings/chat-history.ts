@@ -3,9 +3,31 @@ import path from 'node:path'
 
 export type ChatMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 
+export interface ToolProgressEntry {
+  stage: string
+  detail?: string
+}
+
+export interface ToolRun {
+  id: string
+  name: string
+  status: 'running' | 'completed' | 'failed'
+  progress: ToolProgressEntry[]
+}
+
+export type ChatMessageBlock =
+  | { id: string; kind: 'content'; content: ChatMessageContent }
+  | { id: string; kind: 'thinking'; text: string }
+  | { id: string; kind: 'tool'; toolRun: ToolRun }
+  | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+
 export interface ChatMessage {
   role: string
   content: ChatMessageContent
+  thinking?: string
+  modelLabel?: string
+  toolRuns?: ToolRun[]
+  blocks?: ChatMessageBlock[]
 }
 
 export interface Conversation {
@@ -16,6 +38,8 @@ export interface Conversation {
   updatedAt: string
   /** Provider ID used for this conversation */
   providerId?: string
+  /** Model selected for this conversation */
+  selectedModel?: string
   /** Existing project locked to this conversation for optimization/editing. */
   targetProjectId?: string
 }
@@ -57,6 +81,7 @@ export class ChatHistoryStore {
           createdAt: data.createdAt,
           updatedAt: data.updatedAt,
           providerId: data.providerId,
+          selectedModel: data.selectedModel,
           targetProjectId: data.targetProjectId
         })
       } catch {
