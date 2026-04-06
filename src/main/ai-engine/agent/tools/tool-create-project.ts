@@ -6,6 +6,7 @@ import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback, SessionState } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { streamFilePreview } from './file-preview-progress.js'
+import { normalizeProjectMeta } from '../../../project-fs/project-meta.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -19,7 +20,7 @@ interface CreateProjectArgs {
   name: string
   type: string
   files: Record<string, string>
-  meta?: Record<string, unknown>
+  meta?: unknown
 }
 
 export interface Tool {
@@ -61,6 +62,7 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
     },
     handler: async (args, onProgress) => {
       const { name, type, files, meta = {} } = args as unknown as CreateProjectArgs
+      const normalizedMeta = normalizeProjectMeta(meta)
       const session = getSessionState?.()
 
       // Prevent creating a second project in the same conversation
@@ -92,14 +94,14 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
         '_' + Date.now().toString(36)
 
       // Auto-generate runtime configuration if not provided
-      const runtime = (meta.runtime as Record<string, unknown>) || {}
+      const runtime = (normalizedMeta.runtime as Record<string, unknown>) || {}
       if (!runtime.backend) {
         // Determine the start command based on project type and files
         let command = 'node server.js'
         let cwd: string | undefined
 
         // Detect Next.js projects — use standalone mode command
-        const isNextProject = !!files['next.config.js'] || (meta.framework === 'nextjs')
+        const isNextProject = !!files['next.config.js'] || (normalizedMeta.framework === 'nextjs')
         if (isNextProject) {
           command = 'node .next/standalone/server.js'
         } else if (files['package.json']) {
@@ -147,16 +149,16 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
       }
 
       // Auto-detect framework from files
-      const detectedFramework = files['next.config.js'] ? 'nextjs' : (meta.framework as string | undefined)
+      const detectedFramework = files['next.config.js'] ? 'nextjs' : (normalizedMeta.framework as string | undefined)
 
-      const fullMeta = {
+      const fullMeta = normalizeProjectMeta({
         name,
         type,
         createdAt: new Date().toISOString(),
         ...(detectedFramework ? { framework: detectedFramework } : {}),
-        ...meta,
+        ...normalizedMeta,
         runtime
-      }
+      })
 
       for (const [filePath, content] of Object.entries(files)) {
         await streamFilePreview(filePath, content, onProgress)

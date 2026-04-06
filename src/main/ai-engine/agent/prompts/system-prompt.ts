@@ -146,9 +146,16 @@ module.exports = nextConfig
 
 ### lib/db.ts 标准模板
 \`\`\`typescript
-const BASE_URL = process.env.THE_WORLD_PROJECT_DATA_BASE_URL || ''
+const BASE_URL = process.env.THE_WORLD_PROJECT_DATA_BASE_URL || process.env.NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL || ''
+
+function ensureBaseUrl() {
+  if (!BASE_URL) {
+    throw new Error('Missing The World project data base URL. Use the host injected env vars instead of hardcoding your own database path.')
+  }
+}
 
 export async function queryRecords(table: string, filters?: Record<string, unknown>) {
+  ensureBaseUrl()
   const res = await fetch(\`\${BASE_URL}/records/query\`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -160,6 +167,7 @@ export async function queryRecords(table: string, filters?: Record<string, unkno
 }
 
 export async function saveRecord(table: string, record: Record<string, unknown>) {
+  ensureBaseUrl()
   const res = await fetch(\`\${BASE_URL}/records/save\`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -169,11 +177,13 @@ export async function saveRecord(table: string, record: Record<string, unknown>)
 }
 
 export async function getSchema() {
+  ensureBaseUrl()
   const res = await fetch(\`\${BASE_URL}/schema\`, { cache: 'no-store' })
   return res.json()
 }
 
 export async function listTables() {
+  ensureBaseUrl()
   const res = await fetch(\`\${BASE_URL}/tables\`, { cache: 'no-store' })
   return res.json()
 }
@@ -181,9 +191,11 @@ export async function listTables() {
 
 ### 数据库使用规范
 **严禁**在生成的项目中自行安装、直连或自行初始化 SQLite。所有正式业务数据都必须走 The World 框架提供的标准 SQLite 数据接口：
+- create_project 的 meta 参数必须传原生对象，禁止把整个 meta JSON 再包成字符串
 - 在 meta.dataSchema 中声明 \`database: "sqlite"\` 和 \`dbPath\`（例如 \`data/app.sqlite\`）
-- 在 \`meta.dataSchema.tables\` 中完整声明表结构，让宿主自动初始化 SQLite 表
+- 在 \`meta.dataSchema.tables\` 中用数组完整声明表结构，例如 \`[{ name, columns: [{ name, type, primaryKey, notNull, autoIncrement, defaultSql, defaultValue }] }]\`，不要传对象映射，也不要使用模糊的 \`default\` 字段
 - 生成的项目运行时通过环境变量 \`THE_WORLD_PROJECT_ID\`、\`THE_WORLD_LAN_BASE_URL\`、\`THE_WORLD_RESOURCE_PROXY_BASE_URL\`、\`THE_WORLD_PROJECT_DATA_BASE_URL\` 发现宿主接口
+- 浏览器端如果确实要直接访问宿主数据库接口，使用宿主同时注入的 \`NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL\`，不要把基座地址写死在源码里
 - 生成的项目后端统一调用宿主接口：
   - \`POST {THE_WORLD_PROJECT_DATA_BASE_URL}/records/save\`
   - \`POST {THE_WORLD_PROJECT_DATA_BASE_URL}/records/query\`

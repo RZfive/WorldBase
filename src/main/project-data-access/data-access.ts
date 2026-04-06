@@ -5,6 +5,7 @@ import { BridgeAdapter, type DatabaseDelegate } from './adapters/bridge-adapter.
 import { JsonAdapter } from './adapters/json-adapter.js'
 import { SchemaRegistry } from './schema-registry.js'
 import { DataAnalyzer } from './data-analyzer.js'
+import { normalizeProjectMeta } from '../project-fs/project-meta.js'
 
 interface DataConfig {
   database: string
@@ -156,7 +157,12 @@ export class ProjectDataAccess {
     if (!existsSync(metaPath)) {
       throw new Error(`Project meta not found: ${projectId}`)
     }
-    const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as Record<string, unknown>
+    const rawMetaText = await fs.readFile(metaPath, 'utf-8')
+    const rawMeta = JSON.parse(rawMetaText) as Record<string, unknown>
+    const meta = normalizeProjectMeta(rawMeta)
+    if (JSON.stringify(rawMeta) !== JSON.stringify(meta)) {
+      await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8')
+    }
     return (meta.dataSchema as DataConfig) || null
   }
 

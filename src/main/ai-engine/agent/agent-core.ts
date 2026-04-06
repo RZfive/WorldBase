@@ -125,6 +125,205 @@ export class AgentCore {
     return assistantContent || ''
   }
 
+  private _parseToolArguments (toolName: string, rawArguments: string): Record<string, unknown> {
+    const normalized = rawArguments.trim()
+    if (!normalized) {
+      return {}
+    }
+
+    const tried = new Set<string>()
+    const candidates = this._buildToolArgumentCandidates(normalized)
+
+    for (const candidate of candidates) {
+      const value = candidate.trim()
+      if (!value || tried.has(value)) {
+        continue
+      }
+      tried.add(value)
+
+      const parsed = this._tryParseToolArgumentCandidate(value)
+      if (parsed) {
+        if (value !== normalized) {
+          console.warn(`[Agent] Repaired malformed arguments for tool ${toolName}`)
+        }
+        return parsed
+      }
+    }
+
+    const snippet = normalized.length > 200 ? `${normalized.slice(0, 200)}...` : normalized
+    throw new Error(`Invalid JSON arguments for tool ${toolName}: ${snippet}`)
+  }
+
+  private _tryParseToolArgumentCandidate (candidate: string): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(candidate) as unknown
+      return this._normalizeParsedToolArguments(parsed)
+    } catch {
+      return null
+    }
+  }
+
+  private _normalizeParsedToolArguments (parsed: unknown): Record<string, unknown> | null {
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+
+    if (typeof parsed === 'string') {
+      const nested = parsed.trim()
+      if (!nested) {
+        return {}
+      }
+      if (nested.startsWith('{') || nested.startsWith('[')) {
+        return this._tryParseToolArgumentCandidate(nested)
+      }
+    }
+
+    return null
+  }
+
+  private _buildToolArgumentCandidates (rawArguments: string): string[] {
+    const candidates = [rawArguments]
+    const unfenced = rawArguments
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim()
+
+    if (unfenced && unfenced !== rawArguments) {
+      candidates.push(unfenced)
+    }
+
+    const extracted = this._extractFirstBalancedJson(unfenced || rawArguments)
+    if (extracted) {
+      candidates.push(extracted)
+    }
+
+    const segments = this._splitBalancedJsonSegments(unfenced || rawArguments)
+    if (segments.length > 1) {
+      const merged = this._mergeToolArgumentSegments(segments)
+      if (merged) {
+        candidates.push(JSON.stringify(merged))
+      }
+    }
+
+    return candidates
+  }
+
+  private _extractFirstBalancedJson (raw: string): string | null {
+    const firstObject = raw.indexOf('{')
+    const firstArray = raw.indexOf('[')
+    const startIndexes = [firstObject, firstArray].filter(index => index >= 0)
+    if (startIndexes.length === 0) {
+      return null
+    }
+
+    const start = Math.min(...startIndexes)
+    let depth = 0
+    let inString = false
+    let escaping = false
+
+    for (let index = start; index < raw.length; index++) {
+      const ch = raw[index]
+
+      if (inString) {
+        if (escaping) {
+          escaping = false
+          continue
+        }
+        if (ch === '\\') {
+          escaping = true
+          continue
+        }
+        if (ch === '"') {
+          inString = false
+        }
+        continue
+      }
+
+      if (ch === '"') {
+        inString = true
+        continue
+      }
+
+      if (ch === '{' || ch === '[') {
+        depth++
+        continue
+      }
+
+      if (ch === '}' || ch === ']') {
+        depth--
+        if (depth === 0) {
+          return raw.slice(start, index + 1)
+        }
+      }
+    }
+
+    return null
+  }
+
+  private _splitBalancedJsonSegments (raw: string): string[] {
+    const segments: string[] = []
+    let segmentStart = -1
+    let depth = 0
+    let inString = false
+    let escaping = false
+
+    for (let index = 0; index < raw.length; index++) {
+      const ch = raw[index]
+
+      if (inString) {
+        if (escaping) {
+          escaping = false
+          continue
+        }
+        if (ch === '\\') {
+          escaping = true
+          continue
+        }
+        if (ch === '"') {
+          inString = false
+        }
+        continue
+      }
+
+      if (ch === '"') {
+        inString = true
+        continue
+      }
+
+      if (ch === '{' || ch === '[') {
+        if (depth === 0) {
+          segmentStart = index
+        }
+        depth++
+        continue
+      }
+
+      if (ch === '}' || ch === ']') {
+        depth--
+        if (depth === 0 && segmentStart >= 0) {
+          segments.push(raw.slice(segmentStart, index + 1))
+          segmentStart = -1
+        }
+      }
+    }
+
+    return segments
+  }
+
+  private _mergeToolArgumentSegments (segments: string[]): Record<string, unknown> | null {
+    const merged: Record<string, unknown> = {}
+
+    for (const segment of segments) {
+      const parsed = this._tryParseToolArgumentCandidate(segment)
+      if (!parsed) {
+        return null
+      }
+      Object.assign(merged, parsed)
+    }
+
+    return Object.keys(merged).length > 0 ? merged : null
+  }
+
   async run (userMessages: ChatMessage[]): Promise<ChatMessage> {
     this._resetSessionState()
     const systemMessage: ChatMessage = {
@@ -154,10 +353,10 @@ export class AgentCore {
 
       for (const toolCall of response.tool_calls) {
         const toolName = toolCall.function.name
-        const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
 
         let result: unknown
         try {
+          const toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
           result = await this._executeTool(toolName, toolArgs)
         } catch (err) {
           result = { error: (err as Error).message }
@@ -267,12 +466,12 @@ export class AgentCore {
 
       for (const toolCall of assistantMessage.tool_calls) {
         const toolName = toolCall.function.name
-        const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
 
         yield { type: 'tool_start', name: toolName }
 
         let result: unknown
         try {
+          const toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
           result = await this._executeTool(toolName, toolArgs, onProgress)
         } catch (err) {
           result = { error: (err as Error).message }
