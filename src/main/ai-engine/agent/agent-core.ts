@@ -34,6 +34,17 @@ interface RegisteredTool {
  * AgentCore — AI Agent 核心循环
  * 实现 思考 → 行动 → 观察 的循环
  */
+/**
+ * Per-session state shared between the agent core and tool handlers.
+ * Reset at the start of each run/runStream call.
+ */
+export interface SessionState {
+  /** The project ID created during this session (prevents duplicates). */
+  createdProjectId: string | null
+  /** An existing project ID the user wants to edit/optimize (set via chat context). */
+  targetProjectId: string | null
+}
+
 export class AgentCore {
   // Keep summaries short enough to fit comfortably back into the prompt.
   private static readonly CONTEXT_SUMMARY_PREFIX = '[CONTEXT_SUMMARY]'
@@ -48,6 +59,8 @@ export class AgentCore {
   private maxIterations = 16
   private maxStreamRetries = 3
   private activeSkillContents: string[] = []
+  /** Shared mutable state accessible by tool handlers within a session. */
+  public sessionState: SessionState = { createdProjectId: null, targetProjectId: null }
 
   constructor (provider: OpenAIProvider, services: Record<string, unknown>) {
     this.provider = provider
@@ -76,7 +89,44 @@ export class AgentCore {
   /**
    * Run the agent loop with the given messages (non-streaming, kept for compat).
    */
+  /** Set a target project ID for the current session (edit/optimize mode). */
+  setTargetProjectId (projectId: string | null): void {
+    this.sessionState.targetProjectId = projectId
+  }
+
+  private _resetSessionState (): void {
+    this.sessionState = {
+      createdProjectId: null,
+      targetProjectId: this.sessionState.targetProjectId
+    }
+  }
+
+  private _resolveFinalAssistantContent (assistantContent: ChatMessage['content'], renderedContent: string): ChatMessage['content'] {
+    if (Array.isArray(assistantContent)) {
+      if (!renderedContent) {
+        return assistantContent
+      }
+
+      const imageParts = assistantContent.filter(part => part.type === 'image_url')
+      if (imageParts.length === 0) {
+        return renderedContent
+      }
+
+      return [
+        { type: 'text', text: renderedContent },
+        ...imageParts
+      ]
+    }
+
+    if (renderedContent) {
+      return renderedContent
+    }
+
+    return assistantContent || ''
+  }
+
   async run (userMessages: ChatMessage[]): Promise<ChatMessage> {
+    this._resetSessionState()
     const systemMessage: ChatMessage = {
       role: 'system',
       content: getSystemPrompt(this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined)
@@ -132,6 +182,7 @@ export class AgentCore {
    * Yields tokens in real-time and tool execution events.
    */
   async * runStream (userMessages: ChatMessage[], onProgress?: ProgressCallback): AsyncGenerator<StreamEvent> {
+    this._resetSessionState()
     const systemMessage: ChatMessage = {
       role: 'system',
       content: getSystemPrompt(this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined)
@@ -202,7 +253,10 @@ export class AgentCore {
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
         yield {
           type: 'done',
-          message: { role: 'assistant', content: renderedContent },
+          message: {
+            role: 'assistant',
+            content: this._resolveFinalAssistantContent(assistantMessage.content, renderedContent)
+          },
           thinking: fullThinking || undefined
         }
         return

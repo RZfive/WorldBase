@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 interface ChatMessage {
   role: string
-  content: string
+  content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 }
 
 interface AISettings {
@@ -30,6 +30,7 @@ interface ConversationSummary {
   createdAt: string
   updatedAt: string
   providerId?: string
+  targetProjectId?: string
 }
 
 interface Conversation extends ConversationSummary {
@@ -50,6 +51,7 @@ interface AIProvider {
 interface AIProvidersConfig {
   providers: AIProvider[]
   activeProviderId: string
+  enabledProviderIds: string[]
 }
 
 interface LaunchpadFolderLayout {
@@ -63,6 +65,8 @@ interface LaunchpadLayout {
   topLevelOrder: string[]
 }
 
+type ThemePreference = 'system' | 'light' | 'dark'
+
 /**
  * API shape exposed to the renderer via contextBridge.
  * Must stay in sync with the ElectronAPI declaration in src/env.d.ts.
@@ -70,7 +74,7 @@ interface LaunchpadLayout {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[]) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
   // Conversations
@@ -78,6 +82,7 @@ export interface ElectronAPI {
   getConversation: (id: string) => Promise<Conversation | null>
   saveConversation: (conversation: Conversation) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
+  saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
 
   // Projects
   listProjects: () => Promise<Array<Record<string, unknown>>>
@@ -115,6 +120,9 @@ export interface ElectronAPI {
   saveAISettings: (config: AISettings) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
+  onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
+  getThemePreference: () => Promise<ThemePreference>
+  saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>
@@ -137,7 +145,7 @@ export interface ElectronAPI {
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[]) => ipcRenderer.invoke('ai:chat', messages),
-  chatStream: (messages: ChatMessage[], sessionId: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId),
+  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, targetProjectId?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, providerId, targetProjectId),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
     const channel = `ai:stream-event:${sessionId}`
     const handler = (_e: Electron.IpcRendererEvent, event: StreamEvent) => callback(event)
@@ -151,6 +159,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getConversation: (id: string) => ipcRenderer.invoke('conversations:get', id),
   saveConversation: (conversation: Conversation) => ipcRenderer.invoke('conversations:save', conversation),
   deleteConversation: (id: string) => ipcRenderer.invoke('conversations:delete', id),
+  saveImageToFile: (imageUrl: string, defaultName?: string) => ipcRenderer.invoke('media:saveImage', imageUrl, defaultName),
 
   // Projects
   listProjects: () => ipcRenderer.invoke('projects:list'),
@@ -196,6 +205,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveAISettings: (config: AISettings) => ipcRenderer.invoke('settings:saveAI', config),
   getProviders: () => ipcRenderer.invoke('settings:getProviders'),
   saveProviders: (config: AIProvidersConfig) => ipcRenderer.invoke('settings:saveProviders', config),
+  onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, config: AIProvidersConfig) => callback(config)
+    ipcRenderer.on('settings:providersChanged', handler)
+    return () => { ipcRenderer.removeListener('settings:providersChanged', handler) }
+  },
+  getThemePreference: () => ipcRenderer.invoke('settings:getThemePreference'),
+  saveThemePreference: (preference: ThemePreference) => ipcRenderer.invoke('settings:saveThemePreference', preference),
   getLaunchMode: (projectId: string) => ipcRenderer.invoke('settings:getLaunchMode', projectId),
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => ipcRenderer.invoke('settings:saveLaunchMode', projectId, mode),
   getLaunchpadLayout: () => ipcRenderer.invoke('settings:getLaunchpadLayout'),

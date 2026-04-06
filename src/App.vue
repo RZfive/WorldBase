@@ -8,6 +8,7 @@ import SourceViewer from './renderer/components/viewer/SourceViewer.vue'
 import TitleBar from './renderer/components/app/TitleBar.vue'
 import DockBar from './renderer/components/app/DockBar.vue'
 import ProjectWindowShell from './renderer/components/app/ProjectWindowShell.vue'
+import { applyThemePreference, getAppliedThemePreference, watchSystemThemeChange } from './renderer/utils/theme'
 
 interface RunningApp {
   id: string
@@ -68,6 +69,7 @@ const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | 
 let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
 let runningAppsRefreshToken = 0
+let stopThemeWatcher: (() => void) | null = null
 
 function clearEmbeddedProject (projectId?: string) {
   if (projectId) {
@@ -343,6 +345,14 @@ function closeWindow () { window.electronAPI?.closeWindow() }
 function onDocClickGlobal () { hideDockCtx() }
 
 onMounted(async () => {
+  const savedThemePreference = await window.electronAPI?.getThemePreference?.().catch(() => 'system' as const)
+  applyThemePreference(savedThemePreference || 'system')
+  stopThemeWatcher = watchSystemThemeChange(() => {
+    if (getAppliedThemePreference() === 'system') {
+      applyThemePreference('system')
+    }
+  })
+
   if (isStandaloneProjectWindow) return
 
   await refreshRunningApps()
@@ -372,6 +382,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  stopThemeWatcher?.()
+
   if (isStandaloneProjectWindow) return
 
   document.removeEventListener('click', onDocClickGlobal)
@@ -493,17 +505,17 @@ onUnmounted(() => {
 
 <style scoped>
 .app-root {
-  --dock-accent: #38bdf8;
-  --dock-accent-soft: rgba(56, 189, 248, 0.16);
-  --dock-accent-glow: rgba(56, 189, 248, 0.3);
+  --dock-accent: var(--app-accent);
+  --dock-accent-soft: var(--app-accent-soft);
+  --dock-accent-glow: var(--app-accent-glow);
   display: flex;
   flex-direction: column;
   height: 100vh;
   background:
-    radial-gradient(circle at top left, rgba(56, 189, 248, 0.08), transparent 22%),
-    radial-gradient(circle at bottom left, rgba(245, 158, 11, 0.06), transparent 18%),
-    #090b0f;
-  color: #e4e4e7;
+    radial-gradient(circle at top left, var(--app-shell-tint-1), transparent 22%),
+    radial-gradient(circle at bottom left, var(--app-shell-tint-2), transparent 18%),
+    var(--app-shell-bg);
+  color: var(--app-text);
   border-radius: 10px;
   overflow: hidden;
 }
@@ -523,7 +535,7 @@ onUnmounted(() => {
   min-width: 0;
   overflow: hidden;
   position: relative;
-  background: rgba(6, 10, 16, 0.72);
+  background: var(--app-main-surface);
 }
 
 /* Embedded app view */
@@ -533,7 +545,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #05070b;
+  background: var(--app-shell-bg);
 }
 
 .embedded-slot {
@@ -556,7 +568,7 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  color: #94a3b8;
+  color: var(--app-text-muted);
 }
 
 .embedded-spinner {
@@ -576,7 +588,7 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  color: #64748b;
+  color: var(--app-text-faint);
 }
 
 .embedded-unavailable p { margin: 0; font-size: 0.95em; }
@@ -584,9 +596,9 @@ onUnmounted(() => {
 .embedded-retry-btn {
   padding: 8px 18px;
   border-radius: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(255, 255, 255, 0.04);
-  color: #e2e8f0;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-muted);
+  color: var(--app-text-soft);
   cursor: pointer;
   font-size: 0.85em;
   transition: all 0.12s;
@@ -601,19 +613,19 @@ onUnmounted(() => {
 .dock-ctx-menu {
   position: fixed;
   z-index: 10000;
-  background: rgba(15, 23, 42, 0.96);
+  background: var(--app-panel-strong);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid var(--app-border);
   border-radius: 14px;
   padding: 4px 0;
   min-width: 180px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+  box-shadow: var(--app-shadow);
 }
 
 .dock-ctx-item {
   padding: 9px 16px;
   font-size: 0.85em;
-  color: #e2e8f0;
+  color: var(--app-text-soft);
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.12s ease, color 0.12s ease;
@@ -621,10 +633,10 @@ onUnmounted(() => {
 
 .dock-ctx-item:hover {
   background: var(--dock-accent-soft);
-  color: #f8fafc;
+  color: var(--app-text-strong);
 }
 
-.dock-ctx-item.dock-ctx-danger { color: #fda4af; }
+.dock-ctx-item.dock-ctx-danger { color: var(--app-danger); }
 
 .dock-ctx-item.dock-ctx-danger:hover {
   background: rgba(220, 38, 38, 0.92);
@@ -633,7 +645,7 @@ onUnmounted(() => {
 
 .dock-ctx-divider {
   height: 1px;
-  background: rgba(148, 163, 184, 0.14);
+  background: var(--app-border);
   margin: 4px 0;
 }
 
@@ -650,10 +662,10 @@ onUnmounted(() => {
 }
 
 .lan-modal {
-  background: rgba(15, 23, 42, 0.97);
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: var(--app-panel-strong);
+  border: 1px solid var(--app-border);
   border-radius: 18px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--app-shadow);
   width: 340px;
   overflow: hidden;
 }
@@ -665,13 +677,13 @@ onUnmounted(() => {
   padding: 14px 18px;
   font-size: 0.92em;
   font-weight: 600;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  border-bottom: 1px solid var(--app-border);
 }
 
 .lan-modal-close {
   background: none;
   border: none;
-  color: #94a3b8;
+  color: var(--app-text-muted);
   font-size: 1em;
   cursor: pointer;
   padding: 2px 6px;
@@ -680,8 +692,8 @@ onUnmounted(() => {
 }
 
 .lan-modal-close:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #e2e8f0;
+  background: var(--app-panel-muted);
+  color: var(--app-text-strong);
 }
 
 .lan-modal-body {
@@ -701,7 +713,7 @@ onUnmounted(() => {
 .lan-modal-hint {
   margin: 0;
   font-size: 0.82em;
-  color: #94a3b8;
+  color: var(--app-text-muted);
 }
 
 .lan-url-row {
@@ -720,10 +732,10 @@ onUnmounted(() => {
   white-space: nowrap;
   font-size: 0.82em;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: var(--app-panel-muted);
+  border: 1px solid var(--app-border);
   border-radius: 10px;
-  color: #7dd3fc;
+  color: var(--app-accent);
   cursor: pointer;
   transition: background 0.12s;
 }
@@ -736,9 +748,9 @@ onUnmounted(() => {
   flex-shrink: 0;
   padding: 8px 14px;
   border-radius: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(255, 255, 255, 0.04);
-  color: #e2e8f0;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-muted);
+  color: var(--app-text-soft);
   font-size: 0.82em;
   cursor: pointer;
   white-space: nowrap;

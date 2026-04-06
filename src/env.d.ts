@@ -10,7 +10,7 @@ interface StreamEvent {
   type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'reset' | 'done' | 'error'
   content?: string
   name?: string
-  message?: { role: string; content: string }
+  message?: { role: string; content: MessageContent }
   thinking?: string
   error?: string
   stage?: string
@@ -25,6 +25,7 @@ interface ConversationSummary {
   createdAt: string
   updatedAt: string
   providerId?: string
+  targetProjectId?: string
 }
 
 interface ConversationData extends ConversationSummary {
@@ -45,6 +46,7 @@ interface AIProviderConfig {
 interface AIProvidersConfig {
   providers: AIProviderConfig[]
   activeProviderId: string
+  enabledProviderIds: string[]
 }
 
 interface LaunchpadFolderLayout {
@@ -57,6 +59,8 @@ interface LaunchpadLayout {
   folders: LaunchpadFolderLayout[]
   topLevelOrder: string[]
 }
+
+type ThemePreference = 'system' | 'light' | 'dark'
 
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 
@@ -71,8 +75,8 @@ interface SkillInfo {
 
 interface ElectronAPI {
   // AI
-  chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: string }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string) => Promise<{ ok: boolean }>
+  chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: MessageContent }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
   // Conversations
@@ -80,6 +84,7 @@ interface ElectronAPI {
   getConversation: (id: string) => Promise<ConversationData | null>
   saveConversation: (conversation: ConversationData) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
+  saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
 
   // Projects
   listProjects: () => Promise<Array<Record<string, unknown>>>
@@ -117,6 +122,9 @@ interface ElectronAPI {
   saveAISettings: (config: { apiKey: string; baseUrl: string; model: string }) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
+  onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
+  getThemePreference: () => Promise<ThemePreference>
+  saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>

@@ -86,7 +86,7 @@ function onModelChange (event: Event) {
 <style scoped>
 .chat-header {
   padding: 12px 24px;
-  border-bottom: 1px solid #27272a;
+  border-bottom: 1px solid var(--app-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -97,6 +97,7 @@ function onModelChange (event: Event) {
   margin: 0;
   font-size: 1.1em;
   white-space: nowrap;
+  color: var(--app-text-strong);
 }
 
 .header-controls {
@@ -111,10 +112,10 @@ function onModelChange (event: Event) {
 }
 
 .select-input {
-  background: #27272a;
-  border: 1px solid #3f3f46;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-input-border);
   border-radius: 6px;
-  color: #e4e4e7;
+  color: var(--app-text);
   padding: 4px 8px;
   font-size: 0.8em;
   cursor: pointer;
@@ -122,7 +123,7 @@ function onModelChange (event: Event) {
 
 .select-input:focus {
   outline: none;
-  border-color: #3b82f6;
+  border-color: var(--app-accent);
 }
 
 .skill-selector {
@@ -131,10 +132,10 @@ function onModelChange (event: Event) {
 
 .skill-toggle-btn {
   padding: 4px 12px;
-  background: #27272a;
-  border: 1px solid #3f3f46;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-input-border);
   border-radius: 6px;
-  color: #a1a1aa;
+  color: var(--app-text-muted);
   font-size: 0.8em;
   cursor: pointer;
   transition: all 0.12s;
@@ -142,14 +143,14 @@ function onModelChange (event: Event) {
 }
 
 .skill-toggle-btn:hover {
-  border-color: #6366f1;
-  color: #e4e4e7;
+  border-color: var(--app-accent);
+  color: var(--app-text);
 }
 
 .skill-toggle-btn.has-active {
-  border-color: #6366f1;
-  color: #c7d2fe;
-  background: #1e1b4b40;
+  border-color: var(--app-accent);
+  color: var(--app-text-strong);
+  background: var(--app-accent-soft);
 }
 
 .skill-dropdown {
@@ -158,12 +159,13 @@ function onModelChange (event: Event) {
   right: 0;
   margin-top: 6px;
   min-width: 200px;
-  background: #1e1e22;
-  border: 1px solid #3f3f46;
+  background: var(--app-panel);
+  border: 1px solid var(--app-border-strong);
   border-radius: 8px;
   padding: 6px;
   z-index: 50;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--app-shadow);
+  backdrop-filter: blur(14px);
 }
 
 .skill-option {
@@ -174,17 +176,18 @@ function onModelChange (event: Event) {
   border-radius: 6px;
   cursor: pointer;
   font-size: 0.82em;
-  color: #a1a1aa;
+  color: var(--app-text-muted);
   transition: background 0.1s;
 }
 
 .skill-option:hover {
-  background: #27272a;
-  color: #e4e4e7;
+  background: var(--app-panel-muted);
+  color: var(--app-text);
 }
 
 .skill-option.selected {
-  color: #c7d2fe;
+  color: var(--app-text-strong);
+  background: var(--app-accent-soft);
 }
 
 .skill-check {

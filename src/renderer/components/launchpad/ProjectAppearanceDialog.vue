@@ -121,20 +121,20 @@ function save () {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(2, 6, 12, 0.58);
+  background: rgba(15, 23, 42, 0.3);
   backdrop-filter: blur(10px);
 }
 
 .appearance-dialog {
   width: min(560px, calc(100vw - 32px));
   background:
-    radial-gradient(circle at top right, rgba(56, 189, 248, 0.14), transparent 30%),
-    linear-gradient(180deg, rgba(11, 17, 25, 0.98), rgba(7, 11, 18, 0.96));
-  border: 1px solid rgba(148, 163, 184, 0.14);
+    radial-gradient(circle at top right, var(--app-accent-soft), transparent 30%),
+    linear-gradient(180deg, var(--app-panel), var(--app-panel-strong));
+  border: 1px solid var(--app-border-strong);
   border-radius: 24px;
-  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--app-shadow);
   padding: 24px;
-  color: #e4e4e7;
+  color: var(--app-text);
 }
 
 .appearance-header {
@@ -148,7 +148,7 @@ function save () {
   font-size: 0.72em;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: #7dd3fc;
+  color: var(--app-accent);
   margin-bottom: 6px;
 }
 
@@ -162,13 +162,14 @@ function save () {
   height: 34px;
   border: none;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #cbd5e1;
+  background: var(--app-panel-muted);
+  color: var(--app-text-soft);
   cursor: pointer;
 }
 
 .appearance-close:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
 }
 
 .appearance-preview {
@@ -178,8 +179,8 @@ function save () {
   margin-top: 22px;
   padding: 18px;
   border-radius: 20px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: var(--app-panel-muted);
+  border: 1px solid var(--app-border);
 }
 
 .appearance-preview-icon {
@@ -190,8 +191,8 @@ function save () {
   justify-content: center;
   border-radius: 22px;
   font-size: 2.3em;
-  background: linear-gradient(135deg, rgba(56, 189, 248, 0.24), rgba(255, 255, 255, 0.06));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 18px 36px rgba(0, 0, 0, 0.24);
+  background: linear-gradient(135deg, var(--app-accent-soft), var(--app-panel-subtle));
+  box-shadow: inset 0 1px 0 var(--app-border), 0 18px 36px rgba(15, 23, 42, 0.16);
 }
 
 .appearance-preview-name {
@@ -202,7 +203,7 @@ function save () {
 .appearance-preview-type {
   margin-top: 4px;
   font-size: 0.84em;
-  color: #94a3b8;
+  color: var(--app-text-muted);
   text-transform: capitalize;
 }
 
@@ -215,7 +216,7 @@ function save () {
 
 .appearance-field span {
   font-size: 0.82em;
-  color: #cbd5e1;
+  color: var(--app-text-soft);
 }
 
 .appearance-input {
@@ -223,16 +224,16 @@ function save () {
   box-sizing: border-box;
   height: 44px;
   border-radius: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(255, 255, 255, 0.04);
-  color: #f8fafc;
+  border: 1px solid var(--app-input-border);
+  background: var(--app-input-bg);
+  color: var(--app-text-strong);
   padding: 0 14px;
   outline: none;
 }
 
 .appearance-input:focus {
-  border-color: rgba(56, 189, 248, 0.42);
-  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.18);
+  border-color: var(--app-accent-glow);
+  box-shadow: 0 0 0 1px var(--app-accent-soft);
 }
 
 .appearance-icon-row {
@@ -249,14 +250,15 @@ function save () {
   height: 44px;
   padding: 0 14px;
   border-radius: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(255, 255, 255, 0.04);
-  color: #cbd5e1;
+  border: 1px solid var(--app-input-border);
+  background: var(--app-panel-muted);
+  color: var(--app-text-soft);
   cursor: pointer;
 }
 
 .appearance-reset:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
 }
 
 .appearance-emoji-grid {
@@ -269,8 +271,8 @@ function save () {
 .appearance-emoji-btn {
   height: 48px;
   border-radius: 16px;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--app-border);
+  background: var(--app-panel-subtle);
   font-size: 1.35em;
   cursor: pointer;
   transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
@@ -278,13 +280,13 @@ function save () {
 
 .appearance-emoji-btn:hover {
   transform: translateY(-2px);
-  border-color: rgba(56, 189, 248, 0.28);
-  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--app-accent-glow);
+  background: var(--app-accent-soft);
 }
 
 .appearance-emoji-btn.active {
-  background: rgba(56, 189, 248, 0.16);
-  border-color: rgba(56, 189, 248, 0.38);
+  background: var(--app-accent-soft);
+  border-color: var(--app-accent-glow);
 }
 
 .appearance-actions {
@@ -298,19 +300,19 @@ function save () {
   height: 42px;
   padding: 0 16px;
   border-radius: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  border: 1px solid var(--app-border-strong);
   cursor: pointer;
   font-weight: 600;
 }
 
 .appearance-btn-secondary {
-  background: rgba(255, 255, 255, 0.04);
-  color: #e2e8f0;
+  background: var(--app-panel-muted);
+  color: var(--app-text);
 }
 
 .appearance-btn-primary {
-  background: linear-gradient(135deg, #38bdf8, #0ea5e9);
-  color: #082f49;
+  background: linear-gradient(135deg, var(--app-accent), var(--app-accent-strong));
+  color: #ffffff;
   border-color: transparent;
 }
 

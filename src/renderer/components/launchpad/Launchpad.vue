@@ -1041,17 +1041,20 @@ onUnmounted(() => {
 
 <style>
 .lp-overlay {
-  --lp-accent: #38bdf8;
-  --lp-accent-soft: rgba(56, 189, 248, 0.16);
-  --lp-accent-strong: rgba(14, 165, 233, 0.42);
+  --lp-accent: var(--app-accent);
+  --lp-accent-soft: var(--app-accent-soft);
+  --lp-accent-strong: var(--app-accent-glow);
   --lp-folder-soft: rgba(245, 158, 11, 0.18);
+  --lp-folder-border: rgba(245, 158, 11, 0.26);
+  --lp-folder-glow: rgba(245, 158, 11, 0.12);
   position: absolute;
   inset: 0;
   z-index: 20;
+  color: var(--app-text);
   background:
-    radial-gradient(circle at 18% 18%, rgba(56, 189, 248, 0.14), transparent 24%),
-    radial-gradient(circle at 82% 12%, rgba(245, 158, 11, 0.12), transparent 20%),
-    linear-gradient(180deg, rgba(6, 10, 16, 0.78), rgba(4, 7, 12, 0.94));
+    radial-gradient(circle at 18% 18%, var(--lp-accent-soft), transparent 24%),
+    radial-gradient(circle at 82% 12%, rgba(245, 158, 11, 0.1), transparent 20%),
+    linear-gradient(180deg, var(--app-main-surface), var(--app-shell-bg));
   backdrop-filter: blur(40px) saturate(1.2);
   display: flex;
   flex-direction: column;
@@ -1083,48 +1086,51 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-input-border);
   border-radius: 14px;
   padding: 8px 16px;
   width: 300px;
-  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--app-shadow);
   transition: all 0.2s ease;
 }
 .lp-search-box:focus-within {
   border-color: var(--lp-accent-strong);
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--app-panel);
   width: 360px;
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--lp-accent-soft);
+  box-shadow: var(--app-shadow), 0 0 0 1px var(--lp-accent-soft);
 }
-.lp-search-icon { font-size: 0.85em; opacity: 0.5; }
+.lp-search-icon {
+  font-size: 0.85em;
+  color: var(--app-text-faint);
+}
 .lp-search-input {
   flex: 1;
   background: none;
   border: none;
-  color: #e4e4e7;
+  color: var(--app-text);
   font-size: 0.9em;
   outline: none;
 }
-.lp-search-input::placeholder { color: rgba(255, 255, 255, 0.3); }
+.lp-search-input::placeholder { color: var(--app-text-faint); }
 
 /* ============ Status / empty ============ */
 .lp-status {
-  color: #71717a;
+  color: var(--app-text-muted);
   font-size: 0.92em;
   margin-top: 40px;
 }
-.lp-error { color: #f87171; }
+.lp-error { color: var(--app-danger); }
 .lp-spinner { animation: spin 1s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .lp-empty {
   text-align: center;
   margin-top: 40px;
-  color: #71717a;
+  color: var(--app-text-muted);
 }
 .lp-empty-icon { font-size: 3em; margin-bottom: 16px; }
-.lp-empty-hint { font-size: 0.82em; color: #52525b; margin-top: 8px; }
+.lp-empty-hint { font-size: 0.82em; color: var(--app-text-faint); margin-top: 8px; }
 
 /* ============ Grid container ============ */
 .lp-grid-container {
@@ -1136,7 +1142,7 @@ onUnmounted(() => {
   overflow-x: hidden;
 }
 .lp-grid-container::-webkit-scrollbar { width: 4px; }
-.lp-grid-container::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+.lp-grid-container::-webkit-scrollbar-thumb { background: var(--app-scrollbar); border-radius: 2px; }
 
 .lp-grid {
   display: grid;
@@ -1160,7 +1166,7 @@ onUnmounted(() => {
   width: 96px;
 }
 .lp-cell:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--app-panel-muted);
   transform: translateY(-3px) scale(1.06);
 }
 .lp-cell:active {
@@ -1180,8 +1186,8 @@ onUnmounted(() => {
   bottom: 10px;
   width: 4px;
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(125, 211, 252, 0.95), rgba(14, 165, 233, 0.95));
-  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.22), 0 0 14px rgba(56, 189, 248, 0.35);
+  background: linear-gradient(180deg, var(--app-accent), var(--app-accent-strong));
+  box-shadow: 0 0 0 1px var(--app-accent-soft), 0 0 14px var(--app-accent-glow);
 }
 .lp-cell.drop-before::before {
   left: -8px;
@@ -1195,18 +1201,18 @@ onUnmounted(() => {
   position: relative;
   width: 64px;
   height: 64px;
-  background: linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(135deg, var(--app-panel) 0%, var(--app-panel-subtle) 100%);
+  border: 1px solid var(--app-border);
   border-radius: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255,255,255,0.05);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.16), inset 0 1px 0 var(--app-border);
   transition: all 0.18s;
 }
 .lp-cell:hover .lp-app-icon {
-  border-color: rgba(56, 189, 248, 0.28);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(56, 189, 248, 0.18);
+  border-color: var(--app-accent-glow);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22), 0 0 0 1px var(--app-accent-soft);
 }
 .lp-app-emoji { font-size: 1.8em; }
 .lp-running-badge {
@@ -1216,39 +1222,39 @@ onUnmounted(() => {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: #22c55e;
-  border: 2px solid #0f0f10;
-  box-shadow: 0 0 8px #22c55e80;
+  background: var(--app-success);
+  border: 2px solid var(--app-panel-strong);
+  box-shadow: 0 0 8px var(--app-success);
 }
 
 .lp-cell-name {
   font-size: 0.75em;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--app-text);
   text-align: center;
   max-width: 90px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  text-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
 }
 
 /* ============ Folder icon ============ */
 .lp-folder-icon {
   width: 64px;
   height: 64px;
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.18) 0%, rgba(251, 191, 36, 0.08) 100%);
-  border: 1px solid rgba(245, 158, 11, 0.18);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.18) 0%, var(--app-panel-subtle) 100%);
+  border: 1px solid var(--lp-folder-border);
   border-radius: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.14);
   transition: all 0.18s;
 }
 .lp-cell:hover .lp-folder-icon {
-  border-color: rgba(245, 158, 11, 0.32);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.36);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.2), 0 0 0 1px var(--lp-folder-glow);
 }
 
 .folder-mini-grid {
@@ -1267,10 +1273,10 @@ onUnmounted(() => {
 .folder-mini.empty { opacity: 0; }
 
 .lp-rename-input {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--app-input-bg);
   border: 1px solid var(--lp-accent-strong);
   border-radius: 6px;
-  color: #e4e4e7;
+  color: var(--app-text-strong);
   padding: 3px 8px;
   font-size: 0.75em;
   outline: none;
@@ -1290,9 +1296,9 @@ onUnmounted(() => {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--app-panel-muted);
 }
-.lp-dot.active { background: rgba(255, 255, 255, 0.6); }
+.lp-dot.active { background: var(--app-text-muted); }
 
 /* ============ Folder popup bubble ============ */
 .folder-bubble-overlay {
@@ -1309,16 +1315,16 @@ onUnmounted(() => {
 
 .folder-bubble {
   position: relative;
-  background: rgba(13, 18, 26, 0.94);
+  background: var(--app-panel-strong);
   backdrop-filter: blur(30px);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  border: 1px solid var(--app-border-strong);
   border-radius: 24px;
   width: 420px;
   max-height: 50vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255,255,255,0.03);
+  box-shadow: var(--app-shadow), 0 0 0 1px var(--app-border);
   transform-origin: var(--anchor-x, 50%) var(--anchor-y, 50%);
 }
 
@@ -1336,8 +1342,8 @@ onUnmounted(() => {
   display: block;
   width: 12px;
   height: 12px;
-  background: rgba(13, 18, 26, 0.94);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: var(--app-panel-strong);
+  border: 1px solid var(--app-border-strong);
   transform: rotate(45deg);
   margin: 4px auto 0;
 }
@@ -1347,20 +1353,20 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   padding: 16px 20px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--app-border);
 }
 .folder-bubble-title {
   margin: 0;
   font-size: 0.95em;
   font-weight: 600;
-  color: #e4e4e7;
+  color: var(--app-text-strong);
   cursor: text;
 }
 .folder-rename-input {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--app-input-bg);
   border: 1px solid var(--lp-accent-strong);
   border-radius: 8px;
-  color: #e4e4e7;
+  color: var(--app-text-strong);
   padding: 6px 12px;
   font-size: 0.95em;
   outline: none;
@@ -1373,7 +1379,7 @@ onUnmounted(() => {
 }
 .folder-empty {
   text-align: center;
-  color: #52525b;
+  color: var(--app-text-muted);
   font-size: 0.85em;
   padding: 20px 0;
 }

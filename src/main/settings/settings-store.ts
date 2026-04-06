@@ -30,8 +30,10 @@ export interface AIProvider {
 
 export interface AIProvidersConfig {
   providers: AIProvider[]
-  /** ID of the currently active provider */
+  /** Default provider ID used as fallback for new conversations. */
   activeProviderId: string
+  /** Provider IDs currently enabled for chat selection. */
+  enabledProviderIds: string[]
 }
 
 export interface LaunchpadFolderLayout {
@@ -44,6 +46,8 @@ export interface LaunchpadLayout {
   folders: LaunchpadFolderLayout[]
   topLevelOrder: string[]
 }
+
+export type ThemePreference = 'system' | 'light' | 'dark'
 
 export const DEFAULT_MODEL_CONTEXT_WINDOW = 32000
 type RawModelItem = string | { name?: string; contextWindow?: number }
@@ -59,6 +63,13 @@ function normalizeContextWindow (value: unknown): number {
     }
   }
   return DEFAULT_MODEL_CONTEXT_WINDOW
+}
+
+function normalizeBaseUrl (value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  return trimmed.replace(/\/+$/, '')
 }
 
 function normalizeProvider (input: AIProvider): AIProvider {
@@ -92,7 +103,7 @@ function normalizeProvider (input: AIProvider): AIProvider {
   return {
     id: input.id,
     name: input.name,
-    baseUrl: input.baseUrl,
+    baseUrl: normalizeBaseUrl(input.baseUrl),
     apiKey: input.apiKey,
     models,
     modelContextWindows,
@@ -147,6 +158,38 @@ function normalizeLaunchpadLayout (value: unknown): LaunchpadLayout {
     folders,
     topLevelOrder
   }
+}
+
+function normalizeThemePreference (value: unknown): ThemePreference {
+  if (value === 'light' || value === 'dark' || value === 'system') {
+    return value
+  }
+  return 'system'
+}
+
+function normalizeEnabledProviderIds (
+  value: unknown,
+  providers: AIProvider[],
+  fallbackProviderId?: string
+): string[] {
+  const providerIds = new Set(providers.map(provider => provider.id))
+  const seen = new Set<string>()
+  const enabledProviderIds = Array.isArray(value)
+    ? value
+      .filter((providerId): providerId is string => typeof providerId === 'string' && providerId.trim().length > 0)
+      .map(providerId => providerId.trim())
+      .filter((providerId) => {
+        if (!providerIds.has(providerId) || seen.has(providerId)) return false
+        seen.add(providerId)
+        return true
+      })
+    : []
+
+  if (enabledProviderIds.length === 0 && fallbackProviderId && providerIds.has(fallbackProviderId)) {
+    enabledProviderIds.push(fallbackProviderId)
+  }
+
+  return enabledProviderIds
 }
 
 /**
@@ -227,10 +270,24 @@ export class SettingsStore {
     const saved = settings.aiProviders as AIProvidersConfig | undefined
     if (saved && saved.providers && saved.providers.length > 0) {
       const providers = saved.providers.map(provider => normalizeProvider(provider))
+      const enabledProviderIds = normalizeEnabledProviderIds(
+        (saved as AIProvidersConfig & { enabledProviderIds?: string[] }).enabledProviderIds,
+        providers,
+        saved.activeProviderId
+      )
       const activeProviderId = providers.some(p => p.id === saved.activeProviderId)
         ? saved.activeProviderId
-        : (providers[0]?.id || '')
-      return { providers, activeProviderId }
+        : (enabledProviderIds[0] || providers[0]?.id || '')
+
+      const normalizedEnabledProviderIds = enabledProviderIds.includes(activeProviderId)
+        ? enabledProviderIds
+        : (activeProviderId ? [activeProviderId, ...enabledProviderIds] : enabledProviderIds)
+
+      return {
+        providers,
+        activeProviderId,
+        enabledProviderIds: Array.from(new Set(normalizedEnabledProviderIds))
+      }
     }
 
     // Migrate from legacy single-provider config
@@ -247,21 +304,38 @@ export class SettingsStore {
         },
         activeModel: legacy.model || 'gpt-4o'
       }
-      return { providers: [migrated], activeProviderId: 'default' }
+      return {
+        providers: [migrated],
+        activeProviderId: 'default',
+        enabledProviderIds: ['default']
+      }
     }
 
-    return { providers: [], activeProviderId: '' }
+    return { providers: [], activeProviderId: '', enabledProviderIds: [] }
   }
 
   /**
    * Save multi-provider configuration.
    */
   saveProviders (config: AIProvidersConfig): void {
+    const providers = config.providers.map(provider => normalizeProvider(provider))
+    let activeProviderId = providers.some(p => p.id === config.activeProviderId)
+      ? config.activeProviderId
+      : ''
+    let enabledProviderIds = normalizeEnabledProviderIds(config.enabledProviderIds, providers, activeProviderId)
+
+    if (!activeProviderId) {
+      activeProviderId = enabledProviderIds[0] || providers[0]?.id || ''
+    }
+
+    if (activeProviderId && !enabledProviderIds.includes(activeProviderId)) {
+      enabledProviderIds = [activeProviderId, ...enabledProviderIds]
+    }
+
     const normalized: AIProvidersConfig = {
-      providers: config.providers.map(provider => normalizeProvider(provider)),
-      activeProviderId: config.providers.some(p => p.id === config.activeProviderId)
-        ? config.activeProviderId
-        : (config.providers[0]?.id || '')
+      providers,
+      activeProviderId,
+      enabledProviderIds: Array.from(new Set(enabledProviderIds))
     }
     this.write({ aiProviders: normalized })
 
@@ -300,5 +374,16 @@ export class SettingsStore {
   /** Save launchpad layout preferences. */
   saveLaunchpadLayout (layout: LaunchpadLayout): void {
     this.write({ launchpadLayout: normalizeLaunchpadLayout(layout) })
+  }
+
+  /** Get theme preference: 'system', 'light', or 'dark'. */
+  getThemePreference (): ThemePreference {
+    const settings = this.read()
+    return normalizeThemePreference(settings.themePreference)
+  }
+
+  /** Save theme preference. */
+  saveThemePreference (preference: ThemePreference): void {
+    this.write({ themePreference: normalizeThemePreference(preference) })
   }
 }

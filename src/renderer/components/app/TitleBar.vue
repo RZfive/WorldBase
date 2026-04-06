@@ -54,9 +54,8 @@ const emit = defineEmits<{
   height: 46px;
   padding: 0 14px;
   box-sizing: border-box;
-  background:
-    linear-gradient(180deg, rgba(10, 16, 24, 0.98), rgba(8, 12, 18, 0.92));
-  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
+  border-bottom: 1px solid var(--app-border);
   flex-shrink: 0;
   user-select: none;
   gap: 12px;
@@ -85,8 +84,8 @@ const emit = defineEmits<{
   align-items: center;
   justify-content: center;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  background: var(--app-panel-muted);
+  box-shadow: inset 0 1px 0 var(--app-border);
   font-size: 1em;
 }
 
@@ -98,7 +97,7 @@ const emit = defineEmits<{
 
 .titlebar-title {
   font-size: 0.83em;
-  color: #f8fafc;
+  color: var(--app-text-strong);
   font-weight: 600;
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -108,7 +107,7 @@ const emit = defineEmits<{
 
 .titlebar-subtitle {
   font-size: 0.68em;
-  color: #7dd3fc;
+  color: var(--app-accent);
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }

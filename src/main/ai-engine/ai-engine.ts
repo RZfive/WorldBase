@@ -28,69 +28,101 @@ export interface AIConfigInput {
   contextWindow?: number
 }
 
+export interface AIRequestOptions {
+  targetProjectId?: string | null
+  providerConfig?: AIConfigInput
+}
+
 /**
  * AIEngine — AI 引擎入口
  * 管理 AI 对话、Agent 执行和 function calling
  */
 export class AIEngine {
   private services: AIEngineServices
-  private provider: OpenAIProvider
-  private agent: AgentCore
+  private baseConfig: AIConfigInput = {}
+  private activeSkillContents: string[] = []
+  private defaultTargetProjectId: string | null = null
 
   constructor (services: AIEngineServices) {
     this.services = services
-    this.provider = new OpenAIProvider()
-    this.agent = new AgentCore(this.provider, services as unknown as Record<string, unknown>)
+  }
 
-    registerAllTools(this.agent, services)
+  private applyConfigToProvider (provider: OpenAIProvider, config: AIConfigInput): void {
+    if (config.apiKey) {
+      provider.setApiKey(config.apiKey)
+    }
+    if (config.baseUrl) {
+      provider.setBaseUrl(config.baseUrl)
+    }
+    if (config.model) {
+      provider.setModel(config.model)
+    }
+    if (config.enableThinking !== undefined) {
+      provider.setEnableThinking(config.enableThinking)
+    }
+    if (config.contextWindow !== undefined) {
+      provider.setContextWindow(config.contextWindow)
+    }
+  }
+
+  private createAgent (options?: AIRequestOptions): AgentCore {
+    const provider = new OpenAIProvider()
+    this.applyConfigToProvider(provider, this.baseConfig)
+    if (options?.providerConfig) {
+      this.applyConfigToProvider(provider, options.providerConfig)
+    }
+
+    const agent = new AgentCore(provider, this.services as unknown as Record<string, unknown>)
+    registerAllTools(agent, this.services)
+    agent.setActiveSkills(this.activeSkillContents)
+    agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
+    return agent
   }
 
   /**
    * Handle a chat message from the user (non-streaming).
    */
-  async chat (messages: ChatMessage[]): Promise<ChatMessage> {
-    return this.agent.run(messages)
+  async chat (messages: ChatMessage[], options?: AIRequestOptions): Promise<ChatMessage> {
+    return this.createAgent(options).run(messages)
   }
 
   /**
    * Handle a chat message with streaming response.
    */
-  chatStream (messages: ChatMessage[], onProgress?: ProgressCallback): AsyncGenerator<StreamEvent> {
-    return this.agent.runStream(messages, onProgress)
+  chatStream (messages: ChatMessage[], onProgress?: ProgressCallback, options?: AIRequestOptions): AsyncGenerator<StreamEvent> {
+    return this.createAgent(options).runStream(messages, onProgress)
+  }
+
+  /**
+   * Set the target project ID for the current session (edit/optimize mode).
+   * Prevents create_project from making a new project and forces
+   * write_project_file to target the existing one.
+   */
+  setTargetProjectId (projectId: string | null): void {
+    this.defaultTargetProjectId = projectId
   }
 
   /**
    * Get the list of available tools (for UI display).
    */
   getAvailableTools (): ToolDefinition[] {
-    return this.agent.getToolDefinitions()
+    return this.createAgent().getToolDefinitions()
   }
 
   /**
    * Set active skill contents for the agent.
    */
   setActiveSkills (contents: string[]): void {
-    this.agent.setActiveSkills(contents)
+    this.activeSkillContents = [...contents]
   }
 
   /**
    * Update AI provider configuration.
    */
   configure (config: AIConfigInput): void {
-    if (config.apiKey) {
-      this.provider.setApiKey(config.apiKey)
-    }
-    if (config.baseUrl) {
-      this.provider.setBaseUrl(config.baseUrl)
-    }
-    if (config.model) {
-      this.provider.setModel(config.model)
-    }
-    if (config.enableThinking !== undefined) {
-      this.provider.setEnableThinking(config.enableThinking)
-    }
-    if (config.contextWindow !== undefined) {
-      this.provider.setContextWindow(config.contextWindow)
+    this.baseConfig = {
+      ...this.baseConfig,
+      ...config
     }
   }
 }

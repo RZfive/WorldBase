@@ -3,7 +3,7 @@ import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js
 import type { BuilderService } from '../../../project-runtime/builder-service.js'
 import type { ProjectDataAccess } from '../../../project-data-access/data-access.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
-import type { ProgressCallback } from '../agent-core.js'
+import type { ProgressCallback, SessionState } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { streamFilePreview } from './file-preview-progress.js'
 
@@ -30,7 +30,7 @@ export interface Tool {
 /**
  * Tool: create_project — 创建新项目
  */
-export function toolCreateProject (services: ToolServices): Tool {
+export function toolCreateProject (services: ToolServices, getSessionState?: () => SessionState): Tool {
   return {
     definition: {
       name: 'create_project',
@@ -61,6 +61,24 @@ export function toolCreateProject (services: ToolServices): Tool {
     },
     handler: async (args, onProgress) => {
       const { name, type, files, meta = {} } = args as unknown as CreateProjectArgs
+      const session = getSessionState?.()
+
+      // Prevent creating a second project in the same conversation
+      if (session?.createdProjectId) {
+        return {
+          success: false,
+          error: `本次对话已创建项目 ${session.createdProjectId}，不允许再创建新项目。请使用 write_project_file 工具修改已创建的项目文件，project_id 为 "${session.createdProjectId}"。`
+        }
+      }
+
+      // If the conversation is targeting an existing project for optimization,
+      // block new project creation and redirect to write_project_file
+      if (session?.targetProjectId) {
+        return {
+          success: false,
+          error: `本次对话正在优化现有项目 ${session.targetProjectId}，不允许创建新项目。请使用 write_project_file 工具将代码写入已有项目，project_id 为 "${session.targetProjectId}"。`
+        }
+      }
 
       onProgress?.('🔧 正在初始化项目...', name)
 
@@ -147,6 +165,11 @@ export function toolCreateProject (services: ToolServices): Tool {
       onProgress?.('📁 正在创建项目文件...', `共 ${Object.keys(files).length} 个文件`)
 
       const project = await services.projectFS.createProject(projectId, fullMeta, files)
+
+      // Record the created project ID in session state to prevent duplicates
+      if (session) {
+        session.createdProjectId = projectId
+      }
 
       if ((fullMeta as { dataSchema?: { database?: string } }).dataSchema?.database === 'sqlite') {
         onProgress?.('🗄️ 正在初始化 SQLite 数据接口...', projectId)
