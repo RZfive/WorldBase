@@ -27,6 +27,8 @@ type ChatMessageBlock =
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
+  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
 
 interface ChatMessage {
   role: string
@@ -48,6 +50,10 @@ const props = defineProps<{
   messages: ChatMessage[]
   isLoading: boolean
   filePreview: { active: boolean; filePath: string; content: string; truncated: boolean }
+}>()
+
+const emit = defineEmits<{
+  (e: 'respondAuth', requestId: string, approved: boolean): void
 }>()
 
 const messagesContainer = ref<HTMLElement | null>(null)
@@ -248,6 +254,12 @@ function getMessageSignature (msg?: ChatMessage): string {
       }
       if (block.kind === 'file_preview') {
         return `preview:${block.filePath}:${block.previewContent}:${block.truncated}:${block.active}`
+      }
+      if (block.kind === 'attachment') {
+        return `attachment:${block.fileName}:${block.fileType}:${block.fileSizeLabel}:${block.previewText}`
+      }
+      if (block.kind === 'auth_request') {
+        return `auth:${block.requestId}:${block.status}:${block.title}:${block.detail}`
       }
       return `tool:${block.toolRun.id}:${block.toolRun.status}:${block.toolRun.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`
     })
@@ -650,6 +662,39 @@ onUnmounted(() => {
             </div>
 
             <div
+              v-else-if="block.kind === 'attachment'"
+              class="message-event-card attachment-card"
+            >
+              <div class="attachment-card-header">
+                <span class="attachment-card-icon">📎</span>
+                <div class="attachment-card-meta">
+                  <div class="attachment-card-name">{{ block.fileName }}</div>
+                  <div class="attachment-card-detail">{{ block.fileType.toUpperCase() }} · {{ block.fileSizeLabel }}</div>
+                </div>
+              </div>
+              <div v-if="block.previewText" class="attachment-card-preview">{{ block.previewText }}</div>
+            </div>
+
+            <div
+              v-else-if="block.kind === 'auth_request'"
+              class="message-event-card auth-request-card"
+              :class="block.status"
+            >
+              <div class="auth-request-header">
+                <span class="auth-request-badge">操作授权</span>
+                <span class="auth-request-status" :class="block.status">
+                  {{ block.status === 'approved' ? '已允许' : (block.status === 'denied' ? '已拒绝' : '等待中') }}
+                </span>
+              </div>
+              <div class="auth-request-title">{{ block.title }}</div>
+              <pre class="auth-request-detail">{{ block.detail }}</pre>
+              <div v-if="block.status === 'pending'" class="auth-request-actions">
+                <button class="auth-request-btn secondary" type="button" @click="emit('respondAuth', block.requestId, false)">拒绝</button>
+                <button class="auth-request-btn" type="button" @click="emit('respondAuth', block.requestId, true)">允许</button>
+              </div>
+            </div>
+
+            <div
               v-else-if="block.kind === 'content' && (hasRenderableBlock(block) || isStreamingContentBlock(i, msg, blockIndex, getMessageBlocks(msg, i)))"
               class="message-bubble"
               :class="[msg.role, { streaming: isStreamingContentBlock(i, msg, blockIndex, getMessageBlocks(msg, i)) }]"
@@ -899,6 +944,118 @@ onUnmounted(() => {
   background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
   overflow: hidden;
+}
+
+.attachment-card,
+.auth-request-card {
+  padding: 14px 16px;
+}
+
+.attachment-card-header,
+.auth-request-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.auth-request-header {
+  justify-content: space-between;
+}
+
+.attachment-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: var(--app-accent-soft);
+  flex-shrink: 0;
+}
+
+.attachment-card-meta {
+  min-width: 0;
+}
+
+.attachment-card-name,
+.auth-request-title {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.attachment-card-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attachment-card-detail,
+.auth-request-status {
+  font-size: 0.78rem;
+  color: var(--app-text-muted);
+}
+
+.attachment-card-preview {
+  margin-top: 10px;
+  color: var(--app-text-soft);
+  font-size: 0.86rem;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.auth-request-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--app-accent);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.auth-request-status.pending { color: #f59e0b; }
+.auth-request-status.approved { color: #22c55e; }
+.auth-request-status.denied { color: #ef4444; }
+
+.auth-request-title {
+  margin-top: 12px;
+}
+
+.auth-request-detail {
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-panel-subtle);
+  color: var(--app-text-soft);
+  font-size: 0.82rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.auth-request-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.auth-request-btn {
+  min-width: 88px;
+  padding: 9px 14px;
+  border: none;
+  border-radius: 10px;
+  background: var(--app-accent);
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.auth-request-btn.secondary {
+  background: var(--app-panel-muted);
+  color: var(--app-text);
 }
 
 .message-event-header {

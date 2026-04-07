@@ -12,6 +12,8 @@ type ChatMessageBlock =
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
+  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
 
 interface ChatMessage {
   role: string
@@ -68,6 +70,22 @@ interface FilePreviewState {
   truncated: boolean
 }
 
+interface PendingOfficeFile {
+  id: string
+  name: string
+  filePath: string
+  fileType: string
+  fileSizeLabel: string
+  promptContent: string
+  previewText: string
+}
+
+interface AuthRequestPayload {
+  requestId: string
+  title: string
+  detail: string
+}
+
 interface SkillItem {
   id: string
   name: string
@@ -98,6 +116,9 @@ const providersConfig = ref<ProvidersConfig>({
 const activeProviderId = ref('')
 const selectedModel = ref('')
 const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
+const pendingFiles = ref<PendingOfficeFile[]>([])
+const isUploadingFiles = ref(false)
+const uploadFeedback = ref('')
 const filePreview = ref<FilePreviewState>({
   active: false,
   filePath: '',
@@ -121,6 +142,8 @@ const backgroundStreamMessages = new Map<string, {
 const activeCleanups = new Map<string, () => void>()
 const conversationTargets = new Map<string, string | null>()
 let providerChangeCleanup: (() => void) | null = null
+let authRequestCleanup: (() => void) | null = null
+const MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH = 180
 
 function getEnabledProviders (config: ProvidersConfig): ProviderOption[] {
   const enabledIds = new Set(
@@ -236,6 +259,28 @@ function createFilePreviewBlock (filePath: string, truncated = false): ChatMessa
   }
 }
 
+function createAttachmentBlock (file: PendingOfficeFile): ChatMessageBlock {
+  return {
+    id: createBlockId('attachment'),
+    kind: 'attachment',
+    fileName: file.name,
+    fileType: file.fileType,
+    fileSizeLabel: file.fileSizeLabel,
+    previewText: file.previewText
+  }
+}
+
+function createAuthRequestBlock (request: AuthRequestPayload): ChatMessageBlock {
+  return {
+    id: createBlockId('auth'),
+    kind: 'auth_request',
+    requestId: request.requestId,
+    title: request.title,
+    detail: request.detail,
+    status: 'pending'
+  }
+}
+
 function getLastBlock (blocks: ChatMessageBlock[]): ChatMessageBlock | null {
   return blocks.length > 0 ? blocks[blocks.length - 1] : null
 }
@@ -310,6 +355,86 @@ function findLastRunningToolRun (toolRuns: ToolRun[], preferredName?: string): T
     }
   }
   return null
+}
+
+function findLastRunningToolBlock (message: ChatMessage): Extract<ChatMessageBlock, { kind: 'tool' }> | null {
+  const blocks = ensureBlocks(message)
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    const block = blocks[index]
+    if (block.kind === 'tool' && block.toolRun.status === 'running') {
+      return block
+    }
+  }
+  return null
+}
+
+function findLatestAssistantMessage (): ChatMessage | null {
+  for (let index = messages.value.length - 1; index >= 0; index--) {
+    if (messages.value[index].role === 'assistant') {
+      return messages.value[index]
+    }
+  }
+  return null
+}
+
+function finalizePendingAuthBlocks (message: ChatMessage): void {
+  for (const block of ensureBlocks(message)) {
+    if (block.kind === 'auth_request' && block.status === 'pending') {
+      block.status = 'denied'
+    }
+  }
+}
+
+function formatFileSize (size: number): string {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+function getElectronFilePath (file: File): string | null {
+  // Electron file inputs expose an absolute `path`; standard browsers do not.
+  const candidate = (file as File & { path?: string }).path
+  return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate : null
+}
+
+function trimPreviewText (content: string, maxLength = MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH): string {
+  const normalized = content.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, maxLength)}…`
+}
+
+function buildUploadedFilesPrompt (files: PendingOfficeFile[]): string {
+  return files
+    .map(file => `【用户上传文件：${file.name}】\n文件类型：${file.fileType.toUpperCase()}\n文件内容如下：\n${file.promptContent}\n【文件结束】`)
+    .join('\n\n')
+}
+
+function getConversationTitleText (msg?: ChatMessage): string {
+  if (!msg) return ''
+
+  if (Array.isArray(msg.blocks) && msg.blocks.length > 0) {
+    const contentText = msg.blocks
+      .filter((block): block is Extract<ChatMessageBlock, { kind: 'content' }> => block.kind === 'content')
+      .flatMap(block => typeof block.content === 'string'
+        ? [{ type: 'text', text: block.content }]
+        : block.content)
+      .filter(part => part.type === 'text')
+      .map(part => part.text || '')
+      .join(' ')
+      .trim()
+
+    if (contentText) return contentText
+
+    const attachmentNames = msg.blocks
+      .filter((block): block is Extract<ChatMessageBlock, { kind: 'attachment' }> => block.kind === 'attachment')
+      .map(block => block.fileName)
+
+    if (attachmentNames.length > 0) {
+      return `上传文件：${attachmentNames.join('、')}`
+    }
+  }
+
+  return getMessageText(msg)
 }
 
 function getMessageText (msg: ChatMessage): string {
@@ -387,6 +512,8 @@ async function startOptimizationConversation (ctx: Record<string, unknown>) {
   targetProjectId.value = projectId
   inputText.value = `请帮我继续优化项目"${name}"（项目ID: ${ctx.id}）。请先查看项目当前的代码结构，然后告诉我可以改进的地方。`
   pendingImages.value = []
+  pendingFiles.value = []
+  uploadFeedback.value = ''
   resetTransientStreamState()
   setConversationTarget(conversationId, projectId)
 
@@ -485,6 +612,8 @@ function newConversation () {
   inputText.value = ''
   resetTransientStreamState()
   pendingImages.value = []
+  pendingFiles.value = []
+  uploadFeedback.value = ''
 }
 
 async function loadConversation (id: string) {
@@ -502,6 +631,9 @@ async function loadConversation (id: string) {
     setConversationTarget(id, bg.targetProjectId)
     backgroundStreamMessages.delete(id)
     resetTransientStreamState()
+    pendingFiles.value = []
+    pendingImages.value = []
+    uploadFeedback.value = ''
     await loadProviders(bg.providerId || null, bg.selectedModel || null)
     return
   }
@@ -513,6 +645,9 @@ async function loadConversation (id: string) {
     targetProjectId.value = conv.targetProjectId || null
     setConversationTarget(conv.id, conv.targetProjectId || null)
     resetTransientStreamState()
+    pendingFiles.value = []
+    pendingImages.value = []
+    uploadFeedback.value = ''
     await loadProviders(conv.providerId || null, conv.selectedModel || null)
   }
 }
@@ -527,7 +662,7 @@ async function doSaveConversation (
   if (msgs.length === 0 && !options?.titleOverride && !options?.allowEmpty && !existingConversation) return
 
   const firstUserMsg = msgs.find(m => m.role === 'user')
-  const titleText = firstUserMsg ? getMessageText(firstUserMsg) : ''
+  const titleText = getConversationTitleText(firstUserMsg)
   const resolvedTitle = options?.titleOverride || (titleText
     ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
     : (existingConversation?.title || '新对话'))
@@ -566,34 +701,129 @@ function addImage (base64: string, mimeType: string) {
   pendingImages.value.push({ base64, mimeType })
 }
 
+async function addFiles (files: File[]) {
+  if (!window.electronAPI?.readUploadedOfficeFile || files.length === 0) return
+
+  isUploadingFiles.value = true
+  uploadFeedback.value = ''
+
+  try {
+    for (const file of files) {
+      const filePath = getElectronFilePath(file)
+      if (!filePath) {
+        uploadFeedback.value = `无法读取文件路径：${file.name}`
+        continue
+      }
+
+      try {
+        const uploaded = await window.electronAPI.readUploadedOfficeFile(filePath)
+        pendingFiles.value.push({
+          id: generateId(),
+          name: uploaded.fileName,
+          filePath: uploaded.filePath,
+          fileType: uploaded.fileType,
+          fileSizeLabel: formatFileSize(uploaded.size),
+          promptContent: uploaded.content,
+          previewText: trimPreviewText(uploaded.content)
+        })
+        uploadFeedback.value = ''
+      } catch (err) {
+        uploadFeedback.value = `${file.name} 上传失败：${(err as Error).message}`
+      }
+    }
+  } finally {
+    isUploadingFiles.value = false
+  }
+}
+
 function removeImage (index: number) {
   pendingImages.value.splice(index, 1)
 }
 
+function removeFile (id: string) {
+  pendingFiles.value = pendingFiles.value.filter(file => file.id !== id)
+  if (pendingFiles.value.length === 0) {
+    uploadFeedback.value = ''
+  }
+}
+
+function handleAuthRequest (request: AuthRequestPayload) {
+  const assistantMessage = findLatestAssistantMessage()
+  if (!assistantMessage) return
+
+  const blocks = ensureBlocks(assistantMessage)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'auth_request' }> => {
+    return block.kind === 'auth_request' && block.requestId === request.requestId
+  })
+  if (existing) return
+
+  const toolBlock = findLastRunningToolBlock(assistantMessage)
+  if (toolBlock) {
+    const alreadyLogged = toolBlock.toolRun.progress.some(step => step.stage === '等待授权' && step.detail === request.title)
+    if (!alreadyLogged) {
+      toolBlock.toolRun.progress.push({ stage: '等待授权', detail: request.title })
+    }
+  }
+
+  blocks.push(createAuthRequestBlock(request))
+}
+
+function respondToAuthRequest (requestId: string, approved: boolean) {
+  for (const message of messages.value) {
+    if (!Array.isArray(message.blocks)) continue
+    const block = message.blocks.find((item): item is Extract<ChatMessageBlock, { kind: 'auth_request' }> => {
+      return item.kind === 'auth_request' && item.requestId === requestId
+    })
+    if (!block) continue
+    block.status = approved ? 'approved' : 'denied'
+    break
+  }
+
+  window.electronAPI?.respondAuth(requestId, approved)
+}
+
 async function sendMessage () {
   const text = inputText.value.trim()
-  if ((!text && pendingImages.value.length === 0) || isLoading.value) return
+  if ((!text && pendingImages.value.length === 0 && pendingFiles.value.length === 0) || isLoading.value || isUploadingFiles.value) return
 
   let messageContent: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+  const filePrompt = buildUploadedFilesPrompt(pendingFiles.value)
+  const combinedText = [text, filePrompt].filter(Boolean).join('\n\n')
+  const userBlocks: ChatMessageBlock[] = []
+
+  if (text) {
+    userBlocks.push(createContentBlock(text))
+  }
+  for (const file of pendingFiles.value) {
+    userBlocks.push(createAttachmentBlock(file))
+  }
+
   if (pendingImages.value.length > 0) {
     const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = []
-    if (text) {
-      parts.push({ type: 'text', text })
+    if (combinedText) {
+      parts.push({ type: 'text', text: combinedText })
     }
     for (const img of pendingImages.value) {
       parts.push({ type: 'image_url', image_url: { url: img.base64 } })
     }
     messageContent = parts
+    userBlocks.push(createContentBlock(parts.filter(part => part.type === 'image_url')))
   } else {
-    messageContent = text
+    messageContent = combinedText
   }
 
   const convId = currentConversationId.value || generateId()
   currentConversationId.value = convId
 
-  messages.value.push({ role: 'user', content: messageContent })
+  messages.value.push({
+    role: 'user',
+    content: messageContent,
+    blocks: userBlocks.length > 0 ? userBlocks : undefined
+  })
   inputText.value = ''
   pendingImages.value = []
+  pendingFiles.value = []
+  uploadFeedback.value = ''
   resetTransientStreamState()
 
   messages.value.push({
@@ -711,6 +941,7 @@ async function sendMessage () {
               toolRun.status = 'completed'
             }
           }
+          finalizePendingAuthBlocks(assistantMessage)
           syncAssistantToolRuns()
 
           if (event.message?.content !== undefined) {
@@ -747,6 +978,7 @@ async function sendMessage () {
             activeToolRun.progress.push({ stage: '错误', detail: event.error })
             syncAssistantToolRuns()
           }
+          finalizePendingAuthBlocks(assistantMessage)
           assistantMessage.content = `错误: ${event.error}`
           ensureBlocks(assistantMessage).push(createContentBlock(`错误: ${event.error}`))
 
@@ -787,6 +1019,7 @@ async function sendMessage () {
           assistantMessage.content = '(无响应)'
           ensureBlocks(assistantMessage).push(createContentBlock('(无响应)'))
         }
+        finalizePendingAuthBlocks(assistantMessage)
         void doSaveConversation(convId, targetMessages)
         if (currentConversationId.value === convId) {
           resetTransientStreamState()
@@ -802,6 +1035,7 @@ async function sendMessage () {
       const response = await res.json() as { content?: string }
       assistantMessage.content = response.content || '(无响应)'
       ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
+      finalizePendingAuthBlocks(assistantMessage)
       streamingConvIds.delete(convId)
       void doSaveConversation(convId, targetMessages)
       resetTransientStreamState()
@@ -809,6 +1043,7 @@ async function sendMessage () {
   } catch (err) {
     assistantMessage.content = `错误: ${(err as Error).message}`
     ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
+    finalizePendingAuthBlocks(assistantMessage)
     streamingConvIds.delete(convId)
     resetTransientStreamState()
   }
@@ -832,6 +1067,10 @@ onMounted(async () => {
       void applyProvidersConfig(config, activeProviderId.value, selectedModel.value)
     })
   }
+
+  if (window.electronAPI?.onAuthRequest) {
+    authRequestCleanup = window.electronAPI.onAuthRequest(handleAuthRequest)
+  }
 })
 
 onUnmounted(() => {
@@ -841,6 +1080,8 @@ onUnmounted(() => {
   activeCleanups.clear()
   providerChangeCleanup?.()
   providerChangeCleanup = null
+  authRequestCleanup?.()
+  authRequestCleanup = null
 })
 </script>
 
@@ -873,17 +1114,23 @@ onUnmounted(() => {
         :messages="messages"
         :is-loading="isLoading"
         :file-preview="filePreview"
+        @respond-auth="respondToAuthRequest"
       />
 
       <ChatInput
         v-model="inputText"
         :is-loading="isLoading"
         :pending-images="pendingImages"
+        :pending-files="pendingFiles"
+        :is-uploading-files="isUploadingFiles"
+        :upload-feedback="uploadFeedback"
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
         @send="sendMessage"
         @add-image="addImage"
+        @add-files="addFiles"
         @remove-image="removeImage"
+        @remove-file="removeFile"
         @toggle-skill="toggleSkill"
       />
     </div>

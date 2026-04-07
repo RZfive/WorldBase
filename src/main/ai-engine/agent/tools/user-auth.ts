@@ -1,11 +1,10 @@
-import { dialog, type BrowserWindow } from 'electron'
+import type { BrowserWindow } from 'electron'
 
 /** Timeout in ms before auto-denying an auth request. */
 const AUTH_TIMEOUT_MS = 120_000
 
 /**
- * Show a confirmation dialog to the user before executing a sensitive operation.
- * Tries in-app UI dialog first (via IPC), falls back to native Electron dialog.
+ * Show a confirmation request inside the app before executing a sensitive operation.
  * Returns true if the user approved, false otherwise.
  */
 export async function requestUserAuth (
@@ -15,33 +14,15 @@ export async function requestUserAuth (
 ): Promise<boolean> {
   const win = getMainWindow?.() ?? null
 
-  // Try in-app UI dialog via IPC (more polished UX)
-  if (win && !win.isDestroyed()) {
-    try {
-      return await requestUserAuthViaRenderer(win, title, detail)
-    } catch {
-      // Fall back to native dialog if renderer auth fails
-    }
+  if (!win || win.isDestroyed()) {
+    return false
   }
 
-  // Fallback: native Electron dialog
-  const options = {
-    type: 'warning' as const,
-    title: '操作授权',
-    message: title,
-    detail,
-    buttons: ['拒绝', '允许'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true
+  try {
+    return await requestUserAuthViaRenderer(win, title, detail)
+  } catch {
+    return false
   }
-
-  const result = win
-    ? await dialog.showMessageBox(win, options)
-    : await dialog.showMessageBox(options)
-
-  // button index 1 = "允许"
-  return result.response === 1
 }
 
 /**
