@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises'
+import { createWriteStream } from 'node:fs'
 import path from 'node:path'
 import ExcelJS from 'exceljs'
 import mammoth from 'mammoth'
@@ -148,15 +149,9 @@ export async function readWordFile (filePath: string): Promise<string> {
 
 /**
  * Read a PowerPoint (.pptx) file and extract slide text.
- * Uses a lightweight approach — reads XML inside the zip.
+ * PPTX files are ZIP archives containing XML slide files.
  */
 export async function readPptxFile (filePath: string): Promise<string> {
-  // pptx files are zip archives; we can read them with a simple approach
-  const { createReadStream } = await import('node:fs')
-  const { pipeline } = await import('node:stream/promises')
-  const { createUnzip } = await import('node:zlib')
-
-  // Use a simpler approach: read the file as a buffer and extract XML
   const buffer = await fs.readFile(filePath)
 
   const lines: string[] = []
@@ -164,25 +159,39 @@ export async function readPptxFile (filePath: string): Promise<string> {
   lines.push('')
 
   try {
-    // pptx is a zip file, try to extract slide XML contents
-    // For simplicity, we'll use the exceljs zip dependency (jszip) if available,
-    // or fall back to a basic extraction
-    const JSZip = (await import('exceljs')).default
-    // ExcelJS uses jszip internally; we can access it through a workaround
-    // Instead, let's just try to use Node's built-in capabilities
+    // pptx is a zip file with slides in ppt/slides/slide*.xml
+    const JSZip = (await import('jszip')).default
+    const zip = await JSZip.loadAsync(buffer)
 
-    // Direct approach: pptx is a zip, slides are in ppt/slides/slide*.xml
-    const { Readable } = await import('node:stream')
-    const yauzl = await tryImportYauzl()
-    if (yauzl) {
-      const entries = await extractPptxSlides(filePath, yauzl)
-      for (const entry of entries) {
-        lines.push(entry)
-      }
-    } else {
-      // Fallback: just note the file info
+    // Find slide files sorted by number
+    const slideFiles = Object.keys(zip.files)
+      .filter(name => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+      .sort((a, b) => {
+        const numA = parseInt(a.match(/slide(\d+)/)?.[1] || '0', 10)
+        const numB = parseInt(b.match(/slide(\d+)/)?.[1] || '0', 10)
+        return numA - numB
+      })
+
+    if (slideFiles.length === 0) {
       lines.push(`文件大小: ${(buffer.length / 1024).toFixed(1)} KB`)
-      lines.push('(PowerPoint 文件内容提取需要额外依赖，仅显示文件信息)')
+      lines.push('(未找到幻灯片内容)')
+      return lines.join('\n')
+    }
+
+    lines.push(`幻灯片数量: ${slideFiles.length}\n`)
+
+    for (let i = 0; i < slideFiles.length; i++) {
+      const xmlContent = await zip.files[slideFiles[i]].async('text')
+      const slideTexts = extractTextFromXml(xmlContent)
+      lines.push(`--- 幻灯片 ${i + 1} ---`)
+      if (slideTexts.length > 0) {
+        for (const text of slideTexts) {
+          lines.push(text)
+        }
+      } else {
+        lines.push('(无文本内容)')
+      }
+      lines.push('')
     }
   } catch (err) {
     lines.push(`文件大小: ${(buffer.length / 1024).toFixed(1)} KB`)
@@ -192,17 +201,36 @@ export async function readPptxFile (filePath: string): Promise<string> {
   return lines.join('\n')
 }
 
-async function tryImportYauzl (): Promise<unknown | null> {
-  try {
-    return await import('yauzl')
-  } catch {
-    return null
-  }
-}
+/**
+ * Extract text content from XML by finding all <a:t> tags (used in OOXML).
+ */
+function extractTextFromXml (xml: string): string[] {
+  const texts: string[] = []
+  // Match <a:t>...</a:t> tags which contain text in OOXML slides
+  const regex = /<a:t[^>]*>([\s\S]*?)<\/a:t>/g
+  let match: RegExpExecArray | null
+  let currentParagraph = ''
 
-async function extractPptxSlides (_filePath: string, _yauzl: unknown): Promise<string[]> {
-  // Placeholder - yauzl may not be available
-  return ['(PowerPoint 幻灯片文本提取暂不可用)']
+  // Also track paragraph boundaries via <a:p> tags
+  const paragraphs: string[] = []
+  const pRegex = /<a:p[\s>][\s\S]*?<\/a:p>/g
+  let pMatch: RegExpExecArray | null
+
+  while ((pMatch = pRegex.exec(xml)) !== null) {
+    const pContent = pMatch[0]
+    const textParts: string[] = []
+    const tRegex = /<a:t[^>]*>([\s\S]*?)<\/a:t>/g
+    let tMatch: RegExpExecArray | null
+    while ((tMatch = tRegex.exec(pContent)) !== null) {
+      textParts.push(tMatch[1].trim())
+    }
+    const line = textParts.join('')
+    if (line.trim()) {
+      paragraphs.push(line.trim())
+    }
+  }
+
+  return paragraphs
 }
 
 /**
@@ -283,7 +311,7 @@ export async function writeWordFile (
     const docx = officegen('docx')
 
     for (const para of paragraphs) {
-      const p = docx.createP()
+      const p = docx.createP!()
       if (para.heading) {
         p.addText(para.text, { bold: true, font_size: 16 })
       } else if (para.bold) {
@@ -293,7 +321,6 @@ export async function writeWordFile (
       }
     }
 
-    const { createWriteStream } = require('node:fs') as typeof import('node:fs')
     const out = createWriteStream(filePath)
 
     out.on('error', reject)
@@ -319,7 +346,7 @@ export async function writePptxFile (
     const pptx = officegen('pptx')
 
     for (const slide of slides) {
-      const s = pptx.makeNewSlide()
+      const s = pptx.makeNewSlide!()
       s.name = slide.title
       s.addText(slide.title, { x: 50, y: 30, cx: '80%', font_size: 28, bold: true })
 
@@ -330,7 +357,6 @@ export async function writePptxFile (
       }
     }
 
-    const { createWriteStream } = require('node:fs') as typeof import('node:fs')
     const out = createWriteStream(filePath)
 
     out.on('error', reject)
