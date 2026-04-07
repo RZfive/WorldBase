@@ -118,6 +118,7 @@ const selectedModel = ref('')
 const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
 const pendingFiles = ref<PendingOfficeFile[]>([])
 const isUploadingFiles = ref(false)
+const uploadFeedback = ref('')
 const filePreview = ref<FilePreviewState>({
   active: false,
   filePath: '',
@@ -142,6 +143,7 @@ const activeCleanups = new Map<string, () => void>()
 const conversationTargets = new Map<string, string | null>()
 let providerChangeCleanup: (() => void) | null = null
 let authRequestCleanup: (() => void) | null = null
+const MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH = 180
 
 function getEnabledProviders (config: ProvidersConfig): ProviderOption[] {
   const enabledIds = new Set(
@@ -390,11 +392,12 @@ function formatFileSize (size: number): string {
 }
 
 function getElectronFilePath (file: File): string | null {
+  // Electron file inputs expose an absolute `path`; standard browsers do not.
   const candidate = (file as File & { path?: string }).path
   return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate : null
 }
 
-function trimPreviewText (content: string, maxLength = 180): string {
+function trimPreviewText (content: string, maxLength = MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH): string {
   const normalized = content.replace(/\s+/g, ' ').trim()
   if (normalized.length <= maxLength) return normalized
   return `${normalized.slice(0, maxLength)}…`
@@ -510,6 +513,7 @@ async function startOptimizationConversation (ctx: Record<string, unknown>) {
   inputText.value = `请帮我继续优化项目"${name}"（项目ID: ${ctx.id}）。请先查看项目当前的代码结构，然后告诉我可以改进的地方。`
   pendingImages.value = []
   pendingFiles.value = []
+  uploadFeedback.value = ''
   resetTransientStreamState()
   setConversationTarget(conversationId, projectId)
 
@@ -609,6 +613,7 @@ function newConversation () {
   resetTransientStreamState()
   pendingImages.value = []
   pendingFiles.value = []
+  uploadFeedback.value = ''
 }
 
 async function loadConversation (id: string) {
@@ -628,6 +633,7 @@ async function loadConversation (id: string) {
     resetTransientStreamState()
     pendingFiles.value = []
     pendingImages.value = []
+    uploadFeedback.value = ''
     await loadProviders(bg.providerId || null, bg.selectedModel || null)
     return
   }
@@ -641,6 +647,7 @@ async function loadConversation (id: string) {
     resetTransientStreamState()
     pendingFiles.value = []
     pendingImages.value = []
+    uploadFeedback.value = ''
     await loadProviders(conv.providerId || null, conv.selectedModel || null)
   }
 }
@@ -698,12 +705,13 @@ async function addFiles (files: File[]) {
   if (!window.electronAPI?.readUploadedOfficeFile || files.length === 0) return
 
   isUploadingFiles.value = true
+  uploadFeedback.value = ''
 
   try {
     for (const file of files) {
       const filePath = getElectronFilePath(file)
       if (!filePath) {
-        alert(`无法读取文件路径：${file.name}`)
+        uploadFeedback.value = `无法读取文件路径：${file.name}`
         continue
       }
 
@@ -718,8 +726,9 @@ async function addFiles (files: File[]) {
           promptContent: uploaded.content,
           previewText: trimPreviewText(uploaded.content)
         })
+        uploadFeedback.value = ''
       } catch (err) {
-        alert(`${file.name} 上传失败：${(err as Error).message}`)
+        uploadFeedback.value = `${file.name} 上传失败：${(err as Error).message}`
       }
     }
   } finally {
@@ -733,6 +742,9 @@ function removeImage (index: number) {
 
 function removeFile (id: string) {
   pendingFiles.value = pendingFiles.value.filter(file => file.id !== id)
+  if (pendingFiles.value.length === 0) {
+    uploadFeedback.value = ''
+  }
 }
 
 function handleAuthRequest (request: AuthRequestPayload) {
@@ -811,6 +823,7 @@ async function sendMessage () {
   inputText.value = ''
   pendingImages.value = []
   pendingFiles.value = []
+  uploadFeedback.value = ''
   resetTransientStreamState()
 
   messages.value.push({
@@ -1110,6 +1123,7 @@ onUnmounted(() => {
         :pending-images="pendingImages"
         :pending-files="pendingFiles"
         :is-uploading-files="isUploadingFiles"
+        :upload-feedback="uploadFeedback"
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
         @send="sendMessage"
