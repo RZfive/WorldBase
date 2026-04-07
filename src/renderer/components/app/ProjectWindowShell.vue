@@ -86,7 +86,7 @@ async function resolveProjectUrl () {
     }
 
     if (status.status === 'running' && status.port) {
-      iframeUrl.value = `http://localhost:${status.port}`
+      iframeUrl.value = `http://127.0.0.1:${status.port}`
       frameVersion.value += 1
     } else {
       iframeUrl.value = ''
