@@ -339,8 +339,11 @@ function createWindow (): void {
 
   mainWindow.on('close', (event) => {
     if (hasFinishedQuitCleanup) return
+    if (isClosingMainWindow || isQuitCleanupRunning) {
+      event.preventDefault()
+      return
+    }
     event.preventDefault()
-    if (isClosingMainWindow || isQuitCleanupRunning) return
     isClosingMainWindow = true
     app.quit()
   })
