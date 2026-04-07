@@ -168,6 +168,10 @@ interface ElectronAPI {
   maximizeWindow: () => Promise<void>
   closeWindow: () => Promise<void>
   isMaximized: () => Promise<boolean>
+
+  // Auth (in-app authorization dialogs)
+  onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => () => void
+  respondAuth: (requestId: string, approved: boolean) => void
 }
 
 interface Window {
