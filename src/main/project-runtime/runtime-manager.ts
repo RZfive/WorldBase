@@ -6,6 +6,7 @@ import { PortManager } from './port-manager.js'
 import { ProcessMonitor } from './process-monitor.js'
 import { LAN_SERVER_PORT } from '../constants.js'
 import type { BuilderService } from './builder-service.js'
+import { createBundledRuntimeEnv } from './bundled-runtime.js'
 
 interface LogEntry {
   type: 'stdout' | 'stderr'
@@ -182,9 +183,7 @@ export class RuntimeManager {
 
     // Spawn the process — include node_modules/.bin in PATH so that raw
     // commands extracted from npm scripts can resolve locally-installed binaries.
-    const env = {
-      ...process.env,
-      PATH: `${path.join(cwd, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH || ''}`,
+    const env = await createBundledRuntimeEnv(cwd, {
       PORT: String(port),
       HOSTNAME: '0.0.0.0',
       NODE_ENV: this._resolveNodeEnv(command, isStandalone, isNextProject),
@@ -196,7 +195,7 @@ export class RuntimeManager {
       NEXT_PUBLIC_THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
       NEXT_PUBLIC_THE_WORLD_RESOURCE_PROXY_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/resource-proxy`,
       NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/projects/${projectId}/data`
-    }
+    })
 
     const childProcess = spawn(cmd, args, {
       cwd,
@@ -403,11 +402,12 @@ export class RuntimeManager {
       ? path.join(projectDir, backend.cwd as string)
       : projectDir
 
-    return new Promise((resolve, reject) => {
+    return createBundledRuntimeEnv(cwd).then(env => new Promise((resolve, reject) => {
       const child = spawn('npm', ['install'], {
         cwd,
         stdio: 'pipe',
-        shell: true
+        shell: true,
+        env
       })
 
       let output = ''
@@ -423,7 +423,7 @@ export class RuntimeManager {
       })
 
       child.on('error', reject)
-    })
+    }))
   }
 
   /**

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import crypto from 'node:crypto'
 import { LAN_SERVER_PORT } from '../constants.js'
+import { createBundledRuntimeEnv } from './bundled-runtime.js'
 
 const NEXT_CONFIG_TEMPLATE = `/** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -86,23 +87,24 @@ export class BuilderService {
     // Update build status in meta
     await this._updateBuildStatus(metaPath, 'building')
 
+    const env = await createBundledRuntimeEnv(projectDir, {
+      NODE_ENV: 'production',
+      THE_WORLD_PROJECT_ID: projectId,
+      THE_WORLD_PROJECT_ROOT: projectDir,
+      THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
+      THE_WORLD_RESOURCE_PROXY_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/resource-proxy`,
+      THE_WORLD_PROJECT_DATA_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/projects/${projectId}/data`,
+      NEXT_PUBLIC_THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
+      NEXT_PUBLIC_THE_WORLD_RESOURCE_PROXY_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/resource-proxy`,
+      NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/projects/${projectId}/data`
+    })
+
     return new Promise((resolve) => {
       const child = spawn('npm', ['run', 'build'], {
         cwd: projectDir,
         stdio: 'pipe',
         shell: true,
-        env: {
-          ...process.env,
-          NODE_ENV: 'production',
-          THE_WORLD_PROJECT_ID: projectId,
-          THE_WORLD_PROJECT_ROOT: projectDir,
-          THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
-          THE_WORLD_RESOURCE_PROXY_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/resource-proxy`,
-          THE_WORLD_PROJECT_DATA_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/projects/${projectId}/data`,
-          NEXT_PUBLIC_THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
-          NEXT_PUBLIC_THE_WORLD_RESOURCE_PROXY_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/resource-proxy`,
-          NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/projects/${projectId}/data`
-        }
+        env
       })
 
       let output = ''
@@ -501,11 +503,12 @@ export class BuilderService {
    * Install npm dependencies.
    */
   private _installDeps (cwd: string): Promise<void> {
-    return new Promise((resolve, reject) => {
+    return createBundledRuntimeEnv(cwd).then(env => new Promise((resolve, reject) => {
       const child = spawn('npm', ['install'], {
         cwd,
         stdio: 'pipe',
-        shell: true
+        shell: true,
+        env
       })
 
       child.on('exit', (code) => {
@@ -514,6 +517,6 @@ export class BuilderService {
       })
 
       child.on('error', reject)
-    })
+    }))
   }
 }
