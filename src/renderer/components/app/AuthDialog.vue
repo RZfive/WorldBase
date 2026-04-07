@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { emitAuthResolution, onAuthResolution } from '../../utils/auth-events'
 
 interface AuthRequest {
   requestId: string
@@ -8,26 +9,50 @@ interface AuthRequest {
 }
 
 const currentRequest = ref<AuthRequest | null>(null)
+const queuedRequests = ref<AuthRequest[]>([])
 let cleanup: (() => void) | null = null
+let responseCleanup: (() => void) | null = null
 
 function handleAuthRequest (request: AuthRequest) {
-  currentRequest.value = request
+  if (currentRequest.value?.requestId === request.requestId) return
+  if (queuedRequests.value.some(item => item.requestId === request.requestId)) return
+
+  if (!currentRequest.value) {
+    currentRequest.value = request
+    return
+  }
+
+  queuedRequests.value.push(request)
+}
+
+function handleAuthResolution (payload: { requestId: string }) {
+  if (currentRequest.value?.requestId === payload.requestId) {
+    currentRequest.value = queuedRequests.value.shift() ?? null
+    return
+  }
+
+  queuedRequests.value = queuedRequests.value.filter(item => item.requestId !== payload.requestId)
 }
 
 function respond (approved: boolean) {
-  if (!currentRequest.value) return
-  window.electronAPI?.respondAuth(currentRequest.value.requestId, approved)
-  currentRequest.value = null
+  const requestId = currentRequest.value?.requestId
+  if (!requestId) return
+
+  emitAuthResolution({ requestId, approved })
+  window.electronAPI?.respondAuth(requestId, approved)
 }
 
 onMounted(() => {
   if (window.electronAPI?.onAuthRequest) {
     cleanup = window.electronAPI.onAuthRequest(handleAuthRequest)
   }
+
+  responseCleanup = onAuthResolution(handleAuthResolution)
 })
 
 onUnmounted(() => {
   cleanup?.()
+  responseCleanup?.()
 })
 </script>
 

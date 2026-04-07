@@ -4,6 +4,7 @@ import ConversationSidebar from './ConversationSidebar.vue'
 import MessageList from './MessageList.vue'
 import ChatInput from './ChatInput.vue'
 import ChatHeader from './ChatHeader.vue'
+import { emitAuthResolution, onAuthResolution, type AuthResolutionPayload } from '../../utils/auth-events'
 
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 
@@ -143,6 +144,7 @@ const activeCleanups = new Map<string, () => void>()
 const conversationTargets = new Map<string, string | null>()
 let providerChangeCleanup: (() => void) | null = null
 let authRequestCleanup: (() => void) | null = null
+let authResponseCleanup: (() => void) | null = null
 const MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH = 180
 
 function getEnabledProviders (config: ProvidersConfig): ProviderOption[] {
@@ -748,8 +750,18 @@ function removeFile (id: string) {
 }
 
 function handleAuthRequest (request: AuthRequestPayload) {
-  const assistantMessage = findLatestAssistantMessage()
-  if (!assistantMessage) return
+  let assistantMessage = findLatestAssistantMessage()
+
+  // If no assistant message exists (edge case), create one so the auth card has a home
+  if (!assistantMessage) {
+    const placeholder: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      blocks: []
+    }
+    messages.value.push(placeholder)
+    assistantMessage = placeholder
+  }
 
   const blocks = ensureBlocks(assistantMessage)
   const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'auth_request' }> => {
@@ -768,7 +780,7 @@ function handleAuthRequest (request: AuthRequestPayload) {
   blocks.push(createAuthRequestBlock(request))
 }
 
-function respondToAuthRequest (requestId: string, approved: boolean) {
+function applyAuthResolution (requestId: string, approved: boolean) {
   for (const message of messages.value) {
     if (!Array.isArray(message.blocks)) continue
     const block = message.blocks.find((item): item is Extract<ChatMessageBlock, { kind: 'auth_request' }> => {
@@ -778,7 +790,14 @@ function respondToAuthRequest (requestId: string, approved: boolean) {
     block.status = approved ? 'approved' : 'denied'
     break
   }
+}
 
+function handleAuthResolution (payload: AuthResolutionPayload) {
+  applyAuthResolution(payload.requestId, payload.approved)
+}
+
+function respondToAuthRequest (requestId: string, approved: boolean) {
+  emitAuthResolution({ requestId, approved })
   window.electronAPI?.respondAuth(requestId, approved)
 }
 
@@ -1071,6 +1090,8 @@ onMounted(async () => {
   if (window.electronAPI?.onAuthRequest) {
     authRequestCleanup = window.electronAPI.onAuthRequest(handleAuthRequest)
   }
+
+  authResponseCleanup = onAuthResolution(handleAuthResolution)
 })
 
 onUnmounted(() => {
@@ -1082,6 +1103,8 @@ onUnmounted(() => {
   providerChangeCleanup = null
   authRequestCleanup?.()
   authRequestCleanup = null
+  authResponseCleanup?.()
+  authResponseCleanup = null
 })
 </script>
 
