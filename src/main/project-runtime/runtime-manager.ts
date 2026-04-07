@@ -503,6 +503,7 @@ export class RuntimeManager {
       })
       taskkillProcess.once('exit', (code) => {
         if (code && this._hasLiveProcess(childProcess)) {
+          console.warn(`[RuntimeManager] taskkill exited with code ${code} for PID ${pid}, falling back to direct kill`)
           try {
             childProcess.kill(signal)
           } catch {
@@ -511,6 +512,7 @@ export class RuntimeManager {
         }
       })
       taskkillProcess.once('error', () => {
+        console.warn(`[RuntimeManager] taskkill failed for PID ${pid}, falling back to direct kill`)
         try {
           childProcess.kill(signal)
         } catch {
@@ -523,6 +525,8 @@ export class RuntimeManager {
     const pid = childProcess.pid
     if (pid) {
       try {
+        // On Unix-like systems, a negative PID targets the spawned process group,
+        // so npm/shell child processes are terminated together with their parent.
         process.kill(-pid, signal)
         return
       } catch {
