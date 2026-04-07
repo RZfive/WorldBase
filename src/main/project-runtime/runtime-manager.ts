@@ -495,9 +495,25 @@ export class RuntimeManager {
         return
       }
 
-      spawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
+      const taskkillProcess = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
         stdio: 'ignore',
         shell: true
+      })
+      taskkillProcess.once('exit', (code) => {
+        if (code && this._isProcessAlive(childProcess)) {
+          try {
+            childProcess.kill(signal)
+          } catch {
+            // Ignore fallback kill errors.
+          }
+        }
+      })
+      taskkillProcess.once('error', () => {
+        try {
+          childProcess.kill(signal)
+        } catch {
+          // Ignore fallback kill errors.
+        }
       })
       return
     }
