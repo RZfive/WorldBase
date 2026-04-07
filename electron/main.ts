@@ -338,9 +338,10 @@ function createWindow (): void {
   }
 
   mainWindow.on('close', (event) => {
-    if (isClosingMainWindow || hasFinishedQuitCleanup) return
-    isClosingMainWindow = true
+    if (hasFinishedQuitCleanup) return
     event.preventDefault()
+    if (isClosingMainWindow || isQuitCleanupRunning) return
+    isClosingMainWindow = true
     app.quit()
   })
 
@@ -847,7 +848,9 @@ function setupIPC (): void {
           if (result.status === 'stopped') {
             broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
           }
-        }).catch(() => {})
+        }).catch((error) => {
+          console.warn(`[runtime] Failed to stop ${projectId} after window close:`, error)
+        })
       }
     })
 
