@@ -17,6 +17,7 @@ import { SettingsStore, type AIProvidersConfig, type LaunchpadLayout } from '../
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
+import { isOfficeFile, readOfficeFile, detectOfficeType } from '../src/main/ai-engine/agent/tools/office-utils.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -56,6 +57,8 @@ let hasFinishedQuitCleanup = false
 const projectWindows = new Map<string, BrowserWindow>()
 
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
+const MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
+const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
 
 function getUrlHostname (value?: string): string | null {
   if (!value || value === 'null') return null
@@ -499,6 +502,33 @@ function setupIPC (): void {
 
     await fs.writeFile(result.filePath, buffer)
     return { success: true, filePath: result.filePath }
+  })
+
+  ipcMain.handle('chat:readUploadedOfficeFile', async (_event: IpcMainInvokeEvent, filePath: string) => {
+    const resolvedPath = path.resolve(filePath)
+    const stat = await fs.stat(resolvedPath)
+
+    if (!stat.isFile()) {
+      throw new Error(`路径不是一个文件: ${resolvedPath}`)
+    }
+
+    if (stat.size > MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
+      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)} MB)，最大支持 10 MB`)
+    }
+
+    if (!isOfficeFile(resolvedPath)) {
+      throw new Error(`暂不支持的 Office 文件格式: ${path.extname(resolvedPath) || 'unknown'}`)
+    }
+
+    const result = await readOfficeFile(resolvedPath)
+
+    return {
+      filePath: resolvedPath,
+      fileName: path.basename(resolvedPath),
+      size: stat.size,
+      fileType: detectOfficeType(resolvedPath) || result.type,
+      content: result.content.substring(0, MAX_UPLOADED_OFFICE_CONTENT_LENGTH)
+    }
   })
 
   // Project management
