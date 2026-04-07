@@ -57,6 +57,8 @@ let hasFinishedQuitCleanup = false
 const projectWindows = new Map<string, BrowserWindow>()
 
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
+const MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
+const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
 
 function getUrlHostname (value?: string): string | null {
   if (!value || value === 'null') return null
@@ -510,7 +512,7 @@ function setupIPC (): void {
       throw new Error(`路径不是一个文件: ${resolvedPath}`)
     }
 
-    if (stat.size > 10 * 1024 * 1024) {
+    if (stat.size > MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
       throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)} MB)，最大支持 10 MB`)
     }
 
@@ -525,7 +527,7 @@ function setupIPC (): void {
       fileName: path.basename(resolvedPath),
       size: stat.size,
       fileType: detectOfficeType(resolvedPath) || result.type,
-      content: result.content.substring(0, 100000)
+      content: result.content.substring(0, MAX_UPLOADED_OFFICE_CONTENT_LENGTH)
     }
   })
 

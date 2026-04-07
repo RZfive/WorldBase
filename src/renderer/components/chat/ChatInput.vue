@@ -21,6 +21,7 @@ const props = defineProps<{
   pendingImages: Array<{ base64: string; mimeType: string }>
   pendingFiles: PendingOfficeFile[]
   isUploadingFiles: boolean
+  uploadFeedback: string
   availableSkills: SkillItem[]
   activeSkillIds: Set<string>
 }>()
@@ -118,7 +119,7 @@ function handleOfficeUpload (e: Event) {
         rows="3"
       />
       <div class="input-actions">
-        <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" title="上传 Office 文件">
+        <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles" title="上传 Office 文件">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
           <input
             type="file"
@@ -129,7 +130,7 @@ function handleOfficeUpload (e: Event) {
             @change="handleOfficeUpload"
           />
         </label>
-        <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" title="上传图片">
+        <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles" title="上传图片">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
           <input type="file" accept="image/*" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleImageUpload" />
         </label>
@@ -144,6 +145,7 @@ function handleOfficeUpload (e: Event) {
         </button>
       </div>
     </div>
+    <div v-if="props.uploadFeedback" class="upload-feedback" role="status">{{ props.uploadFeedback }}</div>
   </div>
 </template>
 
@@ -332,6 +334,14 @@ function handleOfficeUpload (e: Event) {
   opacity: 0.5;
   cursor: not-allowed;
   pointer-events: none;
+}
+
+.upload-feedback {
+  margin-top: 8px;
+  padding: 0 4px;
+  color: var(--app-danger);
+  font-size: 0.78em;
+  line-height: 1.5;
 }
 
 .action-btn.send-btn {
