@@ -1,4 +1,4 @@
-import type { BrowserWindow } from 'electron'
+import { type BrowserWindow, ipcMain } from 'electron'
 
 /** Timeout in ms before auto-denying an auth request. */
 const AUTH_TIMEOUT_MS = 120_000
@@ -30,7 +30,6 @@ export async function requestUserAuth (
  */
 function requestUserAuthViaRenderer (win: BrowserWindow, title: string, detail: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const { ipcMain } = require('electron') as typeof import('electron')
     const requestId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
     const cleanup = () => {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { renderMarkdown } from './markdown'
 
 type MessageContent = string | ChatContentPart[]
@@ -67,6 +67,13 @@ const lightboxViewport = ref({ width: 0, height: 0 })
 const MIN_LIGHTBOX_ZOOM = 1
 const MAX_LIGHTBOX_ZOOM = 4
 const LIGHTBOX_ZOOM_STEP = 0.25
+
+/** Tracks which thinking block IDs are collapsed. Default: all expanded during streaming, auto-collapsed after. */
+const collapsedThinking = reactive<Record<string, boolean>>({})
+
+function toggleThinking (id: string): void {
+  collapsedThinking[id] = !collapsedThinking[id]
+}
 
 const latestAssistantMessageIndex = computed(() => {
   for (let index = props.messages.length - 1; index >= 0; index--) {
@@ -530,6 +537,24 @@ function scrollToBottom () {
   })
 }
 
+// Auto-collapse thinking blocks when streaming finishes
+watch(
+  () => props.isLoading,
+  (loading, wasLoading) => {
+    if (!loading && wasLoading) {
+      const lastIdx = props.messages.length - 1
+      if (lastIdx < 0) return
+      const last = props.messages[lastIdx]
+      if (last?.role !== 'assistant') return
+      getMessageBlocks(last, lastIdx).forEach(block => {
+        if (block.kind === 'thinking') {
+          collapsedThinking[block.id] = true
+        }
+      })
+    }
+  }
+)
+
 watch(() => props.messages.length, scrollToBottom)
 
 watch(
@@ -616,11 +641,30 @@ onUnmounted(() => {
               v-if="block.kind === 'thinking' && hasRenderableBlock(block)"
               class="message-event-card thinking-card"
             >
-              <!-- <div class="message-event-header">
-                <span class="message-event-kicker">思考过程</span>
-                <span class="message-event-status">按顺序输出</span>
-              </div> -->
-              <div class="message-event-body markdown-body" v-html="renderMarkdown(block.text)"></div>
+              <button
+                class="thinking-header"
+                type="button"
+                @click="toggleThinking(block.id)"
+              >
+                <span class="thinking-header-left">
+                  <span v-if="isStreamingAssistant(i, msg)" class="thinking-dot-icon" aria-hidden="true">
+                    <span class="thinking-dot"></span>
+                    <span class="thinking-dot"></span>
+                    <span class="thinking-dot"></span>
+                  </span>
+                  <svg v-else class="thinking-brain-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a5 5 0 0 1 5 5c0 1.07-.34 2.06-.9 2.88A4 4 0 0 1 20 14a4 4 0 0 1-4 4h-1v2a1 1 0 0 1-2 0v-2H8a4 4 0 0 1-4-4 4 4 0 0 1 3.9-3.12A5 5 0 0 1 7 7a5 5 0 0 1 5-5z"/></svg>
+                  <span class="thinking-header-label">{{ isStreamingAssistant(i, msg) ? '思考中…' : '思考过程' }}</span>
+                  <span v-if="!isStreamingAssistant(i, msg)" class="thinking-char-count">{{ block.text.length.toLocaleString() }} 字</span>
+                </span>
+                <span class="thinking-chevron" :class="{ expanded: !collapsedThinking[block.id] }" aria-hidden="true">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </span>
+              </button>
+              <div class="thinking-body-wrapper" :class="{ collapsed: collapsedThinking[block.id] }">
+                <div class="thinking-body">
+                  <div class="thinking-body-inner message-event-body markdown-body" v-html="renderMarkdown(block.text)"></div>
+                </div>
+              </div>
             </div>
 
             <div
@@ -680,17 +724,30 @@ onUnmounted(() => {
               class="message-event-card auth-request-card"
               :class="block.status"
             >
-              <div class="auth-request-header">
-                <span class="auth-request-badge">操作授权</span>
-                <span class="auth-request-status" :class="block.status">
-                  {{ block.status === 'approved' ? '已允许' : (block.status === 'denied' ? '已拒绝' : '等待中') }}
-                </span>
+              <div class="auth-request-icon-row">
+                <div class="auth-request-icon" :class="block.status">
+                  <svg v-if="block.status === 'pending'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <svg v-else-if="block.status === 'approved'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                  <svg v-else width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                </div>
+                <div class="auth-request-label-group">
+                  <span class="auth-request-badge">操作授权</span>
+                  <span class="auth-request-status" :class="block.status">
+                    {{ block.status === 'approved' ? '✓ 已允许' : (block.status === 'denied' ? '✕ 已拒绝' : '⏳ 等待授权') }}
+                  </span>
+                </div>
               </div>
               <div class="auth-request-title">{{ block.title }}</div>
               <pre class="auth-request-detail">{{ block.detail }}</pre>
               <div v-if="block.status === 'pending'" class="auth-request-actions">
-                <button class="auth-request-btn secondary" type="button" @click="emit('respondAuth', block.requestId, false)">拒绝</button>
-                <button class="auth-request-btn" type="button" @click="emit('respondAuth', block.requestId, true)">允许</button>
+                <button class="auth-request-btn deny" type="button" @click="emit('respondAuth', block.requestId, false)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                  拒绝
+                </button>
+                <button class="auth-request-btn allow" type="button" @click="emit('respondAuth', block.requestId, true)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  允许执行
+                </button>
               </div>
             </div>
 
@@ -946,20 +1003,41 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.attachment-card,
-.auth-request-card {
+.attachment-card {
   padding: 14px 16px;
 }
 
-.attachment-card-header,
-.auth-request-header {
+.auth-request-card {
+  padding: 18px 20px;
+  border-color: rgba(245, 158, 11, 0.35);
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  transition: border-color 0.3s ease;
+}
+
+.auth-request-card.pending {
+  border-color: rgba(245, 158, 11, 0.45);
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.08), 0 12px 30px rgba(15, 23, 42, 0.08);
+  animation: auth-pulse 2s ease-in-out infinite;
+}
+
+.auth-request-card.approved {
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
+.auth-request-card.denied {
+  border-color: rgba(239, 68, 68, 0.25);
+  opacity: 0.75;
+}
+
+@keyframes auth-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.08), 0 12px 30px rgba(15, 23, 42, 0.08); }
+  50% { box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.12), 0 12px 30px rgba(15, 23, 42, 0.08); }
+}
+
+.attachment-card-header {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-
-.auth-request-header {
-  justify-content: space-between;
 }
 
 .attachment-card-icon {
@@ -977,8 +1055,7 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-.attachment-card-name,
-.auth-request-title {
+.attachment-card-name {
   color: var(--app-text-strong);
   font-weight: 600;
 }
@@ -989,8 +1066,7 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-.attachment-card-detail,
-.auth-request-status {
+.attachment-card-detail {
   font-size: 0.78rem;
   color: var(--app-text-muted);
 }
@@ -1003,23 +1079,62 @@ onUnmounted(() => {
   word-break: break-word;
 }
 
+.auth-request-icon-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.auth-request-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.auth-request-icon.pending {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+}
+
+.auth-request-icon.approved {
+  background: rgba(34, 197, 94, 0.12);
+  color: #22c55e;
+}
+
+.auth-request-icon.denied {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+.auth-request-label-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .auth-request-badge {
   display: inline-flex;
   align-items: center;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: rgba(59, 130, 246, 0.12);
-  color: var(--app-accent);
-  font-size: 0.76rem;
-  font-weight: 600;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--app-text-strong);
 }
 
-.auth-request-status.pending { color: #f59e0b; }
+.auth-request-status {
+  font-size: 0.74rem;
+}
+
+.auth-request-status.pending { color: #f59e0b; font-weight: 600; }
 .auth-request-status.approved { color: #22c55e; }
 .auth-request-status.denied { color: #ef4444; }
 
 .auth-request-title {
-  margin-top: 12px;
+  margin-top: 14px;
+  font-size: 0.88rem;
 }
 
 .auth-request-detail {
@@ -1030,34 +1145,168 @@ onUnmounted(() => {
   background: var(--app-panel-subtle);
   color: var(--app-text-soft);
   font-size: 0.82rem;
-  line-height: 1.6;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
 }
 
 .auth-request-actions {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 16px;
 }
 
 .auth-request-btn {
-  min-width: 88px;
-  padding: 9px 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 100px;
+  height: 40px;
+  padding: 0 18px;
   border: none;
-  border-radius: 10px;
-  background: var(--app-accent);
-  color: #ffffff;
+  border-radius: 12px;
+  font-size: 0.86rem;
   font-weight: 600;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 
-.auth-request-btn.secondary {
+.auth-request-btn.deny {
   background: var(--app-panel-muted);
-  color: var(--app-text);
+  color: var(--app-text-soft);
+  border: 1px solid var(--app-border-strong);
 }
 
+.auth-request-btn.deny:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.auth-request-btn.allow {
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  color: #ffffff;
+  border: 1px solid transparent;
+}
+
+.auth-request-btn.allow:hover {
+  background: linear-gradient(135deg, #2563eb, #4f46e5);
+  box-shadow: 0 4px 15px rgba(99, 102, 241, 0.35);
+}
+
+/* ---- Thinking card ---- */
+.thinking-card {
+  border-color: rgba(139, 92, 246, 0.2);
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+}
+
+.thinking-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 11px 16px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  gap: 10px;
+  transition: background 0.15s ease;
+  border-radius: 18px;
+}
+
+.thinking-header:hover {
+  background: var(--app-panel-muted);
+}
+
+.thinking-header-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.thinking-brain-icon {
+  color: rgba(139, 92, 246, 0.7);
+  flex-shrink: 0;
+}
+
+.thinking-header-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.thinking-char-count {
+  font-size: 0.75rem;
+  color: var(--app-text-muted);
+  white-space: nowrap;
+}
+
+.thinking-chevron {
+  color: var(--app-text-muted);
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+  transition: transform 0.22s ease;
+  display: flex;
+  align-items: center;
+}
+
+.thinking-chevron.expanded {
+  transform: rotate(0deg);
+}
+
+/* Smooth expand/collapse via grid-template-rows trick */
+.thinking-body-wrapper {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.25s ease;
+}
+
+.thinking-body-wrapper.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.thinking-body {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.thinking-body-inner {
+  border-top: 1px solid var(--app-border);
+}
+
+/* Animated dots for streaming */
+.thinking-dot-icon {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.thinking-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(139, 92, 246, 0.7);
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+
+.thinking-dot:nth-child(1) { animation-delay: 0s; }
+.thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes thinking-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* ---- Legacy event cards ---- */
 .message-event-header {
   display: flex;
   align-items: center;
