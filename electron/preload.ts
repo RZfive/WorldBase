@@ -96,6 +96,7 @@ export interface ElectronAPI {
   saveConversation: (conversation: Conversation) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
+  readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
 
   // Projects
   listProjects: () => Promise<Array<Record<string, unknown>>>
@@ -177,6 +178,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveConversation: (conversation: Conversation) => ipcRenderer.invoke('conversations:save', conversation),
   deleteConversation: (id: string) => ipcRenderer.invoke('conversations:delete', id),
   saveImageToFile: (imageUrl: string, defaultName?: string) => ipcRenderer.invoke('media:saveImage', imageUrl, defaultName),
+  readUploadedOfficeFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedOfficeFile', filePath),
 
   // Projects
   listProjects: () => ipcRenderer.invoke('projects:list'),

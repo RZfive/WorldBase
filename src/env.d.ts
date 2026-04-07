@@ -46,6 +46,8 @@ type ChatMessageBlock =
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
+  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
 
 interface ConversationData extends ConversationSummary {
   messages: Array<{
@@ -111,6 +113,7 @@ interface ElectronAPI {
   saveConversation: (conversation: ConversationData) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
+  readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
 
   // Projects
   listProjects: () => Promise<Array<Record<string, unknown>>>
