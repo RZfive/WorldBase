@@ -7,9 +7,39 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old artifacts (keep latest 5 per name)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const artifactNames = ['windows-build', 'mac-arm-build'];
+            const keepCount = 5;
+
+            for (const name of artifactNames) {
+              const artifacts = await github.paginate(
+                github.rest.actions.listArtifactsForRepo,
+                { owner: context.repo.owner, repo: context.repo.repo, name, per_page: 100 }
+              );
+              // newest first
+              artifacts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+              const toDelete = artifacts.slice(keepCount);
+              for (const artifact of toDelete) {
+                console.log(`Deleting artifact: ${artifact.name} (id=${artifact.id}, created=${artifact.created_at})`);
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id,
+                });
+              }
+            }
+
   build-windows:
+    needs: cleanup
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -44,6 +74,7 @@ jobs:
           path: release/*.exe
 
   build-mac-arm:
+    needs: cleanup
     runs-on: macos-14
     steps:
       - name: Checkout repository
