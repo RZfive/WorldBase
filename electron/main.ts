@@ -701,7 +701,7 @@ function setupIPC (): void {
     return {
       port: LAN_SERVER_PORT,
       addresses,
-      baseUrl: addresses.length > 0 ? `http://${addresses[0]}:${LAN_SERVER_PORT}` : `http://localhost:${LAN_SERVER_PORT}`
+      baseUrl: addresses.length > 0 ? `http://${addresses[0]}:${LAN_SERVER_PORT}` : `http://127.0.0.1:${LAN_SERVER_PORT}`
     }
   })
 
@@ -717,7 +717,7 @@ function setupIPC (): void {
         }
       }
     }
-    const lanIp = addresses.length > 0 ? addresses[0] : 'localhost'
+    const lanIp = addresses.length > 0 ? addresses[0] : '127.0.0.1'
     return {
       projectPort: port,
       lanUrl: port ? `http://${lanIp}:${port}` : null,
