@@ -83,12 +83,8 @@ export class RuntimeManager {
         return { projectId, port: existing.port, status: 'already_running' }
       }
 
-      if (existing.process.exitCode == null && !existing.process.killed) {
-        try {
-          existing.process.kill('SIGTERM')
-        } catch {
-          // Best effort: stale process will be replaced by a fresh start attempt.
-        }
+      if (this._hasLiveProcess(existing.process)) {
+        this._terminateProcess(existing.process, 'SIGTERM')
       }
 
       this.runningProjects.delete(projectId)
@@ -205,6 +201,10 @@ export class RuntimeManager {
     const childProcess = spawn(cmd, args, {
       cwd,
       env,
+      // Unix-like systems need detached mode here because it creates a new
+      // process group; later shutdown uses process.kill(-pid, signal) to
+      // target that whole group and terminate npm/shell descendants together.
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: true
     })
@@ -257,6 +257,7 @@ export class RuntimeManager {
       throw new Error(`Project process terminated before ready.${recentLogs ? `\n${recentLogs}` : ''}`)
     }
     if (!ready) {
+      await this.stop(projectId)
       const recentLogs = this.getLogs(projectId, 40).map(log => log.text).join('\n')
       throw new Error(`Project did not become ready on port ${port} within 15 seconds.${recentLogs ? `\n${recentLogs}` : ''}`)
     }
@@ -270,23 +271,61 @@ export class RuntimeManager {
    */
   async stop (projectId: string): Promise<StopResult> {
     const info = this.runningProjects.get(projectId)
-    if (!info || info.status !== 'running') {
+    if (!info) {
       return { projectId, status: 'not_running' }
     }
 
+    if (!this._hasLiveProcess(info.process)) {
+      if (info.status === 'running' || info.status === 'starting' || info.status === 'stopping') {
+        info.status = 'stopped'
+      }
+      this.portManager.release(projectId)
+      return { projectId, status: 'not_running' }
+    }
+
+    info.status = 'stopping'
+
     return new Promise((resolve) => {
-      info.process.on('exit', () => {
+      let forceKillTimer: NodeJS.Timeout | null = null
+
+      const finalize = () => {
+        if (forceKillTimer) {
+          clearTimeout(forceKillTimer)
+        }
         info.status = 'stopped'
         this.portManager.release(projectId)
         resolve({ projectId, status: 'stopped' })
-      })
+      }
 
-      info.process.kill('SIGTERM')
+      const onExit = () => {
+        info.process.off('error', onError)
+        finalize()
+      }
 
-      // Force kill after 5 seconds
-      setTimeout(() => {
-        if (info.status === 'running') {
-          info.process.kill('SIGKILL')
+      const onError = () => {
+        info.process.off('exit', onExit)
+        finalize()
+      }
+
+      info.process.once('exit', onExit)
+      info.process.once('error', onError)
+
+      try {
+        this._terminateProcess(info.process, 'SIGTERM')
+      } catch {
+        info.process.off('exit', onExit)
+        info.process.off('error', onError)
+        finalize()
+        return
+      }
+
+      forceKillTimer = setTimeout(() => {
+        if (this._hasLiveProcess(info.process)) {
+          try {
+            this._terminateProcess(info.process, 'SIGKILL')
+          } catch {
+            finalize()
+          }
         }
       }, 5000)
     })
@@ -443,6 +482,62 @@ export class RuntimeManager {
     }
 
     return null
+  }
+
+  private _hasLiveProcess (childProcess: ChildProcess): boolean {
+    // `killed === true` only means a signal was sent, not that the process tree
+    // has already exited, so rely on exit metadata here.
+    return childProcess.exitCode == null && childProcess.signalCode == null
+  }
+
+  private _terminateProcess (childProcess: ChildProcess, signal: NodeJS.Signals): void {
+    if (!this._hasLiveProcess(childProcess)) return
+
+    if (process.platform === 'win32') {
+      const pid = childProcess.pid
+      if (!pid) {
+        childProcess.kill(signal)
+        return
+      }
+
+      const taskkillProcess = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
+        stdio: 'ignore',
+        shell: true
+      })
+      taskkillProcess.once('exit', (code) => {
+        if (code && this._hasLiveProcess(childProcess)) {
+          console.warn(`[RuntimeManager] taskkill exited with code ${code} for PID ${pid}, falling back to direct kill`)
+          try {
+            childProcess.kill(signal)
+          } catch {
+            // Ignore fallback kill errors.
+          }
+        }
+      })
+      taskkillProcess.once('error', () => {
+        console.warn(`[RuntimeManager] taskkill failed for PID ${pid}, falling back to direct kill`)
+        try {
+          childProcess.kill(signal)
+        } catch {
+          // Ignore fallback kill errors.
+        }
+      })
+      return
+    }
+
+    const pid = childProcess.pid
+    if (pid) {
+      try {
+        // On Unix-like systems, a negative PID targets the spawned process group,
+        // so npm/shell child processes are terminated together with their parent.
+        process.kill(-pid, signal)
+        return
+      } catch {
+        // Fall back to killing the spawned shell process directly.
+      }
+    }
+
+    childProcess.kill(signal)
   }
 
   private async _isNextProject (
