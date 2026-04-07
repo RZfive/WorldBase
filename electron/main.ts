@@ -845,14 +845,17 @@ function setupIPC (): void {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('project:windowClosed', { projectId })
       }
-      const stopPromise = runtimeManager?.stop(projectId)
-      void stopPromise?.then((result) => {
-        if (result.status === 'stopped') {
-          broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
+      if (!runtimeManager) return
+      void (async () => {
+        try {
+          const result = await runtimeManager.stop(projectId)
+          if (result.status === 'stopped') {
+            broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
+          }
+        } catch (error) {
+          console.warn(`[runtime] Failed to stop ${projectId} after window close:`, error)
         }
-      })?.catch((error) => {
-        console.warn(`[runtime] Failed to stop ${projectId} after window close:`, error)
-      })
+      })()
     })
 
     return { success: true }
