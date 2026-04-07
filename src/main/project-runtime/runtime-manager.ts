@@ -201,8 +201,9 @@ export class RuntimeManager {
     const childProcess = spawn(cmd, args, {
       cwd,
       env,
-      // Unix-like systems need a dedicated process group so later shutdown can
-      // terminate npm/shell descendants together via process.kill(-pid, signal).
+      // Unix-like systems need detached mode here because it creates a new
+      // process group; later shutdown uses process.kill(-pid, signal) to
+      // target that whole group and terminate npm/shell descendants together.
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: true
