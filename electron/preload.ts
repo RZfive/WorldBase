@@ -153,6 +153,10 @@ export interface ElectronAPI {
   maximizeWindow: () => Promise<void>
   closeWindow: () => Promise<void>
   isMaximized: () => Promise<boolean>
+
+  // Auth (in-app authorization dialogs)
+  onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => () => void
+  respondAuth: (requestId: string, approved: boolean) => void
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -241,5 +245,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
-  isMaximized: () => ipcRenderer.invoke('window:isMaximized')
+  isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+
+  // Auth (in-app authorization dialogs)
+  onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, request: { requestId: string; title: string; detail: string }) => callback(request)
+    ipcRenderer.on('auth:request', handler)
+    return () => { ipcRenderer.removeListener('auth:request', handler) }
+  },
+  respondAuth: (requestId: string, approved: boolean) => {
+    ipcRenderer.send('auth:response', { requestId, approved })
+  }
 } satisfies ElectronAPI)

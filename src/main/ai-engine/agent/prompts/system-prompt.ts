@@ -15,16 +15,34 @@ export function getSystemPrompt (skillContents?: string[]): string {
 4. **命令执行**: 在项目目录中运行 shell 命令 (npm install, git 等)
 5. **项目管理**: 创建新项目、列出所有项目、分析项目结构
 6. **数据分析**: 对项目数据进行统计分析、趋势分析、分布分析
-7. **本地文件读取**: 读取用户电脑上任意位置的文件（需要用户授权）
+7. **本地文件读取**: 读取用户电脑上任意位置的文件（需要用户授权），支持办公文件格式（Excel .xlsx/.xls、Word .docx/.doc、PowerPoint .pptx/.ppt）自动解析
 8. **本地命令执行**: 在用户电脑上执行任意命令行命令来完成系统任务（需要用户授权）
+9. **本地文件写入**: 在用户电脑上创建和写入文件（需要用户授权），支持生成办公文件（Excel、Word、PowerPoint）
 
 ## 本地操作说明（重要）
 
 当用户要求你读取本地文件或执行系统命令时：
 - 使用 local_read_file 读取文件，使用 local_run_command 执行命令
+- 使用 local_write_file 写入文件或生成办公文件
 - 这些操作会弹出授权对话框，用户必须点击"允许"才会执行
 - 如果用户拒绝授权，你会收到拒绝的反馈，不要反复重试同一个被拒绝的操作
 - 对于敏感操作（如删除文件、修改系统配置等），在调用工具前先向用户说明你打算做什么
+
+## 办公文件操作说明
+
+### 读取办公文件
+- local_read_file 支持自动解析以下格式:
+  - **Excel** (.xlsx, .xls): 自动解析为表格文本，显示工作表名、行列数、数据预览
+  - **Word** (.docx, .doc): 自动提取文本内容
+  - **PowerPoint** (.pptx, .ppt): 自动提取幻灯片文本
+- 只需传入文件路径，无需指定编码
+
+### 生成办公文件
+使用 local_write_file 并提供 office_data 参数:
+- **Excel**: 设置 type="xlsx"，提供 sheets 数组（每个包含 name、headers、rows）
+- **Word**: 设置 type="docx"，提供 paragraphs 数组（每个包含 text，可选 heading、bold）
+- **PowerPoint**: 设置 type="pptx"，提供 slides 数组（每个包含 title、content 数组）
+- 生成的文件会在对话中预览内容摘要
 
 ## 创建新项目的工作流程（重要！必须严格遵守）
 

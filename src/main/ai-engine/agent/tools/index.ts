@@ -9,6 +9,7 @@ import { toolAnalyzeData } from './tool-analyze-data.js'
 import { toolCreateProject } from './tool-create-project.js'
 import { toolLocalFileRead } from './tool-local-file-read.js'
 import { toolLocalCommand } from './tool-local-command.js'
+import { toolLocalWriteFile } from './tool-local-file-write.js'
 import type { AgentCore } from '../agent-core.js'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
@@ -41,7 +42,8 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolAnalyzeData(services),
     toolCreateProject(services, () => agent.sessionState),
     toolLocalFileRead(services),
-    toolLocalCommand(services)
+    toolLocalCommand(services),
+    toolLocalWriteFile(services)
   ]
 
   for (const tool of tools) {
