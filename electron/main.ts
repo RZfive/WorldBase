@@ -48,6 +48,9 @@ let lanServer: LanServer | null = null
 let settingsStore: SettingsStore | null = null
 let chatHistory: ChatHistoryStore | null = null
 let skillStore: SkillStore | null = null
+let isClosingMainWindow = false
+let isQuitCleanupRunning = false
+let hasFinishedQuitCleanup = false
 
 /** Track standalone project windows keyed by projectId */
 const projectWindows = new Map<string, BrowserWindow>()
@@ -333,6 +336,21 @@ function createWindow (): void {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'))
   }
+
+  mainWindow.on('close', (event) => {
+    if (hasFinishedQuitCleanup) return
+    if (isClosingMainWindow || isQuitCleanupRunning) {
+      event.preventDefault()
+      return
+    }
+    event.preventDefault()
+    isClosingMainWindow = true
+    app.quit()
+  })
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
 }
 
 function setupIPC (): void {
@@ -824,10 +842,23 @@ function setupIPC (): void {
 
     win.on('closed', () => {
       projectWindows.delete(projectId)
-      // Notify renderer that standalone window was closed
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('project:windowClosed', { projectId })
       }
+      if (!runtimeManager) {
+        console.warn(`[runtime] Runtime manager unavailable while closing window for ${projectId}`)
+        return
+      }
+      void (async () => {
+        try {
+          const result = await runtimeManager.stop(projectId)
+          if (result.status === 'stopped') {
+            broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
+          }
+        } catch (error) {
+          console.warn(`[runtime] Failed to stop ${projectId} after window close:`, error)
+        }
+      })()
     })
 
     return { success: true }
@@ -872,11 +903,26 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', async () => {
-  if (runtimeManager) {
-    await runtimeManager.stopAll()
-  }
-  if (lanServer) {
-    await lanServer.stop()
-  }
+app.on('before-quit', (event) => {
+  if (hasFinishedQuitCleanup) return
+
+  event.preventDefault()
+
+  if (isQuitCleanupRunning) return
+  isQuitCleanupRunning = true
+
+  void (async () => {
+    try {
+      if (runtimeManager) {
+        await runtimeManager.stopAll()
+      }
+      if (lanServer) {
+        await lanServer.stop()
+      }
+    } finally {
+      hasFinishedQuitCleanup = true
+      isQuitCleanupRunning = false
+      app.quit()
+    }
+  })()
 })
