@@ -6,6 +6,11 @@ import mammoth from 'mammoth'
 
 export type OfficeFileType = 'xlsx' | 'docx' | 'pptx' | 'unknown'
 
+/** Maximum rows to include in Excel preview output. */
+const MAX_EXCEL_PREVIEW_ROWS = 100
+/** Maximum character length for Word text extraction output. */
+const MAX_WORD_TEXT_LENGTH = 80000
+
 const OFFICE_EXTENSIONS: Record<string, OfficeFileType> = {
   '.xlsx': 'xlsx',
   '.xls': 'xlsx',
@@ -50,8 +55,8 @@ export async function readExcelFile (filePath: string): Promise<string> {
       continue
     }
 
-    // Limit to first 100 rows for preview
-    const maxRows = Math.min(worksheet.rowCount, 100)
+    // Limit to first MAX_EXCEL_PREVIEW_ROWS rows for preview
+    const maxRows = Math.min(worksheet.rowCount, MAX_EXCEL_PREVIEW_ROWS)
     const rows: string[][] = []
     const colWidths: number[] = []
 
@@ -130,8 +135,8 @@ export async function readWordFile (filePath: string): Promise<string> {
 
   const text = result.value || ''
   // Limit output
-  if (text.length > 80000) {
-    lines.push(text.substring(0, 80000))
+  if (text.length > MAX_WORD_TEXT_LENGTH) {
+    lines.push(text.substring(0, MAX_WORD_TEXT_LENGTH))
     lines.push(`\n... 内容已截断 (共 ${text.length} 字符)`)
   } else {
     lines.push(text)
