@@ -83,12 +83,8 @@ export class RuntimeManager {
         return { projectId, port: existing.port, status: 'already_running' }
       }
 
-      if (existing.process.exitCode == null && !existing.process.killed) {
-        try {
-          existing.process.kill('SIGTERM')
-        } catch {
-          // Best effort: stale process will be replaced by a fresh start attempt.
-        }
+      if (this._isProcessAlive(existing.process)) {
+        this._terminateProcess(existing.process, 'SIGTERM')
       }
 
       this.runningProjects.delete(projectId)
@@ -205,6 +201,7 @@ export class RuntimeManager {
     const childProcess = spawn(cmd, args, {
       cwd,
       env,
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: true
     })
@@ -257,6 +254,7 @@ export class RuntimeManager {
       throw new Error(`Project process terminated before ready.${recentLogs ? `\n${recentLogs}` : ''}`)
     }
     if (!ready) {
+      await this.stop(projectId)
       const recentLogs = this.getLogs(projectId, 40).map(log => log.text).join('\n')
       throw new Error(`Project did not become ready on port ${port} within 15 seconds.${recentLogs ? `\n${recentLogs}` : ''}`)
     }
@@ -270,23 +268,61 @@ export class RuntimeManager {
    */
   async stop (projectId: string): Promise<StopResult> {
     const info = this.runningProjects.get(projectId)
-    if (!info || info.status !== 'running') {
+    if (!info) {
       return { projectId, status: 'not_running' }
     }
 
+    if (!this._isProcessAlive(info.process)) {
+      if (info.status === 'running' || info.status === 'starting' || info.status === 'stopping') {
+        info.status = 'stopped'
+      }
+      this.portManager.release(projectId)
+      return { projectId, status: 'not_running' }
+    }
+
+    info.status = 'stopping'
+
     return new Promise((resolve) => {
-      info.process.on('exit', () => {
+      let forceKillTimer: NodeJS.Timeout | null = null
+
+      const finalize = () => {
+        if (forceKillTimer) {
+          clearTimeout(forceKillTimer)
+        }
         info.status = 'stopped'
         this.portManager.release(projectId)
         resolve({ projectId, status: 'stopped' })
-      })
+      }
 
-      info.process.kill('SIGTERM')
+      const onExit = () => {
+        info.process.off('error', onError)
+        finalize()
+      }
 
-      // Force kill after 5 seconds
-      setTimeout(() => {
-        if (info.status === 'running') {
-          info.process.kill('SIGKILL')
+      const onError = () => {
+        info.process.off('exit', onExit)
+        finalize()
+      }
+
+      info.process.once('exit', onExit)
+      info.process.once('error', onError)
+
+      try {
+        this._terminateProcess(info.process, 'SIGTERM')
+      } catch {
+        info.process.off('exit', onExit)
+        info.process.off('error', onError)
+        finalize()
+        return
+      }
+
+      forceKillTimer = setTimeout(() => {
+        if (this._isProcessAlive(info.process)) {
+          try {
+            this._terminateProcess(info.process, 'SIGKILL')
+          } catch {
+            finalize()
+          }
         }
       }, 5000)
     })
@@ -443,6 +479,40 @@ export class RuntimeManager {
     }
 
     return null
+  }
+
+  private _isProcessAlive (childProcess: ChildProcess): boolean {
+    return childProcess.exitCode == null && childProcess.signalCode == null
+  }
+
+  private _terminateProcess (childProcess: ChildProcess, signal: NodeJS.Signals): void {
+    if (!this._isProcessAlive(childProcess)) return
+
+    if (process.platform === 'win32') {
+      const pid = childProcess.pid
+      if (!pid) {
+        childProcess.kill(signal)
+        return
+      }
+
+      spawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
+        stdio: 'ignore',
+        shell: true
+      })
+      return
+    }
+
+    const pid = childProcess.pid
+    if (pid) {
+      try {
+        process.kill(-pid, signal)
+        return
+      } catch {
+        // Fall back to killing the spawned shell process directly.
+      }
+    }
+
+    childProcess.kill(signal)
   }
 
   private async _isNextProject (
