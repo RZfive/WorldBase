@@ -83,7 +83,7 @@ export class RuntimeManager {
         return { projectId, port: existing.port, status: 'already_running' }
       }
 
-      if (this._isProcessAlive(existing.process)) {
+      if (this._hasLiveProcess(existing.process)) {
         this._terminateProcess(existing.process, 'SIGTERM')
       }
 
@@ -272,7 +272,7 @@ export class RuntimeManager {
       return { projectId, status: 'not_running' }
     }
 
-    if (!this._isProcessAlive(info.process)) {
+    if (!this._hasLiveProcess(info.process)) {
       if (info.status === 'running' || info.status === 'starting' || info.status === 'stopping') {
         info.status = 'stopped'
       }
@@ -317,7 +317,7 @@ export class RuntimeManager {
       }
 
       forceKillTimer = setTimeout(() => {
-        if (this._isProcessAlive(info.process)) {
+        if (this._hasLiveProcess(info.process)) {
           try {
             this._terminateProcess(info.process, 'SIGKILL')
           } catch {
@@ -481,12 +481,14 @@ export class RuntimeManager {
     return null
   }
 
-  private _isProcessAlive (childProcess: ChildProcess): boolean {
+  private _hasLiveProcess (childProcess: ChildProcess): boolean {
+    // `killed === true` only means a signal was sent, not that the process tree
+    // has already exited, so rely on exit metadata here.
     return childProcess.exitCode == null && childProcess.signalCode == null
   }
 
   private _terminateProcess (childProcess: ChildProcess, signal: NodeJS.Signals): void {
-    if (!this._isProcessAlive(childProcess)) return
+    if (!this._hasLiveProcess(childProcess)) return
 
     if (process.platform === 'win32') {
       const pid = childProcess.pid
@@ -500,7 +502,7 @@ export class RuntimeManager {
         shell: true
       })
       taskkillProcess.once('exit', (code) => {
-        if (code && this._isProcessAlive(childProcess)) {
+        if (code && this._hasLiveProcess(childProcess)) {
           try {
             childProcess.kill(signal)
           } catch {
