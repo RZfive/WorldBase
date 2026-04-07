@@ -845,7 +845,10 @@ function setupIPC (): void {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('project:windowClosed', { projectId })
       }
-      if (!runtimeManager) return
+      if (!runtimeManager) {
+        console.warn(`[runtime] Runtime manager unavailable while closing window for ${projectId}`)
+        return
+      }
       void (async () => {
         try {
           const result = await runtimeManager.stop(projectId)
