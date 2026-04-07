@@ -8,7 +8,6 @@ import SourceViewer from './renderer/components/viewer/SourceViewer.vue'
 import TitleBar from './renderer/components/app/TitleBar.vue'
 import DockBar from './renderer/components/app/DockBar.vue'
 import ProjectWindowShell from './renderer/components/app/ProjectWindowShell.vue'
-import AuthDialog from './renderer/components/app/AuthDialog.vue'
 import { applyThemePreference, getAppliedThemePreference, watchSystemThemeChange } from './renderer/utils/theme'
 
 interface RunningApp {
@@ -500,7 +499,6 @@ onUnmounted(() => {
           </div>
         </div>
       </Teleport>
-      <AuthDialog />
     </template>
   </div>
 </template>

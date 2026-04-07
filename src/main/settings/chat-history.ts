@@ -20,6 +20,8 @@ export type ChatMessageBlock =
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
+  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
 
 export interface ChatMessage {
   role: string
