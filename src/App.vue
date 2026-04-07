@@ -159,7 +159,7 @@ async function openEmbeddedProject (projectId: string) {
 
     const appState = embeddedApps.value.get(projectId)
     if (appState && status.status === 'running' && status.port) {
-      appState.url = `http://localhost:${status.port}`
+      appState.url = `http://127.0.0.1:${status.port}`
     }
 
     await refreshRunningApps()
