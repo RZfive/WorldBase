@@ -9,12 +9,6 @@ permissions:
   contents: write
   actions: write
 
-env:
-  FILE_IO_URL: https://file.io
-  FILE_IO_CONNECT_TIMEOUT: 15
-  FILE_IO_MAX_TIME: 300
-  FILE_IO_MAX_ATTEMPTS: 3
-
 jobs:
   cleanup:
     runs-on: ubuntu-latest
@@ -93,18 +87,12 @@ jobs:
           archive="$(bash .github/scripts/package-release-archive.sh "release/windows-build.zip" "release/*.exe" "release/*.blockmap" "release/latest.yml")"
           echo "archive=${archive}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Windows packages to File.io
-        continue-on-error: true
-        shell: bash
-        run: |
-          bash .github/scripts/upload-to-fileio.sh "${{ steps.package_windows.outputs.archive }}" "Windows"
-
       - name: Upload Windows artifacts
-        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
           path: ${{ steps.package_windows.outputs.archive }}
+          if-no-files-found: error
 
   build-mac-arm:
     needs: cleanup
@@ -155,15 +143,9 @@ jobs:
           archive="$(bash .github/scripts/package-release-archive.sh "release/mac-arm-build.zip" "release/*.dmg" "release/*.dmg.blockmap")"
           echo "archive=${archive}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload macOS ARM packages to File.io
-        continue-on-error: true
-        shell: bash
-        run: |
-          bash .github/scripts/upload-to-fileio.sh "${{ steps.package_mac_arm.outputs.archive }}" "macOS ARM"
-
       - name: Upload macOS ARM artifacts
-        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: mac-arm-build
           path: ${{ steps.package_mac_arm.outputs.archive }}
+          if-no-files-found: error
