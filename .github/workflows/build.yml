@@ -11,12 +11,9 @@ permissions:
 
 env:
   FILE_IO_URL: https://file.io
-  FILE_IO_PARSE_SCRIPT: >-
-    const fs = require('fs');
-    const data = JSON.parse(fs.readFileSync(0, 'utf8'));
-    if (data.success !== true) { console.error('File.io upload was not successful:', data); process.exit(1); }
-    if (!data.link) { console.error('File.io response missing link:', data); process.exit(1); }
-    process.stdout.write(data.link);
+  FILE_IO_CONNECT_TIMEOUT: 15
+  FILE_IO_MAX_TIME: 300
+  FILE_IO_MAX_ATTEMPTS: 3
 
 jobs:
   cleanup:
@@ -93,23 +90,7 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=(release/*.exe)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No Windows package files found in release/"
-            exit 1
-          fi
-
-          for file in "${files[@]}"; do
-            echo "Uploading $file to File.io..."
-            response="$(curl --silent --show-error --fail --connect-timeout 15 --max-time 300 -F "file=@${file}" "$FILE_IO_URL")"
-            link="$(node -e "$FILE_IO_PARSE_SCRIPT" <<<"$response")"
-            filename="$(basename "$file")"
-            echo "File.io link for ${filename}: ${link}"
-            echo "::notice title=File.io upload::${filename}: ${link}"
-            printf -- "- %s: %s\n" "$filename" "$link" >> "$GITHUB_STEP_SUMMARY"
-          done
+          bash .github/scripts/upload-to-fileio.sh "release/*.exe" "Windows"
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -163,23 +144,7 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=(release/*.dmg)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No macOS ARM package files found in release/"
-            exit 1
-          fi
-
-          for file in "${files[@]}"; do
-            echo "Uploading $file to File.io..."
-            response="$(curl --silent --show-error --fail --connect-timeout 15 --max-time 300 -F "file=@${file}" "$FILE_IO_URL")"
-            link="$(node -e "$FILE_IO_PARSE_SCRIPT" <<<"$response")"
-            filename="$(basename "$file")"
-            echo "File.io link for ${filename}: ${link}"
-            echo "::notice title=File.io upload::${filename}: ${link}"
-            printf -- "- %s: %s\n" "$filename" "$link" >> "$GITHUB_STEP_SUMMARY"
-          done
+          bash .github/scripts/upload-to-fileio.sh "release/*.dmg" "macOS ARM"
 
       - name: Upload macOS ARM artifacts
         uses: actions/upload-artifact@v4
