@@ -20,6 +20,7 @@ try {
   data = JSON.parse(input)
 } catch (error) {
   console.error('Failed to parse File.io response as JSON:', error)
+  console.error('File.io response preview:', input.slice(0, 500))
   process.exit(1)
 }
 
