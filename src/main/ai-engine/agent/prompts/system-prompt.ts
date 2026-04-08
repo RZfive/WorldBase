@@ -1,3 +1,5 @@
+import { getEnvironmentContext } from './environment-context.js'
+
 /**
  * Get the system prompt for the AI agent.
  * @param skillContents Optional array of skill contents to inject into the prompt.
@@ -273,7 +275,9 @@ export async function listTables() {
 - 给出清晰、有帮助的回答
 - 如果创建项目后安装依赖、启动应用、调用接口或最终验收失败，必须基于错误信息继续排查并重试，逐步缩小范围，直到至少产出一个可以启动运行的最小可用应用
 - 如果 AI 请求或连接中断，优先根据已有上下文继续任务，不要因为一次中断就放弃
-- 用中文回答用户问题`
+- 用中文回答用户问题
+
+${getEnvironmentContext()}`
 
   // Inject skill contents if provided
   if (skillContents && skillContents.length > 0) {

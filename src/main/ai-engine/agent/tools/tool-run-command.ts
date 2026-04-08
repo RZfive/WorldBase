@@ -3,6 +3,7 @@ import path from 'node:path'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
+import { PROJECT_COMMAND_WHITELIST } from './command-capabilities.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -18,13 +19,6 @@ export interface Tool {
   definition: ToolDefinition
   handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>
 }
-
-/**
- * Allowed commands whitelist for security.
- */
-const ALLOWED_COMMANDS = [
-  'npm', 'npx', 'node', 'git', 'ls', 'cat', 'echo', 'pwd', 'find', 'grep', 'head', 'tail', 'wc'
-]
 
 /**
  * Tool: run_project_command — 在指定项目目录执行命令
@@ -57,11 +51,11 @@ export function toolRunCommand (services: ToolServices): Tool {
       const { project_id, command, cwd } = args as unknown as RunCommandArgs
       // Security: check command whitelist
       const baseCommand = command.split(' ')[0]
-      if (!ALLOWED_COMMANDS.includes(baseCommand)) {
+      if (!PROJECT_COMMAND_WHITELIST.includes(baseCommand)) {
         const hint = baseCommand === 'rm'
           ? ' Use delete_project_file to remove files inside the project.'
           : ''
-        throw new Error(`Command not allowed: ${baseCommand}. Allowed: ${ALLOWED_COMMANDS.join(', ')}.${hint}`)
+        throw new Error(`Command not allowed: ${baseCommand}. Allowed: ${PROJECT_COMMAND_WHITELIST.join(', ')}.${hint}`)
       }
 
       onProgress?.('⚡ 正在执行命令...', command)
