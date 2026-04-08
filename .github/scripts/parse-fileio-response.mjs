@@ -1,6 +1,13 @@
 import { readFileSync } from 'node:fs'
 
-const input = readFileSync(0, 'utf8').trim()
+let input
+
+try {
+  input = readFileSync(0, 'utf8').trim()
+} catch (error) {
+  console.error('Failed to read File.io response from stdin:', error)
+  process.exit(1)
+}
 
 if (!input) {
   console.error('File.io response was empty.')

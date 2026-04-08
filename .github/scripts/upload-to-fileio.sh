@@ -44,7 +44,7 @@ for file in "${files[@]}"; do
 
     echo "File.io upload failed for ${filename} on attempt ${attempt}/${max_attempts}." >&2
     if [ "$attempt" -lt "$max_attempts" ]; then
-      sleep $((attempt * 5))
+      sleep $((5 * 2 ** (attempt - 1)))
     fi
   done
 
