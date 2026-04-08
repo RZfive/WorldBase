@@ -14,13 +14,19 @@ if (!input) {
   process.exit(1)
 }
 
+if (input.startsWith('<') || input.startsWith('<!')) {
+  console.error('File.io returned an HTML page instead of JSON.')
+  console.error('Response preview:', input.slice(0, 300))
+  process.exit(1)
+}
+
 let data
 
 try {
   data = JSON.parse(input)
 } catch (error) {
-  console.error('Failed to parse File.io response as JSON:', error)
-  console.error('File.io response preview:', input.slice(0, 500))
+  console.error('Failed to parse File.io response as JSON:', error.message)
+  console.error('Response preview:', input.slice(0, 500))
   process.exit(1)
 }
 
