@@ -80,6 +80,28 @@ jobs:
       - name: Build Electron (Windows)
         run: pnpm exec electron-builder --win --publish never
 
+      - name: Upload Windows packages to File.io
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release/*.exe)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Windows package files found in release/"
+            exit 1
+          fi
+
+          for file in "${files[@]}"; do
+            echo "Uploading $file to File.io..."
+            response="$(curl --silent --show-error --fail -F "file=@${file}" https://file.io)"
+            link="$(node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync(0, 'utf8')); if (!data.success || !data.link) { console.error('Invalid File.io response:', data); process.exit(1); } process.stdout.write(data.link);" <<<"$response")"
+            filename="$(basename "$file")"
+            echo "File.io link for ${filename}: ${link}"
+            echo "::notice title=File.io upload::${filename}: ${link}"
+            printf -- "- %s: %s\n" "$filename" "$link" >> "$GITHUB_STEP_SUMMARY"
+          done
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -127,6 +149,28 @@ jobs:
 
       - name: Build Electron (macOS ARM)
         run: pnpm exec electron-builder --mac --arm64 --publish never
+
+      - name: Upload macOS ARM packages to File.io
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release/*.dmg)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No macOS ARM package files found in release/"
+            exit 1
+          fi
+
+          for file in "${files[@]}"; do
+            echo "Uploading $file to File.io..."
+            response="$(curl --silent --show-error --fail -F "file=@${file}" https://file.io)"
+            link="$(node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync(0, 'utf8')); if (!data.success || !data.link) { console.error('Invalid File.io response:', data); process.exit(1); } process.stdout.write(data.link);" <<<"$response")"
+            filename="$(basename "$file")"
+            echo "File.io link for ${filename}: ${link}"
+            echo "::notice title=File.io upload::${filename}: ${link}"
+            printf -- "- %s: %s\n" "$filename" "$link" >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Upload macOS ARM artifacts
         uses: actions/upload-artifact@v4
