@@ -86,17 +86,25 @@ jobs:
       - name: Build Electron (Windows)
         run: pnpm exec electron-builder --win --publish never
 
+      - name: Package Windows build artifacts
+        id: package_windows
+        shell: bash
+        run: |
+          archive="$(bash .github/scripts/package-release-archive.sh "release/windows-build.zip" "release/*.exe" "release/*.blockmap" "release/latest.yml")"
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+
       - name: Upload Windows packages to File.io
         continue-on-error: true
         shell: bash
         run: |
-          bash .github/scripts/upload-to-fileio.sh "release/*.exe" "Windows"
+          bash .github/scripts/upload-to-fileio.sh "${{ steps.package_windows.outputs.archive }}" "Windows"
 
       - name: Upload Windows artifacts
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
-          path: release/*.exe
+          path: ${{ steps.package_windows.outputs.archive }}
 
   build-mac-arm:
     needs: cleanup
@@ -140,14 +148,22 @@ jobs:
       - name: Build Electron (macOS ARM)
         run: pnpm exec electron-builder --mac --arm64 --publish never
 
+      - name: Package macOS ARM build artifacts
+        id: package_mac_arm
+        shell: bash
+        run: |
+          archive="$(bash .github/scripts/package-release-archive.sh "release/mac-arm-build.zip" "release/*.dmg" "release/*.dmg.blockmap")"
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+
       - name: Upload macOS ARM packages to File.io
         continue-on-error: true
         shell: bash
         run: |
-          bash .github/scripts/upload-to-fileio.sh "release/*.dmg" "macOS ARM"
+          bash .github/scripts/upload-to-fileio.sh "${{ steps.package_mac_arm.outputs.archive }}" "macOS ARM"
 
       - name: Upload macOS ARM artifacts
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: mac-arm-build
-          path: release/*.dmg
+          path: ${{ steps.package_mac_arm.outputs.archive }}
