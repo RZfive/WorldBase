@@ -94,7 +94,7 @@ jobs:
 
           for file in "${files[@]}"; do
             echo "Uploading $file to File.io..."
-            response="$(curl --silent --show-error --fail -F "file=@${file}" https://file.io)"
+            response="$(curl --silent --show-error --fail --connect-timeout 15 --max-time 300 -F "file=@${file}" https://file.io)"
             link="$(node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync(0, 'utf8')); if (!data.success || !data.link) { console.error('Invalid File.io response:', data); process.exit(1); } process.stdout.write(data.link);" <<<"$response")"
             filename="$(basename "$file")"
             echo "File.io link for ${filename}: ${link}"
@@ -164,7 +164,7 @@ jobs:
 
           for file in "${files[@]}"; do
             echo "Uploading $file to File.io..."
-            response="$(curl --silent --show-error --fail -F "file=@${file}" https://file.io)"
+            response="$(curl --silent --show-error --fail --connect-timeout 15 --max-time 300 -F "file=@${file}" https://file.io)"
             link="$(node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync(0, 'utf8')); if (!data.success || !data.link) { console.error('Invalid File.io response:', data); process.exit(1); } process.stdout.write(data.link);" <<<"$response")"
             filename="$(basename "$file")"
             echo "File.io link for ${filename}: ${link}"
