@@ -10,10 +10,12 @@ permissions:
   actions: write
 
 env:
+  FILE_IO_URL: https://file.io
   FILE_IO_PARSE_SCRIPT: >-
     const fs = require('fs');
     const data = JSON.parse(fs.readFileSync(0, 'utf8'));
-    if (!data.success || !data.link) { console.error('Invalid File.io response:', data); process.exit(1); }
+    if (data.success !== true) { console.error('File.io upload was not successful:', data); process.exit(1); }
+    if (!data.link) { console.error('File.io response missing link:', data); process.exit(1); }
     process.stdout.write(data.link);
 
 jobs:
@@ -101,7 +103,7 @@ jobs:
 
           for file in "${files[@]}"; do
             echo "Uploading $file to File.io..."
-            response="$(curl --silent --show-error --fail --connect-timeout 15 --max-time 300 -F "file=@${file}" https://file.io)"
+            response="$(curl --silent --show-error --fail --connect-timeout 15 --max-time 300 -F "file=@${file}" "$FILE_IO_URL")"
             link="$(node -e "$FILE_IO_PARSE_SCRIPT" <<<"$response")"
             filename="$(basename "$file")"
             echo "File.io link for ${filename}: ${link}"
@@ -171,7 +173,7 @@ jobs:
 
           for file in "${files[@]}"; do
             echo "Uploading $file to File.io..."
-            response="$(curl --silent --show-error --fail --connect-timeout 15 --max-time 300 -F "file=@${file}" https://file.io)"
+            response="$(curl --silent --show-error --fail --connect-timeout 15 --max-time 300 -F "file=@${file}" "$FILE_IO_URL")"
             link="$(node -e "$FILE_IO_PARSE_SCRIPT" <<<"$response")"
             filename="$(basename "$file")"
             echo "File.io link for ${filename}: ${link}"
