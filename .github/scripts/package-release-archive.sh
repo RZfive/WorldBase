@@ -31,7 +31,7 @@ if [ ${#files[@]} -eq 0 ]; then
   exit 1
 fi
 
-python - "$output_archive" "${files[@]}" <<'PY'
+archive_path="$(python - "$output_archive" "${files[@]}" <<'PY'
 from pathlib import Path
 import sys
 import zipfile
@@ -59,9 +59,12 @@ output.parent.mkdir(parents=True, exist_ok=True)
 if output.exists():
     output.unlink()
 
-with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
     for member in members:
         archive.write(member, arcname=member.name)
 
 print(output.as_posix())
 PY
+)"
+
+printf '%s\n' "$archive_path"
