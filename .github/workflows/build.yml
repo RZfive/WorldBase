@@ -90,7 +90,7 @@ jobs:
         id: package_windows
         shell: bash
         run: |
-          archive="$(bash .github/scripts/package-release-archive.sh "release/windows-build.zip" "release/*.exe" "release/*.blockmap" "release/latest*.yml")"
+          archive="$(bash .github/scripts/package-release-archive.sh "release/windows-build.zip" "release/*.exe" "release/*.blockmap" "release/latest.yml")"
           echo "archive=${archive}" >> "$GITHUB_OUTPUT"
 
       - name: Upload Windows packages to File.io

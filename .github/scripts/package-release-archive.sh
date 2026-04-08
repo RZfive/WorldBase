@@ -10,47 +10,38 @@ fi
 output_archive="$1"
 shift
 
-shopt -s nullglob
-
-files=()
-for pattern in "$@"; do
-  matches=($pattern)
-  if [ ${#matches[@]} -eq 0 ]; then
-    continue
-  fi
-
-  for match in "${matches[@]}"; do
-    if [ -f "$match" ]; then
-      files+=("$match")
-    fi
-  done
-done
-
-if [ ${#files[@]} -eq 0 ]; then
-  echo "No files found for archive: ${output_archive}" >&2
+if command -v python3 >/dev/null 2>&1; then
+  python_cmd=python3
+elif command -v python >/dev/null 2>&1; then
+  python_cmd=python
+else
+  echo "Python is required to package release artifacts." >&2
   exit 1
 fi
 
-archive_path="$(python - "$output_archive" "${files[@]}" <<'PY'
+archive_path="$("$python_cmd" - "$output_archive" "$@" <<'PY'
+import glob
 from pathlib import Path
 import sys
 import zipfile
 
 output = Path(sys.argv[1])
+patterns = sys.argv[2:]
 members = []
 seen = set()
 
-for raw_path in sys.argv[2:]:
-    path = Path(raw_path)
-    if not path.is_file():
-        continue
+for pattern in patterns:
+    for raw_path in sorted(glob.glob(pattern)):
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
 
-    resolved = path.resolve()
-    if resolved in seen:
-        continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
 
-    seen.add(resolved)
-    members.append(path)
+        seen.add(resolved)
+        members.append(path)
 
 if not members:
     raise SystemExit("No files available to archive.")
