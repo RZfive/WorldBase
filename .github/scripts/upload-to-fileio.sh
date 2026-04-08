@@ -43,16 +43,17 @@ for file in "${files[@]}"; do
       --output "$response_file" \
       --write-out '%{http_code}' \
       -F "file=@${file}" \
-      "$file_io_url" >"$http_code_file" 2>&1 || curl_exit=$?
+      "$file_io_url" >"$http_code_file" 2>/dev/null || curl_exit=$?
 
-    http_code="$(cat "$http_code_file" 2>/dev/null | grep -oE '[0-9]{3}$' || echo "000")"
+    http_code="$(tr -dc '0-9' < "$http_code_file" | tail -c 3)"
+    http_code="${http_code:-000}"
     rm -f "$http_code_file"
 
     if [ "$curl_exit" -ne 0 ]; then
       echo "curl exited with code ${curl_exit} for ${filename} on attempt ${attempt}/${max_attempts}." >&2
     elif [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
       echo "File.io returned HTTP ${http_code} for ${filename} on attempt ${attempt}/${max_attempts}." >&2
-    elif head -c 1 "$response_file" | grep -qv '{'; then
+    elif ! head -c 1 "$response_file" | grep -q '{'; then
       echo "File.io returned non-JSON response (HTTP ${http_code}) for ${filename} on attempt ${attempt}/${max_attempts}." >&2
       echo "Response preview: $(head -c 200 "$response_file")" >&2
     elif link="$(node "$parser_script" <"$response_file")"; then
