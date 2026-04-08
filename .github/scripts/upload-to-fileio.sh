@@ -36,13 +36,18 @@ for file in "${files[@]}"; do
     if curl --show-error --fail --location \
       --connect-timeout "$connect_timeout" \
       --max-time "$max_time" \
+      --header 'Accept: application/json' \
       -F "file=@${file}" \
       "$file_io_url" >"$response_file"; then
-      uploaded=true
-      break
-    fi
+      if link="$(node "$parser_script" <"$response_file")"; then
+        uploaded=true
+        break
+      fi
 
-    echo "File.io upload failed for ${filename} on attempt ${attempt}/${max_attempts}." >&2
+      echo "File.io returned an invalid response for ${filename} on attempt ${attempt}/${max_attempts}." >&2
+    else
+      echo "File.io upload failed for ${filename} on attempt ${attempt}/${max_attempts}." >&2
+    fi
     if [ "$attempt" -lt "$max_attempts" ]; then
       sleep $((5 * 2 ** (attempt - 1)))
     fi
@@ -54,7 +59,6 @@ for file in "${files[@]}"; do
     exit 1
   fi
 
-  link="$(node "$parser_script" <"$response_file")"
   rm -f "$response_file"
 
   echo "File.io link for ${filename}: ${link}"
