@@ -82,7 +82,6 @@ type ThemePreference = 'system' | 'light' | 'dark'
 type AIExecutionAuthMode = 'strict' | 'auto'
 
 interface AIExecutionPreferences {
-  authMode: AIExecutionAuthMode
   notifyOnTaskComplete: boolean
 }
 
@@ -175,7 +174,7 @@ interface SystemStatusSnapshot {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[]) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => Promise<{ ok: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
@@ -256,7 +255,7 @@ export interface ElectronAPI {
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[]) => ipcRenderer.invoke('ai:chat', messages),
-  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, providerId, modelId, targetProjectId),
+  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, providerId, modelId, targetProjectId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
     const channel = `ai:stream-event:${sessionId}`

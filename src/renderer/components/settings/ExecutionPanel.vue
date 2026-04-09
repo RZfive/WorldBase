@@ -1,79 +1,40 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-
-type AIExecutionAuthMode = 'strict' | 'auto'
-
-interface ExecutionModeOption {
-  id: AIExecutionAuthMode
-  label: string
-  description: string
-  icon: string
-}
+import { onMounted, ref } from 'vue'
 
 const FEEDBACK_DISPLAY_DURATION_MS = 1800
-
-const modeOptions: ExecutionModeOption[] = [
-  {
-    id: 'strict',
-    label: '严格模式',
-    description: '每次读取本地文件、写入文件或执行命令时，都需要你手动授权。',
-    icon: '🛡️'
-  },
-  {
-    id: 'auto',
-    label: '自动执行',
-    description: 'AI 会自动通过授权卡片并继续执行，适合你确认环境安全后的连续任务。',
-    icon: '⚡'
-  }
-]
-
-const authMode = ref<AIExecutionAuthMode>('strict')
 const notifyOnTaskComplete = ref(true)
 const loading = ref(true)
 const saving = ref(false)
 const feedback = ref('')
 
-const selectedModeDescription = computed(() => {
-  return modeOptions.find(option => option.id === authMode.value)?.description || ''
-})
-
 async function loadPreferences () {
   loading.value = true
   try {
     const preferences = await window.electronAPI?.getAIExecutionPreferences?.()
-    authMode.value = preferences?.authMode === 'auto' ? 'auto' : 'strict'
     notifyOnTaskComplete.value = preferences?.notifyOnTaskComplete ?? true
   } catch {
-    authMode.value = 'strict'
     notifyOnTaskComplete.value = true
   } finally {
     loading.value = false
   }
 }
 
-async function savePreferences (next: { authMode?: AIExecutionAuthMode; notifyOnTaskComplete?: boolean }) {
+async function savePreferences (nextNotifyOnTaskComplete: boolean) {
   if (!window.electronAPI?.saveAIExecutionPreferences || saving.value) return
 
-  const previous = {
-    authMode: authMode.value,
-    notifyOnTaskComplete: notifyOnTaskComplete.value
-  }
-
-  if (next.authMode !== undefined) authMode.value = next.authMode
-  if (next.notifyOnTaskComplete !== undefined) notifyOnTaskComplete.value = next.notifyOnTaskComplete
+  const previousNotifyOnTaskComplete = notifyOnTaskComplete.value
+  notifyOnTaskComplete.value = nextNotifyOnTaskComplete
 
   saving.value = true
   feedback.value = ''
 
   try {
     await window.electronAPI.saveAIExecutionPreferences({
-      authMode: authMode.value,
       notifyOnTaskComplete: notifyOnTaskComplete.value
     })
-    feedback.value = '执行偏好已保存'
+    feedback.value = '通知偏好已保存'
   } catch (err) {
-    authMode.value = previous.authMode
-    notifyOnTaskComplete.value = previous.notifyOnTaskComplete
+    notifyOnTaskComplete.value = previousNotifyOnTaskComplete
     feedback.value = `保存失败：${(err as Error).message}`
   } finally {
     saving.value = false
@@ -91,30 +52,9 @@ onMounted(async () => {
 <template>
   <div class="ep-root">
     <div class="ep-header">
-      <h3 class="ep-title">AI 执行授权</h3>
-      <p class="ep-desc">选择本地敏感操作的授权方式，并决定任务完成后是否发送系统通知。</p>
+      <h3 class="ep-title">AI 任务通知</h3>
+      <p class="ep-desc">严格 / 自动执行模式已移到对话框顶部，这里仅控制任务结束后的系统通知。</p>
       <span v-if="feedback" class="ep-feedback">{{ feedback }}</span>
-    </div>
-
-    <div class="ep-separator" />
-
-    <div class="ep-list" :aria-busy="loading">
-      <button
-        v-for="option in modeOptions"
-        :key="option.id"
-        :class="['ep-item', { active: authMode === option.id }]"
-        :disabled="loading || saving"
-        @click="savePreferences({ authMode: option.id })"
-      >
-        <div class="ep-item-left">
-          <span class="ep-item-icon">{{ option.icon }}</span>
-          <div class="ep-item-text">
-            <span class="ep-item-label">{{ option.label }}</span>
-            <span class="ep-item-hint">{{ option.description }}</span>
-          </div>
-        </div>
-        <span v-if="authMode === option.id" class="ep-check">✓</span>
-      </button>
     </div>
 
     <div class="ep-separator" />
@@ -129,15 +69,15 @@ onMounted(async () => {
         class="ep-toggle-input"
         :checked="notifyOnTaskComplete"
         :disabled="loading || saving"
-        @change="savePreferences({ notifyOnTaskComplete: ($event.target as HTMLInputElement).checked })"
+        @change="savePreferences(($event.target as HTMLInputElement).checked)"
       >
     </label>
 
     <div class="ep-separator" />
 
     <div class="ep-note">
-      <span class="ep-note-title">当前模式</span>
-      <p>{{ selectedModeDescription }}</p>
+      <span class="ep-note-title">说明</span>
+      <p>每个对话都可以在聊天窗口顶部单独切换严格授权或自动执行，不再共享全局授权模式。</p>
     </div>
   </div>
 </template>
@@ -180,77 +120,6 @@ onMounted(async () => {
   height: 1px;
   background: var(--app-border);
   margin: 16px 0;
-}
-
-.ep-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.ep-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 4px;
-  border: none;
-  border-bottom: 1px solid var(--app-border);
-  background: none;
-  cursor: pointer;
-  color: inherit;
-  text-align: left;
-  transition: background 0.12s;
-}
-
-.ep-item:last-child {
-  border-bottom: none;
-}
-
-.ep-item:hover:not(:disabled),
-.ep-item.active {
-  background: var(--app-panel-muted);
-}
-
-.ep-item:disabled {
-  cursor: default;
-  opacity: 0.7;
-}
-
-.ep-item-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.ep-item-icon {
-  width: 32px;
-  text-align: center;
-  font-size: 1.25em;
-  flex-shrink: 0;
-}
-
-.ep-item-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.ep-item-label {
-  font-size: 0.92em;
-  font-weight: 500;
-  color: var(--app-text);
-}
-
-.ep-item-hint {
-  font-size: 0.78em;
-  color: var(--app-text-faint);
-}
-
-.ep-check {
-  font-size: 1em;
-  color: var(--app-accent);
-  font-weight: 600;
-  flex-shrink: 0;
-  margin-right: 4px;
 }
 
 .ep-toggle {

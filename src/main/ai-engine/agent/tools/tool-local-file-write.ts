@@ -1,18 +1,16 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
-import type { ProgressCallback } from '../agent-core.js'
+import type { ProgressCallback, SessionState } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { requestUserAuth } from './user-auth.js'
 import { writeExcelFile, writeWordFile, writePptxFile } from './office-utils.js'
-import type { AIExecutionPreferences } from '../../../settings/settings-store.js'
 
 /** Maximum characters for office file preview content. */
 const MAX_PREVIEW_LENGTH = 8000
 
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
-  getAIExecutionPreferences?: () => AIExecutionPreferences
 }
 
 interface LocalWriteFileArgs {
@@ -51,7 +49,7 @@ export interface Tool {
  * Tool: local_write_file — 在用户本地电脑写入文件（需要用户授权）
  * 支持生成办公文件格式: .xlsx, .docx, .pptx
  */
-export function toolLocalWriteFile (services: ToolServices): Tool {
+export function toolLocalWriteFile (services: ToolServices, getSessionState?: () => SessionState): Tool {
   return {
     definition: {
       name: 'local_write_file',
@@ -124,7 +122,7 @@ export function toolLocalWriteFile (services: ToolServices): Tool {
       // Request user authorization
       const authorized = await requestUserAuth(
         services.getMainWindow,
-        services.getAIExecutionPreferences,
+        getSessionState,
         'AI 请求写入本地文件',
         `AI 助手请求在以下路径创建文件:\n\n${resolvedPath}\n\n是否允许？`
       )

@@ -1,6 +1,7 @@
 import { getSystemPrompt } from './prompts/system-prompt.js'
 import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/openai-provider.js'
 import { normalizeAbortReason, USER_ABORT_MESSAGE } from '../abort-utils.js'
+import type { AIExecutionAuthMode } from '../../settings/settings-store.js'
 
 export type ProgressEvent =
   | { type: 'progress'; stage: string; detail?: string }
@@ -44,6 +45,8 @@ export interface SessionState {
   createdProjectId: string | null
   /** An existing project ID the user wants to edit/optimize (set via chat context). */
   targetProjectId: string | null
+  /** Authorization mode for local sensitive actions in this conversation. */
+  authMode: AIExecutionAuthMode
 }
 
 export class AgentCore {
@@ -61,7 +64,7 @@ export class AgentCore {
   private maxStreamRetries = 3
   private activeSkillContents: string[] = []
   /** Shared mutable state accessible by tool handlers within a session. */
-  public sessionState: SessionState = { createdProjectId: null, targetProjectId: null }
+  public sessionState: SessionState = { createdProjectId: null, targetProjectId: null, authMode: 'strict' }
 
   constructor (provider: OpenAIProvider, services: Record<string, unknown>) {
     this.provider = provider
@@ -95,10 +98,15 @@ export class AgentCore {
     this.sessionState.targetProjectId = projectId
   }
 
+  setAuthMode (authMode: AIExecutionAuthMode): void {
+    this.sessionState.authMode = authMode
+  }
+
   private _resetSessionState (): void {
     this.sessionState = {
       createdProjectId: null,
-      targetProjectId: this.sessionState.targetProjectId
+      targetProjectId: this.sessionState.targetProjectId,
+      authMode: this.sessionState.authMode
     }
   }
 

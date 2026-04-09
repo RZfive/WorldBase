@@ -11,14 +11,13 @@ import { toolLocalFileRead } from './tool-local-file-read.js'
 import { toolLocalCommand } from './tool-local-command.js'
 import { toolLocalWriteFile } from './tool-local-file-write.js'
 import { toolRebuildProject } from './tool-rebuild-project.js'
-import type { AgentCore } from '../agent-core.js'
+import type { AgentCore, SessionState } from '../agent-core.js'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
 import type { BuilderService } from '../../../project-runtime/builder-service.js'
 import type { ProjectApiClient } from '../../../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../../../project-data-access/data-access.js'
 import type { BrowserWindow } from 'electron'
-import type { AIExecutionPreferences } from '../../../settings/settings-store.js'
 
 export interface ToolServices {
   projectFS: ProjectFS
@@ -27,13 +26,13 @@ export interface ToolServices {
   apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
   getMainWindow?: () => BrowserWindow | null
-  getAIExecutionPreferences?: () => AIExecutionPreferences
 }
 
 /**
  * Register all tools to the agent.
  */
 export function registerAllTools (agent: AgentCore, services: ToolServices): void {
+  const getSessionState = (): SessionState => agent.sessionState
   const tools = [
     toolReadFile(services),
     toolDeleteFile(services),
@@ -43,11 +42,11 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolRunCommand(services),
     toolListProjects(services),
     toolAnalyzeData(services),
-    toolCreateProject(services, () => agent.sessionState),
+    toolCreateProject(services, getSessionState),
     toolRebuildProject(services),
-    toolLocalFileRead(services),
-    toolLocalCommand(services),
-    toolLocalWriteFile(services)
+    toolLocalFileRead(services, getSessionState),
+    toolLocalCommand(services, getSessionState),
+    toolLocalWriteFile(services, getSessionState)
   ]
 
   for (const tool of tools) {

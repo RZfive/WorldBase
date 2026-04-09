@@ -24,6 +24,7 @@ interface ConversationSummary {
   title: string
   createdAt: string
   updatedAt: string
+  authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string
   targetProjectId?: string
@@ -92,7 +93,6 @@ type ThemePreference = 'system' | 'light' | 'dark'
 type AIExecutionAuthMode = 'strict' | 'auto'
 
 interface AIExecutionPreferences {
-  authMode: AIExecutionAuthMode
   notifyOnTaskComplete: boolean
 }
 
@@ -192,7 +192,7 @@ interface SkillInfo {
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => Promise<{ ok: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
