@@ -392,7 +392,7 @@ export class RuntimeManager {
         pid: info.process.pid,
         startedAt: info.startedAt,
         uptimeSeconds: info.startedAt
-          ? Math.max(0, Number(((Date.now() - new Date(info.startedAt).getTime()) / 1000).toFixed(1)))
+          ? Math.max(0, Math.round((Date.now() - new Date(info.startedAt).getTime()) / 100) / 10)
           : undefined,
         exitCode: info.exitCode,
         error: info.error
