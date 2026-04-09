@@ -29,6 +29,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
   (e: 'send'): void
+  (e: 'stop'): void
   (e: 'addImage', base64: string, mimeType: string): void
   (e: 'addFiles', files: File[]): void
   (e: 'removeImage', index: number): void
@@ -39,6 +40,7 @@ const emit = defineEmits<{
 const inputFocused = ref(false)
 
 function handleKeydown (e: KeyboardEvent) {
+  if (props.isLoading) return
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     emit('send')
@@ -110,12 +112,13 @@ function handleOfficeUpload (e: Event) {
       </div>
       <textarea
         :value="props.modelValue"
+        :class="{ busy: props.isLoading }"
         placeholder="输入消息… (Enter 发送, Shift+Enter 换行)"
+        :aria-busy="props.isLoading ? 'true' : 'false'"
         @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
         @keydown="handleKeydown"
         @focus="inputFocused = true"
         @blur="inputFocused = false"
-        :disabled="props.isLoading"
         rows="3"
       />
       <div class="input-actions">
@@ -136,12 +139,13 @@ function handleOfficeUpload (e: Event) {
         </label>
         <button
           class="action-btn send-btn"
-          @click="emit('send')"
-          :disabled="props.isLoading || props.isUploadingFiles || (!props.modelValue.trim() && props.pendingImages.length === 0 && props.pendingFiles.length === 0)"
-          :title="props.isUploadingFiles ? '文件处理中...' : (props.isLoading ? '生成中...' : '发送')"
+          :class="{ stopping: props.isLoading }"
+          @click="props.isLoading ? emit('stop') : emit('send')"
+          :disabled="props.isUploadingFiles || (!props.isLoading && !props.modelValue.trim() && props.pendingImages.length === 0 && props.pendingFiles.length === 0)"
+          :title="props.isUploadingFiles ? '文件处理中...' : (props.isLoading ? '停止生成' : '发送')"
         >
           <svg v-if="!props.isLoading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-          <span v-else class="send-spinner"></span>
+          <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
         </button>
       </div>
     </div>
@@ -305,6 +309,11 @@ function handleOfficeUpload (e: Event) {
 .input-container textarea::-webkit-scrollbar-thumb { background: var(--app-scrollbar); border-radius: 3px; }
 .input-container textarea::placeholder { color: var(--app-text-faint); }
 
+.input-container textarea.busy {
+  opacity: 0.8;
+  cursor: progress;
+}
+
 .input-actions {
   display: flex;
   align-items: center;
@@ -351,24 +360,18 @@ function handleOfficeUpload (e: Event) {
 
 .action-btn.send-btn:hover:not(:disabled) { background: var(--app-accent-strong); }
 
+.action-btn.send-btn.stopping {
+  background: var(--app-danger);
+}
+
+.action-btn.send-btn.stopping:hover:not(:disabled) {
+  background: #dc2626;
+}
+
 .action-btn.send-btn:disabled {
   background: var(--app-panel-muted);
   color: var(--app-text-faint);
   cursor: not-allowed;
-}
-
-.send-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #ffffff;
-  border-radius: 50%;
-  animation: spin 0.6s linear infinite;
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
 }
 
 /* Active skills bar */

@@ -12,7 +12,7 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'reset' | 'done' | 'error'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: ChatMessage
@@ -88,6 +88,7 @@ export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[]) => Promise<ChatMessage>
   chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
+  stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
   // Conversations
@@ -164,6 +165,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[]) => ipcRenderer.invoke('ai:chat', messages),
   chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, providerId, modelId, targetProjectId),
+  stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
     const channel = `ai:stream-event:${sessionId}`
     const handler = (_e: Electron.IpcRendererEvent, event: StreamEvent) => callback(event)
