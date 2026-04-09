@@ -188,7 +188,7 @@ function formatStatus (value: string) {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="processItem in status.projectProcesses" :key="processItem.projectId">
+              <tr v-for="processItem in status.projectProcesses" :key="`${processItem.projectId}:${processItem.pid || processItem.startedAt || 'unknown'}`">
                 <td>{{ processItem.projectId }}</td>
                 <td>{{ formatStatus(processItem.status) }}</td>
                 <td>{{ processItem.pid || '-' }}</td>
@@ -215,7 +215,7 @@ function formatStatus (value: string) {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="service in status.services.services" :key="service.projectId">
+              <tr v-for="service in status.services.services" :key="`${service.projectId}:${service.name}`">
                 <td>{{ service.name }}</td>
                 <td>{{ formatStatus(service.status) }}</td>
                 <td>{{ service.pid || '-' }}</td>
