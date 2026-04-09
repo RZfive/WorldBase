@@ -64,11 +64,12 @@ export class SkillStore {
   async importFromFile (filePath: string): Promise<Skill> {
     const ext = path.extname(filePath).toLowerCase()
     const baseName = path.basename(filePath, path.extname(filePath))
+    const fileContent = ext === SKILL_ARCHIVE_EXTENSION ? null : fs.readFileSync(filePath, 'utf-8')
     const source = ext === SKILL_ARCHIVE_EXTENSION
       ? await this.readSkillArchive(filePath)
       : {
-          metaContent: fs.readFileSync(filePath, 'utf-8'),
-          content: fs.readFileSync(filePath, 'utf-8')
+          metaContent: fileContent || '',
+          content: fileContent || ''
         }
 
     const { name, description } = this.parseSkillMeta(source.metaContent, baseName)
@@ -77,10 +78,11 @@ export class SkillStore {
 
   /** Import a skill from raw content. */
   importFromContent (name: string, content: string, description?: string): Skill {
+    const meta = this.parseSkillMeta(content, name)
     return this.saveSkill(
       name,
-      name,
-      description || this.parseSkillMeta(content, name).description,
+      meta.name,
+      description || meta.description,
       content
     )
   }
