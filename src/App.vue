@@ -193,9 +193,15 @@ async function openEmbeddedProject (projectId: string) {
 }
 
 function getBrowserAppName (url: URL): string {
-  const pathLabel = url.pathname && url.pathname !== '/'
-    ? decodeURIComponent(url.pathname.replace(/\/+$/, '').split('/').filter(Boolean).slice(-1)[0] || '')
-    : ''
+  let pathLabel = ''
+  if (url.pathname && url.pathname !== '/') {
+    const rawSegment = url.pathname.replace(/\/+$/, '').split('/').filter(Boolean).slice(-1)[0] || ''
+    try {
+      pathLabel = decodeURIComponent(rawSegment)
+    } catch {
+      pathLabel = rawSegment
+    }
+  }
   return pathLabel ? `${url.hostname}/${pathLabel}` : url.hostname
 }
 
