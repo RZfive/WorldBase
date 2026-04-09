@@ -43,7 +43,11 @@ function isRecord (value: unknown): value is Record<string, unknown> {
 }
 
 function sortObjectKeys (input: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right)))
+  return Object.fromEntries(Object.entries(input).sort(([left], [right]) => {
+    if (left < right) return -1
+    if (left > right) return 1
+    return 0
+  }))
 }
 
 export function getNextRuntimeCompatibilityProfile (
