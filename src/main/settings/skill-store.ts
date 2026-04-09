@@ -155,12 +155,16 @@ export class SkillStore {
     const archive = await JSZip.loadAsync(await fsPromises.readFile(filePath))
     const entries = Object.values(archive.files)
       .filter(entry => !entry.dir)
-      .filter(entry => !entry.name.startsWith('__MACOSX/'))
+      .filter(entry => {
+        const normalized = entry.name.replace(/\\/g, '/')
+        const baseName = path.posix.basename(normalized)
+        return !/^__macosx\//i.test(normalized) && baseName !== '.DS_Store' && !baseName.startsWith('._')
+      })
       .filter(entry => this.isSupportedTextFile(entry.name))
       .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
 
     if (entries.length === 0) {
-      throw new Error('压缩包中未找到可导入的 Skill 文本文件')
+      throw new Error('压缩包中未找到支持的文本文件（支持 .md、.txt、.json、.js、.py 等格式）')
     }
 
     const primaryEntry = this.pickPrimaryArchiveEntry(entries)

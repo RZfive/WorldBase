@@ -125,6 +125,8 @@ function getUrlHostname (value?: string): string | null {
 }
 
 function isLocalAppOrigin (value?: string): boolean {
+  // file:// renderers report an opaque "null" origin, so guard both the literal
+  // string and actual file URLs when deciding whether to relax iframe/CORS rules.
   if (!value || value === 'null') return false
   try {
     const parsed = new URL(value)
