@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
 export interface Skill {
@@ -151,7 +152,7 @@ export class SkillStore {
 
   private async readSkillArchive (filePath: string): Promise<{ metaContent: string; content: string }> {
     const JSZip = (await import('jszip')).default
-    const archive = await JSZip.loadAsync(fs.readFileSync(filePath))
+    const archive = await JSZip.loadAsync(await fsPromises.readFile(filePath))
     const entries = Object.values(archive.files)
       .filter(entry => !entry.dir)
       .filter(entry => !entry.name.startsWith('__MACOSX/'))

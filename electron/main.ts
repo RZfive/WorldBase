@@ -188,29 +188,6 @@ function removeHeader (headers: Record<string, string[]>, name: string): void {
   }
 }
 
-function stripFrameAncestorsDirective (headers: Record<string, string[]>): void {
-  for (const key of Object.keys(headers)) {
-    const normalizedKey = key.toLowerCase()
-    if (normalizedKey !== 'content-security-policy' && normalizedKey !== 'content-security-policy-report-only') {
-      continue
-    }
-
-    const nextValues = headers[key]
-      .map(value => value
-        .split(';')
-        .map(part => part.trim())
-        .filter(part => part && !/^frame-ancestors\b/i.test(part))
-        .join('; '))
-      .filter(Boolean)
-
-    if (nextValues.length > 0) {
-      headers[key] = nextValues
-    } else {
-      delete headers[key]
-    }
-  }
-}
-
 function setupEmbeddedAppCorsWorkaround (): void {
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     const referrer = typeof details.referrer === 'string' ? details.referrer : undefined
@@ -246,7 +223,8 @@ function setupEmbeddedAppCorsWorkaround (): void {
 
     if (isFrameRequest) {
       removeHeader(headers, 'X-Frame-Options')
-      stripFrameAncestorsDirective(headers)
+      removeHeader(headers, 'Content-Security-Policy')
+      removeHeader(headers, 'Content-Security-Policy-Report-Only')
       callback({ responseHeaders: headers })
       return
     }
