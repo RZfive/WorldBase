@@ -90,6 +90,88 @@ interface LaunchpadLayout {
 
 type ThemePreference = 'system' | 'light' | 'dark'
 
+interface ServiceEntry {
+  projectId: string
+  name: string
+  port: number
+  status: string
+  pid?: number
+  startedAt?: string
+  framework?: string
+  restartPolicy: 'always' | 'on-failure' | 'never'
+  restartCount: number
+}
+
+interface SystemStatusSnapshot {
+  fetchedAt: string
+  refreshIntervalMs: number
+  cacheAgeMs: number
+  host: {
+    platform: string
+    release: string
+    arch: string
+    uptimeSeconds: number
+    nodeVersion: string
+    electronVersion: string | null
+  }
+  summary: {
+    status: 'ok' | 'busy' | 'degraded'
+    hostUptimeSeconds: number
+    runningProjectCount: number
+    trackedProjectProcessCount: number
+    totalServiceCount: number
+    crashedServiceCount: number
+    cpuUsagePercent: number | null
+    memoryUsagePercent: number
+  }
+  cpu: {
+    model: string
+    cores: number
+    architecture: string
+    loadAverage: number[]
+    usagePercent: number | null
+    sampleWindowMs: number | null
+  }
+  memory: {
+    totalBytes: number
+    freeBytes: number
+    usedBytes: number
+    usagePercent: number
+    processRssBytes: number
+    processHeapUsedBytes: number
+    processHeapTotalBytes: number
+    processExternalBytes: number
+  }
+  currentProcess: {
+    pid: number
+    uptimeSeconds: number
+    platform: string
+    arch: string
+    memory: {
+      rssBytes: number
+      heapUsedBytes: number
+      heapTotalBytes: number
+      externalBytes: number
+    }
+  }
+  projectProcesses: Array<{
+    projectId: string
+    status: string
+    port?: number
+    pid?: number
+    startedAt?: string
+    uptimeSeconds?: number
+    exitCode?: number | null
+    error?: string
+  }>
+  services: {
+    services: ServiceEntry[]
+    totalRunning: number
+    totalStopped: number
+    totalCrashed: number
+  }
+}
+
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 
 interface SkillInfo {
@@ -135,6 +217,7 @@ interface ElectronAPI {
   getOpenWindows: () => Promise<string[]>
   focusProjectWindow: (projectId: string) => Promise<{ success: boolean }>
   onProjectWindowClosed: (callback: (event: { projectId: string }) => void) => () => void
+  getSystemStatus: () => Promise<SystemStatusSnapshot>
 
   // LAN
   getLanInfo: () => Promise<{ port: number; addresses: string[]; baseUrl: string }>

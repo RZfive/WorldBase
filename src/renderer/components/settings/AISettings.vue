@@ -4,8 +4,9 @@ import SkillManager from './SkillManager.vue'
 import ProviderPanel from './ProviderPanel.vue'
 import DatabaseViewer from './DatabaseViewer.vue'
 import AppearancePanel from './AppearancePanel.vue'
+import SystemStatusPanel from './SystemStatusPanel.vue'
 
-type CategoryId = 'providers' | 'skills' | 'appearance' | 'database'
+type CategoryId = 'providers' | 'skills' | 'appearance' | 'database' | 'system'
 
 interface Category {
   id: CategoryId
@@ -17,7 +18,8 @@ const categories: Category[] = [
   { id: 'providers', icon: '🤖', label: '模型服务' },
   { id: 'skills', icon: '✦', label: 'Skill 管理' },
   { id: 'appearance', icon: '🎨', label: '显示设置' },
-  { id: 'database', icon: '🗄', label: '数据设置' }
+  { id: 'database', icon: '🗄', label: '数据设置' },
+  { id: 'system', icon: '🖥', label: '系统状态' }
 ]
 
 const activeCategoryId = ref<CategoryId>('providers')
@@ -43,7 +45,8 @@ const activeCategoryId = ref<CategoryId>('providers')
       <ProviderPanel v-if="activeCategoryId === 'providers'" />
       <SkillManager v-else-if="activeCategoryId === 'skills'" />
       <AppearancePanel v-else-if="activeCategoryId === 'appearance'" />
-      <DatabaseViewer v-else :active="activeCategoryId === 'database'" />
+      <DatabaseViewer v-else-if="activeCategoryId === 'database'" :active="activeCategoryId === 'database'" />
+      <SystemStatusPanel v-else :active="activeCategoryId === 'system'" />
     </div>
   </div>
 </template>
