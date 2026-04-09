@@ -55,6 +55,6 @@ async function getMermaid () {
 
 export async function renderMermaidSvg (code: string): Promise<string> {
   const mermaid = await getMermaid()
-  const { svg } = await mermaid.render(`the-world-mermaid-${Date.now()}-${mermaidRenderCount++}`, code.trim())
+  const { svg } = await mermaid.render(`chat-mermaid-diagram-${Date.now()}-${mermaidRenderCount++}`, code.trim())
   return svg
 }
