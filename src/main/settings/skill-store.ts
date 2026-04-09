@@ -10,6 +10,17 @@ export interface Skill {
   updatedAt: string
 }
 
+const SKILL_ARCHIVE_EXTENSION = '.zip'
+const PRIMARY_SKILL_FILE_NAMES = ['readme.md', 'skill.md', 'index.md', 'main.md']
+const TEXT_FILE_EXTENSIONS = new Set([
+  '.md', '.markdown', '.mdx', '.txt',
+  '.json', '.yaml', '.yml', '.toml', '.ini',
+  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
+  '.py', '.rb', '.go', '.java', '.kt', '.rs', '.php',
+  '.html', '.htm', '.css', '.scss', '.sass', '.less',
+  '.xml', '.svg', '.csv'
+])
+
 /**
  * SkillStore — 管理用户导入的 AI Skill
  * 存储为 JSON 文件到 userData/skills/ 目录
@@ -49,56 +60,29 @@ export class SkillStore {
     }
   }
 
-  /** Import a skill from a markdown file path. */
-  importFromFile (filePath: string): Skill {
-    const content = fs.readFileSync(filePath, 'utf-8')
+  /** Import a skill from a markdown/text file or zip package path. */
+  async importFromFile (filePath: string): Promise<Skill> {
+    const ext = path.extname(filePath).toLowerCase()
     const baseName = path.basename(filePath, path.extname(filePath))
+    const source = ext === SKILL_ARCHIVE_EXTENSION
+      ? await this.readSkillArchive(filePath)
+      : {
+          metaContent: fs.readFileSync(filePath, 'utf-8'),
+          content: fs.readFileSync(filePath, 'utf-8')
+        }
 
-    // Parse name and description from markdown content
-    const { name, description } = this.parseSkillMeta(content, baseName)
-
-    const id = 'skill_' + baseName
-      .toLowerCase()
-      .replace(/[^a-z0-9\u4e00-\u9fff]/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_|_$/g, '')
-      .substring(0, 40) +
-      '_' + Date.now().toString(36)
-
-    const skill: Skill = {
-      id,
-      name,
-      description,
-      content,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-
-    fs.writeFileSync(path.join(this.dir, `${id}.json`), JSON.stringify(skill, null, 2), 'utf-8')
-    return skill
+    const { name, description } = this.parseSkillMeta(source.metaContent, baseName)
+    return this.saveSkill(baseName, name, description, source.content)
   }
 
   /** Import a skill from raw content. */
   importFromContent (name: string, content: string, description?: string): Skill {
-    const id = 'skill_' + name
-      .toLowerCase()
-      .replace(/[^a-z0-9\u4e00-\u9fff]/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_|_$/g, '')
-      .substring(0, 40) +
-      '_' + Date.now().toString(36)
-
-    const skill: Skill = {
-      id,
+    return this.saveSkill(
       name,
-      description: description || this.parseSkillMeta(content, name).description,
-      content,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-
-    fs.writeFileSync(path.join(this.dir, `${id}.json`), JSON.stringify(skill, null, 2), 'utf-8')
-    return skill
+      name,
+      description || this.parseSkillMeta(content, name).description,
+      content
+    )
   }
 
   /** Delete a skill by ID. */
@@ -135,5 +119,100 @@ export class SkillStore {
     }
 
     return { name: name || fallbackName, description }
+  }
+
+  private createSkillId (value: string): string {
+    return 'skill_' + value
+      .toLowerCase()
+      .replace(/[^a-z0-9\u4e00-\u9fff]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '')
+      .substring(0, 40) +
+      '_' + Date.now().toString(36)
+  }
+
+  private saveSkill (baseName: string, name: string, description: string, content: string): Skill {
+    const id = this.createSkillId(baseName)
+    const timestamp = new Date().toISOString()
+    const skill: Skill = {
+      id,
+      name,
+      description,
+      content,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }
+
+    fs.writeFileSync(path.join(this.dir, `${id}.json`), JSON.stringify(skill, null, 2), 'utf-8')
+    return skill
+  }
+
+  private async readSkillArchive (filePath: string): Promise<{ metaContent: string; content: string }> {
+    const JSZip = (await import('jszip')).default
+    const archive = await JSZip.loadAsync(fs.readFileSync(filePath))
+    const entries = Object.values(archive.files)
+      .filter(entry => !entry.dir)
+      .filter(entry => !entry.name.startsWith('__MACOSX/'))
+      .filter(entry => this.isSupportedTextFile(entry.name))
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+
+    if (entries.length === 0) {
+      throw new Error('压缩包中未找到可导入的 Skill 文本文件')
+    }
+
+    const primaryEntry = this.pickPrimaryArchiveEntry(entries)
+    const primaryContent = await primaryEntry.async('text')
+    const sections = [this.formatArchiveEntry(primaryEntry.name, primaryContent, true)]
+
+    for (const entry of entries) {
+      if (entry.name === primaryEntry.name) continue
+      const text = await entry.async('text')
+      sections.push(this.formatArchiveEntry(entry.name, text, false))
+    }
+
+    return {
+      metaContent: primaryContent,
+      content: sections.filter(Boolean).join('\n\n')
+    }
+  }
+
+  private isSupportedTextFile (fileName: string): boolean {
+    return TEXT_FILE_EXTENSIONS.has(path.extname(fileName).toLowerCase())
+  }
+
+  private pickPrimaryArchiveEntry<T extends { name: string }> (entries: T[]): T {
+    return entries.slice().sort((a, b) => {
+      const aRank = this.getArchiveEntryRank(a.name)
+      const bRank = this.getArchiveEntryRank(b.name)
+      return aRank - bRank || a.name.localeCompare(b.name, 'zh-CN')
+    })[0]
+  }
+
+  private getArchiveEntryRank (entryName: string): number {
+    const normalized = entryName.replace(/\\/g, '/').toLowerCase()
+    const baseName = path.posix.basename(normalized)
+    const ext = path.posix.extname(baseName)
+
+    if (PRIMARY_SKILL_FILE_NAMES.includes(baseName)) return 0
+    if (ext === '.md' || ext === '.markdown' || ext === '.mdx') return 1
+    if (ext === '.txt') return 2
+    return 3
+  }
+
+  private formatArchiveEntry (entryName: string, content: string, isPrimary: boolean): string {
+    const normalizedContent = content.replace(/\r\n/g, '\n').trim()
+    if (!normalizedContent) return ''
+
+    if (isPrimary) {
+      return normalizedContent
+    }
+
+    const ext = path.extname(entryName).toLowerCase()
+    if (ext === '.md' || ext === '.markdown' || ext === '.mdx' || ext === '.txt') {
+      return `---\n\n## File: ${entryName}\n\n${normalizedContent}`
+    }
+
+    const language = ext.replace(/^\./, '') || 'text'
+    return `---\n\n## File: ${entryName}\n\n\`\`\`${language}\n${normalizedContent}\n\`\`\``
   }
 }

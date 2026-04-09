@@ -257,6 +257,7 @@ interface ElectronAPI {
   importSkillContent: (name: string, content: string, description?: string) => Promise<{ id: string; name: string }>
   deleteSkill: (id: string) => Promise<boolean>
   setActiveSkills: (skillIds: string[]) => Promise<{ success: boolean; count: number }>
+  onSkillsChanged: (callback: (event: { action: string; count?: number; id?: string }) => void) => () => void
 
   // Window controls
   minimizeWindow: () => Promise<void>
