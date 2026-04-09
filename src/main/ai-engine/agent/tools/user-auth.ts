@@ -44,6 +44,27 @@ function requestUserAuthViaRenderer (
   return new Promise((resolve) => {
     const requestId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
+    // Send auth request to renderer
+    win.webContents.send('auth:request', {
+      requestId,
+      title,
+      detail
+    })
+
+    if (preferences.authMode === 'auto') {
+      emitAuthResolved(win, requestId, true)
+      resolve(true)
+      return
+    }
+
+    const handler = (_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => {
+      if (data.requestId === requestId) {
+        cleanup()
+        emitAuthResolved(win, requestId, data.approved)
+        resolve(data.approved)
+      }
+    }
+
     const cleanup = () => {
       clearTimeout(timer)
       ipcMain.removeListener('auth:response', handler)
@@ -55,26 +76,6 @@ function requestUserAuthViaRenderer (
       resolve(false) // Auto-deny after timeout
     }, AUTH_TIMEOUT_MS)
 
-    const handler = (_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => {
-      if (data.requestId === requestId) {
-        cleanup()
-        emitAuthResolved(win, requestId, data.approved)
-        resolve(data.approved)
-      }
-    }
     ipcMain.on('auth:response', handler)
-
-    // Send auth request to renderer
-    win.webContents.send('auth:request', {
-      requestId,
-      title,
-      detail
-    })
-
-    if (preferences.authMode === 'auto') {
-      cleanup()
-      emitAuthResolved(win, requestId, true)
-      resolve(true)
-    }
   })
 }
