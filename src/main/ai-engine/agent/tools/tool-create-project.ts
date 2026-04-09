@@ -7,6 +7,7 @@ import type { ProgressCallback, SessionState } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { streamFilePreview } from './file-preview-progress.js'
 import { normalizeProjectMeta } from '../../../project-fs/project-meta.js'
+import { normalizeNextPackageJsonText } from '../../../project-runtime/next-runtime-compat.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -65,6 +66,17 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
       const files = normalizeCreateProjectFiles((args as Record<string, unknown>).files)
       const normalizedMeta = normalizeProjectMeta(parsePossiblyStringifiedObject(meta, 'meta') ?? meta)
       const session = getSessionState?.()
+
+      if (files['package.json'] && (!!files['next.config.js'] || normalizedMeta.framework === 'nextjs')) {
+        try {
+          const normalizedPackage = normalizeNextPackageJsonText(files['package.json'])
+          if (normalizedPackage.changed) {
+            files['package.json'] = normalizedPackage.packageJsonText
+          }
+        } catch {
+          // Leave invalid package.json to the later validation step.
+        }
+      }
 
       // Prevent creating a second project in the same conversation
       if (session?.createdProjectId) {

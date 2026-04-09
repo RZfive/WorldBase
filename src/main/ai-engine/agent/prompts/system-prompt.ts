@@ -1,10 +1,12 @@
 import { getEnvironmentContext } from './environment-context.js'
+import { getNextRuntimeCompatibilityProfile } from '../../../project-runtime/next-runtime-compat.js'
 
 /**
  * Get the system prompt for the AI agent.
  * @param skillContents Optional array of skill contents to inject into the prompt.
  */
 export function getSystemPrompt (skillContents?: string[]): string {
+  const nextRuntimeProfile = getNextRuntimeCompatibilityProfile()
   let prompt = `你是 The World 的 AI 助手，一个强大的项目管理和代码生成 Agent。
 
 ## 你的能力
@@ -15,7 +17,7 @@ export function getSystemPrompt (skillContents?: string[]): string {
 2. **API 调用**: 调用运行中项目的后端 API 进行测试和数据获取
 3. **数据库查询**: 直接查询项目数据库来分析数据
 4. **命令执行**: 在项目目录中运行 shell 命令 (npm install, git 等)
-5. **项目管理**: 创建新项目、列出所有项目、分析项目结构
+5. **项目管理**: 创建新项目、列出所有项目、分析项目结构、清理依赖并重新编译项目
 6. **数据分析**: 对项目数据进行统计分析、趋势分析、分布分析
 7. **本地文件读取**: 读取用户电脑上任意位置的文件（需要用户授权），支持办公文件格式（Excel .xlsx/.xls、Word .docx/.doc、PowerPoint .pptx/.ppt）自动解析
 8. **本地命令执行**: 在用户电脑上执行任意命令行命令来完成系统任务（需要用户授权）
@@ -90,7 +92,7 @@ export function getSystemPrompt (skillContents?: string[]): string {
 
 ### 统一技术栈：Next.js（强制）
 
-所有新建项目**必须**使用 Next.js 14+ (App Router) 框架，前后端一体化开发。
+所有新建项目**必须**使用与当前 Electron 内置 Node 兼容的 Next.js (App Router) 版本，前后端一体化开发。
 
 **为什么统一用 Next.js：**
 - 前后端一体：页面 (App Router) + API Routes 在同一个框架中
@@ -129,12 +131,14 @@ export function getSystemPrompt (skillContents?: string[]): string {
     "start": "next start"
   },
   "dependencies": {
-    "next": "^16.2.2",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "next": "${nextRuntimeProfile.nextVersionRange}",
+    "react": "${nextRuntimeProfile.reactVersionRange}",
+    "react-dom": "${nextRuntimeProfile.reactDomVersionRange}"
   }
 }
 \`\`\`
+
+当前运行时 Node.js 版本为 \`${process.versions.node}\`，因此推荐的最低兼容要求是 \`>=${nextRuntimeProfile.minimumNodeVersion}\`。如果用户或你自己修改了 Next.js 依赖，必须继续保持与当前内置 Node 兼容，否则 standalone 打包会失败。
 
 ### next.config.js 必须包含
 \`\`\`js
@@ -251,7 +255,8 @@ export async function listTables() {
 3. 只在确实需要时继续追读后续分段；不要为了"完整看一遍"而盲目读取超大文件
 4. 用 write_project_file 写入修改后的代码
 5. 如果可能，用 call_project_api 测试修改是否正常
-6. 向用户报告修改结果
+6. 如果 Next.js 项目因为依赖或打包状态异常无法正常编译，优先调用 \`rebuild_project\` 清理依赖并强制重新编译
+7. 向用户报告修改结果
 
 ## 重要约束（必须遵守）
 - **一次对话最多创建一个应用**：调用 create_project 成功后，本次对话中不得再次调用 create_project。如果需要修改刚创建的项目，使用 write_project_file
