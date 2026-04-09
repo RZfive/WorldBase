@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import crypto from 'node:crypto'
 import { LAN_SERVER_PORT } from '../constants.js'
 import { createBundledRuntimeEnv } from './bundled-runtime.js'
-import { normalizeNextPackageJsonText } from './next-runtime-compat.js'
+import { ensureNextRuntimeCompatiblePackageJson } from './next-runtime-compat.js'
 
 const NEXT_CONFIG_TEMPLATE = `/** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -235,7 +235,7 @@ export class BuilderService {
     }
 
     if (existsSync(packageJsonPath)) {
-      await this._ensureNextRuntimeCompatiblePackageJson(projectDir)
+      await ensureNextRuntimeCompatiblePackageJson(this.projectsDir, projectDir)
       await this._installDeps(projectDir)
     }
 
@@ -305,7 +305,7 @@ export class BuilderService {
 
   private async _normalizeNextProjectFiles (projectDir: string): Promise<void> {
     await this._removeDuplicateScriptVariants(projectDir)
-    await this._ensureNextRuntimeCompatiblePackageJson(projectDir)
+    await ensureNextRuntimeCompatiblePackageJson(this.projectsDir, projectDir)
     await this._ensureNextStandaloneConfig(projectDir)
 
     const hasTypeScriptSources = await this._hasTypeScriptSources(projectDir)
@@ -366,29 +366,6 @@ export class BuilderService {
     const hasExistingConfig = nextConfigCandidates.some(file => existsSync(path.join(projectDir, file)))
     if (!hasExistingConfig) {
       await fs.writeFile(path.join(projectDir, 'next.config.js'), NEXT_CONFIG_TEMPLATE, 'utf-8')
-    }
-  }
-
-  private async _ensureNextRuntimeCompatiblePackageJson (projectDir: string): Promise<void> {
-    const resolvedProjectsDir = path.resolve(this.projectsDir)
-    const resolvedProjectDir = path.resolve(projectDir)
-    if (resolvedProjectDir !== resolvedProjectsDir && !resolvedProjectDir.startsWith(`${resolvedProjectsDir}${path.sep}`)) {
-      return
-    }
-
-    const packageJsonPath = path.join(resolvedProjectDir, 'package.json')
-    if (!existsSync(packageJsonPath)) {
-      return
-    }
-
-    try {
-      const raw = await fs.readFile(packageJsonPath, 'utf-8')
-      const normalized = normalizeNextPackageJsonText(raw)
-      if (normalized.changed) {
-        await fs.writeFile(packageJsonPath, normalized.packageJsonText, 'utf-8')
-      }
-    } catch {
-      // Leave user-provided package.json untouched if it isn't valid JSON.
     }
   }
 
