@@ -79,8 +79,8 @@ function getTaskLabelFromMessages (messages: Array<{ role: string; content: Mess
     return '未命名任务'
   }
 
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const message = messages[messageIndex]
     if (message.role !== 'user') continue
     const text = getMessageText(message.content).replace(/\s+/g, ' ').trim()
     if (text) {

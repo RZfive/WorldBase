@@ -43,6 +43,20 @@ function requestUserAuthViaRenderer (
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const requestId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+
+    // Send auth request to renderer first so the conversation can render the auth card.
+    win.webContents.send('auth:request', {
+      requestId,
+      title,
+      detail
+    })
+
+    if (authMode === 'auto') {
+      emitAuthResolved(win, requestId, true)
+      resolve(true)
+      return
+    }
+
     let settled = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -68,18 +82,6 @@ function requestUserAuthViaRenderer (
     }
 
     ipcMain.on('auth:response', handler)
-
-    // Send auth request to renderer
-    win.webContents.send('auth:request', {
-      requestId,
-      title,
-      detail
-    })
-
-    if (authMode === 'auto') {
-      finish(true)
-      return
-    }
 
     timer = setTimeout(() => {
       finish(false) // Auto-deny after timeout
