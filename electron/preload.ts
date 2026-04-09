@@ -79,6 +79,12 @@ interface LaunchpadLayout {
 }
 
 type ThemePreference = 'system' | 'light' | 'dark'
+type AIExecutionAuthMode = 'strict' | 'auto'
+
+interface AIExecutionPreferences {
+  authMode: AIExecutionAuthMode
+  notifyOnTaskComplete: boolean
+}
 
 interface ServiceEntry {
   projectId: string
@@ -221,6 +227,8 @@ export interface ElectronAPI {
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
+  getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
+  saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>
@@ -241,6 +249,7 @@ export interface ElectronAPI {
 
   // Auth (in-app authorization dialogs)
   onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => () => void
+  onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
 }
 
@@ -317,6 +326,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getThemePreference: () => ipcRenderer.invoke('settings:getThemePreference'),
   saveThemePreference: (preference: ThemePreference) => ipcRenderer.invoke('settings:saveThemePreference', preference),
+  getAIExecutionPreferences: () => ipcRenderer.invoke('settings:getAIExecutionPreferences'),
+  saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => ipcRenderer.invoke('settings:saveAIExecutionPreferences', preferences),
   getLaunchMode: (projectId: string) => ipcRenderer.invoke('settings:getLaunchMode', projectId),
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => ipcRenderer.invoke('settings:saveLaunchMode', projectId, mode),
   getLaunchpadLayout: () => ipcRenderer.invoke('settings:getLaunchpadLayout'),
@@ -340,6 +351,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_e: Electron.IpcRendererEvent, request: { requestId: string; title: string; detail: string }) => callback(request)
     ipcRenderer.on('auth:request', handler)
     return () => { ipcRenderer.removeListener('auth:request', handler) }
+  },
+  onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { requestId: string; approved: boolean }) => callback(payload)
+    ipcRenderer.on('auth:resolved', handler)
+    return () => { ipcRenderer.removeListener('auth:resolved', handler) }
   },
   respondAuth: (requestId: string, approved: boolean) => {
     ipcRenderer.send('auth:response', { requestId, approved })

@@ -89,6 +89,12 @@ interface LaunchpadLayout {
 }
 
 type ThemePreference = 'system' | 'light' | 'dark'
+type AIExecutionAuthMode = 'strict' | 'auto'
+
+interface AIExecutionPreferences {
+  authMode: AIExecutionAuthMode
+  notifyOnTaskComplete: boolean
+}
 
 interface ServiceEntry {
   projectId: string
@@ -238,6 +244,8 @@ interface ElectronAPI {
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
+  getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
+  saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>
@@ -258,6 +266,7 @@ interface ElectronAPI {
 
   // Auth (in-app authorization dialogs)
   onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => () => void
+  onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
 }
 

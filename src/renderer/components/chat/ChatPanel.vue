@@ -146,6 +146,7 @@ const conversationTargets = new Map<string, string | null>()
 let providerChangeCleanup: (() => void) | null = null
 let authRequestCleanup: (() => void) | null = null
 let authResponseCleanup: (() => void) | null = null
+let authResolvedCleanup: (() => void) | null = null
 const MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH = 180
 
 function getEnabledProviders (config: ProvidersConfig): ProviderOption[] {
@@ -1137,6 +1138,10 @@ onMounted(async () => {
     authRequestCleanup = window.electronAPI.onAuthRequest(handleAuthRequest)
   }
 
+  if (window.electronAPI?.onAuthResolved) {
+    authResolvedCleanup = window.electronAPI.onAuthResolved(handleAuthResolution)
+  }
+
   authResponseCleanup = onAuthResolution(handleAuthResolution)
 })
 
@@ -1150,6 +1155,8 @@ onUnmounted(() => {
   providerChangeCleanup = null
   authRequestCleanup?.()
   authRequestCleanup = null
+  authResolvedCleanup?.()
+  authResolvedCleanup = null
   authResponseCleanup?.()
   authResponseCleanup = null
 })

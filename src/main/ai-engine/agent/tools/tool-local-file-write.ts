@@ -5,12 +5,14 @@ import type { ProgressCallback } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { requestUserAuth } from './user-auth.js'
 import { writeExcelFile, writeWordFile, writePptxFile } from './office-utils.js'
+import type { AIExecutionPreferences } from '../../../settings/settings-store.js'
 
 /** Maximum characters for office file preview content. */
 const MAX_PREVIEW_LENGTH = 8000
 
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
+  getAIExecutionPreferences?: () => AIExecutionPreferences
 }
 
 interface LocalWriteFileArgs {
@@ -122,6 +124,7 @@ export function toolLocalWriteFile (services: ToolServices): Tool {
       // Request user authorization
       const authorized = await requestUserAuth(
         services.getMainWindow,
+        services.getAIExecutionPreferences,
         'AI 请求写入本地文件',
         `AI 助手请求在以下路径创建文件:\n\n${resolvedPath}\n\n是否允许？`
       )
