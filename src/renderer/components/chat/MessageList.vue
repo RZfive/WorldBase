@@ -57,11 +57,11 @@ function handleMessageLinkClick (event: MouseEvent): void {
   if (!link || !link.closest('.markdown-body')) return
 
   const href = link.getAttribute('href')?.trim()
-  if (!href) return
+  if (!href || !/^https?:\/\//i.test(href)) return
 
   let url: URL
   try {
-    url = new URL(href, window.location.href)
+    url = new URL(href)
   } catch {
     return
   }

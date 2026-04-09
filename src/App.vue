@@ -192,6 +192,13 @@ async function openEmbeddedProject (projectId: string) {
   }
 }
 
+function getBrowserAppName (url: URL): string {
+  const pathLabel = url.pathname && url.pathname !== '/'
+    ? decodeURIComponent(url.pathname.replace(/\/+$/, '').split('/').filter(Boolean).slice(-1)[0] || '')
+    : ''
+  return pathLabel ? `${url.hostname}/${pathLabel}` : url.hostname
+}
+
 function openWebLinkInApp (rawUrl: string) {
   let parsed: URL
   try {
@@ -202,7 +209,7 @@ function openWebLinkInApp (rawUrl: string) {
 
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
 
-  const appName = parsed.hostname || '网页'
+  const appName = getBrowserAppName(parsed) || parsed.hostname || parsed.toString()
   browserApp.value = {
     id: BROWSER_APP_ID,
     name: appName,
