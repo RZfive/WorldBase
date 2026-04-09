@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { renderMarkdown } from './markdown'
 import { getContentParts, hasRenderableContent, collapseWhitespace } from './message-utils'
+import { splitMarkdownWithMermaid } from './mermaid'
 import type { ChatMessageBlock } from './types'
+import MermaidDiagram from './MermaidDiagram.vue'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'content' }>
@@ -14,7 +16,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'openLightbox', messageIndex: number, blockIndex: number, partIndex: number): void
+  (e: 'openMermaidPreview', code: string): void
 }>()
+
+function getTextSegments (text?: string) {
+  return splitMarkdownWithMermaid(text || '')
+}
 </script>
 
 <template>
@@ -29,9 +36,27 @@ const emit = defineEmits<{
       >
         <div
           v-if="part.type === 'text' && part.text"
-          class="message-text markdown-body"
-          v-html="renderMarkdown(part.text)"
-        ></div>
+          class="message-text-group"
+        >
+          <template
+            v-for="(segment, segmentIndex) in getTextSegments(part.text)"
+            :key="`${props.block.id}-${partIndex}-${segmentIndex}`"
+          >
+            <div
+              v-if="segment.type === 'markdown'"
+              class="message-text markdown-body"
+              v-html="renderMarkdown(segment.text)"
+            ></div>
+
+            <MermaidDiagram
+              v-else
+              class="message-mermaid-card"
+              :code="segment.text"
+              previewable
+              @open-preview="emit('openMermaidPreview', segment.text)"
+            />
+          </template>
+        </div>
 
         <button
           v-else-if="part.type === 'image_url' && part.image_url?.url"
@@ -87,10 +112,24 @@ const emit = defineEmits<{
   margin-top: 10px;
 }
 
-.message-text + .message-image-card,
-.message-image-card + .message-text,
-.message-image-card + .message-image-card {
+.message-text-group {
+  width: 100%;
+}
+
+.message-text-group > * + * {
   margin-top: 12px;
+}
+
+.message-text-group + .message-image-card,
+.message-image-card + .message-text,
+.message-image-card + .message-image-card,
+.message-image-card + .message-text-group,
+.message-text-group + .message-text-group {
+  margin-top: 12px;
+}
+
+.message-mermaid-card {
+  width: min(100%, 820px);
 }
 
 .message-image-card {
@@ -220,6 +259,10 @@ const emit = defineEmits<{
 
 @media (max-width: 860px) {
   .message-bubble {
+    width: 100%;
+  }
+
+  .message-mermaid-card {
     width: 100%;
   }
 }

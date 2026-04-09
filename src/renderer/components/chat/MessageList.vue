@@ -4,6 +4,7 @@ import { buildMessageBlocks, getContentParts } from './message-utils'
 import type { ChatMessage, GalleryImage, FilePreviewState } from './types'
 import MessageRow from './MessageRow.vue'
 import ImageLightbox from './ImageLightbox.vue'
+import MermaidPreviewDialog from './MermaidPreviewDialog.vue'
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -19,6 +20,7 @@ const emit = defineEmits<{
 const messagesContainer = ref<HTMLElement | null>(null)
 const lightboxRef = ref<InstanceType<typeof ImageLightbox> | null>(null)
 const collapsedThinking = reactive<Record<string, boolean>>({})
+const activeMermaidPreview = ref<{ code: string } | null>(null)
 
 const latestAssistantMessageIndex = computed(() => {
   for (let i = props.messages.length - 1; i >= 0; i--) {
@@ -49,6 +51,14 @@ function toggleThinking (id: string): void {
 
 function openLightbox (messageIndex: number, blockIndex: number, partIndex: number) {
   lightboxRef.value?.open(messageIndex, blockIndex, partIndex)
+}
+
+function openMermaidPreview (code: string) {
+  activeMermaidPreview.value = { code }
+}
+
+function closeMermaidPreview () {
+  activeMermaidPreview.value = null
 }
 
 function handleMessageLinkClick (event: MouseEvent): void {
@@ -158,9 +168,11 @@ watch(
       @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
       @toggle-thinking="toggleThinking"
       @open-lightbox="(mi, bi, pi) => openLightbox(mi, bi, pi)"
+      @open-mermaid-preview="openMermaidPreview"
     />
 
     <ImageLightbox ref="lightboxRef" :images="galleryImages" />
+    <MermaidPreviewDialog :diagram="activeMermaidPreview" @close="closeMermaidPreview" />
   </div>
 </template>
 
