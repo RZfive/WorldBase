@@ -46,6 +46,14 @@ function requestUserAuthViaRenderer (
     let settled = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
+    const finish = (approved: boolean) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      emitAuthResolved(win, requestId, approved)
+      resolve(approved)
+    }
+
     const cleanup = () => {
       if (timer) {
         clearTimeout(timer)
@@ -55,11 +63,8 @@ function requestUserAuthViaRenderer (
     }
 
     const handler = (_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => {
-      if (settled || data.requestId !== requestId) return
-      settled = true
-      cleanup()
-      emitAuthResolved(win, requestId, data.approved)
-      resolve(data.approved)
+      if (data.requestId !== requestId) return
+      finish(data.approved)
     }
 
     ipcMain.on('auth:response', handler)
@@ -72,19 +77,12 @@ function requestUserAuthViaRenderer (
     })
 
     if (preferences.authMode === 'auto') {
-      settled = true
-      cleanup()
-      emitAuthResolved(win, requestId, true)
-      resolve(true)
+      finish(true)
       return
     }
 
     timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      cleanup()
-      emitAuthResolved(win, requestId, false)
-      resolve(false) // Auto-deny after timeout
+      finish(false) // Auto-deny after timeout
     }, AUTH_TIMEOUT_MS)
   })
 }
