@@ -151,7 +151,7 @@ export function normalizeNextPackageJsonText (
   }
 }
 
-function resolvePackageJsonWithinProjectsDir (projectsDir: string, projectDir: string): string | null {
+function resolveProjectPackageJsonPath (projectsDir: string, projectDir: string): string | null {
   const resolvedProjectsDir = path.resolve(projectsDir)
   const resolvedProjectDir = path.resolve(projectDir)
   const relativeProjectDir = path.relative(resolvedProjectsDir, resolvedProjectDir)
@@ -167,7 +167,7 @@ export async function ensureNextRuntimeCompatiblePackageJson (
   projectsDir: string,
   projectDir: string
 ): Promise<void> {
-  const packageJsonPath = resolvePackageJsonWithinProjectsDir(projectsDir, projectDir)
+  const packageJsonPath = resolveProjectPackageJsonPath(projectsDir, projectDir)
   if (!packageJsonPath || !existsSync(packageJsonPath)) {
     return
   }

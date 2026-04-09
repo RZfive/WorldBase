@@ -224,13 +224,16 @@ export class BuilderService {
     const projectDir = path.join(this.projectsDir, projectId)
     const packageJsonPath = path.join(projectDir, 'package.json')
 
-    const cleanupResult = await this.cleanup(projectId)
-    if (!cleanupResult.success) {
-      return {
-        success: false,
-        buildStatus: 'failed',
-        duration: 0,
-        error: cleanupResult.error
+    const needsPreRebuildCleanup = existsSync(path.join(projectDir, 'node_modules')) || existsSync(path.join(projectDir, '.next', 'cache'))
+    if (needsPreRebuildCleanup) {
+      const cleanupResult = await this.cleanup(projectId)
+      if (!cleanupResult.success) {
+        return {
+          success: false,
+          buildStatus: 'failed',
+          duration: 0,
+          error: cleanupResult.error
+        }
       }
     }
 
