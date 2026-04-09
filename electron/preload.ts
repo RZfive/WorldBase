@@ -239,6 +239,7 @@ export interface ElectronAPI {
   importSkillContent: (name: string, content: string, description?: string) => Promise<{ id: string; name: string }>
   deleteSkill: (id: string) => Promise<boolean>
   setActiveSkills: (skillIds: string[]) => Promise<{ success: boolean; count: number }>
+  onSkillsChanged: (callback: (event: { action: string; count?: number; id?: string }) => void) => () => void
 
   // Window controls
   minimizeWindow: () => Promise<void>
@@ -338,6 +339,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   importSkillContent: (name: string, content: string, description?: string) => ipcRenderer.invoke('skills:importContent', name, content, description),
   deleteSkill: (id: string) => ipcRenderer.invoke('skills:delete', id),
   setActiveSkills: (skillIds: string[]) => ipcRenderer.invoke('skills:setActive', skillIds),
+  onSkillsChanged: (callback: (event: { action: string; count?: number; id?: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { action: string; count?: number; id?: string }) => callback(event)
+    ipcRenderer.on('skills:changed', handler)
+    return () => { ipcRenderer.removeListener('skills:changed', handler) }
+  },
 
   // Window controls
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
