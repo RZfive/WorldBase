@@ -385,18 +385,24 @@ export class RuntimeManager {
 
   getProjectProcesses (): ProjectProcessSnapshot[] {
     return Array.from(this.runningProjects.entries())
-      .map(([projectId, info]) => ({
-        projectId,
-        status: info.status,
-        port: info.port,
-        pid: info.process.pid,
-        startedAt: info.startedAt,
-        uptimeSeconds: info.startedAt
-          ? Math.max(0, Math.round((Date.now() - new Date(info.startedAt).getTime()) / 100) / 10)
-          : undefined,
-        exitCode: info.exitCode,
-        error: info.error
-      }))
+      .map(([projectId, info]) => {
+        const uptimeMs = info.startedAt
+          ? Date.now() - new Date(info.startedAt).getTime()
+          : null
+
+        return {
+          projectId,
+          status: info.status,
+          port: info.port,
+          pid: info.process.pid,
+          startedAt: info.startedAt,
+          uptimeSeconds: uptimeMs !== null
+            ? Math.max(0, Math.round(uptimeMs / 100) / 10)
+            : undefined,
+          exitCode: info.exitCode,
+          error: info.error
+        }
+      })
       .sort((left, right) => left.projectId.localeCompare(right.projectId))
   }
 
