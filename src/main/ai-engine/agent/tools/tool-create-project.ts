@@ -19,7 +19,7 @@ interface ToolServices {
 interface CreateProjectArgs {
   name: string
   type: string
-  files: Record<string, string>
+  files: unknown
   meta?: unknown
 }
 
@@ -61,8 +61,9 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
       }
     },
     handler: async (args, onProgress) => {
-      const { name, type, files, meta = {} } = args as unknown as CreateProjectArgs
-      const normalizedMeta = normalizeProjectMeta(meta)
+      const { name, type, meta } = args as unknown as CreateProjectArgs
+      const files = normalizeCreateProjectFiles((args as Record<string, unknown>).files)
+      const normalizedMeta = normalizeProjectMeta(parsePossiblyStringifiedObject(meta, 'meta') ?? meta)
       const session = getSessionState?.()
 
       // Prevent creating a second project in the same conversation
@@ -297,4 +298,58 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
       }
     }
   }
+}
+
+function normalizeCreateProjectFiles (rawFiles: unknown): Record<string, string> {
+  const parsedFiles = parsePossiblyStringifiedObject(rawFiles, 'files')
+
+  if (!parsedFiles) {
+    throw new Error('create_project 的 files 参数必须是 { "路径": "完整文件内容" } 对象，不能是普通字符串。')
+  }
+
+  const entries = Object.entries(parsedFiles)
+  if (entries.length === 0) {
+    throw new Error('create_project 的 files 参数至少要包含一个文件。')
+  }
+
+  const normalizedFiles: Record<string, string> = {}
+
+  for (const [filePath, content] of entries) {
+    if (typeof content !== 'string') {
+      throw new Error(`create_project 的 files["${filePath}"] 必须是完整文件内容字符串。`)
+    }
+    normalizedFiles[filePath] = content
+  }
+
+  return normalizedFiles
+}
+
+function parsePossiblyStringifiedObject (value: unknown, fieldName: string): Record<string, unknown> | null {
+  let current = value
+
+  for (let depth = 0; depth < 3; depth++) {
+    if (current && typeof current === 'object' && !Array.isArray(current)) {
+      return current as Record<string, unknown>
+    }
+
+    if (typeof current !== 'string') {
+      return null
+    }
+
+    const trimmed = current.trim()
+    if (!trimmed.startsWith('{')) {
+      return null
+    }
+
+    try {
+      current = JSON.parse(trimmed) as unknown
+      if (depth === 0) {
+        console.warn(`[tool:create_project] Repaired stringified ${fieldName} argument`)
+      }
+    } catch {
+      return null
+    }
+  }
+
+  return null
 }
