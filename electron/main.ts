@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
 import { AIEngine, type ProgressEvent } from '../src/main/ai-engine/ai-engine.js'
+import { USER_ABORT_MESSAGE } from '../src/main/ai-engine/abort-utils.js'
 import { ProjectFS } from '../src/main/project-fs/project-fs.js'
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
 import { BuilderService } from '../src/main/project-runtime/builder-service.js'
@@ -55,6 +56,7 @@ let hasFinishedQuitCleanup = false
 
 /** Track standalone project windows keyed by projectId */
 const projectWindows = new Map<string, BrowserWindow>()
+const activeChatStreams = new Map<string, AbortController>()
 
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
 const MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
@@ -396,6 +398,8 @@ function setupIPC (): void {
   ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
+    const abortController = new AbortController()
+    activeChatStreams.set(sessionId, abortController)
     // Progress callback: sends progress events directly to renderer in real-time
     const onProgress = (stageOrEvent: string | ProgressEvent, detail?: string) => {
       if (!sender.isDestroyed()) {
@@ -409,7 +413,8 @@ function setupIPC (): void {
     try {
       for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
         targetProjectId: targetProjectId ?? null,
-        providerConfig: resolveProviderConfig(providerId, modelId)
+        providerConfig: resolveProviderConfig(providerId, modelId),
+        abortSignal: abortController.signal
       })) {
         if (sender.isDestroyed()) break
         try {
@@ -450,10 +455,24 @@ function setupIPC (): void {
       }
     } catch (err) {
       if (!sender.isDestroyed()) {
-        sender.send(channel, { type: 'error', error: (err as Error).message })
+        const errorMessage = (err as Error).message
+        sender.send(channel, errorMessage === USER_ABORT_MESSAGE
+          ? { type: 'stopped' }
+          : { type: 'error', error: errorMessage })
       }
+    } finally {
+      activeChatStreams.delete(sessionId)
     }
     return { ok: true }
+  })
+
+  ipcMain.handle('ai:stopStream', async (_event: IpcMainInvokeEvent, sessionId: string) => {
+    const controller = activeChatStreams.get(sessionId)
+    if (!controller || controller.signal.aborted) {
+      return { ok: true, stopped: false }
+    }
+    controller.abort(new Error(USER_ABORT_MESSAGE))
+    return { ok: true, stopped: true }
   })
 
   // Conversation history

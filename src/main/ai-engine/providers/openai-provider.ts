@@ -1,3 +1,5 @@
+import { normalizeAbortReason } from '../abort-utils.js'
+
 export interface ChatContentTextPart {
   type: 'text'
   text: string
@@ -78,6 +80,10 @@ interface StreamDelta {
  * 支持 OpenAI, Azure OpenAI, 以及任何兼容 API
  */
 export class OpenAIProvider {
+  /** Standard requests should fail fast to surface provider issues promptly. */
+  private static readonly STANDARD_REQUEST_TIMEOUT_MS = 60000
+  /** Streaming responses get a longer timeout because token generation can stay open much longer. */
+  private static readonly STREAM_REQUEST_TIMEOUT_MS = 90000
   private apiKey: string
   private baseUrl: string
   private model: string
@@ -282,10 +288,10 @@ export class OpenAIProvider {
   /**
    * Make a chat completion request with function calling support.
    */
-  async chatCompletion (messages: ChatMessage[], tools: ToolDefinition[] = []): Promise<ChatMessage> {
+  async chatCompletion (messages: ChatMessage[], tools: ToolDefinition[] = [], abortSignal?: AbortSignal): Promise<ChatMessage> {
     const body = this.buildRequestBody(messages, tools, false)
 
-    const response = await this.fetchWithRetry(body, false)
+    const response = await this.fetchWithRetry(body, false, abortSignal)
 
     const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
     return this.normalizeAssistantMessage(data.choices[0].message)
@@ -299,7 +305,8 @@ export class OpenAIProvider {
    */
   async * chatCompletionStream (
     messages: ChatMessage[],
-    tools: ToolDefinition[] = []
+    tools: ToolDefinition[] = [],
+    abortSignal?: AbortSignal
   ): AsyncGenerator<
     | { type: 'token'; content: string }
     | { type: 'thinking'; content: string }
@@ -309,14 +316,14 @@ export class OpenAIProvider {
     const body = this.buildRequestBody(messages, tools, true)
 
     if (this.isImageOutputModel()) {
-      const response = await this.fetchWithRetry(body, false)
+      const response = await this.fetchWithRetry(body, false, abortSignal)
       const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
       const message = this.normalizeAssistantMessage(data.choices[0].message)
       yield { type: 'done', message }
       return
     }
 
-    const response = await this.fetchWithRetry(body, true)
+    const response = await this.fetchWithRetry(body, true, abortSignal)
 
     const reader = response.body?.getReader()
     if (!reader) throw new Error('No response body')
@@ -329,6 +336,9 @@ export class OpenAIProvider {
 
     try {
       while (true) {
+        if (abortSignal?.aborted) {
+          throw normalizeAbortReason(abortSignal.reason)
+        }
         const { done, value } = await reader.read()
         if (done) break
 
@@ -380,6 +390,11 @@ export class OpenAIProvider {
           }
         }
       }
+    } catch (err) {
+      if (abortSignal?.aborted) {
+        throw normalizeAbortReason(abortSignal.reason)
+      }
+      throw this.normalizeRequestError(err)
     } finally {
       reader.releaseLock()
     }
@@ -401,7 +416,7 @@ export class OpenAIProvider {
     yield { type: 'done', message }
   }
 
-  private async fetchWithRetry (body: ChatCompletionBody, stream: boolean): Promise<Response> {
+  private async fetchWithRetry (body: ChatCompletionBody, stream: boolean, abortSignal?: AbortSignal): Promise<Response> {
     this.validateConfig()
 
     const maxAttempts = 3
@@ -409,7 +424,20 @@ export class OpenAIProvider {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), stream ? 90000 : 60000)
+      const onAbort = () => {
+        if (!abortSignal) return
+        controller.abort(normalizeAbortReason(abortSignal.reason))
+      }
+      if (abortSignal) {
+        if (abortSignal.aborted) {
+          throw normalizeAbortReason(abortSignal.reason)
+        }
+        abortSignal.addEventListener('abort', onAbort, { once: true })
+      }
+      const timeout = setTimeout(
+        () => controller.abort(new Error('AI request timed out')),
+        stream ? OpenAIProvider.STREAM_REQUEST_TIMEOUT_MS : OpenAIProvider.STANDARD_REQUEST_TIMEOUT_MS
+      )
 
       try {
         const response = await fetch(this.getChatCompletionUrl(), {
@@ -424,12 +452,18 @@ export class OpenAIProvider {
 
         if (response.ok) {
           clearTimeout(timeout)
+          if (abortSignal) {
+            abortSignal.removeEventListener('abort', onAbort)
+          }
           return response
         }
 
         const errorText = await response.text()
         const error = new Error(`OpenAI API error (${response.status}): ${errorText}`)
         clearTimeout(timeout)
+        if (abortSignal) {
+          abortSignal.removeEventListener('abort', onAbort)
+        }
 
         if (!this.isRetryableStatus(response.status) || attempt === maxAttempts) {
           throw error
@@ -438,6 +472,15 @@ export class OpenAIProvider {
         lastError = error
       } catch (err) {
         clearTimeout(timeout)
+        if (abortSignal) {
+          abortSignal.removeEventListener('abort', onAbort)
+        }
+        if (abortSignal?.aborted) {
+          throw normalizeAbortReason(abortSignal.reason)
+        }
+        if (controller.signal.aborted) {
+          throw normalizeAbortReason(controller.signal.reason)
+        }
         const normalized = this.normalizeRequestError(err)
         if (!this.isRetryableError(normalized) || attempt === maxAttempts) {
           throw normalized
@@ -472,7 +515,7 @@ export class OpenAIProvider {
   private normalizeRequestError (error: unknown): Error {
     if (error instanceof Error) {
       if (error.name === 'AbortError') {
-        return new Error('AI request timed out')
+        return normalizeAbortReason(error.cause)
       }
       return error
     }

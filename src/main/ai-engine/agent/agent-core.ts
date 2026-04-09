@@ -1,5 +1,6 @@
 import { getSystemPrompt } from './prompts/system-prompt.js'
 import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/openai-provider.js'
+import { normalizeAbortReason, USER_ABORT_MESSAGE } from '../abort-utils.js'
 
 export type ProgressEvent =
   | { type: 'progress'; stage: string; detail?: string }
@@ -380,7 +381,7 @@ export class AgentCore {
    * Run the agent loop in streaming mode.
    * Yields tokens in real-time and tool execution events.
    */
-  async * runStream (userMessages: ChatMessage[], onProgress?: ProgressCallback): AsyncGenerator<StreamEvent> {
+  async * runStream (userMessages: ChatMessage[], onProgress?: ProgressCallback, abortSignal?: AbortSignal): AsyncGenerator<StreamEvent> {
     this._resetSessionState()
     const systemMessage: ChatMessage = {
       role: 'system',
@@ -394,8 +395,9 @@ export class AgentCore {
     let fullThinking = ''
 
     while (iterations < this.maxIterations) {
+      this._throwIfAborted(abortSignal)
       iterations++
-      messages = await this._compressContextIfNeeded(messages, onProgress)
+      messages = await this._compressContextIfNeeded(messages, onProgress, abortSignal)
 
       let assistantMessage: ChatMessage | null = null
       let iterationThinking = ''
@@ -409,12 +411,13 @@ export class AgentCore {
 
         try {
           if (attempt > 1) {
+            this._throwIfAborted(abortSignal)
             onProgress?.('🔄 AI 连接中断，正在重试...', `第 ${attempt} 次尝试`)
             yield { type: 'reset' }
             await this._sleep(Math.min(1000 * (2 ** (attempt - 1)), 5000))
           }
 
-          for await (const event of this.provider.chatCompletionStream(messages, toolDefs)) {
+          for await (const event of this.provider.chatCompletionStream(messages, toolDefs, abortSignal)) {
             if (event.type === 'thinking') {
               iterationThinking += event.content
               yield { type: 'thinking', content: event.content }
@@ -466,6 +469,7 @@ export class AgentCore {
 
       for (const toolCall of assistantMessage.tool_calls) {
         const toolName = toolCall.function.name
+        this._throwIfAborted(abortSignal)
 
         yield { type: 'tool_start', name: toolName }
 
@@ -473,6 +477,7 @@ export class AgentCore {
         try {
           const toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
           result = await this._executeTool(toolName, toolArgs, onProgress)
+          this._throwIfAborted(abortSignal)
         } catch (err) {
           result = { error: (err as Error).message }
         }
@@ -513,7 +518,7 @@ export class AgentCore {
     return result
   }
 
-  private async _compressContextIfNeeded (messages: ChatMessage[], onProgress?: ProgressCallback): Promise<ChatMessage[]> {
+  private async _compressContextIfNeeded (messages: ChatMessage[], onProgress?: ProgressCallback, abortSignal?: AbortSignal): Promise<ChatMessage[]> {
     const contextWindow = this.provider.getContextWindow()
     const warningThreshold = Math.floor(contextWindow * 0.85)
     const currentTokens = this._estimateTokens(messages)
@@ -538,7 +543,7 @@ export class AgentCore {
     }
 
     const summaryPrompt = this._buildContextSummaryPrompt(summaryTarget)
-    const summaryResponse = await this.provider.chatCompletion(summaryPrompt)
+    const summaryResponse = await this.provider.chatCompletion(summaryPrompt, [], abortSignal)
     const summaryMessage: ChatMessage = {
       role: 'system',
       content: `${AgentCore.CONTEXT_SUMMARY_PREFIX}\n${typeof summaryResponse.content === 'string' ? summaryResponse.content : ''}`
@@ -588,5 +593,10 @@ export class AgentCore {
 
   private async _sleep (ms: number): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, ms))
+  }
+
+  private _throwIfAborted (abortSignal?: AbortSignal): void {
+    if (!abortSignal?.aborted) return
+    throw normalizeAbortReason(abortSignal.reason, USER_ABORT_MESSAGE)
   }
 }
