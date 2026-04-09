@@ -113,7 +113,7 @@ function handleOfficeUpload (e: Event) {
       <textarea
         :value="props.modelValue"
         placeholder="输入消息… (Enter 发送, Shift+Enter 换行)"
-        :aria-busy="props.isLoading"
+        :aria-busy="props.isLoading ? 'true' : 'false'"
         @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
         @keydown="handleKeydown"
         @focus="inputFocused = true"
