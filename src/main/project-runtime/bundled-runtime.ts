@@ -13,13 +13,47 @@ function resolveBundledNodePath (): string {
   return process.execPath
 }
 
-function resolveBundledPnpmCliPath (binName: 'pnpm' | 'pnpx'): string {
-  const packagedPath = path.join(process.resourcesPath, 'app.asar', 'node_modules', 'pnpm', 'bin', `${binName}.cjs`)
-  if (existsSync(packagedPath)) {
-    return packagedPath
+function resolveBundledPnpmPackageDir (): string {
+  const resolvedEntry = require.resolve('pnpm')
+
+  if (path.basename(resolvedEntry) === 'package.json') {
+    return path.dirname(resolvedEntry)
   }
 
-  return require.resolve(`pnpm/bin/${binName}.cjs`)
+  return path.dirname(path.dirname(resolvedEntry))
+}
+
+function resolveBundledPnpmCliPath (binName: 'pnpm' | 'pnpx'): string {
+  const candidatePaths = new Set<string>([
+    path.join(process.resourcesPath, 'app.asar', 'node_modules', 'pnpm', 'bin', `${binName}.cjs`),
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'pnpm', 'bin', `${binName}.cjs`)
+  ])
+
+  const pnpmPackageDir = resolveBundledPnpmPackageDir()
+  candidatePaths.add(path.join(pnpmPackageDir, 'bin', `${binName}.cjs`))
+
+  try {
+    const pnpmPackageJson = require(path.join(pnpmPackageDir, 'package.json')) as {
+      bin?: string | Partial<Record<'pnpm' | 'pnpx', string>>
+    }
+    const declaredBinPath = typeof pnpmPackageJson.bin === 'string'
+      ? pnpmPackageJson.bin
+      : pnpmPackageJson.bin?.[binName]
+
+    if (declaredBinPath) {
+      candidatePaths.add(path.resolve(pnpmPackageDir, declaredBinPath))
+    }
+  } catch {
+    // Ignore package metadata read failures and fall back to the well-known paths above.
+  }
+
+  for (const candidatePath of candidatePaths) {
+    if (existsSync(candidatePath)) {
+      return candidatePath
+    }
+  }
+
+  throw new Error(`Unable to resolve bundled ${binName} CLI entry from pnpm package`)
 }
 
 function shEscape (value: string): string {
