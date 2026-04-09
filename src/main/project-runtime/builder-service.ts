@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 import crypto from 'node:crypto'
 import { LAN_SERVER_PORT } from '../constants.js'
 import { createBundledRuntimeEnv } from './bundled-runtime.js'
+import { ensureNextRuntimeCompatiblePackageJson } from './next-runtime-compat.js'
 
 const NEXT_CONFIG_TEMPLATE = `/** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -223,15 +224,26 @@ export class BuilderService {
     const projectDir = path.join(this.projectsDir, projectId)
     const packageJsonPath = path.join(projectDir, 'package.json')
 
-    // Re-install dependencies if needed
-    if (existsSync(packageJsonPath) && !existsSync(path.join(projectDir, 'node_modules'))) {
+    const needsPreRebuildCleanup = existsSync(path.join(projectDir, 'node_modules')) || existsSync(path.join(projectDir, '.next', 'cache'))
+    if (needsPreRebuildCleanup) {
+      const cleanupResult = await this.cleanup(projectId)
+      if (!cleanupResult.success) {
+        return {
+          success: false,
+          buildStatus: 'failed',
+          duration: 0,
+          error: cleanupResult.error
+        }
+      }
+    }
+
+    if (existsSync(packageJsonPath)) {
+      await ensureNextRuntimeCompatiblePackageJson(this.projectsDir, projectDir)
       await this._installDeps(projectDir)
     }
 
-    // Build
     const result = await this.build(projectId)
 
-    // Cleanup if build succeeded
     if (result.success) {
       await this.cleanup(projectId)
     }
@@ -296,6 +308,7 @@ export class BuilderService {
 
   private async _normalizeNextProjectFiles (projectDir: string): Promise<void> {
     await this._removeDuplicateScriptVariants(projectDir)
+    await ensureNextRuntimeCompatiblePackageJson(this.projectsDir, projectDir)
     await this._ensureNextStandaloneConfig(projectDir)
 
     const hasTypeScriptSources = await this._hasTypeScriptSources(projectDir)

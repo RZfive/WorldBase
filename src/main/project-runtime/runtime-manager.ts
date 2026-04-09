@@ -7,6 +7,7 @@ import { ProcessMonitor } from './process-monitor.js'
 import { LAN_SERVER_PORT } from '../constants.js'
 import type { BuilderService } from './builder-service.js'
 import { createBundledRuntimeEnv } from './bundled-runtime.js'
+import { ensureNextRuntimeCompatiblePackageJson } from './next-runtime-compat.js'
 
 interface LogEntry {
   type: 'stdout' | 'stderr'
@@ -401,6 +402,10 @@ export class RuntimeManager {
     const cwd = backend?.cwd
       ? path.join(projectDir, backend.cwd as string)
       : projectDir
+
+    if (await this._isNextProject(projectDir, meta, backend)) {
+      await ensureNextRuntimeCompatiblePackageJson(this.projectsDir, cwd)
+    }
 
     return createBundledRuntimeEnv(cwd).then(env => new Promise((resolve, reject) => {
       const child = spawn('npm', ['install'], {
