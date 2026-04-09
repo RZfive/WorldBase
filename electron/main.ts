@@ -99,12 +99,15 @@ function notifyAiTaskStatus (
   if (!preferences.notifyOnTaskComplete || !Notification.isSupported()) return
 
   const taskLabel = getTaskLabelFromMessages(messages)
-  const title = status === 'completed'
-    ? 'AI 任务已完成'
-    : status === 'failed'
-      ? 'AI 任务执行失败'
-      : 'AI 任务已停止'
-  const statusLabel = status === 'completed' ? '已完成' : status === 'failed' ? '失败' : '已停止'
+  let title = 'AI 任务已完成'
+  let statusLabel = '已完成'
+  if (status === 'failed') {
+    title = 'AI 任务执行失败'
+    statusLabel = '失败'
+  } else if (status === 'stopped') {
+    title = 'AI 任务已停止'
+    statusLabel = '已停止'
+  }
   const body = detail
     ? `任务：${taskLabel}\n状态：${statusLabel}\n详情：${detail}`
     : `任务：${taskLabel}\n状态：${statusLabel}`
