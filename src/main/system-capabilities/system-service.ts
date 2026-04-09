@@ -169,7 +169,7 @@ export class SystemService {
       const idleDelta = sample.idle - this.lastCpuSample.idle
       sampleWindowMs = now - this.lastCpuSample.capturedAt
       if (totalDelta > 0) {
-        usagePercent = Number((((totalDelta - idleDelta) / totalDelta) * 100).toFixed(1))
+        usagePercent = this.roundToOneDecimal(((totalDelta - idleDelta) / totalDelta) * 100)
       }
     }
 
@@ -190,7 +190,7 @@ export class SystemService {
     const freeBytes = os.freemem()
     const usedBytes = totalBytes - freeBytes
     const usagePercent = totalBytes > 0
-      ? Number(((usedBytes / totalBytes) * 100).toFixed(1))
+      ? this.roundToOneDecimal((usedBytes / totalBytes) * 100)
       : 0
     const processMemory = process.memoryUsage()
 
@@ -230,5 +230,9 @@ export class SystemService {
     if (services.totalCrashed > 0) return 'degraded'
     if ((cpuUsagePercent ?? 0) >= 85 || memoryUsagePercent >= 85) return 'busy'
     return 'ok'
+  }
+
+  private roundToOneDecimal (value: number): number {
+    return Math.round(value * 10) / 10
   }
 }
