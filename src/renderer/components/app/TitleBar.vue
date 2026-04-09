@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
 const props = withDefaults(defineProps<{
   title?: string
   icon?: string
@@ -16,11 +18,17 @@ const emit = defineEmits<{
   (e: 'maximize'): void
   (e: 'close'): void
 }>()
+
+const isWindows = computed(() => {
+  if (typeof navigator === 'undefined') return false
+  const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent
+  return /win/i.test(platform)
+})
 </script>
 
 <template>
-  <div class="titlebar">
-    <div class="titlebar-controls">
+  <div class="titlebar" :class="{ windows: isWindows }">
+    <div v-if="!isWindows" class="titlebar-controls traffic-controls">
       <button class="titlebar-traffic close" @click="emit('close')" title="关闭">
         <span class="titlebar-traffic-glyph">×</span>
       </button>
@@ -42,7 +50,19 @@ const emit = defineEmits<{
       </div>
     </div>
 
-    <div class="titlebar-balance"></div>
+    <div v-if="!isWindows" class="titlebar-balance"></div>
+
+    <div v-else class="titlebar-controls windows-controls">
+      <button class="titlebar-win-button" @click="emit('minimize')" title="最小化" aria-label="最小化">
+        <span class="titlebar-win-glyph minimize"></span>
+      </button>
+      <button class="titlebar-win-button" @click="emit('maximize')" :title="props.isMaximized ? '还原' : '最大化'" :aria-label="props.isMaximized ? '还原' : '最大化'">
+        <span class="titlebar-win-glyph" :class="props.isMaximized ? 'restore' : 'maximize'"></span>
+      </button>
+      <button class="titlebar-win-button close" @click="emit('close')" title="关闭" aria-label="关闭">
+        <span class="titlebar-win-close">×</span>
+      </button>
+    </div>
   </div>
 </template>
 
@@ -59,6 +79,13 @@ const emit = defineEmits<{
   flex-shrink: 0;
   user-select: none;
   gap: 12px;
+}
+
+.titlebar.windows {
+  height: 40px;
+  padding: 0 0 0 12px;
+  gap: 0;
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
 }
 
 .titlebar-drag {
@@ -114,9 +141,17 @@ const emit = defineEmits<{
 
 .titlebar-controls {
   display: flex;
-  gap: 8px;
   align-items: center;
   -webkit-app-region: no-drag;
+}
+
+.traffic-controls {
+  gap: 8px;
+}
+
+.windows-controls {
+  align-self: stretch;
+  margin-left: 12px;
 }
 
 .titlebar-balance {
@@ -152,5 +187,77 @@ const emit = defineEmits<{
 
 .titlebar-controls:hover .titlebar-traffic-glyph {
   opacity: 1;
+}
+
+.titlebar-win-button {
+  width: 46px;
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--app-text-strong);
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+
+.titlebar-win-button:hover {
+  background: rgba(127, 127, 127, 0.16);
+}
+
+.titlebar-win-button.close:hover {
+  background: #e81123;
+  color: #ffffff;
+}
+
+.titlebar-win-glyph {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  display: inline-block;
+}
+
+.titlebar-win-glyph.minimize::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 1px;
+  border-top: 1.5px solid currentColor;
+}
+
+.titlebar-win-glyph.maximize::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid currentColor;
+}
+
+.titlebar-win-glyph.restore::before,
+.titlebar-win-glyph.restore::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  background: transparent;
+}
+
+.titlebar-win-glyph.restore::before {
+  top: 0;
+  right: 0;
+}
+
+.titlebar-win-glyph.restore::after {
+  left: 0;
+  bottom: 0;
+  background: var(--app-panel);
+}
+
+.titlebar-win-close {
+  font-size: 0.95rem;
+  line-height: 1;
 }
 </style>

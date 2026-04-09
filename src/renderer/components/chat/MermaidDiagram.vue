@@ -1,57 +1,63 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
-import { renderMermaidSvg } from './mermaid'
+import { ref, watch } from "vue";
+import { renderMermaidSvg } from "./mermaid";
 
-const props = withDefaults(defineProps<{
-  code: string
-  mode?: 'inline' | 'preview'
-  previewable?: boolean
-}>(), {
-  mode: 'inline',
-  previewable: false
-})
+const props = withDefaults(
+  defineProps<{
+    code: string;
+    mode?: "inline" | "preview";
+    previewable?: boolean;
+  }>(),
+  {
+    mode: "inline",
+    previewable: false,
+  },
+);
 
 const emit = defineEmits<{
-  (e: 'openPreview'): void
-}>()
+  (e: "openPreview"): void;
+}>();
 
-const svgMarkup = ref('')
-const renderError = ref('')
-const isRendering = ref(false)
+const svgMarkup = ref("");
+const renderError = ref("");
+const isRendering = ref(false);
 
-async function renderDiagram () {
-  const code = props.code.trim()
-  svgMarkup.value = ''
-  renderError.value = ''
+async function renderDiagram() {
+  const code = props.code.trim();
+  svgMarkup.value = "";
+  renderError.value = "";
 
   if (!code) {
-    renderError.value = 'Mermaid 内容为空'
-    return
+    renderError.value = "Mermaid 内容为空";
+    return;
   }
 
-  isRendering.value = true
+  isRendering.value = true;
   try {
-    svgMarkup.value = await renderMermaidSvg(code)
+    svgMarkup.value = await renderMermaidSvg(code);
   } catch (error) {
-    renderError.value = error instanceof Error ? error.message : 'Mermaid 图表渲染失败'
+    renderError.value =
+      error instanceof Error ? error.message : "Mermaid 图表渲染失败";
   } finally {
-    isRendering.value = false
+    isRendering.value = false;
   }
 }
 
-watch(() => props.code, () => {
-  void renderDiagram()
-}, { immediate: true })
+watch(
+  () => props.code,
+  () => {
+    void renderDiagram();
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
   <div class="mermaid-diagram" :class="props.mode">
-    <div class="mermaid-diagram-header">
+    <div class="mermaid-diagram-header" v-if="props.mode === 'inline'">
       <div class="mermaid-diagram-meta">
         <span class="mermaid-diagram-badge">Mermaid</span>
-        <span class="mermaid-diagram-hint">
-          {{ props.mode === 'preview' ? '支持滚轮缩放与拖拽查看细节' : '点击展开查看大图' }}
-        </span>
+        <span class="mermaid-diagram-hint">点击展开查看大图</span>
       </div>
       <button
         v-if="props.previewable && props.mode === 'inline'"
@@ -63,9 +69,18 @@ watch(() => props.code, () => {
       </button>
     </div>
 
-    <div class="mermaid-diagram-canvas" :class="{ preview: props.mode === 'preview' }">
-      <div v-if="svgMarkup" class="mermaid-diagram-svg" v-html="svgMarkup"></div>
-      <div v-else-if="isRendering" class="mermaid-diagram-placeholder">正在生成图表…</div>
+    <div
+      class="mermaid-diagram-canvas"
+      :class="{ preview: props.mode === 'preview' }"
+    >
+      <div
+        v-if="svgMarkup"
+        class="mermaid-diagram-svg"
+        v-html="svgMarkup"
+      ></div>
+      <div v-else-if="isRendering" class="mermaid-diagram-placeholder">
+        正在生成图表…
+      </div>
       <div v-else class="mermaid-diagram-error">
         <strong>图表渲染失败</strong>
         <span>{{ renderError }}</span>
@@ -97,7 +112,11 @@ watch(() => props.code, () => {
   gap: 12px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--app-border);
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  background: linear-gradient(
+    180deg,
+    var(--app-panel),
+    var(--app-panel-subtle)
+  );
 }
 
 .mermaid-diagram-meta {
@@ -132,7 +151,9 @@ watch(() => props.code, () => {
   background: transparent;
   color: var(--app-text-strong);
   cursor: pointer;
-  transition: border-color 0.16s ease, background 0.16s ease;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease;
 }
 
 .mermaid-diagram-action:hover {
@@ -142,7 +163,11 @@ watch(() => props.code, () => {
 
 .mermaid-diagram-canvas {
   padding: 16px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(244, 247, 255, 0.96));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.72),
+    rgba(244, 247, 255, 0.96)
+  );
   overflow-x: auto;
 }
 
