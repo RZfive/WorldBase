@@ -78,6 +78,8 @@ interface StreamDelta {
  * 支持 OpenAI, Azure OpenAI, 以及任何兼容 API
  */
 export class OpenAIProvider {
+  private static readonly STANDARD_REQUEST_TIMEOUT_MS = 60000
+  private static readonly STREAM_REQUEST_TIMEOUT_MS = 90000
   private apiKey: string
   private baseUrl: string
   private model: string
@@ -427,7 +429,10 @@ export class OpenAIProvider {
         }
         abortSignal.addEventListener('abort', onAbort, { once: true })
       }
-      const timeout = setTimeout(() => controller.abort(new Error('AI request timed out')), stream ? 90000 : 60000)
+      const timeout = setTimeout(
+        () => controller.abort(new Error('AI request timed out')),
+        stream ? OpenAIProvider.STREAM_REQUEST_TIMEOUT_MS : OpenAIProvider.STANDARD_REQUEST_TIMEOUT_MS
+      )
 
       try {
         const response = await fetch(this.getChatCompletionUrl(), {
@@ -519,7 +524,7 @@ export class OpenAIProvider {
     if (typeof reason === 'string' && reason.trim().length > 0) {
       return new Error(reason)
     }
-    return new Error('AI request timed out')
+    return new Error('AI request was cancelled')
   }
 
   private async delay (ms: number): Promise<void> {

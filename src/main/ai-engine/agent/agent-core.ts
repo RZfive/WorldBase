@@ -596,10 +596,12 @@ export class AgentCore {
 
   private _throwIfAborted (abortSignal?: AbortSignal): void {
     if (!abortSignal?.aborted) return
-    throw abortSignal.reason instanceof Error
-      ? abortSignal.reason
-      : new Error(typeof abortSignal.reason === 'string' && abortSignal.reason.trim().length > 0
-          ? abortSignal.reason
-          : 'AI generation stopped by user')
+    if (abortSignal.reason instanceof Error) {
+      throw abortSignal.reason
+    }
+    if (typeof abortSignal.reason === 'string' && abortSignal.reason.trim().length > 0) {
+      throw new Error(abortSignal.reason)
+    }
+    throw new Error('AI generation stopped by user')
   }
 }
