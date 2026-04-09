@@ -21,6 +21,7 @@ const emit = defineEmits<{
   (e: 'respondAuth', requestId: string, approved: boolean): void
   (e: 'toggleThinking', blockId: string): void
   (e: 'openLightbox', messageIndex: number, blockIndex: number, partIndex: number): void
+  (e: 'openMermaidPreview', code: string): void
 }>()
 
 function getBlocks (): ChatMessageBlock[] {
@@ -115,6 +116,7 @@ function getMessageText (): string {
             :is-streaming-block="isStreamingContentBlock(blockIndex, getBlocks())"
             :message-text="getMessageText()"
             @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
+            @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
           />
         </template>
       </div>

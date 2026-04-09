@@ -23,6 +23,7 @@
     "http-proxy-middleware": "^2.0.6",
     "mammoth": "^1.8.0",
     "marked": "^17.0.5",
+    "mermaid": "11.14.0",
     "officegen": "^0.6.5",
     "pnpm": "10.33.0",
     "qrcode": "^1.5.4",
