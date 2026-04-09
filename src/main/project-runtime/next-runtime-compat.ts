@@ -1,3 +1,7 @@
+import path from 'node:path'
+import fs from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+
 interface SemverParts {
   major: number
   minor: number
@@ -144,5 +148,37 @@ export function normalizeNextPackageJsonText (
       : packageJsonText,
     changed: result.changed,
     profile: result.profile
+  }
+}
+
+function resolvePackageJsonWithinProjectsDir (projectsDir: string, projectDir: string): string | null {
+  const resolvedProjectsDir = path.resolve(projectsDir)
+  const resolvedProjectDir = path.resolve(projectDir)
+  const relativeProjectDir = path.relative(resolvedProjectsDir, resolvedProjectDir)
+
+  if (relativeProjectDir.startsWith('..') || path.isAbsolute(relativeProjectDir)) {
+    return null
+  }
+
+  return path.join(resolvedProjectsDir, relativeProjectDir, 'package.json')
+}
+
+export async function ensureNextRuntimeCompatiblePackageJson (
+  projectsDir: string,
+  projectDir: string
+): Promise<void> {
+  const packageJsonPath = resolvePackageJsonWithinProjectsDir(projectsDir, projectDir)
+  if (!packageJsonPath || !existsSync(packageJsonPath)) {
+    return
+  }
+
+  try {
+    const raw = await fs.readFile(packageJsonPath, 'utf-8')
+    const normalized = normalizeNextPackageJsonText(raw)
+    if (normalized.changed) {
+      await fs.writeFile(packageJsonPath, normalized.packageJsonText, 'utf-8')
+    }
+  } catch {
+    // Leave user-provided package.json untouched if it isn't valid JSON.
   }
 }
