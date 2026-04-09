@@ -313,6 +313,9 @@ export class ProjectFS {
 
     // Write all files
     for (const [filePath, content] of Object.entries(files)) {
+      if (typeof content !== 'string') {
+        throw new Error(`Invalid file content for ${filePath}: expected string`)
+      }
       await this.writeFile(projectId, filePath, content)
     }
 
