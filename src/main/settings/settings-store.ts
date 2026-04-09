@@ -48,6 +48,17 @@ export interface LaunchpadLayout {
 }
 
 export type ThemePreference = 'system' | 'light' | 'dark'
+export type AIExecutionAuthMode = 'strict' | 'auto'
+
+export interface AIExecutionPreferences {
+  authMode: AIExecutionAuthMode
+  notifyOnTaskComplete: boolean
+}
+
+export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
+  authMode: 'strict',
+  notifyOnTaskComplete: true
+}
 
 export const DEFAULT_MODEL_CONTEXT_WINDOW = 32000
 type RawModelItem = string | { name?: string; contextWindow?: number }
@@ -165,6 +176,20 @@ function normalizeThemePreference (value: unknown): ThemePreference {
     return value
   }
   return 'system'
+}
+
+function normalizeAIExecutionAuthMode (value: unknown): AIExecutionAuthMode {
+  return value === 'auto' ? 'auto' : 'strict'
+}
+
+function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreferences {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+  return {
+    authMode: normalizeAIExecutionAuthMode(input.authMode),
+    notifyOnTaskComplete: typeof input.notifyOnTaskComplete === 'boolean'
+      ? input.notifyOnTaskComplete
+      : DEFAULT_AI_EXECUTION_PREFERENCES.notifyOnTaskComplete
+  }
 }
 
 function normalizeEnabledProviderIds (
@@ -385,5 +410,16 @@ export class SettingsStore {
   /** Save theme preference. */
   saveThemePreference (preference: ThemePreference): void {
     this.write({ themePreference: normalizeThemePreference(preference) })
+  }
+
+  /** Get AI execution preferences. */
+  getAIExecutionPreferences (): AIExecutionPreferences {
+    const settings = this.read()
+    return normalizeAIExecutionPreferences(settings.aiExecutionPreferences)
+  }
+
+  /** Save AI execution preferences. */
+  saveAIExecutionPreferences (preferences: AIExecutionPreferences): void {
+    this.write({ aiExecutionPreferences: normalizeAIExecutionPreferences(preferences) })
   }
 }

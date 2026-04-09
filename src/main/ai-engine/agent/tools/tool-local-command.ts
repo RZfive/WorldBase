@@ -4,9 +4,11 @@ import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { requestUserAuth } from './user-auth.js'
+import type { AIExecutionPreferences } from '../../../settings/settings-store.js'
 
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
+  getAIExecutionPreferences?: () => AIExecutionPreferences
 }
 
 interface LocalCommandArgs {
@@ -55,6 +57,7 @@ export function toolLocalCommand (services: ToolServices): Tool {
       // Request user authorization
       const authorized = await requestUserAuth(
         services.getMainWindow,
+        services.getAIExecutionPreferences,
         'AI 请求执行命令行',
         `AI 助手请求执行以下命令:\n\n$ ${command}\n\n工作目录: ${workDir}\n超时: ${timeoutSec} 秒\n\n是否允许？`
       )

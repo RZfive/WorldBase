@@ -18,6 +18,7 @@ import type { BuilderService } from '../../../project-runtime/builder-service.js
 import type { ProjectApiClient } from '../../../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../../../project-data-access/data-access.js'
 import type { BrowserWindow } from 'electron'
+import type { AIExecutionPreferences } from '../../../settings/settings-store.js'
 
 export interface ToolServices {
   projectFS: ProjectFS
@@ -26,6 +27,7 @@ export interface ToolServices {
   apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
   getMainWindow?: () => BrowserWindow | null
+  getAIExecutionPreferences?: () => AIExecutionPreferences
 }
 
 /**

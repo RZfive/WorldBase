@@ -5,9 +5,11 @@ import type { ProgressCallback } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { requestUserAuth } from './user-auth.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from './office-utils.js'
+import type { AIExecutionPreferences } from '../../../settings/settings-store.js'
 
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
+  getAIExecutionPreferences?: () => AIExecutionPreferences
 }
 
 interface LocalReadFileArgs {
@@ -51,6 +53,7 @@ export function toolLocalFileRead (services: ToolServices): Tool {
       // Request user authorization
       const authorized = await requestUserAuth(
         services.getMainWindow,
+        services.getAIExecutionPreferences,
         'AI 请求读取本地文件',
         `AI 助手请求读取以下文件:\n\n${resolvedPath}\n\n是否允许？`
       )
