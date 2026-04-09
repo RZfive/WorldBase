@@ -59,6 +59,17 @@ function requestUserAuthViaRenderer (
 
     let settled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    let handler: ((_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => void) | null = null
+
+    function cleanup () {
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      if (handler) {
+        ipcMain.removeListener('auth:response', handler)
+      }
+    }
 
     const finish = (approved: boolean) => {
       if (settled) return
@@ -68,15 +79,7 @@ function requestUserAuthViaRenderer (
       resolve(approved)
     }
 
-    const cleanup = () => {
-      if (timer) {
-        clearTimeout(timer)
-        timer = null
-      }
-      ipcMain.removeListener('auth:response', handler)
-    }
-
-    const handler = (_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => {
+    handler = (_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => {
       if (data.requestId !== requestId) return
       finish(data.approved)
     }
