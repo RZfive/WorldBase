@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
 import { AIEngine, type ProgressEvent } from '../src/main/ai-engine/ai-engine.js'
+import { USER_ABORT_MESSAGE } from '../src/main/ai-engine/abort-utils.js'
 import { ProjectFS } from '../src/main/project-fs/project-fs.js'
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
 import { BuilderService } from '../src/main/project-runtime/builder-service.js'
@@ -455,7 +456,7 @@ function setupIPC (): void {
     } catch (err) {
       if (!sender.isDestroyed()) {
         const errorMessage = (err as Error).message
-        sender.send(channel, errorMessage === 'AI generation stopped by user'
+        sender.send(channel, errorMessage === USER_ABORT_MESSAGE
           ? { type: 'stopped' }
           : { type: 'error', error: errorMessage })
       }
@@ -470,7 +471,7 @@ function setupIPC (): void {
     if (!controller || controller.signal.aborted) {
       return { ok: true, stopped: false }
     }
-    controller.abort(new Error('AI generation stopped by user'))
+    controller.abort(new Error(USER_ABORT_MESSAGE))
     return { ok: true, stopped: true }
   })
 

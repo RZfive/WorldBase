@@ -1,5 +1,6 @@
 import { getSystemPrompt } from './prompts/system-prompt.js'
 import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/openai-provider.js'
+import { normalizeAbortReason, USER_ABORT_MESSAGE } from '../abort-utils.js'
 
 export type ProgressEvent =
   | { type: 'progress'; stage: string; detail?: string }
@@ -596,12 +597,6 @@ export class AgentCore {
 
   private _throwIfAborted (abortSignal?: AbortSignal): void {
     if (!abortSignal?.aborted) return
-    if (abortSignal.reason instanceof Error) {
-      throw abortSignal.reason
-    }
-    if (typeof abortSignal.reason === 'string' && abortSignal.reason.length > 0) {
-      throw new Error(abortSignal.reason)
-    }
-    throw new Error('AI generation stopped by user')
+    throw normalizeAbortReason(abortSignal.reason, USER_ABORT_MESSAGE)
   }
 }

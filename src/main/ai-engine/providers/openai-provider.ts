@@ -1,3 +1,5 @@
+import { normalizeAbortReason } from '../abort-utils.js'
+
 export interface ChatContentTextPart {
   type: 'text'
   text: string
@@ -335,7 +337,7 @@ export class OpenAIProvider {
     try {
       while (true) {
         if (abortSignal?.aborted) {
-          throw this.normalizeAbortReason(abortSignal.reason)
+          throw normalizeAbortReason(abortSignal.reason)
         }
         const { done, value } = await reader.read()
         if (done) break
@@ -390,7 +392,7 @@ export class OpenAIProvider {
       }
     } catch (err) {
       if (abortSignal?.aborted) {
-        throw this.normalizeAbortReason(abortSignal.reason)
+        throw normalizeAbortReason(abortSignal.reason)
       }
       throw this.normalizeRequestError(err)
     } finally {
@@ -423,11 +425,12 @@ export class OpenAIProvider {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const controller = new AbortController()
       const onAbort = () => {
-        controller.abort(this.normalizeAbortReason(abortSignal?.reason))
+        if (!abortSignal) return
+        controller.abort(normalizeAbortReason(abortSignal.reason))
       }
       if (abortSignal) {
         if (abortSignal.aborted) {
-          throw this.normalizeAbortReason(abortSignal.reason)
+          throw normalizeAbortReason(abortSignal.reason)
         }
         abortSignal.addEventListener('abort', onAbort, { once: true })
       }
@@ -473,10 +476,10 @@ export class OpenAIProvider {
           abortSignal.removeEventListener('abort', onAbort)
         }
         if (abortSignal?.aborted) {
-          throw this.normalizeAbortReason(abortSignal.reason)
+          throw normalizeAbortReason(abortSignal.reason)
         }
         if (controller.signal.aborted) {
-          throw this.normalizeAbortReason(controller.signal.reason)
+          throw normalizeAbortReason(controller.signal.reason)
         }
         const normalized = this.normalizeRequestError(err)
         if (!this.isRetryableError(normalized) || attempt === maxAttempts) {
@@ -512,21 +515,11 @@ export class OpenAIProvider {
   private normalizeRequestError (error: unknown): Error {
     if (error instanceof Error) {
       if (error.name === 'AbortError') {
-        return this.normalizeAbortReason(error.cause)
+        return normalizeAbortReason(error.cause)
       }
       return error
     }
     return new Error(String(error))
-  }
-
-  private normalizeAbortReason (reason: unknown): Error {
-    if (reason instanceof Error) {
-      return reason
-    }
-    if (typeof reason === 'string' && reason.length > 0) {
-      return new Error(reason)
-    }
-    return new Error('AI request was cancelled')
   }
 
   private async delay (ms: number): Promise<void> {

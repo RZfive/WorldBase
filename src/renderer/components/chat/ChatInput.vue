@@ -112,6 +112,7 @@ function handleOfficeUpload (e: Event) {
       </div>
       <textarea
         :value="props.modelValue"
+        :class="{ busy: props.isLoading }"
         placeholder="输入消息… (Enter 发送, Shift+Enter 换行)"
         :aria-busy="props.isLoading ? 'true' : 'false'"
         @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
@@ -307,6 +308,11 @@ function handleOfficeUpload (e: Event) {
 .input-container textarea::-webkit-scrollbar-track { background: transparent; }
 .input-container textarea::-webkit-scrollbar-thumb { background: var(--app-scrollbar); border-radius: 3px; }
 .input-container textarea::placeholder { color: var(--app-text-faint); }
+
+.input-container textarea.busy {
+  opacity: 0.8;
+  cursor: progress;
+}
 
 .input-actions {
   display: flex;
