@@ -10,6 +10,8 @@ interface ExecutionModeOption {
   icon: string
 }
 
+const FEEDBACK_DISPLAY_DURATION_MS = 1800
+
 const modeOptions: ExecutionModeOption[] = [
   {
     id: 'strict',
@@ -77,7 +79,7 @@ async function savePreferences (next: { authMode?: AIExecutionAuthMode; notifyOn
     saving.value = false
     window.setTimeout(() => {
       feedback.value = ''
-    }, 1800)
+    }, FEEDBACK_DISPLAY_DURATION_MS)
   }
 }
 
