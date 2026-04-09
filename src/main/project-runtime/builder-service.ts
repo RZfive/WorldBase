@@ -370,7 +370,13 @@ export class BuilderService {
   }
 
   private async _ensureNextRuntimeCompatiblePackageJson (projectDir: string): Promise<void> {
-    const packageJsonPath = path.join(projectDir, 'package.json')
+    const resolvedProjectsDir = path.resolve(this.projectsDir)
+    const resolvedProjectDir = path.resolve(projectDir)
+    if (resolvedProjectDir !== resolvedProjectsDir && !resolvedProjectDir.startsWith(`${resolvedProjectsDir}${path.sep}`)) {
+      return
+    }
+
+    const packageJsonPath = path.join(resolvedProjectDir, 'package.json')
     if (!existsSync(packageJsonPath)) {
       return
     }
