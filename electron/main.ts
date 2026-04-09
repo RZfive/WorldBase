@@ -304,10 +304,10 @@ async function initializeServices (): Promise<void> {
   }
 
   appGateway = new AppGateway(runtimeManager, projectFS, builderService)
+  systemService = new SystemService(runtimeManager, appGateway)
+
   appGateway.startHealthChecks()
   console.log('[main] AppGateway health checks started')
-
-  systemService = new SystemService(runtimeManager, appGateway)
 
   lanServer = new LanServer({
     port: LAN_SERVER_PORT,
