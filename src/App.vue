@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import QRCode from 'qrcode'
 import ChatPanel from './renderer/components/chat/ChatPanel.vue'
 import Launchpad from './renderer/components/launchpad/Launchpad.vue'
@@ -13,10 +13,12 @@ import { applyThemePreference, getAppliedThemePreference, watchSystemThemeChange
 interface RunningApp {
   id: string
   name: string
+  kind: 'project' | 'browser'
   type: string
   icon?: string
   port?: number
   isWindow: boolean
+  closable?: boolean
 }
 
 interface ProjectStatus {
@@ -40,6 +42,8 @@ type MainView = 'chat' | 'app' | 'source' | 'settings'
 interface EmbeddedAppState {
   url: string
   loading: boolean
+  kind: 'project' | 'browser'
+  sandbox: string
 }
 
 /** Maximum seconds to wait for a project's port to become available after starting. */
@@ -49,6 +53,9 @@ const QR_CODE_WIDTH = 220
 const QR_CODE_MARGIN = 2
 /** Duration in ms for the "copied" feedback after copying a LAN URL. */
 const COPY_FEEDBACK_MS = 2000
+const BROWSER_APP_ID = '__embedded_browser__'
+const PROJECT_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals'
+const BROWSER_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals'
 
 const currentView = ref<MainView>('chat')
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
@@ -58,6 +65,12 @@ const sourceProject = ref<Record<string, unknown> | null>(null)
 const showLaunchpad = ref(false)
 
 const runningApps = ref(new Map<string, RunningApp>())
+const browserApp = ref<RunningApp | null>(null)
+const dockApps = computed(() => {
+  const apps = new Map(runningApps.value)
+  if (browserApp.value) apps.set(browserApp.value.id, browserApp.value)
+  return apps
+})
 
 const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | null }>({
   visible: false,
@@ -71,10 +84,13 @@ let windowClosedCleanup: (() => void) | null = null
 let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
 
-function clearEmbeddedProject (projectId?: string) {
-  if (projectId) {
-    embeddedApps.value.delete(projectId)
-    if (activeEmbeddedProjectId.value === projectId) {
+function clearEmbeddedApp (appId?: string) {
+  if (appId) {
+    embeddedApps.value.delete(appId)
+    if (appId === BROWSER_APP_ID) {
+      browserApp.value = null
+    }
+    if (activeEmbeddedProjectId.value === appId) {
       // Switch to another open app, or clear
       const remaining = [...embeddedApps.value.keys()]
       activeEmbeddedProjectId.value = remaining.length > 0 ? remaining[remaining.length - 1] : null
@@ -83,6 +99,7 @@ function clearEmbeddedProject (projectId?: string) {
   } else {
     embeddedApps.value.clear()
     activeEmbeddedProjectId.value = null
+    browserApp.value = null
   }
 }
 
@@ -134,7 +151,12 @@ async function openEmbeddedProject (projectId: string) {
   // If already open, just bring it to the front
   if (embeddedApps.value.has(projectId)) return
 
-  embeddedApps.value.set(projectId, { url: '', loading: true })
+  embeddedApps.value.set(projectId, {
+    url: '',
+    loading: true,
+    kind: 'project',
+    sandbox: PROJECT_IFRAME_SANDBOX
+  })
 
   try {
     let status = await getRuntimeStatus(projectId)
@@ -170,6 +192,52 @@ async function openEmbeddedProject (projectId: string) {
   }
 }
 
+function getBrowserAppName (url: URL): string {
+  let pathLabel = ''
+  if (url.pathname && url.pathname !== '/') {
+    const rawSegment = url.pathname.replace(/\/+$/, '').split('/').filter(Boolean).slice(-1)[0] || ''
+    try {
+      pathLabel = decodeURIComponent(rawSegment)
+    } catch {
+      pathLabel = rawSegment
+    }
+  }
+  return pathLabel ? `${url.hostname}/${pathLabel}` : url.hostname
+}
+
+function openWebLinkInApp (rawUrl: string) {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
+
+  const appName = getBrowserAppName(parsed) || parsed.hostname || parsed.toString()
+  browserApp.value = {
+    id: BROWSER_APP_ID,
+    name: appName,
+    kind: 'browser',
+    type: 'browser',
+    icon: '🌐',
+    isWindow: false,
+    closable: true
+  }
+
+  embeddedApps.value.set(BROWSER_APP_ID, {
+    url: parsed.toString(),
+    loading: false,
+    kind: 'browser',
+    sandbox: BROWSER_IFRAME_SANDBOX
+  })
+  activeEmbeddedProjectId.value = BROWSER_APP_ID
+  currentView.value = 'app'
+  showLaunchpad.value = false
+  hideDockCtx()
+}
+
 async function openProjectSource (project: Record<string, unknown>) {
   const projectId = project.id as string | undefined
   if (!projectId) return
@@ -193,6 +261,13 @@ async function openProjectFromLaunchpad (project: Record<string, unknown>) {
 }
 
 async function switchToApp (app: RunningApp) {
+  if (app.kind === 'browser') {
+    showLaunchpad.value = false
+    currentView.value = 'app'
+    activeEmbeddedProjectId.value = app.id
+    return
+  }
+
   if (app.isWindow) {
     showLaunchpad.value = false
     await window.electronAPI?.focusProjectWindow(app.id)
@@ -203,6 +278,7 @@ async function switchToApp (app: RunningApp) {
 }
 
 function showDockCtx (e: MouseEvent, app: RunningApp) {
+  if (app.kind !== 'project') return
   e.preventDefault()
   e.stopPropagation()
   dockCtx.value = { visible: true, x: e.clientX, y: e.clientY, app }
@@ -214,7 +290,7 @@ function hideDockCtx () {
 
 async function dockOpenWindow (app: RunningApp) {
   hideDockCtx()
-  if (!window.electronAPI) return
+  if (!window.electronAPI || app.kind !== 'project') return
 
   const status = await getRuntimeStatus(app.id)
   if (status.status !== 'running') {
@@ -223,30 +299,37 @@ async function dockOpenWindow (app: RunningApp) {
   await window.electronAPI.openProjectWindow(app.id)
 
   // Remove from embedded panel; if no apps remain, switch to chat
-  clearEmbeddedProject(app.id)
+  clearEmbeddedApp(app.id)
 
   await refreshRunningApps()
 }
 
 async function dockOpenSource (app: RunningApp) {
   hideDockCtx()
+  if (app.kind !== 'project') return
   const project = await fetchProjectMeta(app.id)
   await openProjectSource(project)
 }
 
 async function dockOptimizeInChat (app: RunningApp) {
   hideDockCtx()
+  if (app.kind !== 'project') return
   const project = await fetchProjectMeta(app.id)
   optimizeProjectInChat(project)
 }
 
 async function dockStopApp (app: RunningApp) {
   hideDockCtx()
+  if (app.kind !== 'project') return
   await window.electronAPI?.stopProject(app.id)
 
-  clearEmbeddedProject(app.id)
+  clearEmbeddedApp(app.id)
 
   await refreshRunningApps()
+}
+
+function closeDockApp (appId: string) {
+  clearEmbeddedApp(appId)
 }
 
 /* ---- LAN Access modal ---- */
@@ -261,7 +344,7 @@ const lanModal = ref<{
 
 async function dockShowLanAccess (app: RunningApp) {
   hideDockCtx()
-  if (!window.electronAPI) return
+  if (!window.electronAPI || app.kind !== 'project') return
 
   const info = await window.electronAPI.getProjectLanUrl(app.id)
   const url = info.lanUrl || info.proxyUrl
@@ -324,6 +407,7 @@ async function refreshRunningApps () {
         nextRunningApps.set(id, {
           id,
           name: (proj.name as string) || id,
+          kind: 'project',
           type: (proj.type as string) || 'unknown',
           icon: proj.icon as string | undefined,
           port: status.port,
@@ -361,7 +445,7 @@ onMounted(async () => {
   if (window.electronAPI?.onProjectChanged) {
     projectChangedCleanup = window.electronAPI.onProjectChanged((event) => {
       if (event.action === 'deleted') {
-        clearEmbeddedProject(event.projectId)
+        clearEmbeddedApp(event.projectId)
       }
       void refreshRunningApps()
     })
@@ -407,17 +491,23 @@ onUnmounted(() => {
         <DockBar
           :current-view="currentView"
           :show-launchpad="showLaunchpad"
-          :running-apps="runningApps"
+          :running-apps="dockApps"
           :embedded-project-id="activeEmbeddedProjectId"
           @open-chat="openChat"
           @toggle-launchpad="toggleLaunchpad"
           @open-settings="openSettings"
           @switch-to-app="switchToApp"
+          @close-app="closeDockApp"
           @context-menu="showDockCtx"
         />
 
         <main class="main-content">
-          <ChatPanel v-show="currentView === 'chat'" :projectContext="chatProjectContext" @contextConsumed="chatProjectContext = null" />
+          <ChatPanel
+            v-show="currentView === 'chat'"
+            :projectContext="chatProjectContext"
+            @contextConsumed="chatProjectContext = null"
+            @open-web-link="openWebLinkInApp"
+          />
 
           <!-- Embedded apps: each app keeps its iframe alive, only the active one is visible -->
           <div v-show="currentView === 'app'" class="embedded-app">
@@ -431,12 +521,13 @@ onUnmounted(() => {
                   v-else-if="appState.url"
                   :src="appState.url"
                   class="embedded-frame"
-                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+                  :sandbox="appState.sandbox"
                   allow="clipboard-read; clipboard-write"
                 ></iframe>
                 <div v-else class="embedded-unavailable">
                   <p>应用未能启动</p>
-                  <button class="embedded-retry-btn" @click="openEmbeddedProject(appId)">🔄 重试</button>
+                  <button v-if="appState.kind === 'project'" class="embedded-retry-btn" @click="openEmbeddedProject(appId)">🔄 重试</button>
+                  <button v-else class="embedded-retry-btn" @click="activeEmbeddedProjectId = null; currentView = 'chat'">↩️ 返回对话</button>
                 </div>
               </div>
             </template>

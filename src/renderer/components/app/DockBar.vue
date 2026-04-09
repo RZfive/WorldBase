@@ -4,10 +4,12 @@ import { getProjectIcon } from '../../utils/project-icon'
 interface RunningApp {
   id: string
   name: string
+  kind: 'project' | 'browser'
   type: string
   icon?: string
   port?: number
   isWindow: boolean
+  closable?: boolean
 }
 
 const props = defineProps<{
@@ -22,8 +24,14 @@ const emit = defineEmits<{
   (e: 'toggleLaunchpad'): void
   (e: 'openSettings'): void
   (e: 'switchToApp', app: RunningApp): void
+  (e: 'closeApp', appId: string): void
   (e: 'contextMenu', event: MouseEvent, app: RunningApp): void
 }>()
+
+function handleContextMenu (event: MouseEvent, app: RunningApp): void {
+  if (app.kind !== 'project') return
+  emit('contextMenu', event, app)
+}
 </script>
 
 <template>
@@ -50,11 +58,20 @@ const emit = defineEmits<{
         :title="app.name + (app.isWindow ? ' (独立窗口)' : '')"
         :data-tip="app.name"
         @click="emit('switchToApp', app)"
-        @contextmenu="emit('contextMenu', $event, app)"
+        @contextmenu="handleContextMenu($event, app)"
       >
         <span class="dock-item-surface">
           <span class="dock-item-icon">{{ getProjectIcon(app.type, app.icon) }}</span>
           <span v-if="app.isWindow" class="dock-window-badge">↗</span>
+          <button
+            v-if="app.closable"
+            class="dock-close-btn"
+            type="button"
+            title="关闭"
+            @click.stop="emit('closeApp', app.id)"
+          >
+            ×
+          </button>
           <span class="dock-running-dot"></span>
         </span>
         <span class="dock-tooltip">{{ app.name }}</span>
@@ -280,6 +297,38 @@ const emit = defineEmits<{
   justify-content: center;
   line-height: 1;
   font-weight: 700;
+}
+
+.dock-close-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.8);
+  color: #ffffff;
+  font-size: 0.72em;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.14s ease, transform 0.14s ease, background 0.14s ease;
+  z-index: 2;
+}
+
+.dock-item:hover .dock-close-btn,
+.dock-item.dock-active .dock-close-btn {
+  opacity: 1;
+}
+
+.dock-close-btn:hover {
+  background: var(--app-danger);
+  transform: scale(1.08);
 }
 
 .dock-running-dot {

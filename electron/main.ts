@@ -125,8 +125,15 @@ function getUrlHostname (value?: string): string | null {
 }
 
 function isLocalAppOrigin (value?: string): boolean {
-  const hostname = getUrlHostname(value)
-  return hostname ? LOCAL_APP_HOSTS.has(hostname) : false
+  // file:// renderers report an opaque "null" origin, so guard both the literal
+  // string and actual file URLs when deciding whether to relax iframe/CORS rules.
+  if (!value || value === 'null') return false
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'file:' || LOCAL_APP_HOSTS.has(parsed.hostname)
+  } catch {
+    return false
+  }
 }
 
 function getOriginFromUrl (value?: string): string | null {
@@ -175,6 +182,14 @@ function upsertHeader (headers: Record<string, string[]>, name: string, value: s
   headers[name] = [value]
 }
 
+function removeHeader (headers: Record<string, string[]>, name: string): void {
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === name.toLowerCase()) {
+      delete headers[key]
+    }
+  }
+}
+
 function setupEmbeddedAppCorsWorkaround (): void {
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     const referrer = typeof details.referrer === 'string' ? details.referrer : undefined
@@ -201,12 +216,21 @@ function setupEmbeddedAppCorsWorkaround (): void {
     const isFromLocalApp = isLocalAppOrigin(referrer)
     const isFrameRequest = details.resourceType === 'mainFrame' || details.resourceType === 'subFrame'
 
-    if (!isFromLocalApp || isFrameRequest || !isRemoteSubresourceRequest(details.url)) {
+    if (!isFromLocalApp || !isRemoteSubresourceRequest(details.url)) {
       callback({ responseHeaders: details.responseHeaders })
       return
     }
 
     const headers = { ...(details.responseHeaders || {}) }
+
+    if (isFrameRequest) {
+      removeHeader(headers, 'X-Frame-Options')
+      removeHeader(headers, 'Content-Security-Policy')
+      removeHeader(headers, 'Content-Security-Policy-Report-Only')
+      callback({ responseHeaders: headers })
+      return
+    }
+
     const allowOrigin = getOriginFromUrl(referrer) || '*'
     upsertHeader(headers, 'Access-Control-Allow-Origin', allowOrigin)
     upsertHeader(headers, 'Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
@@ -882,23 +906,28 @@ function setupIPC (): void {
   ipcMain.handle('skills:import', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       title: '导入 Skill 文件',
-      filters: [{ name: 'Markdown / Text', extensions: ['md', 'txt'] }],
+      filters: [{ name: 'Skill 文件', extensions: ['md', 'txt', 'zip'] }],
       properties: ['openFile', 'multiSelections']
     })
     if (result.canceled || result.filePaths.length === 0) return []
     const imported: Skill[] = []
     for (const filePath of result.filePaths) {
-      imported.push(skillStore!.importFromFile(filePath))
+      imported.push(await skillStore!.importFromFile(filePath))
     }
+    if (imported.length > 0) broadcastToAppWindows('skills:changed', { action: 'imported', count: imported.length })
     return imported
   })
 
   ipcMain.handle('skills:importContent', async (_event: IpcMainInvokeEvent, name: string, content: string, description?: string) => {
-    return skillStore!.importFromContent(name, content, description)
+    const skill = skillStore!.importFromContent(name, content, description)
+    broadcastToAppWindows('skills:changed', { action: 'imported', count: 1 })
+    return skill
   })
 
   ipcMain.handle('skills:delete', async (_event: IpcMainInvokeEvent, id: string) => {
-    return skillStore!.delete(id)
+    const deleted = skillStore!.delete(id)
+    if (deleted) broadcastToAppWindows('skills:changed', { action: 'deleted', id })
+    return deleted
   })
 
   ipcMain.handle('skills:setActive', async (_event: IpcMainInvokeEvent, skillIds: string[]) => {
