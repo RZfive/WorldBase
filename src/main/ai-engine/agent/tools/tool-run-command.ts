@@ -4,6 +4,7 @@ import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
 import { PROJECT_COMMAND_WHITELIST } from './command-capabilities.js'
+import { createBundledRuntimeEnv } from '../../../project-runtime/bundled-runtime.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -69,13 +70,15 @@ export function toolRunCommand (services: ToolServices): Tool {
         throw new Error('Working directory must be within the project directory')
       }
 
+      const env = await createBundledRuntimeEnv(workDir, { NODE_ENV: 'development' })
+
       return new Promise((resolve, reject) => {
         const [cmd, ...cmdArgs] = command.split(' ')
         const child = spawn(cmd, cmdArgs, {
           cwd: workDir,
           shell: true,
           timeout: 30000, // 30 second timeout
-          env: { ...process.env, NODE_ENV: 'development' }
+          env
         })
 
         let stdout = ''

@@ -7,6 +7,7 @@ import { ProcessMonitor } from './process-monitor.js'
 import { LAN_SERVER_PORT } from '../constants.js'
 import type { BuilderService } from './builder-service.js'
 import { createBundledRuntimeEnv } from './bundled-runtime.js'
+import { normalizeNextPackageJsonText } from './next-runtime-compat.js'
 
 interface LogEntry {
   type: 'stdout' | 'stderr'
@@ -402,6 +403,10 @@ export class RuntimeManager {
       ? path.join(projectDir, backend.cwd as string)
       : projectDir
 
+    if (await this._isNextProject(projectDir, meta, backend)) {
+      await this._ensureNextRuntimeCompatiblePackageJson(cwd)
+    }
+
     return createBundledRuntimeEnv(cwd).then(env => new Promise((resolve, reject) => {
       const child = spawn('npm', ['install'], {
         cwd,
@@ -568,6 +573,23 @@ export class RuntimeManager {
       return typeof deps.next === 'string'
     } catch {
       return false
+    }
+  }
+
+  private async _ensureNextRuntimeCompatiblePackageJson (projectDir: string): Promise<void> {
+    const packageJsonPath = path.join(projectDir, 'package.json')
+    if (!existsSync(packageJsonPath)) {
+      return
+    }
+
+    try {
+      const raw = await fs.readFile(packageJsonPath, 'utf-8')
+      const normalized = normalizeNextPackageJsonText(raw)
+      if (normalized.changed) {
+        await fs.writeFile(packageJsonPath, normalized.packageJsonText, 'utf-8')
+      }
+    } catch {
+      // Leave user-provided package.json untouched if it isn't valid JSON.
     }
   }
 
