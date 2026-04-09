@@ -141,6 +141,7 @@ const backgroundStreamMessages = new Map<string, {
   selectedModel: string | null
 }>()
 const activeCleanups = new Map<string, () => void>()
+const activeStreamSessionIds = new Map<string, string>()
 const conversationTargets = new Map<string, string | null>()
 let providerChangeCleanup: (() => void) | null = null
 let authRequestCleanup: (() => void) | null = null
@@ -693,10 +694,18 @@ async function deleteConversation (id: string) {
   await window.electronAPI.deleteConversation(id)
   conversationTargets.delete(id)
   backgroundStreamMessages.delete(id)
+  activeStreamSessionIds.delete(id)
   if (currentConversationId.value === id) {
     newConversation()
   }
   await loadConversations()
+}
+
+async function stopCurrentStream () {
+  if (!window.electronAPI || !currentConversationId.value) return
+  const sessionId = activeStreamSessionIds.get(currentConversationId.value)
+  if (!sessionId) return
+  await window.electronAPI.stopChatStream(sessionId)
 }
 
 function addImage (base64: string, mimeType: string) {
@@ -875,6 +884,7 @@ async function sendMessage () {
   }
 
   streamingConvIds.add(convId)
+  activeStreamSessionIds.set(convId, sessionId)
 
   try {
     if (window.electronAPI) {
@@ -982,6 +992,7 @@ async function sendMessage () {
 
           cleanup()
           activeCleanups.delete(sessionId)
+          activeStreamSessionIds.delete(convId)
           streamingConvIds.delete(convId)
           backgroundStreamMessages.delete(convId)
 
@@ -1003,8 +1014,35 @@ async function sendMessage () {
 
           cleanup()
           activeCleanups.delete(sessionId)
+          activeStreamSessionIds.delete(convId)
           streamingConvIds.delete(convId)
           backgroundStreamMessages.delete(convId)
+
+          if (isForeground) {
+            resetTransientStreamState()
+          }
+        } else if (event.type === 'stopped') {
+          for (const toolRun of toolRuns) {
+            if (toolRun.status === 'running') {
+              toolRun.status = 'completed'
+              toolRun.progress.push({ stage: '已停止', detail: '用户中断了本次生成' })
+            }
+          }
+          finalizePendingAuthBlocks(assistantMessage)
+          syncAssistantToolRuns()
+
+          cleanup()
+          activeCleanups.delete(sessionId)
+          activeStreamSessionIds.delete(convId)
+          streamingConvIds.delete(convId)
+          backgroundStreamMessages.delete(convId)
+
+          if (!hasRenderableContent(assistantMessage)) {
+            assistantMessage.content = '(已停止)'
+            ensureBlocks(assistantMessage).push(createContentBlock('(已停止)'))
+          }
+
+          void doSaveConversation(convId, targetMessages)
 
           if (isForeground) {
             resetTransientStreamState()
@@ -1027,6 +1065,7 @@ async function sendMessage () {
       )
 
       if (streamingConvIds.has(convId)) {
+        activeStreamSessionIds.delete(convId)
         streamingConvIds.delete(convId)
         backgroundStreamMessages.delete(convId)
         const pendingCleanup = activeCleanups.get(sessionId)
@@ -1055,14 +1094,21 @@ async function sendMessage () {
       assistantMessage.content = response.content || '(无响应)'
       ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
       finalizePendingAuthBlocks(assistantMessage)
+      activeStreamSessionIds.delete(convId)
       streamingConvIds.delete(convId)
       void doSaveConversation(convId, targetMessages)
       resetTransientStreamState()
     }
   } catch (err) {
+    const pendingCleanup = activeCleanups.get(sessionId)
+    if (pendingCleanup) {
+      pendingCleanup()
+      activeCleanups.delete(sessionId)
+    }
     assistantMessage.content = `错误: ${(err as Error).message}`
     ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
     finalizePendingAuthBlocks(assistantMessage)
+    activeStreamSessionIds.delete(convId)
     streamingConvIds.delete(convId)
     resetTransientStreamState()
   }
@@ -1099,6 +1145,7 @@ onUnmounted(() => {
     cleanup()
   }
   activeCleanups.clear()
+  activeStreamSessionIds.clear()
   providerChangeCleanup?.()
   providerChangeCleanup = null
   authRequestCleanup?.()
@@ -1150,6 +1197,7 @@ onUnmounted(() => {
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
         @send="sendMessage"
+        @stop="stopCurrentStream"
         @add-image="addImage"
         @add-files="addFiles"
         @remove-image="removeImage"

@@ -31,6 +31,7 @@ export interface AIConfigInput {
 export interface AIRequestOptions {
   targetProjectId?: string | null
   providerConfig?: AIConfigInput
+  abortSignal?: AbortSignal
 }
 
 /**
@@ -90,7 +91,7 @@ export class AIEngine {
    * Handle a chat message with streaming response.
    */
   chatStream (messages: ChatMessage[], onProgress?: ProgressCallback, options?: AIRequestOptions): AsyncGenerator<StreamEvent> {
-    return this.createAgent(options).runStream(messages, onProgress)
+    return this.createAgent(options).runStream(messages, onProgress, options?.abortSignal)
   }
 
   /**
