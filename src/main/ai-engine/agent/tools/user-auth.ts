@@ -43,6 +43,7 @@ function requestUserAuthViaRenderer (
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const requestId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    type AuthResponseHandler = (_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => void
 
     // Send auth request to renderer first so the conversation can render the auth card.
     win.webContents.send('auth:request', {
@@ -59,7 +60,7 @@ function requestUserAuthViaRenderer (
 
     let settled = false
     let timer: ReturnType<typeof setTimeout> | null = null
-    let handler: ((_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => void) | null = null
+    let handler: AuthResponseHandler | null = null
 
     function cleanup () {
       if (timer) {
@@ -68,6 +69,7 @@ function requestUserAuthViaRenderer (
       }
       if (handler) {
         ipcMain.removeListener('auth:response', handler)
+        handler = null
       }
     }
 
