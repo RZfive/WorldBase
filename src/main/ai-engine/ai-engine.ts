@@ -8,6 +8,7 @@ import type { BuilderService } from '../project-runtime/builder-service.js'
 import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { BrowserWindow } from 'electron'
+import type { AIExecutionAuthMode } from '../settings/settings-store.js'
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
 
@@ -32,6 +33,7 @@ export interface AIRequestOptions {
   targetProjectId?: string | null
   providerConfig?: AIConfigInput
   abortSignal?: AbortSignal
+  authMode?: AIExecutionAuthMode
 }
 
 /**
@@ -77,6 +79,7 @@ export class AIEngine {
     registerAllTools(agent, this.services)
     agent.setActiveSkills(this.activeSkillContents)
     agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
+    agent.setAuthMode(options?.authMode ?? 'strict')
     return agent
   }
 

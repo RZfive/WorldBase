@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, session, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, session, Notification, type IpcMainInvokeEvent } from 'electron'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +15,7 @@ import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-a
 import { LanServer } from '../src/main/lan-server/server.js'
 import { LAN_SERVER_PORT } from '../src/main/constants.js'
 import { SystemService } from '../src/main/system-capabilities/system-service.js'
-import { SettingsStore, type AIProvidersConfig, type LaunchpadLayout } from '../src/main/settings/settings-store.js'
+import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
@@ -63,6 +63,57 @@ const activeChatStreams = new Map<string, AbortController>()
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
 const MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
 const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
+
+function getMessageText (content: MessageContent): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter(part => part.type === 'text')
+    .map(part => part.text || '')
+    .join(' ')
+    .trim()
+}
+
+function getTaskLabelFromMessages (messages: Array<{ role: string; content: MessageContent }>): string {
+  if (messages.length === 0) {
+    return '未命名任务'
+  }
+
+  for (let idx = messages.length - 1; idx >= 0; idx--) {
+    const message = messages[idx]
+    if (message.role !== 'user') continue
+    const text = getMessageText(message.content).replace(/\s+/g, ' ').trim()
+    if (text) {
+      return text.length > 40 ? `${text.slice(0, 40)}…` : text
+    }
+  }
+  return '未命名任务'
+}
+
+function notifyAiTaskStatus (
+  preferences: AIExecutionPreferences,
+  messages: Array<{ role: string; content: MessageContent }>,
+  status: 'completed' | 'failed' | 'stopped',
+  detail?: string
+): void {
+  if (!preferences.notifyOnTaskComplete || !Notification.isSupported()) return
+
+  const taskLabel = getTaskLabelFromMessages(messages)
+  let title = 'AI 任务已完成'
+  let statusLabel = '已完成'
+  if (status === 'failed') {
+    title = 'AI 任务执行失败'
+    statusLabel = '失败'
+  } else if (status === 'stopped') {
+    title = 'AI 任务已停止'
+    statusLabel = '已停止'
+  }
+  const body = detail
+    ? `任务：${taskLabel}\n状态：${statusLabel}\n详情：${detail}`
+    : `任务：${taskLabel}\n状态：${statusLabel}`
+
+  new Notification({ title, body }).show()
+}
 
 function getUrlHostname (value?: string): string | null {
   if (!value || value === 'null') return null
@@ -401,10 +452,11 @@ function setupIPC (): void {
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
+    const executionPreferences = settingsStore!.getAIExecutionPreferences()
     activeChatStreams.set(sessionId, abortController)
     // Progress callback: sends progress events directly to renderer in real-time
     const onProgress = (stageOrEvent: string | ProgressEvent, detail?: string) => {
@@ -420,8 +472,12 @@ function setupIPC (): void {
       for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
         targetProjectId: targetProjectId ?? null,
         providerConfig: resolveProviderConfig(providerId, modelId),
-        abortSignal: abortController.signal
+        abortSignal: abortController.signal,
+        authMode: authMode ?? 'strict'
       })) {
+        if (streamEvent.type === 'done') {
+          notifyAiTaskStatus(executionPreferences, messages, 'completed')
+        }
         if (sender.isDestroyed()) break
         try {
           sender.send(channel, JSON.parse(JSON.stringify(streamEvent)))
@@ -460,8 +516,14 @@ function setupIPC (): void {
         }
       }
     } catch (err) {
+      const errorMessage = (err as Error).message
+      notifyAiTaskStatus(
+        executionPreferences,
+        messages,
+        errorMessage === USER_ABORT_MESSAGE ? 'stopped' : 'failed',
+        errorMessage === USER_ABORT_MESSAGE ? '用户中断了本次任务' : errorMessage
+      )
       if (!sender.isDestroyed()) {
-        const errorMessage = (err as Error).message
         sender.send(channel, errorMessage === USER_ABORT_MESSAGE
           ? { type: 'stopped' }
           : { type: 'error', error: errorMessage })
@@ -730,6 +792,15 @@ function setupIPC (): void {
 
   ipcMain.handle('settings:saveThemePreference', async (_event: IpcMainInvokeEvent, preference: 'system' | 'light' | 'dark') => {
     settingsStore!.saveThemePreference(preference)
+    return { success: true }
+  })
+
+  ipcMain.handle('settings:getAIExecutionPreferences', async () => {
+    return settingsStore!.getAIExecutionPreferences()
+  })
+
+  ipcMain.handle('settings:saveAIExecutionPreferences', async (_event: IpcMainInvokeEvent, preferences: AIExecutionPreferences) => {
+    settingsStore!.saveAIExecutionPreferences(preferences)
     return { success: true }
   })
 

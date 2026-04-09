@@ -24,6 +24,7 @@ interface ConversationSummary {
   title: string
   createdAt: string
   updatedAt: string
+  authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string
   targetProjectId?: string
@@ -89,6 +90,11 @@ interface LaunchpadLayout {
 }
 
 type ThemePreference = 'system' | 'light' | 'dark'
+type AIExecutionAuthMode = 'strict' | 'auto'
+
+interface AIExecutionPreferences {
+  notifyOnTaskComplete: boolean
+}
 
 interface ServiceEntry {
   projectId: string
@@ -186,7 +192,7 @@ interface SkillInfo {
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => Promise<{ ok: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
@@ -238,6 +244,8 @@ interface ElectronAPI {
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
+  getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
+  saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>
@@ -258,6 +266,7 @@ interface ElectronAPI {
 
   // Auth (in-app authorization dialogs)
   onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => () => void
+  onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
 }
 
