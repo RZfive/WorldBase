@@ -78,7 +78,9 @@ interface StreamDelta {
  * 支持 OpenAI, Azure OpenAI, 以及任何兼容 API
  */
 export class OpenAIProvider {
+  /** Standard requests should fail fast to surface provider issues promptly. */
   private static readonly STANDARD_REQUEST_TIMEOUT_MS = 60000
+  /** Streaming responses get a longer timeout because token generation can stay open much longer. */
   private static readonly STREAM_REQUEST_TIMEOUT_MS = 90000
   private apiKey: string
   private baseUrl: string
@@ -521,7 +523,7 @@ export class OpenAIProvider {
     if (reason instanceof Error) {
       return reason
     }
-    if (typeof reason === 'string' && reason.trim().length > 0) {
+    if (typeof reason === 'string' && reason.length > 0) {
       return new Error(reason)
     }
     return new Error('AI request was cancelled')
