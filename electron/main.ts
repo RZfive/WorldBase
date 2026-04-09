@@ -14,6 +14,7 @@ import { ProjectDataAccess } from '../src/main/project-data-access/data-access.j
 import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-adapter.js'
 import { LanServer } from '../src/main/lan-server/server.js'
 import { LAN_SERVER_PORT } from '../src/main/constants.js'
+import { SystemService } from '../src/main/system-capabilities/system-service.js'
 import { SettingsStore, type AIProvidersConfig, type LaunchpadLayout } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
@@ -44,6 +45,7 @@ let projectFS: ProjectFS | null = null
 let runtimeManager: RuntimeManager | null = null
 let builderService: BuilderService | null = null
 let appGateway: AppGateway | null = null
+let systemService: SystemService | null = null
 let apiClient: ProjectApiClient | null = null
 let dataAccess: ProjectDataAccess | null = null
 let lanServer: LanServer | null = null
@@ -301,6 +303,12 @@ async function initializeServices (): Promise<void> {
     console.log('[main] Applied saved AI settings')
   }
 
+  appGateway = new AppGateway(runtimeManager, projectFS, builderService)
+  appGateway.startHealthChecks()
+  console.log('[main] AppGateway health checks started')
+
+  systemService = new SystemService(runtimeManager, appGateway)
+
   lanServer = new LanServer({
     port: LAN_SERVER_PORT,
     projectFS,
@@ -308,16 +316,12 @@ async function initializeServices (): Promise<void> {
     apiClient,
     dataAccess,
     aiEngine,
+    systemService,
     settingsStore
   })
 
   await lanServer.start()
   console.log('[main] LAN server started on port 19527')
-
-  // Initialize AppGateway and start health checks
-  appGateway = new AppGateway(runtimeManager, projectFS, builderService)
-  appGateway.startHealthChecks()
-  console.log('[main] AppGateway health checks started')
 }
 
 function createWindow (): void {
@@ -618,6 +622,10 @@ function setupIPC (): void {
 
   ipcMain.handle('runtime:status', async (_event: IpcMainInvokeEvent, projectId: string) => {
     return runtimeManager!.getStatus(projectId)
+  })
+
+  ipcMain.handle('system:getStatus', async () => {
+    return systemService!.getStatus()
   })
 
   // Build management

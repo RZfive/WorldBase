@@ -183,6 +183,7 @@ module.exports = nextConfig
 - API 路由放在 app/api/ 目录下
 - 使用 Next.js Route Handlers (GET, POST, PUT, DELETE)
 - 数据库访问通过 lib/db.ts 调用基座 SQLite 接口
+- 当应用需要系统当前状态、CPU、内存、当前进程、项目进程、服务状态等底层能力时，优先调用基座宿主接口，不要在上层重复实现
 - 外部 API 调用在 Server Components 或 API Routes 中进行（无 CORS 问题）
 
 ### lib/db.ts 标准模板
@@ -236,12 +237,15 @@ export async function listTables() {
 - 在 meta.dataSchema 中声明 \`database: "sqlite"\` 和 \`dbPath\`（例如 \`data/app.sqlite\`）
 - 在 \`meta.dataSchema.tables\` 中用数组完整声明表结构，例如 \`[{ name, columns: [{ name, type, primaryKey, notNull, autoIncrement, defaultSql, defaultValue }] }]\`，不要传对象映射，也不要使用模糊的 \`default\` 字段
 - 生成的项目运行时通过环境变量 \`THE_WORLD_PROJECT_ID\`、\`THE_WORLD_LAN_BASE_URL\`、\`THE_WORLD_RESOURCE_PROXY_BASE_URL\`、\`THE_WORLD_PROJECT_DATA_BASE_URL\` 发现宿主接口
+- 需要系统信息时，优先使用宿主注入的 \`THE_WORLD_SYSTEM_BASE_URL\` 或 \`NEXT_PUBLIC_THE_WORLD_SYSTEM_BASE_URL\`，不要在应用里自己收集宿主 CPU / 内存 / 进程 / 服务状态
 - 浏览器端如果确实要直接访问宿主数据库接口，使用宿主同时注入的 \`NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL\`，不要把基座地址写死在源码里
 - 生成的项目后端统一调用宿主接口：
   - \`POST {THE_WORLD_PROJECT_DATA_BASE_URL}/records/save\`
   - \`POST {THE_WORLD_PROJECT_DATA_BASE_URL}/records/query\`
   - \`GET {THE_WORLD_PROJECT_DATA_BASE_URL}/schema\`
   - \`GET {THE_WORLD_PROJECT_DATA_BASE_URL}/tables\`
+- 当前标准系统接口：
+  - \`GET {THE_WORLD_SYSTEM_BASE_URL}/status\`：返回系统摘要、CPU / 内存摘要、宿主当前进程、项目进程列表、服务状态
 - 项目的业务数据、项目设计数据、后续要给 AI 分析的数据，都必须保存到这个 SQLite 接口，不要把 JSON 文件当正式数据库
 - AI 后续会通过 \`query_project_database\` 和 \`analyze_project_data\` 直接读取并分析同一份 SQLite 数据
 
