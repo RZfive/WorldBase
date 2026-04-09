@@ -43,6 +43,26 @@ function requestUserAuthViaRenderer (
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const requestId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const cleanup = () => {
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      ipcMain.removeListener('auth:response', handler)
+    }
+
+    const handler = (_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => {
+      if (settled || data.requestId !== requestId) return
+      settled = true
+      cleanup()
+      emitAuthResolved(win, requestId, data.approved)
+      resolve(data.approved)
+    }
+
+    ipcMain.on('auth:response', handler)
 
     // Send auth request to renderer
     win.webContents.send('auth:request', {
@@ -52,30 +72,19 @@ function requestUserAuthViaRenderer (
     })
 
     if (preferences.authMode === 'auto') {
+      settled = true
+      cleanup()
       emitAuthResolved(win, requestId, true)
       resolve(true)
       return
     }
 
-    const handler = (_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => {
-      if (data.requestId === requestId) {
-        cleanup()
-        emitAuthResolved(win, requestId, data.approved)
-        resolve(data.approved)
-      }
-    }
-
-    const cleanup = () => {
-      clearTimeout(timer)
-      ipcMain.removeListener('auth:response', handler)
-    }
-
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
+      if (settled) return
+      settled = true
       cleanup()
       emitAuthResolved(win, requestId, false)
       resolve(false) // Auto-deny after timeout
     }, AUTH_TIMEOUT_MS)
-
-    ipcMain.on('auth:response', handler)
   })
 }
