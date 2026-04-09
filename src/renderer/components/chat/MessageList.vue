@@ -13,6 +13,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'respondAuth', requestId: string, approved: boolean): void
+  (e: 'openLink', url: string): void
 }>()
 
 const messagesContainer = ref<HTMLElement | null>(null)
@@ -48,6 +49,27 @@ function toggleThinking (id: string): void {
 
 function openLightbox (messageIndex: number, blockIndex: number, partIndex: number) {
   lightboxRef.value?.open(messageIndex, blockIndex, partIndex)
+}
+
+function handleMessageLinkClick (event: MouseEvent): void {
+  const target = event.target as HTMLElement | null
+  const link = target?.closest('a[href]') as HTMLAnchorElement | null
+  if (!link || !link.closest('.markdown-body')) return
+
+  const href = link.getAttribute('href')?.trim()
+  if (!href || !/^https?:\/\//i.test(href)) return
+
+  let url: URL
+  try {
+    url = new URL(href)
+  } catch {
+    return
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return
+
+  event.preventDefault()
+  emit('openLink', url.toString())
 }
 
 function scrollToBottom () {
@@ -109,7 +131,7 @@ watch(
 </script>
 
 <template>
-  <div class="chat-messages" ref="messagesContainer">
+  <div class="chat-messages" ref="messagesContainer" @click.capture="handleMessageLinkClick">
     <div v-if="props.messages.length === 0" class="empty-state">
       <div class="empty-state-card">
         <div class="empty-state-icon">AI</div>

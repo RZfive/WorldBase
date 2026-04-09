@@ -49,7 +49,7 @@ onMounted(loadSkills)
     <div class="sm-header">
       <div>
         <h3 class="sm-title">Skill 管理</h3>
-        <p class="sm-desc">导入 Skill 文件让 AI 掌握专业技能，在聊天中选择激活</p>
+        <p class="sm-desc">导入 Skill 文件或 zip 技能包让 AI 掌握专业技能，在聊天中选择激活</p>
       </div>
       <button class="sm-import" @click="importSkill">📥 导入 Skill</button>
     </div>
@@ -60,7 +60,7 @@ onMounted(loadSkills)
 
     <div v-else-if="skills.length === 0" class="sm-empty">
       <p>还没有导入任何 Skill</p>
-      <p class="sm-empty-hint">点击「导入 Skill」添加 .md 或 .txt 格式的技能文件</p>
+      <p class="sm-empty-hint">点击「导入 Skill」添加 .md、.txt 或 .zip 格式的技能文件</p>
     </div>
 
     <div v-else class="sm-list">

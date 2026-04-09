@@ -102,6 +102,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'contextConsumed'): void
+  (e: 'openWebLink', url: string): void
 }>()
 
 const messages = ref<ChatMessage[]>([])
@@ -151,6 +152,7 @@ let providerChangeCleanup: (() => void) | null = null
 let authRequestCleanup: (() => void) | null = null
 let authResponseCleanup: (() => void) | null = null
 let authResolvedCleanup: (() => void) | null = null
+let skillsChangedCleanup: (() => void) | null = null
 const MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH = 180
 
 function getEnabledProviders (config: ProvidersConfig): ProviderOption[] {
@@ -175,7 +177,15 @@ const currentModelLabel = computed(() => {
 async function loadSkills () {
   if (!window.electronAPI?.listSkills) return
   try {
-    availableSkills.value = await window.electronAPI.listSkills() as SkillItem[]
+    const nextSkills = await window.electronAPI.listSkills() as SkillItem[]
+    availableSkills.value = nextSkills
+
+    const availableIds = new Set(nextSkills.map(skill => skill.id))
+    const nextActiveIds = Array.from(activeSkillIds.value).filter(id => availableIds.has(id))
+    if (nextActiveIds.length !== activeSkillIds.value.size) {
+      activeSkillIds.value = new Set(nextActiveIds)
+      void syncActiveSkills()
+    }
   } catch { /* ignore */ }
 }
 
@@ -1162,6 +1172,12 @@ onMounted(async () => {
     authResolvedCleanup = window.electronAPI.onAuthResolved(handleAuthResolution)
   }
 
+  if (window.electronAPI?.onSkillsChanged) {
+    skillsChangedCleanup = window.electronAPI.onSkillsChanged(() => {
+      void loadSkills()
+    })
+  }
+
   authResponseCleanup = onAuthResolution(handleAuthResolution)
 })
 
@@ -1177,6 +1193,8 @@ onUnmounted(() => {
   authRequestCleanup = null
   authResolvedCleanup?.()
   authResolvedCleanup = null
+  skillsChangedCleanup?.()
+  skillsChangedCleanup = null
   authResponseCleanup?.()
   authResponseCleanup = null
 })
@@ -1214,6 +1232,7 @@ onUnmounted(() => {
         :is-loading="isLoading"
         :file-preview="filePreview"
         @respond-auth="respondToAuthRequest"
+        @open-link="(url) => emit('openWebLink', url)"
       />
 
       <ChatInput
