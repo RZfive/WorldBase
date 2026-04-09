@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import type { AIExecutionAuthMode } from './settings-store.js'
 
 export type ChatMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 
@@ -38,6 +39,8 @@ export interface Conversation {
   messages: ChatMessage[]
   createdAt: string
   updatedAt: string
+  /** Authorization mode used by this conversation. */
+  authMode?: AIExecutionAuthMode
   /** Provider ID used for this conversation */
   providerId?: string
   /** Model selected for this conversation */
@@ -82,6 +85,7 @@ export class ChatHistoryStore {
           title: data.title,
           createdAt: data.createdAt,
           updatedAt: data.updatedAt,
+          authMode: data.authMode,
           providerId: data.providerId,
           selectedModel: data.selectedModel,
           targetProjectId: data.targetProjectId

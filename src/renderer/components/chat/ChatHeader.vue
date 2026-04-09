@@ -12,10 +12,13 @@ interface SkillItem {
   name: string
 }
 
+type AIExecutionAuthMode = 'strict' | 'auto'
+
 const props = defineProps<{
   providers: ProviderOption[]
   activeProviderId: string
   selectedModel: string
+  authMode: AIExecutionAuthMode
   availableSkills: SkillItem[]
   activeSkillIds: Set<string>
   showSkillPicker: boolean
@@ -24,6 +27,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'update:activeProviderId', providerId: string): void
   (e: 'update:selectedModel', model: string): void
+  (e: 'update:auth-mode', authMode: AIExecutionAuthMode): void
   (e: 'toggleSkillPicker'): void
   (e: 'toggleSkill', skillId: string): void
 }>()
@@ -38,6 +42,10 @@ function onProviderChange (event: Event) {
 
 function onModelChange (event: Event) {
   emit('update:selectedModel', (event.target as HTMLSelectElement).value)
+}
+
+function onAuthModeChange (event: Event) {
+  emit('update:auth-mode', (event.target as HTMLSelectElement).value as AIExecutionAuthMode)
 }
 </script>
 
@@ -56,6 +64,13 @@ function onModelChange (event: Event) {
           @change="onModelChange"
         >
           <option v-for="model in (activeProvider?.models || [])" :key="model" :value="model">{{ model }}</option>
+        </select>
+      </div>
+
+      <div class="auth-mode-selector">
+        <select :value="authMode" class="select-input auth-mode-select" @change="onAuthModeChange">
+          <option value="strict">严格授权</option>
+          <option value="auto">自动执行</option>
         </select>
       </div>
 
@@ -109,6 +124,12 @@ function onModelChange (event: Event) {
 .provider-selector {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+
+.auth-mode-selector {
+  display: flex;
+  align-items: center;
 }
 
 .select-input {
@@ -124,6 +145,10 @@ function onModelChange (event: Event) {
 .select-input:focus {
   outline: none;
   border-color: var(--app-accent);
+}
+
+.auth-mode-select {
+  min-width: 96px;
 }
 
 .skill-selector {

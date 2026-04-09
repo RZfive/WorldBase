@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
-import type { ProgressCallback } from '../agent-core.js'
+import type { ProgressCallback, SessionState } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { requestUserAuth } from './user-auth.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from './office-utils.js'
@@ -24,7 +24,7 @@ export interface Tool {
  * Tool: local_read_file — 读取用户本地电脑上的任意文件（需要用户授权）
  * 支持办公文件格式: .xlsx, .docx, .pptx（自动解析内容）
  */
-export function toolLocalFileRead (services: ToolServices): Tool {
+export function toolLocalFileRead (services: ToolServices, getSessionState?: () => SessionState): Tool {
   return {
     definition: {
       name: 'local_read_file',
@@ -51,6 +51,7 @@ export function toolLocalFileRead (services: ToolServices): Tool {
       // Request user authorization
       const authorized = await requestUserAuth(
         services.getMainWindow,
+        getSessionState,
         'AI 请求读取本地文件',
         `AI 助手请求读取以下文件:\n\n${resolvedPath}\n\n是否允许？`
       )

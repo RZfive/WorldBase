@@ -79,6 +79,11 @@ interface LaunchpadLayout {
 }
 
 type ThemePreference = 'system' | 'light' | 'dark'
+type AIExecutionAuthMode = 'strict' | 'auto'
+
+interface AIExecutionPreferences {
+  notifyOnTaskComplete: boolean
+}
 
 interface ServiceEntry {
   projectId: string
@@ -169,7 +174,7 @@ interface SystemStatusSnapshot {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[]) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => Promise<{ ok: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
@@ -221,6 +226,8 @@ export interface ElectronAPI {
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
+  getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
+  saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>
@@ -241,13 +248,14 @@ export interface ElectronAPI {
 
   // Auth (in-app authorization dialogs)
   onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => () => void
+  onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[]) => ipcRenderer.invoke('ai:chat', messages),
-  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, providerId, modelId, targetProjectId),
+  chatStream: (messages: ChatMessage[], sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, providerId, modelId, targetProjectId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
     const channel = `ai:stream-event:${sessionId}`
@@ -317,6 +325,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getThemePreference: () => ipcRenderer.invoke('settings:getThemePreference'),
   saveThemePreference: (preference: ThemePreference) => ipcRenderer.invoke('settings:saveThemePreference', preference),
+  getAIExecutionPreferences: () => ipcRenderer.invoke('settings:getAIExecutionPreferences'),
+  saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => ipcRenderer.invoke('settings:saveAIExecutionPreferences', preferences),
   getLaunchMode: (projectId: string) => ipcRenderer.invoke('settings:getLaunchMode', projectId),
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => ipcRenderer.invoke('settings:saveLaunchMode', projectId, mode),
   getLaunchpadLayout: () => ipcRenderer.invoke('settings:getLaunchpadLayout'),
@@ -340,6 +350,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_e: Electron.IpcRendererEvent, request: { requestId: string; title: string; detail: string }) => callback(request)
     ipcRenderer.on('auth:request', handler)
     return () => { ipcRenderer.removeListener('auth:request', handler) }
+  },
+  onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { requestId: string; approved: boolean }) => callback(payload)
+    ipcRenderer.on('auth:resolved', handler)
+    return () => { ipcRenderer.removeListener('auth:resolved', handler) }
   },
   respondAuth: (requestId: string, approved: boolean) => {
     ipcRenderer.send('auth:response', { requestId, approved })
