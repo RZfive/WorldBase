@@ -103,6 +103,7 @@ export class AppGateway {
         name: project.name,
         port: status.port || 0,
         status: status.status,
+        pid: status.pid,
         startedAt: status.startedAt,
         framework: (meta.framework as string) || undefined,
         restartPolicy: this.getRestartPolicy(project.id),

@@ -3,12 +3,14 @@ import { createProxyMiddleware } from 'http-proxy-middleware'
 import { isIP } from 'node:net'
 import { projectsRouter } from './routes/projects.js'
 import { aiRouter } from './routes/ai.js'
+import { systemRouter } from './routes/system.js'
 import type { ProjectFS } from '../project-fs/project-fs.js'
 import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
 import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { AIEngine } from '../ai-engine/ai-engine.js'
 import type { SettingsStore } from '../settings/settings-store.js'
+import type { SystemService } from '../system-capabilities/system-service.js'
 import type { Server } from 'node:http'
 
 const LOCAL_RESOURCE_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1'])
@@ -114,6 +116,7 @@ export interface LanServerConfig {
   apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
   aiEngine: AIEngine
+  systemService: SystemService
   settingsStore?: SettingsStore
 }
 
@@ -165,6 +168,9 @@ export class LanServer {
 
     // AI chat routes
     this.app.use('/api/ai', aiRouter(this.services))
+
+    // Host system capability routes
+    this.app.use('/api/system', systemRouter(this.services))
 
     // Remote asset proxy for embedded apps.
     // This allows browser-based projects running in an iframe to load external

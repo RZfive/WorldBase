@@ -29,7 +29,19 @@ interface ProjectStatus {
   projectId: string
   status: string
   port?: number
+  pid?: number
   startedAt?: string
+  exitCode?: number | null
+  error?: string
+}
+
+export interface ProjectProcessSnapshot {
+  projectId: string
+  status: string
+  port?: number
+  pid?: number
+  startedAt?: string
+  uptimeSeconds?: number
   exitCode?: number | null
   error?: string
 }
@@ -193,9 +205,11 @@ export class RuntimeManager {
       THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
       THE_WORLD_RESOURCE_PROXY_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/resource-proxy`,
       THE_WORLD_PROJECT_DATA_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/projects/${projectId}/data`,
+      THE_WORLD_SYSTEM_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/system`,
       NEXT_PUBLIC_THE_WORLD_LAN_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}`,
       NEXT_PUBLIC_THE_WORLD_RESOURCE_PROXY_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/resource-proxy`,
-      NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/projects/${projectId}/data`
+      NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/projects/${projectId}/data`,
+      NEXT_PUBLIC_THE_WORLD_SYSTEM_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/system`
     })
 
     const childProcess = spawn(cmd, args, {
@@ -362,10 +376,34 @@ export class RuntimeManager {
       projectId,
       status: info.status,
       port: info.port,
+      pid: info.process.pid,
       startedAt: info.startedAt,
       exitCode: info.exitCode,
       error: info.error
     }
+  }
+
+  getProjectProcesses (): ProjectProcessSnapshot[] {
+    return Array.from(this.runningProjects.entries())
+      .map(([projectId, info]) => {
+        const uptimeMs = info.startedAt
+          ? Date.now() - new Date(info.startedAt).getTime()
+          : null
+
+        return {
+          projectId,
+          status: info.status,
+          port: info.port,
+          pid: info.process.pid,
+          startedAt: info.startedAt,
+          uptimeSeconds: uptimeMs !== null
+            ? Math.max(0, Math.round(uptimeMs / 100) / 10)
+            : undefined,
+          exitCode: info.exitCode,
+          error: info.error
+        }
+      })
+      .sort((left, right) => left.projectId.localeCompare(right.projectId))
   }
 
   /**
