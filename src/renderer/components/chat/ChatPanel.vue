@@ -7,6 +7,7 @@ import ChatHeader from './ChatHeader.vue'
 import { emitAuthResolution, onAuthResolution, type AuthResolutionPayload } from '../../utils/auth-events'
 
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+type AIExecutionAuthMode = 'strict' | 'auto'
 
 type ChatMessageBlock =
   | { id: string; kind: 'content'; content: MessageContent }
@@ -42,6 +43,7 @@ interface ConversationSummary {
   title: string
   createdAt: string
   updatedAt: string
+  authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string
   targetProjectId?: string
@@ -116,6 +118,7 @@ const providersConfig = ref<ProvidersConfig>({
 })
 const activeProviderId = ref('')
 const selectedModel = ref('')
+const currentAuthMode = ref<AIExecutionAuthMode>('strict')
 const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
 const pendingFiles = ref<PendingOfficeFile[]>([])
 const isUploadingFiles = ref(false)
@@ -137,6 +140,7 @@ const backgroundStreamMessages = new Map<string, {
   messages: ChatMessage[]
   assistantIdx: number
   targetProjectId: string | null
+  authMode: AIExecutionAuthMode
   providerId: string | null
   selectedModel: string | null
 }>()
@@ -497,6 +501,7 @@ function stashCurrentConversationForNavigation () {
       messages: messages.value,
       assistantIdx: messages.value.length - 1,
       targetProjectId: targetProjectId.value,
+      authMode: currentAuthMode.value,
       providerId: activeProviderId.value || null,
       selectedModel: selectedModel.value || null
     })
@@ -514,6 +519,7 @@ async function startOptimizationConversation (ctx: Record<string, unknown>) {
   currentConversationId.value = conversationId
   messages.value = []
   targetProjectId.value = projectId
+  currentAuthMode.value = 'strict'
   inputText.value = `请帮我继续优化项目"${name}"（项目ID: ${ctx.id}）。请先查看项目当前的代码结构，然后告诉我可以改进的地方。`
   pendingImages.value = []
   pendingFiles.value = []
@@ -585,6 +591,15 @@ async function handleModelSelectionChange (model: string) {
   await persistConversationProviderMeta()
 }
 
+async function handleAuthModeChange (authMode: AIExecutionAuthMode) {
+  currentAuthMode.value = authMode
+  if (!currentConversationId.value) return
+  await doSaveConversation(currentConversationId.value, messages.value, {
+    targetProjectId: targetProjectId.value,
+    allowEmpty: true
+  })
+}
+
 async function loadConversations () {
   if (!window.electronAPI) return
   try {
@@ -613,6 +628,7 @@ function newConversation () {
   currentConversationId.value = null
   messages.value = []
   targetProjectId.value = null
+  currentAuthMode.value = 'strict'
   inputText.value = ''
   resetTransientStreamState()
   pendingImages.value = []
@@ -632,6 +648,7 @@ async function loadConversation (id: string) {
     currentConversationId.value = id
     messages.value = bg.messages
     targetProjectId.value = bg.targetProjectId
+    currentAuthMode.value = bg.authMode
     setConversationTarget(id, bg.targetProjectId)
     backgroundStreamMessages.delete(id)
     resetTransientStreamState()
@@ -647,6 +664,7 @@ async function loadConversation (id: string) {
     currentConversationId.value = conv.id
     messages.value = conv.messages
     targetProjectId.value = conv.targetProjectId || null
+    currentAuthMode.value = conv.authMode === 'auto' ? 'auto' : 'strict'
     setConversationTarget(conv.id, conv.targetProjectId || null)
     resetTransientStreamState()
     pendingFiles.value = []
@@ -682,6 +700,7 @@ async function doSaveConversation (
     messages: msgs,
     createdAt: getConversationCreatedAt(convId),
     updatedAt: new Date().toISOString(),
+    authMode: currentAuthMode.value,
     providerId: activeProviderId.value || undefined,
     selectedModel: selectedModel.value || undefined,
     targetProjectId: resolvedTargetProjectId || undefined
@@ -1062,7 +1081,8 @@ async function sendMessage () {
         sessionId,
         activeProviderId.value || undefined,
         selectedModel.value || undefined,
-        targetProjectId.value ?? undefined
+        targetProjectId.value ?? undefined,
+        currentAuthMode.value
       )
 
       if (streamingConvIds.has(convId)) {
@@ -1178,11 +1198,13 @@ onUnmounted(() => {
         :providers="providers"
         :active-provider-id="activeProviderId"
         :selected-model="selectedModel"
+        :auth-mode="currentAuthMode"
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
         :show-skill-picker="showSkillPicker"
         @update:active-provider-id="handleProviderSelectionChange"
         @update:selected-model="handleModelSelectionChange"
+        @update:auth-mode="handleAuthModeChange"
         @toggle-skill-picker="showSkillPicker = !showSkillPicker"
         @toggle-skill="toggleSkill"
       />

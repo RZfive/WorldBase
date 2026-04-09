@@ -1,5 +1,5 @@
 import { type BrowserWindow, ipcMain } from 'electron'
-import { DEFAULT_AI_EXECUTION_PREFERENCES, type AIExecutionPreferences } from '../../../settings/settings-store.js'
+import type { SessionState } from '../agent-core.js'
 
 /** Timeout in ms before auto-denying an auth request. */
 const AUTH_TIMEOUT_MS = 120_000
@@ -10,7 +10,7 @@ const AUTH_TIMEOUT_MS = 120_000
  */
 export async function requestUserAuth (
   getMainWindow: (() => BrowserWindow | null) | undefined,
-  getAIExecutionPreferences: (() => AIExecutionPreferences) | undefined,
+  getSessionState: (() => SessionState) | undefined,
   title: string,
   detail: string
 ): Promise<boolean> {
@@ -21,8 +21,8 @@ export async function requestUserAuth (
   }
 
   try {
-    const preferences = getAIExecutionPreferences?.() ?? DEFAULT_AI_EXECUTION_PREFERENCES
-    return await requestUserAuthViaRenderer(win, title, detail, preferences)
+    const authMode = getSessionState?.().authMode ?? 'strict'
+    return await requestUserAuthViaRenderer(win, title, detail, authMode)
   } catch {
     return false
   }
@@ -39,7 +39,7 @@ function requestUserAuthViaRenderer (
   win: BrowserWindow,
   title: string,
   detail: string,
-  preferences: AIExecutionPreferences
+  authMode: SessionState['authMode']
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const requestId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -76,7 +76,7 @@ function requestUserAuthViaRenderer (
       detail
     })
 
-    if (preferences.authMode === 'auto') {
+    if (authMode === 'auto') {
       finish(true)
       return
     }

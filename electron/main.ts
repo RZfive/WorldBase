@@ -15,7 +15,7 @@ import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-a
 import { LanServer } from '../src/main/lan-server/server.js'
 import { LAN_SERVER_PORT } from '../src/main/constants.js'
 import { SystemService } from '../src/main/system-capabilities/system-service.js'
-import { SettingsStore, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout } from '../src/main/settings/settings-store.js'
+import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
@@ -333,8 +333,7 @@ async function initializeServices (): Promise<void> {
     builderService,
     apiClient,
     dataAccess,
-    getMainWindow: () => mainWindow,
-    getAIExecutionPreferences: () => settingsStore!.getAIExecutionPreferences()
+    getMainWindow: () => mainWindow
   })
 
   // Apply saved AI settings on startup
@@ -453,7 +452,7 @@ function setupIPC (): void {
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
@@ -473,7 +472,8 @@ function setupIPC (): void {
       for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
         targetProjectId: targetProjectId ?? null,
         providerConfig: resolveProviderConfig(providerId, modelId),
-        abortSignal: abortController.signal
+        abortSignal: abortController.signal,
+        authMode: authMode ?? 'strict'
       })) {
         if (streamEvent.type === 'done') {
           notifyAiTaskStatus(executionPreferences, messages, 'completed')

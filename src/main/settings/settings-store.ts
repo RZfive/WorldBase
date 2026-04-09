@@ -51,12 +51,10 @@ export type ThemePreference = 'system' | 'light' | 'dark'
 export type AIExecutionAuthMode = 'strict' | 'auto'
 
 export interface AIExecutionPreferences {
-  authMode: AIExecutionAuthMode
   notifyOnTaskComplete: boolean
 }
 
 export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
-  authMode: 'strict',
   notifyOnTaskComplete: true
 }
 
@@ -178,14 +176,9 @@ function normalizeThemePreference (value: unknown): ThemePreference {
   return 'system'
 }
 
-function normalizeAIExecutionAuthMode (value: unknown): AIExecutionAuthMode {
-  return value === 'auto' ? 'auto' : 'strict'
-}
-
 function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreferences {
   const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
   return {
-    authMode: normalizeAIExecutionAuthMode(input.authMode),
     notifyOnTaskComplete: typeof input.notifyOnTaskComplete === 'boolean'
       ? input.notifyOnTaskComplete
       : DEFAULT_AI_EXECUTION_PREFERENCES.notifyOnTaskComplete
