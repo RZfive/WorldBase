@@ -55,6 +55,9 @@ async function getMermaid () {
 
 export async function renderMermaidSvg (code: string): Promise<string> {
   const mermaid = await getMermaid()
-  const { svg } = await mermaid.render(`chat-mermaid-diagram-${Date.now()}-${mermaidRenderCount++}`, code.trim())
+  const diagramId = typeof crypto?.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${mermaidRenderCount++}`
+  const { svg } = await mermaid.render(`chat-mermaid-diagram-${diagramId}`, code.trim())
   return svg
 }
