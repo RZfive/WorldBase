@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { LaunchFolder, LaunchpadDropTarget, Project } from './types'
-import { getProjectIcon } from '../../utils/project-icon'
+import { resolveProjectIcon } from '../../utils/project-icon'
 
 const props = defineProps<{
   openFolderData: LaunchFolder | null
@@ -36,6 +36,10 @@ function updateRenameInput (event: Event) {
 function dropClass (projectId: string): string | null {
   if (!props.dropTarget || props.dropTarget.id !== projectId) return null
   return `drop-${props.dropTarget.action}`
+}
+
+function resolveIcon (project: Project) {
+  return resolveProjectIcon(project.type, project.icon)
 }
 </script>
 
@@ -94,7 +98,8 @@ function dropClass (projectId: string): string | null {
                 @contextmenu="emit('showMenu', { event: $event, target: project, kind: 'project' })"
               >
                 <div class="lp-app-icon">
-                  <span class="lp-app-emoji">{{ getProjectIcon(project.type, project.icon) }}</span>
+                  <img v-if="resolveIcon(project).kind === 'image'" :src="resolveIcon(project).value" alt="" class="lp-app-image" />
+                  <span v-else class="lp-app-emoji">{{ resolveIcon(project).value }}</span>
                   <span v-if="project.runtime?.status === 'running'" class="lp-running-badge"></span>
                 </div>
                 <span class="lp-cell-name">{{ project.name || project.id }}</span>
@@ -106,3 +111,12 @@ function dropClass (projectId: string): string | null {
     </Transition>
   </Teleport>
 </template>
+
+<style scoped>
+.lp-app-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+}
+</style>

@@ -89,6 +89,17 @@ interface LaunchpadLayout {
   topLevelOrder: string[]
 }
 
+interface WebAppShortcut {
+  id: string
+  kind: 'web'
+  type: 'browser'
+  name: string
+  url: string
+  icon?: string
+  createdAt: string
+  updatedAt: string
+}
+
 type ThemePreference = 'system' | 'light' | 'dark'
 type AIExecutionAuthMode = 'strict' | 'auto'
 
@@ -258,6 +269,8 @@ interface ElectronAPI {
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>
   saveLaunchpadLayout: (layout: LaunchpadLayout) => Promise<{ success: boolean }>
+  getWebApps: () => Promise<WebAppShortcut[]>
+  saveWebApps: (webApps: WebAppShortcut[]) => Promise<{ success: boolean }>
 
   // Skills
   listSkills: () => Promise<SkillInfo[]>

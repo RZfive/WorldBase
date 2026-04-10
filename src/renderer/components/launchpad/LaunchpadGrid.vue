@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { LaunchFolder, LaunchpadDropTarget, LaunchpadGridItem, Project } from './types'
-import { getProjectIcon } from '../../utils/project-icon'
+import { resolveProjectIcon } from '../../utils/project-icon'
 
 const props = defineProps<{
   gridItems: LaunchpadGridItem[]
@@ -40,6 +40,10 @@ function dropClass (item: LaunchpadGridItem): string | null {
   if (!props.dropTarget || props.dropTarget.id !== item.data.id) return null
   return `drop-${props.dropTarget.action}`
 }
+
+function resolveIcon (type?: string, icon?: string) {
+  return resolveProjectIcon(type, icon)
+}
 </script>
 
 <template>
@@ -68,7 +72,15 @@ function dropClass (item: LaunchpadGridItem): string | null {
               v-for="projectId in asFolder(item).projectIds.slice(0, 9)"
               :key="projectId"
               class="folder-mini"
-            >{{ getProjectIcon(props.projects.find(project => project.id === projectId)?.type, props.projects.find(project => project.id === projectId)?.icon as string | undefined) }}</span>
+            >
+              <img
+                v-if="resolveIcon(props.projects.find(project => project.id === projectId)?.type, props.projects.find(project => project.id === projectId)?.icon as string | undefined).kind === 'image'"
+                :src="resolveIcon(props.projects.find(project => project.id === projectId)?.type, props.projects.find(project => project.id === projectId)?.icon as string | undefined).value"
+                alt=""
+                class="folder-mini-img"
+              />
+              <template v-else>{{ resolveIcon(props.projects.find(project => project.id === projectId)?.type, props.projects.find(project => project.id === projectId)?.icon as string | undefined).value }}</template>
+            </span>
             <span
               v-for="n in Math.max(0, 4 - Math.min(asFolder(item).projectIds.length, 9))"
               :key="'empty-' + n"
@@ -92,7 +104,8 @@ function dropClass (item: LaunchpadGridItem): string | null {
 
       <template v-else>
         <div class="lp-app-icon">
-          <span class="lp-app-emoji">{{ getProjectIcon(asProject(item).type, asProject(item).icon) }}</span>
+          <img v-if="resolveIcon(asProject(item).type, asProject(item).icon).kind === 'image'" :src="resolveIcon(asProject(item).type, asProject(item).icon).value" alt="" class="lp-app-image" />
+          <span v-else class="lp-app-emoji">{{ resolveIcon(asProject(item).type, asProject(item).icon).value }}</span>
           <span v-if="asProject(item).runtime?.status === 'running'" class="lp-running-badge"></span>
         </div>
         <span class="lp-cell-name">{{ asProject(item).name || asProject(item).id }}</span>
@@ -100,3 +113,13 @@ function dropClass (item: LaunchpadGridItem): string | null {
     </div>
   </div>
 </template>
+
+<style scoped>
+.lp-app-image,
+.folder-mini-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+}
+</style>

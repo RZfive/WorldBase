@@ -47,6 +47,17 @@ export interface LaunchpadLayout {
   topLevelOrder: string[]
 }
 
+export interface WebAppShortcut {
+  id: string
+  kind: 'web'
+  type: 'browser'
+  name: string
+  url: string
+  icon?: string
+  createdAt: string
+  updatedAt: string
+}
+
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type AIExecutionAuthMode = 'strict' | 'auto'
 
@@ -183,6 +194,60 @@ function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreference
       ? input.notifyOnTaskComplete
       : DEFAULT_AI_EXECUTION_PREFERENCES.notifyOnTaskComplete
   }
+}
+
+function normalizeWebAppShortcut (value: unknown): WebAppShortcut | null {
+  if (!value || typeof value !== 'object') return null
+
+  const record = value as Record<string, unknown>
+  const id = typeof record.id === 'string' ? record.id.trim() : ''
+  const name = typeof record.name === 'string' ? record.name.trim() : ''
+  const urlValue = typeof record.url === 'string' ? record.url.trim() : ''
+  if (!id || !name || !urlValue) return null
+
+  let normalizedUrl = ''
+  try {
+    const parsed = new URL(urlValue)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    normalizedUrl = parsed.toString()
+  } catch {
+    return null
+  }
+
+  const icon = typeof record.icon === 'string' && record.icon.trim()
+    ? record.icon.trim()
+    : undefined
+  const createdAt = typeof record.createdAt === 'string' && record.createdAt.trim()
+    ? record.createdAt.trim()
+    : new Date().toISOString()
+  const updatedAt = typeof record.updatedAt === 'string' && record.updatedAt.trim()
+    ? record.updatedAt.trim()
+    : createdAt
+
+  return {
+    id,
+    kind: 'web',
+    type: 'browser',
+    name,
+    url: normalizedUrl,
+    icon,
+    createdAt,
+    updatedAt
+  }
+}
+
+function normalizeWebApps (value: unknown): WebAppShortcut[] {
+  if (!Array.isArray(value)) return []
+
+  const seenIds = new Set<string>()
+  return value
+    .map(normalizeWebAppShortcut)
+    .filter((webApp): webApp is WebAppShortcut => Boolean(webApp))
+    .filter((webApp) => {
+      if (seenIds.has(webApp.id)) return false
+      seenIds.add(webApp.id)
+      return true
+    })
 }
 
 function normalizeEnabledProviderIds (
@@ -392,6 +457,17 @@ export class SettingsStore {
   /** Save launchpad layout preferences. */
   saveLaunchpadLayout (layout: LaunchpadLayout): void {
     this.write({ launchpadLayout: normalizeLaunchpadLayout(layout) })
+  }
+
+  /** Get persisted web app shortcuts for the launchpad. */
+  getWebApps (): WebAppShortcut[] {
+    const settings = this.read()
+    return normalizeWebApps(settings.webApps)
+  }
+
+  /** Save persisted web app shortcuts for the launchpad. */
+  saveWebApps (webApps: WebAppShortcut[]): void {
+    this.write({ webApps: normalizeWebApps(webApps) })
   }
 
   /** Get theme preference: 'system', 'light', or 'dark'. */

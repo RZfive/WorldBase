@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getProjectIcon } from '../../utils/project-icon'
+import { resolveProjectIcon } from '../../utils/project-icon'
 
 interface RunningApp {
   id: string
@@ -7,9 +7,11 @@ interface RunningApp {
   kind: 'project' | 'browser'
   type: string
   icon?: string
+  url?: string
   port?: number
   isWindow: boolean
   closable?: boolean
+  savedToLaunchpad?: boolean
 }
 
 const props = defineProps<{
@@ -29,8 +31,11 @@ const emit = defineEmits<{
 }>()
 
 function handleContextMenu (event: MouseEvent, app: RunningApp): void {
-  if (app.kind !== 'project') return
   emit('contextMenu', event, app)
+}
+
+function resolveIcon (app: RunningApp) {
+  return resolveProjectIcon(app.type, app.icon)
 }
 </script>
 
@@ -61,7 +66,10 @@ function handleContextMenu (event: MouseEvent, app: RunningApp): void {
         @contextmenu="handleContextMenu($event, app)"
       >
         <span class="dock-item-surface">
-          <span class="dock-item-icon">{{ getProjectIcon(app.type, app.icon) }}</span>
+          <span class="dock-item-icon-wrap">
+            <img v-if="resolveIcon(app).kind === 'image'" :src="resolveIcon(app).value" alt="" class="dock-item-icon dock-item-icon-image" />
+            <span v-else class="dock-item-icon">{{ resolveIcon(app).value }}</span>
+          </span>
           <span v-if="app.isWindow" class="dock-window-badge">↗</span>
           <button
             v-if="app.closable"
@@ -259,6 +267,16 @@ function handleContextMenu (event: MouseEvent, app: RunningApp): void {
   transform: translateY(-50%) translateX(0);
 }
 
+.dock-item-icon-wrap {
+  position: relative;
+  z-index: 1;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .dock-item-icon {
   position: relative;
   z-index: 1;
@@ -266,6 +284,13 @@ function handleContextMenu (event: MouseEvent, app: RunningApp): void {
   line-height: 1;
   transition: transform 0.18s ease, filter 0.18s ease;
   filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.22));
+}
+
+.dock-item-icon-image {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  border-radius: 6px;
 }
 
 .dock-item:hover .dock-item-icon {

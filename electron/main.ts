@@ -15,7 +15,7 @@ import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-a
 import { LanServer } from '../src/main/lan-server/server.js'
 import { LAN_SERVER_PORT } from '../src/main/constants.js'
 import { SystemService } from '../src/main/system-capabilities/system-service.js'
-import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout } from '../src/main/settings/settings-store.js'
+import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout, type WebAppShortcut } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
@@ -413,7 +413,8 @@ function createWindow (): void {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      webviewTag: true
     }
   })
 
@@ -958,6 +959,15 @@ function setupIPC (): void {
 
   ipcMain.handle('settings:saveLaunchpadLayout', async (_event: IpcMainInvokeEvent, layout: LaunchpadLayout) => {
     settingsStore!.saveLaunchpadLayout(layout)
+    return { success: true }
+  })
+
+  ipcMain.handle('settings:getWebApps', async () => {
+    return settingsStore!.getWebApps()
+  })
+
+  ipcMain.handle('settings:saveWebApps', async (_event: IpcMainInvokeEvent, webApps: WebAppShortcut[]) => {
+    settingsStore!.saveWebApps(webApps)
     return { success: true }
   })
 

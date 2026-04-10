@@ -3,6 +3,9 @@ interface Project {
   id: string
   name?: string
   type?: string
+  kind?: 'project' | 'web'
+  url?: string
+  icon?: string
   runtime?: { status?: string; port?: number }
   [key: string]: unknown
 }
@@ -32,6 +35,7 @@ const emit = defineEmits<{
   (e: 'startProject', project: Project): void
   (e: 'stopProject', project: Project): void
   (e: 'optimizeInChat', project: Project): void
+  (e: 'deleteWebApp', appId: string): void
   (e: 'moveToFolder', projectId: string, folderId: string): void
   (e: 'removeFromFolder', projectId: string): void
   (e: 'deleteProject', project: Project): void
@@ -59,22 +63,35 @@ function asFolder (target: Project | LaunchFolder | null): LaunchFolder {
       @click.stop
     >
       <template v-if="props.kind === 'project' && props.target">
-        <div class="ctx-item" @click="emit('openProject', asProject(props.target)); emit('hide')">🪄 打开应用</div>
-        <div class="ctx-item" @click="emit('editProject', asProject(props.target)); emit('hide')">✏️ 修改名称与图标</div>
-        <div class="ctx-item" @click="emit('viewSource', asProject(props.target)); emit('hide')">💻 查看源码</div>
-        <div class="ctx-item" @click="emit('openInWindow', asProject(props.target)); emit('hide')">↗️ 独立窗口运行</div>
-        <div class="ctx-divider"></div>
-        <div v-if="asProject(props.target).runtime?.status !== 'running'" class="ctx-item" @click="emit('startProject', asProject(props.target)); emit('hide')">▶️ 启动</div>
-        <div v-if="asProject(props.target).runtime?.status === 'running'" class="ctx-item" @click="emit('stopProject', asProject(props.target)); emit('hide')">⏹️ 停止</div>
-        <div class="ctx-divider"></div>
-        <div class="ctx-item" @click="emit('optimizeInChat', asProject(props.target)); emit('hide')">💬 继续优化</div>
-        <div v-if="props.folders.length > 0" class="ctx-divider"></div>
-        <div v-for="folder in props.folders" :key="folder.id" class="ctx-item" @click="emit('moveToFolder', asProject(props.target).id, folder.id); emit('hide')">
-          📁 移入「{{ folder.name }}」
-        </div>
-        <div v-if="props.folderedIds.has(asProject(props.target).id)" class="ctx-item" @click="emit('removeFromFolder', asProject(props.target).id); emit('hide')">📤 移出文件夹</div>
-        <div class="ctx-divider"></div>
-        <div class="ctx-item ctx-danger" @click="emit('deleteProject', asProject(props.target)); emit('hide')">🗑️ 删除项目</div>
+        <template v-if="asProject(props.target).kind === 'web'">
+          <div class="ctx-item" @click="emit('openProject', asProject(props.target)); emit('hide')">🌐 打开网页</div>
+          <div v-if="props.folders.length > 0" class="ctx-divider"></div>
+          <div v-for="folder in props.folders" :key="folder.id" class="ctx-item" @click="emit('moveToFolder', asProject(props.target).id, folder.id); emit('hide')">
+            📁 移入「{{ folder.name }}」
+          </div>
+          <div v-if="props.folderedIds.has(asProject(props.target).id)" class="ctx-item" @click="emit('removeFromFolder', asProject(props.target).id); emit('hide')">📤 移出文件夹</div>
+          <div class="ctx-divider"></div>
+          <div class="ctx-item ctx-danger" @click="emit('deleteWebApp', asProject(props.target).id); emit('hide')">🗑️ 从启动台移除</div>
+        </template>
+
+        <template v-else>
+          <div class="ctx-item" @click="emit('openProject', asProject(props.target)); emit('hide')">🪄 打开应用</div>
+          <div class="ctx-item" @click="emit('editProject', asProject(props.target)); emit('hide')">✏️ 修改名称与图标</div>
+          <div class="ctx-item" @click="emit('viewSource', asProject(props.target)); emit('hide')">💻 查看源码</div>
+          <div class="ctx-item" @click="emit('openInWindow', asProject(props.target)); emit('hide')">↗️ 独立窗口运行</div>
+          <div class="ctx-divider"></div>
+          <div v-if="asProject(props.target).runtime?.status !== 'running'" class="ctx-item" @click="emit('startProject', asProject(props.target)); emit('hide')">▶️ 启动</div>
+          <div v-if="asProject(props.target).runtime?.status === 'running'" class="ctx-item" @click="emit('stopProject', asProject(props.target)); emit('hide')">⏹️ 停止</div>
+          <div class="ctx-divider"></div>
+          <div class="ctx-item" @click="emit('optimizeInChat', asProject(props.target)); emit('hide')">💬 继续优化</div>
+          <div v-if="props.folders.length > 0" class="ctx-divider"></div>
+          <div v-for="folder in props.folders" :key="folder.id" class="ctx-item" @click="emit('moveToFolder', asProject(props.target).id, folder.id); emit('hide')">
+            📁 移入「{{ folder.name }}」
+          </div>
+          <div v-if="props.folderedIds.has(asProject(props.target).id)" class="ctx-item" @click="emit('removeFromFolder', asProject(props.target).id); emit('hide')">📤 移出文件夹</div>
+          <div class="ctx-divider"></div>
+          <div class="ctx-item ctx-danger" @click="emit('deleteProject', asProject(props.target)); emit('hide')">🗑️ 删除项目</div>
+        </template>
       </template>
 
       <template v-if="props.kind === 'folder' && props.target">
