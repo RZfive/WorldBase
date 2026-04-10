@@ -78,6 +78,17 @@ interface LaunchpadLayout {
   topLevelOrder: string[]
 }
 
+interface WebAppShortcut {
+  id: string
+  kind: 'web'
+  type: 'browser'
+  name: string
+  url: string
+  icon?: string
+  createdAt: string
+  updatedAt: string
+}
+
 type ThemePreference = 'system' | 'light' | 'dark'
 type AIExecutionAuthMode = 'strict' | 'auto'
 
@@ -240,6 +251,8 @@ export interface ElectronAPI {
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>
   saveLaunchpadLayout: (layout: LaunchpadLayout) => Promise<{ success: boolean }>
+  getWebApps: () => Promise<WebAppShortcut[]>
+  saveWebApps: (webApps: WebAppShortcut[]) => Promise<{ success: boolean }>
 
   // Skills
   listSkills: () => Promise<Array<{ id: string; name: string; description: string; content: string; createdAt: string; updatedAt: string }>>
@@ -340,6 +353,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => ipcRenderer.invoke('settings:saveLaunchMode', projectId, mode),
   getLaunchpadLayout: () => ipcRenderer.invoke('settings:getLaunchpadLayout'),
   saveLaunchpadLayout: (layout: LaunchpadLayout) => ipcRenderer.invoke('settings:saveLaunchpadLayout', layout),
+  getWebApps: () => ipcRenderer.invoke('settings:getWebApps'),
+  saveWebApps: (webApps: WebAppShortcut[]) => ipcRenderer.invoke('settings:saveWebApps', webApps),
 
   // Skills
   listSkills: () => ipcRenderer.invoke('skills:list'),

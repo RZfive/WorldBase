@@ -5,6 +5,7 @@ import ConfirmDialog from './ConfirmDialog.vue'
 import LaunchpadGrid from './LaunchpadGrid.vue'
 import FolderBubble from './FolderBubble.vue'
 import ProjectAppearanceDialog from './ProjectAppearanceDialog.vue'
+import { canInterpretAsWebUrl, createWebAppId, getWebAppNameFromUrl, normalizeWebUrlInput } from '../../utils/web-app'
 import type {
   LaunchFolder,
   LaunchpadDragItem,
@@ -126,7 +127,9 @@ const orderedTopLevelItems = computed<LaunchpadGridItem[]>(() => {
 })
 
 function matchesProjectQuery (project: Project, query: string): boolean {
-  return (project.name || project.id).toLowerCase().includes(query) || (project.type || '').toLowerCase().includes(query)
+  return (project.name || project.id).toLowerCase().includes(query)
+    || (project.type || '').toLowerCase().includes(query)
+    || (typeof project.url === 'string' && project.url.toLowerCase().includes(query))
 }
 
 function matchesFolderQuery (folder: LaunchFolder, query: string): boolean {
@@ -145,6 +148,11 @@ const gridItems = computed(() => {
       ? matchesFolderQuery(item.data, query)
       : matchesProjectQuery(item.data, query)
   })
+})
+
+const searchUrlCandidate = computed(() => {
+  if (!canInterpretAsWebUrl(searchQuery.value)) return null
+  return normalizeWebUrlInput(searchQuery.value)
 })
 
 const openFolderData = computed(() => {
@@ -296,13 +304,39 @@ async function loadProjects () {
   error.value = null
   try {
     if (!window.electronAPI) return
-    const nextProjects = await window.electronAPI.listProjects() as Project[]
-    projects.value = nextProjects
-    syncLayoutWithProjects(nextProjects)
+    const [nextProjects, nextWebApps] = await Promise.all([
+      window.electronAPI.listProjects() as Promise<Project[]>,
+      window.electronAPI.getWebApps ? window.electronAPI.getWebApps() as Promise<WebAppShortcut[]> : Promise.resolve([])
+    ])
+    const mergedApps = [...nextProjects, ...(nextWebApps as unknown as Project[])]
+    projects.value = mergedApps
+    syncLayoutWithProjects(mergedApps)
   } catch (err) {
     error.value = (err as Error).message
   } finally {
     isLoading.value = false
+  }
+}
+
+function openTypedUrl () {
+  if (!searchUrlCandidate.value) return
+
+  const url = searchUrlCandidate.value
+  emit('select', {
+    id: createWebAppId(url),
+    kind: 'web',
+    type: 'browser',
+    name: getWebAppNameFromUrl(url),
+    url,
+    icon: '🌐',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  })
+}
+
+function handleSearchEnter () {
+  if (searchUrlCandidate.value) {
+    openTypedUrl()
   }
 }
 
@@ -461,6 +495,7 @@ function removeFromFolder (projectId: string) {
 }
 
 async function startProject (project: Project) {
+  if (project.kind === 'web') return
   if (!window.electronAPI) return
   try {
     await window.electronAPI.startProject(project.id)
@@ -472,6 +507,7 @@ async function startProject (project: Project) {
 }
 
 async function stopProject (project: Project) {
+  if (project.kind === 'web') return
   if (!window.electronAPI) return
   try {
     await window.electronAPI.stopProject(project.id)
@@ -482,6 +518,7 @@ async function stopProject (project: Project) {
 }
 
 async function openInWindow (project: Project) {
+  if (project.kind === 'web') return
   if (!window.electronAPI) return
   const status = await window.electronAPI.getProjectStatus(project.id) as { status: string }
   if (status.status !== 'running') {
@@ -493,10 +530,12 @@ async function openInWindow (project: Project) {
 }
 
 function openSourceCode (project: Project) {
+  if (project.kind === 'web') return
   emit('viewSource', project)
 }
 
 async function deleteProject (project: Project) {
+  if (project.kind === 'web') return
   confirmDialog.value = {
     visible: true,
     message: `确定删除项目「${project.name || project.id}」？此操作不可撤销。`,
@@ -513,6 +552,20 @@ async function deleteProject (project: Project) {
       await loadProjects()
       confirmDialog.value.visible = false
     }
+  }
+}
+
+async function deleteWebApp (appId: string) {
+  if (!window.electronAPI?.getWebApps || !window.electronAPI?.saveWebApps) return
+  try {
+    const currentApps = await window.electronAPI.getWebApps()
+    const nextApps = currentApps.filter(app => app.id !== appId)
+    await window.electronAPI.saveWebApps(nextApps)
+    removeFromFolder(appId)
+    topLevelOrder.value = topLevelOrder.value.filter(key => key !== projectKey(appId))
+    await loadProjects()
+  } catch (err) {
+    console.error('Failed to delete web app:', err)
   }
 }
 
@@ -918,12 +971,23 @@ onUnmounted(() => {
             ref="searchRef"
             v-model="searchQuery"
             type="text"
-            placeholder="搜索应用…"
+            placeholder="搜索应用或输入网址…"
             class="lp-search-input"
             @click.stop
+            @keydown.enter.prevent="handleSearchEnter"
           />
         </div>
       </div>
+
+      <button
+        v-if="searchUrlCandidate"
+        class="lp-search-action"
+        type="button"
+        @click="openTypedUrl"
+      >
+        <span class="lp-search-action-icon">🌐</span>
+        <span class="lp-search-action-copy">打开网页 {{ searchUrlCandidate }}</span>
+      </button>
 
       <!-- Loading -->
       <div v-if="isLoading && projects.length === 0" class="lp-status">
@@ -1013,6 +1077,7 @@ onUnmounted(() => {
       @start-project="startProject($event)"
       @stop-project="stopProject($event)"
       @optimize-in-chat="emit('optimizeInChat', $event)"
+      @delete-web-app="deleteWebApp($event)"
       @move-to-folder="(projectId, folderId) => moveToFolder(projectId, folderId)"
       @remove-from-folder="removeFromFolder($event)"
       @delete-project="deleteProject($event)"
@@ -1078,6 +1143,34 @@ onUnmounted(() => {
 }
 
 /* ============ Search ============ */
+.lp-search-action {
+  flex-shrink: 0;
+  width: min(520px, calc(100% - 32px));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--app-border-strong);
+  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
+  color: var(--app-text-strong);
+  cursor: pointer;
+  box-shadow: var(--app-shadow);
+}
+
+.lp-search-action-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.lp-search-action-copy {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .lp-search-bar {
   flex-shrink: 0;
   margin-bottom: 20px;

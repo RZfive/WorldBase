@@ -8,6 +8,10 @@ export interface Project {
   name?: string
   type?: string
   icon?: string
+  kind?: 'project' | 'web'
+  url?: string
+  createdAt?: string
+  updatedAt?: string
   runtime?: ProjectRuntime
   [key: string]: unknown
 }

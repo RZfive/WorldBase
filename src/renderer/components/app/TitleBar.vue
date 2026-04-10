@@ -19,9 +19,15 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
+type NavigatorWithUserAgentData = Navigator & {
+  userAgentData?: {
+    platform?: string
+  }
+}
+
 const isWindows = computed(() => {
   if (typeof navigator === 'undefined') return false
-  const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent
+  const platform = (navigator as NavigatorWithUserAgentData).userAgentData?.platform || navigator.platform || navigator.userAgent
   return /win/i.test(platform)
 })
 </script>
