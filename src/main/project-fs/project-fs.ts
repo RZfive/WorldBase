@@ -87,8 +87,10 @@ export class ProjectFS {
           if (!meta.id) meta.id = entry.name
           projects.push(meta)
         } catch {
-          // Directory exists but no meta file — skip
-          projects.push({ id: entry.name, name: entry.name, type: 'unknown' })
+          const recoveredMeta = await this._recoverStandaloneProjectMeta(entry.name)
+          if (recoveredMeta) {
+            projects.push(recoveredMeta)
+          }
         }
       }
     }
@@ -100,8 +102,16 @@ export class ProjectFS {
    */
   async getProjectMeta (projectId: string): Promise<ProjectMeta> {
     const metaPath = this._resolveProjectPath(projectId, '.world-meta.json')
-    const content = await fs.readFile(metaPath, 'utf-8')
-    return normalizeProjectMeta(JSON.parse(content)) as ProjectMeta
+    try {
+      const content = await fs.readFile(metaPath, 'utf-8')
+      return normalizeProjectMeta(JSON.parse(content)) as ProjectMeta
+    } catch {
+      const recoveredMeta = await this._recoverStandaloneProjectMeta(projectId)
+      if (recoveredMeta) {
+        return recoveredMeta
+      }
+      throw new Error(`Project meta not found: ${projectId}`)
+    }
   }
 
   /**
@@ -161,6 +171,42 @@ export class ProjectFS {
     }
 
     await this.safeWriter.safeWrite(fullPath, content)
+  }
+
+  private async _recoverStandaloneProjectMeta (projectId: string): Promise<ProjectMeta | null> {
+    const projectDir = this._resolveProjectPath(projectId)
+    const standaloneServerPath = path.join(projectDir, '.next', 'standalone', 'server.js')
+    if (!existsSync(standaloneServerPath)) {
+      return null
+    }
+
+    const stat = await fs.stat(standaloneServerPath).catch(() => null)
+    const createdAt = stat?.birthtime instanceof Date && !Number.isNaN(stat.birthtime.getTime())
+      ? stat.birthtime.toISOString()
+      : new Date().toISOString()
+
+    const recoveredMeta = normalizeProjectMeta({
+      id: projectId,
+      name: this._deriveProjectName(projectId),
+      type: 'frontend',
+      framework: 'nextjs',
+      createdAt,
+      buildStatus: 'built',
+      runtime: {
+        backend: {
+          command: 'node .next/standalone/server.js'
+        }
+      }
+    }) as ProjectMeta
+
+    await this.saveProjectMeta(projectId, recoveredMeta)
+    return recoveredMeta
+  }
+
+  private _deriveProjectName (projectId: string): string {
+    const withoutPrefix = projectId.replace(/^proj_/, '')
+    const suffixMatch = withoutPrefix.match(/^(.*)_[a-z0-9]{6,}$/i)
+    return suffixMatch?.[1] || withoutPrefix || projectId
   }
 
   /**

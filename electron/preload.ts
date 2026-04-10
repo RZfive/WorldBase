@@ -85,6 +85,14 @@ interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
 }
 
+interface ProjectLanUrlInfo {
+  projectPort: number | null
+  lanUrl: string | null
+  proxyUrl: string
+  localProxyUrl: string
+  lanIp: string
+}
+
 interface ServiceEntry {
   projectId: string
   name: string
@@ -209,7 +217,7 @@ export interface ElectronAPI {
 
   // LAN
   getLanInfo: () => Promise<{ port: number; addresses: string[]; baseUrl: string }>
-  getProjectLanUrl: (projectId: string) => Promise<{ projectPort: number | null; lanUrl: string | null; proxyUrl: string; lanIp: string }>
+  getProjectLanUrl: (projectId: string) => Promise<ProjectLanUrlInfo>
 
   // Data
   queryData: (projectId: string, sql: string) => Promise<Record<string, unknown>>

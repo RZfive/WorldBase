@@ -109,11 +109,16 @@ export class RuntimeManager {
     const metaPath = path.join(projectDir, '.world-meta.json')
     const packageJsonPath = path.join(projectDir, 'package.json')
 
+    let meta: Record<string, unknown>
     if (!existsSync(metaPath)) {
-      throw new Error(`Project meta not found: ${projectId}`)
+      const recoveredMeta = await this._recoverStandaloneMeta(projectId, projectDir, metaPath)
+      if (!recoveredMeta) {
+        throw new Error(`Project meta not found: ${projectId}`)
+      }
+      meta = recoveredMeta
+    } else {
+      meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as Record<string, unknown>
     }
-
-    const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as Record<string, unknown>
     let runtime = (meta.runtime as Record<string, unknown>) || {}
     let backendConfig = runtime.backend as Record<string, unknown> | undefined
 
@@ -659,6 +664,45 @@ export class RuntimeManager {
     }
 
     return 'development'
+  }
+
+  private async _recoverStandaloneMeta (
+    projectId: string,
+    projectDir: string,
+    metaPath: string
+  ): Promise<Record<string, unknown> | null> {
+    if (!_hasStandaloneBuild(projectDir)) {
+      return null
+    }
+
+    const standaloneServerPath = path.join(projectDir, '.next', 'standalone', 'server.js')
+    const stat = await fs.stat(standaloneServerPath).catch(() => null)
+    const createdAt = stat?.birthtime instanceof Date && !Number.isNaN(stat.birthtime.getTime())
+      ? stat.birthtime.toISOString()
+      : new Date().toISOString()
+
+    const recoveredMeta: Record<string, unknown> = {
+      id: projectId,
+      name: this._deriveProjectName(projectId),
+      type: 'frontend',
+      framework: 'nextjs',
+      createdAt,
+      buildStatus: 'built',
+      runtime: {
+        backend: {
+          command: 'node .next/standalone/server.js'
+        }
+      }
+    }
+
+    await fs.writeFile(metaPath, JSON.stringify(recoveredMeta, null, 2), 'utf-8')
+    return recoveredMeta
+  }
+
+  private _deriveProjectName (projectId: string): string {
+    const withoutPrefix = projectId.replace(/^proj_/, '')
+    const suffixMatch = withoutPrefix.match(/^(.*)_[a-z0-9]{6,}$/i)
+    return suffixMatch?.[1] || withoutPrefix || projectId
   }
 
   /**
