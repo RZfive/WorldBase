@@ -109,7 +109,7 @@ export class BuilderService {
     })
 
     try {
-      const { code, output } = await this._runBuildCommand(projectDir, env, isNextProject)
+      const { code, output } = await this._runBuildCommand(projectId, projectDir, env, isNextProject)
       const duration = Date.now() - startTime
 
       if (code === 0) {
@@ -303,25 +303,38 @@ export class BuilderService {
    * On Windows, pnpm-managed Next.js projects can fail when standalone tracing
    * recreates symlinks without elevated privileges.
    */
-  private _shouldUseElevatedBuild (projectDir: string, isNextProject: boolean): boolean {
+  private _shouldUseElevatedBuild (projectId: string, isNextProject: boolean): boolean {
+    const projectDir = this._resolveProjectDir(projectId)
     return process.platform === 'win32' &&
       isNextProject &&
       existsSync(path.join(projectDir, 'node_modules', '.pnpm'))
   }
 
   private async _runBuildCommand (
+    projectId: string,
     projectDir: string,
     env: NodeJS.ProcessEnv,
     isNextProject: boolean
   ): Promise<CommandExecutionResult> {
-    if (this._shouldUseElevatedBuild(projectDir, isNextProject)) {
+    if (this._shouldUseElevatedBuild(projectId, isNextProject)) {
       return await this._runElevatedWindowsBuild(projectDir, env)
     }
 
-    return await this._spawnCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], {
-      cwd: projectDir,
-      env,
-      shell: false
+    return await new Promise((resolve, reject) => {
+      const child = spawn(this._getNpmCommand(), ['run', 'build'], {
+        cwd: projectDir,
+        stdio: 'pipe',
+        shell: false,
+        env
+      })
+
+      let output = ''
+      child.stdout?.on('data', (data: Buffer) => { output += data.toString() })
+      child.stderr?.on('data', (data: Buffer) => { output += data.toString() })
+      child.on('exit', (code) => {
+        resolve({ code, output })
+      })
+      child.on('error', reject)
     })
   }
 
@@ -354,21 +367,32 @@ export class BuilderService {
         fs.writeFile(launcherPath, this._buildElevatedWindowsLauncherScript(), 'utf-8')
       ])
 
-      const launcherResult = await this._spawnCommand('powershell.exe', [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'RemoteSigned',
-        '-File',
-        launcherPath,
-        '-RunnerPath',
-        runnerPath,
-        '-ConfigPath',
-        configPath
-      ], {
-        cwd: projectDir,
-        env: process.env,
-        shell: false
+      const launcherResult = await new Promise<CommandExecutionResult>((resolve, reject) => {
+        const child = spawn('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'RemoteSigned',
+          '-File',
+          launcherPath,
+          '-RunnerPath',
+          runnerPath,
+          '-ConfigPath',
+          configPath
+        ], {
+          cwd: projectDir,
+          stdio: 'pipe',
+          shell: false,
+          env: process.env
+        })
+
+        let output = ''
+        child.stdout?.on('data', (data: Buffer) => { output += data.toString() })
+        child.stderr?.on('data', (data: Buffer) => { output += data.toString() })
+        child.on('exit', (code) => {
+          resolve({ code, output })
+        })
+        child.on('error', reject)
       })
 
       const [stdout, stderr, exitCodeRaw] = await Promise.all([
@@ -439,37 +463,6 @@ export class BuilderService {
     ].join('\n')
   }
 
-  private async _spawnCommand (
-    command: string,
-    args: string[],
-    options: {
-      cwd: string
-      env: NodeJS.ProcessEnv
-      shell?: boolean
-    }
-  ): Promise<CommandExecutionResult> {
-    this._assertSafeWorkingDirectory(options.cwd)
-
-    return await new Promise((resolve, reject) => {
-      const child = spawn(command, args, {
-        cwd: options.cwd,
-        stdio: 'pipe',
-        shell: options.shell ?? false,
-        env: options.env
-      })
-
-      let output = ''
-      child.stdout?.on('data', (data: Buffer) => { output += data.toString() })
-      child.stderr?.on('data', (data: Buffer) => { output += data.toString() })
-
-      child.on('exit', (code) => {
-        resolve({ code, output })
-      })
-
-      child.on('error', reject)
-    })
-  }
-
   private async _readTextFileIfExists (filePath: string): Promise<string> {
     try {
       return await fs.readFile(filePath, 'utf-8')
@@ -479,19 +472,20 @@ export class BuilderService {
   }
 
   private _resolveProjectDir (projectId: string): string {
+    if (!/^[\w\u4e00-\u9fff-]+$/u.test(projectId)) {
+      throw new Error('Project path must stay within the projects directory')
+    }
+
     const baseDir = path.resolve(this.projectsDir)
     const projectDir = path.resolve(baseDir, projectId)
     if (projectDir !== baseDir && !projectDir.startsWith(`${baseDir}${path.sep}`)) {
-      throw new Error('Invalid project id')
+      throw new Error('Project path must stay within the projects directory')
     }
     return projectDir
   }
 
-  private _assertSafeWorkingDirectory (cwd: string): void {
-    const resolved = path.resolve(cwd)
-    if (!path.isAbsolute(resolved)) {
-      throw new Error('Working directory must be absolute')
-    }
+  private _getNpmCommand (): string {
+    return process.platform === 'win32' ? 'npm.cmd' : 'npm'
   }
 
   private async _normalizeNextProjectFiles (projectDir: string): Promise<void> {
@@ -705,8 +699,7 @@ export class BuilderService {
    */
   private _installDeps (cwd: string): Promise<void> {
     return createBundledRuntimeEnv(cwd).then(env => new Promise((resolve, reject) => {
-      this._assertSafeWorkingDirectory(cwd)
-      const child = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install'], {
+      const child = spawn(this._getNpmCommand(), ['install'], {
         cwd,
         stdio: 'pipe',
         shell: false,
