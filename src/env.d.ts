@@ -178,6 +178,14 @@ interface SystemStatusSnapshot {
   }
 }
 
+interface ProjectLanUrlInfo {
+  projectPort: number | null
+  lanUrl: string | null
+  proxyUrl: string
+  localProxyUrl: string
+  lanIp: string
+}
+
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 
 interface SkillInfo {
@@ -227,7 +235,7 @@ interface ElectronAPI {
 
   // LAN
   getLanInfo: () => Promise<{ port: number; addresses: string[]; baseUrl: string }>
-  getProjectLanUrl: (projectId: string) => Promise<{ projectPort: number | null; lanUrl: string | null; proxyUrl: string; lanIp: string }>
+  getProjectLanUrl: (projectId: string) => Promise<ProjectLanUrlInfo>
 
   // Data
   queryData: (projectId: string, sql: string) => Promise<Record<string, unknown>>

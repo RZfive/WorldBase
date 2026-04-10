@@ -26,6 +26,14 @@ interface ProjectStatus {
   port?: number
 }
 
+interface ProjectLanUrlInfo {
+  projectPort: number | null
+  lanUrl: string | null
+  proxyUrl: string
+  localProxyUrl: string
+  lanIp: string
+}
+
 interface ProjectListItem {
   id: string
   name?: string
@@ -44,10 +52,12 @@ interface EmbeddedAppState {
   loading: boolean
   kind: 'project' | 'browser'
   sandbox: string
+  projectPort?: number
 }
 
 /** Maximum seconds to wait for a project's port to become available after starting. */
 const START_TIMEOUT_SECONDS = 15
+const RUNNING_APPS_REFRESH_INTERVAL_MS = 5000
 /** QR code image dimensions. */
 const QR_CODE_WIDTH = 220
 const QR_CODE_MARGIN = 2
@@ -83,6 +93,7 @@ let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
 let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
+let runningAppsInterval: ReturnType<typeof setInterval> | null = null
 
 function clearEmbeddedApp (appId?: string) {
   if (appId) {
@@ -111,6 +122,10 @@ async function fetchProjectMeta (projectId: string) {
 async function getRuntimeStatus (projectId: string) {
   if (!window.electronAPI) return { status: 'unknown' } as ProjectStatus
   return await window.electronAPI.getProjectStatus(projectId) as unknown as ProjectStatus
+}
+
+function buildProjectFrameUrl (port: number): string {
+  return `http://127.0.0.1:${port}`
 }
 
 function openChat () {
@@ -148,15 +163,30 @@ async function openEmbeddedProject (projectId: string) {
   currentView.value = 'app'
   activeEmbeddedProjectId.value = projectId
 
-  // If already open, just bring it to the front
-  if (embeddedApps.value.has(projectId)) return
+  const existingApp = embeddedApps.value.get(projectId)
+  if (existingApp?.url && !existingApp.loading) {
+    const status = await getRuntimeStatus(projectId)
+    if (status.status === 'running' && status.port && existingApp.projectPort === status.port) {
+      return
+    }
+  }
 
-  embeddedApps.value.set(projectId, {
-    url: '',
-    loading: true,
-    kind: 'project',
-    sandbox: PROJECT_IFRAME_SANDBOX
-  })
+  if (existingApp) {
+    embeddedApps.value = new Map(embeddedApps.value).set(projectId, {
+      ...existingApp,
+      url: '',
+      loading: true,
+      projectPort: undefined
+    })
+  } else {
+    embeddedApps.value.set(projectId, {
+      url: '',
+      loading: true,
+      kind: 'project',
+      sandbox: PROJECT_IFRAME_SANDBOX,
+      projectPort: undefined
+    })
+  }
 
   try {
     let status = await getRuntimeStatus(projectId)
@@ -180,7 +210,8 @@ async function openEmbeddedProject (projectId: string) {
 
     const appState = embeddedApps.value.get(projectId)
     if (appState && status.status === 'running' && status.port) {
-      appState.url = `http://127.0.0.1:${status.port}`
+      appState.url = buildProjectFrameUrl(status.port)
+      appState.projectPort = status.port
     }
 
     await refreshRunningApps()
@@ -382,6 +413,49 @@ function closeLanModal () {
   lanModal.value.visible = false
 }
 
+function syncEmbeddedProjectStates (projects: ProjectListItem[]) {
+  const projectStatusMap = new Map(projects.map(project => [project.id, project.runtime ?? { status: 'unknown' }]))
+  const nextEmbeddedApps = new Map(embeddedApps.value)
+  let hasChanges = false
+
+  for (const [appId, appState] of embeddedApps.value) {
+    if (appState.kind !== 'project') continue
+
+    const runtime = projectStatusMap.get(appId)
+    if (runtime?.status === 'starting' && appState.loading) {
+      continue
+    }
+
+    if (!runtime || runtime.status !== 'running' || !runtime.port) {
+      if (appState.url || appState.projectPort !== undefined || appState.loading) {
+        nextEmbeddedApps.set(appId, {
+          ...appState,
+          url: '',
+          loading: false,
+          projectPort: undefined
+        })
+        hasChanges = true
+      }
+      continue
+    }
+
+    const nextUrl = buildProjectFrameUrl(runtime.port)
+    if (appState.url !== nextUrl || appState.projectPort !== runtime.port) {
+      nextEmbeddedApps.set(appId, {
+        ...appState,
+        url: nextUrl,
+        loading: false,
+        projectPort: runtime.port
+      })
+      hasChanges = true
+    }
+  }
+
+  if (hasChanges) {
+    embeddedApps.value = nextEmbeddedApps
+  }
+}
+
 async function refreshRunningApps () {
   if (!window.electronAPI) return
 
@@ -418,6 +492,7 @@ async function refreshRunningApps () {
 
     // Atomic replacement ensures Vue detects the change reliably
     runningApps.value = nextRunningApps
+    syncEmbeddedProjectStates(projects)
   } catch {
     // ignore transient runtime errors
   }
@@ -440,6 +515,9 @@ onMounted(async () => {
   if (isStandaloneProjectWindow) return
 
   await refreshRunningApps()
+  runningAppsInterval = setInterval(() => {
+    void refreshRunningApps()
+  }, RUNNING_APPS_REFRESH_INTERVAL_MS)
   document.addEventListener('click', onDocClickGlobal)
 
   if (window.electronAPI?.onProjectChanged) {
@@ -467,6 +545,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopThemeWatcher?.()
+  if (runningAppsInterval) {
+    clearInterval(runningAppsInterval)
+    runningAppsInterval = null
+  }
 
   if (isStandaloneProjectWindow) return
 

@@ -890,10 +890,12 @@ function setupIPC (): void {
       }
     }
     const lanIp = addresses.length > 0 ? addresses[0] : '127.0.0.1'
+    const encodedProjectId = encodeURIComponent(projectId)
     return {
       projectPort: port,
       lanUrl: port ? `http://${lanIp}:${port}` : null,
-      proxyUrl: `http://${lanIp}:${LAN_SERVER_PORT}/tool/${projectId}`,
+      proxyUrl: `http://${lanIp}:${LAN_SERVER_PORT}/tool/${encodedProjectId}`,
+      localProxyUrl: `http://127.0.0.1:${LAN_SERVER_PORT}/tool/${encodedProjectId}`,
       lanIp
     }
   })
