@@ -82,7 +82,7 @@ export class BuilderService {
    * For Next.js projects this produces .next/standalone/.
    */
   async build (projectId: string): Promise<BuildResult> {
-    const projectDir = path.join(this.projectsDir, projectId)
+    const projectDir = this._resolveProjectDir(projectId)
     const metaPath = path.join(projectDir, '.world-meta.json')
     const startTime = Date.now()
     const isNextProject = await this._isNextProject(projectDir)
@@ -299,6 +299,10 @@ export class BuilderService {
     }
   }
 
+  /**
+   * On Windows, pnpm-managed Next.js projects can fail when standalone tracing
+   * recreates symlinks without elevated privileges.
+   */
   private _shouldUseElevatedBuild (projectDir: string, isNextProject: boolean): boolean {
     return process.platform === 'win32' &&
       isNextProject &&
@@ -314,9 +318,10 @@ export class BuilderService {
       return await this._runElevatedWindowsBuild(projectDir, env)
     }
 
-    return await this._spawnCommand('npm', ['run', 'build'], {
+    return await this._spawnCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], {
       cwd: projectDir,
-      env
+      env,
+      shell: false
     })
   }
 
@@ -325,33 +330,45 @@ export class BuilderService {
     env: NodeJS.ProcessEnv
   ): Promise<CommandExecutionResult> {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'the-world-build-'))
+    const launcherPath = path.join(tempDir, 'launch-elevated-next-build.ps1')
     const runnerPath = path.join(tempDir, 'elevated-next-build.ps1')
+    const configPath = path.join(tempDir, 'build-config.json')
     const stdoutPath = path.join(tempDir, 'stdout.log')
     const stderrPath = path.join(tempDir, 'stderr.log')
     const exitCodePath = path.join(tempDir, 'exit-code.txt')
 
     try {
-      await fs.writeFile(
-        runnerPath,
-        this._buildElevatedWindowsScript(projectDir, env, stdoutPath, stderrPath, exitCodePath),
-        'utf-8'
-      )
+      const config = {
+        projectDir,
+        stdoutPath,
+        stderrPath,
+        exitCodePath,
+        env: Object.fromEntries(
+          Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+        )
+      }
 
-      const launchCommand = [
-        '$ErrorActionPreference = \'Stop\'',
-        `Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','${this._escapePowerShellString(runnerPath)}') | Out-Null`
-      ].join('; ')
+      await Promise.all([
+        fs.writeFile(configPath, JSON.stringify(config), 'utf-8'),
+        fs.writeFile(runnerPath, this._buildElevatedWindowsRunnerScript(), 'utf-8'),
+        fs.writeFile(launcherPath, this._buildElevatedWindowsLauncherScript(), 'utf-8')
+      ])
 
       const launcherResult = await this._spawnCommand('powershell.exe', [
         '-NoProfile',
         '-NonInteractive',
         '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        launchCommand
+        'RemoteSigned',
+        '-File',
+        launcherPath,
+        '-RunnerPath',
+        runnerPath,
+        '-ConfigPath',
+        configPath
       ], {
         cwd: projectDir,
-        env: process.env
+        env: process.env,
+        shell: false
       })
 
       const [stdout, stderr, exitCodeRaw] = await Promise.all([
@@ -368,44 +385,58 @@ export class BuilderService {
 
       return { code: launcherResult.code, output }
     } finally {
-      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(tempDir, { recursive: true, force: true }).catch((err) => {
+        console.warn(`[BuilderService] Failed to clean up temporary elevated build files: ${(err as Error).message}`)
+      })
     }
   }
 
-  private _buildElevatedWindowsScript (
-    projectDir: string,
-    env: NodeJS.ProcessEnv,
-    stdoutPath: string,
-    stderrPath: string,
-    exitCodePath: string
-  ): string {
-    const escape = (value: string): string => this._escapePowerShellString(value)
-    const envAssignments = Object.entries(env)
-      .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
-      .map(([key, value]) => `$psi.Environment['${escape(key)}'] = '${escape(value)}'`)
-      .join('\n')
-
+  private _buildElevatedWindowsLauncherScript (): string {
     return [
       '$ErrorActionPreference = \'Stop\'',
+      'param(',
+      '  [Parameter(Mandatory = $true)][string]$RunnerPath,',
+      '  [Parameter(Mandatory = $true)][string]$ConfigPath',
+      ')',
+      'Start-Process -FilePath \'powershell.exe\' -Verb RunAs -Wait -PassThru -ArgumentList @(',
+      '  \'-NoProfile\',',
+      '  \'-NonInteractive\',',
+      '  \'-ExecutionPolicy\',',
+      '  \'RemoteSigned\',',
+      '  \'-File\',',
+      '  $RunnerPath,',
+      '  \'-ConfigPath\',',
+      '  $ConfigPath',
+      ') | Out-Null'
+    ].join('\n')
+  }
+
+  private _buildElevatedWindowsRunnerScript (): string {
+    return [
+      '$ErrorActionPreference = \'Stop\'',
+      'param([Parameter(Mandatory = $true)][string]$ConfigPath)',
+      '$config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json',
       '$psi = New-Object System.Diagnostics.ProcessStartInfo',
       '$psi.FileName = \'cmd.exe\'',
       '$psi.Arguments = \'/d /s /c "npm run build"\'',
-      `$psi.WorkingDirectory = '${escape(projectDir)}'`,
+      '$psi.WorkingDirectory = [string]$config.projectDir',
       '$psi.UseShellExecute = $false',
       '$psi.RedirectStandardOutput = $true',
       '$psi.RedirectStandardError = $true',
-      envAssignments,
+      'foreach ($property in $config.env.PSObject.Properties) {',
+      '  $psi.Environment[[string]$property.Name] = [string]$property.Value',
+      '}',
       '$process = New-Object System.Diagnostics.Process',
       '$process.StartInfo = $psi',
       '$null = $process.Start()',
       '$stdout = $process.StandardOutput.ReadToEnd()',
       '$stderr = $process.StandardError.ReadToEnd()',
       '$process.WaitForExit()',
-      `[System.IO.File]::WriteAllText('${escape(stdoutPath)}', $stdout, [System.Text.Encoding]::UTF8)`,
-      `[System.IO.File]::WriteAllText('${escape(stderrPath)}', $stderr, [System.Text.Encoding]::UTF8)`,
-      `[System.IO.File]::WriteAllText('${escape(exitCodePath)}', [string]$process.ExitCode, [System.Text.Encoding]::UTF8)`,
+      '[System.IO.File]::WriteAllText([string]$config.stdoutPath, $stdout, [System.Text.Encoding]::UTF8)',
+      '[System.IO.File]::WriteAllText([string]$config.stderrPath, $stderr, [System.Text.Encoding]::UTF8)',
+      '[System.IO.File]::WriteAllText([string]$config.exitCodePath, [string]$process.ExitCode, [System.Text.Encoding]::UTF8)',
       'exit $process.ExitCode'
-    ].filter(Boolean).join('\n')
+    ].join('\n')
   }
 
   private async _spawnCommand (
@@ -414,13 +445,16 @@ export class BuilderService {
     options: {
       cwd: string
       env: NodeJS.ProcessEnv
+      shell?: boolean
     }
   ): Promise<CommandExecutionResult> {
+    this._assertSafeWorkingDirectory(options.cwd)
+
     return await new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: options.cwd,
         stdio: 'pipe',
-        shell: true,
+        shell: options.shell ?? false,
         env: options.env
       })
 
@@ -444,8 +478,20 @@ export class BuilderService {
     }
   }
 
-  private _escapePowerShellString (value: string): string {
-    return value.replace(/'/g, '\'\'')
+  private _resolveProjectDir (projectId: string): string {
+    const baseDir = path.resolve(this.projectsDir)
+    const projectDir = path.resolve(baseDir, projectId)
+    if (projectDir !== baseDir && !projectDir.startsWith(`${baseDir}${path.sep}`)) {
+      throw new Error('Invalid project id')
+    }
+    return projectDir
+  }
+
+  private _assertSafeWorkingDirectory (cwd: string): void {
+    const resolved = path.resolve(cwd)
+    if (!path.isAbsolute(resolved)) {
+      throw new Error('Working directory must be absolute')
+    }
   }
 
   private async _normalizeNextProjectFiles (projectDir: string): Promise<void> {
@@ -659,10 +705,11 @@ export class BuilderService {
    */
   private _installDeps (cwd: string): Promise<void> {
     return createBundledRuntimeEnv(cwd).then(env => new Promise((resolve, reject) => {
-      const child = spawn('npm', ['install'], {
+      this._assertSafeWorkingDirectory(cwd)
+      const child = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install'], {
         cwd,
         stdio: 'pipe',
-        shell: true,
+        shell: false,
         env
       })
 
