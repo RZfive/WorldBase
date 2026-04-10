@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -59,6 +60,11 @@ export interface CleanupResult {
   error?: string
 }
 
+interface CommandExecutionResult {
+  code: number | null
+  output: string
+}
+
 /**
  * BuilderService — 编译服务
  * 负责在 npm install 之后、启动之前执行编译步骤
@@ -102,63 +108,48 @@ export class BuilderService {
       NEXT_PUBLIC_THE_WORLD_SYSTEM_BASE_URL: `http://127.0.0.1:${LAN_SERVER_PORT}/api/system`
     })
 
-    return new Promise((resolve) => {
-      const child = spawn('npm', ['run', 'build'], {
-        cwd: projectDir,
-        stdio: 'pipe',
-        shell: true,
-        env
-      })
+    try {
+      const { code, output } = await this._runBuildCommand(projectDir, env, isNextProject)
+      const duration = Date.now() - startTime
 
-      let output = ''
-      child.stdout?.on('data', (data: Buffer) => { output += data.toString() })
-      child.stderr?.on('data', (data: Buffer) => { output += data.toString() })
+      if (code === 0) {
+        // Post-build: copy static assets for Next.js standalone mode
+        await this._copyNextStaticAssets(projectDir)
 
-      child.on('exit', async (code) => {
-        const duration = Date.now() - startTime
-
-        if (code === 0) {
-          // Post-build: copy static assets for Next.js standalone mode
-          await this._copyNextStaticAssets(projectDir)
-
-          if (isNextProject && !this._hasStandaloneOutput(projectDir)) {
-            await this._updateBuildStatus(metaPath, 'failed')
-            resolve({
-              success: false,
-              buildStatus: 'failed',
-              duration,
-              error: 'Next.js build completed but did not generate .next/standalone/server.js. Ensure next.config.js sets output: \'standalone\'.',
-              output
-            })
-            return
-          }
-
-          const buildHash = await this._computeSourceHash(projectDir)
-          await this._updateBuildMeta(metaPath, 'built', buildHash)
-          resolve({ success: true, buildStatus: 'built', duration, output })
-        } else {
+        if (isNextProject && !this._hasStandaloneOutput(projectDir)) {
           await this._updateBuildStatus(metaPath, 'failed')
-          resolve({
+          return {
             success: false,
             buildStatus: 'failed',
             duration,
-            error: `Build failed with exit code ${code}`,
+            error: 'Next.js build completed but did not generate .next/standalone/server.js. Ensure next.config.js sets output: \'standalone\'.',
             output
-          })
+          }
         }
-      })
 
-      child.on('error', async (err) => {
-        const duration = Date.now() - startTime
-        await this._updateBuildStatus(metaPath, 'failed')
-        resolve({
-          success: false,
-          buildStatus: 'failed',
-          duration,
-          error: err.message
-        })
-      })
-    })
+        const buildHash = await this._computeSourceHash(projectDir)
+        await this._updateBuildMeta(metaPath, 'built', buildHash)
+        return { success: true, buildStatus: 'built', duration, output }
+      }
+
+      await this._updateBuildStatus(metaPath, 'failed')
+      return {
+        success: false,
+        buildStatus: 'failed',
+        duration,
+        error: `Build failed with exit code ${code}`,
+        output
+      }
+    } catch (err) {
+      const duration = Date.now() - startTime
+      await this._updateBuildStatus(metaPath, 'failed')
+      return {
+        success: false,
+        buildStatus: 'failed',
+        duration,
+        error: (err as Error).message
+      }
+    }
   }
 
   /**
@@ -306,6 +297,155 @@ export class BuilderService {
       await fs.mkdir(path.join(standalonePath, '.next'), { recursive: true })
       await fs.cp(staticSrc, staticDest, { recursive: true })
     }
+  }
+
+  private _shouldUseElevatedBuild (projectDir: string, isNextProject: boolean): boolean {
+    return process.platform === 'win32' &&
+      isNextProject &&
+      existsSync(path.join(projectDir, 'node_modules', '.pnpm'))
+  }
+
+  private async _runBuildCommand (
+    projectDir: string,
+    env: NodeJS.ProcessEnv,
+    isNextProject: boolean
+  ): Promise<CommandExecutionResult> {
+    if (this._shouldUseElevatedBuild(projectDir, isNextProject)) {
+      return await this._runElevatedWindowsBuild(projectDir, env)
+    }
+
+    return await this._spawnCommand('npm', ['run', 'build'], {
+      cwd: projectDir,
+      env
+    })
+  }
+
+  private async _runElevatedWindowsBuild (
+    projectDir: string,
+    env: NodeJS.ProcessEnv
+  ): Promise<CommandExecutionResult> {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'the-world-build-'))
+    const runnerPath = path.join(tempDir, 'elevated-next-build.ps1')
+    const stdoutPath = path.join(tempDir, 'stdout.log')
+    const stderrPath = path.join(tempDir, 'stderr.log')
+    const exitCodePath = path.join(tempDir, 'exit-code.txt')
+
+    try {
+      await fs.writeFile(
+        runnerPath,
+        this._buildElevatedWindowsScript(projectDir, env, stdoutPath, stderrPath, exitCodePath),
+        'utf-8'
+      )
+
+      const launchCommand = [
+        '$ErrorActionPreference = \'Stop\'',
+        `Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','${this._escapePowerShellString(runnerPath)}') | Out-Null`
+      ].join('; ')
+
+      const launcherResult = await this._spawnCommand('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        launchCommand
+      ], {
+        cwd: projectDir,
+        env: process.env
+      })
+
+      const [stdout, stderr, exitCodeRaw] = await Promise.all([
+        this._readTextFileIfExists(stdoutPath),
+        this._readTextFileIfExists(stderrPath),
+        this._readTextFileIfExists(exitCodePath)
+      ])
+
+      const output = [launcherResult.output, stdout, stderr].filter(Boolean).join('\n').trim()
+      const parsedExitCode = Number.parseInt(exitCodeRaw.trim(), 10)
+      if (Number.isFinite(parsedExitCode)) {
+        return { code: parsedExitCode, output }
+      }
+
+      return { code: launcherResult.code, output }
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  private _buildElevatedWindowsScript (
+    projectDir: string,
+    env: NodeJS.ProcessEnv,
+    stdoutPath: string,
+    stderrPath: string,
+    exitCodePath: string
+  ): string {
+    const escape = (value: string): string => this._escapePowerShellString(value)
+    const envAssignments = Object.entries(env)
+      .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+      .map(([key, value]) => `$psi.Environment['${escape(key)}'] = '${escape(value)}'`)
+      .join('\n')
+
+    return [
+      '$ErrorActionPreference = \'Stop\'',
+      '$psi = New-Object System.Diagnostics.ProcessStartInfo',
+      '$psi.FileName = \'cmd.exe\'',
+      '$psi.Arguments = \'/d /s /c "npm run build"\'',
+      `$psi.WorkingDirectory = '${escape(projectDir)}'`,
+      '$psi.UseShellExecute = $false',
+      '$psi.RedirectStandardOutput = $true',
+      '$psi.RedirectStandardError = $true',
+      envAssignments,
+      '$process = New-Object System.Diagnostics.Process',
+      '$process.StartInfo = $psi',
+      '$null = $process.Start()',
+      '$stdout = $process.StandardOutput.ReadToEnd()',
+      '$stderr = $process.StandardError.ReadToEnd()',
+      '$process.WaitForExit()',
+      `[System.IO.File]::WriteAllText('${escape(stdoutPath)}', $stdout, [System.Text.Encoding]::UTF8)`,
+      `[System.IO.File]::WriteAllText('${escape(stderrPath)}', $stderr, [System.Text.Encoding]::UTF8)`,
+      `[System.IO.File]::WriteAllText('${escape(exitCodePath)}', [string]$process.ExitCode, [System.Text.Encoding]::UTF8)`,
+      'exit $process.ExitCode'
+    ].filter(Boolean).join('\n')
+  }
+
+  private async _spawnCommand (
+    command: string,
+    args: string[],
+    options: {
+      cwd: string
+      env: NodeJS.ProcessEnv
+    }
+  ): Promise<CommandExecutionResult> {
+    return await new Promise((resolve, reject) => {
+      const child = spawn(command, args, {
+        cwd: options.cwd,
+        stdio: 'pipe',
+        shell: true,
+        env: options.env
+      })
+
+      let output = ''
+      child.stdout?.on('data', (data: Buffer) => { output += data.toString() })
+      child.stderr?.on('data', (data: Buffer) => { output += data.toString() })
+
+      child.on('exit', (code) => {
+        resolve({ code, output })
+      })
+
+      child.on('error', reject)
+    })
+  }
+
+  private async _readTextFileIfExists (filePath: string): Promise<string> {
+    try {
+      return await fs.readFile(filePath, 'utf-8')
+    } catch {
+      return ''
+    }
+  }
+
+  private _escapePowerShellString (value: string): string {
+    return value.replace(/'/g, '\'\'')
   }
 
   private async _normalizeNextProjectFiles (projectDir: string): Promise<void> {

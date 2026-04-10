@@ -59,6 +59,8 @@ pnpm electron:dev
 pnpm electron:build
 ```
 
+> Windows 下如果生成/打包 Next.js standalone 应用时触发 symlink 权限错误，The World 会在构建阶段自动拉起管理员授权。
+
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |
