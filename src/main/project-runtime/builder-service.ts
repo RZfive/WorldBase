@@ -230,6 +230,14 @@ export class BuilderService {
       }
     }
 
+    // Remove stale lockfiles that may have been left by a previously failed install
+    for (const lockfile of ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']) {
+      const lockfilePath = path.join(projectDir, lockfile)
+      if (existsSync(lockfilePath)) {
+        try { await fs.rm(lockfilePath, { force: true }) } catch { /* best-effort */ }
+      }
+    }
+
     if (existsSync(packageJsonPath)) {
       await ensureNextRuntimeCompatiblePackageJson(this.projectsDir, projectDir)
       await this._installDeps(projectDir)
@@ -361,8 +369,11 @@ export class BuilderService {
         )
       }
 
+      // Write config JSON with UTF-8 BOM so that PowerShell 5.1 (which defaults
+      // to the system ANSI code page) reads CJK project directory paths correctly.
+      const UTF8_BOM = '\uFEFF'
       await Promise.all([
-        fs.writeFile(configPath, JSON.stringify(config), 'utf-8'),
+        fs.writeFile(configPath, UTF8_BOM + JSON.stringify(config), 'utf-8'),
         fs.writeFile(runnerPath, this._buildElevatedWindowsRunnerScript(), 'utf-8'),
         fs.writeFile(launcherPath, this._buildElevatedWindowsLauncherScript(), 'utf-8')
       ])
@@ -416,12 +427,14 @@ export class BuilderService {
   }
 
   private _buildElevatedWindowsLauncherScript (): string {
+    // param() MUST be the first statement in a PowerShell script;
+    // only comments and [CmdletBinding()] may precede it.
     return [
-      '$ErrorActionPreference = \'Stop\'',
       'param(',
       '  [Parameter(Mandatory = $true)][string]$RunnerPath,',
       '  [Parameter(Mandatory = $true)][string]$ConfigPath',
       ')',
+      '$ErrorActionPreference = \'Stop\'',
       'Start-Process -FilePath \'powershell.exe\' -Verb RunAs -Wait -PassThru -ArgumentList @(',
       '  \'-NoProfile\',',
       '  \'-NonInteractive\',',
@@ -436,10 +449,11 @@ export class BuilderService {
   }
 
   private _buildElevatedWindowsRunnerScript (): string {
+    // param() MUST be the first statement in a PowerShell script.
     return [
-      '$ErrorActionPreference = \'Stop\'',
       'param([Parameter(Mandatory = $true)][string]$ConfigPath)',
-      '$config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json',
+      '$ErrorActionPreference = \'Stop\'',
+      '$config = Get-Content -LiteralPath $ConfigPath -Encoding UTF8 -Raw | ConvertFrom-Json',
       '$psi = New-Object System.Diagnostics.ProcessStartInfo',
       '$psi.FileName = \'cmd.exe\'',
       '$psi.Arguments = \'/d /s /c "npm run build"\'',

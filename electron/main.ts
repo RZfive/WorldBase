@@ -9,6 +9,7 @@ import { ProjectFS } from '../src/main/project-fs/project-fs.js'
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
 import { BuilderService } from '../src/main/project-runtime/builder-service.js'
 import { AppGateway } from '../src/main/project-runtime/app-gateway.js'
+import { ProcessManagerService } from '../src/main/project-runtime/process-manager-service.js'
 import { ProjectApiClient } from '../src/main/project-api-bridge/api-client.js'
 import { ProjectDataAccess } from '../src/main/project-data-access/data-access.js'
 import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-adapter.js'
@@ -45,6 +46,7 @@ let projectFS: ProjectFS | null = null
 let runtimeManager: RuntimeManager | null = null
 let builderService: BuilderService | null = null
 let appGateway: AppGateway | null = null
+let processManagerService: ProcessManagerService | null = null
 let systemService: SystemService | null = null
 let apiClient: ProjectApiClient | null = null
 let dataAccess: ProjectDataAccess | null = null
@@ -63,6 +65,36 @@ const activeChatStreams = new Map<string, AbortController>()
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
 const MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
 const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
+
+function openWebviewPopupInDock (url: string): void {
+  let parsedUrl: URL
+
+  try {
+    parsedUrl = new URL(url)
+  } catch {
+    return
+  }
+
+  if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('browser:openUrlInDock', { url: parsedUrl.toString() })
+    }
+    return
+  }
+
+  void shell.openExternal(parsedUrl.toString()).catch((error) => {
+    console.error('[main] Failed to open external popup URL:', error)
+  })
+}
+
+function attachMainWindowWebviewHandlers (win: BrowserWindow): void {
+  win.webContents.on('did-attach-webview', (_event, guestContents) => {
+    guestContents.setWindowOpenHandler(({ url }) => {
+      openWebviewPopupInDock(url)
+      return { action: 'deny' }
+    })
+  })
+}
 
 function getMessageText (content: MessageContent): string {
   if (typeof content === 'string') return content
@@ -379,6 +411,7 @@ async function initializeServices (): Promise<void> {
   }
 
   appGateway = new AppGateway(runtimeManager, projectFS, builderService)
+  processManagerService = new ProcessManagerService(runtimeManager, projectFS)
   // System snapshots read the current runtime/app-gateway state directly.
   // Periodic health checks are started here before the service is exposed via IPC/LAN.
   appGateway.startHealthChecks()
@@ -416,6 +449,14 @@ function createWindow (): void {
       nodeIntegration: false,
       webviewTag: true
     }
+  })
+
+  attachMainWindowWebviewHandlers(mainWindow)
+
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (!/(\[web-apps\]|\[launchpad\]|\[browser-webview\])/.test(message)) return
+    const levelLabel = ['debug', 'info', 'warn', 'error'][level] || String(level)
+    console.log(`[renderer:${levelLabel}] ${message} (${sourceId}:${line})`)
   })
 
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -753,6 +794,39 @@ function setupIPC (): void {
     return { success: true }
   })
 
+  // Process management
+  ipcMain.handle('process:getSnapshot', async () => {
+    return processManagerService!.getSnapshot()
+  })
+
+  ipcMain.handle('process:restart', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    const result = await processManagerService!.restartProject(projectId)
+    if (result.success) {
+      broadcastToAppWindows('projects:changed', { action: 'started', projectId })
+    }
+    return result
+  })
+
+  ipcMain.handle('process:stop', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    const result = await processManagerService!.stopProject(projectId)
+    if (result.success) {
+      broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
+    }
+    return result
+  })
+
+  ipcMain.handle('process:forceKill', async (_event: IpcMainInvokeEvent, projectId: string) => {
+    const result = await processManagerService!.forceKillProject(projectId)
+    if (result.success) {
+      broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
+    }
+    return result
+  })
+
+  ipcMain.handle('process:killOrphan', async (_event: IpcMainInvokeEvent, pid: number) => {
+    return processManagerService!.killOrphanProcess(pid)
+  })
+
   // Data access
   ipcMain.handle('data:query', async (_event: IpcMainInvokeEvent, projectId: string, sql: string) => {
     return dataAccess!.queryDatabase(projectId, sql)
@@ -963,10 +1037,21 @@ function setupIPC (): void {
   })
 
   ipcMain.handle('settings:getWebApps', async () => {
-    return settingsStore!.getWebApps()
+    const webApps = settingsStore!.getWebApps()
+    console.info('[main:web-apps] getWebApps', webApps.map(app => ({
+      id: app.id,
+      name: app.name,
+      url: app.url
+    })))
+    return webApps
   })
 
   ipcMain.handle('settings:saveWebApps', async (_event: IpcMainInvokeEvent, webApps: WebAppShortcut[]) => {
+    console.info('[main:web-apps] saveWebApps', webApps.map(app => ({
+      id: app.id,
+      name: app.name,
+      url: app.url
+    })))
     settingsStore!.saveWebApps(webApps)
     return { success: true }
   })

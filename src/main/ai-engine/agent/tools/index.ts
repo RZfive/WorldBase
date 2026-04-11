@@ -5,6 +5,7 @@ import { toolCallApi } from './tool-call-api.js'
 import { toolQueryDb } from './tool-query-db.js'
 import { toolRunCommand } from './tool-run-command.js'
 import { toolListProjects } from './tool-list-projects.js'
+import { toolListProjectFiles } from './tool-list-project-files.js'
 import { toolAnalyzeData } from './tool-analyze-data.js'
 import { toolCreateProject } from './tool-create-project.js'
 import { toolLocalFileRead } from './tool-local-file-read.js'
@@ -41,6 +42,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolQueryDb(services),
     toolRunCommand(services),
     toolListProjects(services),
+    toolListProjectFiles(services),
     toolAnalyzeData(services),
     toolCreateProject(services, getSessionState),
     toolRebuildProject(services),

@@ -61,3 +61,15 @@ export function createWebAppId (url: string): string {
   const slugSource = `${parsed.hostname}${parsed.pathname}`.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'site'
   return `web_${slugSource.slice(0, 48)}_${hashString(normalizedUrl)}`
 }
+
+/**
+ * Create a unique web app ID that won't collide with existing entries for the
+ * same URL.  Used when the user explicitly adds a *new* shortcut to the launchpad.
+ */
+export function createUniqueWebAppId (url: string): string {
+  const normalizedUrl = normalizeWebUrlInput(url) || url.trim()
+  const parsed = new URL(normalizedUrl)
+  const slugSource = `${parsed.hostname}${parsed.pathname}`.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'site'
+  const uniqueSuffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+  return `web_${slugSource.slice(0, 48)}_${uniqueSuffix}`
+}

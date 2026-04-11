@@ -1,5 +1,5 @@
 export const PROJECT_COMMAND_WHITELIST = [
-  'npm', 'npx', 'node', 'git', 'ls', 'cat', 'echo', 'pwd', 'find', 'grep', 'head', 'tail', 'wc'
+  'npm', 'node', 'git', 'echo'
 ]
 
 export const LOCAL_COMMAND_DISCOVERY_CANDIDATES = [
