@@ -59,7 +59,7 @@ export function getNextRuntimeCompatibilityProfile (
 ): NextRuntimeCompatibilityProfile {
   if (compareSemver(nodeVersion, '20.9.0') >= 0) {
     return {
-      nextVersionRange: '^16.0.0',
+      nextVersionRange: '^15.0.0',
       reactVersionRange: '^19.0.0',
       reactDomVersionRange: '^19.0.0',
       minimumNodeVersion: '20.9.0'

@@ -116,6 +116,33 @@ interface ServiceEntry {
   restartCount: number
 }
 
+interface ManagedProcessInfo {
+  projectId: string
+  projectName: string
+  status: string
+  pid?: number
+  port?: number
+  startedAt?: string
+  uptimeSeconds?: number
+  memoryRssBytes?: number
+  exitCode?: number | null
+  error?: string
+}
+
+interface OrphanProcessInfo {
+  pid: number
+  name: string
+  memoryRssBytes: number
+  commandLine: string
+  listeningPort?: number
+}
+
+interface ProcessManagerSnapshot {
+  managed: ManagedProcessInfo[]
+  orphans: OrphanProcessInfo[]
+  fetchedAt: string
+}
+
 interface SystemStatusSnapshot {
   fetchedAt: string
   refreshIntervalMs: number
@@ -224,7 +251,15 @@ export interface ElectronAPI {
   getOpenWindows: () => Promise<string[]>
   focusProjectWindow: (projectId: string) => Promise<{ success: boolean }>
   onProjectWindowClosed: (callback: (event: { projectId: string }) => void) => () => void
+  onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
+
+  // Process management
+  getProcessSnapshot: () => Promise<ProcessManagerSnapshot>
+  restartManagedProcess: (projectId: string) => Promise<{ success: boolean; error?: string }>
+  stopManagedProcess: (projectId: string) => Promise<{ success: boolean; error?: string }>
+  forceKillManagedProcess: (projectId: string) => Promise<{ success: boolean; error?: string }>
+  killOrphanProcess: (pid: number) => Promise<{ success: boolean; error?: string }>
 
   // LAN
   getLanInfo: () => Promise<{ port: number; addresses: string[]; baseUrl: string }>
@@ -322,7 +357,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('project:windowClosed', handler)
     return () => { ipcRenderer.removeListener('project:windowClosed', handler) }
   },
+  onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { url: string }) => callback(event)
+    ipcRenderer.on('browser:openUrlInDock', handler)
+    return () => { ipcRenderer.removeListener('browser:openUrlInDock', handler) }
+  },
   getSystemStatus: () => ipcRenderer.invoke('system:getStatus'),
+
+  // Process management
+  getProcessSnapshot: () => ipcRenderer.invoke('process:getSnapshot'),
+  restartManagedProcess: (projectId: string) => ipcRenderer.invoke('process:restart', projectId),
+  stopManagedProcess: (projectId: string) => ipcRenderer.invoke('process:stop', projectId),
+  forceKillManagedProcess: (projectId: string) => ipcRenderer.invoke('process:forceKill', projectId),
+  killOrphanProcess: (pid: number) => ipcRenderer.invoke('process:killOrphan', pid),
 
   // LAN
   getLanInfo: () => ipcRenderer.invoke('lan:getInfo'),

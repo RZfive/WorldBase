@@ -239,15 +239,23 @@ function normalizeWebAppShortcut (value: unknown): WebAppShortcut | null {
 function normalizeWebApps (value: unknown): WebAppShortcut[] {
   if (!Array.isArray(value)) return []
 
-  const seenIds = new Set<string>()
-  return value
+  const normalized = value
     .map(normalizeWebAppShortcut)
     .filter((webApp): webApp is WebAppShortcut => Boolean(webApp))
-    .filter((webApp) => {
-      if (seenIds.has(webApp.id)) return false
-      seenIds.add(webApp.id)
-      return true
-    })
+
+  const seenIds = new Set<string>()
+  const seenUrls = new Set<string>()
+  const deduped: WebAppShortcut[] = []
+
+  for (let index = normalized.length - 1; index >= 0; index -= 1) {
+    const webApp = normalized[index]
+    if (seenIds.has(webApp.id) || seenUrls.has(webApp.url)) continue
+    seenIds.add(webApp.id)
+    seenUrls.add(webApp.url)
+    deduped.push(webApp)
+  }
+
+  return deduped.reverse()
 }
 
 function normalizeEnabledProviderIds (

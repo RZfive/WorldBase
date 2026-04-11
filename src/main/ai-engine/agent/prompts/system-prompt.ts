@@ -254,7 +254,7 @@ export async function listTables() {
 当用户要求修改或优化现有项目代码时:
 - **严禁调用 create_project 创建新项目**——必须使用 write_project_file 写入原有项目
 - 如果用户消息中包含项目 ID（如"项目ID: proj_xxx"），所有文件操作必须以该 project_id 为目标
-1. 先用 read_project_file 了解现有代码结构；优先按 200 行左右分段读取，大文件不要一次性整文件读取
+1. 先用 list_project_files 了解目录结构，再用 read_project_file 阅读现有代码；优先按 200 行左右分段读取，大文件不要一次性整文件读取
 2. 如果 read_project_file 返回 has_more=true、next_start_line 或 truncated=true，继续用 start_line=next_start_line 追读下一段，直到拿到完成当前任务所需的上下文
 3. 只在确实需要时继续追读后续分段；不要为了"完整看一遍"而盲目读取超大文件
 4. 用 write_project_file 写入修改后的代码
@@ -277,6 +277,7 @@ export async function listTables() {
 
 - 创建新项目前必须先规划 PRD 并获得用户确认，**绝对不能跳过规划步骤**
 - 修改代码前先理解现有结构，不要盲目覆盖
+- 项目结构探索优先使用 list_project_files 和 read_project_file；不要用 run_project_command 执行 ls、find、dir、npx 或其他探索性/交互式命令
 - 读取大文件时优先分段，先抓住与当前任务直接相关的 imports、类型、入口、目标函数和相邻调用链
 - 数据库查询只能用 SELECT，不能修改数据
 - 对命令执行保持谨慎，只执行安全的命令

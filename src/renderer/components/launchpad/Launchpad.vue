@@ -308,6 +308,11 @@ async function loadProjects () {
       window.electronAPI.listProjects() as Promise<Project[]>,
       window.electronAPI.getWebApps ? window.electronAPI.getWebApps() as Promise<WebAppShortcut[]> : Promise.resolve([])
     ])
+    console.info('[launchpad] loadProjects webApps', (nextWebApps as WebAppShortcut[]).map(app => ({
+      id: app.id,
+      name: app.name,
+      url: app.url
+    })))
     const mergedApps = [...nextProjects, ...(nextWebApps as unknown as Project[])]
     projects.value = mergedApps
     syncLayoutWithProjects(mergedApps)

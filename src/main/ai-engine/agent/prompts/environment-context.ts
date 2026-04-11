@@ -36,6 +36,7 @@ export function getEnvironmentContext (): string {
     '',
     '### 项目内命令工具限制',
     `- run_project_command 仅允许: ${PROJECT_COMMAND_WHITELIST.join(', ')}`,
+    '- 项目目录探索优先使用 list_project_files；文件内容优先使用 read_project_file，不要把 run_project_command 当作 ls/find/dir 的替代品',
     '- local_run_command 会在用户本机通过 shell 执行命令，默认超时 60 秒，最大 300 秒',
     '- local_run_command 未指定 cwd 时默认使用用户主目录；local_read_file / local_write_file 传参时应优先使用绝对路径',
     '- 对于已知存在的命令，直接使用；不要先用“试探命令是否存在”的方式反复探测环境'

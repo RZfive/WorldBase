@@ -213,14 +213,22 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
         } catch (err) {
           onProgress?.('⚠️ 依赖安装失败', (err as Error).message)
           console.warn(`[tool:create_project] Failed to install deps: ${(err as Error).message}`)
+
+          // Clean up partially-installed node_modules and lockfiles to prevent
+          // dirty state on retry via rebuild_project.
+          try {
+            await services.builderService.cleanup(projectId)
+          } catch { /* best-effort */ }
+
           return {
-            success: true,
+            success: false,
             ready: false,
             recoverable: true,
             stage: 'install',
             project,
             projectId,
-            message: `Project "${name}" created with ID: ${projectId}. Warning: npm install failed — ${(err as Error).message}`
+            error: `npm install failed — ${(err as Error).message}`,
+            message: `Project "${name}" files were created (ID: ${projectId}), but dependency installation failed. The project is NOT running. Error: ${(err as Error).message}. Fix package.json if needed and call rebuild_project with project_id "${projectId}" to retry.`
           }
         }
       }
@@ -248,27 +256,29 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
             onProgress?.('❌ 编译失败，项目未启动', buildResult.error || '')
             console.warn(`[tool:create_project] Build failed: ${buildResult.error}`)
             return {
-              success: true,
+              success: false,
               ready: false,
               recoverable: true,
               stage: 'build',
               project,
               projectId,
               output: buildResult.output,
-              message: `Project "${name}" created with ID: ${projectId}, but build failed — ${buildResult.error || 'unknown build error'}`
+              error: buildResult.error || 'unknown build error',
+              message: `Project "${name}" files were created (ID: ${projectId}), but the build failed. The project is NOT running. Error: ${buildResult.error || 'unknown build error'}. Please check the files and retry the build.`
             }
           }
         } catch (err) {
           onProgress?.('❌ 编译出错，项目未启动', (err as Error).message)
           console.warn(`[tool:create_project] Build error: ${(err as Error).message}`)
           return {
-            success: true,
+            success: false,
             ready: false,
             recoverable: true,
             stage: 'build',
             project,
             projectId,
-            message: `Project "${name}" created with ID: ${projectId}, but build failed — ${(err as Error).message}`
+            error: (err as Error).message,
+            message: `Project "${name}" files were created (ID: ${projectId}), but the build failed. The project is NOT running. Error: ${(err as Error).message}. Please check the files and retry the build.`
           }
         }
       }
@@ -285,14 +295,15 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
         onProgress?.('⚠️ 启动失败', (err as Error).message)
         console.warn(`[tool:create_project] Failed to auto-start: ${(err as Error).message}`)
         return {
-          success: true,
+          success: false,
           ready: false,
           recoverable: true,
           stage: 'start',
           project,
           projectId,
           logs: services.runtimeManager.getLogs(projectId, 40),
-          message: `Project "${name}" created with ID: ${projectId}, but failed to start automatically — ${(err as Error).message}`
+          error: (err as Error).message,
+          message: `Project "${name}" files were created (ID: ${projectId}), but the project failed to start. It is NOT running. Error: ${(err as Error).message}. Please check the project files and configuration.`
         }
       }
 

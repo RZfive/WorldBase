@@ -70,6 +70,27 @@ const COPY_FEEDBACK_MS = 2000
 const PROJECT_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals'
 const BROWSER_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals'
 
+function logWebAppsSnapshot (label: string, webApps: SavedWebApp[]) {
+  console.info(`[web-apps] ${label}`, webApps.map(app => ({
+    id: app.id,
+    name: app.name,
+    url: app.url
+  })))
+}
+
+function toPlainSavedWebApps (webApps: SavedWebApp[]): SavedWebApp[] {
+  return webApps.map(app => ({
+    id: app.id,
+    kind: 'web',
+    type: 'browser',
+    name: app.name,
+    url: app.url,
+    icon: app.icon,
+    createdAt: app.createdAt,
+    updatedAt: app.updatedAt
+  }))
+}
+
 const currentView = ref<MainView>('chat')
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
 const embeddedApps = ref(new Map<string, EmbeddedAppState>())
@@ -97,6 +118,7 @@ const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | 
 
 let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
+let browserOpenInDockCleanup: (() => void) | null = null
 let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
 let runningAppsInterval: ReturnType<typeof setInterval> | null = null
@@ -137,17 +159,28 @@ function buildProjectFrameUrl (port: number): string {
   return `http://127.0.0.1:${port}`
 }
 
-function isSavedWebAppId (appId: string): boolean {
-  return savedWebApps.value.some(app => app.id === appId)
+function resolveSavedWebAppId (
+  app: Pick<RunningApp, 'id' | 'kind' | 'url'>,
+  savedApps = savedWebApps.value
+): string | null {
+  if (app.kind !== 'browser') return null
+
+  const savedById = savedApps.find(entry => entry.id === app.id)
+  if (savedById) return savedById.id
+
+  const normalizedUrl = normalizeWebUrlInput(app.url || '')
+  if (!normalizedUrl) return null
+
+  const savedByUrl = savedApps.find(entry => normalizeWebUrlInput(entry.url) === normalizedUrl)
+  return savedByUrl?.id || null
 }
 
 function syncBrowserAppSavedFlags (nextSavedWebApps: SavedWebApp[]) {
-  const savedIds = new Set(nextSavedWebApps.map(app => app.id))
   const nextBrowserApps = new Map(browserApps.value)
   let hasChanges = false
 
   for (const [appId, app] of browserApps.value) {
-    const nextSavedState = savedIds.has(appId)
+    const nextSavedState = resolveSavedWebAppId(app, nextSavedWebApps) !== null
     if (app.savedToLaunchpad !== nextSavedState) {
       nextBrowserApps.set(appId, {
         ...app,
@@ -165,7 +198,8 @@ function syncBrowserAppSavedFlags (nextSavedWebApps: SavedWebApp[]) {
 async function loadSavedWebApps () {
   if (!window.electronAPI?.getWebApps) return
 
-  const nextSavedWebApps = await window.electronAPI.getWebApps() as SavedWebApp[]
+  const nextSavedWebApps = toPlainSavedWebApps(await window.electronAPI.getWebApps() as SavedWebApp[])
+  logWebAppsSnapshot('loadSavedWebApps <- main', nextSavedWebApps)
   savedWebApps.value = nextSavedWebApps
   syncBrowserAppSavedFlags(nextSavedWebApps)
 }
@@ -173,9 +207,19 @@ async function loadSavedWebApps () {
 async function persistSavedWebApps (nextSavedWebApps: SavedWebApp[]) {
   if (!window.electronAPI?.saveWebApps) return
 
-  await window.electronAPI.saveWebApps(nextSavedWebApps)
-  savedWebApps.value = nextSavedWebApps
-  syncBrowserAppSavedFlags(nextSavedWebApps)
+  const serializableWebApps = toPlainSavedWebApps(nextSavedWebApps)
+
+  logWebAppsSnapshot('persistSavedWebApps -> main', serializableWebApps)
+
+  try {
+    await window.electronAPI.saveWebApps(serializableWebApps)
+  } catch (err) {
+    console.error('[web-apps] persistSavedWebApps failed', err)
+    throw err
+  }
+
+  savedWebApps.value = serializableWebApps
+  syncBrowserAppSavedFlags(serializableWebApps)
 }
 
 function upsertBrowserApp (app: RunningApp) {
@@ -279,7 +323,18 @@ async function openEmbeddedProject (projectId: string) {
 
     await refreshRunningApps()
   } catch {
-    // keep the view, will show placeholder
+    // Start failed — remove the broken entry so we don't fall back to a
+    // stale app.  Return to chat instead of leaving a dead placeholder.
+    embeddedApps.value.delete(projectId)
+    if (activeEmbeddedProjectId.value === projectId) {
+      const remaining = [...embeddedApps.value.keys()]
+      if (remaining.length > 0) {
+        activeEmbeddedProjectId.value = remaining[remaining.length - 1]
+      } else {
+        activeEmbeddedProjectId.value = null
+        currentView.value = 'chat'
+      }
+    }
   } finally {
     const appState = embeddedApps.value.get(projectId)
     if (appState) appState.loading = false
@@ -292,9 +347,11 @@ function openWebLinkInApp (rawUrl: string, options: BrowserAppOpenOptions = {}) 
 
   const appId = options.appId || createWebAppId(normalizedUrl)
   const existingBrowserApp = browserApps.value.get(appId)
-  const appName = options.name || existingBrowserApp?.name || getWebAppNameFromUrl(normalizedUrl)
-  const appIcon = options.icon || existingBrowserApp?.icon || '🌐'
-  const savedToLaunchpad = options.savedToLaunchpad ?? existingBrowserApp?.savedToLaunchpad ?? isSavedWebAppId(appId)
+  const reuseExistingMetadata = normalizeWebUrlInput(existingBrowserApp?.url || '') === normalizedUrl
+  const appName = options.name || (reuseExistingMetadata ? existingBrowserApp?.name : undefined) || getWebAppNameFromUrl(normalizedUrl)
+  const appIcon = options.icon || (reuseExistingMetadata ? existingBrowserApp?.icon : undefined) || '🌐'
+  const savedToLaunchpad = options.savedToLaunchpad
+    ?? (resolveSavedWebAppId({ id: appId, kind: 'browser', url: normalizedUrl }) !== null)
 
   upsertBrowserApp({
     id: appId,
@@ -327,12 +384,17 @@ function handleBrowserAppStateChange (payload: { appId: string; url: string; tit
   const normalizedUrl = normalizeWebUrlInput(payload.url) || existingApp.url || payload.url
   const nextName = payload.title?.trim() || existingApp.name || (normalizedUrl ? getWebAppNameFromUrl(normalizedUrl) : existingApp.id)
   const nextIcon = payload.icon || existingApp.icon || '🌐'
+  const savedToLaunchpad = resolveSavedWebAppId({
+    ...existingApp,
+    url: normalizedUrl
+  }) !== null
 
   upsertBrowserApp({
     ...existingApp,
     name: nextName,
     url: normalizedUrl,
-    icon: nextIcon
+    icon: nextIcon,
+    savedToLaunchpad
   })
 
   const embeddedApp = embeddedApps.value.get(payload.appId)
@@ -346,6 +408,13 @@ function handleBrowserAppStateChange (payload: { appId: string; url: string; tit
 
 function showBrowserAppCtx (payload: { appId: string; x: number; y: number }) {
   const browserApp = browserApps.value.get(payload.appId)
+  console.info('[web-apps] showBrowserAppCtx', {
+    appId: payload.appId,
+    x: payload.x,
+    y: payload.y,
+    found: Boolean(browserApp),
+    knownAppIds: [...browserApps.value.keys()]
+  })
   if (!browserApp) return
 
   dockCtx.value = {
@@ -463,52 +532,83 @@ function closeDockApp (appId: string) {
 async function saveBrowserAppToLaunchpad (app: RunningApp) {
   if (app.kind !== 'browser' || !app.url) return
 
+  const normalizedUrl = normalizeWebUrlInput(app.url)
+  if (!normalizedUrl) return
+
   const now = new Date().toISOString()
-  const existingShortcut = savedWebApps.value.find(entry => entry.id === app.id)
+  const existingShortcut = savedWebApps.value.find(entry => (
+    entry.id === app.id || normalizeWebUrlInput(entry.url) === normalizedUrl
+  ))
+
   const nextShortcut: SavedWebApp = {
-    id: app.id,
+    id: existingShortcut?.id || createWebAppId(normalizedUrl),
     kind: 'web',
     type: 'browser',
-    name: app.name || getWebAppNameFromUrl(app.url),
-    url: app.url,
+    name: app.name || getWebAppNameFromUrl(normalizedUrl),
+    url: normalizedUrl,
     icon: app.icon && app.icon !== '🌐' ? app.icon : undefined,
     createdAt: existingShortcut?.createdAt || now,
     updatedAt: now
   }
 
-  const nextSavedWebApps = [
-    ...savedWebApps.value.filter(entry => entry.id !== app.id),
+  const nextSavedWebApps = toPlainSavedWebApps([
+    ...savedWebApps.value.filter(entry => {
+      const entryUrl = normalizeWebUrlInput(entry.url)
+      return entry.id !== nextShortcut.id && entryUrl !== normalizedUrl
+    }),
     nextShortcut
-  ]
+  ])
+
+  console.info('[web-apps] saveBrowserAppToLaunchpad', {
+    runningAppId: app.id,
+    runningAppName: app.name,
+    normalizedUrl,
+    nextShortcut,
+    previousCount: savedWebApps.value.length,
+    nextCount: nextSavedWebApps.length
+  })
 
   await persistSavedWebApps(nextSavedWebApps)
   upsertBrowserApp({
     ...app,
-    savedToLaunchpad: true,
+    savedToLaunchpad: resolveSavedWebAppId(app, nextSavedWebApps) !== null,
     icon: nextShortcut.icon || app.icon
   })
 }
 
-async function removeBrowserAppFromLaunchpad (appId: string) {
-  const nextSavedWebApps = savedWebApps.value.filter(entry => entry.id !== appId)
+async function removeBrowserAppFromLaunchpad (app: RunningApp) {
+  if (app.kind !== 'browser') return
+
+  const shortcutId = resolveSavedWebAppId(app)
+  if (!shortcutId) return
+
+  const nextSavedWebApps = toPlainSavedWebApps(savedWebApps.value.filter(entry => entry.id !== shortcutId))
   await persistSavedWebApps(nextSavedWebApps)
 
-  const browserApp = browserApps.value.get(appId)
-  if (!browserApp) return
   upsertBrowserApp({
-    ...browserApp,
-    savedToLaunchpad: false
+    ...app,
+    savedToLaunchpad: resolveSavedWebAppId(app, nextSavedWebApps) !== null
   })
 }
 
 async function dockSaveBrowserApp (app: RunningApp) {
   hideDockCtx()
-  await saveBrowserAppToLaunchpad(app)
+  console.info('[web-apps] dockSaveBrowserApp click', {
+    appId: app.id,
+    name: app.name,
+    url: app.url,
+    savedToLaunchpad: app.savedToLaunchpad
+  })
+  try {
+    await saveBrowserAppToLaunchpad(app)
+  } catch (err) {
+    console.error('[web-apps] dockSaveBrowserApp failed', err)
+  }
 }
 
-async function dockRemoveBrowserApp (appId: string) {
+async function dockRemoveBrowserApp (app: RunningApp) {
   hideDockCtx()
-  await removeBrowserAppFromLaunchpad(appId)
+  await removeBrowserAppFromLaunchpad(app)
 }
 
 /* ---- LAN Access modal ---- */
@@ -575,14 +675,19 @@ function syncEmbeddedProjectStates (projects: ProjectListItem[]) {
     }
 
     if (!runtime || runtime.status !== 'running' || !runtime.port) {
-      if (appState.url || appState.projectPort !== undefined || appState.loading) {
-        nextEmbeddedApps.set(appId, {
-          ...appState,
-          url: '',
-          loading: false,
-          projectPort: undefined
-        })
-        hasChanges = true
+      // Project is no longer running — remove the embedded entry so the dock
+      // doesn't silently fall back to a stale app after a startup failure.
+      nextEmbeddedApps.delete(appId)
+      hasChanges = true
+
+      if (activeEmbeddedProjectId.value === appId) {
+        const remaining = [...nextEmbeddedApps.keys()]
+        if (remaining.length > 0) {
+          activeEmbeddedProjectId.value = remaining[remaining.length - 1]
+        } else {
+          activeEmbeddedProjectId.value = null
+          currentView.value = 'chat'
+        }
       }
       continue
     }
@@ -690,6 +795,12 @@ onMounted(async () => {
       }
     })
   }
+
+  if (window.electronAPI?.onBrowserOpenUrlInDock) {
+    browserOpenInDockCleanup = window.electronAPI.onBrowserOpenUrlInDock(({ url }) => {
+      openWebLinkInApp(url)
+    })
+  }
 })
 
 onUnmounted(() => {
@@ -704,6 +815,7 @@ onUnmounted(() => {
   document.removeEventListener('click', onDocClickGlobal)
   projectChangedCleanup?.()
   windowClosedCleanup?.()
+  browserOpenInDockCleanup?.()
 })
 </script>
 
@@ -810,8 +922,8 @@ onUnmounted(() => {
             <div class="dock-ctx-item dock-ctx-danger" @click="dockStopApp(dockCtx.app!)">⏹️ 停止</div>
           </template>
           <template v-else>
-            <div class="dock-ctx-item" @click="dockSaveBrowserApp(dockCtx.app!)">{{ dockCtx.app?.savedToLaunchpad ? '💾 更新启动台应用' : '📌 添加为启动台应用' }}</div>
-            <div v-if="dockCtx.app?.savedToLaunchpad" class="dock-ctx-item" @click="dockRemoveBrowserApp(dockCtx.app!.id)">🗑️ 从启动台移除</div>
+            <div class="dock-ctx-item" @click="dockSaveBrowserApp(dockCtx.app!)">{{ dockCtx.app?.savedToLaunchpad ? '💾 更新启动台条目' : '📌 添加到启动台' }}</div>
+            <div v-if="dockCtx.app?.savedToLaunchpad" class="dock-ctx-item" @click="dockRemoveBrowserApp(dockCtx.app!)">🗑️ 从启动台移除</div>
             <div class="dock-ctx-divider"></div>
             <div class="dock-ctx-item dock-ctx-danger" @click="closeDockApp(dockCtx.app!.id)">✖️ 关闭网页</div>
           </template>
