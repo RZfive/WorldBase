@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { renderMermaidSvg } from "./mermaid";
+import { renderMermaidSvg } from "../mermaid";
 
 const props = withDefaults(
   defineProps<{

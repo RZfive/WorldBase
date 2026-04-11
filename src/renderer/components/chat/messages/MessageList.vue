@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick } from 'vue'
-import { buildMessageBlocks, getContentParts } from './message-utils'
-import type { ChatMessage, GalleryImage, FilePreviewState } from './types'
+import { buildMessageBlocks, getContentParts } from '../message-utils'
+import type { ChatMessage, GalleryImage, FilePreviewState } from '../types'
 import MessageRow from './MessageRow.vue'
-import ImageLightbox from './ImageLightbox.vue'
-import MermaidPreviewDialog from './MermaidPreviewDialog.vue'
+import ImageLightbox from '../media/ImageLightbox.vue'
+import MermaidPreviewDialog from '../media/MermaidPreviewDialog.vue'
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -180,10 +180,11 @@ watch(
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 28px 20px;
+  padding: 24px var(--chat-message-gutter, 28px) 20px;
   display: flex;
   flex-direction: column;
   gap: 20px;
+  scrollbar-gutter: stable;
 }
 
 .empty-state {
@@ -195,7 +196,7 @@ watch(
 }
 
 .empty-state-card {
-  width: min(560px, 100%);
+  width: min(720px, 100%);
   padding: 28px 30px;
   border-radius: 24px;
   border: 1px solid var(--app-border-strong);
@@ -239,6 +240,10 @@ watch(
 @media (max-width: 860px) {
   .chat-messages {
     padding: 20px 16px 16px;
+  }
+
+  .empty-state-card {
+    width: min(100%, 640px);
   }
 }
 </style>

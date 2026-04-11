@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { buildMessageBlocks, getContentText, hasRenderableContent } from './message-utils'
-import type { ChatMessage, ChatMessageBlock, FilePreviewState } from './types'
-import ThinkingBlock from './ThinkingBlock.vue'
-import ToolRunBlock from './ToolRunBlock.vue'
-import FilePreviewBlock from './FilePreviewBlock.vue'
-import AttachmentBlock from './AttachmentBlock.vue'
-import AuthRequestBlock from './AuthRequestBlock.vue'
-import ContentBlock from './ContentBlock.vue'
+import { buildMessageBlocks, getContentText, hasRenderableContent } from '../message-utils'
+import type { ChatMessage, ChatMessageBlock, FilePreviewState } from '../types'
+import ThinkingBlock from '../blocks/ThinkingBlock.vue'
+import ToolRunBlock from '../blocks/ToolRunBlock.vue'
+import FilePreviewBlock from '../blocks/FilePreviewBlock.vue'
+import AttachmentBlock from '../blocks/AttachmentBlock.vue'
+import AuthRequestBlock from '../blocks/AuthRequestBlock.vue'
+import ContentBlock from '../blocks/ContentBlock.vue'
 
 const props = defineProps<{
   msg: ChatMessage
@@ -130,7 +130,9 @@ function getMessageText (): string {
 .message-row {
   display: flex;
   align-items: flex-end;
-  gap: 14px;
+  gap: var(--chat-avatar-gap, 14px);
+  width: min(100%, var(--chat-message-track-max, 1480px));
+  margin: 0 auto;
 }
 
 .message-row.user {
@@ -142,8 +144,8 @@ function getMessageText (): string {
 }
 
 .message-avatar {
-  width: 40px;
-  height: 40px;
+  width: var(--chat-avatar-size, 40px);
+  height: var(--chat-avatar-size, 40px);
   border-radius: 16px;
   display: flex;
   align-items: center;
@@ -166,8 +168,8 @@ function getMessageText (): string {
 }
 
 .message-column {
-  width: min(820px, calc(100% - 54px));
-  max-width: calc(100% - 54px);
+  width: min(var(--chat-message-column-max, 1120px), calc(100% - var(--chat-dual-avatar-footprint, 108px)));
+  max-width: calc(100% - var(--chat-dual-avatar-footprint, 108px));
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -226,9 +228,19 @@ function getMessageText (): string {
 }
 
 @media (max-width: 860px) {
+  .message-row {
+    width: 100%;
+    gap: 10px;
+  }
+
+  .message-avatar {
+    width: 36px;
+    height: 36px;
+  }
+
   .message-column {
-    width: min(100%, calc(100% - 50px));
-    max-width: calc(100% - 50px);
+    width: min(100%, calc(100% - 46px));
+    max-width: calc(100% - 46px);
   }
 }
 </style>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import type { GalleryImage } from './types'
+import type { GalleryImage } from '../types'
 
 const props = defineProps<{
   images: GalleryImage[]
