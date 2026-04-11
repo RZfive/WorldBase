@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import ConversationSidebar from './ConversationSidebar.vue'
-import MessageList from './MessageList.vue'
-import ChatInput from './ChatInput.vue'
-import ChatHeader from './ChatHeader.vue'
+import ConversationSidebar from './layout/ConversationSidebar.vue'
+import MessageList from './messages/MessageList.vue'
+import ChatInput from './layout/ChatInput.vue'
+import ChatHeader from './layout/ChatHeader.vue'
 import { emitAuthResolution, onAuthResolution, type AuthResolutionPayload } from '../../utils/auth-events'
 
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
@@ -1263,6 +1263,15 @@ onUnmounted(() => {
 }
 
 .chat-panel {
+  --chat-message-gutter: clamp(18px, 2.4vw, 40px);
+  --chat-message-track-max: 1480px;
+  --chat-message-column-max: 1120px;
+  --chat-event-card-max: 1080px;
+  --chat-bubble-max: 1120px;
+  --chat-avatar-size: 40px;
+  --chat-avatar-gap: 14px;
+  --chat-avatar-footprint: calc(var(--chat-avatar-size) + var(--chat-avatar-gap));
+  --chat-dual-avatar-footprint: calc(var(--chat-avatar-footprint) * 2);
   display: flex;
   flex-direction: column;
   flex: 1;

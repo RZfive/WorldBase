@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
-import type { ChatMessageBlock } from './types'
+import type { ChatMessageBlock } from '../types'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'file_preview' }>
@@ -36,7 +36,7 @@ watch(
 
 <style scoped>
 .message-event-card {
-  width: min(100%, 760px);
+  width: min(100%, var(--chat-event-card-max, 1080px));
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
   overflow: hidden;
 }

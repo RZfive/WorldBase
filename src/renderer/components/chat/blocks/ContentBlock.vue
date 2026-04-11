@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { renderMarkdown } from './markdown'
-import { getContentParts, hasRenderableContent, collapseWhitespace } from './message-utils'
-import { splitMarkdownWithMermaid } from './mermaid'
-import type { ChatMessageBlock } from './types'
-import MermaidDiagram from './MermaidDiagram.vue'
+import { renderMarkdown } from '../markdown'
+import { getContentParts, hasRenderableContent, collapseWhitespace } from '../message-utils'
+import { splitMarkdownWithMermaid } from '../mermaid'
+import type { ChatMessageBlock } from '../types'
+import MermaidDiagram from '../media/MermaidDiagram.vue'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'content' }>
@@ -77,7 +77,7 @@ function getTextSegments (text?: string) {
 
 <style scoped>
 .message-bubble {
-  width: fit-content;
+  width: min(100%, var(--chat-bubble-max, 1120px));
   max-width: 100%;
   padding: 16px 18px;
   border-radius: 22px;
@@ -129,7 +129,7 @@ function getTextSegments (text?: string) {
 }
 
 .message-mermaid-card {
-  width: min(100%, 820px);
+  width: min(100%, calc(var(--chat-bubble-max, 1120px) - 24px));
 }
 
 .message-image-card {
@@ -137,7 +137,7 @@ function getTextSegments (text?: string) {
   flex-direction: column;
   gap: 8px;
   align-items: flex-start;
-  max-width: min(340px, 100%);
+  max-width: min(420px, 100%);
   padding: 8px;
   background: var(--app-panel);
   border: 1px solid var(--app-border-strong);
@@ -155,8 +155,8 @@ function getTextSegments (text?: string) {
 .message-image {
   display: block;
   width: 100%;
-  max-width: 324px;
-  max-height: 324px;
+  max-width: 404px;
+  max-height: 404px;
   object-fit: cover;
   border-radius: 12px;
   border: 1px solid var(--app-border-strong);

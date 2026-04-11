@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { renderMarkdown } from './markdown'
-import type { ChatMessageBlock } from './types'
+import { renderMarkdown } from '../markdown'
+import type { ChatMessageBlock } from '../types'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'thinking' }>
@@ -45,7 +45,7 @@ const emit = defineEmits<{
 <style scoped>
 /* Base event card styles */
 .message-event-card {
-  width: min(100%, 760px);
+  width: min(100%, var(--chat-event-card-max, 1080px));
   border: 1px solid var(--app-border-strong);
   border-radius: 18px;
   background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));

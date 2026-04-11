@@ -137,6 +137,7 @@ function handleOfficeUpload (e: Event) {
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
           <input type="file" accept="image/*" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleImageUpload" />
         </label>
+        {{ `${props.isUploadingFiles} ${props.isLoading} ${props.modelValue.trim() } ${props.pendingImages.length === 0} ${props.pendingFiles.length === 0}` }}
         <button
           class="action-btn send-btn"
           :class="{ stopping: props.isLoading }"
@@ -155,9 +156,15 @@ function handleOfficeUpload (e: Event) {
 
 <style scoped>
 .chat-input {
-  padding: 12px 24px 16px;
+  padding: 12px var(--chat-message-gutter, 24px) 16px;
   border-top: 1px solid var(--app-border);
   background: linear-gradient(180deg, transparent, var(--app-panel-subtle));
+}
+
+.chat-input > * {
+  max-width: var(--chat-message-track-max, 1480px);
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .input-container {
