@@ -12,6 +12,8 @@ import { toolLocalFileRead } from './tool-local-file-read.js'
 import { toolLocalCommand } from './tool-local-command.js'
 import { toolLocalWriteFile } from './tool-local-file-write.js'
 import { toolRebuildProject } from './tool-rebuild-project.js'
+import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
+import type { DocumentStore } from './document-store.js'
 import type { AgentCore, SessionState } from '../agent-core.js'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
@@ -26,6 +28,7 @@ export interface ToolServices {
   builderService: BuilderService
   apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
+  documentStore?: DocumentStore
   getMainWindow?: () => BrowserWindow | null
 }
 
@@ -50,6 +53,14 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolLocalCommand(services, getSessionState),
     toolLocalWriteFile(services, getSessionState)
   ]
+
+  // Register document tools if store is available
+  if (services.documentStore) {
+    tools.push(
+      toolReadDocument(services.documentStore),
+      toolListDocuments(services.documentStore)
+    )
+  }
 
   for (const tool of tools) {
     agent.registerTool(tool.definition.name, tool.definition, tool.handler)

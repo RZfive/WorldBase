@@ -32,6 +32,20 @@ interface RegisteredTool {
   handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>
 }
 
+interface ToolExecutionRecord {
+  name: string
+  args: Record<string, unknown>
+  result: unknown
+}
+
+interface LoopGuardState {
+  startedAt: number
+  totalIterations: number
+  segmentIndex: number
+  consecutiveDuplicateIterations: number
+  lastIterationFingerprint: string | null
+}
+
 /**
  * AgentCore — AI Agent 核心循环
  * 实现 思考 → 行动 → 观察 的循环
@@ -51,16 +65,30 @@ export interface SessionState {
 
 export class AgentCore {
   // Keep summaries short enough to fit comfortably back into the prompt.
+  private static readonly AUTO_CONTINUE_PREFIX = '[AUTO_CONTINUE]'
   private static readonly CONTEXT_SUMMARY_PREFIX = '[CONTEXT_SUMMARY]'
   private static readonly CONTEXT_SUMMARY_CHAR_LIMIT = 1500
+  private static readonly CONTEXT_SUMMARY_SOURCE_MAX_CHARS = 4000
+  private static readonly CONTEXT_HEADROOM_RATIO = 0.15
+  private static readonly CONTEXT_MIN_HEADROOM_TOKENS = 2048
+  private static readonly CONTEXT_MAX_HEADROOM_TOKENS = 8192
+  private static readonly RECENT_MESSAGE_KEEP_OPTIONS = [6, 4, 2, 0] as const
   // Lightweight heuristic for providers without tokenizer access.
   private static readonly ESTIMATED_CHARS_PER_TOKEN = 4
   private static readonly ESTIMATED_MESSAGE_OVERHEAD_TOKENS = 12
+  private static readonly FINGERPRINT_MAX_DEPTH = 4
+  private static readonly FINGERPRINT_MAX_ARRAY_ITEMS = 8
+  private static readonly FINGERPRINT_MAX_OBJECT_KEYS = 12
+  private static readonly FINGERPRINT_MAX_STRING_CHARS = 240
   private provider: OpenAIProvider
   private services: Record<string, unknown>
   private tools = new Map<string, RegisteredTool>()
-  // Allow a few extra repair attempts after create/edit/start tool loops.
-  private maxIterations = 16
+  // Per-segment iteration budget before the agent automatically compacts and continues.
+  private maxIterations = 128
+  // Periodically force a silent context compaction so long sessions can keep going.
+  private proactiveCompressionInterval = 16
+  private maxRunDurationMs = 15 * 60 * 1000
+  private maxDuplicateIterationFingerprints = 6
   private maxStreamRetries = 3
   private activeSkillContents: string[] = []
   /** Shared mutable state accessible by tool handlers within a session. */
@@ -333,6 +361,185 @@ export class AgentCore {
     return Object.keys(merged).length > 0 ? merged : null
   }
 
+  private _createLoopGuardState (): LoopGuardState {
+    return {
+      startedAt: Date.now(),
+      totalIterations: 0,
+      segmentIndex: 1,
+      consecutiveDuplicateIterations: 0,
+      lastIterationFingerprint: null
+    }
+  }
+
+  private _getLoopStopReason (state: LoopGuardState): string | null {
+    const elapsed = Date.now() - state.startedAt
+    if (elapsed >= this.maxRunDurationMs) {
+      const minutes = Math.max(1, Math.ceil(elapsed / 60000))
+      return `当前任务已连续运行约 ${minutes} 分钟仍未完成。为避免持续占用资源，本次先停止。请稍后继续，或将任务拆分为更小步骤后再试。`
+    }
+
+    if (state.consecutiveDuplicateIterations >= this.maxDuplicateIterationFingerprints) {
+      return `AI 已连续 ${state.consecutiveDuplicateIterations} 轮重复相同的工具调用和结果，继续下去大概率只会空转。本次先停止，请调整提示词、检查工具返回，或换一种处理策略后再试。`
+    }
+
+    return null
+  }
+
+  private _buildStopMessage (reason: string): ChatMessage {
+    return {
+      role: 'assistant',
+      content: reason
+    }
+  }
+
+  private _appendStopReason (renderedContent: string, reason: string): string {
+    return renderedContent.trim().length > 0
+      ? `${renderedContent}\n\n${reason}`
+      : reason
+  }
+
+  private async _prepareAutomaticContinuation (messages: ChatMessage[], state: LoopGuardState, onProgress?: ProgressCallback, abortSignal?: AbortSignal): Promise<ChatMessage[]> {
+    const nextSegmentIndex = state.segmentIndex + 1
+    onProgress?.('♻️ 正在自动续跑...', `第 ${nextSegmentIndex} 段，累计 ${state.totalIterations} 轮`)
+
+    const compressedMessages = await this._compressContextIfNeeded(
+      this._removeSystemMessagesByPrefix(messages, AgentCore.AUTO_CONTINUE_PREFIX),
+      onProgress,
+      abortSignal,
+      true
+    )
+
+    state.segmentIndex = nextSegmentIndex
+    return this._insertSystemDirective(
+      compressedMessages,
+      `${AgentCore.AUTO_CONTINUE_PREFIX}\n你正在继续同一个尚未完成的任务。这不是新任务，不要重复已经成功完成的步骤，也不要重复执行刚刚已成功且结果无变化的工具。优先基于最近的工具结果继续推进；如果同一错误连续出现，请改变策略并明确说明新的处理思路。当前为自动续跑第 ${state.segmentIndex} 段。`
+    )
+  }
+
+  private _removeSystemMessagesByPrefix (messages: ChatMessage[], prefix: string): ChatMessage[] {
+    return messages.filter((message, index) => {
+      return !(index > 0 &&
+        message.role === 'system' &&
+        typeof message.content === 'string' &&
+        message.content.startsWith(prefix))
+    })
+  }
+
+  private _insertSystemDirective (messages: ChatMessage[], content: string): ChatMessage[] {
+    const nextMessages = [...this._removeSystemMessagesByPrefix(messages, AgentCore.AUTO_CONTINUE_PREFIX)]
+    const insertIndex = nextMessages.findIndex((message, index) => index > 0 && this._isExistingSummaryMessage(message))
+    nextMessages.splice(insertIndex >= 0 ? insertIndex + 1 : 1, 0, {
+      role: 'system',
+      content
+    })
+    return nextMessages
+  }
+
+  private _recordIterationActivity (state: LoopGuardState, executions: ToolExecutionRecord[]): void {
+    if (executions.length === 0) {
+      return
+    }
+
+    const fingerprint = this._buildIterationFingerprint(executions)
+    if (state.lastIterationFingerprint === fingerprint) {
+      state.consecutiveDuplicateIterations++
+      return
+    }
+
+    state.lastIterationFingerprint = fingerprint
+    state.consecutiveDuplicateIterations = 1
+  }
+
+  private _buildIterationFingerprint (executions: ToolExecutionRecord[]): string {
+    return JSON.stringify(executions.map(execution => ({
+      name: execution.name,
+      args: this._normalizeFingerprintValue(execution.args),
+      result: this._normalizeFingerprintValue(execution.result)
+    })))
+  }
+
+  private _normalizeFingerprintValue (value: unknown, depth = 0): unknown {
+    if (depth >= AgentCore.FINGERPRINT_MAX_DEPTH) {
+      return '[max-depth]'
+    }
+
+    if (value === null || typeof value === 'boolean' || typeof value === 'number') {
+      return value
+    }
+
+    if (typeof value === 'string') {
+      return this._truncateString(value, AgentCore.FINGERPRINT_MAX_STRING_CHARS)
+    }
+
+    if (typeof value === 'bigint') {
+      return value.toString()
+    }
+
+    if (Array.isArray(value)) {
+      const normalized = value
+        .slice(0, AgentCore.FINGERPRINT_MAX_ARRAY_ITEMS)
+        .map(item => this._normalizeFingerprintValue(item, depth + 1))
+
+      if (value.length > AgentCore.FINGERPRINT_MAX_ARRAY_ITEMS) {
+        normalized.push(`[+${value.length - AgentCore.FINGERPRINT_MAX_ARRAY_ITEMS} more items]`)
+      }
+
+      return normalized
+    }
+
+    if (value && typeof value === 'object') {
+      const entries = Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+
+      const normalized: Record<string, unknown> = {}
+      for (const [key, entryValue] of entries.slice(0, AgentCore.FINGERPRINT_MAX_OBJECT_KEYS)) {
+        normalized[key] = this._normalizeFingerprintValue(entryValue, depth + 1)
+      }
+
+      if (entries.length > AgentCore.FINGERPRINT_MAX_OBJECT_KEYS) {
+        normalized.__truncatedKeys = entries.length - AgentCore.FINGERPRINT_MAX_OBJECT_KEYS
+      }
+
+      return normalized
+    }
+
+    return String(value)
+  }
+
+  private _truncateString (value: string, maxChars: number): string {
+    if (value.length <= maxChars) {
+      return value
+    }
+
+    const suffix = `...[truncated ${value.length - maxChars} chars]`
+    const headLength = Math.max(0, maxChars - suffix.length)
+    return `${value.slice(0, headLength)}${suffix}`
+  }
+
+  private _serializeMessageContentForSummary (content: ChatMessage['content']): string {
+    if (typeof content === 'string') {
+      return this._truncateString(content, AgentCore.CONTEXT_SUMMARY_SOURCE_MAX_CHARS)
+    }
+
+    const rendered = content
+      .map(part => part.type === 'text' ? part.text : '[image omitted]')
+      .join('\n')
+
+    return this._truncateString(rendered, AgentCore.CONTEXT_SUMMARY_SOURCE_MAX_CHARS)
+  }
+
+  private _getContextCompressionThreshold (contextWindow: number): number {
+    const reservedTokens = Math.min(
+      Math.max(
+        Math.floor(contextWindow * AgentCore.CONTEXT_HEADROOM_RATIO),
+        AgentCore.CONTEXT_MIN_HEADROOM_TOKENS
+      ),
+      AgentCore.CONTEXT_MAX_HEADROOM_TOKENS
+    )
+
+    return Math.max(1, contextWindow - reservedTokens)
+  }
+
   async run (userMessages: ChatMessage[]): Promise<ChatMessage> {
     this._resetSessionState()
     const systemMessage: ChatMessage = {
@@ -342,12 +549,24 @@ export class AgentCore {
 
     let messages: ChatMessage[] = [systemMessage, ...userMessages]
     const toolDefs = this.getToolDefinitions()
+    const loopGuard = this._createLoopGuardState()
+    let segmentIterations = 0
 
-    let iterations = 0
+    while (true) {
+      const stopReason = this._getLoopStopReason(loopGuard)
+      if (stopReason) {
+        return this._buildStopMessage(stopReason)
+      }
 
-    while (iterations < this.maxIterations) {
-      iterations++
-      messages = await this._compressContextIfNeeded(messages)
+      if (segmentIterations >= this.maxIterations) {
+        messages = await this._prepareAutomaticContinuation(messages, loopGuard)
+        segmentIterations = 0
+      }
+
+      const forceCompression = segmentIterations > 0 && segmentIterations % this.proactiveCompressionInterval === 0
+      messages = await this._compressContextIfNeeded(messages, undefined, undefined, forceCompression)
+      segmentIterations++
+      loopGuard.totalIterations++
 
       const response = await this.provider.chatCompletion(messages, toolDefs)
 
@@ -359,17 +578,21 @@ export class AgentCore {
       }
 
       messages.push(response)
+      const executions: ToolExecutionRecord[] = []
 
       for (const toolCall of response.tool_calls) {
         const toolName = toolCall.function.name
 
         let result: unknown
+        let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
         try {
-          const toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
+          toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
           result = await this._executeTool(toolName, toolArgs)
         } catch (err) {
           result = { error: (err as Error).message }
         }
+
+        executions.push({ name: toolName, args: toolArgs, result })
 
         messages.push({
           role: 'tool',
@@ -377,11 +600,8 @@ export class AgentCore {
           content: JSON.stringify(result)
         })
       }
-    }
 
-    return {
-      role: 'assistant',
-      content: '我已经尝试了多个步骤但还没有得到最终结果。请告诉我还需要什么帮助。'
+      this._recordIterationActivity(loopGuard, executions)
     }
   }
 
@@ -398,14 +618,35 @@ export class AgentCore {
 
     let messages: ChatMessage[] = [systemMessage, ...userMessages]
     const toolDefs = this.getToolDefinitions()
-    let iterations = 0
+    const loopGuard = this._createLoopGuardState()
+    let segmentIterations = 0
     let renderedContent = ''
     let fullThinking = ''
 
-    while (iterations < this.maxIterations) {
+    while (true) {
       this._throwIfAborted(abortSignal)
-      iterations++
-      messages = await this._compressContextIfNeeded(messages, onProgress, abortSignal)
+      const stopReason = this._getLoopStopReason(loopGuard)
+      if (stopReason) {
+        yield {
+          type: 'done',
+          message: {
+            role: 'assistant',
+            content: this._appendStopReason(renderedContent, stopReason)
+          },
+          thinking: fullThinking || undefined
+        }
+        return
+      }
+
+      if (segmentIterations >= this.maxIterations) {
+        messages = await this._prepareAutomaticContinuation(messages, loopGuard, onProgress, abortSignal)
+        segmentIterations = 0
+      }
+
+      const forceCompression = segmentIterations > 0 && segmentIterations % this.proactiveCompressionInterval === 0
+      messages = await this._compressContextIfNeeded(messages, forceCompression ? undefined : onProgress, abortSignal, forceCompression)
+      segmentIterations++
+      loopGuard.totalIterations++
 
       let assistantMessage: ChatMessage | null = null
       let iterationThinking = ''
@@ -474,6 +715,7 @@ export class AgentCore {
 
       // Execute tool calls
       messages.push(assistantMessage)
+      const executions: ToolExecutionRecord[] = []
 
       for (const toolCall of assistantMessage.tool_calls) {
         const toolName = toolCall.function.name
@@ -482,13 +724,16 @@ export class AgentCore {
         yield { type: 'tool_start', name: toolName }
 
         let result: unknown
+        let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
         try {
-          const toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
+          toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
           result = await this._executeTool(toolName, toolArgs, onProgress)
           this._throwIfAborted(abortSignal)
         } catch (err) {
           result = { error: (err as Error).message }
         }
+
+        executions.push({ name: toolName, args: toolArgs, result })
 
         yield { type: 'tool_end', name: toolName }
 
@@ -498,13 +743,15 @@ export class AgentCore {
           content: JSON.stringify(result)
         })
       }
+
+      this._recordIterationActivity(loopGuard, executions)
     }
 
     yield {
       type: 'done',
       message: {
         role: 'assistant',
-        content: renderedContent || '我已经尝试了多个步骤但还没有得到最终结果。请告诉我还需要什么帮助。'
+        content: renderedContent || '本次流式响应提前结束，未返回完整结果。请继续处理，或重试一次。'
       },
       thinking: fullThinking || undefined
     }
@@ -526,28 +773,27 @@ export class AgentCore {
     return result
   }
 
-  private async _compressContextIfNeeded (messages: ChatMessage[], onProgress?: ProgressCallback, abortSignal?: AbortSignal): Promise<ChatMessage[]> {
+  private async _compressContextIfNeeded (messages: ChatMessage[], onProgress?: ProgressCallback, abortSignal?: AbortSignal, force = false): Promise<ChatMessage[]> {
     const contextWindow = this.provider.getContextWindow()
-    const warningThreshold = Math.floor(contextWindow * 0.85)
+    const warningThreshold = this._getContextCompressionThreshold(contextWindow)
     const currentTokens = this._estimateTokens(messages)
 
-    if (currentTokens < warningThreshold || messages.length <= 8) {
+    if (!force && currentTokens < warningThreshold) {
       return messages
     }
 
     onProgress?.('🧠 正在压缩上下文...', `${currentTokens}/${contextWindow}`)
 
-    const systemMessage = messages[0]
-    const existingSummaryIndex = messages.findIndex((message, index) => {
+    const sanitizedMessages = this._removeSystemMessagesByPrefix(messages, AgentCore.AUTO_CONTINUE_PREFIX)
+    const systemMessage = sanitizedMessages[0]
+    const existingSummaryIndex = sanitizedMessages.findIndex((message, index) => {
       return index > 0 && this._isExistingSummaryMessage(message)
     })
-    const summaryOffset = existingSummaryIndex >= 0 ? 1 : 0
-    const keepCount = 6
-    const recentMessages = messages.slice(Math.max(1 + summaryOffset, messages.length - keepCount))
-    const summaryTarget = messages.slice(1 + summaryOffset, Math.max(1 + summaryOffset, messages.length - keepCount))
+    const summaryStartIndex = existingSummaryIndex >= 0 ? existingSummaryIndex + 1 : 1
+    const summaryTarget = sanitizedMessages.slice(summaryStartIndex)
 
-    if (summaryTarget.length === 0) {
-      return messages
+    if (!systemMessage || summaryTarget.length === 0) {
+      return sanitizedMessages
     }
 
     const summaryPrompt = this._buildContextSummaryPrompt(summaryTarget)
@@ -557,7 +803,22 @@ export class AgentCore {
       content: `${AgentCore.CONTEXT_SUMMARY_PREFIX}\n${typeof summaryResponse.content === 'string' ? summaryResponse.content : ''}`
     }
 
-    const compressed = [systemMessage, summaryMessage, ...recentMessages]
+    let compressed: ChatMessage[] = [systemMessage, summaryMessage]
+
+    for (const keepCount of AgentCore.RECENT_MESSAGE_KEEP_OPTIONS) {
+      if (keepCount > summaryTarget.length) {
+        continue
+      }
+
+      const recentMessages = keepCount > 0 ? summaryTarget.slice(-keepCount) : []
+      compressed = [systemMessage, summaryMessage, ...recentMessages]
+
+      if (this._estimateTokens(compressed) <= warningThreshold || keepCount === 0) {
+        onProgress?.('✅ 上下文已压缩', `${this._estimateTokens(compressed)}/${contextWindow}`)
+        return compressed
+      }
+    }
+
     onProgress?.('✅ 上下文已压缩', `${this._estimateTokens(compressed)}/${contextWindow}`)
     return compressed
   }
@@ -565,10 +826,20 @@ export class AgentCore {
   private _buildContextSummaryPrompt (messages: ChatMessage[]): ChatMessage[] {
     const serializedMessages = messages
       .map((message, index) => {
-        const content = typeof message.content === 'string'
-          ? message.content
-          : JSON.stringify(message.content)
-        return `#${index + 1} [${message.role}]\n${content}`
+        const sections = [`#${index + 1} [${message.role}]`, this._serializeMessageContentForSummary(message.content)]
+
+        if (message.reasoning_content) {
+          sections.push(`[thinking]\n${this._truncateString(message.reasoning_content, AgentCore.CONTEXT_SUMMARY_SOURCE_MAX_CHARS)}`)
+        }
+
+        if (message.tool_calls && message.tool_calls.length > 0) {
+          const toolCallLines = message.tool_calls.map(toolCall => {
+            return `${toolCall.function.name}(${this._truncateString(toolCall.function.arguments, AgentCore.FINGERPRINT_MAX_STRING_CHARS)})`
+          })
+          sections.push(`[tool_calls]\n${toolCallLines.join('\n')}`)
+        }
+
+        return sections.filter(section => section.trim().length > 0).join('\n')
       })
       .join('\n\n')
 

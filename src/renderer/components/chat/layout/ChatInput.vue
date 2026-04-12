@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 interface SkillItem {
   id: string
@@ -15,6 +15,12 @@ interface PendingOfficeFile {
   fileSizeLabel: string
 }
 
+interface DocumentTagChip {
+  regionId: string
+  label: string
+  raw: string
+}
+
 const props = defineProps<{
   modelValue: string
   isLoading: boolean
@@ -24,6 +30,7 @@ const props = defineProps<{
   uploadFeedback: string
   availableSkills: SkillItem[]
   activeSkillIds: Set<string>
+  documentDockVisible: boolean
 }>()
 
 const emit = defineEmits<{
@@ -32,15 +39,69 @@ const emit = defineEmits<{
   (e: 'stop'): void
   (e: 'addImage', base64: string, mimeType: string): void
   (e: 'addFiles', files: File[]): void
+  (e: 'addFilePaths', paths: string[]): void
   (e: 'removeImage', index: number): void
   (e: 'removeFile', id: string): void
   (e: 'toggleSkill', id: string): void
+  (e: 'toggleDocumentDock'): void
 }>()
 
+const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
+
 const inputFocused = ref(false)
+const documentTags = computed<DocumentTagChip[]>(() => {
+  const seenRegionIds = new Set<string>()
+  const tags: DocumentTagChip[] = []
+
+  for (const match of props.modelValue.matchAll(DOCUMENT_TAG_PATTERN)) {
+    const regionId = match[1]
+    if (seenRegionIds.has(regionId)) continue
+    seenRegionIds.add(regionId)
+    tags.push({
+      regionId,
+      label: match[2]?.trim() || '文档标签',
+      raw: match[0]
+    })
+  }
+
+  return tags
+})
+const plainDraftText = computed(() => {
+  return props.modelValue
+    .replace(DOCUMENT_TAG_PATTERN, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^\n+/, '')
+})
+const hasDraftContent = computed(() => {
+  return props.modelValue.trim().length > 0 || props.pendingImages.length > 0 || props.pendingFiles.length > 0
+})
+const isSendDisabled = computed(() => props.isUploadingFiles || (!props.isLoading && !hasDraftContent.value))
+
+function buildDraftValue (tags: DocumentTagChip[], text: string): string {
+  const tagSegment = tags.map(tag => tag.raw).join(' ')
+  if (tagSegment && text) return `${tagSegment}\n${text}`
+  return tagSegment || text
+}
+
+function handleTextInput (e: Event) {
+  const nextText = (e.target as HTMLTextAreaElement).value
+  emit('update:modelValue', buildDraftValue(documentTags.value, nextText))
+}
+
+function removeDocumentTag (regionId: string) {
+  const remainingTags = documentTags.value.filter(tag => tag.regionId !== regionId)
+  emit('update:modelValue', buildDraftValue(remainingTags, plainDraftText.value))
+}
 
 function handleKeydown (e: KeyboardEvent) {
   if (props.isLoading) return
+  if (e.key === 'Backspace' && plainDraftText.value.trim().length === 0 && documentTags.value.length > 0) {
+    e.preventDefault()
+    removeDocumentTag(documentTags.value[documentTags.value.length - 1].regionId)
+    return
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     emit('send')
@@ -74,6 +135,13 @@ function handleOfficeUpload (e: Event) {
   if (!input.files || input.files.length === 0) return
   emit('addFiles', Array.from(input.files))
   input.value = ''
+}
+
+async function handleOfficePickerClick () {
+  if (!window.electronAPI?.pickOfficeFiles) return
+  const { canceled, filePaths } = await window.electronAPI.pickOfficeFiles()
+  if (canceled || filePaths.length === 0) return
+  emit('addFilePaths', filePaths)
 }
 </script>
 
@@ -110,39 +178,40 @@ function handleOfficeUpload (e: Event) {
           <button class="image-remove" @click="emit('removeImage', idx)">×</button>
         </div>
       </div>
+      <div v-if="documentTags.length > 0" class="document-tag-bar">
+        <div v-for="tag in documentTags" :key="tag.regionId" class="document-tag-chip">
+          <span class="document-tag-chip-prefix">#</span>
+          <span class="document-tag-chip-label">{{ tag.label }}</span>
+          <button class="document-tag-chip-remove" @click="removeDocumentTag(tag.regionId)" title="移除文档标签">×</button>
+        </div>
+      </div>
       <textarea
-        :value="props.modelValue"
+        :value="plainDraftText"
         :class="{ busy: props.isLoading }"
         placeholder="输入消息… (Enter 发送, Shift+Enter 换行)"
         :aria-busy="props.isLoading ? 'true' : 'false'"
-        @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
+        @input="handleTextInput"
         @keydown="handleKeydown"
         @focus="inputFocused = true"
         @blur="inputFocused = false"
         rows="3"
       />
       <div class="input-actions">
-        <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles" title="上传 Office 文件">
+        <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" @click="emit('toggleDocumentDock')" title="文档工作台">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        </button>
+        <button class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :disabled="props.isLoading || props.isUploadingFiles" title="上传 Office 文件" @click="handleOfficePickerClick">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
-          <input
-            type="file"
-            accept=".xlsx,.xls,.docx,.doc,.pptx,.ppt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.ms-powerpoint"
-            multiple
-            hidden
-            :disabled="props.isLoading || props.isUploadingFiles"
-            @change="handleOfficeUpload"
-          />
-        </label>
+        </button>
         <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles" title="上传图片">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
           <input type="file" accept="image/*" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleImageUpload" />
         </label>
-        {{ `${props.isUploadingFiles} ${props.isLoading} ${props.modelValue.trim() } ${props.pendingImages.length === 0} ${props.pendingFiles.length === 0}` }}
         <button
           class="action-btn send-btn"
           :class="{ stopping: props.isLoading }"
           @click="props.isLoading ? emit('stop') : emit('send')"
-          :disabled="props.isUploadingFiles || (!props.isLoading && !props.modelValue.trim() && props.pendingImages.length === 0 && props.pendingFiles.length === 0)"
+          :disabled="isSendDisabled"
           :title="props.isUploadingFiles ? '文件处理中...' : (props.isLoading ? '停止生成' : '发送')"
         >
           <svg v-if="!props.isLoading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -294,6 +363,55 @@ function handleOfficeUpload (e: Event) {
   transition: opacity 0.15s;
 }
 
+.document-tag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
+.document-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--app-accent-glow);
+  background: var(--app-accent-soft);
+  color: var(--app-text-soft);
+}
+
+.document-tag-chip-prefix {
+  color: var(--app-accent);
+  font-weight: 700;
+}
+
+.document-tag-chip-label {
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.8em;
+  font-weight: 600;
+}
+
+.document-tag-chip-remove {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+}
+
+.document-tag-chip-remove:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--app-danger);
+}
+
 .input-container textarea {
   display: block;
   width: 100%;
@@ -345,6 +463,7 @@ function handleOfficeUpload (e: Event) {
 }
 
 .action-btn:hover { background: var(--app-panel-muted); color: var(--app-text); }
+.action-btn.doc-btn.active { color: var(--app-accent); background: var(--app-accent-soft); }
 .action-btn.upload-btn { cursor: pointer; }
 .action-btn.disabled {
   opacity: 0.5;
