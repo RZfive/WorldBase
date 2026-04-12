@@ -4,6 +4,7 @@ import ConversationSidebar from './layout/ConversationSidebar.vue'
 import MessageList from './messages/MessageList.vue'
 import ChatInput from './layout/ChatInput.vue'
 import ChatHeader from './layout/ChatHeader.vue'
+import DocumentDock from './layout/DocumentDock.vue'
 import { emitAuthResolution, onAuthResolution, type AuthResolutionPayload } from '../../utils/auth-events'
 
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
@@ -135,6 +136,8 @@ const availableSkills = ref<SkillItem[]>([])
 const activeSkillIds = ref<Set<string>>(new Set())
 const showSkillPicker = ref(false)
 const syncingProviderOptions = ref(false)
+const documentDockVisible = ref(false)
+const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
 
 const streamingConvIds = reactive(new Set<string>())
 const backgroundStreamMessages = new Map<string, {
@@ -347,6 +350,22 @@ function appendFinalContentBlock (message: ChatMessage, finalContent: MessageCon
   if (finalContent === undefined) return
 
   const blocks = ensureBlocks(message)
+
+  if (typeof finalContent === 'string') {
+    for (let index = blocks.length - 1; index >= 0; index--) {
+      const block = blocks[index]
+      if (block.kind === 'content' && typeof block.content === 'string') {
+        block.content = finalContent
+        return
+      }
+    }
+
+    if (finalContent.trim().length > 0) {
+      blocks.push(createContentBlock(finalContent))
+    }
+    return
+  }
+
   const hasContentBlock = blocks.some(block => block.kind === 'content' && (typeof block.content === 'string'
     ? block.content.trim().length > 0
     : block.content.length > 0))
@@ -386,10 +405,10 @@ function findLastRunningToolBlock (message: ChatMessage): Extract<ChatMessageBlo
   return null
 }
 
-function findLatestAssistantMessage (): ChatMessage | null {
-  for (let index = messages.value.length - 1; index >= 0; index--) {
-    if (messages.value[index].role === 'assistant') {
-      return messages.value[index]
+function findLatestAssistantMessage (chatMessages: ChatMessage[] = messages.value): ChatMessage | null {
+  for (let index = chatMessages.length - 1; index >= 0; index--) {
+    if (chatMessages[index].role === 'assistant') {
+      return chatMessages[index]
     }
   }
   return null
@@ -401,6 +420,47 @@ function finalizePendingAuthBlocks (message: ChatMessage): void {
       block.status = 'denied'
     }
   }
+}
+
+function markToolRunStopped (toolRun: ToolRun): void {
+  toolRun.status = 'completed'
+  const alreadyMarked = toolRun.progress.some(step => step.stage === '已停止')
+  if (!alreadyMarked) {
+    toolRun.progress.push({ stage: '已停止', detail: '用户中断了本次生成' })
+  }
+}
+
+function markAssistantMessageStopped (message: ChatMessage): void {
+  for (const toolRun of message.toolRuns || []) {
+    if (toolRun.status === 'running') {
+      markToolRunStopped(toolRun)
+    }
+  }
+
+  for (const block of ensureBlocks(message)) {
+    if (block.kind === 'tool' && block.toolRun.status === 'running') {
+      markToolRunStopped(block.toolRun)
+    }
+  }
+
+  finalizePendingAuthBlocks(message)
+
+  if (!hasRenderableContent(message)) {
+    message.content = '(已停止)'
+    ensureBlocks(message).push(createContentBlock('(已停止)'))
+  }
+}
+
+function releaseStreamSession (convId: string, sessionId: string): void {
+  const cleanup = activeCleanups.get(sessionId)
+  if (cleanup) {
+    cleanup()
+    activeCleanups.delete(sessionId)
+  }
+
+  activeStreamSessionIds.delete(convId)
+  streamingConvIds.delete(convId)
+  backgroundStreamMessages.delete(convId)
 }
 
 function formatFileSize (size: number): string {
@@ -425,6 +485,20 @@ function buildUploadedFilesPrompt (files: PendingOfficeFile[]): string {
   return files
     .map(file => `【用户上传文件：${file.name}】\n文件类型：${file.fileType.toUpperCase()}\n文件内容如下：\n${file.promptContent}\n【文件结束】`)
     .join('\n\n')
+}
+
+function extractDocumentTagRefs (text: string): { regionIds: string[]; normalizedText: string } {
+  const regionIds = new Set<string>()
+  const normalizedText = text.replace(DOCUMENT_TAG_PATTERN, (_match, regionId: string, rawLabel?: string) => {
+    regionIds.add(regionId)
+    const label = rawLabel?.trim() || '文档标签'
+    return `文档标签「${label}」`
+  })
+
+  return {
+    regionIds: Array.from(regionIds),
+    normalizedText
+  }
 }
 
 function getConversationTitleText (msg?: ChatMessage): string {
@@ -733,9 +807,29 @@ async function deleteConversation (id: string) {
 
 async function stopCurrentStream () {
   if (!window.electronAPI || !currentConversationId.value) return
-  const sessionId = activeStreamSessionIds.get(currentConversationId.value)
+  const convId = currentConversationId.value
+  const targetMessages = messages.value
+  const sessionId = activeStreamSessionIds.get(convId)
   if (!sessionId) return
-  await window.electronAPI.stopChatStream(sessionId)
+
+  try {
+    await window.electronAPI.stopChatStream(sessionId)
+  } catch (err) {
+    console.warn('[chat] Failed to request stream stop:', (err as Error).message)
+  }
+
+  if (!streamingConvIds.has(convId)) return
+
+  const assistantMessage = findLatestAssistantMessage(targetMessages)
+  if (assistantMessage) {
+    markAssistantMessageStopped(assistantMessage)
+  }
+
+  releaseStreamSession(convId, sessionId)
+  if (currentConversationId.value === convId) {
+    resetTransientStreamState()
+  }
+  void doSaveConversation(convId, targetMessages)
 }
 
 function addImage (base64: string, mimeType: string) {
@@ -743,7 +837,7 @@ function addImage (base64: string, mimeType: string) {
 }
 
 async function addFiles (files: File[]) {
-  if (!window.electronAPI?.readUploadedOfficeFile || files.length === 0) return
+  if (files.length === 0) return
 
   isUploadingFiles.value = true
   uploadFeedback.value = ''
@@ -756,6 +850,21 @@ async function addFiles (files: File[]) {
         continue
       }
 
+      // PDF files → import as structured document
+      const isPdf = /\.pdf$/i.test(file.name)
+      if (isPdf && window.electronAPI?.importDocument) {
+        try {
+          await window.electronAPI.importDocument(filePath)
+          documentDockVisible.value = true
+          uploadFeedback.value = ''
+        } catch (err) {
+          uploadFeedback.value = `${file.name} 导入失败：${(err as Error).message}`
+        }
+        continue
+      }
+
+      // Office files → legacy upload path
+      if (!window.electronAPI?.readUploadedOfficeFile) continue
       try {
         const uploaded = await window.electronAPI.readUploadedOfficeFile(filePath)
         pendingFiles.value.push({
@@ -777,6 +886,50 @@ async function addFiles (files: File[]) {
   }
 }
 
+async function addFilePaths (paths: string[]) {
+  if (paths.length === 0) return
+
+  isUploadingFiles.value = true
+  uploadFeedback.value = ''
+
+  try {
+    for (const filePath of paths) {
+      // PDF files → import as structured document
+      const isPdf = /\.pdf$/i.test(filePath)
+      if (isPdf && window.electronAPI?.importDocument) {
+        try {
+          await window.electronAPI.importDocument(filePath)
+          documentDockVisible.value = true
+          uploadFeedback.value = ''
+        } catch (err) {
+          uploadFeedback.value = `导入失败：${(err as Error).message}`
+        }
+        continue
+      }
+
+      // Office files → legacy upload path
+      if (!window.electronAPI?.readUploadedOfficeFile) continue
+      try {
+        const uploaded = await window.electronAPI.readUploadedOfficeFile(filePath)
+        pendingFiles.value.push({
+          id: generateId(),
+          name: uploaded.fileName,
+          filePath: uploaded.filePath,
+          fileType: uploaded.fileType,
+          fileSizeLabel: formatFileSize(uploaded.size),
+          promptContent: uploaded.content,
+          previewText: trimPreviewText(uploaded.content)
+        })
+        uploadFeedback.value = ''
+      } catch (err) {
+        uploadFeedback.value = `上传失败：${(err as Error).message}`
+      }
+    }
+  } finally {
+    isUploadingFiles.value = false
+  }
+}
+
 function removeImage (index: number) {
   pendingImages.value.splice(index, 1)
 }
@@ -786,6 +939,11 @@ function removeFile (id: string) {
   if (pendingFiles.value.length === 0) {
     uploadFeedback.value = ''
   }
+}
+
+function insertDocumentTag (tag: string) {
+  const spacer = inputText.value.length > 0 && !/\s$/.test(inputText.value) ? ' ' : ''
+  inputText.value = `${inputText.value}${spacer}${tag} `
 }
 
 function handleAuthRequest (request: AuthRequestPayload) {
@@ -846,11 +1004,20 @@ async function sendMessage () {
 
   let messageContent: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
   const filePrompt = buildUploadedFilesPrompt(pendingFiles.value)
-  const combinedText = [text, filePrompt].filter(Boolean).join('\n\n')
+  const { regionIds: referencedDocumentRegionIds, normalizedText } = extractDocumentTagRefs(text)
+
+  let docSelectionsPrompt = ''
+  if (referencedDocumentRegionIds.length > 0 && window.electronAPI?.buildDocumentSelectionsPrompt) {
+    try {
+      docSelectionsPrompt = await window.electronAPI.buildDocumentSelectionsPrompt(referencedDocumentRegionIds)
+    } catch { /* ignore */ }
+  }
+
+  const combinedText = [normalizedText, filePrompt, docSelectionsPrompt].filter(Boolean).join('\n\n')
   const userBlocks: ChatMessageBlock[] = []
 
-  if (text) {
-    userBlocks.push(createContentBlock(text))
+  if (normalizedText) {
+    userBlocks.push(createContentBlock(normalizedText))
   }
   for (const file of pendingFiles.value) {
     userBlocks.push(createAttachmentBlock(file))
@@ -920,163 +1087,151 @@ async function sendMessage () {
     if (window.electronAPI) {
       const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {
         const isForeground = currentConversationId.value === convId
-
-        if (event.type === 'thinking' && event.content) {
-          thinkingAccum += event.content
-          assistantMessage.thinking = thinkingAccum
-          const thinkingBlock = ensureThinkingBlock(assistantMessage)
-          thinkingBlock.text += event.content
-        } else if (event.type === 'reset') {
-          thinkingAccum = ''
-          assistantMessage.content = ''
-          assistantMessage.thinking = ''
-          assistantMessage.blocks = []
+        const finishSession = (saveConversation = false) => {
+          releaseStreamSession(convId, sessionId)
+          if (saveConversation) {
+            void doSaveConversation(convId, targetMessages)
+          }
           if (isForeground) {
             resetTransientStreamState()
           }
-        } else if (event.type === 'token' && event.content) {
-          assistantMessage.content =
-            ((assistantMessage.content as string) || '') + event.content
-          const contentBlock = ensureStreamingContentBlock(assistantMessage)
-          contentBlock.content = `${typeof contentBlock.content === 'string' ? contentBlock.content : ''}${event.content}`
-        } else if (event.type === 'file_preview_start' && event.filePath) {
-          const activeToolRun = ensureActiveToolRun('文件生成')
-          const alreadyLogged = activeToolRun.progress.some(step => step.stage === '文件预览' && step.detail === event.filePath)
-          if (!alreadyLogged) {
-            activeToolRun.progress.push({ stage: '文件预览', detail: event.filePath })
+        }
+
+        try {
+          if (event.type === 'thinking' && event.content) {
+            thinkingAccum += event.content
+            assistantMessage.thinking = thinkingAccum
+            const thinkingBlock = ensureThinkingBlock(assistantMessage)
+            thinkingBlock.text += event.content
+          } else if (event.type === 'reset') {
+            thinkingAccum = ''
+            assistantMessage.content = ''
+            assistantMessage.thinking = ''
+            assistantMessage.blocks = []
+            if (isForeground) {
+              resetTransientStreamState()
+            }
+          } else if (event.type === 'token' && event.content) {
+            assistantMessage.content =
+              ((assistantMessage.content as string) || '') + event.content
+            const contentBlock = ensureStreamingContentBlock(assistantMessage)
+            contentBlock.content = `${typeof contentBlock.content === 'string' ? contentBlock.content : ''}${event.content}`
+          } else if (event.type === 'file_preview_start' && event.filePath) {
+            const activeToolRun = ensureActiveToolRun('文件生成')
+            const alreadyLogged = activeToolRun.progress.some(step => step.stage === '文件预览' && step.detail === event.filePath)
+            if (!alreadyLogged) {
+              activeToolRun.progress.push({ stage: '文件预览', detail: event.filePath })
+              syncAssistantToolRuns()
+            }
+            ensureBlocks(assistantMessage).push(createFilePreviewBlock(event.filePath, Boolean(event.truncated)))
+            if (isForeground) {
+              filePreview.value = {
+                active: true,
+                filePath: event.filePath,
+                content: '',
+                truncated: Boolean(event.truncated)
+              }
+            }
+          } else if (event.type === 'file_preview_chunk' && event.content) {
+            const previewBlock = getLastActivePreviewBlock(assistantMessage, event.filePath)
+            if (previewBlock) {
+              previewBlock.previewContent += event.content
+            }
+            if (isForeground && filePreview.value.filePath === event.filePath) {
+              filePreview.value = {
+                ...filePreview.value,
+                content: filePreview.value.content + event.content
+              }
+            }
+          } else if (event.type === 'file_preview_end') {
+            const previewBlock = getLastActivePreviewBlock(assistantMessage, event.filePath)
+            if (previewBlock) {
+              previewBlock.active = false
+              previewBlock.truncated = Boolean(event.truncated ?? previewBlock.truncated)
+            }
+            if (isForeground) {
+              filePreview.value = {
+                ...filePreview.value,
+                active: false,
+                truncated: Boolean(event.truncated ?? filePreview.value.truncated)
+              }
+            }
+          } else if (event.type === 'tool_start' && event.name) {
+            const toolRun = createToolRun(event.name)
+            toolRuns.push(toolRun)
+            ensureBlocks(assistantMessage).push(createToolBlock(toolRun))
             syncAssistantToolRuns()
-          }
-          ensureBlocks(assistantMessage).push(createFilePreviewBlock(event.filePath, Boolean(event.truncated)))
-          if (isForeground) {
-            filePreview.value = {
-              active: true,
-              filePath: event.filePath,
-              content: '',
-              truncated: Boolean(event.truncated)
-            }
-          }
-        } else if (event.type === 'file_preview_chunk' && event.content) {
-          const previewBlock = getLastActivePreviewBlock(assistantMessage, event.filePath)
-          if (previewBlock) {
-            previewBlock.previewContent += event.content
-          }
-          if (isForeground && filePreview.value.filePath === event.filePath) {
-            filePreview.value = {
-              ...filePreview.value,
-              content: filePreview.value.content + event.content
-            }
-          }
-        } else if (event.type === 'file_preview_end') {
-          const previewBlock = getLastActivePreviewBlock(assistantMessage, event.filePath)
-          if (previewBlock) {
-            previewBlock.active = false
-            previewBlock.truncated = Boolean(event.truncated ?? previewBlock.truncated)
-          }
-          if (isForeground) {
-            filePreview.value = {
-              ...filePreview.value,
-              active: false,
-              truncated: Boolean(event.truncated ?? filePreview.value.truncated)
-            }
-          }
-        } else if (event.type === 'tool_start' && event.name) {
-          const toolRun = createToolRun(event.name)
-          toolRuns.push(toolRun)
-          ensureBlocks(assistantMessage).push(createToolBlock(toolRun))
-          syncAssistantToolRuns()
-        } else if (event.type === 'progress' && event.stage) {
-          const activeToolRun = ensureActiveToolRun()
-          activeToolRun.progress.push({ stage: event.stage, detail: event.detail })
-          syncAssistantToolRuns()
-        } else if (event.type === 'tool_end') {
-          const activeToolRun = findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
-          if (activeToolRun) {
-            activeToolRun.status = 'completed'
+          } else if (event.type === 'progress' && event.stage) {
+            const activeToolRun = ensureActiveToolRun()
+            activeToolRun.progress.push({ stage: event.stage, detail: event.detail })
             syncAssistantToolRuns()
-          }
-        } else if (event.type === 'done') {
-          for (const toolRun of toolRuns) {
-            if (toolRun.status === 'running') {
-              toolRun.status = 'completed'
+          } else if (event.type === 'tool_end') {
+            const activeToolRun = findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
+            if (activeToolRun) {
+              activeToolRun.status = 'completed'
+              syncAssistantToolRuns()
+            }
+          } else if (event.type === 'done') {
+            try {
+              for (const toolRun of toolRuns) {
+                if (toolRun.status === 'running') {
+                  toolRun.status = 'completed'
+                }
+              }
+              finalizePendingAuthBlocks(assistantMessage)
+              syncAssistantToolRuns()
+
+              if (event.message?.content !== undefined) {
+                assistantMessage.content = event.message.content
+                appendFinalContentBlock(assistantMessage, event.message.content)
+              }
+              if (!hasRenderableContent(assistantMessage)) {
+                assistantMessage.content = '(无响应)'
+                ensureBlocks(assistantMessage).push(createContentBlock('(无响应)'))
+              }
+              if (event.thinking && !assistantMessage.thinking) {
+                assistantMessage.thinking = event.thinking
+                ensureBlocks(assistantMessage).push(createThinkingBlock(event.thinking))
+              }
+            } finally {
+              finishSession(true)
+            }
+          } else if (event.type === 'error') {
+            try {
+              const activeToolRun = findLastRunningToolRun(toolRuns)
+              if (activeToolRun) {
+                activeToolRun.status = 'failed'
+                activeToolRun.progress.push({ stage: '错误', detail: event.error })
+                syncAssistantToolRuns()
+              }
+              finalizePendingAuthBlocks(assistantMessage)
+              assistantMessage.content = `错误: ${event.error}`
+              ensureBlocks(assistantMessage).push(createContentBlock(`错误: ${event.error}`))
+            } finally {
+              finishSession()
+            }
+          } else if (event.type === 'stopped') {
+            try {
+              markAssistantMessageStopped(assistantMessage)
+              syncAssistantToolRuns()
+            } finally {
+              finishSession(true)
             }
           }
-          finalizePendingAuthBlocks(assistantMessage)
-          syncAssistantToolRuns()
+        } catch (err) {
+          console.error('[chat] Failed to handle stream event:', event, err)
 
-          if (event.message?.content !== undefined) {
-            if (Array.isArray(event.message.content)) {
-              assistantMessage.content = event.message.content
-            } else if (!getMessageText(assistantMessage) && event.message.content) {
-              assistantMessage.content = event.message.content
-            }
-            appendFinalContentBlock(assistantMessage, event.message.content)
-          }
-          if (!hasRenderableContent(assistantMessage)) {
-            assistantMessage.content = '(无响应)'
-            ensureBlocks(assistantMessage).push(createContentBlock('(无响应)'))
-          }
-          if (event.thinking && !assistantMessage.thinking) {
-            assistantMessage.thinking = event.thinking
-            ensureBlocks(assistantMessage).push(createThinkingBlock(event.thinking))
-          }
-
-          cleanup()
-          activeCleanups.delete(sessionId)
-          activeStreamSessionIds.delete(convId)
-          streamingConvIds.delete(convId)
-          backgroundStreamMessages.delete(convId)
-
-          void doSaveConversation(convId, targetMessages)
-
-          if (isForeground) {
-            resetTransientStreamState()
-          }
-        } else if (event.type === 'error') {
           const activeToolRun = findLastRunningToolRun(toolRuns)
           if (activeToolRun) {
             activeToolRun.status = 'failed'
-            activeToolRun.progress.push({ stage: '错误', detail: event.error })
+            activeToolRun.progress.push({ stage: '渲染错误', detail: (err as Error).message })
             syncAssistantToolRuns()
           }
+
           finalizePendingAuthBlocks(assistantMessage)
-          assistantMessage.content = `错误: ${event.error}`
-          ensureBlocks(assistantMessage).push(createContentBlock(`错误: ${event.error}`))
-
-          cleanup()
-          activeCleanups.delete(sessionId)
-          activeStreamSessionIds.delete(convId)
-          streamingConvIds.delete(convId)
-          backgroundStreamMessages.delete(convId)
-
-          if (isForeground) {
-            resetTransientStreamState()
-          }
-        } else if (event.type === 'stopped') {
-          for (const toolRun of toolRuns) {
-            if (toolRun.status === 'running') {
-              toolRun.status = 'completed'
-              toolRun.progress.push({ stage: '已停止', detail: '用户中断了本次生成' })
-            }
-          }
-          finalizePendingAuthBlocks(assistantMessage)
-          syncAssistantToolRuns()
-
-          cleanup()
-          activeCleanups.delete(sessionId)
-          activeStreamSessionIds.delete(convId)
-          streamingConvIds.delete(convId)
-          backgroundStreamMessages.delete(convId)
-
-          if (!hasRenderableContent(assistantMessage)) {
-            assistantMessage.content = '(已停止)'
-            ensureBlocks(assistantMessage).push(createContentBlock('(已停止)'))
-          }
-
-          void doSaveConversation(convId, targetMessages)
-
-          if (isForeground) {
-            resetTransientStreamState()
-          }
+          assistantMessage.content = `错误: ${(err as Error).message}`
+          ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
+          finishSession(true)
         }
       })
 
@@ -1096,14 +1251,7 @@ async function sendMessage () {
       )
 
       if (streamingConvIds.has(convId)) {
-        activeStreamSessionIds.delete(convId)
-        streamingConvIds.delete(convId)
-        backgroundStreamMessages.delete(convId)
-        const pendingCleanup = activeCleanups.get(sessionId)
-        if (pendingCleanup) {
-          pendingCleanup()
-          activeCleanups.delete(sessionId)
-        }
+        releaseStreamSession(convId, sessionId)
         if (!hasRenderableContent(assistantMessage)) {
           assistantMessage.content = '(无响应)'
           ensureBlocks(assistantMessage).push(createContentBlock('(无响应)'))
@@ -1128,20 +1276,18 @@ async function sendMessage () {
       activeStreamSessionIds.delete(convId)
       streamingConvIds.delete(convId)
       void doSaveConversation(convId, targetMessages)
-      resetTransientStreamState()
+      if (currentConversationId.value === convId) {
+        resetTransientStreamState()
+      }
     }
   } catch (err) {
-    const pendingCleanup = activeCleanups.get(sessionId)
-    if (pendingCleanup) {
-      pendingCleanup()
-      activeCleanups.delete(sessionId)
-    }
+    releaseStreamSession(convId, sessionId)
     assistantMessage.content = `错误: ${(err as Error).message}`
     ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
     finalizePendingAuthBlocks(assistantMessage)
-    activeStreamSessionIds.delete(convId)
-    streamingConvIds.delete(convId)
-    resetTransientStreamState()
+    if (currentConversationId.value === convId) {
+      resetTransientStreamState()
+    }
   }
 }
 
@@ -1235,6 +1381,13 @@ onUnmounted(() => {
         @open-link="(url) => emit('openWebLink', url)"
       />
 
+      <DocumentDock
+        :visible="documentDockVisible"
+        @close="documentDockVisible = false"
+        @selections-changed="() => {}"
+        @insert-selection-tag="insertDocumentTag"
+      />
+
       <ChatInput
         v-model="inputText"
         :is-loading="isLoading"
@@ -1244,13 +1397,16 @@ onUnmounted(() => {
         :upload-feedback="uploadFeedback"
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
+        :document-dock-visible="documentDockVisible"
         @send="sendMessage"
         @stop="stopCurrentStream"
         @add-image="addImage"
         @add-files="addFiles"
+        @add-file-paths="addFilePaths"
         @remove-image="removeImage"
         @remove-file="removeFile"
         @toggle-skill="toggleSkill"
+        @toggle-document-dock="documentDockVisible = !documentDockVisible"
       />
     </div>
   </div>

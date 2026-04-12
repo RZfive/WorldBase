@@ -307,6 +307,21 @@ export interface ElectronAPI {
   onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => () => void
   onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
+
+  // Document import / preview / selection
+  pickDocumentFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
+  pickOfficeFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
+  importDocument: (filePath: string) => Promise<{ artifact: unknown }>
+  listDocuments: () => Promise<unknown[]>
+  getDocument: (artifactId: string) => Promise<unknown | null>
+  getDocumentRenderData: (artifactId: string) => Promise<{ mimeType: string; bytes: Uint8Array } | null>
+  openDocumentOriginal: (artifactId: string) => Promise<{ success: boolean; error?: string }>
+  removeDocument: (artifactId: string) => Promise<boolean>
+  createDocumentSelection: (payload: { artifactId: string; nodeIds: string[]; label: string; color: string; excerpt?: string }) => Promise<unknown>
+  removeDocumentSelection: (regionId: string) => Promise<boolean>
+  updateDocumentSelectionLabel: (regionId: string, label: string) => Promise<unknown | null>
+  getDocumentSelections: (artifactId: string) => Promise<unknown[]>
+  buildDocumentSelectionsPrompt: (regionIds?: string[]) => Promise<string>
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -434,5 +449,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   respondAuth: (requestId: string, approved: boolean) => {
     ipcRenderer.send('auth:response', { requestId, approved })
-  }
+  },
+
+  // Document import / preview / selection
+  pickDocumentFiles: () => ipcRenderer.invoke('document:pickFiles'),
+  pickOfficeFiles: () => ipcRenderer.invoke('office:pickFiles'),
+  importDocument: (filePath: string) => ipcRenderer.invoke('document:import', filePath),
+  listDocuments: () => ipcRenderer.invoke('document:list'),
+  getDocument: (artifactId: string) => ipcRenderer.invoke('document:get', artifactId),
+  getDocumentRenderData: (artifactId: string) => ipcRenderer.invoke('document:getRenderData', artifactId),
+  openDocumentOriginal: (artifactId: string) => ipcRenderer.invoke('document:openOriginal', artifactId),
+  removeDocument: (artifactId: string) => ipcRenderer.invoke('document:remove', artifactId),
+  createDocumentSelection: (payload: { artifactId: string; nodeIds: string[]; label: string; color: string; excerpt?: string }) => ipcRenderer.invoke('document:createSelection', payload),
+  removeDocumentSelection: (regionId: string) => ipcRenderer.invoke('document:removeSelection', regionId),
+  updateDocumentSelectionLabel: (regionId: string, label: string) => ipcRenderer.invoke('document:updateSelectionLabel', regionId, label),
+  getDocumentSelections: (artifactId: string) => ipcRenderer.invoke('document:getSelections', artifactId),
+  buildDocumentSelectionsPrompt: (regionIds?: string[]) => ipcRenderer.invoke('document:buildSelectionsPrompt', regionIds)
 } satisfies ElectronAPI)

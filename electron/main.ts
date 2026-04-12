@@ -21,6 +21,10 @@ import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-h
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../src/main/ai-engine/agent/tools/office-utils.js'
+import { DocumentStore } from '../src/main/ai-engine/agent/tools/document-store.js'
+import { parseDocument, isSupportedDocument, detectDocumentType } from '../src/main/ai-engine/agent/tools/document-parser.js'
+import type { CreateSelectionPayload } from '../src/main/ai-engine/agent/tools/document-types.js'
+import { buildDocumentRenderPreview, readDocumentRenderAsset } from '../src/main/document-preview/document-render-service.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -54,6 +58,7 @@ let lanServer: LanServer | null = null
 let settingsStore: SettingsStore | null = null
 let chatHistory: ChatHistoryStore | null = null
 let skillStore: SkillStore | null = null
+let documentStore: DocumentStore | null = null
 let isClosingMainWindow = false
 let isQuitCleanupRunning = false
 let hasFinishedQuitCleanup = false
@@ -383,12 +388,15 @@ async function initializeServices (): Promise<void> {
     closeAll: () => sqliteDelegate.closeAll()
   })
 
+  documentStore = new DocumentStore()
+
   aiEngine = new AIEngine({
     projectFS,
     runtimeManager,
     builderService,
     apiClient,
     dataAccess,
+    documentStore,
     getMainWindow: () => mainWindow
   })
 
@@ -682,6 +690,108 @@ function setupIPC (): void {
       fileType: detectOfficeType(resolvedPath) || result.type,
       content: result.content.substring(0, MAX_UPLOADED_OFFICE_CONTENT_LENGTH)
     }
+  })
+
+  // ─── Document import / preview / selection ───────────────────────────
+
+  ipcMain.handle('document:import', async (_event: IpcMainInvokeEvent, filePath: string) => {
+    const resolvedPath = path.resolve(filePath)
+    const stat = await fs.stat(resolvedPath)
+    if (!stat.isFile()) throw new Error(`路径不是一个文件: ${resolvedPath}`)
+    if (stat.size > MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
+      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)} MB)，最大支持 10 MB`)
+    }
+    if (!isSupportedDocument(resolvedPath)) {
+      throw new Error(`不支持的文档格式: ${path.extname(resolvedPath) || 'unknown'}`)
+    }
+    const artifact = await parseDocument(resolvedPath)
+    artifact.render = await buildDocumentRenderPreview(resolvedPath, artifact.fileType)
+    documentStore!.addArtifact(artifact)
+    return { artifact }
+  })
+
+  ipcMain.handle('document:pickFiles', async (event: IpcMainInvokeEvent) => {
+    const senderWindow = getSenderWindow(event) || mainWindow
+    const dialogOptions = {
+      title: '导入文档',
+      filters: [
+        { name: '文档', extensions: ['pdf', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'] }
+      ],
+      properties: ['openFile' as const, 'multiSelections' as const]
+    }
+    const result = senderWindow
+      ? await dialog.showOpenDialog(senderWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions)
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true, filePaths: [] }
+    return { canceled: false, filePaths: result.filePaths }
+  })
+
+  ipcMain.handle('office:pickFiles', async (event: IpcMainInvokeEvent) => {
+    const senderWindow = getSenderWindow(event) || mainWindow
+    const dialogOptions = {
+      title: '上传 Office 文件',
+      filters: [
+        { name: 'Office 文档', extensions: ['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'] }
+      ],
+      properties: ['openFile' as const, 'multiSelections' as const]
+    }
+    const result = senderWindow
+      ? await dialog.showOpenDialog(senderWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions)
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true, filePaths: [] }
+    return { canceled: false, filePaths: result.filePaths }
+  })
+
+  ipcMain.handle('document:list', async () => {
+    return documentStore!.listSummaries()
+  })
+
+  ipcMain.handle('document:get', async (_event: IpcMainInvokeEvent, artifactId: string) => {
+    return documentStore!.getArtifact(artifactId)
+  })
+
+  ipcMain.handle('document:getRenderData', async (_event: IpcMainInvokeEvent, artifactId: string) => {
+    const artifact = documentStore!.getArtifact(artifactId)
+    if (!artifact) return null
+    return readDocumentRenderAsset(artifact.render)
+  })
+
+  ipcMain.handle('document:openOriginal', async (_event: IpcMainInvokeEvent, artifactId: string) => {
+    const artifact = documentStore!.getArtifact(artifactId)
+    if (!artifact) {
+      return { success: false, error: `文档不存在: ${artifactId}` }
+    }
+
+    const error = await shell.openPath(artifact.filePath)
+    if (error) {
+      return { success: false, error }
+    }
+
+    return { success: true }
+  })
+
+  ipcMain.handle('document:remove', async (_event: IpcMainInvokeEvent, artifactId: string) => {
+    return documentStore!.removeArtifact(artifactId)
+  })
+
+  ipcMain.handle('document:createSelection', async (_event: IpcMainInvokeEvent, payload: CreateSelectionPayload) => {
+    return documentStore!.createSelection(payload)
+  })
+
+  ipcMain.handle('document:removeSelection', async (_event: IpcMainInvokeEvent, regionId: string) => {
+    return documentStore!.removeSelection(regionId)
+  })
+
+  ipcMain.handle('document:updateSelectionLabel', async (_event: IpcMainInvokeEvent, regionId: string, label: string) => {
+    return documentStore!.updateSelectionLabel(regionId, label)
+  })
+
+  ipcMain.handle('document:getSelections', async (_event: IpcMainInvokeEvent, artifactId: string) => {
+    return documentStore!.getSelectionsForArtifact(artifactId)
+  })
+
+  ipcMain.handle('document:buildSelectionsPrompt', async (_event: IpcMainInvokeEvent, regionIds?: string[]) => {
+    return documentStore!.buildSelectionsPrompt(regionIds)
   })
 
   // Project management

@@ -235,6 +235,61 @@ interface SkillInfo {
   updatedAt: string
 }
 
+// Document types (renderer-side DTOs)
+type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'unknown'
+
+interface DocumentRenderPreviewDTO {
+  kind: 'pdf' | 'html' | 'structured'
+  source: 'original' | 'generated' | 'fallback'
+  status: 'ready' | 'unavailable'
+  mimeType?: string
+  assetPath?: string
+  error?: string
+  generatedAt: string
+}
+
+interface DocumentNodeDTO {
+  id: string
+  type: 'heading' | 'paragraph' | 'table' | 'table_row' | 'slide' | 'page' | 'sheet' | 'image_placeholder' | 'list_item'
+  text: string
+  level: number
+  pageIndex: number
+  children?: DocumentNodeDTO[]
+  meta?: Record<string, unknown>
+}
+
+interface DocumentArtifactDTO {
+  id: string
+  filePath: string
+  fileName: string
+  fileSize: number
+  fileType: DocumentFileType
+  plainText: string
+  nodes: DocumentNodeDTO[]
+  render?: DocumentRenderPreviewDTO
+  importedAt: string
+}
+
+interface DocumentSelectionDTO {
+  id: string
+  artifactId: string
+  nodeIds: string[]
+  label: string
+  color: string
+  excerpt?: string
+  createdAt: string
+}
+
+interface DocumentSummaryDTO {
+  id: string
+  fileName: string
+  fileType: DocumentFileType
+  fileSize: number
+  nodeCount: number
+  selectionCount: number
+  importedAt: string
+}
+
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: MessageContent }>
@@ -325,6 +380,21 @@ interface ElectronAPI {
   onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => () => void
   onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
+
+  // Document import / preview / selection
+  pickDocumentFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
+  pickOfficeFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
+  importDocument: (filePath: string) => Promise<{ artifact: DocumentArtifactDTO }>
+  listDocuments: () => Promise<DocumentSummaryDTO[]>
+  getDocument: (artifactId: string) => Promise<DocumentArtifactDTO | null>
+  getDocumentRenderData: (artifactId: string) => Promise<{ mimeType: string; bytes: Uint8Array } | null>
+  openDocumentOriginal: (artifactId: string) => Promise<{ success: boolean; error?: string }>
+  removeDocument: (artifactId: string) => Promise<boolean>
+  createDocumentSelection: (payload: { artifactId: string; nodeIds: string[]; label: string; color: string; excerpt?: string }) => Promise<DocumentSelectionDTO>
+  removeDocumentSelection: (regionId: string) => Promise<boolean>
+  updateDocumentSelectionLabel: (regionId: string, label: string) => Promise<DocumentSelectionDTO | null>
+  getDocumentSelections: (artifactId: string) => Promise<DocumentSelectionDTO[]>
+  buildDocumentSelectionsPrompt: (regionIds?: string[]) => Promise<string>
 }
 
 interface Window {
