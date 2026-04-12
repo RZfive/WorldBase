@@ -282,6 +282,8 @@ export interface ElectronAPI {
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
   getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
+  exportAppConfig: () => Promise<{ success: boolean; canceled?: boolean; filePath?: string }>
+  importAppConfig: () => Promise<{ success: boolean; canceled?: boolean; filePath?: string; importedAt?: string; requiresReload?: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>
@@ -411,6 +413,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveThemePreference: (preference: ThemePreference) => ipcRenderer.invoke('settings:saveThemePreference', preference),
   getAIExecutionPreferences: () => ipcRenderer.invoke('settings:getAIExecutionPreferences'),
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => ipcRenderer.invoke('settings:saveAIExecutionPreferences', preferences),
+  exportAppConfig: () => ipcRenderer.invoke('settings:exportConfig'),
+  importAppConfig: () => ipcRenderer.invoke('settings:importConfig'),
   getLaunchMode: (projectId: string) => ipcRenderer.invoke('settings:getLaunchMode', projectId),
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => ipcRenderer.invoke('settings:saveLaunchMode', projectId, mode),
   getLaunchpadLayout: () => ipcRenderer.invoke('settings:getLaunchpadLayout'),

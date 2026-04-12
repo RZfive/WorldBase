@@ -5,10 +5,11 @@ import ProviderPanel from './ProviderPanel.vue'
 import DatabaseViewer from './DatabaseViewer.vue'
 import AppearancePanel from './AppearancePanel.vue'
 import ExecutionPanel from './ExecutionPanel.vue'
+import ConfigTransferPanel from './ConfigTransferPanel.vue'
 import ProcessManagerPanel from './ProcessManagerPanel.vue'
 import SystemStatusPanel from './SystemStatusPanel.vue'
 
-type CategoryId = 'providers' | 'skills' | 'execution' | 'appearance' | 'database' | 'processes' | 'system'
+type CategoryId = 'providers' | 'skills' | 'execution' | 'appearance' | 'config' | 'database' | 'processes' | 'system'
 
 interface Category {
   id: CategoryId
@@ -21,6 +22,7 @@ const categories: Category[] = [
   { id: 'skills', icon: '✦', label: 'Skill 管理' },
   { id: 'execution', icon: '⚙️', label: '执行设置' },
   { id: 'appearance', icon: '🎨', label: '显示设置' },
+  { id: 'config', icon: '📦', label: '配置迁移' },
   { id: 'database', icon: '🗄', label: '数据设置' },
   { id: 'processes', icon: '📊', label: '进程管理' },
   { id: 'system', icon: '🖥', label: '系统状态' }
@@ -50,6 +52,7 @@ const activeCategoryId = ref<CategoryId>('providers')
       <SkillManager v-else-if="activeCategoryId === 'skills'" />
       <ExecutionPanel v-else-if="activeCategoryId === 'execution'" />
       <AppearancePanel v-else-if="activeCategoryId === 'appearance'" />
+      <ConfigTransferPanel v-else-if="activeCategoryId === 'config'" />
       <DatabaseViewer v-else-if="activeCategoryId === 'database'" :active="activeCategoryId === 'database'" />
       <ProcessManagerPanel v-else-if="activeCategoryId === 'processes'" :active="activeCategoryId === 'processes'" />
       <SystemStatusPanel v-else :active="activeCategoryId === 'system'" />

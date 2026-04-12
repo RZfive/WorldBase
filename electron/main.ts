@@ -16,7 +16,7 @@ import { SqliteAdapter } from '../src/main/project-data-access/adapters/sqlite-a
 import { LanServer } from '../src/main/lan-server/server.js'
 import { LAN_SERVER_PORT } from '../src/main/constants.js'
 import { SystemService } from '../src/main/system-capabilities/system-service.js'
-import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout, type WebAppShortcut } from '../src/main/settings/settings-store.js'
+import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout, type PortableSettingsConfig, type WebAppShortcut } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
@@ -25,6 +25,7 @@ import { DocumentStore } from '../src/main/ai-engine/agent/tools/document-store.
 import { parseDocument, isSupportedDocument, detectDocumentType } from '../src/main/ai-engine/agent/tools/document-parser.js'
 import type { CreateSelectionPayload } from '../src/main/ai-engine/agent/tools/document-types.js'
 import { buildDocumentRenderPreview, readDocumentRenderAsset } from '../src/main/document-preview/document-render-service.js'
+import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../src/main/settings/settings-transfer.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -359,6 +360,21 @@ function getSnapshotsDir (): string {
   return path.join(userDataPath, 'snapshots')
 }
 
+function applyActiveProviderToAiEngine (): AIProvidersConfig {
+  const normalizedConfig = settingsStore!.getProviders()
+  const active = normalizedConfig.providers.find(provider => provider.id === normalizedConfig.activeProviderId)
+
+  aiEngine!.configure({
+    apiKey: active?.apiKey ?? '',
+    baseUrl: active?.baseUrl ?? '',
+    model: active?.activeModel ?? '',
+    enableThinking: active?.enableThinking ?? false,
+    contextWindow: active?.activeModel ? active.modelContextWindows?.[active.activeModel] : undefined
+  })
+
+  return normalizedConfig
+}
+
 async function initializeServices (): Promise<void> {
   const projectsDir = getProjectsDir()
   const snapshotsDir = getSnapshotsDir()
@@ -401,21 +417,10 @@ async function initializeServices (): Promise<void> {
   })
 
   // Apply saved AI settings on startup
-  const providersConfig = settingsStore.getProviders()
+  const providersConfig = applyActiveProviderToAiEngine()
   const activeProvider = providersConfig.providers.find(p => p.id === providersConfig.activeProviderId)
-  const savedAI = settingsStore.getAISettings()
   if (activeProvider) {
-    aiEngine.configure({
-      apiKey: activeProvider.apiKey,
-      baseUrl: activeProvider.baseUrl,
-      model: activeProvider.activeModel,
-      enableThinking: activeProvider.enableThinking ?? false,
-      contextWindow: activeProvider.modelContextWindows?.[activeProvider.activeModel]
-    })
     console.log('[main] Applied active AI provider settings')
-  } else if (savedAI.apiKey || savedAI.baseUrl || savedAI.model) {
-    aiEngine.configure(savedAI)
-    console.log('[main] Applied saved AI settings')
   }
 
   appGateway = new AppGateway(runtimeManager, projectFS, builderService)
@@ -979,18 +984,7 @@ function setupIPC (): void {
 
   ipcMain.handle('settings:saveProviders', async (_event: IpcMainInvokeEvent, config: AIProvidersConfig) => {
     settingsStore!.saveProviders(config)
-    const normalizedConfig = settingsStore!.getProviders()
-    // Reconfigure AI engine with the active provider
-    const active = normalizedConfig.providers.find(p => p.id === normalizedConfig.activeProviderId)
-    if (active) {
-      aiEngine!.configure({
-        apiKey: active.apiKey,
-        baseUrl: active.baseUrl,
-        model: active.activeModel,
-        enableThinking: active.enableThinking ?? false,
-        contextWindow: active.modelContextWindows?.[active.activeModel]
-      })
-    }
+    const normalizedConfig = applyActiveProviderToAiEngine()
     broadcastToAppWindows('settings:providersChanged', normalizedConfig)
     return { success: true }
   })
@@ -1011,6 +1005,66 @@ function setupIPC (): void {
   ipcMain.handle('settings:saveAIExecutionPreferences', async (_event: IpcMainInvokeEvent, preferences: AIExecutionPreferences) => {
     settingsStore!.saveAIExecutionPreferences(preferences)
     return { success: true }
+  })
+
+  ipcMain.handle('settings:exportConfig', async (event: IpcMainInvokeEvent) => {
+    const senderWindow = getSenderWindow(event) || mainWindow
+    const now = new Date()
+    const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+    const dialogOptions = {
+      title: '导出加密配置',
+      defaultPath: `the-world-config-${stamp}.${PORTABLE_SETTINGS_EXTENSION}`,
+      filters: [
+        { name: 'The World 配置包', extensions: [PORTABLE_SETTINGS_EXTENSION] }
+      ]
+    }
+
+    const result = senderWindow
+      ? await dialog.showSaveDialog(senderWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
+
+    if (result.canceled || !result.filePath) {
+      return { success: false, canceled: true }
+    }
+
+    const serialized = encryptPortableSettingsConfig(settingsStore!.exportPortableConfig(), PORTABLE_SETTINGS_APP_ID)
+    await fs.writeFile(result.filePath, serialized, 'utf-8')
+    return { success: true, filePath: result.filePath }
+  })
+
+  ipcMain.handle('settings:importConfig', async (event: IpcMainInvokeEvent) => {
+    const senderWindow = getSenderWindow(event) || mainWindow
+    const dialogOptions = {
+      title: '导入加密配置',
+      filters: [
+        { name: 'The World 配置包', extensions: [PORTABLE_SETTINGS_EXTENSION] }
+      ],
+      properties: ['openFile' as const]
+    }
+
+    const result = senderWindow
+      ? await dialog.showOpenDialog(senderWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions)
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true }
+    }
+
+    const filePath = result.filePaths[0]
+    const serialized = await fs.readFile(filePath, 'utf-8')
+    const payload = decryptPortableSettingsConfig(serialized, PORTABLE_SETTINGS_APP_ID)
+    const normalizedConfig = settingsStore!.importPortableConfig(payload.config as PortableSettingsConfig)
+    const providersConfig = applyActiveProviderToAiEngine()
+
+    broadcastToAppWindows('settings:providersChanged', providersConfig)
+
+    return {
+      success: true,
+      filePath,
+      importedAt: payload.exportedAt,
+      requiresReload: true,
+      importedConfig: normalizedConfig
+    }
   })
 
   // Window controls

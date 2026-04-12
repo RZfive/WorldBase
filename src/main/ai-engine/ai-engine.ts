@@ -53,13 +53,13 @@ export class AIEngine {
   }
 
   private applyConfigToProvider (provider: OpenAIProvider, config: AIConfigInput): void {
-    if (config.apiKey) {
+    if (config.apiKey !== undefined) {
       provider.setApiKey(config.apiKey)
     }
-    if (config.baseUrl) {
+    if (config.baseUrl !== undefined) {
       provider.setBaseUrl(config.baseUrl)
     }
-    if (config.model) {
+    if (config.model !== undefined) {
       provider.setModel(config.model)
     }
     if (config.enableThinking !== undefined) {
