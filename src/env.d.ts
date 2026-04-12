@@ -355,6 +355,8 @@ interface ElectronAPI {
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
   getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
+  exportAppConfig: () => Promise<{ success: boolean; canceled?: boolean; filePath?: string }>
+  importAppConfig: () => Promise<{ success: boolean; canceled?: boolean; filePath?: string; importedAt?: string; requiresReload?: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
   saveLaunchMode: (projectId: string, mode: 'embed' | 'window') => Promise<{ success: boolean }>
   getLaunchpadLayout: () => Promise<LaunchpadLayout>

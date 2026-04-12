@@ -65,6 +65,15 @@ export interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
 }
 
+export interface PortableSettingsConfig {
+  providers: AIProvidersConfig
+  themePreference: ThemePreference
+  aiExecutionPreferences: AIExecutionPreferences
+  launchpadLayout: LaunchpadLayout
+  webApps: WebAppShortcut[]
+  projectLaunchModes: Record<string, 'embed' | 'window'>
+}
+
 export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
   notifyOnTaskComplete: true
 }
@@ -258,6 +267,19 @@ function normalizeWebApps (value: unknown): WebAppShortcut[] {
   return deduped.reverse()
 }
 
+function normalizeProjectLaunchModes (value: unknown): Record<string, 'embed' | 'window'> {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+  const normalized: Record<string, 'embed' | 'window'> = {}
+
+  for (const [projectId, mode] of Object.entries(input)) {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) continue
+    normalized[normalizedProjectId] = mode === 'window' ? 'window' : 'embed'
+  }
+
+  return normalized
+}
+
 function normalizeEnabledProviderIds (
   value: unknown,
   providers: AIProvider[],
@@ -281,6 +303,28 @@ function normalizeEnabledProviderIds (
   }
 
   return enabledProviderIds
+}
+
+function normalizeProvidersConfig (config: AIProvidersConfig): AIProvidersConfig {
+  const providers = config.providers.map(provider => normalizeProvider(provider))
+  let activeProviderId = providers.some(p => p.id === config.activeProviderId)
+    ? config.activeProviderId
+    : ''
+  let enabledProviderIds = normalizeEnabledProviderIds(config.enabledProviderIds, providers, activeProviderId)
+
+  if (!activeProviderId) {
+    activeProviderId = enabledProviderIds[0] || providers[0]?.id || ''
+  }
+
+  if (activeProviderId && !enabledProviderIds.includes(activeProviderId)) {
+    enabledProviderIds = [activeProviderId, ...enabledProviderIds]
+  }
+
+  return {
+    providers,
+    activeProviderId,
+    enabledProviderIds: Array.from(new Set(enabledProviderIds))
+  }
 }
 
 /**
@@ -325,6 +369,17 @@ export class SettingsStore {
       this._cache = merged
     } catch (err) {
       console.error('[settings] Failed to write settings:', (err as Error).message)
+      throw err
+    }
+  }
+
+  /** Replace settings on disk with a normalized object. */
+  replace (data: Record<string, unknown>): void {
+    try {
+      fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2), 'utf-8')
+      this._cache = data
+    } catch (err) {
+      console.error('[settings] Failed to replace settings:', (err as Error).message)
       throw err
     }
   }
@@ -409,25 +464,7 @@ export class SettingsStore {
    * Save multi-provider configuration.
    */
   saveProviders (config: AIProvidersConfig): void {
-    const providers = config.providers.map(provider => normalizeProvider(provider))
-    let activeProviderId = providers.some(p => p.id === config.activeProviderId)
-      ? config.activeProviderId
-      : ''
-    let enabledProviderIds = normalizeEnabledProviderIds(config.enabledProviderIds, providers, activeProviderId)
-
-    if (!activeProviderId) {
-      activeProviderId = enabledProviderIds[0] || providers[0]?.id || ''
-    }
-
-    if (activeProviderId && !enabledProviderIds.includes(activeProviderId)) {
-      enabledProviderIds = [activeProviderId, ...enabledProviderIds]
-    }
-
-    const normalized: AIProvidersConfig = {
-      providers,
-      activeProviderId,
-      enabledProviderIds: Array.from(new Set(enabledProviderIds))
-    }
+    const normalized = normalizeProvidersConfig(config)
     this.write({ aiProviders: normalized })
 
     // Also keep legacy fields in sync with the active provider
@@ -498,5 +535,43 @@ export class SettingsStore {
   /** Save AI execution preferences. */
   saveAIExecutionPreferences (preferences: AIExecutionPreferences): void {
     this.write({ aiExecutionPreferences: normalizeAIExecutionPreferences(preferences) })
+  }
+
+  /** Build a normalized, portable settings snapshot for encrypted export. */
+  exportPortableConfig (): PortableSettingsConfig {
+    const settings = this.read()
+    return {
+      providers: this.getProviders(),
+      themePreference: this.getThemePreference(),
+      aiExecutionPreferences: this.getAIExecutionPreferences(),
+      launchpadLayout: this.getLaunchpadLayout(),
+      webApps: this.getWebApps(),
+      projectLaunchModes: normalizeProjectLaunchModes(settings.projectLaunchModes)
+    }
+  }
+
+  /** Replace local settings with an imported, normalized snapshot. */
+  importPortableConfig (config: PortableSettingsConfig): PortableSettingsConfig {
+    const normalizedProviders = normalizeProvidersConfig(config.providers || {
+      providers: [],
+      activeProviderId: '',
+      enabledProviderIds: []
+    })
+    const activeProvider = normalizedProviders.providers.find(provider => provider.id === normalizedProviders.activeProviderId)
+
+    const nextSettings: Record<string, unknown> = {
+      aiProviders: normalizedProviders,
+      aiApiKey: activeProvider?.apiKey || '',
+      aiBaseUrl: activeProvider?.baseUrl || '',
+      aiModel: activeProvider?.activeModel || '',
+      themePreference: normalizeThemePreference(config.themePreference),
+      aiExecutionPreferences: normalizeAIExecutionPreferences(config.aiExecutionPreferences),
+      launchpadLayout: normalizeLaunchpadLayout(config.launchpadLayout),
+      webApps: normalizeWebApps(config.webApps),
+      projectLaunchModes: normalizeProjectLaunchModes(config.projectLaunchModes)
+    }
+
+    this.replace(nextSettings)
+    return this.exportPortableConfig()
   }
 }
