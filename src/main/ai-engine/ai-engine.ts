@@ -7,6 +7,7 @@ import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
 import type { BuilderService } from '../project-runtime/builder-service.js'
 import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
+import type { AsyncTaskManager } from './agent/tools/async-task-manager.js'
 import type { DocumentStore } from './agent/tools/document-store.js'
 import type { BrowserWindow } from 'electron'
 import type { AIExecutionAuthMode } from '../settings/settings-store.js'
@@ -19,6 +20,7 @@ export interface AIEngineServices {
   builderService: BuilderService
   apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
+  asyncTaskManager: AsyncTaskManager
   documentStore?: DocumentStore
   getMainWindow?: () => BrowserWindow | null
 }

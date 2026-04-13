@@ -9,7 +9,7 @@ import type { BuilderService } from './builder-service.js'
 import { createBundledRuntimeEnv } from './bundled-runtime.js'
 import { ensureNextRuntimeCompatiblePackageJson } from './next-runtime-compat.js'
 
-interface LogEntry {
+export interface LogEntry {
   type: 'stdout' | 'stderr'
   text: string
   time: number
@@ -25,7 +25,7 @@ interface ProjectRunInfo {
   error?: string
 }
 
-interface ProjectStatus {
+export interface ProjectStatus {
   projectId: string
   status: string
   port?: number

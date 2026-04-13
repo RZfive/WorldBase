@@ -21,6 +21,7 @@ import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-h
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../src/main/ai-engine/agent/tools/office-utils.js'
+import { AsyncTaskManager } from '../src/main/ai-engine/agent/tools/async-task-manager.js'
 import { DocumentStore } from '../src/main/ai-engine/agent/tools/document-store.js'
 import { parseDocument, isSupportedDocument, detectDocumentType } from '../src/main/ai-engine/agent/tools/document-parser.js'
 import type { CreateSelectionPayload } from '../src/main/ai-engine/agent/tools/document-types.js'
@@ -55,6 +56,7 @@ let processManagerService: ProcessManagerService | null = null
 let systemService: SystemService | null = null
 let apiClient: ProjectApiClient | null = null
 let dataAccess: ProjectDataAccess | null = null
+let asyncTaskManager: AsyncTaskManager | null = null
 let lanServer: LanServer | null = null
 let settingsStore: SettingsStore | null = null
 let chatHistory: ChatHistoryStore | null = null
@@ -390,6 +392,7 @@ async function initializeServices (): Promise<void> {
   runtimeManager.setBuilderService(builderService)
   apiClient = new ProjectApiClient(runtimeManager)
   dataAccess = new ProjectDataAccess(projectsDir)
+  asyncTaskManager = new AsyncTaskManager(builderService)
 
   // Wire up the external database delegate.
   // The SqliteAdapter is loaded here (in the shell) so that the data layer
@@ -412,6 +415,7 @@ async function initializeServices (): Promise<void> {
     builderService,
     apiClient,
     dataAccess,
+    asyncTaskManager,
     documentStore,
     getMainWindow: () => mainWindow
   })
