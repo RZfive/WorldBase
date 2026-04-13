@@ -40,8 +40,7 @@ function batchEscape (value: string): string {
 function createUnixProxyScript (targetPath: string, runtimeBinDir: string): string {
   return [
     '#!/bin/sh',
-    `ORIGINAL_PATH=${shEscape(getOriginalPath())}`,
-    `export PATH=${shEscape(`${runtimeBinDir}${path.delimiter}`)}$ORIGINAL_PATH`,
+    `export PATH=${shEscape([runtimeBinDir, getOriginalPath()].filter(Boolean).join(path.delimiter))}`,
     `exec ${shEscape(targetPath)} "$@"`
   ].join('\n')
 }
@@ -50,8 +49,8 @@ function createWindowsProxyScript (targetPath: string, runtimeBinDir: string): s
   return [
     '@echo off',
     'setlocal',
-    `set "ORIGINAL_PATH=${getOriginalPath().replace(/"/g, '""')}"`,
-    `set "PATH=${runtimeBinDir};%ORIGINAL_PATH%"`,
+    `set ${batchEscape(`ORIGINAL_PATH=${getOriginalPath()}`)}`,
+    `set ${batchEscape(`PATH=${runtimeBinDir};%ORIGINAL_PATH%`)}`,
     `call ${batchEscape(targetPath)} %*`
   ].join('\r\n')
 }
