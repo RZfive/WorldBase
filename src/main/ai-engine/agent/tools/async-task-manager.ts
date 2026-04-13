@@ -52,7 +52,7 @@ export class AsyncTaskManager {
     }
 
     const record: AsyncTaskRecord = {
-      id: `${task}_${Date.now()}_${crypto.randomUUID()}`,
+      id: `${task}_${crypto.randomUUID()}`,
       projectId,
       task,
       status: 'queued',
@@ -120,7 +120,7 @@ export class AsyncTaskManager {
 
     const removableTasks = Array.from(this.tasks.values())
       .filter(task => task.status === 'completed' || task.status === 'failed')
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .sort((left, right) => left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : 0)
 
     while (this.tasks.size > this.maxTaskHistory && removableTasks.length > 0) {
       const task = removableTasks.shift()
