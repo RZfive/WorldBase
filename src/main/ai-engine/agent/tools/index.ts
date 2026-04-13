@@ -12,7 +12,11 @@ import { toolLocalFileRead } from './tool-local-file-read.js'
 import { toolLocalCommand } from './tool-local-command.js'
 import { toolLocalWriteFile } from './tool-local-file-write.js'
 import { toolRebuildProject } from './tool-rebuild-project.js'
+import { toolGetProjectLogs } from './tool-get-project-logs.js'
+import { toolGetProjectStatus } from './tool-get-project-status.js'
+import { toolGetTaskStatus, toolStartAsyncTask } from './tool-async-task.js'
 import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
+import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
 import type { AgentCore, SessionState } from '../agent-core.js'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
@@ -28,6 +32,7 @@ export interface ToolServices {
   builderService: BuilderService
   apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
+  asyncTaskManager: AsyncTaskManager
   documentStore?: DocumentStore
   getMainWindow?: () => BrowserWindow | null
 }
@@ -46,9 +51,13 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolRunCommand(services),
     toolListProjects(services),
     toolListProjectFiles(services),
+    toolGetProjectStatus(services),
+    toolGetProjectLogs(services),
     toolAnalyzeData(services),
     toolCreateProject(services, getSessionState),
     toolRebuildProject(services),
+    toolStartAsyncTask(services),
+    toolGetTaskStatus(services),
     toolLocalFileRead(services, getSessionState),
     toolLocalCommand(services, getSessionState),
     toolLocalWriteFile(services, getSessionState)
