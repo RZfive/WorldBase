@@ -37,7 +37,7 @@ export function toolRunCommand (services: ToolServices): Tool {
   return {
     definition: {
       name: 'run_project_command',
-      description: '在指定项目目录中执行 shell 命令。仅允许安全命令 (npm, node, git 等)。',
+      description: '在指定项目目录中执行 shell 命令。仅允许安全命令（npm / npx 生态脚本、node、git、echo 等）。',
       parameters: {
         type: 'object',
         properties: {

@@ -36,6 +36,7 @@ export function getEnvironmentContext (): string {
     '',
     '### 项目内命令工具限制',
     `- run_project_command 仅允许: ${PROJECT_COMMAND_WHITELIST.join(', ')}`,
+    '- 子项目运行时默认使用 npm / npx 处理依赖安装和脚本执行；不要假设 pnpm / yarn 在运行环境中可用',
     '- 项目目录探索优先使用 list_project_files；文件内容优先使用 read_project_file，不要把 run_project_command 当作 ls/find/dir 的替代品',
     '- 运行时排障优先使用 get_project_status 与 get_project_logs；长任务优先使用 start_async_task 与 get_task_status',
     '- local_run_command 会在用户本机通过 shell 执行命令，默认超时 60 秒，最大 300 秒',
