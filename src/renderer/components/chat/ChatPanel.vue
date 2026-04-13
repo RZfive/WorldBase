@@ -138,6 +138,7 @@ const showSkillPicker = ref(false)
 const syncingProviderOptions = ref(false)
 const documentDockVisible = ref(false)
 const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
+const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 
 const streamingConvIds = reactive(new Set<string>())
 const backgroundStreamMessages = new Map<string, {
@@ -501,6 +502,15 @@ function extractDocumentTagRefs (text: string): { regionIds: string[]; normalize
   }
 }
 
+function extractProjectTagRefs (text: string): { projectId: string | null; normalizedText: string } {
+  let projectId: string | null = null
+  const normalizedText = text.replace(PROJECT_TAG_PATTERN, (_match, id: string) => {
+    if (!projectId) projectId = id
+    return ''
+  }).replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n')
+  return { projectId, normalizedText }
+}
+
 function getConversationTitleText (msg?: ChatMessage): string {
   if (!msg) return ''
 
@@ -604,7 +614,7 @@ async function startOptimizationConversation (ctx: Record<string, unknown>) {
   messages.value = []
   targetProjectId.value = projectId
   currentAuthMode.value = 'strict'
-  inputText.value = `请帮我继续优化项目"${name}"（项目ID: ${ctx.id}）。请先查看项目当前的代码结构，然后告诉我可以改进的地方。`
+  inputText.value = `[[project:${ctx.id}|${name}]]`
   pendingImages.value = []
   pendingFiles.value = []
   uploadFeedback.value = ''
@@ -1004,7 +1014,12 @@ async function sendMessage () {
 
   let messageContent: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
   const filePrompt = buildUploadedFilesPrompt(pendingFiles.value)
-  const { regionIds: referencedDocumentRegionIds, normalizedText } = extractDocumentTagRefs(text)
+  const { projectId: taggedProjectId, normalizedText: textAfterProject } = extractProjectTagRefs(text)
+  if (taggedProjectId && !targetProjectId.value) {
+    targetProjectId.value = taggedProjectId
+    setConversationTarget(currentConversationId.value || '', taggedProjectId)
+  }
+  const { regionIds: referencedDocumentRegionIds, normalizedText } = extractDocumentTagRefs(textAfterProject)
 
   let docSelectionsPrompt = ''
   if (referencedDocumentRegionIds.length > 0 && window.electronAPI?.buildDocumentSelectionsPrompt) {

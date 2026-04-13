@@ -21,6 +21,12 @@ interface DocumentTagChip {
   raw: string
 }
 
+interface ProjectTagChip {
+  projectId: string
+  name: string
+  raw: string
+}
+
 const props = defineProps<{
   modelValue: string
   isLoading: boolean
@@ -47,8 +53,20 @@ const emit = defineEmits<{
 }>()
 
 const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
+const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 
 const inputFocused = ref(false)
+const projectTags = computed<ProjectTagChip[]>(() => {
+  const seenIds = new Set<string>()
+  const tags: ProjectTagChip[] = []
+  for (const match of props.modelValue.matchAll(PROJECT_TAG_PATTERN)) {
+    const projectId = match[1]
+    if (seenIds.has(projectId)) continue
+    seenIds.add(projectId)
+    tags.push({ projectId, name: match[2]?.trim() || projectId, raw: match[0] })
+  }
+  return tags
+})
 const documentTags = computed<DocumentTagChip[]>(() => {
   const seenRegionIds = new Set<string>()
   const tags: DocumentTagChip[] = []
@@ -68,6 +86,7 @@ const documentTags = computed<DocumentTagChip[]>(() => {
 })
 const plainDraftText = computed(() => {
   return props.modelValue
+    .replace(PROJECT_TAG_PATTERN, '')
     .replace(DOCUMENT_TAG_PATTERN, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n[ \t]+/g, '\n')
@@ -85,9 +104,23 @@ function buildDraftValue (tags: DocumentTagChip[], text: string): string {
   return tagSegment || text
 }
 
+function removeProjectTag (projectId: string) {
+  const remaining = projectTags.value.filter(t => t.projectId !== projectId)
+  const projectSegment = remaining.map(t => t.raw).join(' ')
+  const docSegment = documentTags.value.map(t => t.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment].filter(Boolean).join(' ')
+  const text = plainDraftText.value
+  if (tagSegment && text) { emit('update:modelValue', `${tagSegment}\n${text}`); return }
+  emit('update:modelValue', tagSegment || text)
+}
+
 function handleTextInput (e: Event) {
   const nextText = (e.target as HTMLTextAreaElement).value
-  emit('update:modelValue', buildDraftValue(documentTags.value, nextText))
+  const projectSegment = projectTags.value.map(t => t.raw).join(' ')
+  const docSegment = documentTags.value.map(t => t.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment].filter(Boolean).join(' ')
+  if (tagSegment && nextText) { emit('update:modelValue', `${tagSegment}\n${nextText}`); return }
+  emit('update:modelValue', tagSegment || nextText)
 }
 
 function removeDocumentTag (regionId: string) {
@@ -97,10 +130,17 @@ function removeDocumentTag (regionId: string) {
 
 function handleKeydown (e: KeyboardEvent) {
   if (props.isLoading) return
-  if (e.key === 'Backspace' && plainDraftText.value.trim().length === 0 && documentTags.value.length > 0) {
-    e.preventDefault()
-    removeDocumentTag(documentTags.value[documentTags.value.length - 1].regionId)
-    return
+  if (e.key === 'Backspace' && plainDraftText.value.trim().length === 0) {
+    if (documentTags.value.length > 0) {
+      e.preventDefault()
+      removeDocumentTag(documentTags.value[documentTags.value.length - 1].regionId)
+      return
+    }
+    if (projectTags.value.length > 0) {
+      e.preventDefault()
+      removeProjectTag(projectTags.value[projectTags.value.length - 1].projectId)
+      return
+    }
   }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -176,6 +216,13 @@ async function handleOfficePickerClick () {
         <div v-for="(img, idx) in props.pendingImages" :key="idx" class="image-preview-item">
           <img :src="img.base64" class="image-thumb" />
           <button class="image-remove" @click="emit('removeImage', idx)">×</button>
+        </div>
+      </div>
+      <div v-if="projectTags.length > 0" class="project-tag-bar">
+        <div v-for="tag in projectTags" :key="tag.projectId" class="project-tag-chip">
+          <span class="project-tag-chip-prefix">📦</span>
+          <span class="project-tag-chip-label">{{ tag.name }}</span>
+          <button class="project-tag-chip-remove" @click="removeProjectTag(tag.projectId)" title="移除项目标签">×</button>
         </div>
       </div>
       <div v-if="documentTags.length > 0" class="document-tag-bar">
@@ -361,6 +408,55 @@ async function handleOfficePickerClick () {
   line-height: 1;
   opacity: 0;
   transition: opacity 0.15s;
+}
+
+.project-tag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
+.project-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
+  color: var(--app-text-soft);
+}
+
+.project-tag-chip-prefix {
+  font-size: 0.82em;
+}
+
+.project-tag-chip-label {
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.8em;
+  font-weight: 600;
+  color: var(--app-accent);
+}
+
+.project-tag-chip-remove {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+}
+
+.project-tag-chip-remove:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--app-danger);
 }
 
 .document-tag-bar {
