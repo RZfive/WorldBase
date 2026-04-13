@@ -11,8 +11,7 @@ await build({
   },
   external: [
     'electron',
-    'better-sqlite3',
-    'pnpm'
+    'better-sqlite3'
   ],
   sourcemap: false,
 })
