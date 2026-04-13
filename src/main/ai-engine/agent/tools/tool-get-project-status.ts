@@ -70,11 +70,13 @@ export function toolGetProjectStatus (services: ToolServices): Tool {
         ? (nodeModulesPresent ? 'installed' : 'missing')
         : 'not_applicable'
 
-      const recommendedPrepareAction = packageJsonExists
-        ? isNextProject
-          ? (needsRebuild ? 'rebuild_project' : standaloneBuildPresent ? 'none' : nodeModulesPresent ? 'rebuild_project' : 'install_dependencies')
-          : (nodeModulesPresent ? 'none' : 'install_dependencies')
-        : 'none'
+      const recommendedPrepareAction = getRecommendedPrepareAction({
+        packageJsonExists,
+        isNextProject,
+        nodeModulesPresent,
+        standaloneBuildPresent,
+        needsRebuild
+      })
 
       return {
         ...status,
@@ -107,4 +109,40 @@ async function detectNextProject (packageJsonPath: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+function getRecommendedPrepareAction ({
+  packageJsonExists,
+  isNextProject,
+  nodeModulesPresent,
+  standaloneBuildPresent,
+  needsRebuild
+}: {
+  packageJsonExists: boolean
+  isNextProject: boolean
+  nodeModulesPresent: boolean
+  standaloneBuildPresent: boolean
+  needsRebuild?: boolean
+}): 'none' | 'install_dependencies' | 'rebuild_project' {
+  if (!packageJsonExists) {
+    return 'none'
+  }
+
+  if (!isNextProject) {
+    return nodeModulesPresent ? 'none' : 'install_dependencies'
+  }
+
+  if (needsRebuild) {
+    return 'rebuild_project'
+  }
+
+  if (standaloneBuildPresent) {
+    return 'none'
+  }
+
+  if (nodeModulesPresent) {
+    return 'rebuild_project'
+  }
+
+  return 'install_dependencies'
 }
