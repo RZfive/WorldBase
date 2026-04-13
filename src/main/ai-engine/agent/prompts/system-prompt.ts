@@ -258,9 +258,9 @@ export async function listTables() {
 2. 如果 read_project_file 返回 has_more=true、next_start_line 或 truncated=true，继续用 start_line=next_start_line 追读下一段，直到拿到完成当前任务所需的上下文
 3. 只在确实需要时继续追读后续分段；不要为了"完整看一遍"而盲目读取超大文件
 4. 用 write_project_file 写入修改后的代码
-5. 如果项目启动失败、页面白屏或一直加载中，先用 \`get_project_status\` 查看运行状态，再用 \`get_project_logs\` 读取 stderr/stdout 日志定位根因
+5. 如果项目启动失败、页面白屏或一直加载中，先用 \`get_project_status\` 查看运行状态，并直接参考其中的 \`node_modules_present\`、\`standalone_build_present\`、\`needs_rebuild\`、\`recommended_prepare_action\`，再用 \`get_project_logs\` 读取 stderr/stdout 日志定位根因
 6. 如果可能，用 call_project_api 测试修改是否正常
-7. 如果 Next.js 项目因为依赖或打包状态异常无法正常编译，优先调用 \`rebuild_project\`；如果预计耗时较长，则改用 \`start_async_task\` 启动 rebuild，再用 \`get_task_status\` 轮询结果
+7. 如果 \`get_project_status\` 返回 \`recommended_prepare_action: "install_dependencies"\`，先安装依赖；如果返回 \`recommended_prepare_action: "rebuild_project"\`，优先调用 \`rebuild_project\`；如果预计耗时较长，则改用 \`start_async_task\` 启动 rebuild，再用 \`get_task_status\` 轮询结果
 8. 向用户报告修改结果
 
 ## 重要约束（必须遵守）
@@ -284,7 +284,7 @@ export async function listTables() {
 - 读取大文件时优先分段，先抓住与当前任务直接相关的 imports、类型、入口、目标函数和相邻调用链
 - 数据库查询只能用 SELECT，不能修改数据
 - 对命令执行保持谨慎，只执行安全的命令
-- 遇到运行时故障时，优先查看 \`get_project_status\` / \`get_project_logs\`，不要只依赖 \`call_project_api\` 猜测问题
+- 遇到运行时故障时，优先查看 \`get_project_status\` / \`get_project_logs\`，不要只依赖 \`call_project_api\` 猜测问题；\`get_project_status\` 已直接返回依赖安装状态和是否需要重建，不要再为此重复做额外探测
 - 长时间构建或重建优先使用 \`start_async_task\` + \`get_task_status\`，避免请求在等待过程中超时
 - 本地文件读取和命令执行需要用户授权，拒绝后不要重复请求
 - 给出清晰、有帮助的回答
