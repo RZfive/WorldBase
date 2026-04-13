@@ -48,17 +48,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v5
-        with:
-          run_install: false
-
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Restore Electron caches
         uses: actions/cache@v5
@@ -66,21 +61,21 @@ jobs:
           path: |
             ~\AppData\Local\electron\Cache
             ~\AppData\Local\electron-builder\Cache
-          key: ${{ runner.os }}-electron-${{ hashFiles('pnpm-lock.yaml', 'package.json', 'electron-builder.json') }}
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json', 'package.json', 'electron-builder.json') }}
           restore-keys: |
             ${{ runner.os }}-electron-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci --legacy-peer-deps
 
       - name: Build frontend
-        run: pnpm build
+        run: npm run build
 
       - name: Compile Electron TypeScript
-        run: pnpm build:electron
+        run: npm run build:electron
 
       - name: Build Electron (Windows)
-        run: pnpm exec electron-builder --win --publish never
+        run: npx electron-builder --win --publish never
 
       - name: Package Windows build artifacts
         id: package_windows
@@ -103,17 +98,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v5
-        with:
-          run_install: false
-
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Restore Electron caches
         uses: actions/cache@v5
@@ -121,21 +111,21 @@ jobs:
           path: |
             ~/Library/Caches/electron
             ~/Library/Caches/electron-builder
-          key: ${{ runner.os }}-electron-${{ hashFiles('pnpm-lock.yaml', 'package.json', 'electron-builder.json') }}
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json', 'package.json', 'electron-builder.json') }}
           restore-keys: |
             ${{ runner.os }}-electron-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci --legacy-peer-deps
 
       - name: Build frontend
-        run: pnpm build
+        run: npm run build
 
       - name: Compile Electron TypeScript
-        run: pnpm build:electron
+        run: npm run build:electron
 
       - name: Build Electron (macOS ARM)
-        run: pnpm exec electron-builder --mac --arm64 --publish never
+        run: npx electron-builder --mac --arm64 --publish never
 
       - name: Package macOS ARM build artifacts
         id: package_mac_arm
