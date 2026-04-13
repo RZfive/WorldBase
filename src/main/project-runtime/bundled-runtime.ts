@@ -71,6 +71,9 @@ async function ensureRuntimeBinDir (): Promise<string> {
       const npxPath = resolveSystemCommandPath(process.platform === 'win32'
         ? ['npx.cmd', 'npx.exe', 'npx']
         : ['npx'])
+      if (!npmPath) {
+        throw new Error('Unable to find npm in PATH for child-project runtime installs')
+      }
       const hash = crypto.createHash('sha256')
         .update(`${nodePath}\n${npmPath || ''}\n${npxPath || ''}`)
         .digest('hex')
