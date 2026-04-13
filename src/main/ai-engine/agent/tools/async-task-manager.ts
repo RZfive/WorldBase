@@ -52,7 +52,7 @@ export class AsyncTaskManager {
     }
 
     const record: AsyncTaskRecord = {
-      id: `task_${crypto.randomUUID()}`,
+      id: `${task}_${Date.now()}_${crypto.randomUUID()}`,
       projectId,
       task,
       status: 'queued',

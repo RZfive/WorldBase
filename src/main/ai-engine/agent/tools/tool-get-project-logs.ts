@@ -18,6 +18,7 @@ export interface Tool {
 
 const DEFAULT_LINES = 50
 const MAX_LINES = 200
+const FILTER_BUFFER_MULTIPLIER = 3
 
 export function toolGetProjectLogs (services: ToolServices): Tool {
   return {
@@ -49,7 +50,7 @@ export function toolGetProjectLogs (services: ToolServices): Tool {
       const requestedLines = Math.min(Math.max(lines || DEFAULT_LINES, 1), MAX_LINES)
       const logType = type || 'all'
       const logs = services.runtimeManager
-        .getLogs(project_id, requestedLines * (logType === 'all' ? 1 : 3))
+        .getLogs(project_id, requestedLines * (logType === 'all' ? 1 : FILTER_BUFFER_MULTIPLIER))
         .filter(entry => logType === 'all' || entry.type === logType)
         .slice(-requestedLines)
 
