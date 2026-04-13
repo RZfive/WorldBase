@@ -8,6 +8,7 @@ let runtimeBinDirPromise: Promise<string> | null = null
 let chinaMirrorEnabledPromise: Promise<boolean> | null = null
 
 const CHINA_NPM_REGISTRY = 'https://registry.npmmirror.com'
+const IP_LOOKUP_TIMEOUT_MS = 3000
 const CHINA_IP_LOOKUP_URLS = [
   'https://api.country.is/',
   'https://ipapi.co/json/'
@@ -64,6 +65,8 @@ function createWindowsProxyScript (targetPath: string, runtimeBinDir: string): s
 }
 
 function hasExplicitRegistryConfig (env: NodeJS.ProcessEnv): boolean {
+  // Respect both per-invocation overrides and process-wide npm registry
+  // configuration so we never clobber an explicitly selected mirror.
   return [
     env.NPM_CONFIG_REGISTRY,
     env.npm_config_registry,
@@ -73,7 +76,7 @@ function hasExplicitRegistryConfig (env: NodeJS.ProcessEnv): boolean {
 }
 
 function readForcedChinaIpFlag (): boolean | null {
-  const raw = process.env.THE_WORLD_FORCE_CHINA_IP
+  const raw = process.env.THE_WORLD_FORCE_CN_MIRROR ?? process.env.THE_WORLD_FORCE_CHINA_IP
   if (!raw) return null
   const normalized = raw.trim().toLowerCase()
   if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
@@ -95,7 +98,7 @@ function extractCountryCode (payload: unknown): string | null {
 
 async function isChinaIp (): Promise<boolean> {
   const forced = readForcedChinaIpFlag()
-  if (forced != null) {
+  if (forced !== null) {
     return forced
   }
 
@@ -104,7 +107,7 @@ async function isChinaIp (): Promise<boolean> {
       for (const url of CHINA_IP_LOOKUP_URLS) {
         try {
           const response = await fetch(url, {
-            signal: AbortSignal.timeout(3000),
+            signal: AbortSignal.timeout(IP_LOOKUP_TIMEOUT_MS),
             headers: {
               accept: 'application/json'
             }
