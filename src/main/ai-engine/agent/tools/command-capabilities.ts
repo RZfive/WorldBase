@@ -3,7 +3,7 @@ export const PROJECT_COMMAND_WHITELIST = [
 ]
 
 export const LOCAL_COMMAND_DISCOVERY_CANDIDATES = [
-  'node', 'npm', 'npx', 'pnpm', 'git',
+  'node', 'npm', 'npx', 'git',
   'python', 'python3', 'pip', 'pip3',
   'bash', 'sh', 'zsh',
   'pwsh', 'powershell', 'cmd',
