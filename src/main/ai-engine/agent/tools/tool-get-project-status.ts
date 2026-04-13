@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { existsSync } from 'node:fs'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
 import type { BuilderService } from '../../../project-runtime/builder-service.js'
@@ -43,8 +42,10 @@ export function toolGetProjectStatus (services: ToolServices): Tool {
       const projectDir = path.join(services.projectFS.projectsDir, project_id)
       const packageJsonPath = path.join(projectDir, 'package.json')
       const nodeModulesPath = path.join(projectDir, 'node_modules')
-      const packageJsonExists = existsSync(packageJsonPath)
-      const nodeModulesPresent = existsSync(nodeModulesPath)
+      const [packageJsonExists, nodeModulesPresent] = await Promise.all([
+        pathExists(packageJsonPath),
+        pathExists(nodeModulesPath)
+      ])
       const standaloneBuildPresent = services.builderService.hasStandaloneBuild(project_id)
       const recentLogs = services.runtimeManager
         .getLogs(project_id, 20)
@@ -61,7 +62,7 @@ export function toolGetProjectStatus (services: ToolServices): Tool {
         // Ignore missing meta and fall back to on-disk detection below.
       }
 
-      const isNextProject = framework === 'nextjs' || await detectNextProject(packageJsonPath)
+      const isNextProject = framework === 'nextjs' || await detectNextProject(packageJsonPath, packageJsonExists)
       const needsRebuild = isNextProject
         ? await services.builderService.needsRebuild(project_id)
         : undefined
@@ -94,8 +95,8 @@ export function toolGetProjectStatus (services: ToolServices): Tool {
   }
 }
 
-async function detectNextProject (packageJsonPath: string): Promise<boolean> {
-  if (!existsSync(packageJsonPath)) {
+async function detectNextProject (packageJsonPath: string, packageJsonExists: boolean): Promise<boolean> {
+  if (!packageJsonExists) {
     return false
   }
 
@@ -106,6 +107,15 @@ async function detectNextProject (packageJsonPath: string): Promise<boolean> {
       ...((pkg.devDependencies || {}) as Record<string, string>)
     }
     return typeof deps.next === 'string'
+  } catch {
+    return false
+  }
+}
+
+async function pathExists (targetPath: string): Promise<boolean> {
+  try {
+    await fs.access(targetPath)
+    return true
   } catch {
     return false
   }
