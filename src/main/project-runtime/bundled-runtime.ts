@@ -5,14 +5,6 @@ import fs from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 
 let runtimeBinDirPromise: Promise<string> | null = null
-let chinaMirrorEnabledPromise: Promise<boolean> | null = null
-
-const CHINA_NPM_REGISTRY = 'https://registry.npmmirror.com'
-const IP_LOOKUP_TIMEOUT_MS = 3000
-const CHINA_IP_LOOKUP_URLS = [
-  'https://api.country.is/',
-  'https://ipapi.co/json/'
-]
 
 function resolveBundledNodePath (): string {
   return process.execPath
@@ -62,98 +54,6 @@ function createWindowsProxyScript (targetPath: string, runtimeBinDir: string): s
     `set "PATH=${runtimeBinDir};%ORIGINAL_PATH%"`,
     `call ${batchEscape(targetPath)} %*`
   ].join('\r\n')
-}
-
-function hasExplicitRegistryConfig (env: NodeJS.ProcessEnv): boolean {
-  // Respect both per-invocation overrides and process-wide npm registry
-  // configuration so we never clobber an explicitly selected mirror.
-  return [
-    env.NPM_CONFIG_REGISTRY,
-    env.npm_config_registry,
-    process.env.NPM_CONFIG_REGISTRY,
-    process.env.npm_config_registry
-  ].some(value => typeof value === 'string' && value.trim().length > 0)
-}
-
-function readForcedChinaIpFlag (): boolean | null {
-  const raw = process.env.THE_WORLD_FORCE_CN_MIRROR ?? process.env.THE_WORLD_FORCE_CHINA_IP
-  if (!raw) return null
-  const normalized = raw.trim().toLowerCase()
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
-  return null
-}
-
-function extractCountryCode (payload: unknown): string | null {
-  if (!payload || typeof payload !== 'object') {
-    return null
-  }
-
-  const record = payload as Record<string, unknown>
-  const value = record.country ?? record.country_code ?? record.countryCode
-  return typeof value === 'string' && value.trim()
-    ? value.trim().toUpperCase()
-    : null
-}
-
-async function isChinaIp (): Promise<boolean> {
-  const forced = readForcedChinaIpFlag()
-  if (forced !== null) {
-    return forced
-  }
-
-  if (!chinaMirrorEnabledPromise) {
-    chinaMirrorEnabledPromise = (async () => {
-      for (const url of CHINA_IP_LOOKUP_URLS) {
-        try {
-          const response = await fetch(url, {
-            signal: AbortSignal.timeout(IP_LOOKUP_TIMEOUT_MS),
-            headers: {
-              accept: 'application/json'
-            }
-          })
-
-          if (!response.ok) {
-            continue
-          }
-
-          const countryCode = extractCountryCode(await response.json())
-          if (countryCode === 'CN') {
-            return true
-          }
-          if (countryCode) {
-            return false
-          }
-        } catch {
-          // Ignore detection failures and fall back to the default registry.
-        }
-      }
-
-      return false
-    })()
-  }
-
-  return chinaMirrorEnabledPromise
-}
-
-async function resolveRegistryEnv (env: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
-  if (hasExplicitRegistryConfig(env)) {
-    return {}
-  }
-
-  // Allow deployments to force a specific npm mirror without disabling the
-  // automatic China-IP fallback logic globally.
-  const explicitRegistry = process.env.THE_WORLD_NPM_REGISTRY?.trim()
-  const registry = explicitRegistry || (await isChinaIp() ? CHINA_NPM_REGISTRY : '')
-
-  if (!registry) {
-    return {}
-  }
-
-  return {
-    NPM_CONFIG_REGISTRY: registry,
-    npm_config_registry: registry
-  }
 }
 
 async function writeExecutableFile (filePath: string, content: string): Promise<void> {
@@ -237,13 +137,10 @@ export async function createBundledRuntimeEnv (
 ): Promise<NodeJS.ProcessEnv> {
   const runtimeBinDir = await ensureRuntimeBinDir()
   const originalPath = getOriginalPath()
-  const registryEnv = await resolveRegistryEnv(extraEnv)
 
   return {
     ...process.env,
-    ...registryEnv,
     ...extraEnv,
-    THE_WORLD_ORIGINAL_PATH: originalPath,
     PATH: [
       runtimeBinDir,
       path.join(cwd, 'node_modules', '.bin'),

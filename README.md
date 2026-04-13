@@ -47,16 +47,16 @@ the-world/
 
 ```bash
 # 安装依赖
-npm install --legacy-peer-deps
+pnpm install
 
 # 启动开发服务器 (仅前端)
-npm run dev
+pnpm dev
 
 # 启动 Electron 开发
-npm run electron:dev
+pnpm electron:dev
 
 # 构建应用
-npm run electron:build
+pnpm electron:build
 ```
 
 > Windows 下如果生成/打包 Next.js standalone 应用时触发 symlink 权限错误，The World 会在构建阶段自动拉起管理员授权。
