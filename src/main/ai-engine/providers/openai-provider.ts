@@ -217,7 +217,7 @@ export class OpenAIProvider {
   }
 
   private normalizeOutgoingMessages (messages: ChatMessage[]): ChatMessage[] {
-    return messages.map(message => {
+    const normalized = messages.map(message => {
       if (!message.tool_calls || message.tool_calls.length === 0) {
         return message
       }
@@ -227,6 +227,22 @@ export class OpenAIProvider {
         tool_calls: this.normalizeToolCalls(message.tool_calls)
       }
     })
+
+    return this.ensureUserMessage(normalized)
+  }
+
+  private ensureUserMessage (messages: ChatMessage[]): ChatMessage[] {
+    if (messages.some(message => message.role === 'user')) {
+      return messages
+    }
+
+    return [
+      ...messages,
+      {
+        role: 'user',
+        content: '请基于以上上下文继续当前任务，不要重复已经完成的步骤。'
+      }
+    ]
   }
 
   private normalizeBaseUrl (url: string): string {
