@@ -138,6 +138,8 @@ async function resolveRegistryEnv (env: NodeJS.ProcessEnv): Promise<NodeJS.Proce
     return {}
   }
 
+  // Allow deployments to force a specific npm mirror without disabling the
+  // automatic China-IP fallback logic globally.
   const explicitRegistry = process.env.THE_WORLD_NPM_REGISTRY?.trim()
   const registry = explicitRegistry || (await isChinaIp() ? CHINA_NPM_REGISTRY : '')
 
@@ -179,7 +181,7 @@ async function ensureRuntimeBinDir (): Promise<string> {
         `exec env ELECTRON_RUN_AS_NODE=1 ${shEscape(nodePath)} "$@"`
       ].join('\n')
 
-      const unixNpm = [
+      const unixProxyScripts = [
         npmPath ? createUnixProxyScript(npmPath, runtimeBinDir) : null,
         npxPath ? createUnixProxyScript(npxPath, runtimeBinDir) : null
       ]
@@ -191,27 +193,30 @@ async function ensureRuntimeBinDir (): Promise<string> {
         `"${nodePath}" %*`
       ].join('\r\n')
 
-      const windowsNpm = [
+      const windowsProxyScripts = [
         npmPath ? createWindowsProxyScript(npmPath, runtimeBinDir) : null,
         npxPath ? createWindowsProxyScript(npxPath, runtimeBinDir) : null
       ]
+
+      const [unixNpmScript, unixNpxScript] = unixProxyScripts
+      const [windowsNpmScript, windowsNpxScript] = windowsProxyScripts
 
       const filesToWrite: Array<Promise<void>> = [
         writeExecutableFile(path.join(runtimeBinDir, 'node'), unixNode),
         writeExecutableFile(path.join(runtimeBinDir, 'node.cmd'), windowsNode)
       ]
 
-      if (unixNpm[0]) {
-        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npm'), unixNpm[0]))
+      if (unixNpmScript) {
+        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npm'), unixNpmScript))
       }
-      if (unixNpm[1]) {
-        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npx'), unixNpm[1]))
+      if (unixNpxScript) {
+        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npx'), unixNpxScript))
       }
-      if (windowsNpm[0]) {
-        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npm.cmd'), windowsNpm[0]))
+      if (windowsNpmScript) {
+        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npm.cmd'), windowsNpmScript))
       }
-      if (windowsNpm[1]) {
-        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npx.cmd'), windowsNpm[1]))
+      if (windowsNpxScript) {
+        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npx.cmd'), windowsNpxScript))
       }
 
       await Promise.all(filesToWrite)
