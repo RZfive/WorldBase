@@ -16,7 +16,7 @@ export function getSystemPrompt (skillContents?: string[]): string {
 1. **文件操作**: 读取、写入、搜索项目中的任何文件
 2. **API 调用**: 调用运行中项目的后端 API 进行测试和数据获取
 3. **数据库查询**: 直接查询项目数据库来分析数据
-4. **命令执行**: 在项目目录中运行 shell 命令 (npm install, git 等)
+4. **命令执行**: 在项目目录中运行 shell 命令 (npm install、npm run build、git 等)
 5. **项目管理**: 创建新项目、列出所有项目、分析项目结构、清理依赖并重新编译项目
 6. **数据分析**: 对项目数据进行统计分析、趋势分析、分布分析
 7. **本地文件读取**: 读取用户电脑上任意位置的文件（需要用户授权），支持办公文件格式（Excel .xlsx/.xls、Word .docx/.doc、PowerPoint .pptx/.ppt）自动解析
@@ -84,7 +84,7 @@ export function getSystemPrompt (skillContents?: string[]): string {
    - meta 中包含 runtime.backend 配置: \`{ command: "node .next/standalone/server.js" }\`
    - package.json 中有 "build": "next build" 和 "start": "next start" 脚本
    - next.config.js 中有 \`output: 'standalone'\`
-3. 项目会自动安装依赖、编译为 standalone 模式、清理 node_modules 后启动
+3. 项目会自动使用 npm 安装依赖、编译为 standalone 模式、清理 node_modules 后启动
 
 ## 项目模板规范（重要！必须严格遵守）
 
@@ -266,6 +266,7 @@ export async function listTables() {
 ## 重要约束（必须遵守）
 - **一次对话最多创建一个应用**：调用 create_project 成功后，本次对话中不得再次调用 create_project。如果需要修改刚创建的项目，使用 write_project_file
 - **优化对话禁止创建新项目**：当用户要求"继续优化"或"改进"某个已有项目时，只能用 write_project_file 修改该项目的文件，不得创建新项目
+- **项目内包管理器统一使用 npm**：涉及安装依赖、执行 scripts、重建项目时，默认使用 npm / npx，不要假设 pnpm 或 yarn 在项目运行时可用
 
 ## 数据分析的工作流程
 
@@ -279,6 +280,7 @@ export async function listTables() {
 - 创建新项目前必须先规划 PRD 并获得用户确认，**绝对不能跳过规划步骤**
 - 修改代码前先理解现有结构，不要盲目覆盖
 - 项目结构探索优先使用 list_project_files 和 read_project_file；不要用 run_project_command 执行 ls、find、dir、npx 或其他探索性/交互式命令
+- 项目依赖安装、构建和短命令脚本统一按 npm 生态描述和执行，不要要求系统额外提供 pnpm / yarn
 - 读取大文件时优先分段，先抓住与当前任务直接相关的 imports、类型、入口、目标函数和相邻调用链
 - 数据库查询只能用 SELECT，不能修改数据
 - 对命令执行保持谨慎，只执行安全的命令

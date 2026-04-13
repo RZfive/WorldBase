@@ -3,9 +3,6 @@ import os from 'node:os'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { createRequire } from 'node:module'
-
-const require = createRequire(import.meta.url)
 
 let runtimeBinDirPromise: Promise<string> | null = null
 
@@ -13,51 +10,49 @@ function resolveBundledNodePath (): string {
   return process.execPath
 }
 
-function resolveBundledPnpmPackageDir (): string {
-  const resolvedEntry = require.resolve('pnpm')
-
-  if (path.basename(resolvedEntry) === 'package.json') {
-    return path.dirname(resolvedEntry)
-  }
-
-  return path.dirname(path.dirname(resolvedEntry))
+function getOriginalPath (): string {
+  return process.env.PATH || ''
 }
 
-function resolveBundledPnpmCliPath (binName: 'pnpm' | 'pnpx'): string {
-  const candidatePaths = new Set<string>([
-    path.join(process.resourcesPath, 'app.asar', 'node_modules', 'pnpm', 'bin', `${binName}.cjs`),
-    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'pnpm', 'bin', `${binName}.cjs`)
-  ])
+function resolveSystemCommandPath (commandNames: string[]): string | null {
+  const pathEntries = getOriginalPath().split(path.delimiter).filter(Boolean)
 
-  const pnpmPackageDir = resolveBundledPnpmPackageDir()
-  candidatePaths.add(path.join(pnpmPackageDir, 'bin', `${binName}.cjs`))
-
-  try {
-    const pnpmPackageJson = require(path.join(pnpmPackageDir, 'package.json')) as {
-      bin?: string | Partial<Record<'pnpm' | 'pnpx', string>>
-    }
-    const declaredBinPath = typeof pnpmPackageJson.bin === 'string'
-      ? pnpmPackageJson.bin
-      : pnpmPackageJson.bin?.[binName]
-
-    if (declaredBinPath) {
-      candidatePaths.add(path.resolve(pnpmPackageDir, declaredBinPath))
-    }
-  } catch {
-    // Ignore package metadata read failures and fall back to the well-known paths above.
-  }
-
-  for (const candidatePath of candidatePaths) {
-    if (existsSync(candidatePath)) {
-      return candidatePath
+  for (const dir of pathEntries) {
+    for (const commandName of commandNames) {
+      const candidatePath = path.join(dir, commandName)
+      if (existsSync(candidatePath)) {
+        return candidatePath
+      }
     }
   }
 
-  throw new Error(`Unable to resolve bundled ${binName} CLI entry from pnpm package`)
+  return null
 }
 
 function shEscape (value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`
+}
+
+function batchEscape (value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+function createUnixProxyScript (targetPath: string, runtimeBinDir: string): string {
+  return [
+    '#!/bin/sh',
+    `export PATH=${shEscape([runtimeBinDir, getOriginalPath()].filter(Boolean).join(path.delimiter))}`,
+    `exec ${shEscape(targetPath)} "$@"`
+  ].join('\n')
+}
+
+function createWindowsProxyScript (targetPath: string, runtimeBinDir: string): string {
+  return [
+    '@echo off',
+    'setlocal',
+    `set ${batchEscape(`ORIGINAL_PATH=${getOriginalPath()}`)}`,
+    `set ${batchEscape(`PATH=${runtimeBinDir};%ORIGINAL_PATH%`)}`,
+    `call ${batchEscape(targetPath)} %*`
+  ].join('\r\n')
 }
 
 async function writeExecutableFile (filePath: string, content: string): Promise<void> {
@@ -69,10 +64,17 @@ async function ensureRuntimeBinDir (): Promise<string> {
   if (!runtimeBinDirPromise) {
     runtimeBinDirPromise = (async () => {
       const nodePath = resolveBundledNodePath()
-      const pnpmCliPath = resolveBundledPnpmCliPath('pnpm')
-      const pnpxCliPath = resolveBundledPnpmCliPath('pnpx')
+      const npmPath = resolveSystemCommandPath(process.platform === 'win32'
+        ? ['npm.cmd', 'npm.exe', 'npm']
+        : ['npm'])
+      const npxPath = resolveSystemCommandPath(process.platform === 'win32'
+        ? ['npx.cmd', 'npx.exe', 'npx']
+        : ['npx'])
+      if (!npmPath) {
+        throw new Error('Unable to find npm in PATH for child-project runtime installs')
+      }
       const hash = crypto.createHash('sha256')
-        .update(`${nodePath}\n${pnpmCliPath}\n${pnpxCliPath}`)
+        .update(`${nodePath}\n${npmPath || ''}\n${npxPath || ''}`)
         .digest('hex')
         .slice(0, 12)
       const runtimeBinDir = path.join(os.tmpdir(), 'the-world-runtime', hash)
@@ -84,15 +86,10 @@ async function ensureRuntimeBinDir (): Promise<string> {
         `exec env ELECTRON_RUN_AS_NODE=1 ${shEscape(nodePath)} "$@"`
       ].join('\n')
 
-      const unixNpm = [
-        '#!/bin/sh',
-        `exec env ELECTRON_RUN_AS_NODE=1 ${shEscape(nodePath)} ${shEscape(pnpmCliPath)} "$@"`
-      ].join('\n')
-
-      const unixNpx = [
-        '#!/bin/sh',
-        `exec env ELECTRON_RUN_AS_NODE=1 ${shEscape(nodePath)} ${shEscape(pnpxCliPath)} "$@"`
-      ].join('\n')
+      const unixProxyScripts = [
+        npmPath ? createUnixProxyScript(npmPath, runtimeBinDir) : null,
+        npxPath ? createUnixProxyScript(npxPath, runtimeBinDir) : null
+      ]
 
       const windowsNode = [
         '@echo off',
@@ -101,28 +98,33 @@ async function ensureRuntimeBinDir (): Promise<string> {
         `"${nodePath}" %*`
       ].join('\r\n')
 
-      const windowsNpm = [
-        '@echo off',
-        'setlocal',
-        'set ELECTRON_RUN_AS_NODE=1',
-        `"${nodePath}" "${pnpmCliPath}" %*`
-      ].join('\r\n')
+      const windowsProxyScripts = [
+        npmPath ? createWindowsProxyScript(npmPath, runtimeBinDir) : null,
+        npxPath ? createWindowsProxyScript(npxPath, runtimeBinDir) : null
+      ]
 
-      const windowsNpx = [
-        '@echo off',
-        'setlocal',
-        'set ELECTRON_RUN_AS_NODE=1',
-        `"${nodePath}" "${pnpxCliPath}" %*`
-      ].join('\r\n')
+      const [unixNpmScript, unixNpxScript] = unixProxyScripts
+      const [windowsNpmScript, windowsNpxScript] = windowsProxyScripts
 
-      await Promise.all([
+      const filesToWrite: Array<Promise<void>> = [
         writeExecutableFile(path.join(runtimeBinDir, 'node'), unixNode),
-        writeExecutableFile(path.join(runtimeBinDir, 'npm'), unixNpm),
-        writeExecutableFile(path.join(runtimeBinDir, 'npx'), unixNpx),
-        writeExecutableFile(path.join(runtimeBinDir, 'node.cmd'), windowsNode),
-        writeExecutableFile(path.join(runtimeBinDir, 'npm.cmd'), windowsNpm),
-        writeExecutableFile(path.join(runtimeBinDir, 'npx.cmd'), windowsNpx)
-      ])
+        writeExecutableFile(path.join(runtimeBinDir, 'node.cmd'), windowsNode)
+      ]
+
+      if (unixNpmScript) {
+        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npm'), unixNpmScript))
+      }
+      if (unixNpxScript) {
+        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npx'), unixNpxScript))
+      }
+      if (windowsNpmScript) {
+        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npm.cmd'), windowsNpmScript))
+      }
+      if (windowsNpxScript) {
+        filesToWrite.push(writeExecutableFile(path.join(runtimeBinDir, 'npx.cmd'), windowsNpxScript))
+      }
+
+      await Promise.all(filesToWrite)
 
       return runtimeBinDir
     })()
@@ -136,6 +138,7 @@ export async function createBundledRuntimeEnv (
   extraEnv: NodeJS.ProcessEnv = {}
 ): Promise<NodeJS.ProcessEnv> {
   const runtimeBinDir = await ensureRuntimeBinDir()
+  const originalPath = getOriginalPath()
 
   return {
     ...process.env,
@@ -143,7 +146,7 @@ export async function createBundledRuntimeEnv (
     PATH: [
       runtimeBinDir,
       path.join(cwd, 'node_modules', '.bin'),
-      process.env.PATH || ''
+      originalPath
     ].filter(Boolean).join(path.delimiter)
   }
 }
