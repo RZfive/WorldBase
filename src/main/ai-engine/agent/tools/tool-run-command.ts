@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
+import type { BuilderService } from '../../../project-runtime/builder-service.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
 import { PROJECT_COMMAND_WHITELIST } from './command-capabilities.js'
@@ -8,6 +9,7 @@ import { createBundledRuntimeEnv } from '../../../project-runtime/bundled-runtim
 
 interface ToolServices {
   projectFS: ProjectFS
+  builderService: Pick<BuilderService, 'syncManualBuildState'>
 }
 
 interface RunCommandArgs {
@@ -15,6 +17,11 @@ interface RunCommandArgs {
   command: string
   cwd?: string
   timeout_seconds?: number
+}
+
+interface ParsedCommand {
+  baseCommand: string
+  tokens: string[]
 }
 
 export interface Tool {
@@ -103,13 +110,25 @@ export function toolRunCommand (services: ToolServices): Tool {
         const startedAt = Date.now()
         let forceResolveHandle: NodeJS.Timeout | null = null
 
-        const finish = (payload: Record<string, unknown>) => {
+        const finish = async (payload: Record<string, unknown>) => {
           if (settled) return
           settled = true
           clearTimeout(timeoutHandle)
           clearInterval(heartbeatHandle)
           if (forceResolveHandle) {
             clearTimeout(forceResolveHandle)
+          }
+          if (isSuccessfulManualBuild(parsed, payload)) {
+            try {
+              const syncResult = await services.builderService.syncManualBuildState(project_id)
+              payload.manualBuildStateSynced = syncResult.synced
+              if (!syncResult.synced && syncResult.reason) {
+                payload.manualBuildStateSyncReason = syncResult.reason
+              }
+            } catch (err) {
+              payload.manualBuildStateSynced = false
+              payload.manualBuildStateSyncReason = (err as Error).message
+            }
           }
           resolve(payload)
         }
@@ -138,15 +157,17 @@ export function toolRunCommand (services: ToolServices): Tool {
           if (!forceResolveHandle) {
             forceResolveHandle = setTimeout(() => {
               if (!settled) {
-                finish({
+                void finish({
                   exitCode: -1,
+                  reason: timedOut ? 'timeout' : 'output_limit',
                   timedOut: timedOut || terminatedByOutputLimit,
                   stdout,
                   stderr,
                   error: timedOut
                     ? `Command timed out after ${timeoutSeconds} seconds`
                     : 'Command did not close cleanly after termination',
-                  outputTruncated
+                  outputTruncated,
+                  observedReadySignal: hasReadySignal(stdout, stderr)
                 })
               }
             }, 5000)
@@ -188,28 +209,32 @@ export function toolRunCommand (services: ToolServices): Tool {
             onProgress?.('✅ 命令执行完成', `退出码: ${String(exitCode)}`)
           }
 
-          finish({
-            exitCode,
-            signal,
-            timedOut,
-            stdout,
-            stderr,
-            outputTruncated,
-            error: timedOut
-              ? `Command timed out after ${timeoutSeconds} seconds`
-              : undefined
+            void finish({
+              exitCode,
+              signal,
+              reason: timedOut ? 'timeout' : terminatedByOutputLimit ? 'output_limit' : 'completed',
+              timedOut,
+              stdout,
+              stderr,
+              outputTruncated,
+              observedReadySignal: hasReadySignal(stdout, stderr),
+              error: timedOut
+                ? `Command timed out after ${timeoutSeconds} seconds`
+                : undefined
+            })
           })
-        })
 
         child.on('error', (err) => {
           onProgress?.('❌ 命令执行失败', err.message)
-          finish({
+          void finish({
             exitCode: -1,
+            reason: 'spawn_error',
             stdout,
             stderr,
             error: `Command failed: ${err.message}`,
             timedOut,
-            outputTruncated
+            outputTruncated,
+            observedReadySignal: hasReadySignal(stdout, stderr)
           })
         })
       })
@@ -217,7 +242,7 @@ export function toolRunCommand (services: ToolServices): Tool {
   }
 }
 
-function validateProjectCommand (rawCommand: string): { baseCommand: string; tokens: string[] } {
+function validateProjectCommand (rawCommand: string): ParsedCommand {
   const command = rawCommand.trim()
   if (!command) {
     throw new Error('Command must not be empty')
@@ -244,6 +269,18 @@ function validateProjectCommand (rawCommand: string): { baseCommand: string; tok
   }
 
   return { baseCommand, tokens }
+}
+
+function isSuccessfulManualBuild (parsed: ParsedCommand, payload: Record<string, unknown>): boolean {
+  return parsed.baseCommand === 'npm' &&
+    parsed.tokens[1]?.toLowerCase() === 'run' &&
+    parsed.tokens[2]?.toLowerCase() === 'build' &&
+    payload.exitCode === 0
+}
+
+function hasReadySignal (stdout: string, stderr: string): boolean {
+  const combinedOutput = `${stdout}\n${stderr}`
+  return /\b(ready|listening|started server|server started)\b/i.test(combinedOutput)
 }
 
 function tokenizeCommand (command: string): string[] {

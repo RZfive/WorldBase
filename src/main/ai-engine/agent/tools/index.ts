@@ -15,6 +15,7 @@ import { toolRebuildProject } from './tool-rebuild-project.js'
 import { toolGetProjectLogs } from './tool-get-project-logs.js'
 import { toolGetProjectStatus } from './tool-get-project-status.js'
 import { toolGetTaskStatus, toolStartAsyncTask } from './tool-async-task.js'
+import { toolStartProjectServer } from './tool-start-server.js'
 import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
@@ -53,6 +54,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolListProjectFiles(services),
     toolGetProjectStatus(services),
     toolGetProjectLogs(services),
+    toolStartProjectServer(services),
     toolAnalyzeData(services),
     toolCreateProject(services, getSessionState),
     toolRebuildProject(services),
