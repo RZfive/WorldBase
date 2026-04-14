@@ -51,7 +51,7 @@ const isWindows = computed(() => {
         <span class="titlebar-icon">{{ props.icon }}</span>
         <div class="titlebar-copy">
           <span class="titlebar-title">{{ props.title }}</span>
-          <span v-if="props.subtitle" class="titlebar-subtitle">{{ props.subtitle }}</span>
+          <!-- <span v-if="props.subtitle" class="titlebar-subtitle">{{ props.subtitle }}</span> -->
         </div>
       </div>
     </div>

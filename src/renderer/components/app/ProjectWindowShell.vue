@@ -27,6 +27,7 @@ const loading = ref(true)
 const error = ref('')
 const isMaximized = ref(false)
 const frameVersion = ref(0)
+const PROJECT_IFRAME_ALLOW = 'clipboard-read; clipboard-write; fullscreen'
 
 let projectChangedCleanup: (() => void) | null = null
 
@@ -172,7 +173,8 @@ onUnmounted(() => {
         :src="iframeUrl"
         class="project-window-frame"
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
-        allow="clipboard-read; clipboard-write"
+        :allow="PROJECT_IFRAME_ALLOW"
+        allowfullscreen
       ></iframe>
     </div>
   </div>
