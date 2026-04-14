@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
 import type { BuilderService } from '../../../project-runtime/builder-service.js'
@@ -24,6 +25,9 @@ interface CreateProjectArgs {
   files: unknown
   meta?: unknown
 }
+
+const MAX_PROJECT_SLUG_LENGTH = 20
+const PROJECT_ID_HASH_LENGTH = 8
 
 export interface Tool {
   definition: ToolDefinition
@@ -103,13 +107,7 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
       onProgress?.('🔧 正在初始化项目...', name)
 
       // Generate a project ID from the name
-      const projectId = 'proj_' + name
-        .toLowerCase()
-        .replace(/[^a-z0-9\u4e00-\u9fff]/g, '_')
-        .replace(/_+/g, '_')
-        .replace(/^_|_$/g, '')
-        .substring(0, 30) +
-        '_' + Date.now().toString(36)
+      const projectId = generateProjectId(name)
 
       // Auto-generate runtime configuration if not provided
       const runtime = (normalizedMeta.runtime as Record<string, unknown>) || {}
@@ -326,6 +324,24 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
       }
     }
   }
+}
+
+function generateProjectId (name: string): string {
+  const asciiSlug = name
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, MAX_PROJECT_SLUG_LENGTH) || 'project'
+
+  const suffix = crypto
+    .createHash('sha1')
+    .update(`${name}:${Date.now()}:${crypto.randomUUID()}`)
+    .digest('hex')
+    .slice(0, PROJECT_ID_HASH_LENGTH)
+
+  return `proj_${asciiSlug}_${suffix}`
 }
 
 function normalizeCreateProjectFiles (rawFiles: unknown): Record<string, string> {
