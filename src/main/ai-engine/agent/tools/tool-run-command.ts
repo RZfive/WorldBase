@@ -37,25 +37,25 @@ export function toolRunCommand (services: ToolServices): Tool {
   return {
     definition: {
       name: 'run_project_command',
-      description: '在指定项目目录中执行 shell 命令。仅允许安全命令（npm / npx 生态脚本、node、git、echo 等）。',
+      description: 'Run a shell command in the specified project directory. Only safe commands are allowed.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           command: {
             type: 'string',
-            description: 'Shell 命令'
+            description: 'Shell command'
           },
           cwd: {
             type: 'string',
-            description: '工作子目录 (默认项目根目录)'
+            description: 'Working subdirectory (defaults to the project root)'
           },
           timeout_seconds: {
             type: 'integer',
-            description: `超时时间（秒），默认 ${DEFAULT_TIMEOUT_SECONDS} 秒，最大 ${MAX_TIMEOUT_SECONDS} 秒`
+            description: `Timeout in seconds. Default ${DEFAULT_TIMEOUT_SECONDS}, maximum ${MAX_TIMEOUT_SECONDS}.`
           }
         },
         required: ['project_id', 'command']

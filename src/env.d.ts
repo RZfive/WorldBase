@@ -105,6 +105,52 @@ type AIExecutionAuthMode = 'strict' | 'auto'
 
 interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
+  enableAiLogging: boolean
+}
+
+interface AILogConversationSummary {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  sessionCount: number
+  lastStatus?: 'running' | 'completed' | 'failed' | 'stopped'
+  errorCount: number
+}
+
+interface AILogConversation {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  sessions: Array<{
+    id: string
+    startedAt: string
+    updatedAt: string
+    finishedAt?: string
+    status: 'running' | 'completed' | 'failed' | 'stopped'
+    providerId?: string
+    modelId?: string
+    authMode?: AIExecutionAuthMode
+    targetProjectId?: string | null
+    uploadedMessages: Array<{
+      role: string
+      content: MessageContent
+      tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
+      tool_call_id?: string
+      reasoning_content?: string
+    }>
+    providerCalls: unknown[]
+    toolExecutions: unknown[]
+    errors: unknown[]
+    finalAssistantMessage?: {
+      role: string
+      content: MessageContent
+      tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
+      tool_call_id?: string
+      reasoning_content?: string
+    }
+  }>
 }
 
 interface ServiceEntry {
@@ -293,7 +339,7 @@ interface DocumentSummaryDTO {
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => Promise<{ ok: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
@@ -355,6 +401,9 @@ interface ElectronAPI {
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
   getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
+  listAILogConversations: () => Promise<AILogConversationSummary[]>
+  getAILogConversation: (conversationId: string) => Promise<AILogConversation | null>
+  deleteAILogConversation: (conversationId: string) => Promise<boolean>
   exportAppConfig: () => Promise<{ success: boolean; canceled?: boolean; filePath?: string }>
   importAppConfig: () => Promise<{ success: boolean; canceled?: boolean; filePath?: string; importedAt?: string; requiresReload?: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>

@@ -19,13 +19,13 @@ export function toolRebuildProject (services: ToolServices): Tool {
   return {
     definition: {
       name: 'rebuild_project',
-      description: '清理项目的 node_modules 和 Next.js 缓存后，重新安装依赖并重新编译。适用于打包失败、依赖变更或需要强制重新打包时。',
+      description: 'Clean node_modules and the Next.js cache, then reinstall dependencies and rebuild the project.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           }
         },
         required: ['project_id']
