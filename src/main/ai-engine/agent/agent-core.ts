@@ -551,7 +551,10 @@ export class AgentCore {
     this._resetSessionState()
     const systemMessage: ChatMessage = {
       role: 'system',
-      content: getSystemPrompt(this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined)
+      content: getSystemPrompt({
+        skillContents: this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined,
+        targetProjectId: this.sessionState.targetProjectId
+      })
     }
 
     let messages: ChatMessage[] = [systemMessage, ...userMessages]
@@ -628,7 +631,10 @@ export class AgentCore {
     this._resetSessionState()
     const systemMessage: ChatMessage = {
       role: 'system',
-      content: getSystemPrompt(this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined)
+      content: getSystemPrompt({
+        skillContents: this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined,
+        targetProjectId: this.sessionState.targetProjectId
+      })
     }
 
     let messages: ChatMessage[] = [systemMessage, ...userMessages]
