@@ -23,17 +23,17 @@ export function toolDeleteFile (services: ToolServices): Tool {
   return {
     definition: {
       name: 'delete_project_file',
-      description: '删除指定项目中的单个文件。用于移除旧文件、错误文件或重命名时的遗留文件。',
+      description: 'Delete a single file from the specified project.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           file_path: {
             type: 'string',
-            description: '相对于项目根目录的文件路径'
+            description: 'File path relative to the project root'
           }
         },
         required: ['project_id', 'file_path']

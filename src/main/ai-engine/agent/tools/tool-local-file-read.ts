@@ -28,17 +28,17 @@ export function toolLocalFileRead (services: ToolServices, getSessionState?: () 
   return {
     definition: {
       name: 'local_read_file',
-      description: '读取用户本地电脑上的文件内容。执行前需要用户授权。可以读取系统上任何位置的文件。支持办公文件格式（.xlsx, .xls, .docx, .doc, .pptx, .ppt），会自动解析为可读文本。',
+      description: 'Read a file from the user's local computer. User approval is required. Office files are parsed automatically.',
       parameters: {
         type: 'object',
         properties: {
           file_path: {
             type: 'string',
-            description: '文件的绝对路径，例如 /Users/xxx/Documents/file.txt 或 /Users/xxx/report.xlsx'
+            description: 'Absolute file path, for example /Users/xxx/Documents/file.txt or /Users/xxx/report.xlsx'
           },
           encoding: {
             type: 'string',
-            description: '文件编码，默认 utf-8（办公文件格式会自动处理编码）'
+            description: 'File encoding. Defaults to utf-8; office formats are handled automatically.'
           }
         },
         required: ['file_path']

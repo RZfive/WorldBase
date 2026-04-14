@@ -22,17 +22,17 @@ export function toolQueryDb (services: ToolServices): Tool {
   return {
     definition: {
       name: 'query_project_database',
-      description: '对指定项目的数据库执行只读 SQL 查询。仅支持 SELECT 语句。用于分析项目数据。',
+      description: 'Run a read-only SQL query against the specified project database. SELECT only.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           sql: {
             type: 'string',
-            description: 'SELECT 查询语句'
+            description: 'SELECT query'
           }
         },
         required: ['project_id', 'sql']

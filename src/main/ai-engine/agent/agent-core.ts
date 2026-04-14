@@ -67,7 +67,7 @@ export class AgentCore {
   // Keep summaries short enough to fit comfortably back into the prompt.
   private static readonly AUTO_CONTINUE_PREFIX = '[AUTO_CONTINUE]'
   private static readonly CONTEXT_SUMMARY_PREFIX = '[CONTEXT_SUMMARY]'
-  private static readonly CONTEXT_SUMMARY_CHAR_LIMIT = 1500
+  private static readonly CONTEXT_SUMMARY_CHAR_LIMIT = 1000
   private static readonly CONTEXT_SUMMARY_SOURCE_MAX_CHARS = 4000
   private static readonly CONTEXT_HEADROOM_RATIO = 0.15
   private static readonly CONTEXT_MIN_HEADROOM_TOKENS = 2048
@@ -87,7 +87,7 @@ export class AgentCore {
   private maxIterations = 128
   // Periodically force a silent context compaction so long sessions can keep going.
   private proactiveCompressionInterval = 16
-  private maxRunDurationMs = 15 * 60 * 1000
+  private maxRunDurationMs = 8 * 60 * 60 * 1000
   private maxDuplicateIterationFingerprints = 6
   private maxStreamRetries = 3
   private activeSkillContents: string[] = []
@@ -375,11 +375,11 @@ export class AgentCore {
     const elapsed = Date.now() - state.startedAt
     if (elapsed >= this.maxRunDurationMs) {
       const minutes = Math.max(1, Math.ceil(elapsed / 60000))
-      return `当前任务已连续运行约 ${minutes} 分钟仍未完成。为避免持续占用资源，本次先停止。请稍后继续，或将任务拆分为更小步骤后再试。`
+      return `The current task has been running for about ${minutes} minutes without finishing, so it has been stopped to avoid holding resources indefinitely. Please continue later or split it into smaller steps.`
     }
 
     if (state.consecutiveDuplicateIterations >= this.maxDuplicateIterationFingerprints) {
-      return `AI 已连续 ${state.consecutiveDuplicateIterations} 轮重复相同的工具调用和结果，继续下去大概率只会空转。本次先停止，请调整提示词、检查工具返回，或换一种处理策略后再试。`
+      return `The AI repeated the same tool calls and results for ${state.consecutiveDuplicateIterations} consecutive iterations, so this run has been stopped to avoid looping. Adjust the prompt, inspect tool output, or try a different strategy.`
     }
 
     return null
@@ -400,7 +400,7 @@ export class AgentCore {
 
   private async _prepareAutomaticContinuation (messages: ChatMessage[], state: LoopGuardState, onProgress?: ProgressCallback, abortSignal?: AbortSignal): Promise<ChatMessage[]> {
     const nextSegmentIndex = state.segmentIndex + 1
-    onProgress?.('♻️ 正在自动续跑...', `第 ${nextSegmentIndex} 段，累计 ${state.totalIterations} 轮`)
+    onProgress?.('♻️ Auto-continuing...', `Segment ${nextSegmentIndex}, ${state.totalIterations} total iterations`)
 
     const compressedMessages = await this._compressContextIfNeeded(
       this._removeSystemMessagesByPrefix(messages, AgentCore.AUTO_CONTINUE_PREFIX),
@@ -782,7 +782,7 @@ export class AgentCore {
       return messages
     }
 
-    onProgress?.('🧠 正在压缩上下文...', `${currentTokens}/${contextWindow}`)
+    onProgress?.('🧠 Compressing context...', `${currentTokens}/${contextWindow}`)
 
     const sanitizedMessages = this._removeSystemMessagesByPrefix(messages, AgentCore.AUTO_CONTINUE_PREFIX)
     const systemMessage = sanitizedMessages[0]
@@ -814,12 +814,12 @@ export class AgentCore {
       compressed = [systemMessage, summaryMessage, ...recentMessages]
 
       if (this._estimateTokens(compressed) <= warningThreshold || keepCount === 0) {
-        onProgress?.('✅ 上下文已压缩', `${this._estimateTokens(compressed)}/${contextWindow}`)
+        onProgress?.('✅ Context compressed', `${this._estimateTokens(compressed)}/${contextWindow}`)
         return compressed
       }
     }
 
-    onProgress?.('✅ 上下文已压缩', `${this._estimateTokens(compressed)}/${contextWindow}`)
+    onProgress?.('✅ Context compressed', `${this._estimateTokens(compressed)}/${contextWindow}`)
     return compressed
   }
 
@@ -846,11 +846,11 @@ export class AgentCore {
     return [
       {
         role: 'system',
-        content: `你是上下文压缩助手。请把对话压缩成简洁但完整的中文摘要，长度尽量控制在 ${AgentCore.CONTEXT_SUMMARY_CHAR_LIMIT} 字以内，保留需求、已完成工作、失败原因、关键文件路径、项目ID、命令、端口、下一步待办，避免丢失会影响继续任务的信息。`
+        content: `You summarize long conversations for continued execution. Produce a concise but complete plain-text summary in English, ideally within ${AgentCore.CONTEXT_SUMMARY_CHAR_LIMIT} characters. Preserve the goal, completed work, failures, key file paths, project IDs, commands, ports, and next steps.`
       },
       {
         role: 'user',
-        content: `请压缩以下历史上下文，输出纯文本摘要：\n\n${serializedMessages}`
+        content: `Compress the following conversation history and output plain text only:\n\n${serializedMessages}`
       }
     ]
   }

@@ -24,22 +24,22 @@ export function toolGetProjectLogs (services: ToolServices): Tool {
   return {
     definition: {
       name: 'get_project_logs',
-      description: '读取项目最近的运行日志，可按 stdout、stderr 或全部日志过滤。',
+      description: 'Read recent project logs, optionally filtered by stdout, stderr, or all logs.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           lines: {
             type: 'integer',
-            description: `返回最近多少条日志，默认 ${DEFAULT_LINES}，最大 ${MAX_LINES}`
+            description: `How many recent log lines to return. Default ${DEFAULT_LINES}, maximum ${MAX_LINES}.`
           },
           type: {
             type: 'string',
             enum: ['stdout', 'stderr', 'all'],
-            description: '日志类型过滤，默认 all'
+            description: 'Log type filter. Defaults to all.'
           }
         },
         required: ['project_id']

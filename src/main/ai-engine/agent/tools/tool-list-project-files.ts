@@ -32,17 +32,17 @@ export function toolListProjectFiles (services: ToolServices): Tool {
   return {
     definition: {
       name: 'list_project_files',
-      description: '列出指定项目目录下的文件和文件夹。用于了解项目结构，避免使用 shell 的 ls/find/dir。',
+      description: 'List files and folders in the specified project directory.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           dir_path: {
             type: 'string',
-            description: '相对于项目根目录的目录路径，默认根目录'
+            description: 'Directory path relative to the project root. Defaults to the root directory.'
           }
         },
         required: ['project_id']

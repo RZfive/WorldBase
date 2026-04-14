@@ -240,7 +240,7 @@ export class OpenAIProvider {
       ...messages,
       {
         role: 'user',
-        content: '请基于以上上下文继续当前任务，不要重复已经完成的步骤。'
+        content: 'Continue the current task from the existing context. Do not repeat completed steps.'
       }
     ]
   }

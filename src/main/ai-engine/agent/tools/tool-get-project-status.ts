@@ -24,13 +24,13 @@ export function toolGetProjectStatus (services: ToolServices): Tool {
   return {
     definition: {
       name: 'get_project_status',
-      description: '获取项目当前运行状态、端口、进程 ID、启动时间、依赖是否已安装、构建产物是否存在，以及最近的错误日志摘要。',
+      description: 'Get the current project runtime status, port, PID, start time, dependency/build state, and recent error summary.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           }
         },
         required: ['project_id']
