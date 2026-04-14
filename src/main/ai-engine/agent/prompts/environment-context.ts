@@ -39,7 +39,7 @@ export function getEnvironmentContext (): string {
     '- Use npm / npx by default for dependency installs and scripts inside generated projects; do not assume pnpm / yarn is available at runtime',
     '- Use list_project_files for project exploration and read_project_file for file contents; do not use run_project_command as a substitute for ls/find/dir',
     '- Use get_project_status and get_project_logs first for runtime debugging; use start_async_task and get_task_status first for long jobs',
-    '- local_run_command executes through the user's shell, with a default timeout of 60 seconds and a maximum of 300 seconds',
+    "- local_run_command executes through the user's shell, with a default timeout of 60 seconds and a maximum of 300 seconds",
     '- local_run_command defaults to the user home directory when cwd is omitted; prefer absolute paths for local_read_file / local_write_file',
     '- If a command is known to exist, use it directly; do not repeatedly probe the environment just to confirm availability'
   ]
