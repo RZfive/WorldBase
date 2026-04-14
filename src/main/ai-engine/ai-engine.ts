@@ -11,6 +11,7 @@ import type { AsyncTaskManager } from './agent/tools/async-task-manager.js'
 import type { DocumentStore } from './agent/tools/document-store.js'
 import type { BrowserWindow } from 'electron'
 import type { AIExecutionAuthMode } from '../settings/settings-store.js'
+import type { AILogSessionLogger } from '../settings/ai-log-store.js'
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
 
@@ -38,6 +39,7 @@ export interface AIRequestOptions {
   providerConfig?: AIConfigInput
   abortSignal?: AbortSignal
   authMode?: AIExecutionAuthMode
+  aiLogger?: AILogSessionLogger
 }
 
 /**
@@ -78,12 +80,14 @@ export class AIEngine {
     if (options?.providerConfig) {
       this.applyConfigToProvider(provider, options.providerConfig)
     }
+    provider.setLogger(options?.aiLogger)
 
     const agent = new AgentCore(provider, this.services as unknown as Record<string, unknown>)
     registerAllTools(agent, this.services)
     agent.setActiveSkills(this.activeSkillContents)
     agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
     agent.setAuthMode(options?.authMode ?? 'strict')
+    agent.setLogger(options?.aiLogger)
     return agent
   }
 
