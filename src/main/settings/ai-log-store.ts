@@ -151,7 +151,21 @@ function createLogId (): string {
 }
 
 function cloneJson<T> (value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T
+  if (value === undefined || value === null) {
+    return value
+  }
+
+  try {
+    const serialized = JSON.stringify(value, (_key, currentValue) => {
+      return typeof currentValue === 'bigint' ? currentValue.toString() : currentValue
+    })
+    if (serialized === undefined) {
+      return value
+    }
+    return JSON.parse(serialized) as T
+  } catch {
+    return String(value) as T
+  }
 }
 
 function extractMessageText (message?: AILogMessage): string {
