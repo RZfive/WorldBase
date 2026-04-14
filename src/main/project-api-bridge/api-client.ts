@@ -21,7 +21,12 @@ export class ProjectApiClient {
    * Generic API call to a running project.
    */
   async call (projectId: string, method: string, apiPath: string, data: Record<string, unknown> | null = null): Promise<ApiResponse> {
-    const port = this.runtimeManager.getPort(projectId)
+    let port = this.runtimeManager.getPort(projectId)
+    if (!port) {
+      const startResult = await this.runtimeManager.start(projectId)
+      port = startResult.port || this.runtimeManager.getPort(projectId)
+    }
+
     if (!port) {
       throw new Error(`Project ${projectId} is not running`)
     }

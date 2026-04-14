@@ -71,13 +71,19 @@ When the user asks to modify or optimize an existing project:
 - Use call_project_api to verify behavior when useful.
 - If get_project_status recommends install_dependencies or rebuild_project, follow that guidance. Prefer start_async_task plus get_task_status for long rebuilds.
 
-## Tool usage priorities
-- Use list_project_files and read_project_file for exploration instead of shell-based ls/find/dir discovery.
-- Use safe project commands only when needed for install, build, test, or short diagnostics.
-- query_project_database must stay read-only and use SELECT statements only.
-- For long-running work, prefer async task tools over blocking requests.
+ ## Tool usage priorities
+ - Use list_project_files and read_project_file for exploration instead of shell-based ls/find/dir discovery.
+ - Use safe project commands only when needed for install, build, test, or short diagnostics.
+ - Do not use run_project_command to start long-lived servers. Use start_project_server for background startup and call_project_api to wake a stopped project when needed.
+ - If run_project_command times out but stdout/stderr shows ready or listening, treat that as a successful startup signal instead of a crash.
+ - query_project_database must stay read-only and use SELECT statements only.
+ - For long-running work, prefer async task tools over blocking requests.
 
-## Compatibility requirements
+ ## Common runtime gotchas
+ - A successful manual npm run build is valid even if an older status snapshot still suggests needs_rebuild, because the snapshot may lag behind the latest manual build; follow up with call_project_api or start_project_server instead of rebuilding again.
+ - 'ExperimentalWarning: SQLite is an experimental feature' is only a warning and does not mean the process crashed.
+ 
+ ## Compatibility requirements
 - Current Node.js version: ${process.versions.node}
 - Minimum compatible Node.js version for generated Next.js projects: >=${nextRuntimeProfile.minimumNodeVersion}
 - Required dependency ranges:
