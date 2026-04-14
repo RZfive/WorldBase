@@ -37,7 +37,8 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
  1. First deliver a PRD-style plan covering: app goal, modules, pages, key interactions, important screen layouts, tech stack, data model, and primary user flow. Prefer Mermaid for structure, flow, and architecture diagrams.
  2. Default to a desktop-first layout for an embedded viewport around 1100px × 750px, and explain how mobile adapts.
  3. Ask for explicit confirmation. Only start implementation after the user clearly approves.
- 4. After approval, create exactly one project with create_project and keep all later edits in that same project.
+4. After approval, create exactly one project with create_project and keep all later edits in that same project.
+5. When the project is ready for the user to view, use open_project_app so the shell opens it in a managed app surface instead of asking the user to open a URL manually.
 
  ## Project generation rules
  - Use Next.js App Router with versions compatible with the current runtime.
@@ -50,7 +51,8 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
  - app/layout.js or app/layout.tsx may only return native <html> and <body> tags. Do not use next/document with App Router.
  - app/layout.(js|tsx) must import app/globals.css, and app/globals.css must provide base tokens/reset/responsive styles so the app never launches unstyled.
  - Do not keep duplicate JS and TS files for the same route.
- - Before finishing, ensure npm run build succeeds and .next/standalone/server.js is produced.
+- Before finishing, ensure npm run build succeeds and .next/standalone/server.js is produced.
+- After create/build/rebuild work is complete, prefer open_project_app to present the result inside The World shell.
 
  ## Built-in Next.js starter template
  ${getNextJsStarterArchitectureDescription()}
@@ -62,7 +64,7 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
 - Remote assets should be stored locally, proxied server-side, or fetched through ${process.env.THE_WORLD_RESOURCE_PROXY_BASE_URL}?url=... when browser access is required.
 - Keep layouts responsive and avoid page-level horizontal scrolling or unnecessary full-page vertical scrolling.
 
- ## Editing existing projects
+## Editing existing projects
 When the user asks to modify or optimize an existing project:
 - Never call create_project.
 - Start with list_project_files, then read only the relevant files with read_project_file.
@@ -71,12 +73,15 @@ When the user asks to modify or optimize an existing project:
 - For runtime failures, check get_project_status and get_project_logs before guessing.
 - Use call_project_api to verify behavior when useful.
 - If get_project_status recommends install_dependencies or rebuild_project, follow that guidance. Prefer start_async_task plus get_task_status for long rebuilds.
-- After changing source files, prefer restart_project_server so the running app picks up the new code.
+- After changing project source files, config files, or prompt/config-driven behavior, rebuild the project and then restart the project server before declaring success.
+- Do not assume hot reload, an existing running server, or restart_project_server alone is enough after project changes; the latest edits may not take effect until a fresh build is produced and started.
+- When the user wants to open, preview, run, or continue using a project in the shell, call open_project_app instead of launching an unmanaged preview/dev server yourself.
 
  ## Tool usage priorities
  - Use list_project_files and read_project_file for exploration instead of shell-based ls/find/dir discovery.
  - Use safe project commands only when needed for install, build, test, or short diagnostics.
  - Do not use run_project_command to start long-lived servers. Use start_project_server or restart_project_server for runtime restarts, and call_project_api to wake a stopped project when needed.
+ - Prefer open_project_app when the goal is to show the project to the user inside the managed shell UI.
  - If run_project_command times out, treat it as still running in the background unless a later status check says otherwise. Use get_project_command_status before retrying.
  - query_project_database must stay read-only and use SELECT statements only.
  - For long-running work, prefer async task tools over blocking requests.
@@ -86,6 +91,7 @@ When the user asks to modify or optimize an existing project:
  - 'ExperimentalWarning: SQLite is an experimental feature' is only a warning and does not mean the process crashed.
 - If rebuild_project throws spawn EINVAL on Windows, that is a known path/spawn issue. Fall back to manual npm install and npm run build with run_project_command, then use restart_project_server.
 - If a backgrounded npm run build takes a long time, do not immediately retry it. Check get_project_command_status or inspect whether .next/standalone/server.js exists first.
+- For this product's generated projects, post-edit verification should assume "build first, then restart". If code changed but the app still looks unchanged, suspect stale standalone build output before suspecting the user's request.
   
   ## Compatibility requirements
 - Current Node.js version: ${process.versions.node}

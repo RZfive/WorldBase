@@ -68,6 +68,7 @@ const QR_CODE_MARGIN = 2
 /** Duration in ms for the "copied" feedback after copying a LAN URL. */
 const COPY_FEEDBACK_MS = 2000
 const PROJECT_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals'
+const PROJECT_IFRAME_ALLOW = 'clipboard-read; clipboard-write; fullscreen'
 const BROWSER_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals'
 
 function logWebAppsSnapshot (label: string, webApps: SavedWebApp[]) {
@@ -118,6 +119,7 @@ const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | 
 
 let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
+let projectOpenInShellCleanup: (() => void) | null = null
 let browserOpenInDockCleanup: (() => void) | null = null
 let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
@@ -452,6 +454,33 @@ async function openProjectFromLaunchpad (project: Record<string, unknown>) {
   if (openWindows.includes(projectId)) {
     showLaunchpad.value = false
     await window.electronAPI.focusProjectWindow(projectId)
+    return
+  }
+
+  await openEmbeddedProject(projectId)
+}
+
+async function openProjectInShell (projectId: string, mode: 'embed' | 'window' = 'embed') {
+  if (!window.electronAPI) return
+
+  showLaunchpad.value = false
+  hideDockCtx()
+
+  if (mode === 'window') {
+    const openWindows = await window.electronAPI.getOpenWindows()
+    if (openWindows.includes(projectId)) {
+      await window.electronAPI.focusProjectWindow(projectId)
+      return
+    }
+
+    const status = await getRuntimeStatus(projectId)
+    if (status.status !== 'running') {
+      await window.electronAPI.startProject(projectId)
+    }
+
+    await window.electronAPI.openProjectWindow(projectId)
+    clearEmbeddedApp(projectId)
+    await refreshRunningApps()
     return
   }
 
@@ -796,6 +825,12 @@ onMounted(async () => {
     })
   }
 
+  if (window.electronAPI?.onProjectOpenInShell) {
+    projectOpenInShellCleanup = window.electronAPI.onProjectOpenInShell(({ projectId, mode }) => {
+      void openProjectInShell(projectId, mode === 'window' ? 'window' : 'embed')
+    })
+  }
+
   if (window.electronAPI?.onBrowserOpenUrlInDock) {
     browserOpenInDockCleanup = window.electronAPI.onBrowserOpenUrlInDock(({ url }) => {
       openWebLinkInApp(url)
@@ -815,6 +850,7 @@ onUnmounted(() => {
   document.removeEventListener('click', onDocClickGlobal)
   projectChangedCleanup?.()
   windowClosedCleanup?.()
+  projectOpenInShellCleanup?.()
   browserOpenInDockCleanup?.()
 })
 </script>
@@ -865,7 +901,8 @@ onUnmounted(() => {
                   :src="appState.url"
                   class="embedded-frame"
                   :sandbox="appState.sandbox"
-                  allow="clipboard-read; clipboard-write"
+                  :allow="PROJECT_IFRAME_ALLOW"
+                  allowfullscreen
                 ></iframe>
                 <BrowserWebView
                   v-else-if="appState.kind === 'browser' && appState.url"

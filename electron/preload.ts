@@ -285,6 +285,7 @@ export interface ElectronAPI {
   getOpenWindows: () => Promise<string[]>
   focusProjectWindow: (projectId: string) => Promise<{ success: boolean }>
   onProjectWindowClosed: (callback: (event: { projectId: string }) => void) => () => void
+  onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
   onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
 
@@ -410,6 +411,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_e: Electron.IpcRendererEvent, event: { projectId: string }) => callback(event)
     ipcRenderer.on('project:windowClosed', handler)
     return () => { ipcRenderer.removeListener('project:windowClosed', handler) }
+  },
+  onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { projectId: string; mode?: 'embed' | 'window' }) => callback(event)
+    ipcRenderer.on('project:openInShell', handler)
+    return () => { ipcRenderer.removeListener('project:openInShell', handler) }
   },
   onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, event: { url: string }) => callback(event)

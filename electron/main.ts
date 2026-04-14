@@ -75,6 +75,7 @@ const activeChatStreams = new Map<string, AbortController>()
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
 const MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
 const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
+const VIRTUAL_INTERFACE_NAME_PATTERN = /(loopback|virtual|vmware|vbox|virtualbox|docker|podman|wsl|hyper-v|vethernet|tailscale|zerotier|utun|tun|tap|bridge)/i
 
 function openWebviewPopupInDock (url: string): void {
   let parsedUrl: URL
@@ -193,6 +194,57 @@ function getOriginFromUrl (value?: string): string | null {
   } catch {
     return null
   }
+}
+
+function isPrivateIpv4 (address: string): boolean {
+  const octets = address.split('.').map(part => Number.parseInt(part, 10))
+  if (octets.length !== 4 || octets.some(octet => Number.isNaN(octet) || octet < 0 || octet > 255)) {
+    return false
+  }
+
+  if (octets[0] === 10) return true
+  if (octets[0] === 192 && octets[1] === 168) return true
+  if (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) return true
+  return false
+}
+
+function isLinkLocalIpv4 (address: string): boolean {
+  return address.startsWith('169.254.')
+}
+
+function getPreferredLanIpv4Addresses (): string[] {
+  const nets = networkInterfaces()
+  const candidates: Array<{ address: string; score: number }> = []
+
+  for (const [name, entries] of Object.entries(nets)) {
+    const normalizedName = name || ''
+    const isVirtualInterface = VIRTUAL_INTERFACE_NAME_PATTERN.test(normalizedName)
+
+    for (const net of entries || []) {
+      if (net.family !== 'IPv4' || net.internal || !net.address || isLinkLocalIpv4(net.address)) {
+        continue
+      }
+
+      let score = 0
+      if (isPrivateIpv4(net.address)) score += 100
+      if (!isVirtualInterface) score += 30
+      if (normalizedName.toLowerCase().includes('wi-fi') || normalizedName.toLowerCase().includes('wlan')) score += 10
+      if (normalizedName.toLowerCase().includes('ethernet')) score += 10
+      if (isVirtualInterface) score -= 50
+
+      candidates.push({ address: net.address, score })
+    }
+  }
+
+  const seen = new Set<string>()
+  return candidates
+    .sort((left, right) => right.score - left.score || left.address.localeCompare(right.address))
+    .map(candidate => candidate.address)
+    .filter(address => {
+      if (seen.has(address)) return false
+      seen.add(address)
+      return true
+    })
 }
 
 function isRemoteSubresourceRequest (value: string): boolean {
@@ -1148,15 +1200,7 @@ function setupIPC (): void {
 
   // Get LAN server info (local IP and port)
   ipcMain.handle('lan:getInfo', async () => {
-    const nets = networkInterfaces()
-    const addresses: string[] = []
-    for (const name of Object.keys(nets)) {
-      for (const net of nets[name] || []) {
-        if (net.family === 'IPv4' && !net.internal) {
-          addresses.push(net.address)
-        }
-      }
-    }
+    const addresses = getPreferredLanIpv4Addresses()
     return {
       port: LAN_SERVER_PORT,
       addresses,
@@ -1167,15 +1211,7 @@ function setupIPC (): void {
   // Get project LAN URL for QR code generation
   ipcMain.handle('projects:getLanUrl', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const port = runtimeManager!.getPort(projectId)
-    const nets = networkInterfaces()
-    const addresses: string[] = []
-    for (const name of Object.keys(nets)) {
-      for (const net of nets[name] || []) {
-        if (net.family === 'IPv4' && !net.internal) {
-          addresses.push(net.address)
-        }
-      }
-    }
+    const addresses = getPreferredLanIpv4Addresses()
     const lanIp = addresses.length > 0 ? addresses[0] : '127.0.0.1'
     const encodedProjectId = encodeURIComponent(projectId)
     return {
