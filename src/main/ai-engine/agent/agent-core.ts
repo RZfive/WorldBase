@@ -67,7 +67,7 @@ export class AgentCore {
   // Keep summaries short enough to fit comfortably back into the prompt.
   private static readonly AUTO_CONTINUE_PREFIX = '[AUTO_CONTINUE]'
   private static readonly CONTEXT_SUMMARY_PREFIX = '[CONTEXT_SUMMARY]'
-  private static readonly CONTEXT_SUMMARY_CHAR_LIMIT = 1000
+  private static readonly CONTEXT_SUMMARY_CHAR_LIMIT = 1500
   private static readonly CONTEXT_SUMMARY_SOURCE_MAX_CHARS = 4000
   private static readonly CONTEXT_HEADROOM_RATIO = 0.15
   private static readonly CONTEXT_MIN_HEADROOM_TOKENS = 2048
