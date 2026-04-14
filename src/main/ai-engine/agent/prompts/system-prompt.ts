@@ -80,8 +80,8 @@ When the user asks to modify or optimize an existing project:
  - For long-running work, prefer async task tools over blocking requests.
 
  ## Common runtime gotchas
- - A successful manual npm run build is valid even if an older status snapshot still suggested needs_rebuild; follow up with call_project_api or start_project_server instead of rebuilding again.
- - ExperimentalWarning: SQLite is an experimental feature is only a warning and does not mean the process crashed.
+ - A successful manual npm run build is valid even if an older status snapshot still suggests needs_rebuild, because the snapshot may lag behind the latest manual build; follow up with call_project_api or start_project_server instead of rebuilding again.
+ - 'ExperimentalWarning: SQLite is an experimental feature' is only a warning and does not mean the process crashed.
  
  ## Compatibility requirements
 - Current Node.js version: ${process.versions.node}
