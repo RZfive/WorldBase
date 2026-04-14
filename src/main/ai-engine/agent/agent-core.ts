@@ -88,6 +88,7 @@ export class AgentCore {
   private maxIterations = 128
   // Periodically force a silent context compaction so long sessions can keep going.
   private proactiveCompressionInterval = 16
+  // Long-running build/debug tasks may legitimately span hours, so keep the guard aligned with the product limit.
   private maxRunDurationMs = 8 * 60 * 60 * 1000
   private maxDuplicateIterationFingerprints = 6
   private maxStreamRetries = 3
