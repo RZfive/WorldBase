@@ -21,27 +21,27 @@ export function getEnvironmentContext (): string {
   }
 
   const lines = [
-    '## 当前系统环境（启动前注入）',
+    '## Current system environment (injected at startup)',
     '',
-    `- 操作系统: ${formatOperatingSystem()}`,
+    `- Operating system: ${formatOperatingSystem()}`,
     `- Node.js: ${process.version}`,
-    `- Electron: ${process.versions.electron || '未知'}`,
-    `- 默认 Shell: ${process.env.SHELL || process.env.ComSpec || '未知'}`,
-    `- AI 进程工作目录: ${process.cwd()}`,
-    `- 用户主目录: ${os.homedir()}`,
-    `- 临时目录: ${os.tmpdir()}`,
+    `- Electron: ${process.versions.electron || 'unknown'}`,
+    `- Default shell: ${process.env.SHELL || process.env.ComSpec || 'unknown'}`,
+    `- AI process working directory: ${process.cwd()}`,
+    `- User home directory: ${os.homedir()}`,
+    `- Temporary directory: ${os.tmpdir()}`,
     '',
-    '### 已知可用的本地命令',
+    '### Known available local commands',
     `- ${formatCommandList(discoverAvailableCommands(LOCAL_COMMAND_DISCOVERY_CANDIDATES))}`,
     '',
-    '### 项目内命令工具限制',
-    `- run_project_command 仅允许: ${PROJECT_COMMAND_WHITELIST.join(', ')}`,
-    '- 子项目运行时默认使用 npm / npx 处理依赖安装和脚本执行；不要假设 pnpm / yarn 在运行环境中可用',
-    '- 项目目录探索优先使用 list_project_files；文件内容优先使用 read_project_file，不要把 run_project_command 当作 ls/find/dir 的替代品',
-    '- 运行时排障优先使用 get_project_status 与 get_project_logs；长任务优先使用 start_async_task 与 get_task_status',
-    '- local_run_command 会在用户本机通过 shell 执行命令，默认超时 60 秒，最大 300 秒',
-    '- local_run_command 未指定 cwd 时默认使用用户主目录；local_read_file / local_write_file 传参时应优先使用绝对路径',
-    '- 对于已知存在的命令，直接使用；不要先用“试探命令是否存在”的方式反复探测环境'
+    '### Project command-tool limits',
+    `- run_project_command allows only: ${PROJECT_COMMAND_WHITELIST.join(', ')}`,
+    '- Use npm / npx by default for dependency installs and scripts inside generated projects; do not assume pnpm / yarn is available at runtime',
+    '- Use list_project_files for project exploration and read_project_file for file contents; do not use run_project_command as a substitute for ls/find/dir',
+    '- Use get_project_status and get_project_logs first for runtime debugging; use start_async_task and get_task_status first for long jobs',
+    "- local_run_command executes through the user's shell, with a default timeout of 60 seconds and a maximum of 300 seconds",
+    '- local_run_command defaults to the user home directory when cwd is omitted; prefer absolute paths for local_read_file / local_write_file',
+    '- If a command is known to exist, use it directly; do not repeatedly probe the environment just to confirm availability'
   ]
 
   cachedEnvironmentContext = lines.join('\n')
@@ -55,7 +55,7 @@ function formatOperatingSystem (): string {
 
 function formatCommandList (commands: string[]): string {
   if (commands.length === 0) {
-    return '未检测到候选命令，请仅使用工具说明中明确支持的命令'
+    return 'No candidate commands were detected. Only use commands explicitly supported by the tools.'
   }
 
   return commands.join(', ')

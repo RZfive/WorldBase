@@ -18,6 +18,7 @@ import { LAN_SERVER_PORT } from '../src/main/constants.js'
 import { SystemService } from '../src/main/system-capabilities/system-service.js'
 import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout, type PortableSettingsConfig, type WebAppShortcut } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
+import { AILogStore } from '../src/main/settings/ai-log-store.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../src/main/ai-engine/agent/tools/office-utils.js'
@@ -60,6 +61,7 @@ let asyncTaskManager: AsyncTaskManager | null = null
 let lanServer: LanServer | null = null
 let settingsStore: SettingsStore | null = null
 let chatHistory: ChatHistoryStore | null = null
+let aiLogStore: AILogStore | null = null
 let skillStore: SkillStore | null = null
 let documentStore: DocumentStore | null = null
 let isClosingMainWindow = false
@@ -128,6 +130,14 @@ function getTaskLabelFromMessages (messages: Array<{ role: string; content: Mess
     }
   }
   return '未命名任务'
+}
+
+function getConversationTitleFromMessages (messages: Array<{ role: string; content: MessageContent }>): string {
+  const firstUserMessage = messages.find(message => message.role === 'user')
+  if (!firstUserMessage) return '新对话'
+  const text = getMessageText(firstUserMessage.content)
+  if (!text) return '新对话'
+  return text.length > 40 ? `${text.slice(0, 40)}...` : text
 }
 
 function notifyAiTaskStatus (
@@ -384,6 +394,7 @@ async function initializeServices (): Promise<void> {
 
   settingsStore = new SettingsStore(userDataPath)
   chatHistory = new ChatHistoryStore(userDataPath)
+  aiLogStore = new AILogStore(userDataPath)
   skillStore = new SkillStore(userDataPath)
 
   projectFS = new ProjectFS(projectsDir, snapshotsDir)
@@ -535,11 +546,24 @@ function setupIPC (): void {
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
+    const conversationTitle = getConversationTitleFromMessages(messages)
+    const aiLogger = executionPreferences.enableAiLogging && aiLogStore && conversationId
+      ? aiLogStore.createSessionLogger({
+          conversationId,
+          title: conversationTitle,
+          sessionId,
+          uploadedMessages: messages,
+          providerId,
+          modelId,
+          authMode,
+          targetProjectId: targetProjectId ?? null
+        })
+      : undefined
     activeChatStreams.set(sessionId, abortController)
     // Progress callback: sends progress events directly to renderer in real-time
     const onProgress = (stageOrEvent: string | ProgressEvent, detail?: string) => {
@@ -551,21 +575,24 @@ function setupIPC (): void {
         sender.send(channel, stageOrEvent)
       }
     }
-    try {
-      for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
-        targetProjectId: targetProjectId ?? null,
-        providerConfig: resolveProviderConfig(providerId, modelId),
-        abortSignal: abortController.signal,
-        authMode: authMode ?? 'strict'
-      })) {
+      try {
+        for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
+          targetProjectId: targetProjectId ?? null,
+          providerConfig: resolveProviderConfig(providerId, modelId),
+          abortSignal: abortController.signal,
+          authMode: authMode ?? 'strict',
+          aiLogger
+        })) {
         if (streamEvent.type === 'done') {
           notifyAiTaskStatus(executionPreferences, messages, 'completed')
+          aiLogger?.finish('completed', streamEvent.message)
         }
         if (sender.isDestroyed()) break
         try {
           sender.send(channel, JSON.parse(JSON.stringify(streamEvent)))
         } catch (serErr) {
           console.error('[ai:chatStream] Stream event serialization failed:', serErr)
+          aiLogger?.logError('stream', serErr as Error, { streamEventType: streamEvent.type })
           // Fallback: send a safe subset if serialization fails (e.g. circular refs in tool results)
           try {
             const safe: Record<string, unknown> = { type: (streamEvent as { type: string }).type }
@@ -595,17 +622,21 @@ function setupIPC (): void {
             sender.send(channel, safe)
           } catch (fallbackErr) {
             console.error('[ai:chatStream] Fallback send also failed:', fallbackErr)
+            aiLogger?.logError('stream', fallbackErr as Error, { phase: 'fallback-send', streamEventType: streamEvent.type })
           }
         }
       }
     } catch (err) {
       const errorMessage = (err as Error).message
+      const finalStatus = errorMessage === USER_ABORT_MESSAGE ? 'stopped' : 'failed'
       notifyAiTaskStatus(
         executionPreferences,
         messages,
-        errorMessage === USER_ABORT_MESSAGE ? 'stopped' : 'failed',
+        finalStatus,
         errorMessage === USER_ABORT_MESSAGE ? '用户中断了本次任务' : errorMessage
       )
+      aiLogger?.logError('stream', err as Error, { sessionId, conversationId })
+      aiLogger?.finish(finalStatus)
       if (!sender.isDestroyed()) {
         sender.send(channel, errorMessage === USER_ABORT_MESSAGE
           ? { type: 'stopped' }
@@ -1009,6 +1040,18 @@ function setupIPC (): void {
   ipcMain.handle('settings:saveAIExecutionPreferences', async (_event: IpcMainInvokeEvent, preferences: AIExecutionPreferences) => {
     settingsStore!.saveAIExecutionPreferences(preferences)
     return { success: true }
+  })
+
+  ipcMain.handle('settings:listAILogConversations', async () => {
+    return aiLogStore!.listConversations()
+  })
+
+  ipcMain.handle('settings:getAILogConversation', async (_event: IpcMainInvokeEvent, conversationId: string) => {
+    return aiLogStore!.getConversation(conversationId)
+  })
+
+  ipcMain.handle('settings:deleteAILogConversation', async (_event: IpcMainInvokeEvent, conversationId: string) => {
+    return aiLogStore!.deleteConversation(conversationId)
   })
 
   ipcMain.handle('settings:exportConfig', async (event: IpcMainInvokeEvent) => {

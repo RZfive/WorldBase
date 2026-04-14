@@ -1259,6 +1259,7 @@ async function sendMessage () {
       await window.electronAPI.chatStream(
         chatMessages,
         sessionId,
+        convId,
         activeProviderId.value || undefined,
         selectedModel.value || undefined,
         targetProjectId.value ?? undefined,

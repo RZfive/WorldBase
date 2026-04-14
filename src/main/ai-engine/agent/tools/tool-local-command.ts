@@ -27,21 +27,21 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
   return {
     definition: {
       name: 'local_run_command',
-      description: '在用户本地电脑执行 shell 命令。执行前需要用户授权。可以运行任何命令行程序来完成系统任务。',
+      description: "Run a shell command on the user's local computer. User approval is required.",
       parameters: {
         type: 'object',
         properties: {
           command: {
             type: 'string',
-            description: '要执行的 shell 命令'
+            description: 'Shell command to execute'
           },
           cwd: {
             type: 'string',
-            description: '工作目录（绝对路径），默认为用户 Home 目录'
+            description: 'Working directory as an absolute path. Defaults to the user home directory.'
           },
           timeout: {
             type: 'number',
-            description: '超时时间（秒），默认 60 秒，最大 300 秒'
+            description: 'Timeout in seconds. Default 60, maximum 300.'
           }
         },
         required: ['command']
@@ -56,15 +56,15 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
       const authorized = await requestUserAuth(
         services.getMainWindow,
         getSessionState,
-        'AI 请求执行命令行',
-        `AI 助手请求执行以下命令:\n\n$ ${command}\n\n工作目录: ${workDir}\n超时: ${timeoutSec} 秒\n\n是否允许？`
+        'AI requests a local command',
+        `The AI assistant wants to run this command:\n\n$ ${command}\n\nWorking directory: ${workDir}\nTimeout: ${timeoutSec} seconds\n\nAllow it?`
       )
 
       if (!authorized) {
-        return { error: '用户拒绝了命令执行请求', command }
+        return { error: 'The user denied the local command request.', command }
       }
 
-      onProgress?.('⚡ 执行本地命令...', command)
+      onProgress?.('⚡ Running local command...', command)
 
       return new Promise((resolve) => {
         const child = spawn(command, [], {
@@ -93,7 +93,7 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
         })
 
         child.on('exit', (code) => {
-          onProgress?.('✅ 命令执行完成', `退出码: ${code}`)
+          onProgress?.('✅ Local command finished', `Exit code: ${code}`)
           resolve({
             exitCode: code,
             stdout: stdout.substring(0, 50000),
@@ -102,7 +102,7 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
         })
 
         child.on('error', (err) => {
-          onProgress?.('❌ 命令执行失败', err.message)
+          onProgress?.('❌ Local command failed', err.message)
           resolve({
             exitCode: -1,
             error: err.message,
