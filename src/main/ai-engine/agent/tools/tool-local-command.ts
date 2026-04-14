@@ -56,15 +56,15 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
       const authorized = await requestUserAuth(
         services.getMainWindow,
         getSessionState,
-        'AI 请求执行命令行',
-        `AI 助手请求执行以下命令:\n\n$ ${command}\n\n工作目录: ${workDir}\n超时: ${timeoutSec} 秒\n\n是否允许？`
+        'AI requests a local command',
+        `The AI assistant wants to run this command:\n\n$ ${command}\n\nWorking directory: ${workDir}\nTimeout: ${timeoutSec} seconds\n\nAllow it?`
       )
 
       if (!authorized) {
-        return { error: '用户拒绝了命令执行请求', command }
+        return { error: 'The user denied the local command request.', command }
       }
 
-      onProgress?.('⚡ 执行本地命令...', command)
+      onProgress?.('⚡ Running local command...', command)
 
       return new Promise((resolve) => {
         const child = spawn(command, [], {
@@ -93,7 +93,7 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
         })
 
         child.on('exit', (code) => {
-          onProgress?.('✅ 命令执行完成', `退出码: ${code}`)
+          onProgress?.('✅ Local command finished', `Exit code: ${code}`)
           resolve({
             exitCode: code,
             stdout: stdout.substring(0, 50000),
@@ -102,7 +102,7 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
         })
 
         child.on('error', (err) => {
-          onProgress?.('❌ 命令执行失败', err.message)
+          onProgress?.('❌ Local command failed', err.message)
           resolve({
             exitCode: -1,
             error: err.message,
