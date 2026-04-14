@@ -24,18 +24,18 @@ export function toolStartAsyncTask (services: ToolServices): Tool {
   return {
     definition: {
       name: 'start_async_task',
-      description: '启动长时间运行的异步项目任务，避免因为等待 rebuild 等操作而导致 AI 请求超时。',
+      description: 'Start a long-running async project task to avoid request timeouts.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           task: {
             type: 'string',
             enum: ['rebuild'],
-            description: '异步任务类型'
+            description: 'Async task type'
           }
         },
         required: ['project_id', 'task']
@@ -55,13 +55,13 @@ export function toolGetTaskStatus (services: ToolServices): Tool {
   return {
     definition: {
       name: 'get_task_status',
-      description: '查询异步任务的当前状态、进度和最终结果。',
+      description: 'Get the current status, progress, and final result of an async task.',
       parameters: {
         type: 'object',
         properties: {
           task_id: {
             type: 'string',
-            description: '异步任务 ID'
+            description: 'Async task ID'
           }
         },
         required: ['task_id']

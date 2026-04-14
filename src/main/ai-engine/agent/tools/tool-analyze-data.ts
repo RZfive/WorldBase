@@ -23,29 +23,29 @@ export function toolAnalyzeData (services: ToolServices): Tool {
   return {
     definition: {
       name: 'analyze_project_data',
-      description: '分析指定项目的数据，返回统计结果。支持: summary(概要), trend(趋势), distribution(分布), comparison(对比)。',
+      description: 'Analyze project data and return statistics. Supported types: summary, trend, distribution, comparison.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           analysis_type: {
             type: 'string',
             enum: ['summary', 'trend', 'distribution', 'comparison'],
-            description: '分析类型'
+            description: 'Analysis type'
           },
           options: {
             type: 'object',
-            description: '分析选项。trend 需要: {table, dateColumn, valueColumn}; distribution 需要: {table, column}; comparison 需要: {table, groupColumn, valueColumn}',
+            description: 'Analysis options. trend needs {table, dateColumn, valueColumn}; distribution needs {table, column}; comparison needs {table, groupColumn, valueColumn}.',
             properties: {
-              table: { type: 'string', description: '表名' },
-              dateColumn: { type: 'string', description: '日期列 (trend)' },
-              valueColumn: { type: 'string', description: '值列' },
-              column: { type: 'string', description: '分析列 (distribution)' },
-              groupColumn: { type: 'string', description: '分组列 (comparison)' },
-              aggregation: { type: 'string', description: '聚合函数 (comparison): SUM/AVG/COUNT/MIN/MAX' }
+              table: { type: 'string', description: 'Table name' },
+              dateColumn: { type: 'string', description: 'Date column (trend)' },
+              valueColumn: { type: 'string', description: 'Value column' },
+              column: { type: 'string', description: 'Column to analyze (distribution)' },
+              groupColumn: { type: 'string', description: 'Group column (comparison)' },
+              aggregation: { type: 'string', description: 'Aggregation function (comparison): SUM/AVG/COUNT/MIN/MAX' }
             }
           }
         },

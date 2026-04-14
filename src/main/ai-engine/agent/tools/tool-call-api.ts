@@ -24,26 +24,26 @@ export function toolCallApi (services: ToolServices): Tool {
   return {
     definition: {
       name: 'call_project_api',
-      description: '调用指定项目正在运行的后端 HTTP API。用于测试接口或获取运行时数据。',
+      description: 'Call a running HTTP API exposed by the specified project.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           method: {
             type: 'string',
             enum: ['GET', 'POST', 'PUT', 'DELETE'],
-            description: 'HTTP 方法'
+            description: 'HTTP method'
           },
           path: {
             type: 'string',
-            description: 'API 路径，如 /api/records'
+            description: 'API path, for example /api/records'
           },
           body: {
             type: 'object',
-            description: '请求体 (POST/PUT 时使用)'
+            description: 'Request body for POST or PUT requests'
           }
         },
         required: ['project_id', 'method', 'path']

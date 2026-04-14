@@ -25,21 +25,21 @@ export function toolWriteFile (services: ToolServices): Tool {
   return {
     definition: {
       name: 'write_project_file',
-      description: '修改指定项目的文件。会自动创建备份。用于修改项目代码。',
+      description: 'Modify a file in the specified project. A backup is created automatically.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           file_path: {
             type: 'string',
-            description: '相对于项目根目录的文件路径'
+            description: 'File path relative to the project root'
           },
           content: {
             type: 'string',
-            description: '完整的文件内容'
+            description: 'Full file content'
           }
         },
         required: ['project_id', 'file_path', 'content']

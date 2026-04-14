@@ -27,21 +27,21 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
   return {
     definition: {
       name: 'local_run_command',
-      description: '在用户本地电脑执行 shell 命令。执行前需要用户授权。可以运行任何命令行程序来完成系统任务。',
+      description: 'Run a shell command on the user's local computer. User approval is required.',
       parameters: {
         type: 'object',
         properties: {
           command: {
             type: 'string',
-            description: '要执行的 shell 命令'
+            description: 'Shell command to execute'
           },
           cwd: {
             type: 'string',
-            description: '工作目录（绝对路径），默认为用户 Home 目录'
+            description: 'Working directory as an absolute path. Defaults to the user home directory.'
           },
           timeout: {
             type: 'number',
-            description: '超时时间（秒），默认 60 秒，最大 300 秒'
+            description: 'Timeout in seconds. Default 60, maximum 300.'
           }
         },
         required: ['command']

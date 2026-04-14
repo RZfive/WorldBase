@@ -19,7 +19,7 @@ export function toolListProjects (services: ToolServices): Tool {
   return {
     definition: {
       name: 'list_projects',
-      description: '列出所有已创建项目的列表及其运行状态。',
+      description: 'List all created projects and their runtime status.',
       parameters: {
         type: 'object',
         properties: {},

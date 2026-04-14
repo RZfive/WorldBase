@@ -43,25 +43,25 @@ export function toolReadFile (services: ToolServices): Tool {
   return {
     definition: {
       name: 'read_project_file',
-      description: '读取指定项目的文件内容。支持按行分段读取大文件，用于理解项目代码结构。',
+      description: 'Read file content from the specified project. Large files can be read in line-based segments.',
       parameters: {
         type: 'object',
         properties: {
           project_id: {
             type: 'string',
-            description: '项目 ID'
+            description: 'Project ID'
           },
           file_path: {
             type: 'string',
-            description: '相对于项目根目录的文件路径'
+            description: 'File path relative to the project root'
           },
           start_line: {
             type: 'integer',
-            description: '起始行号（从 1 开始）。大文件建议分段读取。'
+            description: 'Start line number (1-based). Use segments for large files.'
           },
           max_lines: {
             type: 'integer',
-            description: `最多读取的行数。默认 ${DEFAULT_SEGMENT_LINES} 行，最大 ${MAX_SEGMENT_LINES} 行。`
+            description: `Maximum lines to read. Default ${DEFAULT_SEGMENT_LINES}, maximum ${MAX_SEGMENT_LINES}.`
           }
         },
         required: ['project_id', 'file_path']

@@ -36,26 +36,26 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
   return {
     definition: {
       name: 'create_project',
-      description: '根据 AI 生成的代码创建新项目。提供项目名称、类型、文件内容和元数据。',
+      description: 'Create a new project from AI-generated code, including name, type, files, and metadata.',
       parameters: {
         type: 'object',
         properties: {
           name: {
             type: 'string',
-            description: '项目名称 (如: 记账应用)'
+            description: 'Project name, for example: expense tracker'
           },
           type: {
             type: 'string',
             enum: ['frontend', 'backend', 'fullstack'],
-            description: '项目类型'
+            description: 'Project type'
           },
           files: {
             type: 'object',
-            description: '文件内容映射 {相对路径: 文件内容}'
+            description: 'File content map {relativePath: fileContent}'
           },
           meta: {
             type: 'object',
-            description: '.world-meta.json 的内容 (运行时配置、API 定义、数据模式等)'
+            description: '.world-meta.json content, including runtime config, API definitions, and data schema'
           }
         },
         required: ['name', 'type', 'files']

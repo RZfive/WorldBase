@@ -53,30 +53,30 @@ export function toolLocalWriteFile (services: ToolServices, getSessionState?: ()
   return {
     definition: {
       name: 'local_write_file',
-      description: '在用户本地电脑创建或写入文件。执行前需要用户授权。支持创建办公文件（.xlsx, .docx, .pptx），也支持写入普通文本文件。',
+      description: 'Create or write a file on the user's local computer. User approval is required. Supports office files and plain text files.',
       parameters: {
         type: 'object',
         properties: {
           file_path: {
             type: 'string',
-            description: '文件保存的绝对路径，例如 /Users/xxx/Documents/report.xlsx'
+            description: 'Absolute save path, for example /Users/xxx/Documents/report.xlsx'
           },
           content: {
             type: 'string',
-            description: '文本文件的内容。如果是办公文件格式，请使用 office_data 参数'
+            description: 'Text file content. For office files, use office_data instead.'
           },
           office_data: {
             type: 'object',
-            description: '办公文件的结构化数据。type 指定文件类型（xlsx/docx/pptx）',
+            description: 'Structured office document data. type selects xlsx/docx/pptx.',
             properties: {
               type: {
                 type: 'string',
                 enum: ['xlsx', 'docx', 'pptx'],
-                description: '办公文件类型'
+                description: 'Office file type'
               },
               sheets: {
                 type: 'array',
-                description: 'Excel 工作表数据，每个元素包含 name（表名）、headers（列标题数组）和 rows（数据行二维数组）',
+                description: 'Excel sheet data. Each item includes name, headers, and rows.',
                 items: {
                   type: 'object',
                   properties: {
@@ -88,7 +88,7 @@ export function toolLocalWriteFile (services: ToolServices, getSessionState?: ()
               },
               paragraphs: {
                 type: 'array',
-                description: 'Word 文档段落，每个元素包含 text（文本）、heading（是否标题）和 bold（是否加粗）',
+                description: 'Word document paragraphs. Each item includes text, heading, and bold.',
                 items: {
                   type: 'object',
                   properties: {
@@ -100,7 +100,7 @@ export function toolLocalWriteFile (services: ToolServices, getSessionState?: ()
               },
               slides: {
                 type: 'array',
-                description: 'PowerPoint 幻灯片，每个元素包含 title（标题）和 content（内容行数组）',
+                description: 'PowerPoint slides. Each item includes title and content.',
                 items: {
                   type: 'object',
                   properties: {
@@ -210,7 +210,7 @@ async function writeOfficeDocument (
     }
 
     default:
-      throw new Error(`不支持的办公文件类型: ${data.type}。支持的类型: xlsx, docx, pptx`)
+      throw new Error(`不支持的Office file type: ${data.type}。支持的类型: xlsx, docx, pptx`)
   }
 
   const stat = await fs.stat(filePath)

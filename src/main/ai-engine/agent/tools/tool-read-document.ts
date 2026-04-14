@@ -9,18 +9,18 @@ export function toolReadDocument (documentStore: DocumentStore) {
   return {
     definition: {
       name: 'read_document',
-      description: '读取用户已导入的文档内容。可以读取完整文档文本，也可以读取用户标记的特定选区。',
+      description: 'Read imported document content, either the full text or selected regions.',
       parameters: {
         type: 'object' as const,
         properties: {
           artifact_id: {
             type: 'string',
-            description: '文档的唯一ID。使用 list_documents 获取可用文档列表。'
+            description: 'Unique document ID. Use list_documents to discover available documents.'
           },
           region_ids: {
             type: 'array',
             items: { type: 'string' },
-            description: '可选的选区ID列表。如果提供,则只返回这些选区的内容。'
+            description: 'Optional list of selection IDs. If provided, only those selections are returned.'
           }
         },
         required: ['artifact_id']
@@ -65,7 +65,7 @@ export function toolListDocuments (documentStore: DocumentStore) {
   return {
     definition: {
       name: 'list_documents',
-      description: '列出所有用户已导入的文档及其选区摘要。',
+      description: 'List all imported documents and their selection summaries.',
       parameters: {
         type: 'object' as const,
         properties: {}
