@@ -98,7 +98,7 @@ When the user asks to modify or optimize an existing project:
  ${getEnvironmentContext()}`
 
   if (options?.targetProjectId) {
-    prompt += `\n\n## Active target project\n- This conversation is currently bound to existing project ID: ${options.targetProjectId}\n- Prefer that project for all read/write/build/runtime actions unless the user explicitly switches to another project`
+    prompt += `\n\n## Active target project\n- This conversation is currently bound to existing project ID: ${options.targetProjectId}.\n- Prefer that project for all read/write/build/runtime actions unless the user explicitly switches to another project.`
   }
 
   if (skillContents && skillContents.length > 0) {
