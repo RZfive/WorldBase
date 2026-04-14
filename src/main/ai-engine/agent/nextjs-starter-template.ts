@@ -342,6 +342,8 @@ export function getNextJsStarterArchitectureDescription (): string {
     '- Page entry: app/page.(js|tsx) is the initial screen and should be replaced with the requested product UI instead of deleted without a replacement.',
     '- Styling layer: app/globals.css contains resets, design tokens, spacing, and responsive defaults so generated apps never launch without styles.',
     '- Data layer: browser components call The World host APIs and project data endpoints instead of creating their own local infrastructure.',
+    '- Persistence rule: when the app needs data saving, declare tables in .world-meta.json dataSchema and use The World host SQLite APIs only.',
+    '- Forbidden persistence patterns: do not add better-sqlite3, sqlite3, Prisma, Drizzle, Sequelize, TypeORM, custom SQLite bootstrap code, or ad hoc local file storage for business data.',
     '',
     'Template architecture diagram:',
     STARTER_MERMAID_DIAGRAM
