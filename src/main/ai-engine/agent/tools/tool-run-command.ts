@@ -86,6 +86,7 @@ const READY_SIGNAL_PATTERNS = [
 ]
 
 const commandHistory = new Map<string, CommandExecutionRecord>()
+let commandSequence = 0
 
 /**
  * Tool: run_project_command — 在指定项目目录执行命令
@@ -151,7 +152,7 @@ export function toolRunCommand (services: ToolServices): Tool {
         })
 
         const record: CommandExecutionRecord = {
-          command_id: globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+          command_id: globalThis.crypto?.randomUUID?.() || `cmd_${Date.now().toString(36)}_${(++commandSequence).toString(36)}`,
           project_id,
           command,
           cwd: resolvedWorkDir,
@@ -183,7 +184,7 @@ export function toolRunCommand (services: ToolServices): Tool {
           if (next.length <= limit) {
             return { value: next, truncated: false }
           }
-          return { value: next.slice(-limit), truncated: true }
+          return { value: next.slice(0, limit), truncated: true }
         }
 
         const cleanupForegroundTimers = () => {

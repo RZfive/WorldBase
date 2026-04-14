@@ -375,11 +375,11 @@ export class BuilderService {
     }
 
     return await new Promise((resolve, reject) => {
-      const child = spawn(`${this._getNpmCommand()} run build`, [], {
+      const child = spawn(this._getNpmCommand(), ['run', 'build'], {
         cwd: projectDir,
         stdio: 'pipe',
-        shell: true,
-        windowsHide: true,
+        shell: process.platform === 'win32',
+        windowsHide: process.platform === 'win32',
         env
       })
 
@@ -760,11 +760,11 @@ export class BuilderService {
    */
   private _installDeps (cwd: string): Promise<void> {
     return createBundledRuntimeEnv(cwd).then(env => new Promise((resolve, reject) => {
-      const child = spawn(`${this._getNpmCommand()} install`, [], {
+      const child = spawn(this._getNpmCommand(), ['install'], {
         cwd,
         stdio: 'pipe',
-        shell: true,
-        windowsHide: true,
+        shell: process.platform === 'win32',
+        windowsHide: process.platform === 'win32',
         env
       })
 
