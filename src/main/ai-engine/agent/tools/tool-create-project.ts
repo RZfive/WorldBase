@@ -8,6 +8,7 @@ import type { BrowserWindow } from 'electron'
 import { streamFilePreview } from './file-preview-progress.js'
 import { normalizeProjectMeta } from '../../../project-fs/project-meta.js'
 import { normalizeNextPackageJsonText } from '../../../project-runtime/next-runtime-compat.js'
+import { applyNextJsStarterTemplate } from '../nextjs-starter-template.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -63,9 +64,13 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
     },
     handler: async (args, onProgress) => {
       const { name, type, meta } = args as unknown as CreateProjectArgs
-      const files = normalizeCreateProjectFiles((args as Record<string, unknown>).files)
-      const normalizedMeta = normalizeProjectMeta(parsePossiblyStringifiedObject(meta, 'meta') ?? meta)
+      let files = normalizeCreateProjectFiles((args as Record<string, unknown>).files)
+      let normalizedMeta = normalizeProjectMeta(parsePossiblyStringifiedObject(meta, 'meta') ?? meta)
       const session = getSessionState?.()
+
+      const preparedTemplate = applyNextJsStarterTemplate(files, normalizedMeta)
+      files = preparedTemplate.files
+      normalizedMeta = normalizeProjectMeta(preparedTemplate.meta)
 
       if (files['package.json'] && (!!files['next.config.js'] || normalizedMeta.framework === 'nextjs')) {
         try {
