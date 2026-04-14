@@ -280,7 +280,7 @@ function isSuccessfulManualBuild (parsed: ParsedCommand, payload: Record<string,
 
 function hasReadySignal (stdout: string, stderr: string): boolean {
   const combinedOutput = `${stdout}\n${stderr}`
-  return /\b(ready|listening|started server|server started)\b/i.test(combinedOutput)
+  return /\b(ready|listening|started server|server started)\b|已启动|启动完成|监听中|服务已就绪/i.test(combinedOutput)
 }
 
 function tokenizeCommand (command: string): string[] {

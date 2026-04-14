@@ -36,7 +36,7 @@ export function toolStartProjectServer (services: ToolServices): Tool {
       onProgress?.('🚀 正在启动项目服务...', project_id)
       const startResult = await services.runtimeManager.start(project_id)
       const status = services.runtimeManager.getStatus(project_id)
-      const startupLogs = services.runtimeManager.getLogs(project_id, 40).slice(-20)
+      const startupLogs = services.runtimeManager.getLogs(project_id, 20)
       onProgress?.('✅ 项目服务已就绪', `${project_id} @ ${status.port ?? startResult.port}`)
       return {
         project_id,
