@@ -27,7 +27,7 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
   return {
     definition: {
       name: 'local_run_command',
-      description: 'Run a shell command on the user's local computer. User approval is required.',
+      description: "Run a shell command on the user's local computer. User approval is required.",
       parameters: {
         type: 'object',
         properties: {

@@ -53,7 +53,7 @@ export function toolLocalWriteFile (services: ToolServices, getSessionState?: ()
   return {
     definition: {
       name: 'local_write_file',
-      description: 'Create or write a file on the user's local computer. User approval is required. Supports office files and plain text files.',
+      description: "Create or write a file on the user's local computer. User approval is required. Supports office files and plain text files.",
       parameters: {
         type: 'object',
         properties: {
