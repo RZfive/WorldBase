@@ -401,6 +401,7 @@ async function initializeServices (): Promise<void> {
   runtimeManager = new RuntimeManager(projectsDir)
   builderService = new BuilderService(projectsDir)
   runtimeManager.setBuilderService(builderService)
+  builderService.setRuntimeManager(runtimeManager)
   apiClient = new ProjectApiClient(runtimeManager)
   dataAccess = new ProjectDataAccess(projectsDir)
   asyncTaskManager = new AsyncTaskManager(builderService)

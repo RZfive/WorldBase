@@ -3,7 +3,7 @@ import { toolDeleteFile } from './tool-delete-file.js'
 import { toolWriteFile } from './tool-write-file.js'
 import { toolCallApi } from './tool-call-api.js'
 import { toolQueryDb } from './tool-query-db.js'
-import { toolRunCommand } from './tool-run-command.js'
+import { toolGetProjectCommandStatus, toolRunCommand } from './tool-run-command.js'
 import { toolListProjects } from './tool-list-projects.js'
 import { toolListProjectFiles } from './tool-list-project-files.js'
 import { toolAnalyzeData } from './tool-analyze-data.js'
@@ -16,6 +16,7 @@ import { toolGetProjectLogs } from './tool-get-project-logs.js'
 import { toolGetProjectStatus } from './tool-get-project-status.js'
 import { toolGetTaskStatus, toolStartAsyncTask } from './tool-async-task.js'
 import { toolStartProjectServer } from './tool-start-server.js'
+import { toolRestartProjectServer } from './tool-restart-server.js'
 import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
@@ -50,11 +51,13 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolCallApi(services),
     toolQueryDb(services),
     toolRunCommand(services),
+    toolGetProjectCommandStatus(),
     toolListProjects(services),
     toolListProjectFiles(services),
     toolGetProjectStatus(services),
     toolGetProjectLogs(services),
     toolStartProjectServer(services),
+    toolRestartProjectServer(services),
     toolAnalyzeData(services),
     toolCreateProject(services, getSessionState),
     toolRebuildProject(services),
