@@ -252,6 +252,24 @@ export class BuilderService {
     return result
   }
 
+  async syncManualBuildState (projectId: string): Promise<{ synced: boolean; reason?: string }> {
+    const projectDir = this._resolveProjectDir(projectId)
+    const metaPath = path.join(projectDir, '.world-meta.json')
+    const isNextProject = await this._isNextProject(projectDir)
+
+    if (isNextProject) {
+      if (!this._hasStandaloneOutput(projectDir)) {
+        await this._updateBuildStatus(metaPath, 'failed')
+        return { synced: false, reason: 'standalone_output_missing' }
+      }
+      await this._copyNextStaticAssets(projectDir)
+    }
+
+    const buildHash = await this._computeSourceHash(projectDir)
+    await this._updateBuildMeta(metaPath, 'built', buildHash)
+    return { synced: true }
+  }
+
   /**
    * Check if a project has a valid standalone build.
    */

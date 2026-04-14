@@ -70,12 +70,27 @@
 | `project_id` | string | 项目 ID |
 | `command` | string | shell 命令 |
 | `cwd` | string? | 子目录 (默认项目根目录) |
+| `timeout_seconds` | integer? | 超时时间 |
 
 **安全限制**: 白名单命令 (npm, node, git 等)。
 
+**返回补充**: 当命令因超时或输出截断被终止时，会返回 `reason`（如 `timeout` / `output_limit`）、`stdout`、`stderr`，并附带 `observedReadySignal` 帮助 Agent 判断服务是否已成功启动。
+
 ---
 
-### 6. `list_projects` — 列出所有项目
+### 6. `start_project_server` — 后台启动项目服务
+
+启动指定项目的后端服务，等待服务就绪后立即返回运行信息和最近启动日志。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `project_id` | string | 项目 ID |
+
+**返回**: 包含 `status`、`port`、`pid`、`started_at`、`startup_logs`。
+
+---
+
+### 7. `list_projects` — 列出所有项目
 
 返回所有已创建项目的列表及其运行状态。
 
@@ -83,7 +98,7 @@
 
 ---
 
-### 7. `analyze_project_data` — 分析项目数据
+### 8. `analyze_project_data` — 分析项目数据
 
 分析指定项目的数据，返回统计结果。
 
@@ -95,7 +110,7 @@
 
 ---
 
-### 8. `create_project` — 创建新项目
+### 9. `create_project` — 创建新项目
 
 根据 AI 生成的代码创建新项目。
 
