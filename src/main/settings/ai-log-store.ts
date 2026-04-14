@@ -156,6 +156,7 @@ function cloneJson<T> (value: T): T {
   }
 
   try {
+    // Logs are stored as JSON for inspection only, so bigint values are stringified on purpose to keep writes stable.
     const serialized = JSON.stringify(value, (_key, currentValue) => {
       return typeof currentValue === 'bigint' ? currentValue.toString() : currentValue
     })
