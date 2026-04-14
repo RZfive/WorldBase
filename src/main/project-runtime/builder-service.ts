@@ -260,7 +260,7 @@ export class BuilderService {
     if (isNextProject) {
       if (!this._hasStandaloneOutput(projectDir)) {
         await this._updateBuildStatus(metaPath, 'failed')
-        return { synced: false, reason: 'standalone_output_missing' }
+        return { synced: false, reason: 'standaloneOutputMissing' }
       }
       await this._copyNextStaticAssets(projectDir)
     }

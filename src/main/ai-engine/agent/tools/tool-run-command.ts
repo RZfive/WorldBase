@@ -35,7 +35,18 @@ const HEARTBEAT_INTERVAL_MS = 10000
 const MAX_STDOUT_CHARS = 20000
 const MAX_STDERR_CHARS = 10000
 const LONG_RUNNING_NPM_SCRIPTS = new Set(['dev', 'start', 'serve', 'preview', 'watch'])
+const BUILD_NPM_SCRIPTS = new Set(['build'])
 const SAFE_GIT_SUBCOMMANDS = new Set(['status', 'diff', 'log', 'show', 'rev-parse', 'branch'])
+const READY_SIGNAL_PATTERNS = [
+  /\bready\b/i,
+  /\blistening\b/i,
+  /\bstarted server\b/i,
+  /\bserver started\b/i,
+  /已启动/i,
+  /启动完成/i,
+  /监听中/i,
+  /服务已就绪/i
+]
 
 /**
  * Tool: run_project_command — 在指定项目目录执行命令
@@ -274,13 +285,13 @@ function validateProjectCommand (rawCommand: string): ParsedCommand {
 function isSuccessfulManualBuild (parsed: ParsedCommand, payload: Record<string, unknown>): boolean {
   return parsed.baseCommand === 'npm' &&
     parsed.tokens[1]?.toLowerCase() === 'run' &&
-    parsed.tokens[2]?.toLowerCase() === 'build' &&
+    BUILD_NPM_SCRIPTS.has(parsed.tokens[2]?.toLowerCase() || '') &&
     payload.exitCode === 0
 }
 
 function hasReadySignal (stdout: string, stderr: string): boolean {
   const combinedOutput = `${stdout}\n${stderr}`
-  return /\b(ready|listening|started server|server started)\b|已启动|启动完成|监听中|服务已就绪/i.test(combinedOutput)
+  return READY_SIGNAL_PATTERNS.some(pattern => pattern.test(combinedOutput))
 }
 
 function tokenizeCommand (command: string): string[] {
