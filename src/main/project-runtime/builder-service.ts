@@ -7,6 +7,7 @@ import crypto from 'node:crypto'
 import { LAN_SERVER_PORT } from '../constants.js'
 import { createBundledRuntimeEnv } from './bundled-runtime.js'
 import { ensureNextRuntimeCompatiblePackageJson } from './next-runtime-compat.js'
+import type { RuntimeManager } from './runtime-manager.js'
 
 const NEXT_CONFIG_TEMPLATE = `/** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -52,6 +53,10 @@ export interface BuildResult {
   duration: number
   error?: string
   output?: string
+  runtimeStatus?: string
+  port?: number
+  pid?: number
+  startupLogs?: string[]
 }
 
 export interface CleanupResult {
@@ -72,9 +77,14 @@ interface CommandExecutionResult {
  */
 export class BuilderService {
   private projectsDir: string
+  private runtimeManager: Pick<RuntimeManager, 'getStatus' | 'getLogs' | 'start' | 'stop'> | null = null
 
   constructor (projectsDir: string) {
     this.projectsDir = projectsDir
+  }
+
+  setRuntimeManager (runtimeManager: Pick<RuntimeManager, 'getStatus' | 'getLogs' | 'start' | 'stop'>): void {
+    this.runtimeManager = runtimeManager
   }
 
   /**
@@ -216,6 +226,11 @@ export class BuilderService {
   async rebuild (projectId: string): Promise<BuildResult> {
     const projectDir = path.join(this.projectsDir, projectId)
     const packageJsonPath = path.join(projectDir, 'package.json')
+    const runtimeStatusBeforeRebuild = this.runtimeManager?.getStatus(projectId)
+
+    if (this.runtimeManager && runtimeStatusBeforeRebuild?.status !== 'not_started') {
+      await this.runtimeManager.stop(projectId)
+    }
 
     const needsPreRebuildCleanup = existsSync(path.join(projectDir, 'node_modules')) || existsSync(path.join(projectDir, '.next', 'cache'))
     if (needsPreRebuildCleanup) {
@@ -247,6 +262,19 @@ export class BuilderService {
 
     if (result.success) {
       await this.cleanup(projectId)
+      if (this.runtimeManager) {
+        try {
+          const startResult = await this.runtimeManager.start(projectId)
+          const runtimeStatus = this.runtimeManager.getStatus(projectId)
+          result.runtimeStatus = startResult.status
+          result.port = runtimeStatus.port ?? startResult.port
+          result.pid = runtimeStatus.pid
+          result.startupLogs = this.runtimeManager.getLogs(projectId, 20).map(log => log.text)
+        } catch (err) {
+          result.success = false
+          result.error = `Build succeeded but restart failed: ${(err as Error).message}`
+        }
+      }
     }
 
     return result
@@ -350,7 +378,8 @@ export class BuilderService {
       const child = spawn(this._getNpmCommand(), ['run', 'build'], {
         cwd: projectDir,
         stdio: 'pipe',
-        shell: false,
+        shell: process.platform === 'win32',
+        windowsHide: process.platform === 'win32',
         env
       })
 
@@ -734,7 +763,8 @@ export class BuilderService {
       const child = spawn(this._getNpmCommand(), ['install'], {
         cwd,
         stdio: 'pipe',
-        shell: false,
+        shell: process.platform === 'win32',
+        windowsHide: process.platform === 'win32',
         env
       })
 

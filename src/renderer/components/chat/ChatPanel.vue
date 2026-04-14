@@ -606,6 +606,7 @@ function stashCurrentConversationForNavigation () {
 async function startOptimizationConversation (ctx: Record<string, unknown>) {
   const projectId = typeof ctx.id === 'string' ? ctx.id : null
   const name = String(ctx.name || ctx.id || '未知项目')
+  const projectRef = projectId ? `[[project:${projectId}|${name}]]` : ''
   const conversationId = generateId()
 
   stashCurrentConversationForNavigation()
@@ -614,7 +615,7 @@ async function startOptimizationConversation (ctx: Record<string, unknown>) {
   messages.value = []
   targetProjectId.value = projectId
   currentAuthMode.value = 'strict'
-  inputText.value = `[[project:${ctx.id}|${name}]]`
+  inputText.value = `${projectRef}${projectRef ? '\n' : ''}请先检查这个项目的当前代码、运行状态和最近日志，明确告诉我这个项目现在的具体问题、风险点和可优化项，然后再继续修改。`
   pendingImages.value = []
   pendingFiles.value = []
   uploadFeedback.value = ''
