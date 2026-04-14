@@ -19,7 +19,7 @@ export function toolRebuildProject (services: ToolServices): Tool {
   return {
     definition: {
       name: 'rebuild_project',
-      description: 'Clean node_modules and the Next.js cache, then reinstall dependencies and rebuild the project.',
+      description: 'Atomically stop the project server, reinstall dependencies, rebuild the project, and start a fresh server.',
       parameters: {
         type: 'object',
         properties: {
@@ -34,13 +34,13 @@ export function toolRebuildProject (services: ToolServices): Tool {
     handler: async (args, onProgress) => {
       const { project_id } = args as unknown as RebuildProjectArgs
 
-      onProgress?.('🧹 正在清理依赖和构建缓存...', project_id)
+      onProgress?.('🧹 正在执行原子重建流程...', project_id)
       const result = await services.builderService.rebuild(project_id)
 
       if (result.success) {
-        onProgress?.('✅ 重新编译完成', `耗时 ${Math.round(result.duration / 1000)}s`)
+        onProgress?.('✅ 重建完成', `耗时 ${Math.round(result.duration / 1000)}s`)
       } else {
-        onProgress?.('❌ 重新编译失败', result.error || 'unknown error')
+        onProgress?.('❌ 重建失败', result.error || 'unknown error')
       }
 
       return result
