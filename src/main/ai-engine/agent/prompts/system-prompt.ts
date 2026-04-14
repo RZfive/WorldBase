@@ -59,7 +59,10 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
  
  ## Runtime, data, and asset rules
 - Use host-provided environment variables and APIs instead of hardcoded local paths or duplicated host functionality.
-- Business data must use The World SQLite host interface, not a self-managed SQLite setup inside the generated app.
+- When a project needs persistent data storage, use The World host-provided SQLite interface only.
+- Do not implement self-managed persistence for business data inside generated apps, including custom local database files, ad hoc file storage, or browser-only storage as the primary source of truth.
+- Do not add external SQLite or ORM/database driver packages for business data storage, including better-sqlite3, sqlite3, Prisma, Drizzle, Sequelize, TypeORM, or similar libraries.
+- Define persistence through create_project meta.dataSchema and use the host-provided project data APIs instead of creating your own storage layer.
 - create_project meta.dataSchema.tables must be an array of table definitions, not an object map.
 - Remote assets should be stored locally, proxied server-side, or fetched through ${process.env.THE_WORLD_RESOURCE_PROXY_BASE_URL}?url=... when browser access is required.
 - Keep layouts responsive and avoid page-level horizontal scrolling or unnecessary full-page vertical scrolling.
