@@ -2,6 +2,7 @@ import { getSystemPrompt } from './prompts/system-prompt.js'
 import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/openai-provider.js'
 import { normalizeAbortReason, USER_ABORT_MESSAGE } from '../abort-utils.js'
 import type { AIExecutionAuthMode } from '../../settings/settings-store.js'
+import type { AILogSessionLogger } from '../../settings/ai-log-store.js'
 
 export type ProgressEvent =
   | { type: 'progress'; stage: string; detail?: string }
@@ -91,6 +92,7 @@ export class AgentCore {
   private maxDuplicateIterationFingerprints = 6
   private maxStreamRetries = 3
   private activeSkillContents: string[] = []
+  private logger?: AILogSessionLogger
   /** Shared mutable state accessible by tool handlers within a session. */
   public sessionState: SessionState = { createdProjectId: null, targetProjectId: null, authMode: 'strict' }
 
@@ -128,6 +130,10 @@ export class AgentCore {
 
   setAuthMode (authMode: AIExecutionAuthMode): void {
     this.sessionState.authMode = authMode
+  }
+
+  setLogger (logger?: AILogSessionLogger): void {
+    this.logger = logger
   }
 
   private _resetSessionState (): void {
@@ -593,6 +599,14 @@ export class AgentCore {
         }
 
         executions.push({ name: toolName, args: toolArgs, result })
+        this.logger?.logToolExecution({
+          name: toolName,
+          rawArguments: toolCall.function.arguments,
+          parsedArguments: toolArgs,
+          result,
+          status: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? 'failed' : 'completed',
+          error: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? String((result as Record<string, unknown>).error) : undefined
+        })
 
         messages.push({
           role: 'tool',
@@ -734,6 +748,14 @@ export class AgentCore {
         }
 
         executions.push({ name: toolName, args: toolArgs, result })
+        this.logger?.logToolExecution({
+          name: toolName,
+          rawArguments: toolCall.function.arguments,
+          parsedArguments: toolArgs,
+          result,
+          status: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? 'failed' : 'completed',
+          error: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? String((result as Record<string, unknown>).error) : undefined
+        })
 
         yield { type: 'tool_end', name: toolName }
 

@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 
 const FEEDBACK_DISPLAY_DURATION_MS = 1800
 const notifyOnTaskComplete = ref(true)
+const enableAiLogging = ref(false)
 const loading = ref(true)
 const saving = ref(false)
 const feedback = ref('')
@@ -12,29 +13,39 @@ async function loadPreferences () {
   try {
     const preferences = await window.electronAPI?.getAIExecutionPreferences?.()
     notifyOnTaskComplete.value = preferences?.notifyOnTaskComplete ?? true
+    enableAiLogging.value = preferences?.enableAiLogging ?? false
   } catch {
     notifyOnTaskComplete.value = true
+    enableAiLogging.value = false
   } finally {
     loading.value = false
   }
 }
 
-async function savePreferences (nextNotifyOnTaskComplete: boolean) {
+async function savePreferences (nextPreferences: { notifyOnTaskComplete?: boolean; enableAiLogging?: boolean }) {
   if (!window.electronAPI?.saveAIExecutionPreferences || saving.value) return
 
   const previousNotifyOnTaskComplete = notifyOnTaskComplete.value
-  notifyOnTaskComplete.value = nextNotifyOnTaskComplete
+  const previousEnableAiLogging = enableAiLogging.value
+  if (typeof nextPreferences.notifyOnTaskComplete === 'boolean') {
+    notifyOnTaskComplete.value = nextPreferences.notifyOnTaskComplete
+  }
+  if (typeof nextPreferences.enableAiLogging === 'boolean') {
+    enableAiLogging.value = nextPreferences.enableAiLogging
+  }
 
   saving.value = true
   feedback.value = ''
 
   try {
     await window.electronAPI.saveAIExecutionPreferences({
-      notifyOnTaskComplete: notifyOnTaskComplete.value
+      notifyOnTaskComplete: notifyOnTaskComplete.value,
+      enableAiLogging: enableAiLogging.value
     })
     feedback.value = '通知偏好已保存'
   } catch (err) {
     notifyOnTaskComplete.value = previousNotifyOnTaskComplete
+    enableAiLogging.value = previousEnableAiLogging
     feedback.value = `保存失败：${(err as Error).message}`
   } finally {
     saving.value = false
@@ -64,21 +75,37 @@ onMounted(async () => {
         <span class="ep-toggle-title">任务结束后发送系统通知</span>
         <span class="ep-toggle-hint">通知中心会显示任务名称和当前状态，适合后台执行时提醒你查看结果。</span>
       </div>
-      <input
-        type="checkbox"
-        class="ep-toggle-input"
-        :checked="notifyOnTaskComplete"
-        :disabled="loading || saving"
-        @change="savePreferences(($event.target as HTMLInputElement).checked)"
-      >
-    </label>
+        <input
+          type="checkbox"
+          class="ep-toggle-input"
+          :checked="notifyOnTaskComplete"
+          :disabled="loading || saving"
+          @change="savePreferences({ notifyOnTaskComplete: ($event.target as HTMLInputElement).checked })"
+        >
+      </label>
 
-    <div class="ep-separator" />
+      <div class="ep-separator" />
 
-    <div class="ep-note">
-      <span class="ep-note-title">说明</span>
-      <p>每个对话都可以在聊天窗口顶部单独切换严格授权或自动执行，不再共享全局授权模式。</p>
-    </div>
+      <label class="ep-toggle">
+        <div class="ep-toggle-copy">
+          <span class="ep-toggle-title">开启 AI 日志中心</span>
+          <span class="ep-toggle-hint">记录每次对话上传给 AI 的消息、模型请求结果、工具调用和报错，方便后续在“日志中心”排查问题。</span>
+        </div>
+        <input
+          type="checkbox"
+          class="ep-toggle-input"
+          :checked="enableAiLogging"
+          :disabled="loading || saving"
+          @change="savePreferences({ enableAiLogging: ($event.target as HTMLInputElement).checked })"
+        >
+      </label>
+
+      <div class="ep-separator" />
+
+      <div class="ep-note">
+        <span class="ep-note-title">说明</span>
+        <p>每个对话都可以在聊天窗口顶部单独切换严格授权或自动执行，不再共享全局授权模式。</p>
+      </div>
   </div>
 </template>
 

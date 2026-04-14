@@ -1,4 +1,5 @@
 import { normalizeAbortReason } from '../abort-utils.js'
+import type { AILogSessionLogger } from '../../settings/ai-log-store.js'
 
 export interface ChatContentTextPart {
   type: 'text'
@@ -89,6 +90,7 @@ export class OpenAIProvider {
   private model: string
   private enableThinking: boolean
   private contextWindow: number
+  private logger?: AILogSessionLogger
 
   constructor () {
     this.apiKey = process.env.OPENAI_API_KEY || ''
@@ -301,16 +303,37 @@ export class OpenAIProvider {
     this.enableThinking = enable
   }
 
+  setLogger (logger?: AILogSessionLogger): void {
+    this.logger = logger
+  }
+
   /**
    * Make a chat completion request with function calling support.
    */
   async chatCompletion (messages: ChatMessage[], tools: ToolDefinition[] = [], abortSignal?: AbortSignal): Promise<ChatMessage> {
     const body = this.buildRequestBody(messages, tools, false)
+    const callId = this.logger?.logProviderCallStart({
+      stream: false,
+      model: this.model,
+      baseUrl: this.getChatCompletionUrl(),
+      messages: body.messages,
+      tools
+    })
 
-    const response = await this.fetchWithRetry(body, false, abortSignal)
-
-    const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
-    return this.normalizeAssistantMessage(data.choices[0].message)
+    try {
+      const response = await this.fetchWithRetry(body, false, abortSignal)
+      const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
+      const message = this.normalizeAssistantMessage(data.choices[0].message)
+      if (callId) {
+        this.logger?.logProviderCallSuccess(callId, { message, raw: data })
+      }
+      return message
+    } catch (error) {
+      if (callId) {
+        this.logger?.logProviderCallFailure(callId, this.normalizeRequestError(error), { stream: false, model: this.model })
+      }
+      throw error
+    }
   }
 
   /**
@@ -330,106 +353,130 @@ export class OpenAIProvider {
     | { type: 'done'; message: ChatMessage }
   > {
     const body = this.buildRequestBody(messages, tools, true)
+    const callId = this.logger?.logProviderCallStart({
+      stream: !this.isImageOutputModel(),
+      model: this.model,
+      baseUrl: this.getChatCompletionUrl(),
+      messages: body.messages,
+      tools
+    })
 
     if (this.isImageOutputModel()) {
-      const response = await this.fetchWithRetry(body, false, abortSignal)
-      const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
-      const message = this.normalizeAssistantMessage(data.choices[0].message)
-      yield { type: 'done', message }
-      return
+      try {
+        const response = await this.fetchWithRetry(body, false, abortSignal)
+        const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
+        const message = this.normalizeAssistantMessage(data.choices[0].message)
+        if (callId) {
+          this.logger?.logProviderCallSuccess(callId, { message, raw: data })
+        }
+        yield { type: 'done', message }
+        return
+      } catch (error) {
+        if (callId) {
+          this.logger?.logProviderCallFailure(callId, this.normalizeRequestError(error), { stream: false, model: this.model })
+        }
+        throw error
+      }
     }
 
-    const response = await this.fetchWithRetry(body, true, abortSignal)
-
-    const reader = response.body?.getReader()
-    if (!reader) throw new Error('No response body')
-
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let fullContent = ''
-    let fullReasoning = ''
-    const toolCallsMap = new Map<number, ToolCall>()
-
     try {
-      while (true) {
-        if (abortSignal?.aborted) {
-          throw normalizeAbortReason(abortSignal.reason)
-        }
-        const { done, value } = await reader.read()
-        if (done) break
+      const response = await this.fetchWithRetry(body, true, abortSignal)
 
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('No response body')
 
-        for (const line of lines) {
-          const trimmed = line.trim()
-          if (!trimmed || !trimmed.startsWith('data: ')) continue
-          const jsonStr = trimmed.slice(6)
-          if (jsonStr === '[DONE]') continue
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let fullContent = ''
+      let fullReasoning = ''
+      const toolCallsMap = new Map<number, ToolCall>()
 
-          let parsed: { choices: Array<{ delta: StreamDelta; finish_reason?: string | null }> }
-          try {
-            parsed = JSON.parse(jsonStr)
-          } catch {
-            continue
+      try {
+        while (true) {
+          if (abortSignal?.aborted) {
+            throw normalizeAbortReason(abortSignal.reason)
           }
+          const { done, value } = await reader.read()
+          if (done) break
 
-          const delta = parsed.choices?.[0]?.delta
-          if (!delta) continue
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
 
-          // Handle reasoning_content (thinking) from compatible models
-          if (delta.reasoning_content) {
-            fullReasoning += delta.reasoning_content
-            yield { type: 'thinking', content: delta.reasoning_content }
-          }
+          for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed || !trimmed.startsWith('data: ')) continue
+            const jsonStr = trimmed.slice(6)
+            if (jsonStr === '[DONE]') continue
 
-          if (delta.content) {
-            fullContent += delta.content
-            yield { type: 'token', content: delta.content }
-          }
+            let parsed: { choices: Array<{ delta: StreamDelta; finish_reason?: string | null }> }
+            try {
+              parsed = JSON.parse(jsonStr)
+            } catch {
+              continue
+            }
 
-          if (delta.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              if (!toolCallsMap.has(tc.index)) {
-                toolCallsMap.set(tc.index, {
-                  id: tc.id || '',
-                  type: 'function',
-                  function: { name: '', arguments: '' }
-                })
+            const delta = parsed.choices?.[0]?.delta
+            if (!delta) continue
+
+            // Handle reasoning_content (thinking) from compatible models
+            if (delta.reasoning_content) {
+              fullReasoning += delta.reasoning_content
+              yield { type: 'thinking', content: delta.reasoning_content }
+            }
+
+            if (delta.content) {
+              fullContent += delta.content
+              yield { type: 'token', content: delta.content }
+            }
+
+            if (delta.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                if (!toolCallsMap.has(tc.index)) {
+                  toolCallsMap.set(tc.index, {
+                    id: tc.id || '',
+                    type: 'function',
+                    function: { name: '', arguments: '' }
+                  })
+                }
+                const existing = toolCallsMap.get(tc.index)!
+                if (tc.id) existing.id = tc.id
+                if (tc.function?.name) existing.function.name += tc.function.name
+                if (tc.function?.arguments) existing.function.arguments += tc.function.arguments
               }
-              const existing = toolCallsMap.get(tc.index)!
-              if (tc.id) existing.id = tc.id
-              if (tc.function?.name) existing.function.name += tc.function.name
-              if (tc.function?.arguments) existing.function.arguments += tc.function.arguments
             }
           }
         }
+      } finally {
+        reader.releaseLock()
       }
+      const message: ChatMessage = {
+        role: 'assistant',
+        content: fullContent || ''
+      }
+
+      if (fullReasoning) {
+        message.reasoning_content = fullReasoning
+      }
+
+      if (toolCallsMap.size > 0) {
+        message.tool_calls = Array.from(toolCallsMap.values())
+        yield { type: 'tool_calls', message }
+      }
+
+      if (callId) {
+        this.logger?.logProviderCallSuccess(callId, { message })
+      }
+      yield { type: 'done', message }
     } catch (err) {
-      if (abortSignal?.aborted) {
-        throw normalizeAbortReason(abortSignal.reason)
+      const normalized = abortSignal?.aborted
+        ? normalizeAbortReason(abortSignal.reason)
+        : this.normalizeRequestError(err)
+      if (callId) {
+        this.logger?.logProviderCallFailure(callId, normalized, { stream: true, model: this.model })
       }
-      throw this.normalizeRequestError(err)
-    } finally {
-      reader.releaseLock()
+      throw normalized
     }
-
-    const message: ChatMessage = {
-      role: 'assistant',
-      content: fullContent || ''
-    }
-
-    if (fullReasoning) {
-      message.reasoning_content = fullReasoning
-    }
-
-    if (toolCallsMap.size > 0) {
-      message.tool_calls = Array.from(toolCallsMap.values())
-      yield { type: 'tool_calls', message }
-    }
-
-    yield { type: 'done', message }
   }
 
   private async fetchWithRetry (body: ChatCompletionBody, stream: boolean, abortSignal?: AbortSignal): Promise<Response> {

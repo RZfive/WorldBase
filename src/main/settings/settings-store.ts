@@ -63,6 +63,7 @@ export type AIExecutionAuthMode = 'strict' | 'auto'
 
 export interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
+  enableAiLogging: boolean
 }
 
 export interface PortableSettingsConfig {
@@ -75,7 +76,8 @@ export interface PortableSettingsConfig {
 }
 
 export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
-  notifyOnTaskComplete: true
+  notifyOnTaskComplete: true,
+  enableAiLogging: false
 }
 
 export const DEFAULT_MODEL_CONTEXT_WINDOW = 32000
@@ -201,7 +203,10 @@ function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreference
   return {
     notifyOnTaskComplete: typeof input.notifyOnTaskComplete === 'boolean'
       ? input.notifyOnTaskComplete
-      : DEFAULT_AI_EXECUTION_PREFERENCES.notifyOnTaskComplete
+      : DEFAULT_AI_EXECUTION_PREFERENCES.notifyOnTaskComplete,
+    enableAiLogging: typeof input.enableAiLogging === 'boolean'
+      ? input.enableAiLogging
+      : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging
   }
 }
 
