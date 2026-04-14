@@ -28,7 +28,7 @@ export function toolLocalFileRead (services: ToolServices, getSessionState?: () 
   return {
     definition: {
       name: 'local_read_file',
-      description: 'Read a file from the user's local computer. User approval is required. Office files are parsed automatically.',
+      description: "Read a file from the user's local computer. User approval is required. Office files are parsed automatically.",
       parameters: {
         type: 'object',
         properties: {
