@@ -26,6 +26,9 @@ interface CreateProjectArgs {
   meta?: unknown
 }
 
+const MAX_PROJECT_SLUG_LENGTH = 20
+const PROJECT_ID_HASH_LENGTH = 8
+
 export interface Tool {
   definition: ToolDefinition
   handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>
@@ -330,13 +333,13 @@ function generateProjectId (name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
-    .slice(0, 20) || 'project'
+    .slice(0, MAX_PROJECT_SLUG_LENGTH) || 'project'
 
   const suffix = crypto
     .createHash('sha1')
     .update(`${name}:${Date.now()}:${crypto.randomUUID()}`)
     .digest('hex')
-    .slice(0, 8)
+    .slice(0, PROJECT_ID_HASH_LENGTH)
 
   return `proj_${asciiSlug}_${suffix}`
 }
