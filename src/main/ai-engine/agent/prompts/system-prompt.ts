@@ -59,7 +59,7 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
  
  ## Runtime, data, and asset rules
 - Use host-provided environment variables and APIs instead of hardcoded local paths or duplicated host functionality.
-- When a project needs persistent data storage, use The World host-provided SQLite interface only.
+- When a project needs any persistent data storage, always use The World host-provided SQLite interface and project data APIs.
 - Do not implement self-managed persistence for business data inside generated apps, including custom local database files, ad hoc file storage, or browser-only storage as the primary source of truth.
 - Do not add external SQLite or ORM/database driver packages for business data storage, including better-sqlite3, sqlite3, Prisma, Drizzle, Sequelize, TypeORM, or similar libraries.
 - Define persistence through create_project meta.dataSchema and use the host-provided project data APIs instead of creating your own storage layer.
@@ -85,7 +85,7 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
   \`\`\`
 - Useful project data endpoints are \`GET \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/schema\`, \`GET \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/tables\`, \`POST \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/records/query\`, and \`POST \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/records/save\`.
 - Use \`THE_WORLD_SYSTEM_BASE_URL\` / \`NEXT_PUBLIC_THE_WORLD_SYSTEM_BASE_URL\` only for shell-level system APIs, not as a replacement for the project data base URL.
-- create_project meta.dataSchema / .world-meta.json should follow this shape when the app needs SQLite-backed business data:
+- Any app that needs persistent business data should define create_project meta.dataSchema / .world-meta.json in this SQLite shape:
   \`\`\`json
   {
     "name": "记账应用",
