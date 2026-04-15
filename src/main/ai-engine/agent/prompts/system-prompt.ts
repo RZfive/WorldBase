@@ -64,6 +64,55 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
 - Do not add external SQLite or ORM/database driver packages for business data storage, including better-sqlite3, sqlite3, Prisma, Drizzle, Sequelize, TypeORM, or similar libraries.
 - Define persistence through create_project meta.dataSchema and use the host-provided project data APIs instead of creating your own storage layer.
 - create_project meta.dataSchema.tables must be an array of table definitions, not an object map.
+- Use the injected project data base URL for database reads/writes, for example:
+  \`\`\`js
+  const BASE_URL =
+    process.env.THE_WORLD_PROJECT_DATA_BASE_URL ||
+    process.env.NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL ||
+    ''
+  \`\`\`
+- Then call the host project data endpoints instead of opening SQLite directly, for example:
+  \`\`\`js
+  await fetch(\`\${BASE_URL}/records/save\`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      table: 'records',
+      record: { id: 'rec_001', amount: 128.5, category: '餐饮' },
+      mode: 'upsert'
+    })
+  })
+  \`\`\`
+- Useful project data endpoints are \`GET \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/schema\`, \`GET \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/tables\`, \`POST \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/records/query\`, and \`POST \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/records/save\`.
+- Use \`THE_WORLD_SYSTEM_BASE_URL\` / \`NEXT_PUBLIC_THE_WORLD_SYSTEM_BASE_URL\` only for shell-level system APIs, not as a replacement for the project data base URL.
+- create_project meta.dataSchema / .world-meta.json should follow this shape when the app needs SQLite-backed business data:
+  \`\`\`json
+  {
+    "name": "记账应用",
+    "type": "fullstack",
+    "framework": "nextjs",
+    "runtime": {
+      "backend": {
+        "command": "node .next/standalone/server.js"
+      }
+    },
+    "dataSchema": {
+      "database": "sqlite",
+      "dbPath": "data/app.sqlite",
+      "tables": [
+        {
+          "name": "records",
+          "columns": [
+            { "name": "id", "type": "TEXT", "primaryKey": true },
+            { "name": "amount", "type": "REAL" },
+            { "name": "category", "type": "TEXT" },
+            { "name": "created_at", "type": "TEXT", "defaultSql": "CURRENT_TIMESTAMP" }
+          ]
+        }
+      ]
+    }
+  }
+  \`\`\`
 - Remote assets should be stored locally, proxied server-side, or fetched through ${process.env.THE_WORLD_RESOURCE_PROXY_BASE_URL}?url=... when browser access is required.
 - Keep layouts responsive and avoid page-level horizontal scrolling or unnecessary full-page vertical scrolling.
 
