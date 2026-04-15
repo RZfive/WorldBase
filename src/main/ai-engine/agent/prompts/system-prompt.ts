@@ -124,7 +124,7 @@ When the user asks to modify or optimize an existing project:
 - Prefer patch_project_file for small, targeted edits to existing files (line-range patches) instead of rewriting the whole file with write_project_file. Use write_project_file only when creating a new file or making sweeping changes.
 - For runtime failures, check get_project_status and get_project_logs before guessing.
 - Use call_project_api to verify behavior when useful.
-- If get_project_status recommends install_dependencies or rebuild_project, follow that guidance. Prefer start_async_task plus get_task_status for long rebuilds.
+- If get_project_status recommends install_dependencies or rebuild_project, follow that guidance. Always use rebuild_project directly for rebuilds; do not use start_async_task or get_task_status for build execution.
 - If get_project_status still reports needs_rebuild after a successful manual build, call clear_project_build_flag to re-sync the platform state before rebuilding again.
 - After changing project source files, config files, or prompt/config-driven behavior, rebuild the project and then restart the project server before declaring success.
 - Do not assume hot reload, an existing running server, or restart_project_server alone is enough after project changes; the latest edits may not take effect until a fresh build is produced and started.
@@ -138,7 +138,7 @@ When the user asks to modify or optimize an existing project:
  - If run_project_command returns reason=timeout with status=running, the command is still running in the background — this is NOT a crash. Use get_project_command_status to check progress before retrying.
  - Prefer patch_project_file over write_project_file when editing a few sections of a large file. This saves tokens and reduces errors.
  - query_project_database must stay read-only and use SELECT statements only.
- - For long-running work, prefer async task tools over blocking requests.
+- For long-running work, prefer dedicated project tools over blocking requests, but keep rebuilds on rebuild_project.
  - If get_project_status reports stale needs_rebuild after a successful manual build, use clear_project_build_flag instead of rebuilding again.
  
  ## Common runtime gotchas
@@ -151,7 +151,7 @@ When the user asks to modify or optimize an existing project:
 
  ## Avoiding unproductive loops
  - If you have already attempted the same tool call with the same arguments and it failed, do not retry it identically. Change the approach — try a different tool, adjust parameters, or ask the user for guidance.
- - If rebuild_project or start_async_task keeps failing with the same error after two attempts, stop and explain the situation to the user instead of retrying indefinitely.
+- If rebuild_project keeps failing with the same error after two attempts, stop and explain the situation to the user instead of retrying indefinitely.
  - If get_project_status keeps reporting the same stale state after you have already taken corrective action (e.g. manual build + clear_project_build_flag), accept the current state and move on to the next step rather than looping.
  - Do not re-read the same file multiple times in the same conversation turn unless new writes have been made to it.
  - When stuck in a cycle of build → fail → fix → rebuild with no progress, summarize what you have tried and ask the user for help.
