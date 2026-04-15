@@ -78,7 +78,7 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       table: 'records',
-      record: { id: 'rec_001', amount: 128.5, category: '餐饮' },
+      record: { id: 'rec_001', amount: 128.5, category: 'food' },
       mode: 'upsert'
     })
   })
