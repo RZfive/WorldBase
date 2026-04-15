@@ -261,7 +261,8 @@ export function toolRunCommand (services: ToolServices): Tool {
           record.reason = 'timeout'
           record.timedOut = true
           record.background = true
-          record.message = 'Command is still running in background. Use get_project_command_status with this command_id to check progress.'
+          record.status = 'running'
+          record.message = 'Command exceeded the foreground wait timeout but is still running in the background. This is NOT a crash — use get_project_command_status with this command_id to check progress before retrying.'
           updateReadySignal()
           onProgress?.('⏱️ 前台等待超时，命令转入后台继续执行', `${timeoutSeconds}s: ${command}`)
           resolveOnce(toCommandSnapshot(record))
