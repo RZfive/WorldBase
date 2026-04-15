@@ -48,17 +48,17 @@ export function toolPatchFile (services: ToolServices): Tool {
           },
           patches: {
             type: 'array',
-            description: 'Array of patches. Each patch replaces lines start_line..end_line (1-based, inclusive) with the given content. To insert without removing, set start_line = end_line = the line AFTER the insertion point and provide content (existing line is NOT removed in insert mode — use start_line > end_line for pure insert). Patches must not overlap.',
+            description: 'Array of patches. Each patch replaces lines start_line..end_line (1-based, inclusive) with the given content. For pure insertion before a line without removing anything, set end_line to a value less than start_line (e.g. end_line = 0). Patches must not overlap.',
             items: {
               type: 'object',
               properties: {
                 start_line: {
                   type: 'integer',
-                  description: 'First line to replace (1-based, inclusive)'
+                  description: 'First line to replace (1-based, inclusive). For insertions, the line before which to insert.'
                 },
                 end_line: {
                   type: 'integer',
-                  description: 'Last line to replace (1-based, inclusive). Use 0 or a value less than start_line for pure insertion before start_line.'
+                  description: 'Last line to replace (1-based, inclusive). Set to a value less than start_line (e.g. 0) for pure insertion before start_line without removing any existing line.'
                 },
                 content: {
                   type: 'string',
@@ -90,13 +90,16 @@ export function toolPatchFile (services: ToolServices): Tool {
       // them from bottom to top without shifting earlier line numbers.
       const sortedPatches = [...patches].sort((a, b) => b.start_line - a.start_line)
 
-      // Validate no overlaps (after sorting, each patch's start must be after
-      // the previous patch's end).
+      // Validate no overlaps (after sorting, each patch's effective range must
+      // not reach into the range of the next patch below it).
       for (let i = 0; i < sortedPatches.length - 1; i++) {
         const current = sortedPatches[i]
         const next = sortedPatches[i + 1]
         const currentEffectiveStart = Math.max(1, current.start_line)
-        const nextEffectiveEnd = Math.max(next.start_line - 1, next.end_line)
+        // For insertion patches (end_line < start_line), the effective range is
+        // just the insertion point — there is no span of removed lines.
+        const isNextInsert = next.end_line < next.start_line
+        const nextEffectiveEnd = isNextInsert ? next.start_line - 1 : next.end_line
         if (nextEffectiveEnd >= currentEffectiveStart) {
           throw new Error(
             `Patches overlap: lines ${next.start_line}-${next.end_line} and ${current.start_line}-${current.end_line}. Split into non-overlapping ranges.`
