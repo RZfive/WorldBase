@@ -72,10 +72,11 @@ When the user asks to modify or optimize an existing project:
 - Never call create_project.
 - Start with list_project_files, then read only the relevant files with read_project_file.
 - Read large files in chunks of about 200 lines and continue only when more context is needed.
-- Use write_project_file for edits.
+- Prefer patch_project_file for small, targeted edits to existing files (line-range patches) instead of rewriting the whole file with write_project_file. Use write_project_file only when creating a new file or making sweeping changes.
 - For runtime failures, check get_project_status and get_project_logs before guessing.
 - Use call_project_api to verify behavior when useful.
 - If get_project_status recommends install_dependencies or rebuild_project, follow that guidance. Prefer start_async_task plus get_task_status for long rebuilds.
+- If get_project_status still reports needs_rebuild after a successful manual build, call clear_project_build_flag to re-sync the platform state before rebuilding again.
 - After changing project source files, config files, or prompt/config-driven behavior, rebuild the project and then restart the project server before declaring success.
 - Do not assume hot reload, an existing running server, or restart_project_server alone is enough after project changes; the latest edits may not take effect until a fresh build is produced and started.
 - When the user wants to open, preview, run, or continue using a project in the shell, call open_project_app instead of launching an unmanaged preview/dev server yourself.
@@ -85,16 +86,26 @@ When the user asks to modify or optimize an existing project:
  - Use safe project commands only when needed for install, build, test, or short diagnostics.
  - Do not use run_project_command to start long-lived servers. Use start_project_server or restart_project_server for runtime restarts, and call_project_api to wake a stopped project when needed.
  - Prefer open_project_app when the goal is to show the project to the user inside the managed shell UI.
- - If run_project_command times out, treat it as still running in the background unless a later status check says otherwise. Use get_project_command_status before retrying.
+ - If run_project_command returns reason=timeout with status=running, the command is still running in the background — this is NOT a crash. Use get_project_command_status to check progress before retrying.
+ - Prefer patch_project_file over write_project_file when editing a few sections of a large file. This saves tokens and reduces errors.
  - query_project_database must stay read-only and use SELECT statements only.
  - For long-running work, prefer async task tools over blocking requests.
+ - If get_project_status reports stale needs_rebuild after a successful manual build, use clear_project_build_flag instead of rebuilding again.
  
  ## Common runtime gotchas
- - A successful manual npm run build is valid even if an older status snapshot still suggests needs_rebuild, because the snapshot may lag behind the latest manual build; follow up with call_project_api or start_project_server instead of rebuilding again.
+ - A successful manual npm run build is valid even if an older status snapshot still suggests needs_rebuild, because the snapshot may lag behind the latest manual build; call clear_project_build_flag to re-sync, then follow up with call_project_api or start_project_server instead of rebuilding again.
  - 'ExperimentalWarning: SQLite is an experimental feature' is only a warning and does not mean the process crashed.
-- If rebuild_project throws spawn EINVAL on Windows, that is a known path/spawn issue. Fall back to manual npm install and npm run build with run_project_command, then use restart_project_server.
+- If rebuild_project throws spawn EINVAL on Windows, that is a known path/spawn issue. Fall back to manual npm install and npm run build with run_project_command, then use clear_project_build_flag and restart_project_server.
 - If a backgrounded npm run build takes a long time, do not immediately retry it. Check get_project_command_status or inspect whether .next/standalone/server.js exists first.
 - For this product's generated projects, post-edit verification should assume "build first, then restart". If code changed but the app still looks unchanged, suspect stale standalone build output before suspecting the user's request.
+- When run_project_command returns status=running with reason=timeout, the process was NOT killed — it is still running in the background. Check get_project_command_status before assuming failure or retrying.
+
+ ## Avoiding unproductive loops
+ - If you have already attempted the same tool call with the same arguments and it failed, do not retry it identically. Change the approach — try a different tool, adjust parameters, or ask the user for guidance.
+ - If rebuild_project or start_async_task keeps failing with the same error after two attempts, stop and explain the situation to the user instead of retrying indefinitely.
+ - If get_project_status keeps reporting the same stale state after you have already taken corrective action (e.g. manual build + clear_project_build_flag), accept the current state and move on to the next step rather than looping.
+ - Do not re-read the same file multiple times in the same conversation turn unless new writes have been made to it.
+ - When stuck in a cycle of build → fail → fix → rebuild with no progress, summarize what you have tried and ask the user for help.
   
   ## Compatibility requirements
 - Current Node.js version: ${process.versions.node}

@@ -1,6 +1,7 @@
 import { toolReadFile } from './tool-read-file.js'
 import { toolDeleteFile } from './tool-delete-file.js'
 import { toolWriteFile } from './tool-write-file.js'
+import { toolPatchFile } from './tool-patch-file.js'
 import { toolCallApi } from './tool-call-api.js'
 import { toolQueryDb } from './tool-query-db.js'
 import { toolGetProjectCommandStatus, toolRunCommand } from './tool-run-command.js'
@@ -12,6 +13,7 @@ import { toolLocalFileRead } from './tool-local-file-read.js'
 import { toolLocalCommand } from './tool-local-command.js'
 import { toolLocalWriteFile } from './tool-local-file-write.js'
 import { toolRebuildProject } from './tool-rebuild-project.js'
+import { toolClearProjectBuildFlag } from './tool-clear-build-flag.js'
 import { toolGetProjectLogs } from './tool-get-project-logs.js'
 import { toolGetProjectStatus } from './tool-get-project-status.js'
 import { toolGetTaskStatus, toolStartAsyncTask } from './tool-async-task.js'
@@ -49,6 +51,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolReadFile(services),
     toolDeleteFile(services),
     toolWriteFile(services),
+    toolPatchFile(services),
     toolCallApi(services),
     toolQueryDb(services),
     toolRunCommand(services),
@@ -63,6 +66,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolAnalyzeData(services),
     toolCreateProject(services, getSessionState),
     toolRebuildProject(services),
+    toolClearProjectBuildFlag(services),
     toolStartAsyncTask(services),
     toolGetTaskStatus(services),
     toolLocalFileRead(services, getSessionState),
