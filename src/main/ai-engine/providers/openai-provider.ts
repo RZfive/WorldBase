@@ -37,6 +37,10 @@ export interface ToolDefinition {
   parameters: Record<string, unknown>
 }
 
+interface RequestOptions {
+  timeoutMs?: number
+}
+
 interface ChatCompletionBody {
   model: string
   messages: ChatMessage[]
@@ -310,7 +314,12 @@ export class OpenAIProvider {
   /**
    * Make a chat completion request with function calling support.
    */
-  async chatCompletion (messages: ChatMessage[], tools: ToolDefinition[] = [], abortSignal?: AbortSignal): Promise<ChatMessage> {
+  async chatCompletion (
+    messages: ChatMessage[],
+    tools: ToolDefinition[] = [],
+    abortSignal?: AbortSignal,
+    options?: RequestOptions
+  ): Promise<ChatMessage> {
     const body = this.buildRequestBody(messages, tools, false)
     const callId = this.logger?.logProviderCallStart({
       stream: false,
@@ -321,7 +330,7 @@ export class OpenAIProvider {
     })
 
     try {
-      const response = await this.fetchWithRetry(body, false, abortSignal)
+      const response = await this.fetchWithRetry(body, false, abortSignal, options)
       const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
       const message = this.normalizeAssistantMessage(data.choices[0].message)
       if (callId) {
@@ -479,7 +488,12 @@ export class OpenAIProvider {
     }
   }
 
-  private async fetchWithRetry (body: ChatCompletionBody, stream: boolean, abortSignal?: AbortSignal): Promise<Response> {
+  private async fetchWithRetry (
+    body: ChatCompletionBody,
+    stream: boolean,
+    abortSignal?: AbortSignal,
+    options?: RequestOptions
+  ): Promise<Response> {
     this.validateConfig()
 
     const maxAttempts = 3
@@ -499,7 +513,7 @@ export class OpenAIProvider {
       }
       const timeout = setTimeout(
         () => controller.abort(new Error('AI request timed out')),
-        stream ? OpenAIProvider.STREAM_REQUEST_TIMEOUT_MS : OpenAIProvider.STANDARD_REQUEST_TIMEOUT_MS
+        options?.timeoutMs ?? (stream ? OpenAIProvider.STREAM_REQUEST_TIMEOUT_MS : OpenAIProvider.STANDARD_REQUEST_TIMEOUT_MS)
       )
 
       try {
