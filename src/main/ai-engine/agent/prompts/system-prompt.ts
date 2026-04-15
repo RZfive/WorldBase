@@ -88,7 +88,7 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
 - Any app that needs persistent business data should define create_project meta.dataSchema / .world-meta.json in this SQLite shape:
   \`\`\`json
   {
-    "name": "记账应用",
+    "name": "Expense Tracker",
     "type": "fullstack",
     "framework": "nextjs",
     "runtime": {
