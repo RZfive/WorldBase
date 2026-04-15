@@ -73,6 +73,7 @@ export class AgentCore {
   private static readonly CONTEXT_HEADROOM_RATIO = 0.15
   private static readonly CONTEXT_MIN_HEADROOM_TOKENS = 2048
   private static readonly CONTEXT_MAX_HEADROOM_TOKENS = 8192
+  private static readonly CONTEXT_COMPRESSION_TIMEOUT_MS = 5 * 60 * 1000
   private static readonly RECENT_MESSAGE_KEEP_OPTIONS = [6, 4, 2, 0] as const
   // Lightweight heuristic for providers without tokenizer access.
   private static readonly ESTIMATED_CHARS_PER_TOKEN = 4
@@ -826,7 +827,9 @@ export class AgentCore {
     }
 
     const summaryPrompt = this._buildContextSummaryPrompt(summaryTarget)
-    const summaryResponse = await this.provider.chatCompletion(summaryPrompt, [], abortSignal)
+    const summaryResponse = await this.provider.chatCompletion(summaryPrompt, [], abortSignal, {
+      timeoutMs: AgentCore.CONTEXT_COMPRESSION_TIMEOUT_MS
+    })
     const summaryMessage: ChatMessage = {
       role: 'system',
       content: `${AgentCore.CONTEXT_SUMMARY_PREFIX}\n${typeof summaryResponse.content === 'string' ? summaryResponse.content : ''}`
