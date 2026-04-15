@@ -327,19 +327,34 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
 }
 
 function generateProjectId (name: string): string {
+  // Strip combining marks and extract only ASCII letters/digits to build a
+  // filesystem-safe slug.  Chinese / CJK / emoji names produce an empty slug
+  // after this step, which is expected — the hash suffix guarantees uniqueness.
   const asciiSlug = name
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
-    .slice(0, MAX_PROJECT_SLUG_LENGTH) || 'project'
+    .slice(0, MAX_PROJECT_SLUG_LENGTH)
 
   const suffix = crypto
     .createHash('sha1')
     .update(`${name}:${Date.now()}:${crypto.randomUUID()}`)
     .digest('hex')
     .slice(0, PROJECT_ID_HASH_LENGTH)
+
+  // When the name is entirely non-Latin (e.g. "笔记管理") the slug is empty.
+  // Fall back to a longer hash so the ID is still human-distinguishable and
+  // never contains non-ASCII characters in the filesystem path.
+  if (!asciiSlug) {
+    const longHash = crypto
+      .createHash('sha1')
+      .update(`${name}:${Date.now()}:${crypto.randomUUID()}`)
+      .digest('hex')
+      .slice(0, MAX_PROJECT_SLUG_LENGTH)
+    return `proj_${longHash}`
+  }
 
   return `proj_${asciiSlug}_${suffix}`
 }
