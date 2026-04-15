@@ -38,7 +38,7 @@ export function getEnvironmentContext (): string {
     `- run_project_command allows only: ${PROJECT_COMMAND_WHITELIST.join(', ')}`,
     '- Use npm / npx by default for dependency installs and scripts inside generated projects; do not assume pnpm / yarn is available at runtime',
     '- Use list_project_files for project exploration and read_project_file for file contents; do not use run_project_command as a substitute for ls/find/dir',
-    '- Use get_project_status and get_project_logs first for runtime debugging; use start_async_task and get_task_status first for long jobs',
+    '- Use get_project_status and get_project_logs first for runtime debugging; after app edits, use rebuild_project directly and do not use start_async_task/get_task_status for builds',
     '- Use start_project_server or restart_project_server for long-lived servers instead of run_project_command; call_project_api can wake a stopped project automatically',
     '- Use open_project_app when the goal is to show a project in The World shell; do not launch your own unmanaged preview server just to present the app',
     '- If run_project_command returns reason=timeout, treat it as still running in the background and query it with get_project_command_status before retrying',
