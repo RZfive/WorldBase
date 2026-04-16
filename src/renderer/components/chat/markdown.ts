@@ -127,6 +127,14 @@ interface ExtractedDisplayMath {
   expressions: Map<string, string>
 }
 
+function isClosingFenceMarker (marker: string, fenceMarker: string): boolean {
+  return (
+    marker.length >= fenceMarker.length &&
+    marker[0] === fenceMarker[0] &&
+    /^(`+|~+)$/.test(marker)
+  )
+}
+
 function sanitizeNode (node: Element): void {
   const children = Array.from(node.childNodes)
   for (const child of children) {
@@ -295,8 +303,7 @@ function sanitizeStyleValue (doc: Document, value: string): string {
     if (!propertyValue) continue
     if (/(?:expression|javascript:|vbscript:|@import|url\s*\()/i.test(propertyValue)) continue
     const isSupportedStyle = typeof CSS === 'undefined' || !CSS.supports ||
-      CSS.supports(normalizedProperty, propertyValue) ||
-      CSS.supports(`${normalizedProperty}: ${propertyValue}`)
+      CSS.supports(normalizedProperty, propertyValue)
     if (!isSupportedStyle) continue
 
     safeDeclarations.push(`${normalizedProperty}: ${propertyValue}`)
@@ -338,6 +345,8 @@ function normalizeMathExpression (doc: Document, expression: string, displayMode
     .split('\n')
     .map(line => {
       const trimmedEnd = line.replace(/\s+$/g, '')
+      // Some chat outputs paste row separators as a single trailing backslash at EOL.
+      // KaTeX expects "\\" for matrix/aligned line breaks, so normalize that case.
       if (trimmedEnd.endsWith('\\') && !trimmedEnd.endsWith('\\\\')) return `${trimmedEnd}\\`
       return line
     })
@@ -360,12 +369,7 @@ function extractDisplayMathBlocks (text: string): ExtractedDisplayMath {
       if (!inFence) {
         inFence = true
         fenceMarker = marker
-      } else if (
-        marker.length >= fenceMarker.length &&
-        marker[0] === fenceMarker[0] &&
-        /^(`+|~+)$/.test(marker) &&
-        marker.split('').every(char => char === fenceMarker[0])
-      ) {
+      } else if (isClosingFenceMarker(marker, fenceMarker)) {
         inFence = false
         fenceMarker = ''
       }
@@ -427,12 +431,7 @@ function extractFootnotes (text: string): { text: string, footnotes: Map<string,
       if (!inFence) {
         inFence = true
         fenceMarker = marker
-      } else if (
-        marker.length >= fenceMarker.length &&
-        marker[0] === fenceMarker[0] &&
-        /^(`+|~+)$/.test(marker) &&
-        marker.split('').every(char => char === fenceMarker[0])
-      ) {
+      } else if (isClosingFenceMarker(marker, fenceMarker)) {
         inFence = false
         fenceMarker = ''
       }
