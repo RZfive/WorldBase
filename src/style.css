@@ -216,7 +216,7 @@ html, body, #app {
 
 .markdown-body img {
   display: block;
-  max-width: min(100%, 100%);
+  max-width: 100%;
   height: auto;
   border-radius: 12px;
   margin: 0.8em 0;
