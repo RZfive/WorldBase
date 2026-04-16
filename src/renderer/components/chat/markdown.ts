@@ -127,7 +127,7 @@ interface ExtractedDisplayMath {
   expressions: Map<string, string>
 }
 
-function isClosingFenceMarker (marker: string, fenceMarker: string): boolean {
+function canCloseFenceMarker (marker: string, fenceMarker: string): boolean {
   return (
     marker.length >= fenceMarker.length &&
     marker[0] === fenceMarker[0] &&
@@ -302,9 +302,9 @@ function sanitizeStyleValue (doc: Document, value: string): string {
     if (!ALLOWED_STYLE_PROPS.has(normalizedProperty)) continue
     if (!propertyValue) continue
     if (/(?:expression|javascript:|vbscript:|@import|url\s*\()/i.test(propertyValue)) continue
-    const isSupportedStyle = typeof CSS === 'undefined' || !CSS.supports ||
+    const isStyleAllowed = typeof CSS === 'undefined' || !CSS.supports ||
       CSS.supports(normalizedProperty, propertyValue)
-    if (!isSupportedStyle) continue
+    if (!isStyleAllowed) continue
 
     safeDeclarations.push(`${normalizedProperty}: ${propertyValue}`)
   }
@@ -369,7 +369,7 @@ function extractDisplayMathBlocks (text: string): ExtractedDisplayMath {
       if (!inFence) {
         inFence = true
         fenceMarker = marker
-      } else if (isClosingFenceMarker(marker, fenceMarker)) {
+      } else if (canCloseFenceMarker(marker, fenceMarker)) {
         inFence = false
         fenceMarker = ''
       }
@@ -431,7 +431,7 @@ function extractFootnotes (text: string): { text: string, footnotes: Map<string,
       if (!inFence) {
         inFence = true
         fenceMarker = marker
-      } else if (isClosingFenceMarker(marker, fenceMarker)) {
+      } else if (canCloseFenceMarker(marker, fenceMarker)) {
         inFence = false
         fenceMarker = ''
       }
@@ -518,11 +518,12 @@ function shouldSkipFootnoteNode (node: Node): boolean {
 }
 
 function createFootnoteSlug (id: string): string {
-  return id
+  const slug = id
     .trim()
     .replace(/[^\w-]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .toLowerCase() || 'note'
+    .toLowerCase()
+  return slug || 'note'
 }
 
 function createFootnoteReference (doc: Document, id: string, number: number): HTMLElement {
