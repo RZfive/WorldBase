@@ -16,15 +16,15 @@ marked.use({
         return src.indexOf('==')
       },
       tokenizer (src) {
-        if (!src.startsWith('==')) return
+        if (!src.startsWith('==')) return undefined
 
         let searchIndex = 2
         while (searchIndex < src.length) {
           const closingIndex = src.indexOf('==', searchIndex)
-          if (closingIndex === -1) return
+          if (closingIndex === -1) return undefined
           if (!isEscaped(src, closingIndex)) {
             const text = src.slice(2, closingIndex)
-            if (!text.trim()) return
+            if (!text.trim()) return undefined
 
             return {
               type: 'highlight',
@@ -289,7 +289,10 @@ function sanitizeStyleValue (doc: Document, value: string): string {
     if (!ALLOWED_STYLE_PROPS.has(normalizedProperty)) continue
     if (!propertyValue) continue
     if (/(?:expression|javascript:|vbscript:|@import|url\s*\()/i.test(propertyValue)) continue
-    if (typeof CSS !== 'undefined' && CSS.supports && !CSS.supports(normalizedProperty, propertyValue)) continue
+    const isSupportedStyle = typeof CSS === 'undefined' || !CSS.supports ||
+      CSS.supports(normalizedProperty, propertyValue) ||
+      CSS.supports(`${normalizedProperty}: ${propertyValue}`)
+    if (!isSupportedStyle) continue
 
     safeDeclarations.push(`${normalizedProperty}: ${propertyValue}`)
   }
@@ -518,7 +521,7 @@ function appendFootnotesSection (root: Element, orderedIds: string[], footnotes:
     const backReference = doc.createElement('a')
     backReference.className = 'md-footnote-backref'
     backReference.href = `#fnref-${slug}`
-    backReference.setAttribute('aria-label', `返回脚注引用 ${index + 1}`)
+    backReference.setAttribute('aria-label', `Back to footnote reference ${index + 1}`)
     backReference.textContent = '↩'
     item.appendChild(backReference)
 
