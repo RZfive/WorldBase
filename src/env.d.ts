@@ -7,7 +7,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: { role: string; content: MessageContent }
@@ -17,6 +17,10 @@ interface StreamEvent {
   detail?: string
   filePath?: string
   truncated?: boolean
+  query?: string
+  engine?: string
+  results?: WebSearchResultItem[]
+  result?: WebFetchResultEntry
 }
 
 interface ConversationSummary {
@@ -42,11 +46,40 @@ interface ToolRun {
   progress: ToolProgressEntry[]
 }
 
+interface WebSearchResultItem {
+  rank: number
+  title: string
+  url: string
+  snippet: string
+  source: string
+  published_at?: string
+}
+
+interface WebFetchResultEntry {
+  url: string
+  final_url?: string
+  ok: boolean
+  status?: number
+  status_text?: string
+  content_type?: string
+  title?: string
+  description?: string
+  content: string
+  excerpt_strategy?: 'query_snippets' | 'leading_text'
+  query_snippets?: string[]
+  query_match_count?: number
+  truncated: boolean
+  fetched_at: string
+  error?: string
+}
+
 type ChatMessageBlock =
   | { id: string; kind: 'content'; content: MessageContent }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
+  | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
   | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
 
@@ -342,6 +375,7 @@ interface ElectronAPI {
   chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => Promise<{ ok: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
+  setPlanMode: (active: boolean) => Promise<{ success: boolean }>
 
   // Conversations
   listConversations: () => Promise<ConversationSummary[]>

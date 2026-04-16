@@ -184,6 +184,8 @@ class ProjectApiClient {
 | `agent/agent-core.js` | Agent 核心循环 (思考→行动→观察) |
 | `agent/tools/` | Agent 可用的工具集 |
 | `agent/prompts/` | Agent 系统 prompt |
+| `agent/permissions/` | 多层权限决策引擎 |
+| `agent/tool-result-storage.js` | 大输出智能处理 (截断/文件化) |
 
 **Agent 工具集**:
 
@@ -197,6 +199,21 @@ class ProjectApiClient {
 | `list_projects` | 列出所有项目及状态 |
 | `analyze_project_data` | 分析指定项目的数据 |
 | `create_project` | 创建新项目 |
+| `glob_search` | 按 glob 模式搜索项目文件 |
+| `grep_search` | 在项目代码中搜索文本/正则模式 |
+
+**权限引擎 (PermissionEngine)**:
+
+5 层决策链保障工具执行安全:
+1. 安全工具白名单 → 只读工具直接放行
+2. 用户规则匹配 → 自定义 allow/deny/ask 规则
+3. 命令安全分类 → 正则规则自动分析命令安全等级
+4. 高危工具检查 → 本地系统操作强制用户确认
+5. 默认放行 → 项目范围内工具默认允许
+
+**工具结果存储 (ToolResultStorage)**:
+
+按大小智能处理工具返回值: < 30KB 内联、30-100KB 截断预览、> 100KB 持久化到文件。
 
 ---
 
@@ -225,12 +242,38 @@ class ProjectApiClient {
 
 ## 安全模型
 
+### 权限引擎 (PermissionEngine)
+
+工具执行由 `PermissionEngine` 多层决策链控制:
+
+```
+工具调用 → 安全白名单检查 → 用户规则匹配 → 命令安全分类 → 高危工具检查 → 默认放行
+```
+
+| 决策层 | 机制 | 覆盖工具 |
+|--------|------|---------|
+| 安全工具白名单 | 自动放行 | `read_project_file`, `list_projects`, `glob_search`, `grep_search`, `query_project_database` 等只读工具 |
+| 用户规则匹配 | allow/deny/ask | 所有工具 (支持工具名+参数模式匹配) |
+| 命令安全分类 | 正则规则分析 | `run_project_command`, `local_run_command` |
+| 高危工具检查 | 强制用户确认 | `local_file_read`, `local_file_write`, `local_run_command` |
+| 默认规则 | 放行 | 其余项目范围内工具 |
+
+### 命令安全等级
+
+| 等级 | 示例 | 处理 |
+|------|------|------|
+| 安全 (safe) | `cat`, `ls`, `npm list`, `git status`, `node -c` | 自动放行 |
+| 需确认 (risky) | `npm install`, `git push`, `npm run build` | 弹窗确认 |
+| 禁止 (deny) | `rm -rf`, `curl|sh`, `chmod 777` | 直接拒绝 |
+
+### 传统安全边界
+
 | 权限类别 | 允许 | 需确认 | 禁止 |
 |---------|------|--------|------|
 | 文件系统 | 项目内读写 | - | 项目外访问 |
 | API 调用 | 子项目 API | - | 外部网络 (LLM除外) |
 | 数据库 | SELECT | INSERT/UPDATE/DELETE | DROP 等破坏性操作 |
-| 命令执行 | npm/git | 其他命令 | rm -rf 等危险操作 |
+| 命令执行 | 安全命令 | 需确认命令 | 危险命令 |
 
 ---
 

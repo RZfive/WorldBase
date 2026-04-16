@@ -20,6 +20,12 @@ import { toolStartProjectServer } from './tool-start-server.js'
 import { toolRestartProjectServer } from './tool-restart-server.js'
 import { toolOpenProjectApp } from './tool-open-project-app.js'
 import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
+import { toolGlobSearch } from './tool-glob-search.js'
+import { toolGrepSearch } from './tool-grep-search.js'
+import { toolWebSearch } from './tool-web-search.js'
+import { toolFetchWebpage } from './tool-fetch-webpage.js'
+import { toolEnterPlanMode, toolExitPlanMode } from './tool-plan-mode.js'
+import { toolRunSkill, toolListSkills } from './tool-run-skill.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
 import type { AgentCore, SessionState } from '../agent-core.js'
@@ -68,7 +74,15 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolClearProjectBuildFlag(services),
     toolLocalFileRead(services, getSessionState),
     toolLocalCommand(services, getSessionState),
-    toolLocalWriteFile(services, getSessionState)
+    toolLocalWriteFile(services, getSessionState),
+    toolGlobSearch(services),
+    toolGrepSearch(services),
+    toolWebSearch(),
+    toolFetchWebpage(),
+    toolEnterPlanMode(() => agent.getPlanEngine()),
+    toolExitPlanMode(() => agent.getPlanEngine()),
+    toolRunSkill(() => agent.getSkillEngine()),
+    toolListSkills(() => agent.getSkillEngine())
   ]
 
   // Register document tools if store is available

@@ -41,11 +41,14 @@ interface RequestOptions {
   timeoutMs?: number
 }
 
+export type UsageCallback = (usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } }) => void
+
 interface ChatCompletionBody {
   model: string
   messages: ChatMessage[]
   temperature?: number
   stream?: boolean
+  stream_options?: { include_usage: boolean }
   modalities?: string[]
   tools?: { type: string; function: { name: string; description: string; parameters: Record<string, unknown> } }[]
   tool_choice?: string
@@ -95,6 +98,7 @@ export class OpenAIProvider {
   private enableThinking: boolean
   private contextWindow: number
   private logger?: AILogSessionLogger
+  private onUsage?: UsageCallback
 
   constructor () {
     this.apiKey = process.env.OPENAI_API_KEY || ''
@@ -120,6 +124,11 @@ export class OpenAIProvider {
       messages: this.normalizeOutgoingMessages(messages),
       temperature: 0.7,
       stream
+    }
+
+    // Request usage data in stream responses
+    if (stream && this.onUsage) {
+      body.stream_options = { include_usage: true }
     }
 
     if (this.isImageOutputModel()) {
@@ -311,6 +320,10 @@ export class OpenAIProvider {
     this.logger = logger
   }
 
+  setOnUsage (callback?: UsageCallback): void {
+    this.onUsage = callback
+  }
+
   /**
    * Make a chat completion request with function calling support.
    */
@@ -331,8 +344,11 @@ export class OpenAIProvider {
 
     try {
       const response = await this.fetchWithRetry(body, false, abortSignal, options)
-      const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
+      const data = await response.json() as { choices: Array<{ message: ApiChatMessage }>; usage?: Record<string, unknown> }
       const message = this.normalizeAssistantMessage(data.choices[0].message)
+      if (data.usage && this.onUsage) {
+        this.onUsage(data.usage as Parameters<UsageCallback>[0])
+      }
       if (callId) {
         this.logger?.logProviderCallSuccess(callId, { message, raw: data })
       }
@@ -418,11 +434,16 @@ export class OpenAIProvider {
             const jsonStr = trimmed.slice(6)
             if (jsonStr === '[DONE]') continue
 
-            let parsed: { choices: Array<{ delta: StreamDelta; finish_reason?: string | null }> }
+            let parsed: { choices?: Array<{ delta: StreamDelta; finish_reason?: string | null }>; usage?: Record<string, unknown> }
             try {
               parsed = JSON.parse(jsonStr)
             } catch {
               continue
+            }
+
+            // Extract usage from the final stream chunk (OpenAI sends it when stream_options.include_usage is true)
+            if (parsed.usage && this.onUsage) {
+              this.onUsage(parsed.usage as Parameters<UsageCallback>[0])
             }
 
             const delta = parsed.choices?.[0]?.delta

@@ -12,7 +12,7 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: ChatMessage
@@ -22,6 +22,10 @@ interface StreamEvent {
   detail?: string
   filePath?: string
   truncated?: boolean
+  query?: string
+  engine?: string
+  results?: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }>
+  result?: { url: string; final_url?: string; ok: boolean; status?: number; status_text?: string; content_type?: string; title?: string; description?: string; content: string; excerpt_strategy?: 'query_snippets' | 'leading_text'; query_snippets?: string[]; query_match_count?: number; truncated: boolean; fetched_at: string; error?: string }
 }
 
 interface ConversationSummary {
@@ -91,6 +95,18 @@ interface WebAppShortcut {
 
 type ThemePreference = 'system' | 'light' | 'dark'
 type AIExecutionAuthMode = 'strict' | 'auto'
+
+interface CostModelPricingEntry {
+  model: string
+  inputPerMillion: number
+  outputPerMillion: number
+  cacheReadPerMillion: number
+}
+
+interface CostSettings {
+  modelPricing: CostModelPricingEntry[]
+  budgetLimit: number | null
+}
 
 interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
@@ -307,6 +323,13 @@ export interface ElectronAPI {
   queryTable: (projectId: string, tableName: string, page: number, pageSize: number) => Promise<{ rows: Record<string, unknown>[]; total: number }>
   getTableSchema: (projectId: string) => Promise<unknown[] | null>
 
+  // Plan Mode
+  setPlanMode: (active: boolean) => Promise<{ success: boolean }>
+
+  // Cost Settings
+  getCostSettings: () => Promise<CostSettings>
+  saveCostSettings: (settings: CostSettings) => Promise<{ success: boolean }>
+
   // Settings
   getAISettings: () => Promise<AISettings>
   saveAISettings: (config: AISettings) => Promise<{ success: boolean }>
@@ -467,6 +490,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveLaunchpadLayout: (layout: LaunchpadLayout) => ipcRenderer.invoke('settings:saveLaunchpadLayout', layout),
   getWebApps: () => ipcRenderer.invoke('settings:getWebApps'),
   saveWebApps: (webApps: WebAppShortcut[]) => ipcRenderer.invoke('settings:saveWebApps', webApps),
+
+  // Plan Mode
+  setPlanMode: (active: boolean) => ipcRenderer.invoke('ai:setPlanMode', active),
+
+  // Cost Settings
+  getCostSettings: () => ipcRenderer.invoke('settings:getCostSettings'),
+  saveCostSettings: (settings: CostSettings) => ipcRenderer.invoke('settings:saveCostSettings', settings),
 
   // Skills
   listSkills: () => ipcRenderer.invoke('skills:list'),

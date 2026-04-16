@@ -64,7 +64,7 @@ function closeMermaidPreview () {
 function handleMessageLinkClick (event: MouseEvent): void {
   const target = event.target as HTMLElement | null
   const link = target?.closest('a[href]') as HTMLAnchorElement | null
-  if (!link || !link.closest('.markdown-body')) return
+  if (!link || (!link.closest('.markdown-body') && !link.hasAttribute('data-chat-external'))) return
 
   const href = link.getAttribute('href')?.trim()
   if (!href || !/^https?:\/\//i.test(href)) return
@@ -103,6 +103,8 @@ function getMessageSignature (msg?: ChatMessage): string {
     }
     if (block.kind === 'thinking') return `thinking:${block.text}`
     if (block.kind === 'file_preview') return `preview:${block.filePath}:${block.previewContent}:${block.truncated}:${block.active}`
+    if (block.kind === 'web_search') return `websearch:${block.query}:${block.engine}:${block.results.map(item => `${item.rank}:${item.url}:${item.title}:${item.snippet}`).join('|')}`
+    if (block.kind === 'web_fetch') return `webfetch:${block.query || ''}:${block.result.url}:${block.result.final_url || ''}:${block.result.ok}:${block.result.title || ''}:${block.result.error || ''}:${block.result.query_snippets?.join('|') || ''}`
     if (block.kind === 'attachment') return `attachment:${block.fileName}:${block.fileType}:${block.fileSizeLabel}:${block.previewText}`
     if (block.kind === 'auth_request') return `auth:${block.requestId}:${block.status}:${block.title}:${block.detail}`
     return `tool:${block.toolRun.id}:${block.toolRun.status}:${block.toolRun.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`

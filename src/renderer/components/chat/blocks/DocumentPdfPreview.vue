@@ -2,6 +2,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { EventBus, PDFLinkService, PDFViewer } from 'pdfjs-dist/legacy/web/pdf_viewer.mjs'
+import type { PDFDocumentLoadingTask, PDFDocumentProxy } from 'pdfjs-dist/types/src/display/api'
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'
 import 'pdfjs-dist/legacy/web/pdf_viewer.css'
 
@@ -34,8 +35,8 @@ const loadError = ref('')
 let eventBus: EventBus | null = null
 let linkService: PDFLinkService | null = null
 let pdfViewer: PDFViewer | null = null
-let loadingTask: ReturnType<typeof getDocument> | null = null
-let pdfDocument: Awaited<ReturnType<ReturnType<typeof getDocument>['promise']['then']>> | null = null
+let loadingTask: PDFDocumentLoadingTask | null = null
+let pdfDocument: PDFDocumentProxy | null = null
 let activeLoadId = 0
 
 async function ensureViewerReady () {
@@ -72,8 +73,8 @@ async function destroyPdfDocument () {
     loadingTask = null
   }
 
-  if (pdfViewer) {
-    pdfViewer.setDocument(null)
+  if (viewerRef.value) {
+    viewerRef.value.replaceChildren()
   }
 
   if (pdfDocument) {
@@ -84,6 +85,8 @@ async function destroyPdfDocument () {
     }
     pdfDocument = null
   }
+
+  linkService?.setDocument(null)
 }
 
 async function loadPdfDocument (bytes: Uint8Array) {

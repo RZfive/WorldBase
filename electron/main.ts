@@ -491,6 +491,23 @@ async function initializeServices (): Promise<void> {
     console.log('[main] Applied active AI provider settings')
   }
 
+  // Apply saved cost settings on startup
+  const savedCostSettings = settingsStore!.getCostSettings()
+  if (savedCostSettings.modelPricing.length > 0) {
+    const pricingMap: Record<string, { inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion?: number }> = {}
+    for (const entry of savedCostSettings.modelPricing) {
+      pricingMap[entry.model] = {
+        inputPerMillion: entry.inputPerMillion,
+        outputPerMillion: entry.outputPerMillion,
+        cacheReadPerMillion: entry.cacheReadPerMillion || undefined
+      }
+    }
+    aiEngine.setCustomModelPricing(pricingMap)
+  }
+  if (savedCostSettings.budgetLimit != null) {
+    aiEngine.setBudgetLimit(savedCostSettings.budgetLimit)
+  }
+
   appGateway = new AppGateway(runtimeManager, projectFS, builderService)
   processManagerService = new ProcessManagerService(runtimeManager, projectFS)
   // System snapshots read the current runtime/app-gateway state directly.
@@ -656,6 +673,15 @@ function setupIPC (): void {
             if ('detail' in streamEvent) safe.detail = String((streamEvent as { detail?: string }).detail || '')
             if ('filePath' in streamEvent) safe.filePath = String((streamEvent as { filePath?: string }).filePath || '')
             if ('truncated' in streamEvent) safe.truncated = Boolean((streamEvent as { truncated?: boolean }).truncated)
+            if ('query' in streamEvent) safe.query = String((streamEvent as { query?: string }).query || '')
+            if ('engine' in streamEvent) safe.engine = String((streamEvent as { engine?: string }).engine || '')
+            if ('results' in streamEvent) {
+              try {
+                safe.results = JSON.parse(JSON.stringify((streamEvent as { results?: unknown }).results ?? []))
+              } catch {
+                safe.results = []
+              }
+            }
             if ('result' in streamEvent) {
               try {
                 safe.result = JSON.parse(JSON.stringify((streamEvent as { result?: unknown }).result))
@@ -1301,6 +1327,33 @@ function setupIPC (): void {
       url: app.url
     })))
     settingsStore!.saveWebApps(webApps)
+    return { success: true }
+  })
+
+  // --- Plan Mode ---
+  ipcMain.handle('ai:setPlanMode', async (_event: IpcMainInvokeEvent, active: boolean) => {
+    aiEngine!.setPlanMode(active)
+    return { success: true }
+  })
+
+  // --- Cost Settings ---
+  ipcMain.handle('settings:getCostSettings', async () => {
+    return settingsStore!.getCostSettings()
+  })
+
+  ipcMain.handle('settings:saveCostSettings', async (_event: IpcMainInvokeEvent, costSettings: { modelPricing: Array<{ model: string; inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }>; budgetLimit: number | null }) => {
+    settingsStore!.saveCostSettings(costSettings)
+    // Apply pricing overrides to AIEngine
+    const pricingMap: Record<string, { inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion?: number }> = {}
+    for (const entry of costSettings.modelPricing) {
+      pricingMap[entry.model] = {
+        inputPerMillion: entry.inputPerMillion,
+        outputPerMillion: entry.outputPerMillion,
+        cacheReadPerMillion: entry.cacheReadPerMillion || undefined
+      }
+    }
+    aiEngine!.setCustomModelPricing(pricingMap)
+    aiEngine!.setBudgetLimit(costSettings.budgetLimit)
     return { success: true }
   })
 

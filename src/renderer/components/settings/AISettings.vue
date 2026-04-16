@@ -9,8 +9,9 @@ import LogCenterPanel from './LogCenterPanel.vue'
 import ConfigTransferPanel from './ConfigTransferPanel.vue'
 import ProcessManagerPanel from './ProcessManagerPanel.vue'
 import SystemStatusPanel from './SystemStatusPanel.vue'
+import CostSettingsPanel from './CostSettingsPanel.vue'
 
-type CategoryId = 'providers' | 'skills' | 'execution' | 'logs' | 'appearance' | 'config' | 'database' | 'processes' | 'system'
+type CategoryId = 'providers' | 'skills' | 'execution' | 'logs' | 'appearance' | 'config' | 'database' | 'processes' | 'system' | 'cost'
 
 interface Category {
   id: CategoryId
@@ -22,6 +23,7 @@ const categories: Category[] = [
   { id: 'providers', icon: '🤖', label: '模型服务' },
   { id: 'skills', icon: '✦', label: 'Skill 管理' },
   { id: 'execution', icon: '⚙️', label: '执行设置' },
+  { id: 'cost', icon: '💰', label: '成本核算' },
   { id: 'logs', icon: '🧾', label: '日志中心' },
   { id: 'appearance', icon: '🎨', label: '显示设置' },
   { id: 'config', icon: '📦', label: '配置迁移' },
@@ -53,6 +55,7 @@ const activeCategoryId = ref<CategoryId>('providers')
       <ProviderPanel v-if="activeCategoryId === 'providers'" />
       <SkillManager v-else-if="activeCategoryId === 'skills'" />
       <ExecutionPanel v-else-if="activeCategoryId === 'execution'" />
+      <CostSettingsPanel v-else-if="activeCategoryId === 'cost'" />
       <LogCenterPanel v-else-if="activeCategoryId === 'logs'" />
       <AppearancePanel v-else-if="activeCategoryId === 'appearance'" />
       <ConfigTransferPanel v-else-if="activeCategoryId === 'config'" />
