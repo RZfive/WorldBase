@@ -122,6 +122,11 @@ interface RenderMarkdownOptions {
   enableFootnotes?: boolean
 }
 
+interface ExtractedDisplayMath {
+  text: string
+  expressions: Map<string, string>
+}
+
 function sanitizeNode (node: Element): void {
   const children = Array.from(node.childNodes)
   for (const child of children) {
@@ -268,7 +273,7 @@ function shouldSkipMathNode (node: Node): boolean {
 
 function appendKatex (fragment: DocumentFragment, doc: Document, expression: string, displayMode: boolean): void {
   const template = doc.createElement('template')
-  template.innerHTML = katex.renderToString(expression, {
+  template.innerHTML = katex.renderToString(normalizeMathExpression(doc, expression, displayMode), {
     displayMode,
     output: 'htmlAndMathml',
     throwOnError: false,
@@ -317,6 +322,93 @@ function trimTrailingEmptyLines (lines: string[]): string[] {
   let endIndex = lines.length
   while (endIndex > 0 && !lines[endIndex - 1].trim()) endIndex -= 1
   return lines.slice(0, endIndex)
+}
+
+function decodeHtmlEntities (doc: Document, value: string): string {
+  const textarea = doc.createElement('textarea')
+  textarea.innerHTML = value
+  return textarea.value
+}
+
+function normalizeMathExpression (doc: Document, expression: string, displayMode: boolean): string {
+  const decoded = decodeHtmlEntities(doc, expression).replace(/\r\n?/g, '\n')
+  if (!displayMode) return decoded
+
+  return decoded
+    .split('\n')
+    .map(line => {
+      const trimmedEnd = line.replace(/\s+$/g, '')
+      if (trimmedEnd.endsWith('\\') && !trimmedEnd.endsWith('\\\\')) return `${trimmedEnd}\\`
+      return line
+    })
+    .join('\n')
+}
+
+function extractDisplayMathBlocks (text: string): ExtractedDisplayMath {
+  const lines = text.split(/\r?\n/)
+  const keptLines: string[] = []
+  const expressions = new Map<string, string>()
+
+  let inFence = false
+  let fenceMarker = ''
+
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index]
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/)
+    if (fenceMatch) {
+      const marker = fenceMatch[1]
+      if (!inFence) {
+        inFence = true
+        fenceMarker = marker
+      } else if (
+        marker.length >= fenceMarker.length &&
+        marker[0] === fenceMarker[0] &&
+        /^(`+|~+)$/.test(marker) &&
+        marker.split('').every(char => char === fenceMarker[0])
+      ) {
+        inFence = false
+        fenceMarker = ''
+      }
+
+      keptLines.push(line)
+      index += 1
+      continue
+    }
+
+    if (!inFence) {
+      const delimiterMatch = line.match(/^ {0,3}(\$\$|\\\[)\s*$/)
+      if (delimiterMatch) {
+        const delimiter = delimiterMatch[1]
+        const closePattern = delimiter === '$$' ? /^ {0,3}\$\$\s*$/ : /^ {0,3}\\\]\s*$/
+        const expressionLines: string[] = []
+        index += 1
+
+        while (index < lines.length && !closePattern.test(lines[index])) {
+          expressionLines.push(lines[index])
+          index += 1
+        }
+
+        if (index < lines.length) {
+          const placeholder = `CHATMATHBLOCK${expressions.size}TOKEN`
+          expressions.set(placeholder, expressionLines.join('\n'))
+          keptLines.push(placeholder)
+          index += 1
+          continue
+        }
+
+        keptLines.push(line, ...expressionLines)
+        break
+      }
+    }
+
+    keptLines.push(line)
+    index += 1
+  }
+
+  return {
+    text: keptLines.join('\n'),
+    expressions
+  }
 }
 
 function extractFootnotes (text: string): { text: string, footnotes: Map<string, FootnoteDefinition> } {
@@ -537,6 +629,66 @@ function renderFootnotes (root: Element, footnotes: Map<string, FootnoteDefiniti
   appendFootnotesSection(root, orderedIds, footnotes)
 }
 
+type DisplayMathPlaceholderSegment =
+  | { type: 'text'; value: string }
+  | { type: 'math'; placeholder: string }
+
+function tokenizeDisplayMathPlaceholders (text: string, expressions: Map<string, string>): DisplayMathPlaceholderSegment[] {
+  const segments: DisplayMathPlaceholderSegment[] = []
+  const matcher = /CHATMATHBLOCK\d+TOKEN/g
+  let lastIndex = 0
+
+  for (const match of text.matchAll(matcher)) {
+    const matchIndex = match.index ?? -1
+    const placeholder = match[0]
+    if (matchIndex === -1 || !expressions.has(placeholder)) continue
+
+    if (matchIndex > lastIndex) segments.push({ type: 'text', value: text.slice(lastIndex, matchIndex) })
+    segments.push({ type: 'math', placeholder })
+    lastIndex = matchIndex + placeholder.length
+  }
+
+  if (lastIndex === 0) return [{ type: 'text', value: text }]
+  if (lastIndex < text.length) segments.push({ type: 'text', value: text.slice(lastIndex) })
+
+  return segments
+}
+
+function renderDisplayMathPlaceholders (root: Element, expressions: Map<string, string>): void {
+  if (!expressions.size) return
+
+  const doc = root.ownerDocument
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const textNodes: Text[] = []
+
+  let currentNode = walker.nextNode()
+  while (currentNode) {
+    const value = currentNode.nodeValue || ''
+    if (value.includes('CHATMATHBLOCK')) textNodes.push(currentNode as Text)
+    currentNode = walker.nextNode()
+  }
+
+  for (const textNode of textNodes) {
+    const parent = textNode.parentNode
+    if (!parent) continue
+
+    const segments = tokenizeDisplayMathPlaceholders(textNode.nodeValue || '', expressions)
+    if (!segments.some(segment => segment.type === 'math')) continue
+
+    const fragment = doc.createDocumentFragment()
+    for (const segment of segments) {
+      if (segment.type === 'text') {
+        if (segment.value) fragment.appendChild(doc.createTextNode(segment.value))
+        continue
+      }
+
+      appendKatex(fragment, doc, expressions.get(segment.placeholder) || '', true)
+    }
+
+    parent.replaceChild(fragment, textNode)
+  }
+}
+
 function renderMathInNode (root: Element): void {
   const doc = root.ownerDocument
   const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT)
@@ -587,7 +739,8 @@ function renderMarkdownInternal (text: string, options: RenderMarkdownOptions = 
 
   const shouldExtractFootnotes = options.enableFootnotes !== false
   const extracted = shouldExtractFootnotes ? extractFootnotes(text) : { text, footnotes: options.footnotes || new Map() }
-  const raw = marked.parse(extracted.text, { async: false }) as string
+  const extractedDisplayMath = extractDisplayMathBlocks(extracted.text)
+  const raw = marked.parse(extractedDisplayMath.text, { async: false }) as string
 
   const parser = new DOMParser()
   const doc = parser.parseFromString(`<div>${raw}</div>`, 'text/html')
@@ -595,6 +748,7 @@ function renderMarkdownInternal (text: string, options: RenderMarkdownOptions = 
   if (!root) return ''
 
   sanitizeNode(root)
+  renderDisplayMathPlaceholders(root, extractedDisplayMath.expressions)
   renderMathInNode(root)
   if (shouldExtractFootnotes) renderFootnotes(root, extracted.footnotes)
 
