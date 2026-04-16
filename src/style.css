@@ -80,6 +80,17 @@ html, body, #app {
   color: var(--app-text);
 }
 
+.markdown-body .katex {
+  font-size: 1em;
+}
+
+.markdown-body .katex-display {
+  margin: 0.65em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+}
+
 /* Global scrollbar styling */
 ::-webkit-scrollbar {
   width: 6px;
