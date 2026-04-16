@@ -4,6 +4,8 @@ import type { ChatMessage, ChatMessageBlock, FilePreviewState } from '../types'
 import ThinkingBlock from '../blocks/ThinkingBlock.vue'
 import ToolRunBlock from '../blocks/ToolRunBlock.vue'
 import FilePreviewBlock from '../blocks/FilePreviewBlock.vue'
+import WebSearchBlock from '../blocks/WebSearchBlock.vue'
+import WebFetchBlock from '../blocks/WebFetchBlock.vue'
 import AttachmentBlock from '../blocks/AttachmentBlock.vue'
 import AuthRequestBlock from '../blocks/AuthRequestBlock.vue'
 import ContentBlock from '../blocks/ContentBlock.vue'
@@ -93,6 +95,16 @@ function getMessageText (): string {
 
           <FilePreviewBlock
             v-else-if="block.kind === 'file_preview'"
+            :block="block"
+          />
+
+          <WebSearchBlock
+            v-else-if="block.kind === 'web_search'"
+            :block="block"
+          />
+
+          <WebFetchBlock
+            v-else-if="block.kind === 'web_fetch'"
             :block="block"
           />
 

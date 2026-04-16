@@ -3,12 +3,20 @@ import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/o
 import { normalizeAbortReason, USER_ABORT_MESSAGE } from '../abort-utils.js'
 import type { AIExecutionAuthMode } from '../../settings/settings-store.js'
 import type { AILogSessionLogger } from '../../settings/ai-log-store.js'
+import { PermissionEngine, type PermissionRule, type PermissionContext } from './permissions/permission-engine.js'
+import { ToolResultStorage } from './tool-result-storage.js'
+import { PlanEngine, type Plan } from './plan-mode.js'
+import { LoopDetector } from './loop-detector.js'
+import { SkillEngine } from './skill-engine.js'
+import { CostTracker, type ApiUsage } from '../cost-tracker.js'
 
 export type ProgressEvent =
   | { type: 'progress'; stage: string; detail?: string }
   | { type: 'file_preview_start'; filePath: string; truncated?: boolean }
   | { type: 'file_preview_chunk'; filePath: string; content: string }
   | { type: 'file_preview_end'; filePath: string; truncated?: boolean }
+  | { type: 'web_search_result'; query: string; engine: string; results: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }> }
+  | { type: 'web_fetch_result'; query?: string; result: { url: string; final_url?: string; ok: boolean; status?: number; status_text?: string; content_type?: string; title?: string; description?: string; content: string; excerpt_strategy?: 'query_snippets' | 'leading_text'; query_snippets?: string[]; query_match_count?: number; truncated: boolean; fetched_at: string; error?: string } }
 
 export interface ProgressCallback {
   (stage: string, detail?: string): void
@@ -24,7 +32,11 @@ export type StreamEvent =
   | { type: 'file_preview_start'; filePath: string; truncated?: boolean }
   | { type: 'file_preview_chunk'; filePath: string; content: string }
   | { type: 'file_preview_end'; filePath: string; truncated?: boolean }
+  | { type: 'web_search_result'; query: string; engine: string; results: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }> }
+  | { type: 'web_fetch_result'; query?: string; result: { url: string; final_url?: string; ok: boolean; status?: number; status_text?: string; content_type?: string; title?: string; description?: string; content: string; excerpt_strategy?: 'query_snippets' | 'leading_text'; query_snippets?: string[]; query_match_count?: number; truncated: boolean; fetched_at: string; error?: string } }
   | { type: 'reset' }
+  | { type: 'plan_mode'; active: boolean; plan?: Plan }
+  | { type: 'cost_update'; totalCost: number; inputTokens: number; outputTokens: number }
   | { type: 'done'; message: ChatMessage; thinking?: string }
   | { type: 'error'; error: string }
 
@@ -95,17 +107,54 @@ export class AgentCore {
   private maxStreamRetries = 3
   private activeSkillContents: string[] = []
   private logger?: AILogSessionLogger
+  private permissionEngine: PermissionEngine
+  private resultStorage: ToolResultStorage
+  private planEngine: PlanEngine
+  private loopDetector: LoopDetector
+  private skillEngine: SkillEngine
+  private costTracker: CostTracker
   /** Shared mutable state accessible by tool handlers within a session. */
   public sessionState: SessionState = { createdProjectId: null, targetProjectId: null, authMode: 'strict' }
 
   constructor (provider: OpenAIProvider, services: Record<string, unknown>) {
     this.provider = provider
     this.services = services
+    this.permissionEngine = new PermissionEngine({})
+    this.resultStorage = new ToolResultStorage()
+    this.planEngine = new PlanEngine()
+    this.loopDetector = new LoopDetector(this.maxDuplicateIterationFingerprints)
+    this.skillEngine = new SkillEngine()
+    this.costTracker = new CostTracker()
+
+    // Wire cost tracking into provider usage callback
+    this.provider.setOnUsage((usage) => {
+      this.costTracker.record(this.provider.getModel(), usage)
+    })
   }
 
   /** Set skill contents to inject into the system prompt. */
   setActiveSkills (contents: string[]): void {
     this.activeSkillContents = contents
+    // 解析 skill 内容并注册到 SkillEngine
+    this.skillEngine.clear()
+    for (const content of contents) {
+      this.skillEngine.registerFromContent(content)
+    }
+  }
+
+  /** Get the plan engine instance (used by plan mode tools). */
+  getPlanEngine (): PlanEngine {
+    return this.planEngine
+  }
+
+  /** Get the skill engine instance (used by run_skill tool). */
+  getSkillEngine (): SkillEngine {
+    return this.skillEngine
+  }
+
+  /** Get the cost tracker instance. */
+  getCostTracker (): CostTracker {
+    return this.costTracker
   }
 
   /**
@@ -138,12 +187,25 @@ export class AgentCore {
     this.logger = logger
   }
 
+  /** Configure the permission engine with context for user-auth dialogs. */
+  setPermissionContext (context: PermissionContext): void {
+    this.permissionEngine = new PermissionEngine(context)
+  }
+
+  /** Load user-configured permission rules. */
+  setPermissionRules (rules: PermissionRule[]): void {
+    this.permissionEngine.loadRules(rules)
+  }
+
   private _resetSessionState (): void {
     this.sessionState = {
       createdProjectId: null,
       targetProjectId: this.sessionState.targetProjectId,
       authMode: this.sessionState.authMode
     }
+    this.planEngine.reset()
+    this.loopDetector.reset()
+    this.costTracker.reset()
   }
 
   private _resolveFinalAssistantContent (assistantContent: ChatMessage['content'], renderedContent: string): ChatMessage['content'] {
@@ -613,14 +675,22 @@ export class AgentCore {
           error: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? String((result as Record<string, unknown>).error) : undefined
         })
 
+        // Process result through ToolResultStorage (handles large outputs)
+        const resultContent = await this._processToolResult(result, toolName, toolCall.id)
         messages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: JSON.stringify(result)
+          content: resultContent
         })
       }
 
       this._recordIterationActivity(loopGuard, executions)
+
+      // Enhanced loop detection with SHA-256 hashing
+      const loopResult = this.loopDetector.record(executions)
+      if (loopResult.looping) {
+        return this._buildStopMessage(loopResult.reason!)
+      }
     }
   }
 
@@ -767,14 +837,30 @@ export class AgentCore {
 
         yield { type: 'tool_end', name: toolName }
 
+        // Process result through ToolResultStorage (handles large outputs)
+        const resultContent = await this._processToolResult(result, toolName, toolCall.id)
         messages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: JSON.stringify(result)
+          content: resultContent
         })
       }
 
       this._recordIterationActivity(loopGuard, executions)
+
+      // Enhanced loop detection with SHA-256 hashing
+      const loopResult = this.loopDetector.record(executions)
+      if (loopResult.looping) {
+        yield {
+          type: 'done',
+          message: {
+            role: 'assistant',
+            content: this._appendStopReason(renderedContent, loopResult.reason!)
+          },
+          thinking: fullThinking || undefined
+        }
+        return
+      }
     }
 
     yield {
@@ -789,6 +875,7 @@ export class AgentCore {
 
   /**
    * Execute a tool by name with given arguments.
+   * Checks permissions first, then executes, then processes the result via ToolResultStorage.
    */
   async _executeTool (name: string, args: Record<string, unknown>, onProgress?: ProgressCallback): Promise<unknown> {
     const tool = this.tools.get(name)
@@ -796,11 +883,35 @@ export class AgentCore {
       throw new Error(`Unknown tool: ${name}`)
     }
 
+    // Plan mode check — block write tools
+    if (!this.planEngine.isToolAllowed(name)) {
+      return { error: `当前处于规划模式，不允许执行写入操作 (${name})。请先退出规划模式。` }
+    }
+
+    // Permission check
+    const permission = await this.permissionEngine.check(name, args)
+    if (!permission.allowed) {
+      console.log(`[Agent] Tool ${name} denied: ${permission.reason}`)
+      return { error: `Permission denied: ${permission.reason}` }
+    }
+
     console.log(`[Agent] Executing tool: ${name}`, args)
     const result = await tool.handler(args, onProgress)
     console.log(`[Agent] Tool result:`, typeof result === 'string' ? result.substring(0, 200) : result)
 
     return result
+  }
+
+  /**
+   * Serialize and process a tool result through ToolResultStorage.
+   * Large results are truncated or persisted to disk automatically.
+   */
+  async _processToolResult (result: unknown, toolName: string, callId: string): Promise<string> {
+    const processed = await this.resultStorage.process(result, toolName, callId)
+    if (processed.strategy !== 'inline') {
+      console.log(`[Agent] Tool result ${processed.strategy}: ${processed.originalLength} chars → ${processed.content.length} chars`)
+    }
+    return processed.content
   }
 
   private async _compressContextIfNeeded (messages: ChatMessage[], onProgress?: ProgressCallback, abortSignal?: AbortSignal, force = false): Promise<ChatMessage[]> {

@@ -6,7 +6,7 @@ import { getNextJsStarterArchitectureDescription } from '../nextjs-starter-templ
  * Get the system prompt for the AI agent.
  * @param options Optional dynamic session context.
  */
-export function getSystemPrompt (options?: { skillContents?: string[]; targetProjectId?: string | null }): string {
+export function getSystemPrompt (options?: { skillContents?: string[]; targetProjectId?: string | null; planModeActive?: boolean }): string {
   const nextRuntimeProfile = getNextRuntimeCompatibilityProfile()
   const skillContents = options?.skillContents
   let prompt = `You are The World AI assistant. Complete the user's request accurately, use tools when needed, and avoid repeating finished work.
@@ -22,6 +22,8 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
 ## Available capabilities
 - Read, write, search, and delete project files.
 - Call project HTTP APIs and run read-only database queries.
+- Search the public web and then fetch selected public pages for external references.
+- Fetch public web pages for external documentation or reference material when needed.
 - Run safe shell commands inside projects.
 - Create, inspect, rebuild, and analyze projects.
 - Read or write local files and run local commands with user approval.
@@ -132,6 +134,8 @@ When the user asks to modify or optimize an existing project:
 
  ## Tool usage priorities
  - Use list_project_files and read_project_file for exploration instead of shell-based ls/find/dir discovery.
+- When you need external information but do not know the exact page URL, call web_search first. If you want to quickly inspect the top search hits, set auto_fetch_top_n; otherwise call fetch_webpage on the most relevant result URLs after reviewing the search results.
+ - Use fetch_webpage only for public external references such as docs, changelogs, or API specifications. Do not use it for localhost, private-network addresses, or project runtime URLs.
  - Use safe project commands only when needed for install, build, test, or short diagnostics.
  - Do not use run_project_command to start long-lived servers. Use start_project_server or restart_project_server for runtime restarts, and call_project_api to wake a stopped project when needed.
  - Prefer open_project_app when the goal is to show the project to the user inside the managed shell UI.
@@ -175,6 +179,11 @@ When the user asks to modify or optimize an existing project:
     for (let i = 0; i < skillContents.length; i++) {
       prompt += `### Skill ${i + 1}\n\n${skillContents[i]}\n\n`
     }
+    prompt += 'You can use the `run_skill` tool to execute a registered skill with arguments, or `list_skills` to see all available skills.\n'
+  }
+
+  if (options?.planModeActive) {
+    prompt += '\n\n## 📋 Plan Mode Active\n\nYou are currently in **Plan Mode**. In this mode:\n- You can ONLY use read-only tools (read files, search, list, query) to analyze the codebase.\n- All write operations (create, write, patch, delete, run commands, rebuild, etc.) are BLOCKED.\n- Formulate a clear step-by-step plan for the task.\n- When your plan is ready, call `exit_plan_mode` with the plan summary and steps to begin execution.\n- Do NOT attempt write operations — they will be rejected.\n'
   }
 
   return prompt

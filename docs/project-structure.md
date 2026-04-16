@@ -42,6 +42,9 @@ the-world/
 │   │   │   │   └── openai-provider.js # OpenAI 兼容 API
 │   │   │   └── agent/                 # AI Agent 系统
 │   │   │       ├── agent-core.js      # Agent 核心循环
+│   │   │       ├── tool-result-storage.js # 大输出智能处理
+│   │   │       ├── permissions/       # 权限引擎
+│   │   │       │   └── permission-engine.js # 多层权限决策链
 │   │   │       ├── tools/             # Agent 工具集
 │   │   │       │   ├── index.js       # 工具注册入口
 │   │   │       │   ├── tool-read-file.js
@@ -51,7 +54,9 @@ the-world/
 │   │   │       │   ├── tool-run-command.js
 │   │   │       │   ├── tool-list-projects.js
 │   │   │       │   ├── tool-analyze-data.js
-│   │   │       │   └── tool-create-project.js
+│   │   │       │   ├── tool-create-project.js
+│   │   │       │   ├── tool-glob-search.js  # 文件模式搜索
+│   │   │       │   └── tool-grep-search.js  # 代码内容搜索
 │   │   │       └── prompts/
 │   │   │           └── system-prompt.js
 │   │   │

@@ -51,6 +51,9 @@ export class AIEngine {
   private baseConfig: AIConfigInput = {}
   private activeSkillContents: string[] = []
   private defaultTargetProjectId: string | null = null
+  private planModeDefault: boolean = false
+  private customModelPricing: Record<string, { inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion?: number }> = {}
+  private budgetLimit: number | null = null
 
   constructor (services: AIEngineServices) {
     this.services = services
@@ -88,6 +91,23 @@ export class AIEngine {
     agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
     agent.setAuthMode(options?.authMode ?? 'strict')
     agent.setLogger(options?.aiLogger)
+    // Wire up permission engine with window context for user-auth dialogs
+    agent.setPermissionContext({
+      getMainWindow: this.services.getMainWindow,
+      getSessionState: () => agent.sessionState
+    })
+    // Apply plan mode default
+    if (this.planModeDefault) {
+      agent.getPlanEngine().enter('UI activated plan mode')
+    }
+    // Apply custom pricing overrides
+    const costTracker = agent.getCostTracker()
+    for (const [model, pricing] of Object.entries(this.customModelPricing)) {
+      costTracker.setModelPricing(model, pricing)
+    }
+    if (this.budgetLimit != null) {
+      costTracker.setBudgetLimit(this.budgetLimit)
+    }
     return agent
   }
 
@@ -136,5 +156,30 @@ export class AIEngine {
       ...this.baseConfig,
       ...config
     }
+  }
+
+  /**
+   * Set whether new agents start in plan mode by default.
+   */
+  setPlanMode (active: boolean): void {
+    this.planModeDefault = active
+  }
+
+  getPlanMode (): boolean {
+    return this.planModeDefault
+  }
+
+  /**
+   * Set custom model pricing overrides.
+   */
+  setCustomModelPricing (pricing: Record<string, { inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion?: number }>): void {
+    this.customModelPricing = { ...pricing }
+  }
+
+  /**
+   * Set session budget limit.
+   */
+  setBudgetLimit (limit: number | null): void {
+    this.budgetLimit = limit
   }
 }

@@ -2,55 +2,10 @@
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import DocumentRenderHost from '../blocks/DocumentRenderHost.vue'
 
-interface DocumentNode {
-  id: string
-  type: string
-  text: string
-  level: number
-  pageIndex: number
-  children?: DocumentNode[]
-  meta?: Record<string, unknown>
-}
-
-interface DocumentArtifact {
-  id: string
-  filePath: string
-  fileName: string
-  fileSize: number
-  fileType: string
-  plainText: string
-  nodes: DocumentNode[]
-  render?: {
-    kind: 'pdf' | 'html' | 'structured'
-    source: 'original' | 'generated' | 'fallback'
-    status: 'ready' | 'unavailable'
-    mimeType?: string
-    assetPath?: string
-    error?: string
-    generatedAt: string
-  }
-  importedAt: string
-}
-
-interface DocumentSummary {
-  id: string
-  fileName: string
-  fileType: string
-  fileSize: number
-  nodeCount: number
-  selectionCount: number
-  importedAt: string
-}
-
-interface SelectionRegion {
-  id: string
-  artifactId: string
-  nodeIds: string[]
-  label: string
-  color: string
-  excerpt?: string
-  createdAt: string
-}
+type DocumentNode = DocumentNodeDTO
+type DocumentArtifact = DocumentArtifactDTO
+type DocumentSummary = DocumentSummaryDTO
+type SelectionRegion = DocumentSelectionDTO
 
 interface HighlightSelectionPayload {
   nodeIds?: string[]

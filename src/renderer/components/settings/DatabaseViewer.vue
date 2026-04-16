@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 
 interface DatabaseTableColumn {
   name: string
@@ -129,6 +129,12 @@ function backToDbList () {
   selectedTable.value = null
   tableRows.value = []
 }
+
+onMounted(() => {
+  if (props.active) {
+    loadDatabases()
+  }
+})
 </script>
 
 <template>

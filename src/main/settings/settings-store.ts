@@ -542,6 +542,25 @@ export class SettingsStore {
     this.write({ aiExecutionPreferences: normalizeAIExecutionPreferences(preferences) })
   }
 
+  /** Get cost tracking settings. */
+  getCostSettings (): { modelPricing: Array<{ model: string; inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }>; budgetLimit: number | null } {
+    const settings = this.read()
+    const raw = settings.costSettings as { modelPricing?: unknown[]; budgetLimit?: number | null } | undefined
+    const modelPricing = Array.isArray(raw?.modelPricing) ? (raw.modelPricing as Array<Record<string, unknown>>).map((e) => ({
+      model: String(e.model || ''),
+      inputPerMillion: Number(e.inputPerMillion) || 0,
+      outputPerMillion: Number(e.outputPerMillion) || 0,
+      cacheReadPerMillion: Number(e.cacheReadPerMillion) || 0
+    })).filter(e => e.model) : []
+    const budgetLimit = raw?.budgetLimit != null ? Number(raw.budgetLimit) : null
+    return { modelPricing, budgetLimit }
+  }
+
+  /** Save cost tracking settings. */
+  saveCostSettings (costSettings: { modelPricing: Array<{ model: string; inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }>; budgetLimit: number | null }): void {
+    this.write({ costSettings })
+  }
+
   /** Build a normalized, portable settings snapshot for encrypted export. */
   exportPortableConfig (): PortableSettingsConfig {
     const settings = this.read()

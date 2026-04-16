@@ -22,6 +22,7 @@ const props = defineProps<{
   availableSkills: SkillItem[]
   activeSkillIds: Set<string>
   showSkillPicker: boolean
+  planModeActive: boolean
 }>()
 
 const emit = defineEmits<{
@@ -30,6 +31,7 @@ const emit = defineEmits<{
   (e: 'update:auth-mode', authMode: AIExecutionAuthMode): void
   (e: 'toggleSkillPicker'): void
   (e: 'toggleSkill', skillId: string): void
+  (e: 'togglePlanMode'): void
 }>()
 
 const activeProvider = computed(() =>
@@ -73,6 +75,15 @@ function onAuthModeChange (event: Event) {
           <option value="auto">自动执行</option>
         </select>
       </div>
+
+      <button
+        class="plan-mode-btn"
+        :class="{ active: planModeActive }"
+        @click="emit('togglePlanMode')"
+        :title="planModeActive ? '退出规划模式' : '进入规划模式'"
+      >
+        📋 {{ planModeActive ? '规划中' : '规划模式' }}
+      </button>
 
       <div v-if="availableSkills.length > 0" class="skill-selector">
         <button
@@ -149,6 +160,29 @@ function onAuthModeChange (event: Event) {
 
 .auth-mode-select {
   min-width: 96px;
+}
+
+.plan-mode-btn {
+  padding: 4px 12px;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-input-border);
+  border-radius: 6px;
+  color: var(--app-text-muted);
+  font-size: 0.8em;
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+
+.plan-mode-btn:hover {
+  border-color: var(--app-accent);
+  color: var(--app-text);
+}
+
+.plan-mode-btn.active {
+  border-color: #f59e0b;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
 }
 
 .skill-selector {

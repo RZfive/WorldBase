@@ -15,6 +15,8 @@ type ChatMessageBlock =
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
+  | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
   | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
 
@@ -37,6 +39,33 @@ interface ToolRun {
   name: string
   status: 'running' | 'completed' | 'failed'
   progress: ToolProgressEntry[]
+}
+
+interface WebSearchResultItem {
+  rank: number
+  title: string
+  url: string
+  snippet: string
+  source: string
+  published_at?: string
+}
+
+interface WebFetchResultEntry {
+  url: string
+  final_url?: string
+  ok: boolean
+  status?: number
+  status_text?: string
+  content_type?: string
+  title?: string
+  description?: string
+  content: string
+  excerpt_strategy?: 'query_snippets' | 'leading_text'
+  query_snippets?: string[]
+  query_match_count?: number
+  truncated: boolean
+  fetched_at: string
+  error?: string
 }
 
 interface ConversationSummary {
@@ -135,6 +164,7 @@ const filePreview = ref<FilePreviewState>({
 const availableSkills = ref<SkillItem[]>([])
 const activeSkillIds = ref<Set<string>>(new Set())
 const showSkillPicker = ref(false)
+const planModeActive = ref(false)
 const syncingProviderOptions = ref(false)
 const documentDockVisible = ref(false)
 const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
@@ -278,6 +308,25 @@ function createFilePreviewBlock (filePath: string, truncated = false): ChatMessa
     previewContent: '',
     truncated,
     active: true
+  }
+}
+
+function createWebSearchBlock (query: string, engine: string, results: WebSearchResultItem[]): ChatMessageBlock {
+  return {
+    id: createBlockId('websearch'),
+    kind: 'web_search',
+    query,
+    engine,
+    results
+  }
+}
+
+function createWebFetchBlock (result: WebFetchResultEntry, query?: string): ChatMessageBlock {
+  return {
+    id: createBlockId('webfetch'),
+    kind: 'web_fetch',
+    query,
+    result
   }
 }
 
@@ -693,6 +742,15 @@ async function handleAuthModeChange (authMode: AIExecutionAuthMode) {
     targetProjectId: targetProjectId.value,
     allowEmpty: true
   })
+}
+
+async function togglePlanMode () {
+  planModeActive.value = !planModeActive.value
+  if (window.electronAPI?.setPlanMode) {
+    try {
+      await window.electronAPI.setPlanMode(planModeActive.value)
+    } catch { /* ignore */ }
+  }
 }
 
 async function loadConversations () {
@@ -1172,6 +1230,10 @@ async function sendMessage () {
                 truncated: Boolean(event.truncated ?? filePreview.value.truncated)
               }
             }
+          } else if (event.type === 'web_search_result' && event.query) {
+            ensureBlocks(assistantMessage).push(createWebSearchBlock(event.query, event.engine || 'web', Array.isArray(event.results) ? event.results : []))
+          } else if (event.type === 'web_fetch_result' && event.result) {
+            ensureBlocks(assistantMessage).push(createWebFetchBlock(event.result as WebFetchResultEntry, event.query))
           } else if (event.type === 'tool_start' && event.name) {
             const toolRun = createToolRun(event.name)
             toolRuns.push(toolRun)
@@ -1383,11 +1445,13 @@ onUnmounted(() => {
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
         :show-skill-picker="showSkillPicker"
+        :plan-mode-active="planModeActive"
         @update:active-provider-id="handleProviderSelectionChange"
         @update:selected-model="handleModelSelectionChange"
         @update:auth-mode="handleAuthModeChange"
         @toggle-skill-picker="showSkillPicker = !showSkillPicker"
         @toggle-skill="toggleSkill"
+        @toggle-plan-mode="togglePlanMode"
       />
 
       <MessageList
