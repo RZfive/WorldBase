@@ -332,7 +332,12 @@ function extractFootnotes (text: string): { text: string, footnotes: Map<string,
       if (!inFence) {
         inFence = true
         fenceMarker = marker
-      } else if (marker[0] === fenceMarker[0] && marker.length >= fenceMarker.length) {
+      } else if (
+        marker.length >= fenceMarker.length &&
+        marker[0] === fenceMarker[0] &&
+        /^(`+|~+)$/.test(marker) &&
+        marker.split('').every(char => char === fenceMarker[0])
+      ) {
         inFence = false
         fenceMarker = ''
       }
