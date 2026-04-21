@@ -85,6 +85,19 @@ async function reloadActiveSelections () {
   activeSelections.value = await window.electronAPI.getDocumentSelections(activeArtifact.value.id) as SelectionRegion[]
 }
 
+async function ensurePreviewForArtifact (id: string) {
+  if (!window.electronAPI?.ensureDocumentRenderPreview) return
+
+  try {
+    const artifact = await window.electronAPI.ensureDocumentRenderPreview(id) as DocumentArtifact | null
+    if (artifact && activeArtifactId.value === id) {
+      activeArtifact.value = artifact
+    }
+  } catch (err) {
+    console.error('[doc-dock] Failed to prepare render preview:', err)
+  }
+}
+
 async function openArtifact (id: string) {
   if (!window.electronAPI?.getDocument) return
   activeArtifactId.value = id
@@ -92,6 +105,9 @@ async function openArtifact (id: string) {
   try {
     activeArtifact.value = await window.electronAPI.getDocument(id) as DocumentArtifact | null
     await reloadActiveSelections()
+    if (activeArtifact.value && (!activeArtifact.value.render || activeArtifact.value.render.status !== 'ready')) {
+      void ensurePreviewForArtifact(id)
+    }
   } catch (err) {
     console.error('[doc-dock] Failed to load artifact:', err)
   }
@@ -110,15 +126,20 @@ async function handleImportClick () {
       return
     }
 
+    let lastImportedArtifactId: string | null = null
     for (const filePath of filePaths) {
       try {
         const result = await window.electronAPI.importDocument(filePath)
         const artifact = result.artifact as DocumentArtifact
-        await loadDocumentList()
-        await openArtifact(artifact.id)
+        lastImportedArtifactId = artifact.id
       } catch (err) {
         importError.value = `导入失败: ${(err as Error).message}`
       }
+    }
+
+    if (lastImportedArtifactId) {
+      await loadDocumentList()
+      await openArtifact(lastImportedArtifactId)
     }
   } catch (err) {
     importError.value = `打开文件选择器失败: ${(err as Error).message}`

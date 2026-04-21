@@ -23,10 +23,14 @@ function formatCellValue (cell: ExcelJS.Cell): string {
   return String(cell.value)
 }
 
-export async function parseExcelToNodes (filePath: string): Promise<DocumentNode[]> {
+export async function parseExcelToNodes (input: string | Buffer): Promise<DocumentNode[]> {
   nodeCounter = 0
   const workbook = new ExcelJS.Workbook()
-  await workbook.xlsx.readFile(filePath)
+  if (typeof input === 'string') {
+    await workbook.xlsx.readFile(input)
+  } else {
+    await workbook.xlsx.load(input as never)
+  }
 
   const nodes: DocumentNode[] = []
 

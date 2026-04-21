@@ -141,6 +141,16 @@ interface AIExecutionPreferences {
   enableAiLogging: boolean
 }
 
+interface CostSettings {
+  modelPricing: Array<{
+    model: string
+    inputPerMillion: number
+    outputPerMillion: number
+    cacheReadPerMillion: number
+  }>
+  budgetLimit: number | null
+}
+
 interface AILogConversationSummary {
   id: string
   title: string
@@ -237,6 +247,12 @@ interface SystemStatusSnapshot {
     processHeapUsedBytes: number
     processHeapTotalBytes: number
     processExternalBytes: number
+  }
+  gpu: {
+    status: 'hardware' | 'software' | 'disabled' | 'unavailable'
+    primaryDevice: string
+    secondaryDevices: string[]
+    featureStatus: Record<string, string>
   }
   currentProcess: {
     pid: number
@@ -383,6 +399,8 @@ interface ElectronAPI {
   saveConversation: (conversation: ConversationData) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
+  readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
+  readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
 
   // Projects
@@ -439,6 +457,8 @@ interface ElectronAPI {
   listAILogConversations: () => Promise<AILogConversationSummary[]>
   getAILogConversation: (conversationId: string) => Promise<AILogConversation | null>
   deleteAILogConversation: (conversationId: string) => Promise<boolean>
+  getCostSettings: () => Promise<CostSettings>
+  saveCostSettings: (settings: CostSettings) => Promise<{ success: boolean }>
   exportAppConfig: () => Promise<{ success: boolean; canceled?: boolean; filePath?: string }>
   importAppConfig: () => Promise<{ success: boolean; canceled?: boolean; filePath?: string; importedAt?: string; requiresReload?: boolean }>
   getLaunchMode: (projectId: string) => Promise<'embed' | 'window'>
@@ -473,6 +493,7 @@ interface ElectronAPI {
   importDocument: (filePath: string) => Promise<{ artifact: DocumentArtifactDTO }>
   listDocuments: () => Promise<DocumentSummaryDTO[]>
   getDocument: (artifactId: string) => Promise<DocumentArtifactDTO | null>
+  ensureDocumentRenderPreview: (artifactId: string) => Promise<DocumentArtifactDTO | null>
   getDocumentRenderData: (artifactId: string) => Promise<{ mimeType: string; bytes: Uint8Array } | null>
   openDocumentOriginal: (artifactId: string) => Promise<{ success: boolean; error?: string }>
   removeDocument: (artifactId: string) => Promise<boolean>

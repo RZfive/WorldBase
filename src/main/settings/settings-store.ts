@@ -66,10 +66,16 @@ export interface AIExecutionPreferences {
   enableAiLogging: boolean
 }
 
+export interface CostSettings {
+  modelPricing: Array<{ model: string; inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }>
+  budgetLimit: number | null
+}
+
 export interface PortableSettingsConfig {
   providers: AIProvidersConfig
   themePreference: ThemePreference
   aiExecutionPreferences: AIExecutionPreferences
+  costSettings: CostSettings
   launchpadLayout: LaunchpadLayout
   webApps: WebAppShortcut[]
   projectLaunchModes: Record<string, 'embed' | 'window'>
@@ -207,6 +213,47 @@ function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreference
     enableAiLogging: typeof input.enableAiLogging === 'boolean'
       ? input.enableAiLogging
       : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging
+  }
+}
+
+function normalizeModelPricingEntry (entry: unknown): { model: string; inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number } | null {
+  if (!entry || typeof entry !== 'object') return null
+
+  const input = entry as Record<string, unknown>
+  const model = typeof input.model === 'string' ? input.model.trim() : ''
+  if (!model) return null
+
+  const inputPerMillion = Number(input.inputPerMillion)
+  const outputPerMillion = Number(input.outputPerMillion)
+  const cacheReadPerMillion = Number(input.cacheReadPerMillion)
+
+  return {
+    model,
+    inputPerMillion: Number.isFinite(inputPerMillion) ? inputPerMillion : 0,
+    outputPerMillion: Number.isFinite(outputPerMillion) ? outputPerMillion : 0,
+    cacheReadPerMillion: Number.isFinite(cacheReadPerMillion) ? cacheReadPerMillion : 0
+  }
+}
+
+function normalizeCostSettings (value: unknown): CostSettings {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+  const modelPricing = Array.isArray(input.modelPricing)
+    ? input.modelPricing
+      .map(normalizeModelPricingEntry)
+      .filter((entry): entry is NonNullable<ReturnType<typeof normalizeModelPricingEntry>> => Boolean(entry))
+    : []
+  const budgetLimit = input.budgetLimit == null
+    ? null
+    : (Number.isFinite(Number(input.budgetLimit)) ? Number(input.budgetLimit) : null)
+
+  const seenModels = new Set<string>()
+  return {
+    modelPricing: modelPricing.filter((entry) => {
+      if (seenModels.has(entry.model)) return false
+      seenModels.add(entry.model)
+      return true
+    }),
+    budgetLimit
   }
 }
 
@@ -543,22 +590,14 @@ export class SettingsStore {
   }
 
   /** Get cost tracking settings. */
-  getCostSettings (): { modelPricing: Array<{ model: string; inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }>; budgetLimit: number | null } {
+  getCostSettings (): CostSettings {
     const settings = this.read()
-    const raw = settings.costSettings as { modelPricing?: unknown[]; budgetLimit?: number | null } | undefined
-    const modelPricing = Array.isArray(raw?.modelPricing) ? (raw.modelPricing as Array<Record<string, unknown>>).map((e) => ({
-      model: String(e.model || ''),
-      inputPerMillion: Number(e.inputPerMillion) || 0,
-      outputPerMillion: Number(e.outputPerMillion) || 0,
-      cacheReadPerMillion: Number(e.cacheReadPerMillion) || 0
-    })).filter(e => e.model) : []
-    const budgetLimit = raw?.budgetLimit != null ? Number(raw.budgetLimit) : null
-    return { modelPricing, budgetLimit }
+    return normalizeCostSettings(settings.costSettings)
   }
 
   /** Save cost tracking settings. */
-  saveCostSettings (costSettings: { modelPricing: Array<{ model: string; inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }>; budgetLimit: number | null }): void {
-    this.write({ costSettings })
+  saveCostSettings (costSettings: CostSettings): void {
+    this.write({ costSettings: normalizeCostSettings(costSettings) })
   }
 
   /** Build a normalized, portable settings snapshot for encrypted export. */
@@ -568,6 +607,7 @@ export class SettingsStore {
       providers: this.getProviders(),
       themePreference: this.getThemePreference(),
       aiExecutionPreferences: this.getAIExecutionPreferences(),
+      costSettings: this.getCostSettings(),
       launchpadLayout: this.getLaunchpadLayout(),
       webApps: this.getWebApps(),
       projectLaunchModes: normalizeProjectLaunchModes(settings.projectLaunchModes)
@@ -590,6 +630,7 @@ export class SettingsStore {
       aiModel: activeProvider?.activeModel || '',
       themePreference: normalizeThemePreference(config.themePreference),
       aiExecutionPreferences: normalizeAIExecutionPreferences(config.aiExecutionPreferences),
+      costSettings: normalizeCostSettings(config.costSettings),
       launchpadLayout: normalizeLaunchpadLayout(config.launchpadLayout),
       webApps: normalizeWebApps(config.webApps),
       projectLaunchModes: normalizeProjectLaunchModes(config.projectLaunchModes)

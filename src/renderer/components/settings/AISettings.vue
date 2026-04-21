@@ -3,15 +3,11 @@ import { ref } from 'vue'
 import SkillManager from './SkillManager.vue'
 import ProviderPanel from './ProviderPanel.vue'
 import DatabaseViewer from './DatabaseViewer.vue'
-import AppearancePanel from './AppearancePanel.vue'
-import ExecutionPanel from './ExecutionPanel.vue'
+import GeneralSettingsPanel from './GeneralSettingsPanel.vue'
 import LogCenterPanel from './LogCenterPanel.vue'
-import ConfigTransferPanel from './ConfigTransferPanel.vue'
 import ProcessManagerPanel from './ProcessManagerPanel.vue'
-import SystemStatusPanel from './SystemStatusPanel.vue'
-import CostSettingsPanel from './CostSettingsPanel.vue'
 
-type CategoryId = 'providers' | 'skills' | 'execution' | 'logs' | 'appearance' | 'config' | 'database' | 'processes' | 'system' | 'cost'
+type CategoryId = 'general' | 'providers' | 'skills' | 'logs' | 'database' | 'processes'
 
 interface Category {
   id: CategoryId
@@ -20,19 +16,15 @@ interface Category {
 }
 
 const categories: Category[] = [
+  { id: 'general', icon: '⚙️', label: '通用设置' },
   { id: 'providers', icon: '🤖', label: '模型服务' },
   { id: 'skills', icon: '✦', label: 'Skill 管理' },
-  { id: 'execution', icon: '⚙️', label: '执行设置' },
-  { id: 'cost', icon: '💰', label: '成本核算' },
   { id: 'logs', icon: '🧾', label: '日志中心' },
-  { id: 'appearance', icon: '🎨', label: '显示设置' },
-  { id: 'config', icon: '📦', label: '配置迁移' },
   { id: 'database', icon: '🗄', label: '数据设置' },
-  { id: 'processes', icon: '📊', label: '进程管理' },
-  { id: 'system', icon: '🖥', label: '系统状态' }
+  { id: 'processes', icon: '📊', label: '进程管理' }
 ]
 
-const activeCategoryId = ref<CategoryId>('providers')
+const activeCategoryId = ref<CategoryId>('general')
 </script>
 
 <template>
@@ -52,16 +44,12 @@ const activeCategoryId = ref<CategoryId>('providers')
 
     <!-- Right content -->
     <div class="cat-content">
-      <ProviderPanel v-if="activeCategoryId === 'providers'" />
+      <GeneralSettingsPanel v-if="activeCategoryId === 'general'" />
+      <ProviderPanel v-else-if="activeCategoryId === 'providers'" />
       <SkillManager v-else-if="activeCategoryId === 'skills'" />
-      <ExecutionPanel v-else-if="activeCategoryId === 'execution'" />
-      <CostSettingsPanel v-else-if="activeCategoryId === 'cost'" />
       <LogCenterPanel v-else-if="activeCategoryId === 'logs'" />
-      <AppearancePanel v-else-if="activeCategoryId === 'appearance'" />
-      <ConfigTransferPanel v-else-if="activeCategoryId === 'config'" />
       <DatabaseViewer v-else-if="activeCategoryId === 'database'" :active="activeCategoryId === 'database'" />
-      <ProcessManagerPanel v-else-if="activeCategoryId === 'processes'" :active="activeCategoryId === 'processes'" />
-      <SystemStatusPanel v-else :active="activeCategoryId === 'system'" />
+      <ProcessManagerPanel v-else :active="activeCategoryId === 'processes'" />
     </div>
   </div>
 </template>

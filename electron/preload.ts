@@ -233,6 +233,12 @@ interface SystemStatusSnapshot {
     processHeapTotalBytes: number
     processExternalBytes: number
   }
+  gpu: {
+    status: 'hardware' | 'software' | 'disabled' | 'unavailable'
+    primaryDevice: string
+    secondaryDevices: string[]
+    featureStatus: Record<string, string>
+  }
   currentProcess: {
     pid: number
     uptimeSeconds: number
@@ -280,6 +286,8 @@ export interface ElectronAPI {
   saveConversation: (conversation: Conversation) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
+  readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
+  readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
 
   // Projects
@@ -377,6 +385,7 @@ export interface ElectronAPI {
   importDocument: (filePath: string) => Promise<{ artifact: unknown }>
   listDocuments: () => Promise<unknown[]>
   getDocument: (artifactId: string) => Promise<unknown | null>
+  ensureDocumentRenderPreview: (artifactId: string) => Promise<unknown | null>
   getDocumentRenderData: (artifactId: string) => Promise<{ mimeType: string; bytes: Uint8Array } | null>
   openDocumentOriginal: (artifactId: string) => Promise<{ success: boolean; error?: string }>
   removeDocument: (artifactId: string) => Promise<boolean>
@@ -406,6 +415,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveConversation: (conversation: Conversation) => ipcRenderer.invoke('conversations:save', conversation),
   deleteConversation: (id: string) => ipcRenderer.invoke('conversations:delete', id),
   saveImageToFile: (imageUrl: string, defaultName?: string) => ipcRenderer.invoke('media:saveImage', imageUrl, defaultName),
+  readUploadedAttachmentFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedAttachmentFile', filePath),
+  readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => ipcRenderer.invoke('chat:readUploadedAttachmentBuffer', payload),
   readUploadedOfficeFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedOfficeFile', filePath),
 
   // Projects
@@ -537,6 +548,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   importDocument: (filePath: string) => ipcRenderer.invoke('document:import', filePath),
   listDocuments: () => ipcRenderer.invoke('document:list'),
   getDocument: (artifactId: string) => ipcRenderer.invoke('document:get', artifactId),
+  ensureDocumentRenderPreview: (artifactId: string) => ipcRenderer.invoke('document:ensureRenderPreview', artifactId),
   getDocumentRenderData: (artifactId: string) => ipcRenderer.invoke('document:getRenderData', artifactId),
   openDocumentOriginal: (artifactId: string) => ipcRenderer.invoke('document:openOriginal', artifactId),
   removeDocument: (artifactId: string) => ipcRenderer.invoke('document:remove', artifactId),

@@ -24,7 +24,7 @@ import type { MessageContent } from '../src/main/ai-engine/providers/openai-prov
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../src/main/ai-engine/agent/tools/office-utils.js'
 import { AsyncTaskManager } from '../src/main/ai-engine/agent/tools/async-task-manager.js'
 import { DocumentStore } from '../src/main/ai-engine/agent/tools/document-store.js'
-import { parseDocument, isSupportedDocument, detectDocumentType } from '../src/main/ai-engine/agent/tools/document-parser.js'
+import { parseDocument, parseDocumentBuffer, isSupportedDocument, detectDocumentType } from '../src/main/ai-engine/agent/tools/document-parser.js'
 import type { CreateSelectionPayload } from '../src/main/ai-engine/agent/tools/document-types.js'
 import { buildDocumentRenderPreview, readDocumentRenderAsset } from '../src/main/document-preview/document-render-service.js'
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../src/main/settings/settings-transfer.js'
@@ -76,6 +76,168 @@ const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
 const MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
 const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
 const VIRTUAL_INTERFACE_NAME_PATTERN = /(loopback|virtual|vmware|vbox|virtualbox|docker|podman|wsl|hyper-v|vethernet|tailscale|zerotier|utun|tun|tap|bridge)/i
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  '.txt', '.md', '.mdx', '.markdown',
+  '.json', '.jsonc', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
+  '.csv', '.tsv', '.log', '.sql', '.graphql', '.gql', '.xml',
+  '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '.vue',
+  '.css', '.scss', '.sass', '.less', '.html', '.htm',
+  '.py', '.rb', '.php', '.java', '.kt', '.go', '.rs', '.c', '.cc', '.cpp', '.cxx', '.h', '.hpp', '.cs',
+  '.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd',
+  '.env', '.properties', '.gitignore', '.editorconfig', '.npmrc', '.pnpmfile', '.npmignore'
+])
+const TEXT_ATTACHMENT_FILE_NAMES = new Set([
+  '.env', '.gitignore', '.npmrc', '.npmignore', '.editorconfig',
+  'dockerfile', 'makefile', 'readme', 'license', 'procfile'
+])
+const TEXT_ATTACHMENT_MIME_PATTERN = /^(text\/|application\/(json|ld\+json|xml|yaml|x-yaml|javascript|x-javascript|typescript|x-typescript|csv|toml|sql|graphql))/i
+
+interface UploadedAttachmentBufferPayload {
+  fileName: string
+  fileType?: string
+  bytes: Uint8Array
+}
+
+interface UploadedAttachmentResult {
+  filePath: string
+  fileName: string
+  size: number
+  fileType: string
+  content: string
+}
+
+function isSupportedTextAttachment (fileName: string): boolean {
+  const normalizedName = path.basename(fileName).toLowerCase()
+  return TEXT_ATTACHMENT_FILE_NAMES.has(normalizedName) || TEXT_ATTACHMENT_EXTENSIONS.has(path.extname(normalizedName))
+}
+
+function isLikelyTextAttachmentMimeType (fileType?: string): boolean {
+  return typeof fileType === 'string' && TEXT_ATTACHMENT_MIME_PATTERN.test(fileType.trim())
+}
+
+function looksLikeTextBuffer (buffer: Buffer): boolean {
+  const sample = buffer.subarray(0, Math.min(buffer.length, 4096))
+  if (sample.length === 0) return true
+
+  let suspiciousByteCount = 0
+  for (const byte of sample) {
+    if (byte === 0) return false
+    const isControl = byte < 32 && byte !== 9 && byte !== 10 && byte !== 13
+    if (isControl) suspiciousByteCount++
+  }
+
+  return suspiciousByteCount / sample.length < 0.05
+}
+
+function detectTextAttachmentType (fileName: string, fileType?: string): string {
+  const normalizedName = path.basename(fileName).toLowerCase()
+  if (TEXT_ATTACHMENT_FILE_NAMES.has(normalizedName)) {
+    return normalizedName.replace(/^\./, '') || 'text'
+  }
+
+  const extension = path.extname(normalizedName).replace(/^\./, '')
+  if (extension) return extension
+
+  const normalizedMimeType = fileType?.trim().toLowerCase() || ''
+  if (normalizedMimeType.includes('json')) return 'json'
+  if (normalizedMimeType.includes('xml')) return 'xml'
+  if (normalizedMimeType.includes('yaml')) return 'yaml'
+  if (normalizedMimeType.includes('markdown')) return 'md'
+  return 'text'
+}
+
+function trimAttachmentContent (content: string): string {
+  return content.replace(/^\uFEFF/, '').substring(0, MAX_UPLOADED_OFFICE_CONTENT_LENGTH)
+}
+
+async function readUploadedAttachmentFromBuffer (
+  buffer: Buffer,
+  options: { fileName: string; fileType?: string; filePath?: string }
+): Promise<UploadedAttachmentResult> {
+  const fileName = path.basename(options.fileName || '').trim()
+  if (!fileName) {
+    throw new Error('附件缺少文件名')
+  }
+
+  if (buffer.byteLength > MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
+    throw new Error(`文件过大 (${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB)，最大支持 10 MB`)
+  }
+
+  if (isSupportedDocument(fileName)) {
+    const artifact = options.filePath
+      ? await parseDocument(options.filePath)
+      : await parseDocumentBuffer(buffer, { fileName, fileSize: buffer.byteLength })
+
+    return {
+      filePath: options.filePath || '',
+      fileName,
+      size: buffer.byteLength,
+      fileType: artifact.fileType,
+      content: trimAttachmentContent(artifact.plainText)
+    }
+  }
+
+  if (!isSupportedTextAttachment(fileName) && !isLikelyTextAttachmentMimeType(options.fileType) && !looksLikeTextBuffer(buffer)) {
+    throw new Error(`暂不支持的附件格式: ${path.extname(fileName) || 'unknown'}`)
+  }
+
+  return {
+    filePath: options.filePath || '',
+    fileName,
+    size: buffer.byteLength,
+    fileType: detectTextAttachmentType(fileName, options.fileType),
+    content: trimAttachmentContent(buffer.toString('utf8'))
+  }
+}
+
+async function readUploadedAttachmentFromPath (filePath: string): Promise<UploadedAttachmentResult> {
+  const resolvedPath = path.resolve(filePath)
+  const stat = await fs.stat(resolvedPath)
+
+  if (!stat.isFile()) {
+    throw new Error(`路径不是一个文件: ${resolvedPath}`)
+  }
+
+  if (isSupportedDocument(resolvedPath)) {
+    const artifact = await parseDocument(resolvedPath)
+    return {
+      filePath: resolvedPath,
+      fileName: path.basename(resolvedPath),
+      size: stat.size,
+      fileType: artifact.fileType,
+      content: trimAttachmentContent(artifact.plainText)
+    }
+  }
+
+  const buffer = await fs.readFile(resolvedPath)
+  return readUploadedAttachmentFromBuffer(buffer, {
+    fileName: path.basename(resolvedPath),
+    filePath: resolvedPath
+  })
+}
+
+async function ensureDocumentRenderPreview (artifactId: string) {
+  const artifact = documentStore!.getArtifact(artifactId)
+  if (!artifact) return null
+
+  if (artifact.render?.status === 'ready') {
+    return artifact
+  }
+
+  try {
+    artifact.render = await buildDocumentRenderPreview(artifact.filePath, artifact.fileType)
+  } catch (error) {
+    artifact.render = {
+      kind: 'structured',
+      source: 'fallback',
+      status: 'unavailable',
+      error: `真实预览生成失败，已回退到结构化视图: ${(error as Error).message || String(error)}`,
+      generatedAt: new Date().toISOString()
+    }
+  }
+
+  return artifact
+}
 
 function openWebviewPopupInDock (url: string): void {
   let parsedUrl: URL
@@ -811,6 +973,18 @@ function setupIPC (): void {
     }
   })
 
+  ipcMain.handle('chat:readUploadedAttachmentFile', async (_event: IpcMainInvokeEvent, filePath: string) => {
+    return readUploadedAttachmentFromPath(filePath)
+  })
+
+  ipcMain.handle('chat:readUploadedAttachmentBuffer', async (_event: IpcMainInvokeEvent, payload: UploadedAttachmentBufferPayload) => {
+    const bytes = payload?.bytes instanceof Uint8Array ? payload.bytes : new Uint8Array()
+    return readUploadedAttachmentFromBuffer(Buffer.from(bytes), {
+      fileName: payload?.fileName || '',
+      fileType: payload?.fileType
+    })
+  })
+
   // ─── Document import / preview / selection ───────────────────────────
 
   ipcMain.handle('document:import', async (_event: IpcMainInvokeEvent, filePath: string) => {
@@ -824,7 +998,6 @@ function setupIPC (): void {
       throw new Error(`不支持的文档格式: ${path.extname(resolvedPath) || 'unknown'}`)
     }
     const artifact = await parseDocument(resolvedPath)
-    artifact.render = await buildDocumentRenderPreview(resolvedPath, artifact.fileType)
     documentStore!.addArtifact(artifact)
     return { artifact }
   })
@@ -873,6 +1046,10 @@ function setupIPC (): void {
     const artifact = documentStore!.getArtifact(artifactId)
     if (!artifact) return null
     return readDocumentRenderAsset(artifact.render)
+  })
+
+  ipcMain.handle('document:ensureRenderPreview', async (_event: IpcMainInvokeEvent, artifactId: string) => {
+    return ensureDocumentRenderPreview(artifactId)
   })
 
   ipcMain.handle('document:openOriginal', async (_event: IpcMainInvokeEvent, artifactId: string) => {

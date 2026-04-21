@@ -39,7 +39,7 @@ export interface ApiUsage {
   }
 }
 
-const DEFAULT_PRICING: Array<[string, ModelPricing]> = [
+export const DEFAULT_MODEL_PRICING: Array<[string, ModelPricing]> = [
   ['gpt-4o', { inputPerMillion: 2.5, outputPerMillion: 10 }],
   ['gpt-4o-mini', { inputPerMillion: 0.15, outputPerMillion: 0.6 }],
   ['gpt-4.1', { inputPerMillion: 2, outputPerMillion: 8 }],
@@ -56,8 +56,31 @@ const DEFAULT_PRICING: Array<[string, ModelPricing]> = [
   ['deepseek-reasoner', { inputPerMillion: 0.55, outputPerMillion: 2.19 }]
 ]
 
+export function resolveDefaultModelPricing (model: string): ModelPricing | undefined {
+  if (!model) return undefined
+
+  const normalized = model.trim()
+  const exactMatch = DEFAULT_MODEL_PRICING.find(([key]) => key === normalized)
+  if (exactMatch) return { ...exactMatch[1] }
+
+  const stripped = normalized.replace(/^(openai\/|anthropic\/|google\/|deepseek\/)/, '')
+  const strippedMatch = DEFAULT_MODEL_PRICING.find(([key]) => key === stripped)
+  if (strippedMatch) return { ...strippedMatch[1] }
+
+  let bestMatch: ModelPricing | undefined
+  let bestMatchLength = 0
+  for (const [key, pricing] of DEFAULT_MODEL_PRICING) {
+    if (stripped.includes(key) && key.length > bestMatchLength) {
+      bestMatch = pricing
+      bestMatchLength = key.length
+    }
+  }
+
+  return bestMatch ? { ...bestMatch } : undefined
+}
+
 export class CostTracker {
-  private pricing = new Map<string, ModelPricing>(DEFAULT_PRICING)
+  private pricing = new Map<string, ModelPricing>(DEFAULT_MODEL_PRICING)
   private sessionUsage: UsageEntry[] = []
   private budgetLimit?: number
 
