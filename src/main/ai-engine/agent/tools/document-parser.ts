@@ -10,6 +10,12 @@ import { parseWordToNodes } from './document-parser-word.js'
 import { parsePptxToNodes } from './document-parser-pptx.js'
 import { parsePdfToNodes } from './document-parser-pdf.js'
 
+interface ParseDocumentBufferOptions {
+  fileName: string
+  filePath?: string
+  fileSize?: number
+}
+
 const EXTENSION_TYPE_MAP: Record<string, DocumentFileType> = {
   '.pdf': 'pdf',
   '.xlsx': 'xlsx',
@@ -47,6 +53,41 @@ function flattenNodeText (nodes: DocumentNode[]): string {
   return parts.join('\n')
 }
 
+async function parseDocumentNodes (fileType: DocumentFileType, buffer: Buffer, filePath?: string): Promise<DocumentNode[]> {
+  switch (fileType) {
+    case 'xlsx':
+      return parseExcelToNodes(filePath || buffer)
+    case 'docx':
+      return parseWordToNodes(buffer)
+    case 'pptx':
+      return parsePptxToNodes(buffer)
+    case 'pdf':
+      return parsePdfToNodes(buffer)
+    default:
+      throw new Error(`未实现的解析器: ${fileType}`)
+  }
+}
+
+export async function parseDocumentBuffer (buffer: Buffer, options: ParseDocumentBufferOptions): Promise<DocumentArtifact> {
+  const fileName = path.basename(options.fileName)
+  const fileType = detectDocumentType(fileName)
+  if (fileType === 'unknown') throw new Error(`不支持的文件格式: ${path.extname(fileName)}`)
+
+  const nodes = await parseDocumentNodes(fileType, buffer, options.filePath)
+  const plainText = flattenNodeText(nodes)
+
+  return {
+    id: generateId(),
+    filePath: options.filePath ? path.resolve(options.filePath) : fileName,
+    fileName,
+    fileSize: options.fileSize ?? buffer.byteLength,
+    fileType,
+    plainText,
+    nodes,
+    importedAt: new Date().toISOString()
+  }
+}
+
 /**
  * Parse any supported document file into a structured DocumentArtifact.
  */
@@ -59,35 +100,9 @@ export async function parseDocument (filePath: string): Promise<DocumentArtifact
   if (fileType === 'unknown') throw new Error(`不支持的文件格式: ${path.extname(resolvedPath)}`)
 
   const buffer = await fs.readFile(resolvedPath)
-  let nodes: DocumentNode[]
-
-  switch (fileType) {
-    case 'xlsx':
-      nodes = await parseExcelToNodes(resolvedPath)
-      break
-    case 'docx':
-      nodes = await parseWordToNodes(buffer)
-      break
-    case 'pptx':
-      nodes = await parsePptxToNodes(buffer)
-      break
-    case 'pdf':
-      nodes = await parsePdfToNodes(buffer)
-      break
-    default:
-      throw new Error(`未实现的解析器: ${fileType}`)
-  }
-
-  const plainText = flattenNodeText(nodes)
-
-  return {
-    id: generateId(),
-    filePath: resolvedPath,
+  return parseDocumentBuffer(buffer, {
     fileName: path.basename(resolvedPath),
-    fileSize: stat.size,
-    fileType,
-    plainText,
-    nodes,
-    importedAt: new Date().toISOString()
-  }
+    filePath: resolvedPath,
+    fileSize: stat.size
+  })
 }

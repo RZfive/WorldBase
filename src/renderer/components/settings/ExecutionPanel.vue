@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { loadAIExecutionPreferences, persistAIExecutionPreferences } from '../../utils/ai-execution-preferences'
 
 const FEEDBACK_DISPLAY_DURATION_MS = 1800
-const notifyOnTaskComplete = ref(true)
-const enableAiLogging = ref(false)
+const executionPreferences = ref<AIExecutionPreferences>({
+  notifyOnTaskComplete: true,
+  enableAiLogging: false
+})
 const loading = ref(true)
 const saving = ref(false)
 const feedback = ref('')
@@ -11,41 +14,37 @@ const feedback = ref('')
 async function loadPreferences () {
   loading.value = true
   try {
-    const preferences = await window.electronAPI?.getAIExecutionPreferences?.()
-    notifyOnTaskComplete.value = preferences?.notifyOnTaskComplete ?? true
-    enableAiLogging.value = preferences?.enableAiLogging ?? false
+    executionPreferences.value = await loadAIExecutionPreferences()
   } catch {
-    notifyOnTaskComplete.value = true
-    enableAiLogging.value = false
+    executionPreferences.value = {
+      notifyOnTaskComplete: true,
+      enableAiLogging: false
+    }
   } finally {
     loading.value = false
   }
 }
 
-async function savePreferences (nextPreferences: { notifyOnTaskComplete?: boolean; enableAiLogging?: boolean }) {
-  if (!window.electronAPI?.saveAIExecutionPreferences || saving.value) return
+async function savePreferences (notifyOnTaskComplete: boolean) {
+  if (saving.value) return
 
-  const previousNotifyOnTaskComplete = notifyOnTaskComplete.value
-  const previousEnableAiLogging = enableAiLogging.value
-  if (typeof nextPreferences.notifyOnTaskComplete === 'boolean') {
-    notifyOnTaskComplete.value = nextPreferences.notifyOnTaskComplete
-  }
-  if (typeof nextPreferences.enableAiLogging === 'boolean') {
-    enableAiLogging.value = nextPreferences.enableAiLogging
+  const previousNotifyOnTaskComplete = executionPreferences.value.notifyOnTaskComplete
+  executionPreferences.value = {
+    ...executionPreferences.value,
+    notifyOnTaskComplete
   }
 
   saving.value = true
   feedback.value = ''
 
   try {
-    await window.electronAPI.saveAIExecutionPreferences({
-      notifyOnTaskComplete: notifyOnTaskComplete.value,
-      enableAiLogging: enableAiLogging.value
-    })
+    await persistAIExecutionPreferences(executionPreferences.value)
     feedback.value = '通知偏好已保存'
   } catch (err) {
-    notifyOnTaskComplete.value = previousNotifyOnTaskComplete
-    enableAiLogging.value = previousEnableAiLogging
+    executionPreferences.value = {
+      ...executionPreferences.value,
+      notifyOnTaskComplete: previousNotifyOnTaskComplete
+    }
     feedback.value = `保存失败：${(err as Error).message}`
   } finally {
     saving.value = false
@@ -63,8 +62,8 @@ onMounted(async () => {
 <template>
   <div class="ep-root">
     <div class="ep-header">
-      <h3 class="ep-title">AI 任务通知</h3>
-      <p class="ep-desc">严格 / 自动执行模式已移到对话框顶部，这里仅控制任务结束后的系统通知。</p>
+      <h3 class="ep-title">任务通知</h3>
+      <p class="ep-desc">这里只保留任务结束后的系统通知。AI 日志开关已移到“日志中心”。</p>
       <span v-if="feedback" class="ep-feedback">{{ feedback }}</span>
     </div>
 
@@ -78,25 +77,9 @@ onMounted(async () => {
         <input
           type="checkbox"
           class="ep-toggle-input"
-          :checked="notifyOnTaskComplete"
+          :checked="executionPreferences.notifyOnTaskComplete"
           :disabled="loading || saving"
-          @change="savePreferences({ notifyOnTaskComplete: ($event.target as HTMLInputElement).checked })"
-        >
-      </label>
-
-      <div class="ep-separator" />
-
-      <label class="ep-toggle">
-        <div class="ep-toggle-copy">
-          <span class="ep-toggle-title">开启 AI 日志中心</span>
-          <span class="ep-toggle-hint">记录每次对话上传给 AI 的消息、模型请求结果、工具调用和报错，方便后续在“日志中心”排查问题。</span>
-        </div>
-        <input
-          type="checkbox"
-          class="ep-toggle-input"
-          :checked="enableAiLogging"
-          :disabled="loading || saving"
-          @change="savePreferences({ enableAiLogging: ($event.target as HTMLInputElement).checked })"
+          @change="savePreferences(($event.target as HTMLInputElement).checked)"
         >
       </label>
 
@@ -104,7 +87,7 @@ onMounted(async () => {
 
       <div class="ep-note">
         <span class="ep-note-title">说明</span>
-        <p>每个对话都可以在聊天窗口顶部单独切换严格授权或自动执行，不再共享全局授权模式。</p>
+        <p>每个对话都可以在聊天窗口顶部单独切换严格授权或自动执行，不再共享全局授权模式。日志记录请到“日志中心”管理。</p>
       </div>
   </div>
 </template>

@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { loadAIExecutionPreferences, persistAIExecutionPreferences } from '../../utils/ai-execution-preferences'
 
+const FEEDBACK_DISPLAY_DURATION_MS = 1800
 const loading = ref(false)
 const deleting = ref(false)
+const savingPreferences = ref(false)
 const feedback = ref('')
 const executionPreferences = ref<AIExecutionPreferences>({
   notifyOnTaskComplete: true,
@@ -30,15 +33,49 @@ function formatJson (value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
 
+function setFeedback (message: string) {
+  feedback.value = message
+  window.setTimeout(() => {
+    if (feedback.value === message) {
+      feedback.value = ''
+    }
+  }, FEEDBACK_DISPLAY_DURATION_MS)
+}
+
 async function loadPreferences () {
-  if (!window.electronAPI?.getAIExecutionPreferences) return
   try {
-    executionPreferences.value = await window.electronAPI.getAIExecutionPreferences()
+    executionPreferences.value = await loadAIExecutionPreferences()
   } catch {
     executionPreferences.value = {
       notifyOnTaskComplete: true,
       enableAiLogging: false
     }
+  }
+}
+
+async function savePreferences (enableAiLogging: boolean) {
+  if (savingPreferences.value) return
+
+  const previousValue = executionPreferences.value.enableAiLogging
+  executionPreferences.value = {
+    ...executionPreferences.value,
+    enableAiLogging
+  }
+
+  savingPreferences.value = true
+  feedback.value = ''
+
+  try {
+    await persistAIExecutionPreferences(executionPreferences.value)
+    setFeedback(enableAiLogging ? '日志记录已开启' : '日志记录已关闭')
+  } catch (error) {
+    executionPreferences.value = {
+      ...executionPreferences.value,
+      enableAiLogging: previousValue
+    }
+    setFeedback(`保存失败：${(error as Error).message}`)
+  } finally {
+    savingPreferences.value = false
   }
 }
 
@@ -103,8 +140,20 @@ onMounted(async () => {
       </div>
 
       <div class="lc-status" :class="{ disabled: !executionPreferences.enableAiLogging }">
-        <strong>{{ executionPreferences.enableAiLogging ? '日志记录已开启' : '日志记录未开启' }}</strong>
-        <span>{{ executionPreferences.enableAiLogging ? '新对话会持续写入日志。' : '请先到“执行设置”开启 AI 日志中心。' }}</span>
+        <div class="lc-status-header">
+          <div class="lc-status-copy">
+            <strong>{{ executionPreferences.enableAiLogging ? '日志记录已开启' : '日志记录未开启' }}</strong>
+            <span>{{ executionPreferences.enableAiLogging ? '新对话会持续写入日志，便于排查模型请求、工具调用和错误。' : '关闭后不会再写入新的 AI 日志，历史记录仍可继续查看。' }}</span>
+          </div>
+          <input
+            type="checkbox"
+            class="lc-toggle-input"
+            :checked="executionPreferences.enableAiLogging"
+            :disabled="savingPreferences"
+            @change="savePreferences(($event.target as HTMLInputElement).checked)"
+          >
+        </div>
+        <span class="lc-status-tip">开关只影响新的对话会话，当前已生成的日志不会被删除。</span>
       </div>
 
       <p v-if="feedback" class="lc-feedback">{{ feedback }}</p>
@@ -256,7 +305,7 @@ onMounted(async () => {
 .lc-status {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
   padding: 12px;
   border-radius: 12px;
   background: var(--app-accent-soft);
@@ -264,9 +313,34 @@ onMounted(async () => {
   font-size: 0.82em;
 }
 
+.lc-status-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lc-status-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .lc-status.disabled {
   background: var(--app-panel-subtle);
   color: var(--app-text-muted);
+}
+
+.lc-toggle-input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--app-accent);
+  flex-shrink: 0;
+}
+
+.lc-status-tip {
+  color: inherit;
+  opacity: 0.82;
 }
 
 .lc-feedback {

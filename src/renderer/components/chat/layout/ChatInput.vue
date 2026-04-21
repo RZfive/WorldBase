@@ -8,7 +8,7 @@ interface SkillItem {
   content?: string
 }
 
-interface PendingOfficeFile {
+interface PendingAttachment {
   id: string
   name: string
   fileType: string
@@ -31,7 +31,7 @@ const props = defineProps<{
   modelValue: string
   isLoading: boolean
   pendingImages: Array<{ base64: string; mimeType: string }>
-  pendingFiles: PendingOfficeFile[]
+  pendingFiles: PendingAttachment[]
   isUploadingFiles: boolean
   uploadFeedback: string
   availableSkills: SkillItem[]
@@ -43,9 +43,7 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
   (e: 'send'): void
   (e: 'stop'): void
-  (e: 'addImage', base64: string, mimeType: string): void
-  (e: 'addFiles', files: File[]): void
-  (e: 'addFilePaths', paths: string[]): void
+  (e: 'addAttachments', files: File[]): void
   (e: 'removeImage', index: number): void
   (e: 'removeFile', id: string): void
   (e: 'toggleSkill', id: string): void
@@ -56,6 +54,8 @@ const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
 const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 
 const inputFocused = ref(false)
+const dragDepth = ref(0)
+const dragActive = ref(false)
 const projectTags = computed<ProjectTagChip[]>(() => {
   const seenIds = new Set<string>()
   const tags: ProjectTagChip[] = []
@@ -148,40 +148,81 @@ function handleKeydown (e: KeyboardEvent) {
   }
 }
 
-function handleImageUpload (e: Event) {
+function collectTransferFiles (transfer: DataTransfer | null): File[] {
+  if (!transfer) return []
+
+  const directFiles = Array.from(transfer.files || [])
+  if (directFiles.length > 0) return directFiles
+
+  return Array.from(transfer.items || [])
+    .filter(item => item.kind === 'file')
+    .map(item => item.getAsFile())
+    .filter((file): file is File => Boolean(file))
+}
+
+function hasTransferFiles (transfer: DataTransfer | null): boolean {
+  return collectTransferFiles(transfer).length > 0
+}
+
+function handleAttachmentSelection (e: Event) {
+  if (props.isLoading || props.isUploadingFiles) return
   const input = e.target as HTMLInputElement
   if (!input.files || input.files.length === 0) return
 
-  for (const file of Array.from(input.files)) {
-    if (!file.type.startsWith('image/')) continue
-    if (file.size > 20 * 1024 * 1024) {
-      alert('图片大小不能超过 20MB')
-      continue
-    }
+  emit('addAttachments', Array.from(input.files))
+  input.value = ''
+}
 
-    const reader = new FileReader()
-    reader.onload = () => {
-      const base64 = reader.result as string
-      emit('addImage', base64, file.type)
-    }
-    reader.readAsDataURL(file)
+function handlePaste (e: ClipboardEvent) {
+  if (props.isLoading || props.isUploadingFiles) return
+
+  const files = collectTransferFiles(e.clipboardData)
+  if (files.length === 0) return
+
+  e.preventDefault()
+  emit('addAttachments', files)
+}
+
+function handleDragEnter (e: DragEvent) {
+  if (props.isLoading || props.isUploadingFiles || !hasTransferFiles(e.dataTransfer)) return
+
+  e.preventDefault()
+  dragDepth.value += 1
+  dragActive.value = true
+}
+
+function handleDragOver (e: DragEvent) {
+  if (!hasTransferFiles(e.dataTransfer)) return
+
+  e.preventDefault()
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = props.isLoading || props.isUploadingFiles ? 'none' : 'copy'
   }
 
-  input.value = ''
+  if (!props.isLoading && !props.isUploadingFiles) {
+    dragActive.value = true
+  }
 }
 
-function handleOfficeUpload (e: Event) {
-  const input = e.target as HTMLInputElement
-  if (!input.files || input.files.length === 0) return
-  emit('addFiles', Array.from(input.files))
-  input.value = ''
+function handleDragLeave (e: DragEvent) {
+  if (!hasTransferFiles(e.dataTransfer)) return
+
+  e.preventDefault()
+  dragDepth.value = Math.max(0, dragDepth.value - 1)
+  if (dragDepth.value === 0) {
+    dragActive.value = false
+  }
 }
 
-async function handleOfficePickerClick () {
-  if (!window.electronAPI?.pickOfficeFiles) return
-  const { canceled, filePaths } = await window.electronAPI.pickOfficeFiles()
-  if (canceled || filePaths.length === 0) return
-  emit('addFilePaths', filePaths)
+function handleDrop (e: DragEvent) {
+  const files = collectTransferFiles(e.dataTransfer)
+  e.preventDefault()
+
+  dragDepth.value = 0
+  dragActive.value = false
+
+  if (props.isLoading || props.isUploadingFiles || files.length === 0) return
+  emit('addAttachments', files)
 }
 </script>
 
@@ -200,7 +241,14 @@ async function handleOfficePickerClick () {
     </div>
 
     <!-- Unified input container -->
-    <div class="input-container" :class="{ focused: inputFocused }">
+    <div
+      class="input-container"
+      :class="{ focused: inputFocused, dragging: dragActive }"
+      @dragenter="handleDragEnter"
+      @dragover="handleDragOver"
+      @dragleave="handleDragLeave"
+      @drop="handleDrop"
+    >
       <!-- Image preview inside input -->
       <div v-if="props.pendingFiles.length > 0" class="file-preview-bar">
         <div v-for="file in props.pendingFiles" :key="file.id" class="file-preview-item">
@@ -239,6 +287,7 @@ async function handleOfficePickerClick () {
         :aria-busy="props.isLoading ? 'true' : 'false'"
         @input="handleTextInput"
         @keydown="handleKeydown"
+        @paste="handlePaste"
         @focus="inputFocused = true"
         @blur="inputFocused = false"
         rows="3"
@@ -247,12 +296,9 @@ async function handleOfficePickerClick () {
         <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" @click="emit('toggleDocumentDock')" title="文档工作台">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
         </button>
-        <button class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :disabled="props.isLoading || props.isUploadingFiles" title="上传 Office 文件" @click="handleOfficePickerClick">
+        <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles" title="添加附件">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
-        </button>
-        <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles" title="上传图片">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-          <input type="file" accept="image/*" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleImageUpload" />
+          <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
         </label>
         <button
           class="action-btn send-btn"
@@ -295,6 +341,12 @@ async function handleOfficePickerClick () {
 .input-container.focused {
   border-color: var(--app-accent);
   box-shadow: 0 0 0 2px var(--app-accent-soft);
+}
+
+.input-container.dragging {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-soft);
+  background: color-mix(in srgb, var(--app-accent-soft) 26%, var(--app-input-bg));
 }
 
 .image-preview-bar {

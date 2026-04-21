@@ -1,4 +1,5 @@
 import os from 'node:os'
+import { app } from 'electron'
 import type { AppGateway, ServiceMap } from '../project-runtime/app-gateway.js'
 import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
 
@@ -78,6 +79,12 @@ export interface SystemStatusSnapshot {
   summary: SystemSummary
   cpu: HostCpuInfo
   memory: HostMemoryInfo
+  gpu: {
+    status: 'hardware' | 'software' | 'disabled' | 'unavailable'
+    primaryDevice: string
+    secondaryDevices: string[]
+    featureStatus: Record<string, string>
+  }
   currentProcess: CurrentProcessInfo
   projectProcesses: ProjectProcessInfo[]
   services: ServiceMap
@@ -116,6 +123,7 @@ export class SystemService {
     const services = await this.appGateway.getServiceMap()
     const cpu = this.captureCpuInfo(now)
     const memory = this.captureMemoryInfo()
+    const gpu = await this.captureGpuInfo()
     const currentProcess = this.captureCurrentProcess()
     const hostUptimeSeconds = os.uptime()
 
@@ -143,6 +151,7 @@ export class SystemService {
       },
       cpu,
       memory,
+      gpu,
       currentProcess,
       projectProcesses,
       services
@@ -218,6 +227,55 @@ export class SystemService {
         heapUsedBytes: memory.heapUsed,
         heapTotalBytes: memory.heapTotal,
         externalBytes: memory.external
+      }
+    }
+  }
+
+  private async captureGpuInfo (): Promise<SystemStatusSnapshot['gpu']> {
+    try {
+      const featureStatus = app.getGPUFeatureStatus()
+      const normalizedFeatureStatus = Object.fromEntries(
+        Object.entries(featureStatus).map(([name, status]) => [name, String(status)])
+      )
+      const gpuInfo = await app.getGPUInfo('basic') as Record<string, unknown>
+      const rawDevices = Array.isArray(gpuInfo.gpuDevice) ? gpuInfo.gpuDevice : []
+      const devices = rawDevices
+        .filter((device): device is Record<string, unknown> => Boolean(device) && typeof device === 'object')
+        .map((device) => ({
+          active: Boolean(device.active),
+          deviceString: typeof device.deviceString === 'string' && device.deviceString.trim()
+            ? device.deviceString.trim()
+            : '未知 GPU'
+        }))
+
+      const activeDevice = devices.find(device => device.active) || devices[0]
+      const primaryDevice = activeDevice?.deviceString || '未检测到 GPU'
+      const secondaryDevices = devices
+        .filter(device => device !== activeDevice)
+        .map(device => device.deviceString)
+
+      const statusValues = Object.values(normalizedFeatureStatus)
+      let status: SystemStatusSnapshot['gpu']['status'] = 'unavailable'
+      if (statusValues.some(value => value === 'disabled_off' || value === 'unavailable_software')) {
+        status = 'disabled'
+      } else if (statusValues.some(value => value === 'software_only' || value === 'disabled_software')) {
+        status = 'software'
+      } else if (statusValues.some(value => value === 'enabled' || value === 'enabled_readback' || value === 'enabled_force')) {
+        status = 'hardware'
+      }
+
+      return {
+        status,
+        primaryDevice,
+        secondaryDevices,
+        featureStatus: normalizedFeatureStatus
+      }
+    } catch {
+      return {
+        status: 'unavailable',
+        primaryDevice: '未检测到 GPU',
+        secondaryDevices: [],
+        featureStatus: {}
       }
     }
   }

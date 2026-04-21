@@ -103,7 +103,7 @@ interface FilePreviewState {
   truncated: boolean
 }
 
-interface PendingOfficeFile {
+interface PendingAttachment {
   id: string
   name: string
   filePath: string
@@ -111,6 +111,14 @@ interface PendingOfficeFile {
   fileSizeLabel: string
   promptContent: string
   previewText: string
+}
+
+interface UploadedAttachmentResult {
+  filePath: string
+  fileName: string
+  size: number
+  fileType: string
+  content: string
 }
 
 interface AuthRequestPayload {
@@ -151,7 +159,7 @@ const activeProviderId = ref('')
 const selectedModel = ref('')
 const currentAuthMode = ref<AIExecutionAuthMode>('strict')
 const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
-const pendingFiles = ref<PendingOfficeFile[]>([])
+const pendingFiles = ref<PendingAttachment[]>([])
 const isUploadingFiles = ref(false)
 const uploadFeedback = ref('')
 const filePreview = ref<FilePreviewState>({
@@ -188,6 +196,7 @@ let authResponseCleanup: (() => void) | null = null
 let authResolvedCleanup: (() => void) | null = null
 let skillsChangedCleanup: (() => void) | null = null
 const MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH = 180
+const MAX_IMAGE_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
 
 function getEnabledProviders (config: ProvidersConfig): ProviderOption[] {
   const enabledIds = new Set(
@@ -330,7 +339,7 @@ function createWebFetchBlock (result: WebFetchResultEntry, query?: string): Chat
   }
 }
 
-function createAttachmentBlock (file: PendingOfficeFile): ChatMessageBlock {
+function createAttachmentBlock (file: PendingAttachment): ChatMessageBlock {
   return {
     id: createBlockId('attachment'),
     kind: 'attachment',
@@ -525,15 +534,50 @@ function getElectronFilePath (file: File): string | null {
   return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate : null
 }
 
+function isImageAttachment (file: File): boolean {
+  return file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name)
+}
+
+async function readFileAsDataUrl (file: File): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(reader.error || new Error(`无法读取文件：${file.name}`))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function readFileAsUint8Array (file: File): Promise<Uint8Array> {
+  return new Uint8Array(await file.arrayBuffer())
+}
+
+async function readUploadedAttachment (file: File): Promise<UploadedAttachmentResult> {
+  if (window.electronAPI?.readUploadedAttachmentBuffer) {
+    const bytes = await readFileAsUint8Array(file)
+    return window.electronAPI.readUploadedAttachmentBuffer({
+      fileName: file.name,
+      fileType: file.type || undefined,
+      bytes
+    })
+  }
+
+  const filePath = getElectronFilePath(file)
+  if (filePath && window.electronAPI?.readUploadedAttachmentFile) {
+    return window.electronAPI.readUploadedAttachmentFile(filePath)
+  }
+
+  throw new Error(`当前环境不支持读取附件：${file.name}`)
+}
+
 function trimPreviewText (content: string, maxLength = MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH): string {
   const normalized = content.replace(/\s+/g, ' ').trim()
   if (normalized.length <= maxLength) return normalized
   return `${normalized.slice(0, maxLength)}…`
 }
 
-function buildUploadedFilesPrompt (files: PendingOfficeFile[]): string {
+function buildUploadedFilesPrompt (files: PendingAttachment[]): string {
   return files
-    .map(file => `【用户上传文件：${file.name}】\n文件类型：${file.fileType.toUpperCase()}\n文件内容如下：\n${file.promptContent}\n【文件结束】`)
+    .map(file => `【用户附件：${file.name}】\n文件类型：${file.fileType.toUpperCase()}\n文件内容如下：\n${file.promptContent}\n【附件结束】`)
     .join('\n\n')
 }
 
@@ -581,7 +625,7 @@ function getConversationTitleText (msg?: ChatMessage): string {
       .map(block => block.fileName)
 
     if (attachmentNames.length > 0) {
-      return `上传文件：${attachmentNames.join('、')}`
+      return `附件：${attachmentNames.join('、')}`
     }
   }
 
@@ -901,11 +945,7 @@ async function stopCurrentStream () {
   void doSaveConversation(convId, targetMessages)
 }
 
-function addImage (base64: string, mimeType: string) {
-  pendingImages.value.push({ base64, mimeType })
-}
-
-async function addFiles (files: File[]) {
+async function addAttachments (files: File[]) {
   if (files.length === 0) return
 
   isUploadingFiles.value = true
@@ -913,33 +953,31 @@ async function addFiles (files: File[]) {
 
   try {
     for (const file of files) {
-      const filePath = getElectronFilePath(file)
-      if (!filePath) {
-        uploadFeedback.value = `无法读取文件路径：${file.name}`
-        continue
-      }
+      if (isImageAttachment(file)) {
+        if (file.size > MAX_IMAGE_ATTACHMENT_SIZE_BYTES) {
+          uploadFeedback.value = `${file.name} 添加失败：图片大小不能超过 20MB`
+          continue
+        }
 
-      // PDF files → import as structured document
-      const isPdf = /\.pdf$/i.test(file.name)
-      if (isPdf && window.electronAPI?.importDocument) {
         try {
-          await window.electronAPI.importDocument(filePath)
-          documentDockVisible.value = true
+          const base64 = await readFileAsDataUrl(file)
+          pendingImages.value.push({
+            base64,
+            mimeType: file.type || 'image/png'
+          })
           uploadFeedback.value = ''
         } catch (err) {
-          uploadFeedback.value = `${file.name} 导入失败：${(err as Error).message}`
+          uploadFeedback.value = `${file.name} 添加失败：${(err as Error).message}`
         }
         continue
       }
 
-      // Office files → legacy upload path
-      if (!window.electronAPI?.readUploadedOfficeFile) continue
       try {
-        const uploaded = await window.electronAPI.readUploadedOfficeFile(filePath)
+        const uploaded = await readUploadedAttachment(file)
         pendingFiles.value.push({
           id: generateId(),
           name: uploaded.fileName,
-          filePath: uploaded.filePath,
+          filePath: uploaded.filePath || getElectronFilePath(file) || file.name,
           fileType: uploaded.fileType,
           fileSizeLabel: formatFileSize(uploaded.size),
           promptContent: uploaded.content,
@@ -947,51 +985,7 @@ async function addFiles (files: File[]) {
         })
         uploadFeedback.value = ''
       } catch (err) {
-        uploadFeedback.value = `${file.name} 上传失败：${(err as Error).message}`
-      }
-    }
-  } finally {
-    isUploadingFiles.value = false
-  }
-}
-
-async function addFilePaths (paths: string[]) {
-  if (paths.length === 0) return
-
-  isUploadingFiles.value = true
-  uploadFeedback.value = ''
-
-  try {
-    for (const filePath of paths) {
-      // PDF files → import as structured document
-      const isPdf = /\.pdf$/i.test(filePath)
-      if (isPdf && window.electronAPI?.importDocument) {
-        try {
-          await window.electronAPI.importDocument(filePath)
-          documentDockVisible.value = true
-          uploadFeedback.value = ''
-        } catch (err) {
-          uploadFeedback.value = `导入失败：${(err as Error).message}`
-        }
-        continue
-      }
-
-      // Office files → legacy upload path
-      if (!window.electronAPI?.readUploadedOfficeFile) continue
-      try {
-        const uploaded = await window.electronAPI.readUploadedOfficeFile(filePath)
-        pendingFiles.value.push({
-          id: generateId(),
-          name: uploaded.fileName,
-          filePath: uploaded.filePath,
-          fileType: uploaded.fileType,
-          fileSizeLabel: formatFileSize(uploaded.size),
-          promptContent: uploaded.content,
-          previewText: trimPreviewText(uploaded.content)
-        })
-        uploadFeedback.value = ''
-      } catch (err) {
-        uploadFeedback.value = `上传失败：${(err as Error).message}`
+        uploadFeedback.value = `${file.name} 添加失败：${(err as Error).message}`
       }
     }
   } finally {
@@ -1481,9 +1475,7 @@ onUnmounted(() => {
         :document-dock-visible="documentDockVisible"
         @send="sendMessage"
         @stop="stopCurrentStream"
-        @add-image="addImage"
-        @add-files="addFiles"
-        @add-file-paths="addFilePaths"
+        @add-attachments="addAttachments"
         @remove-image="removeImage"
         @remove-file="removeFile"
         @toggle-skill="toggleSkill"
