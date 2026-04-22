@@ -108,6 +108,65 @@ interface CostSettings {
   budgetLimit: number | null
 }
 
+type MCPTransportType = 'stdio' | 'streamable-http' | 'sse'
+
+interface MCPServerConfig {
+  id: string
+  name: string
+  enabled: boolean
+  transport: MCPTransportType
+  command: string
+  args: string[]
+  cwd: string
+  env: Record<string, string>
+  url: string
+  headers: Record<string, string>
+  timeoutMs: number
+}
+
+interface MCPToolSummary {
+  name: string
+  localName: string
+  description: string
+  inputSchema: Record<string, unknown>
+}
+
+interface MCPResourceSummary {
+  uri: string
+  name: string
+  description?: string
+  mimeType?: string
+}
+
+interface MCPPromptSummary {
+  name: string
+  description: string
+  arguments: Array<{ name: string; description?: string; required?: boolean }>
+}
+
+interface MCPServerSnapshot {
+  id: string
+  name: string
+  enabled: boolean
+  transport: MCPTransportType
+  status: 'disconnected' | 'connecting' | 'connected' | 'error'
+  error?: string
+  updatedAt: string | null
+  tools: MCPToolSummary[]
+  resources: MCPResourceSummary[]
+  prompts: MCPPromptSummary[]
+  capabilities: {
+    tools: boolean
+    resources: boolean
+    prompts: boolean
+  }
+}
+
+interface MCPStateSnapshot {
+  servers: MCPServerSnapshot[]
+  updatedAt: string
+}
+
 interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
   enableAiLogging: boolean
@@ -348,6 +407,12 @@ export interface ElectronAPI {
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
   getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
+  getMcpServers: () => Promise<MCPServerConfig[]>
+  saveMcpServers: (servers: MCPServerConfig[]) => Promise<{ success: boolean }>
+  getMcpState: () => Promise<MCPStateSnapshot>
+  refreshMcpServer: (serverId?: string) => Promise<MCPStateSnapshot | MCPServerSnapshot>
+  disconnectMcpServer: (serverId: string) => Promise<MCPServerSnapshot>
+  onMcpStateChanged: (callback: (state: MCPStateSnapshot) => void) => () => void
   listAILogConversations: () => Promise<AILogConversationSummary[]>
   getAILogConversation: (conversationId: string) => Promise<AILogConversation | null>
   deleteAILogConversation: (conversationId: string) => Promise<boolean>
@@ -490,6 +555,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveThemePreference: (preference: ThemePreference) => ipcRenderer.invoke('settings:saveThemePreference', preference),
   getAIExecutionPreferences: () => ipcRenderer.invoke('settings:getAIExecutionPreferences'),
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => ipcRenderer.invoke('settings:saveAIExecutionPreferences', preferences),
+  getMcpServers: () => ipcRenderer.invoke('settings:getMcpServers'),
+  saveMcpServers: (servers: MCPServerConfig[]) => ipcRenderer.invoke('settings:saveMcpServers', servers),
+  getMcpState: () => ipcRenderer.invoke('settings:getMcpState'),
+  refreshMcpServer: (serverId?: string) => ipcRenderer.invoke('settings:refreshMcpServer', serverId),
+  disconnectMcpServer: (serverId: string) => ipcRenderer.invoke('settings:disconnectMcpServer', serverId),
+  onMcpStateChanged: (callback: (state: MCPStateSnapshot) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, state: MCPStateSnapshot) => callback(state)
+    ipcRenderer.on('settings:mcpStateChanged', handler)
+    return () => { ipcRenderer.removeListener('settings:mcpStateChanged', handler) }
+  },
   listAILogConversations: () => ipcRenderer.invoke('settings:listAILogConversations'),
   getAILogConversation: (conversationId: string) => ipcRenderer.invoke('settings:getAILogConversation', conversationId),
   deleteAILogConversation: (conversationId: string) => ipcRenderer.invoke('settings:deleteAILogConversation', conversationId),

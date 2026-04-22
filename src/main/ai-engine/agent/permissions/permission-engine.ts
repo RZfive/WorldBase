@@ -87,7 +87,12 @@ const ALWAYS_SAFE_TOOLS = new Set([
   'grep_search',
   'web_search',
   'fetch_webpage',
-  'list_documents'
+  'list_documents',
+  'mcp_list_servers',
+  'mcp_list_resources',
+  'mcp_read_resource',
+  'mcp_list_prompts',
+  'mcp_get_prompt'
 ])
 
 /**
@@ -180,6 +185,21 @@ export class PermissionEngine {
       if (classification.level === 'safe') {
         return { allowed: true, reason: 'Safe command', askedUser: false }
       }
+    }
+
+    if (toolName.startsWith('mcp__')) {
+      const approved = await this._askUser(toolName, args, '该操作会调用外部 MCP 服务')
+      return { allowed: approved, reason: 'External MCP tool invocation', askedUser: true }
+    }
+
+    if (toolName === 'install_skill') {
+      const approved = await this._askUser(toolName, args, '该操作会把 Skill 安装到本地应用，并可在当前会话中立即启用')
+      return { allowed: approved, reason: 'Skill installation requires confirmation', askedUser: true }
+    }
+
+    if (toolName === 'install_mcp_server') {
+      const approved = await this._askUser(toolName, args, '该操作会写入 MCP 服务配置，并可能立即连接外部服务')
+      return { allowed: approved, reason: 'MCP installation requires confirmation', askedUser: true }
     }
 
     // Layer 4: High-risk tools → always ask

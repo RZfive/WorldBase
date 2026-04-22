@@ -151,6 +151,69 @@ interface CostSettings {
   budgetLimit: number | null
 }
 
+type MCPTransportType = 'stdio' | 'streamable-http' | 'sse'
+
+interface MCPServerConfig {
+  id: string
+  name: string
+  enabled: boolean
+  transport: MCPTransportType
+  command: string
+  args: string[]
+  cwd: string
+  env: Record<string, string>
+  url: string
+  headers: Record<string, string>
+  timeoutMs: number
+}
+
+interface MCPToolSummary {
+  name: string
+  localName: string
+  description: string
+  inputSchema: Record<string, unknown>
+}
+
+interface MCPResourceSummary {
+  uri: string
+  name: string
+  description?: string
+  mimeType?: string
+}
+
+interface MCPPromptSummary {
+  name: string
+  description: string
+  arguments: Array<{
+    name: string
+    description?: string
+    required?: boolean
+  }>
+}
+
+interface MCPServerSnapshot {
+  id: string
+  name: string
+  enabled: boolean
+  transport: MCPTransportType
+  status: 'disconnected' | 'connecting' | 'connected' | 'error'
+  error?: string
+  updatedAt: string | null
+  tools: MCPToolSummary[]
+  resources: MCPResourceSummary[]
+  prompts: MCPPromptSummary[]
+  capabilities: {
+    tools: boolean
+    resources: boolean
+    prompts: boolean
+  }
+}
+
+interface MCPStateSnapshot {
+  servers: MCPServerSnapshot[]
+  updatedAt: string
+}
+
 interface AILogConversationSummary {
   id: string
   title: string
@@ -454,6 +517,12 @@ interface ElectronAPI {
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
   getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
+  getMcpServers: () => Promise<MCPServerConfig[]>
+  saveMcpServers: (servers: MCPServerConfig[]) => Promise<{ success: boolean }>
+  getMcpState: () => Promise<MCPStateSnapshot>
+  refreshMcpServer: (serverId?: string) => Promise<MCPStateSnapshot | MCPServerSnapshot>
+  disconnectMcpServer: (serverId: string) => Promise<MCPServerSnapshot>
+  onMcpStateChanged: (callback: (state: MCPStateSnapshot) => void) => () => void
   listAILogConversations: () => Promise<AILogConversationSummary[]>
   getAILogConversation: (conversationId: string) => Promise<AILogConversation | null>
   deleteAILogConversation: (conversationId: string) => Promise<boolean>

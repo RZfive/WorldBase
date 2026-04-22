@@ -28,6 +28,8 @@ import { parseDocument, parseDocumentBuffer, isSupportedDocument, detectDocument
 import type { CreateSelectionPayload } from '../src/main/ai-engine/agent/tools/document-types.js'
 import { buildDocumentRenderPreview, readDocumentRenderAsset } from '../src/main/document-preview/document-render-service.js'
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../src/main/settings/settings-transfer.js'
+import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.js'
+import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -64,6 +66,7 @@ let chatHistory: ChatHistoryStore | null = null
 let aiLogStore: AILogStore | null = null
 let skillStore: SkillStore | null = null
 let documentStore: DocumentStore | null = null
+let mcpService: MCPService | null = null
 let isClosingMainWindow = false
 let isQuitCleanupRunning = false
 let hasFinishedQuitCleanup = false
@@ -601,6 +604,14 @@ function applyActiveProviderToAiEngine (): AIProvidersConfig {
   return normalizedConfig
 }
 
+function applyMcpServersToService (): MCPServerConfig[] {
+  const servers = settingsStore!.getMcpServers()
+  void mcpService!.updateServers(servers).catch((error) => {
+    console.error('[main:mcp] Failed to apply MCP settings:', error)
+  })
+  return servers
+}
+
 async function initializeServices (): Promise<void> {
   const projectsDir = getProjectsDir()
   const snapshotsDir = getSnapshotsDir()
@@ -610,6 +621,10 @@ async function initializeServices (): Promise<void> {
   chatHistory = new ChatHistoryStore(userDataPath)
   aiLogStore = new AILogStore(userDataPath)
   skillStore = new SkillStore(userDataPath)
+  mcpService = new MCPService()
+  mcpService.on('stateChanged', (state: MCPStateSnapshot) => {
+    broadcastToAppWindows('settings:mcpStateChanged', state)
+  })
 
   projectFS = new ProjectFS(projectsDir, snapshotsDir)
   runtimeManager = new RuntimeManager(projectsDir)
@@ -643,7 +658,13 @@ async function initializeServices (): Promise<void> {
     dataAccess,
     asyncTaskManager,
     documentStore,
-    getMainWindow: () => mainWindow
+    skillStore,
+    settingsStore,
+    getMainWindow: () => mainWindow,
+    notifySkillsChanged: (event) => {
+      broadcastToAppWindows('skills:changed', event)
+    },
+    mcpService
   })
 
   // Apply saved AI settings on startup
@@ -669,6 +690,8 @@ async function initializeServices (): Promise<void> {
   if (savedCostSettings.budgetLimit != null) {
     aiEngine.setBudgetLimit(savedCostSettings.budgetLimit)
   }
+
+  applyMcpServersToService()
 
   appGateway = new AppGateway(runtimeManager, projectFS, builderService)
   processManagerService = new ProcessManagerService(runtimeManager, projectFS)
@@ -1280,6 +1303,32 @@ function setupIPC (): void {
     return { success: true }
   })
 
+  ipcMain.handle('settings:getMcpServers', async () => {
+    return settingsStore!.getMcpServers()
+  })
+
+  ipcMain.handle('settings:saveMcpServers', async (_event: IpcMainInvokeEvent, servers: MCPServerConfig[]) => {
+    settingsStore!.saveMcpServers(servers)
+    applyMcpServersToService()
+    return { success: true }
+  })
+
+  ipcMain.handle('settings:getMcpState', async () => {
+    return mcpService!.getState()
+  })
+
+  ipcMain.handle('settings:refreshMcpServer', async (_event: IpcMainInvokeEvent, serverId?: string) => {
+    if (!serverId) {
+      await mcpService!.refreshEnabledServers()
+      return mcpService!.getState()
+    }
+    return mcpService!.refreshServer(serverId)
+  })
+
+  ipcMain.handle('settings:disconnectMcpServer', async (_event: IpcMainInvokeEvent, serverId: string) => {
+    return mcpService!.disconnectServer(serverId)
+  })
+
   ipcMain.handle('settings:getThemePreference', async () => {
     return settingsStore!.getThemePreference()
   })
@@ -1358,6 +1407,7 @@ function setupIPC (): void {
     const payload = decryptPortableSettingsConfig(serialized, PORTABLE_SETTINGS_APP_ID)
     const normalizedConfig = settingsStore!.importPortableConfig(payload.config as PortableSettingsConfig)
     const providersConfig = applyActiveProviderToAiEngine()
+    applyMcpServersToService()
 
     broadcastToAppWindows('settings:providersChanged', providersConfig)
 
@@ -1652,6 +1702,9 @@ app.on('before-quit', (event) => {
       }
       if (lanServer) {
         await lanServer.stop()
+      }
+      if (mcpService) {
+        await mcpService.dispose()
       }
     } finally {
       hasFinishedQuitCleanup = true

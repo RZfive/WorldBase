@@ -26,6 +26,8 @@ import { toolWebSearch } from './tool-web-search.js'
 import { toolFetchWebpage } from './tool-fetch-webpage.js'
 import { toolEnterPlanMode, toolExitPlanMode } from './tool-plan-mode.js'
 import { toolRunSkill, toolListSkills } from './tool-run-skill.js'
+import { toolInstallSkill } from './tool-install-skill.js'
+import { toolInstallMcpServer } from './tool-install-mcp-server.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
 import type { AgentCore, SessionState } from '../agent-core.js'
@@ -34,6 +36,9 @@ import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js
 import type { BuilderService } from '../../../project-runtime/builder-service.js'
 import type { ProjectApiClient } from '../../../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../../../project-data-access/data-access.js'
+import type { SkillStore } from '../../../settings/skill-store.js'
+import type { SettingsStore } from '../../../settings/settings-store.js'
+import type { MCPService } from '../../../mcp/mcp-service.js'
 import type { BrowserWindow } from 'electron'
 
 export interface ToolServices {
@@ -44,7 +49,11 @@ export interface ToolServices {
   dataAccess: ProjectDataAccess
   asyncTaskManager: AsyncTaskManager
   documentStore?: DocumentStore
+  skillStore?: SkillStore
+  settingsStore?: SettingsStore
   getMainWindow?: () => BrowserWindow | null
+  notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
+  mcpService?: MCPService
 }
 
 /**
@@ -82,7 +91,9 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolEnterPlanMode(() => agent.getPlanEngine()),
     toolExitPlanMode(() => agent.getPlanEngine()),
     toolRunSkill(() => agent.getSkillEngine()),
-    toolListSkills(() => agent.getSkillEngine())
+    toolListSkills(() => agent.getSkillEngine()),
+    toolInstallSkill(services, () => agent.getSkillEngine()),
+    toolInstallMcpServer(services)
   ]
 
   // Register document tools if store is available

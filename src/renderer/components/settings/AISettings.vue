@@ -5,9 +5,10 @@ import ProviderPanel from './ProviderPanel.vue'
 import DatabaseViewer from './DatabaseViewer.vue'
 import GeneralSettingsPanel from './GeneralSettingsPanel.vue'
 import LogCenterPanel from './LogCenterPanel.vue'
+import MCPSettingsPanel from './MCPSettingsPanel.vue'
 import ProcessManagerPanel from './ProcessManagerPanel.vue'
 
-type CategoryId = 'general' | 'providers' | 'skills' | 'logs' | 'database' | 'processes'
+type CategoryId = 'general' | 'providers' | 'mcp' | 'skills' | 'logs' | 'database' | 'processes'
 
 interface Category {
   id: CategoryId
@@ -18,6 +19,7 @@ interface Category {
 const categories: Category[] = [
   { id: 'general', icon: '⚙️', label: '通用设置' },
   { id: 'providers', icon: '🤖', label: '模型服务' },
+  { id: 'mcp', icon: '🔌', label: 'MCP 管理' },
   { id: 'skills', icon: '✦', label: 'Skill 管理' },
   { id: 'logs', icon: '🧾', label: '日志中心' },
   { id: 'database', icon: '🗄', label: '数据设置' },
@@ -46,10 +48,11 @@ const activeCategoryId = ref<CategoryId>('general')
     <div class="cat-content">
       <GeneralSettingsPanel v-if="activeCategoryId === 'general'" />
       <ProviderPanel v-else-if="activeCategoryId === 'providers'" />
+      <MCPSettingsPanel v-else-if="activeCategoryId === 'mcp'" />
       <SkillManager v-else-if="activeCategoryId === 'skills'" />
       <LogCenterPanel v-else-if="activeCategoryId === 'logs'" />
       <DatabaseViewer v-else-if="activeCategoryId === 'database'" :active="activeCategoryId === 'database'" />
-      <ProcessManagerPanel v-else :active="activeCategoryId === 'processes'" />
+      <ProcessManagerPanel v-else-if="activeCategoryId === 'processes'" :active="activeCategoryId === 'processes'" />
     </div>
   </div>
 </template>

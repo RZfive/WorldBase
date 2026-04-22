@@ -179,17 +179,22 @@
 
 ### 13. `web_search` — 搜索公开网页
 
-按关键词搜索公开网页结果，返回标题、URL、摘要和来源域名。适用于“知道主题但不知道具体文档地址”的场景，也支持在同一次调用里自动继续抓取前 N 个搜索结果页面。
+按关键词搜索公开网页结果，返回标题、URL、摘要和来源域名。适用于“知道主题但不知道具体文档地址”的场景，也支持在同一次调用里自动继续抓取前 N 个搜索结果页面。当前会使用多搜索源（默认 `bing` + `duckduckgo`，技术类查询会额外补 `github` 仓库搜索），并按查询相关性重排结果。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `query` | string | 搜索关键词 |
 | `limit` | integer? | 最大返回条数，默认 6，最大 10 |
+| `sources` | string[]? | 可选搜索源，支持 `bing` / `duckduckgo` / `github` |
+| `allowed_domains` | string[]? | 仅保留这些域名及其子域名的结果 |
+| `blocked_domains` | string[]? | 排除这些域名及其子域名的结果 |
 | `auto_fetch_top_n` | integer? | 自动继续抓取前 N 个搜索结果页面，最大 5 |
 | `fetch_max_chars` | integer? | 启用自动抓取时，每个页面最多返回字符数，默认 12000，最大 40000 |
 | `fetch_timeout_ms` | integer? | 启用自动抓取时，每个页面的超时时间，默认 10000ms，最大 30000ms |
 
-**返回**: 包含 `query`、`engine`、`results`、`fetched_at`。启用自动抓取时，还会返回 `auto_fetched_count` 与 `fetched_results`。每条搜索结果含 `rank`、`title`、`url`、`snippet`、`source`、`published_at`。
+**返回**: 包含 `query`、`engine`、`sources_used`、`results`、`fetched_at`。启用自动抓取时，还会返回 `auto_fetched_count` 与 `fetched_results`。每条搜索结果含 `rank`、`title`、`url`、`snippet`、`source`、`published_at`。
+
+**质量增强**: 会自动扩展常见技术缩写（如 `MCP`）、根据查询语言设置搜索语言、合并多搜索源结果、过滤低相关度结果，并优先提升文档站、规范页、仓库 README 等结果。
 
 **建议搭配**: 如果要快速做一轮外部资料收集，可直接对 `web_search` 传 `auto_fetch_top_n`；如果只想精确挑选页面，再单独调用 `fetch_webpage`。
 
