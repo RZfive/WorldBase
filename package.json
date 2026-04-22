@@ -15,6 +15,8 @@
     "electron:build": "vite build && node scripts/build-main.mjs && node scripts/build-preload.mjs && electron-builder"
   },
   "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
+    "@modelcontextprotocol/client": "^2.0.0-alpha.2",
     "better-sqlite3": "^12.8.0",
     "body-parser": "^1.20.4",
     "exceljs": "^4.4.0",

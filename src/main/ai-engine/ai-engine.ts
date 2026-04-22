@@ -10,8 +10,10 @@ import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { AsyncTaskManager } from './agent/tools/async-task-manager.js'
 import type { DocumentStore } from './agent/tools/document-store.js'
 import type { BrowserWindow } from 'electron'
-import type { AIExecutionAuthMode } from '../settings/settings-store.js'
+import type { AIExecutionAuthMode, SettingsStore } from '../settings/settings-store.js'
 import type { AILogSessionLogger } from '../settings/ai-log-store.js'
+import type { MCPService } from '../mcp/mcp-service.js'
+import type { SkillStore } from '../settings/skill-store.js'
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
 
@@ -23,7 +25,11 @@ export interface AIEngineServices {
   dataAccess: ProjectDataAccess
   asyncTaskManager: AsyncTaskManager
   documentStore?: DocumentStore
+  skillStore?: SkillStore
+  settingsStore?: SettingsStore
   getMainWindow?: () => BrowserWindow | null
+  notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
+  mcpService?: MCPService
 }
 
 export interface AIConfigInput {
@@ -87,6 +93,7 @@ export class AIEngine {
 
     const agent = new AgentCore(provider, this.services as unknown as Record<string, unknown>)
     registerAllTools(agent, this.services)
+    this.registerMcpTools(agent)
     agent.setActiveSkills(this.activeSkillContents)
     agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
     agent.setAuthMode(options?.authMode ?? 'strict')
@@ -111,18 +118,40 @@ export class AIEngine {
     return agent
   }
 
+  private registerMcpTools (agent: AgentCore): void {
+    const mcpService = this.services.mcpService
+    if (!mcpService) return
+
+    for (const tool of mcpService.getBuiltinToolRegistrations()) {
+      agent.registerTool(tool.definition.name, tool.definition, tool.handler)
+    }
+
+    for (const definition of mcpService.getCachedDynamicToolDefinitions()) {
+      agent.registerTool(definition.name, definition, async (args, onProgress) => {
+        return mcpService.executeDynamicTool(definition.name, args, onProgress)
+      })
+    }
+  }
+
+  private async primeMcpTools (): Promise<void> {
+    if (!this.services.mcpService) return
+    await this.services.mcpService.refreshEnabledServers()
+  }
+
   /**
    * Handle a chat message from the user (non-streaming).
    */
   async chat (messages: ChatMessage[], options?: AIRequestOptions): Promise<ChatMessage> {
+    await this.primeMcpTools()
     return this.createAgent(options).run(messages)
   }
 
   /**
    * Handle a chat message with streaming response.
    */
-  chatStream (messages: ChatMessage[], onProgress?: ProgressCallback, options?: AIRequestOptions): AsyncGenerator<StreamEvent> {
-    return this.createAgent(options).runStream(messages, onProgress, options?.abortSignal)
+  async *chatStream (messages: ChatMessage[], onProgress?: ProgressCallback, options?: AIRequestOptions): AsyncGenerator<StreamEvent> {
+    await this.primeMcpTools()
+    yield * this.createAgent(options).runStream(messages, onProgress, options?.abortSignal)
   }
 
   /**

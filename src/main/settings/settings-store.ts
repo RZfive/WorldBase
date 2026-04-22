@@ -71,11 +71,28 @@ export interface CostSettings {
   budgetLimit: number | null
 }
 
+export type MCPTransportType = 'stdio' | 'streamable-http' | 'sse'
+
+export interface MCPServerConfig {
+  id: string
+  name: string
+  enabled: boolean
+  transport: MCPTransportType
+  command: string
+  args: string[]
+  cwd: string
+  env: Record<string, string>
+  url: string
+  headers: Record<string, string>
+  timeoutMs: number
+}
+
 export interface PortableSettingsConfig {
   providers: AIProvidersConfig
   themePreference: ThemePreference
   aiExecutionPreferences: AIExecutionPreferences
   costSettings: CostSettings
+  mcpServers: MCPServerConfig[]
   launchpadLayout: LaunchpadLayout
   webApps: WebAppShortcut[]
   projectLaunchModes: Record<string, 'embed' | 'window'>
@@ -87,6 +104,7 @@ export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
 }
 
 export const DEFAULT_MODEL_CONTEXT_WINDOW = 32000
+export const DEFAULT_MCP_SERVER_TIMEOUT_MS = 15000
 type RawModelItem = string | { name?: string; contextWindow?: number }
 
 function normalizeContextWindow (value: unknown): number {
@@ -255,6 +273,93 @@ function normalizeCostSettings (value: unknown): CostSettings {
     }),
     budgetLimit
   }
+}
+
+function normalizeStringArray (value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    .map(item => item.trim())
+}
+
+function normalizeStringMap (value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object') return {}
+
+  const normalized: Record<string, string> = {}
+  for (const [key, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedKey = key.trim()
+    if (!normalizedKey) continue
+    const normalizedValue = typeof rawValue === 'string'
+      ? rawValue
+      : (rawValue == null ? '' : String(rawValue))
+    normalized[normalizedKey] = normalizedValue
+  }
+  return normalized
+}
+
+function normalizeMcpTransportType (value: unknown): MCPTransportType {
+  if (value === 'streamable-http' || value === 'sse' || value === 'stdio') {
+    return value
+  }
+  return 'stdio'
+}
+
+function normalizeMcpTimeout (value: unknown): number {
+  const numeric = Number(value)
+  if (Number.isFinite(numeric) && numeric >= 1000) {
+    return Math.floor(numeric)
+  }
+  return DEFAULT_MCP_SERVER_TIMEOUT_MS
+}
+
+function normalizeMcpServerConfig (value: unknown): MCPServerConfig | null {
+  if (!value || typeof value !== 'object') return null
+
+  const input = value as Record<string, unknown>
+  const id = typeof input.id === 'string' ? input.id.trim() : ''
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  if (!id || !name) return null
+
+  const transport = normalizeMcpTransportType(input.transport)
+  const urlValue = typeof input.url === 'string' ? input.url.trim() : ''
+  let normalizedUrl = ''
+  if (urlValue) {
+    try {
+      normalizedUrl = new URL(urlValue).toString()
+    } catch {
+      normalizedUrl = ''
+    }
+  }
+
+  return {
+    id,
+    name,
+    enabled: input.enabled !== false,
+    transport,
+    command: typeof input.command === 'string' ? input.command.trim() : '',
+    args: normalizeStringArray(input.args),
+    cwd: typeof input.cwd === 'string' ? input.cwd.trim() : '',
+    env: normalizeStringMap(input.env),
+    url: normalizedUrl,
+    headers: normalizeStringMap(input.headers),
+    timeoutMs: normalizeMcpTimeout(input.timeoutMs)
+  }
+}
+
+function normalizeMcpServers (value: unknown): MCPServerConfig[] {
+  if (!Array.isArray(value)) return []
+
+  const seen = new Set<string>()
+  const normalized: MCPServerConfig[] = []
+
+  for (const item of value) {
+    const server = normalizeMcpServerConfig(item)
+    if (!server || seen.has(server.id)) continue
+    seen.add(server.id)
+    normalized.push(server)
+  }
+
+  return normalized.sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
 }
 
 function normalizeWebAppShortcut (value: unknown): WebAppShortcut | null {
@@ -600,6 +705,17 @@ export class SettingsStore {
     this.write({ costSettings: normalizeCostSettings(costSettings) })
   }
 
+  /** Get configured MCP servers. */
+  getMcpServers (): MCPServerConfig[] {
+    const settings = this.read()
+    return normalizeMcpServers(settings.mcpServers)
+  }
+
+  /** Save configured MCP servers. */
+  saveMcpServers (servers: MCPServerConfig[]): void {
+    this.write({ mcpServers: normalizeMcpServers(servers) })
+  }
+
   /** Build a normalized, portable settings snapshot for encrypted export. */
   exportPortableConfig (): PortableSettingsConfig {
     const settings = this.read()
@@ -608,6 +724,7 @@ export class SettingsStore {
       themePreference: this.getThemePreference(),
       aiExecutionPreferences: this.getAIExecutionPreferences(),
       costSettings: this.getCostSettings(),
+      mcpServers: this.getMcpServers(),
       launchpadLayout: this.getLaunchpadLayout(),
       webApps: this.getWebApps(),
       projectLaunchModes: normalizeProjectLaunchModes(settings.projectLaunchModes)
@@ -631,6 +748,7 @@ export class SettingsStore {
       themePreference: normalizeThemePreference(config.themePreference),
       aiExecutionPreferences: normalizeAIExecutionPreferences(config.aiExecutionPreferences),
       costSettings: normalizeCostSettings(config.costSettings),
+      mcpServers: normalizeMcpServers(config.mcpServers),
       launchpadLayout: normalizeLaunchpadLayout(config.launchpadLayout),
       webApps: normalizeWebApps(config.webApps),
       projectLaunchModes: normalizeProjectLaunchModes(config.projectLaunchModes)

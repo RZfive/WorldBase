@@ -31,12 +31,79 @@ export interface FetchPublicWebpageOptions {
   timeoutMs?: number
 }
 
+export interface SearchLocaleProfile {
+  bingLanguage: string
+  bingCountry: string
+  duckduckgoRegion: string
+  acceptLanguage: string
+}
+
 const BLOCKED_HOSTNAMES = new Set([
   'localhost',
   '127.0.0.1',
   '0.0.0.0',
   '::1'
 ])
+
+const SEARCH_LOCALE_PROFILES: Array<{ pattern: RegExp; profile: SearchLocaleProfile }> = [
+  {
+    pattern: /[\u4e00-\u9fff]/,
+    profile: {
+      bingLanguage: 'zh-CN',
+      bingCountry: 'cn',
+      duckduckgoRegion: 'cn-zh',
+      acceptLanguage: 'zh-CN,zh;q=0.9,en;q=0.7'
+    }
+  },
+  {
+    pattern: /[\u3040-\u30ff]/,
+    profile: {
+      bingLanguage: 'ja-JP',
+      bingCountry: 'jp',
+      duckduckgoRegion: 'jp-jp',
+      acceptLanguage: 'ja-JP,ja;q=0.9,en;q=0.7'
+    }
+  },
+  {
+    pattern: /[\uac00-\ud7af]/,
+    profile: {
+      bingLanguage: 'ko-KR',
+      bingCountry: 'kr',
+      duckduckgoRegion: 'kr-kr',
+      acceptLanguage: 'ko-KR,ko;q=0.9,en;q=0.7'
+    }
+  },
+  {
+    pattern: /[а-яё]/i,
+    profile: {
+      bingLanguage: 'ru-RU',
+      bingCountry: 'ru',
+      duckduckgoRegion: 'ru-ru',
+      acceptLanguage: 'ru-RU,ru;q=0.9,en;q=0.7'
+    }
+  }
+]
+
+const DEFAULT_SEARCH_LOCALE_PROFILE: SearchLocaleProfile = {
+  bingLanguage: 'en-US',
+  bingCountry: 'us',
+  duckduckgoRegion: 'us-en',
+  acceptLanguage: 'en-US,en;q=0.9'
+}
+
+export function detectSearchLocale (query?: string): SearchLocaleProfile {
+  const sample = String(query || '').trim()
+  for (const entry of SEARCH_LOCALE_PROFILES) {
+    if (entry.pattern.test(sample)) {
+      return entry.profile
+    }
+  }
+  return DEFAULT_SEARCH_LOCALE_PROFILE
+}
+
+export function buildAcceptLanguageHeader (query?: string): string {
+  return detectSearchLocale(query).acceptLanguage
+}
 
 export function isPrivateIpAddress (address: string): boolean {
   const lower = address.toLowerCase()
@@ -129,14 +196,43 @@ function extractMetaContent (html: string, attrName: string, attrValue: string):
   return content ? decodeHtmlEntities(content.trim()) : undefined
 }
 
-export function extractReadableTextFromHtml (html: string): { title?: string; description?: string; text: string } {
-  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
-  const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/\s+/g, ' ').trim()) : undefined
-  const description = extractMetaContent(html, 'name', 'description') || extractMetaContent(html, 'property', 'og:description')
+function extractPrimaryContentHtml (html: string, sourceUrl?: string): string {
+  let hostname = ''
+  try {
+    hostname = sourceUrl ? new URL(sourceUrl).hostname.toLowerCase() : ''
+  } catch {
+    hostname = ''
+  }
 
+  if (hostname === 'github.com') {
+    const githubReadme = html.match(/<article[^>]+class=["'][^"']*markdown-body[^"']*["'][\s\S]*?<\/article>/i)
+    if (githubReadme?.[0]) {
+      return githubReadme[0]
+    }
+  }
+
+  const focusedPatterns = [
+    /<main\b[\s\S]*?<\/main>/i,
+    /<article\b[\s\S]*?<\/article>/i,
+    /<section\b[^>]+(?:id|class)=["'][^"']*(?:content|documentation|docs|article|post|readme|markdown-body)[^"']*["'][\s\S]*?<\/section>/i
+  ]
+
+  for (const pattern of focusedPatterns) {
+    const match = html.match(pattern)
+    if (match?.[0]) {
+      return match[0]
+    }
+  }
+
+  return html
+}
+
+function htmlFragmentToText (html: string): string {
   const withoutNoise = html
     .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<(script|style|noscript|template|svg|canvas)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<(script|style|noscript|template|svg|canvas|nav|footer|header|aside|form|dialog)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (_match, code: string) => `\n\n${stripHtmlToText(code)}\n\n`)
+    .replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (_match, code: string) => ` ${stripHtmlToText(code)} `)
     .replace(/<(br|\/p|\/div|\/section|\/article|\/li|\/ul|\/ol|\/tr|\/table|\/h[1-6]|\/header|\/footer|\/main|\/aside)\s*>/gi, '\n')
     .replace(/<li[^>]*>/gi, '\n- ')
     .replace(/<tr[^>]*>/gi, '\n')
@@ -144,13 +240,24 @@ export function extractReadableTextFromHtml (html: string): { title?: string; de
     .replace(/<th[^>]*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
 
-  const text = decodeHtmlEntities(withoutNoise)
+  return decodeHtmlEntities(withoutNoise)
     .replace(/\r/g, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n[ \t]+/g, '\n')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+export function extractReadableTextFromHtml (html: string, sourceUrl?: string): { title?: string; description?: string; text: string } {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+  const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/\s+/g, ' ').trim()) : undefined
+  const description = extractMetaContent(html, 'name', 'description') || extractMetaContent(html, 'property', 'og:description')
+
+  const focusedHtml = extractPrimaryContentHtml(html, sourceUrl)
+  const focusedText = htmlFragmentToText(focusedHtml)
+  const fallbackText = focusedHtml === html ? focusedText : htmlFragmentToText(html)
+  const text = focusedText.length >= Math.min(400, fallbackText.length) ? focusedText : fallbackText
 
   return { title, description, text }
 }
@@ -283,6 +390,7 @@ export async function fetchPublicWebpage (rawUrl: string, options: FetchPublicWe
       signal: controller.signal,
       headers: {
         accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,text/*;q=0.8,*/*;q=0.2',
+        'accept-language': buildAcceptLanguageHeader(options.query),
         'user-agent': 'The World AI Agent/1.0'
       }
     })
@@ -294,7 +402,7 @@ export async function fetchPublicWebpage (rawUrl: string, options: FetchPublicWe
     let sourceText = responseText
 
     if (contentType.includes('html') || contentType.includes('xml')) {
-      const extracted = extractReadableTextFromHtml(responseText)
+      const extracted = extractReadableTextFromHtml(responseText, response.url || parsedUrl.toString())
       title = extracted.title
       description = extracted.description
       sourceText = extracted.text
