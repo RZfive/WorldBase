@@ -57,7 +57,11 @@ const galleryImages = computed<GalleryImage[]>(() => {
 })
 
 function toggleThinking (id: string): void {
-  collapsedThinking[id] = !collapsedThinking[id]
+  collapsedThinking[id] = !isThinkingCollapsed(id)
+}
+
+function isThinkingCollapsed (id: string): boolean {
+  return collapsedThinking[id] !== false
 }
 
 function openLightbox (messageIndex: number, blockIndex: number, partIndex: number) {
