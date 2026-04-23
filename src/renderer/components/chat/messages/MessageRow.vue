@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { buildMessageBlocks, getContentText, hasRenderableContent } from '../message-utils'
 import type { ChatMessage, ChatMessageBlock, FilePreviewState } from '../types'
 import ThinkingBlock from '../blocks/ThinkingBlock.vue'
@@ -66,6 +67,11 @@ function getModelLabel (): string {
 function getMessageText (): string {
   return getContentText(props.msg.content)
 }
+
+const blocks = computed(() => getBlocks())
+const isStreamingAssistantMessage = computed(() => isStreamingAssistant())
+const lastContentBlockIndex = computed(() => getLastContentBlockIndex(blocks.value))
+const messageText = computed(() => getMessageText())
 </script>
 
 <template>
@@ -79,11 +85,11 @@ function getMessageText (): string {
       </div>
 
       <div class="message-flow" :class="props.msg.role">
-        <template v-for="(block, blockIndex) in getBlocks()" :key="block.id">
+        <template v-for="(block, blockIndex) in blocks" :key="block.id">
           <ThinkingBlock
             v-if="block.kind === 'thinking' && hasRenderableBlock(block)"
             :block="block"
-            :is-streaming="isStreamingAssistant()"
+            :is-streaming="isStreamingAssistantMessage"
             :is-collapsed="!!props.collapsedThinking[block.id]"
             @toggle="emit('toggleThinking', block.id)"
           />
@@ -120,13 +126,13 @@ function getMessageText (): string {
           />
 
           <ContentBlock
-            v-else-if="block.kind === 'content' && (hasRenderableBlock(block) || isStreamingContentBlock(blockIndex, getBlocks()))"
+            v-else-if="block.kind === 'content' && (hasRenderableBlock(block) || (isStreamingAssistantMessage && blockIndex === lastContentBlockIndex))"
             :block="block"
             :role="props.msg.role"
             :message-index="props.index"
             :block-index="blockIndex"
-            :is-streaming-block="isStreamingContentBlock(blockIndex, getBlocks())"
-            :message-text="getMessageText()"
+            :is-streaming-block="isStreamingAssistantMessage && blockIndex === lastContentBlockIndex"
+            :message-text="messageText"
             @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
             @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
           />
