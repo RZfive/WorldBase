@@ -196,14 +196,19 @@ function cleanupMessageObserver (index: number): void {
   messageObservers.delete(index)
 }
 
+function extractHTMLElement (element: unknown): HTMLElement | null {
+  if (element instanceof HTMLElement) return element
+  if (element && typeof element === 'object' && '$el' in element) {
+    const candidate = (element as { $el?: unknown }).$el
+    if (candidate instanceof HTMLElement) return candidate
+  }
+  return null
+}
+
 function setMessageItemRef (index: number, element: unknown): void {
   cleanupMessageObserver(index)
 
-  const item = element instanceof HTMLElement
-    ? element
-    : (element && typeof element === 'object' && '$el' in element && (element as { $el?: unknown }).$el instanceof HTMLElement
-        ? (element as { $el: HTMLElement }).$el
-        : null)
+  const item = extractHTMLElement(element)
   if (!item) return
 
   updateMeasuredHeight(index, item.offsetHeight)
@@ -220,9 +225,9 @@ function setMessageItemRef (index: number, element: unknown): void {
 }
 
 function resetVirtualMeasurements (): void {
-  Object.keys(measuredMessageHeights).forEach(key => {
+  for (const key in measuredMessageHeights) {
     delete measuredMessageHeights[Number(key)]
-  })
+  }
   messageObservers.forEach(observer => observer.disconnect())
   messageObservers.clear()
 }
