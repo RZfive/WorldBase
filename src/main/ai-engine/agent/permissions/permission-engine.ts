@@ -34,6 +34,7 @@ export interface PermissionRule {
 export interface PermissionContext {
   getMainWindow?: () => BrowserWindow | null
   getSessionState?: () => SessionState
+  getAbortSignal?: () => AbortSignal | undefined
 }
 
 /**
@@ -79,6 +80,8 @@ const ALWAYS_SAFE_TOOLS = new Set([
   'read_project_file',
   'list_project_files',
   'list_projects',
+  'list_scheduled_tasks',
+  'manage_todo_list',
   'get_project_status',
   'get_project_logs',
   'get_project_command_status',
@@ -202,6 +205,11 @@ export class PermissionEngine {
       return { allowed: approved, reason: 'MCP installation requires confirmation', askedUser: true }
     }
 
+    if (toolName === 'create_scheduled_task') {
+      const approved = await this._askUser(toolName, args, '该操作会创建一个会自动运行的 AI 定时任务')
+      return { allowed: approved, reason: 'Scheduled task creation requires confirmation', askedUser: true }
+    }
+
     // Layer 4: High-risk tools → always ask
     if (HIGH_RISK_TOOLS.has(toolName)) {
       const approved = await this._askUser(
@@ -274,6 +282,7 @@ export class PermissionEngine {
     return requestUserAuth(
       this.context.getMainWindow,
       this.context.getSessionState,
+      this.context.getAbortSignal,
       title,
       detail
     )

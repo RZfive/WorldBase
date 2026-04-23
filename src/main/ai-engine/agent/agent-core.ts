@@ -12,6 +12,7 @@ import { CostTracker, type ApiUsage } from '../cost-tracker.js'
 
 export type ProgressEvent =
   | { type: 'progress'; stage: string; detail?: string }
+  | { type: 'todo_update'; items: Array<{ id: number; title: string; status: 'not-started' | 'in-progress' | 'completed' }> }
   | { type: 'file_preview_start'; filePath: string; truncated?: boolean }
   | { type: 'file_preview_chunk'; filePath: string; content: string }
   | { type: 'file_preview_end'; filePath: string; truncated?: boolean }
@@ -29,6 +30,7 @@ export type StreamEvent =
   | { type: 'tool_start'; name: string }
   | { type: 'tool_end'; name: string }
   | { type: 'progress'; stage: string; detail?: string }
+  | { type: 'todo_update'; items: Array<{ id: number; title: string; status: 'not-started' | 'in-progress' | 'completed' }> }
   | { type: 'file_preview_start'; filePath: string; truncated?: boolean }
   | { type: 'file_preview_chunk'; filePath: string; content: string }
   | { type: 'file_preview_end'; filePath: string; truncated?: boolean }
@@ -113,6 +115,8 @@ export class AgentCore {
   private loopDetector: LoopDetector
   private skillEngine: SkillEngine
   private costTracker: CostTracker
+  private currentAbortSignal?: AbortSignal
+  private authModeResolver?: () => AIExecutionAuthMode
   /** Shared mutable state accessible by tool handlers within a session. */
   public sessionState: SessionState = { createdProjectId: null, targetProjectId: null, authMode: 'strict' }
 
@@ -157,6 +161,14 @@ export class AgentCore {
     return this.costTracker
   }
 
+  getAbortSignal (): AbortSignal | undefined {
+    return this.currentAbortSignal
+  }
+
+  getEffectiveAuthMode (): AIExecutionAuthMode {
+    return this.authModeResolver?.() ?? this.sessionState.authMode
+  }
+
   /**
    * Register a tool for the agent to use.
    */
@@ -183,6 +195,10 @@ export class AgentCore {
     this.sessionState.authMode = authMode
   }
 
+  setAuthModeResolver (resolver?: () => AIExecutionAuthMode): void {
+    this.authModeResolver = resolver
+  }
+
   setLogger (logger?: AILogSessionLogger): void {
     this.logger = logger
   }
@@ -201,7 +217,7 @@ export class AgentCore {
     this.sessionState = {
       createdProjectId: null,
       targetProjectId: this.sessionState.targetProjectId,
-      authMode: this.sessionState.authMode
+      authMode: this.getEffectiveAuthMode()
     }
     this.planEngine.reset()
     this.loopDetector.reset()
@@ -612,6 +628,7 @@ export class AgentCore {
 
   async run (userMessages: ChatMessage[]): Promise<ChatMessage> {
     this._resetSessionState()
+    this.currentAbortSignal = undefined
     const systemMessage: ChatMessage = {
       role: 'system',
       content: getSystemPrompt({
@@ -620,77 +637,81 @@ export class AgentCore {
       })
     }
 
-    let messages: ChatMessage[] = [systemMessage, ...userMessages]
-    const toolDefs = this.getToolDefinitions()
-    const loopGuard = this._createLoopGuardState()
-    let segmentIterations = 0
+    try {
+      let messages: ChatMessage[] = [systemMessage, ...userMessages]
+      const toolDefs = this.getToolDefinitions()
+      const loopGuard = this._createLoopGuardState()
+      let segmentIterations = 0
 
-    while (true) {
-      const stopReason = this._getLoopStopReason(loopGuard)
-      if (stopReason) {
-        return this._buildStopMessage(stopReason)
-      }
-
-      if (segmentIterations >= this.maxIterations) {
-        messages = await this._prepareAutomaticContinuation(messages, loopGuard)
-        segmentIterations = 0
-      }
-
-      const forceCompression = segmentIterations > 0 && segmentIterations % this.proactiveCompressionInterval === 0
-      messages = await this._compressContextIfNeeded(messages, undefined, undefined, forceCompression)
-      segmentIterations++
-      loopGuard.totalIterations++
-
-      const response = await this.provider.chatCompletion(messages, toolDefs)
-
-      if (!response.tool_calls || response.tool_calls.length === 0) {
-        return {
-          role: 'assistant',
-          content: response.content || ''
-        }
-      }
-
-      messages.push(response)
-      const executions: ToolExecutionRecord[] = []
-
-      for (const toolCall of response.tool_calls) {
-        const toolName = toolCall.function.name
-
-        let result: unknown
-        let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
-        try {
-          toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
-          result = await this._executeTool(toolName, toolArgs)
-        } catch (err) {
-          result = { error: (err as Error).message }
+      while (true) {
+        const stopReason = this._getLoopStopReason(loopGuard)
+        if (stopReason) {
+          return this._buildStopMessage(stopReason)
         }
 
-        executions.push({ name: toolName, args: toolArgs, result })
-        this.logger?.logToolExecution({
-          name: toolName,
-          rawArguments: toolCall.function.arguments,
-          parsedArguments: toolArgs,
-          result,
-          status: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? 'failed' : 'completed',
-          error: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? String((result as Record<string, unknown>).error) : undefined
-        })
+        if (segmentIterations >= this.maxIterations) {
+          messages = await this._prepareAutomaticContinuation(messages, loopGuard)
+          segmentIterations = 0
+        }
 
-        // Process result through ToolResultStorage (handles large outputs)
-        const resultContent = await this._processToolResult(result, toolName, toolCall.id)
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: resultContent
-        })
+        const forceCompression = segmentIterations > 0 && segmentIterations % this.proactiveCompressionInterval === 0
+        messages = await this._compressContextIfNeeded(messages, undefined, undefined, forceCompression)
+        segmentIterations++
+        loopGuard.totalIterations++
+
+        const response = await this.provider.chatCompletion(messages, toolDefs)
+
+        if (!response.tool_calls || response.tool_calls.length === 0) {
+          return {
+            role: 'assistant',
+            content: response.content || ''
+          }
+        }
+
+        messages.push(response)
+        const executions: ToolExecutionRecord[] = []
+
+        for (const toolCall of response.tool_calls) {
+          const toolName = toolCall.function.name
+
+          let result: unknown
+          let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
+          try {
+            toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
+            result = await this._executeTool(toolName, toolArgs)
+          } catch (err) {
+            result = { error: (err as Error).message }
+          }
+
+          executions.push({ name: toolName, args: toolArgs, result })
+          this.logger?.logToolExecution({
+            name: toolName,
+            rawArguments: toolCall.function.arguments,
+            parsedArguments: toolArgs,
+            result,
+            status: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? 'failed' : 'completed',
+            error: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? String((result as Record<string, unknown>).error) : undefined
+          })
+
+          // Process result through ToolResultStorage (handles large outputs)
+          const resultContent = await this._processToolResult(result, toolName, toolCall.id)
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: resultContent
+          })
+        }
+
+        this._recordIterationActivity(loopGuard, executions)
+
+        // Enhanced loop detection with SHA-256 hashing
+        const loopResult = this.loopDetector.record(executions)
+        if (loopResult.looping) {
+          return this._buildStopMessage(loopResult.reason!)
+        }
       }
-
-      this._recordIterationActivity(loopGuard, executions)
-
-      // Enhanced loop detection with SHA-256 hashing
-      const loopResult = this.loopDetector.record(executions)
-      if (loopResult.looping) {
-        return this._buildStopMessage(loopResult.reason!)
-      }
+    } finally {
+      this.currentAbortSignal = undefined
     }
   }
 
@@ -700,6 +721,7 @@ export class AgentCore {
    */
   async * runStream (userMessages: ChatMessage[], onProgress?: ProgressCallback, abortSignal?: AbortSignal): AsyncGenerator<StreamEvent> {
     this._resetSessionState()
+    this.currentAbortSignal = abortSignal
     const systemMessage: ChatMessage = {
       role: 'system',
       content: getSystemPrompt({
@@ -708,37 +730,38 @@ export class AgentCore {
       })
     }
 
-    let messages: ChatMessage[] = [systemMessage, ...userMessages]
-    const toolDefs = this.getToolDefinitions()
-    const loopGuard = this._createLoopGuardState()
-    let segmentIterations = 0
-    let renderedContent = ''
-    let fullThinking = ''
+    try {
+      let messages: ChatMessage[] = [systemMessage, ...userMessages]
+      const toolDefs = this.getToolDefinitions()
+      const loopGuard = this._createLoopGuardState()
+      let segmentIterations = 0
+      let renderedContent = ''
+      let fullThinking = ''
 
-    while (true) {
-      this._throwIfAborted(abortSignal)
-      const stopReason = this._getLoopStopReason(loopGuard)
-      if (stopReason) {
-        yield {
-          type: 'done',
-          message: {
-            role: 'assistant',
-            content: this._appendStopReason(renderedContent, stopReason)
-          },
-          thinking: fullThinking || undefined
+      while (true) {
+        this._throwIfAborted(abortSignal)
+        const stopReason = this._getLoopStopReason(loopGuard)
+        if (stopReason) {
+          yield {
+            type: 'done',
+            message: {
+              role: 'assistant',
+              content: this._appendStopReason(renderedContent, stopReason)
+            },
+            thinking: fullThinking || undefined
+          }
+          return
         }
-        return
-      }
 
-      if (segmentIterations >= this.maxIterations) {
-        messages = await this._prepareAutomaticContinuation(messages, loopGuard, onProgress, abortSignal)
-        segmentIterations = 0
-      }
+        if (segmentIterations >= this.maxIterations) {
+          messages = await this._prepareAutomaticContinuation(messages, loopGuard, onProgress, abortSignal)
+          segmentIterations = 0
+        }
 
-      const forceCompression = segmentIterations > 0 && segmentIterations % this.proactiveCompressionInterval === 0
-      messages = await this._compressContextIfNeeded(messages, forceCompression ? undefined : onProgress, abortSignal, forceCompression)
-      segmentIterations++
-      loopGuard.totalIterations++
+        const forceCompression = segmentIterations > 0 && segmentIterations % this.proactiveCompressionInterval === 0
+        messages = await this._compressContextIfNeeded(messages, forceCompression ? undefined : onProgress, abortSignal, forceCompression)
+        segmentIterations++
+        loopGuard.totalIterations++
 
       let assistantMessage: ChatMessage | null = null
       let iterationThinking = ''
@@ -809,67 +832,73 @@ export class AgentCore {
       messages.push(assistantMessage)
       const executions: ToolExecutionRecord[] = []
 
-      for (const toolCall of assistantMessage.tool_calls) {
-        const toolName = toolCall.function.name
-        this._throwIfAborted(abortSignal)
-
-        yield { type: 'tool_start', name: toolName }
-
-        let result: unknown
-        let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
-        try {
-          toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
-          result = await this._executeTool(toolName, toolArgs, onProgress)
+        for (const toolCall of assistantMessage.tool_calls) {
+          const toolName = toolCall.function.name
           this._throwIfAborted(abortSignal)
-        } catch (err) {
-          result = { error: (err as Error).message }
+
+          yield { type: 'tool_start', name: toolName }
+
+          let result: unknown
+          let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
+          try {
+            toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
+            result = await this._executeTool(toolName, toolArgs, onProgress)
+            this._throwIfAborted(abortSignal)
+          } catch (err) {
+            if (abortSignal?.aborted || (err as Error).message === USER_ABORT_MESSAGE) {
+              throw normalizeAbortReason(abortSignal?.reason ?? err, USER_ABORT_MESSAGE)
+            }
+            result = { error: (err as Error).message }
+          }
+
+          executions.push({ name: toolName, args: toolArgs, result })
+          this.logger?.logToolExecution({
+            name: toolName,
+            rawArguments: toolCall.function.arguments,
+            parsedArguments: toolArgs,
+            result,
+            status: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? 'failed' : 'completed',
+            error: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? String((result as Record<string, unknown>).error) : undefined
+          })
+
+          yield { type: 'tool_end', name: toolName }
+
+          // Process result through ToolResultStorage (handles large outputs)
+          const resultContent = await this._processToolResult(result, toolName, toolCall.id)
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: resultContent
+          })
         }
 
-        executions.push({ name: toolName, args: toolArgs, result })
-        this.logger?.logToolExecution({
-          name: toolName,
-          rawArguments: toolCall.function.arguments,
-          parsedArguments: toolArgs,
-          result,
-          status: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? 'failed' : 'completed',
-          error: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? String((result as Record<string, unknown>).error) : undefined
-        })
+        this._recordIterationActivity(loopGuard, executions)
 
-        yield { type: 'tool_end', name: toolName }
-
-        // Process result through ToolResultStorage (handles large outputs)
-        const resultContent = await this._processToolResult(result, toolName, toolCall.id)
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: resultContent
-        })
-      }
-
-      this._recordIterationActivity(loopGuard, executions)
-
-      // Enhanced loop detection with SHA-256 hashing
-      const loopResult = this.loopDetector.record(executions)
-      if (loopResult.looping) {
-        yield {
-          type: 'done',
-          message: {
-            role: 'assistant',
-            content: this._appendStopReason(renderedContent, loopResult.reason!)
-          },
-          thinking: fullThinking || undefined
+        // Enhanced loop detection with SHA-256 hashing
+        const loopResult = this.loopDetector.record(executions)
+        if (loopResult.looping) {
+          yield {
+            type: 'done',
+            message: {
+              role: 'assistant',
+              content: this._appendStopReason(renderedContent, loopResult.reason!)
+            },
+            thinking: fullThinking || undefined
+          }
+          return
         }
-        return
       }
-    }
 
-    yield {
-      type: 'done',
-      message: {
-        role: 'assistant',
-        content: renderedContent || '本次流式响应提前结束，未返回完整结果。请继续处理，或重试一次。'
-      },
-      thinking: fullThinking || undefined
+      yield {
+        type: 'done',
+        message: {
+          role: 'assistant',
+          content: renderedContent || '本次流式响应提前结束，未返回完整结果。请继续处理，或重试一次。'
+        },
+        thinking: fullThinking || undefined
+      }
+    } finally {
+      this.currentAbortSignal = undefined
     }
   }
 

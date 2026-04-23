@@ -173,6 +173,21 @@ async function withTimeout<T> (promise: Promise<T>, timeoutMs: number, label: st
   }
 }
 
+function normalizeAllowedServerIds (allowedServerIds?: Iterable<string>): Set<string> | null {
+  if (!allowedServerIds) return null
+
+  const normalized = new Set<string>()
+  for (const serverId of allowedServerIds) {
+    if (typeof serverId !== 'string') continue
+    const trimmed = serverId.trim()
+    if (trimmed) {
+      normalized.add(trimmed)
+    }
+  }
+
+  return normalized.size > 0 ? normalized : null
+}
+
 export class MCPService extends EventEmitter {
   private sessions = new Map<string, MCPServerSession>()
 
@@ -217,16 +232,32 @@ export class MCPService extends EventEmitter {
     }
   }
 
-  getCachedDynamicToolDefinitions (): ToolDefinition[] {
+  getCachedDynamicToolDefinitions (allowedServerIds?: Iterable<string>): ToolDefinition[] {
+    const allowedServerIdSet = normalizeAllowedServerIds(allowedServerIds)
     return Array.from(this.sessions.values())
-      .filter(session => session.config.enabled)
+      .filter(session => session.config.enabled && (!allowedServerIdSet || allowedServerIdSet.has(session.config.id)))
       .flatMap(session => Array.from(session.bindings.values()).map(binding => binding.definition))
   }
 
-  getBuiltinToolRegistrations (): Array<{
+  getBuiltinToolRegistrations (allowedServerIds?: Iterable<string>): Array<{
     definition: ToolDefinition
     handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>
   }> {
+    const allowedServerIdSet = normalizeAllowedServerIds(allowedServerIds)
+    const assertServerAllowed = (serverId: string): void => {
+      if (allowedServerIdSet && !allowedServerIdSet.has(serverId)) {
+        throw new Error(`MCP 服务器 ${serverId} 未被当前任务授权`)
+      }
+    }
+    const getFilteredState = (): MCPStateSnapshot => {
+      const state = this.getState()
+      if (!allowedServerIdSet) return state
+      return {
+        ...state,
+        servers: state.servers.filter(server => allowedServerIdSet.has(server.id))
+      }
+    }
+
     return [
       {
         definition: {
@@ -239,7 +270,7 @@ export class MCPService extends EventEmitter {
           }
         },
         handler: async () => {
-          return this.getState()
+          return getFilteredState()
         }
       },
       {
@@ -257,6 +288,7 @@ export class MCPService extends EventEmitter {
         handler: async (args) => {
           const serverId = typeof args.server_id === 'string' ? args.server_id.trim() : ''
           if (serverId) {
+            assertServerAllowed(serverId)
             const snapshot = await this.refreshServer(serverId)
             return {
               server: snapshot.name,
@@ -265,9 +297,9 @@ export class MCPService extends EventEmitter {
             }
           }
 
-          await this.refreshEnabledServers()
+          await this.refreshEnabledServers(allowedServerIdSet ?? undefined)
           return {
-            servers: this.getState().servers.map(server => ({
+            servers: getFilteredState().servers.map(server => ({
               server_id: server.id,
               server: server.name,
               resources: server.resources
@@ -296,6 +328,7 @@ export class MCPService extends EventEmitter {
             throw new Error('server_id 和 uri 为必填项')
           }
 
+          assertServerAllowed(serverId)
           const session = await this.ensureConnected(serverId)
           const result = await withTimeout(session.client!.readResource({ uri }), session.config.timeoutMs, `读取 ${serverId} 资源`)
           return {
@@ -320,6 +353,7 @@ export class MCPService extends EventEmitter {
         handler: async (args) => {
           const serverId = typeof args.server_id === 'string' ? args.server_id.trim() : ''
           if (serverId) {
+            assertServerAllowed(serverId)
             const snapshot = await this.refreshServer(serverId)
             return {
               server: snapshot.name,
@@ -328,9 +362,9 @@ export class MCPService extends EventEmitter {
             }
           }
 
-          await this.refreshEnabledServers()
+          await this.refreshEnabledServers(allowedServerIdSet ?? undefined)
           return {
-            servers: this.getState().servers.map(server => ({
+            servers: getFilteredState().servers.map(server => ({
               server_id: server.id,
               server: server.name,
               prompts: server.prompts
@@ -364,6 +398,7 @@ export class MCPService extends EventEmitter {
             throw new Error('server_id 和 name 为必填项')
           }
 
+          assertServerAllowed(serverId)
           const session = await this.ensureConnected(serverId)
           const promptArgs = normalizePromptArgsMap(args.arguments)
           const result = await withTimeout(session.client!.getPrompt({ name, arguments: promptArgs }), session.config.timeoutMs, `读取 ${serverId} Prompt`)
@@ -379,8 +414,12 @@ export class MCPService extends EventEmitter {
     ]
   }
 
-  async refreshEnabledServers (): Promise<void> {
-    const enabledSessions = Array.from(this.sessions.values()).filter(session => session.config.enabled)
+  async refreshEnabledServers (allowedServerIds?: Iterable<string>): Promise<void> {
+    const allowedServerIdSet = normalizeAllowedServerIds(allowedServerIds)
+    const enabledSessions = Array.from(this.sessions.values()).filter(session => {
+      if (!session.config.enabled) return false
+      return !allowedServerIdSet || allowedServerIdSet.has(session.config.id)
+    })
     await Promise.allSettled(enabledSessions.map(async (session) => {
       await this.ensureConnected(session.config.id)
       await this.refreshSessionMetadata(session)
@@ -414,10 +453,15 @@ export class MCPService extends EventEmitter {
     return this.buildSnapshot(session)
   }
 
-  async executeDynamicTool (localName: string, args: Record<string, unknown>, onProgress?: ProgressCallback): Promise<unknown> {
+  async executeDynamicTool (localName: string, args: Record<string, unknown>, onProgress?: ProgressCallback, allowedServerIds?: Iterable<string>): Promise<unknown> {
     const binding = this.findBinding(localName)
     if (!binding) {
       throw new Error(`未知的 MCP 工具: ${localName}`)
+    }
+
+    const allowedServerIdSet = normalizeAllowedServerIds(allowedServerIds)
+    if (allowedServerIdSet && !allowedServerIdSet.has(binding.serverId)) {
+      throw new Error(`MCP 服务器 ${binding.serverId} 未被当前任务授权`)
     }
 
     const session = await this.ensureConnected(binding.serverId)

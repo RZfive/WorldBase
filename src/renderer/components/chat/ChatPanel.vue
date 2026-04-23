@@ -5,15 +5,24 @@ import MessageList from './messages/MessageList.vue'
 import ChatInput from './layout/ChatInput.vue'
 import ChatHeader from './layout/ChatHeader.vue'
 import DocumentDock from './layout/DocumentDock.vue'
+import PinnedTodoPanel from './layout/PinnedTodoPanel.vue'
 import { emitAuthResolution, onAuthResolution, type AuthResolutionPayload } from '../../utils/auth-events'
 
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 type AIExecutionAuthMode = 'strict' | 'auto'
+type TodoStatus = 'not-started' | 'in-progress' | 'completed'
+
+interface TodoItem {
+  id: number
+  title: string
+  status: TodoStatus
+}
 
 type ChatMessageBlock =
   | { id: string; kind: 'content'; content: MessageContent }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
+  | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
@@ -211,6 +220,8 @@ const isLoading = computed(() => {
   return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
 })
 
+const activeTodoItems = computed(() => getLatestVisibleTodoItems(messages.value, isLoading.value))
+
 const currentModelLabel = computed(() => {
   const provider = providers.value.find(item => item.id === activeProviderId.value)
   const labelParts = [selectedModel.value, provider?.name].filter(Boolean)
@@ -306,6 +317,14 @@ function createToolBlock (toolRun: ToolRun): ChatMessageBlock {
     id: createBlockId('tool'),
     kind: 'tool',
     toolRun
+  }
+}
+
+function createTodoBlock (items: TodoItem[]): ChatMessageBlock {
+  return {
+    id: createBlockId('todo'),
+    kind: 'todo',
+    items: items.map(item => ({ ...item }))
   }
 }
 
@@ -464,6 +483,56 @@ function findLastRunningToolBlock (message: ChatMessage): Extract<ChatMessageBlo
   return null
 }
 
+function getLatestTodoBlock (message: ChatMessage): Extract<ChatMessageBlock, { kind: 'todo' }> | null {
+  const blocks = Array.isArray(message.blocks) ? message.blocks : []
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    const block = blocks[index]
+    if (block.kind === 'todo') {
+      return block
+    }
+  }
+  return null
+}
+
+function getLatestVisibleTodoItems (chatMessages: ChatMessage[] = messages.value, loading = isLoading.value): TodoItem[] {
+  const latestAssistant = findLatestAssistantMessage(chatMessages)
+  if (!latestAssistant) {
+    return []
+  }
+
+  const todoBlock = getLatestTodoBlock(latestAssistant)
+  if (!todoBlock) {
+    return []
+  }
+
+  if (!loading && todoBlock.items.length > 0 && todoBlock.items.every(item => item.status === 'completed')) {
+    return []
+  }
+
+  return todoBlock.items.map(item => ({ ...item }))
+}
+
+function syncTodoBlock (message: ChatMessage, items: TodoItem[]): void {
+  const blocks = ensureBlocks(message)
+  const nextItems = items.map(item => ({ ...item }))
+  const existing = getLatestTodoBlock(message)
+  if (nextItems.length === 0) {
+    if (!existing) return
+    const blockIndex = blocks.findIndex(block => block.id === existing.id)
+    if (blockIndex >= 0) {
+      blocks.splice(blockIndex, 1)
+    }
+    return
+  }
+
+  if (existing) {
+    existing.items = nextItems
+    return
+  }
+
+  blocks.push(createTodoBlock(nextItems))
+}
+
 function findLatestAssistantMessage (chatMessages: ChatMessage[] = messages.value): ChatMessage | null {
   for (let index = chatMessages.length - 1; index >= 0; index--) {
     if (chatMessages[index].role === 'assistant') {
@@ -471,6 +540,124 @@ function findLatestAssistantMessage (chatMessages: ChatMessage[] = messages.valu
     }
   }
   return null
+}
+
+function getMessageTextContent (content: MessageContent): string {
+  if (typeof content === 'string') {
+    return content.trim()
+  }
+
+  return content
+    .filter(part => part.type === 'text')
+    .map(part => part.text || '')
+    .join(' ')
+    .trim()
+}
+
+function isAssistantMessageStopped (message: ChatMessage): boolean {
+  if (getMessageTextContent(message.content).includes('(已停止)')) {
+    return true
+  }
+
+  const toolRuns = Array.isArray(message.toolRuns) && message.toolRuns.length > 0
+    ? message.toolRuns
+    : (Array.isArray(message.blocks)
+        ? message.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'tool' }> => block.kind === 'tool').map(block => block.toolRun)
+        : [])
+
+  return toolRuns.some(toolRun => toolRun.progress.some(step => step.stage === '已停止'))
+}
+
+function buildInterruptedRunSummary (history: ChatMessage[]): string | null {
+  const latestAssistant = findLatestAssistantMessage(history)
+  if (!latestAssistant || !isAssistantMessageStopped(latestAssistant)) {
+    return null
+  }
+
+  const lines = [
+    '以下是上一轮被用户手动终止时的执行进度。如果用户是在继续同一个任务，请把这些内容视为已经完成或已知状态，不要要求用户重复说明，也不要重复已完成的步骤。'
+  ]
+
+  const todoBlock = getLatestTodoBlock(latestAssistant)
+  if (todoBlock && todoBlock.items.length > 0) {
+    lines.push('当前 Todo 状态：')
+    for (const item of todoBlock.items) {
+      const statusLabel = item.status === 'completed'
+        ? '已完成'
+        : item.status === 'in-progress'
+          ? '进行中'
+          : '未开始'
+      lines.push(`- [${statusLabel}] ${item.id}. ${item.title}`)
+    }
+  }
+
+  const toolRuns = Array.isArray(latestAssistant.toolRuns) && latestAssistant.toolRuns.length > 0
+    ? latestAssistant.toolRuns
+    : (Array.isArray(latestAssistant.blocks)
+        ? latestAssistant.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'tool' }> => block.kind === 'tool').map(block => block.toolRun)
+        : [])
+
+  if (toolRuns.length > 0) {
+    lines.push('上一轮工具执行进度：')
+    for (const toolRun of toolRuns) {
+      const statusLabel = toolRun.status === 'failed'
+        ? '失败'
+        : toolRun.progress.some(step => step.stage === '已停止')
+          ? '已中断'
+          : toolRun.status === 'completed'
+            ? '已完成'
+            : '执行中'
+      const recentProgress = toolRun.progress.slice(-3).map(step => step.detail ? `${step.stage}: ${step.detail}` : step.stage)
+      lines.push(`- ${toolRun.name} [${statusLabel}]${recentProgress.length > 0 ? ` -> ${recentProgress.join(' | ')}` : ''}`)
+    }
+  }
+
+  const authBlocks = Array.isArray(latestAssistant.blocks)
+    ? latestAssistant.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'auth_request' }> => block.kind === 'auth_request')
+    : []
+  if (authBlocks.length > 0) {
+    lines.push('授权记录：')
+    for (const block of authBlocks) {
+      const statusLabel = block.status === 'approved' ? '已允许' : block.status === 'denied' ? '已拒绝' : '等待中'
+      lines.push(`- ${statusLabel}: ${block.title}`)
+    }
+  }
+
+  const previewBlocks = Array.isArray(latestAssistant.blocks)
+    ? latestAssistant.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'file_preview' }> => block.kind === 'file_preview')
+    : []
+  if (previewBlocks.length > 0) {
+    lines.push('已生成或查看过的文件预览：')
+    for (const block of previewBlocks.slice(-3)) {
+      lines.push(`- ${block.filePath}`)
+    }
+  }
+
+  return lines.join('\n')
+}
+
+function buildOutgoingChatMessages (sourceMessages: ChatMessage[]): Array<{ role: string; content: MessageContent }> {
+  const outgoingMessages = sourceMessages.map(message => ({
+    role: message.role,
+    content: message.content
+  }))
+
+  if (sourceMessages.length === 0) {
+    return outgoingMessages
+  }
+
+  const summary = buildInterruptedRunSummary(sourceMessages.slice(0, -1))
+  if (!summary) {
+    return outgoingMessages
+  }
+
+  const insertIndex = Math.max(outgoingMessages.length - 1, 0)
+  outgoingMessages.splice(insertIndex, 0, {
+    role: 'system',
+    content: summary
+  })
+
+  return outgoingMessages
 }
 
 function finalizePendingAuthBlocks (message: ChatMessage): void {
@@ -781,6 +968,13 @@ async function handleModelSelectionChange (model: string) {
 
 async function handleAuthModeChange (authMode: AIExecutionAuthMode) {
   currentAuthMode.value = authMode
+  const activeConversationId = currentConversationId.value
+  const activeSessionId = activeConversationId ? activeStreamSessionIds.get(activeConversationId) : null
+  if (activeSessionId && window.electronAPI?.updateChatSessionAuthMode) {
+    try {
+      await window.electronAPI.updateChatSessionAuthMode(activeSessionId, authMode)
+    } catch { /* ignore */ }
+  }
   if (!currentConversationId.value) return
   await doSaveConversation(currentConversationId.value, messages.value, {
     targetProjectId: targetProjectId.value,
@@ -1233,6 +1427,8 @@ async function sendMessage () {
             toolRuns.push(toolRun)
             ensureBlocks(assistantMessage).push(createToolBlock(toolRun))
             syncAssistantToolRuns()
+          } else if (event.type === 'todo_update' && Array.isArray(event.items)) {
+            syncTodoBlock(assistantMessage, event.items)
           } else if (event.type === 'progress' && event.stage) {
             const activeToolRun = ensureActiveToolRun()
             activeToolRun.progress.push({ stage: event.stage, detail: event.detail })
@@ -1309,10 +1505,7 @@ async function sendMessage () {
 
       activeCleanups.set(sessionId, cleanup)
 
-      const chatMessages = JSON.parse(JSON.stringify(targetMessages.slice(0, -1).map(m => ({
-        role: m.role,
-        content: m.content
-      }))))
+      const chatMessages = JSON.parse(JSON.stringify(buildOutgoingChatMessages(targetMessages.slice(0, -1))))
       await window.electronAPI.chatStream(
         chatMessages,
         sessionId,
@@ -1336,7 +1529,7 @@ async function sendMessage () {
         }
       }
     } else {
-      const chatMessages = JSON.parse(JSON.stringify(targetMessages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))))
+      const chatMessages = JSON.parse(JSON.stringify(buildOutgoingChatMessages(targetMessages.slice(0, -1))))
       const res = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1448,7 +1641,14 @@ onUnmounted(() => {
         @toggle-plan-mode="togglePlanMode"
       />
 
+      <PinnedTodoPanel
+        v-if="activeTodoItems.length > 0"
+        :items="activeTodoItems"
+        :is-loading="isLoading"
+      />
+
       <MessageList
+        :key="currentConversationId || 'draft'"
         :messages="messages"
         :is-loading="isLoading"
         :file-preview="filePreview"

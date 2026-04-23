@@ -1,9 +1,6 @@
 import { type BrowserWindow, ipcMain } from 'electron'
 import type { SessionState } from '../agent-core.js'
 
-/** Timeout in ms before auto-denying an auth request. */
-const AUTH_TIMEOUT_MS = 120_000
-
 /**
  * Show a confirmation request inside the app before executing a sensitive operation.
  * Returns true if the user approved, false otherwise.
@@ -11,6 +8,7 @@ const AUTH_TIMEOUT_MS = 120_000
 export async function requestUserAuth (
   getMainWindow: (() => BrowserWindow | null) | undefined,
   getSessionState: (() => SessionState) | undefined,
+  getAbortSignal: (() => AbortSignal | undefined) | undefined,
   title: string,
   detail: string
 ): Promise<boolean> {
@@ -21,8 +19,7 @@ export async function requestUserAuth (
   }
 
   try {
-    const authMode = getSessionState?.().authMode ?? 'strict'
-    return await requestUserAuthViaRenderer(win, title, detail, authMode)
+    return await requestUserAuthViaRenderer(win, title, detail, getSessionState, getAbortSignal)
   } catch {
     return false
   }
@@ -39,7 +36,8 @@ function requestUserAuthViaRenderer (
   win: BrowserWindow,
   title: string,
   detail: string,
-  authMode: SessionState['authMode']
+  getSessionState: (() => SessionState) | undefined,
+  getAbortSignal: (() => AbortSignal | undefined) | undefined
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const requestId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -52,24 +50,31 @@ function requestUserAuthViaRenderer (
       detail
     })
 
-    if (authMode === 'auto') {
+    const resolveCurrentMode = (): SessionState['authMode'] => getSessionState?.().authMode ?? 'strict'
+    if (resolveCurrentMode() === 'auto') {
       emitAuthResolved(win, requestId, true)
       resolve(true)
       return
     }
 
     let settled = false
-    let timer: ReturnType<typeof setTimeout> | null = null
+    let authModePoll: ReturnType<typeof setInterval> | null = null
     let handler: AuthResponseHandler | null = null
+    let abortSignal: AbortSignal | undefined
+    let abortListener: (() => void) | null = null
 
     function cleanup () {
-      if (timer) {
-        clearTimeout(timer)
-        timer = null
+      if (authModePoll) {
+        clearInterval(authModePoll)
+        authModePoll = null
       }
       if (handler) {
         ipcMain.removeListener('auth:response', handler)
         handler = null
+      }
+      if (abortSignal && abortListener) {
+        abortSignal.removeEventListener('abort', abortListener)
+        abortListener = null
       }
     }
 
@@ -88,8 +93,21 @@ function requestUserAuthViaRenderer (
 
     ipcMain.on('auth:response', handler)
 
-    timer = setTimeout(() => {
-      finish(false) // Auto-deny after timeout
-    }, AUTH_TIMEOUT_MS)
+    authModePoll = setInterval(() => {
+      if (resolveCurrentMode() === 'auto') {
+        finish(true)
+      }
+    }, 200)
+
+    abortSignal = getAbortSignal?.()
+    if (abortSignal?.aborted) {
+      finish(false)
+      return
+    }
+
+    abortListener = () => {
+      finish(false)
+    }
+    abortSignal?.addEventListener('abort', abortListener, { once: true })
   })
 }

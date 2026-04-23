@@ -49,7 +49,7 @@ export interface Tool {
  * Tool: local_write_file — 在用户本地电脑写入文件（需要用户授权）
  * 支持生成办公文件格式: .xlsx, .docx, .pptx
  */
-export function toolLocalWriteFile (services: ToolServices, getSessionState?: () => SessionState): Tool {
+export function toolLocalWriteFile (services: ToolServices, getSessionState?: () => SessionState, getAbortSignal?: () => AbortSignal | undefined): Tool {
   return {
     definition: {
       name: 'local_write_file',
@@ -123,6 +123,7 @@ export function toolLocalWriteFile (services: ToolServices, getSessionState?: ()
       const authorized = await requestUserAuth(
         services.getMainWindow,
         getSessionState,
+        getAbortSignal,
         'AI requests a local file write',
         `The AI assistant wants to create a file at this path:\n\n${resolvedPath}\n\nAllow it?`
       )
