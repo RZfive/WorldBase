@@ -21,10 +21,13 @@ const SEGMENT_BLOCK_LIMIT = 6
 const SEGMENT_OVERSCAN = 2
 // Approximate markdown slice height before ResizeObserver measurements arrive.
 const SEGMENT_ESTIMATED_HEIGHT = 220
+// Keep reopened fenced-code slices large enough to remain readable after wrapper overhead is added back.
+const MIN_FENCE_CONTENT_CHARS = 400
 
 const viewportRef = ref<HTMLElement | null>(null)
 const viewportScrollTop = ref(0)
 const viewportHeight = ref(0)
+const savedViewportScrollTop = ref(0)
 const measuredSegmentHeights = reactive<Record<number, number>>({})
 const segmentObservers = new Map<number, ResizeObserver>()
 let viewportObserver: ResizeObserver | null = null
@@ -65,7 +68,7 @@ function splitOversizedBlock (block: string, maxChars: number): string[] {
     let bufferLength = 0
     const wrapperLength = lines[0].length + lines[lines.length - 1].length + 2
     // Preserve room for reopening/closing fenced code blocks while still keeping each slice useful.
-    const safeMaxChars = Math.max(maxChars - wrapperLength, 400)
+    const safeMaxChars = Math.max(maxChars - wrapperLength, MIN_FENCE_CONTENT_CHARS)
 
     for (const line of contentLines) {
       const nextLength = bufferLength + line.length + (buffer.length > 0 ? 1 : 0)
@@ -182,6 +185,7 @@ const shouldUseSegmentWindow = computed(() => thinkingSegments.value.length > 1)
 function syncViewportMetrics (): void {
   if (!viewportRef.value) return
   viewportScrollTop.value = viewportRef.value.scrollTop
+  savedViewportScrollTop.value = viewportScrollTop.value
   viewportHeight.value = viewportRef.value.clientHeight
 }
 
@@ -275,7 +279,7 @@ function setSegmentRef (index: number, element: Element | null): void {
 }
 
 function resetSegmentMeasurements (): void {
-  for (const key in measuredSegmentHeights) delete measuredSegmentHeights[Number(key)]
+  Object.keys(measuredSegmentHeights).forEach(key => delete measuredSegmentHeights[Number(key)])
   segmentObservers.forEach(observer => observer.disconnect())
   segmentObservers.clear()
 }
@@ -294,10 +298,11 @@ watch(
   () => props.isCollapsed,
   (collapsed) => {
     if (!collapsed) {
-      nextTick(syncViewportMetrics)
-      return
+      nextTick(() => {
+        if (viewportRef.value) viewportRef.value.scrollTop = savedViewportScrollTop.value
+        syncViewportMetrics()
+      })
     }
-    viewportScrollTop.value = 0
   }
 )
 
