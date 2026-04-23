@@ -24,7 +24,7 @@ export interface Tool {
  * Tool: local_read_file — 读取用户本地电脑上的任意文件（需要用户授权）
  * 支持办公文件格式: .xlsx, .docx, .pptx（自动解析内容）
  */
-export function toolLocalFileRead (services: ToolServices, getSessionState?: () => SessionState): Tool {
+export function toolLocalFileRead (services: ToolServices, getSessionState?: () => SessionState, getAbortSignal?: () => AbortSignal | undefined): Tool {
   return {
     definition: {
       name: 'local_read_file',
@@ -52,6 +52,7 @@ export function toolLocalFileRead (services: ToolServices, getSessionState?: () 
       const authorized = await requestUserAuth(
         services.getMainWindow,
         getSessionState,
+        getAbortSignal,
         'AI requests a local file read',
         `The AI assistant wants to read this file:\n\n${resolvedPath}\n\nAllow it?`
       )

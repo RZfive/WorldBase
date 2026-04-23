@@ -14,6 +14,7 @@ import type { AIExecutionAuthMode, SettingsStore } from '../settings/settings-st
 import type { AILogSessionLogger } from '../settings/ai-log-store.js'
 import type { MCPService } from '../mcp/mcp-service.js'
 import type { SkillStore } from '../settings/skill-store.js'
+import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.js'
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
 
@@ -30,6 +31,7 @@ export interface AIEngineServices {
   getMainWindow?: () => BrowserWindow | null
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   mcpService?: MCPService
+  scheduledTaskService?: ScheduledTaskService
 }
 
 export interface AIConfigInput {
@@ -45,7 +47,10 @@ export interface AIRequestOptions {
   providerConfig?: AIConfigInput
   abortSignal?: AbortSignal
   authMode?: AIExecutionAuthMode
+  getAuthMode?: () => AIExecutionAuthMode
   aiLogger?: AILogSessionLogger
+  activeSkillContents?: string[]
+  allowedMcpServerIds?: string[]
 }
 
 /**
@@ -63,6 +68,10 @@ export class AIEngine {
 
   constructor (services: AIEngineServices) {
     this.services = services
+  }
+
+  setScheduledTaskService (scheduledTaskService?: ScheduledTaskService): void {
+    this.services.scheduledTaskService = scheduledTaskService
   }
 
   private applyConfigToProvider (provider: OpenAIProvider, config: AIConfigInput): void {
@@ -92,16 +101,21 @@ export class AIEngine {
     provider.setLogger(options?.aiLogger)
 
     const agent = new AgentCore(provider, this.services as unknown as Record<string, unknown>)
+    agent.setAuthModeResolver(options?.getAuthMode)
     registerAllTools(agent, this.services)
-    this.registerMcpTools(agent)
-    agent.setActiveSkills(this.activeSkillContents)
+    this.registerMcpTools(agent, options?.allowedMcpServerIds)
+    agent.setActiveSkills(options?.activeSkillContents ?? this.activeSkillContents)
     agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
     agent.setAuthMode(options?.authMode ?? 'strict')
     agent.setLogger(options?.aiLogger)
     // Wire up permission engine with window context for user-auth dialogs
     agent.setPermissionContext({
       getMainWindow: this.services.getMainWindow,
-      getSessionState: () => agent.sessionState
+      getSessionState: () => ({
+        ...agent.sessionState,
+        authMode: agent.getEffectiveAuthMode()
+      }),
+      getAbortSignal: () => agent.getAbortSignal()
     })
     // Apply plan mode default
     if (this.planModeDefault) {
@@ -118,31 +132,31 @@ export class AIEngine {
     return agent
   }
 
-  private registerMcpTools (agent: AgentCore): void {
+  private registerMcpTools (agent: AgentCore, allowedMcpServerIds?: string[]): void {
     const mcpService = this.services.mcpService
     if (!mcpService) return
 
-    for (const tool of mcpService.getBuiltinToolRegistrations()) {
+    for (const tool of mcpService.getBuiltinToolRegistrations(allowedMcpServerIds)) {
       agent.registerTool(tool.definition.name, tool.definition, tool.handler)
     }
 
-    for (const definition of mcpService.getCachedDynamicToolDefinitions()) {
+    for (const definition of mcpService.getCachedDynamicToolDefinitions(allowedMcpServerIds)) {
       agent.registerTool(definition.name, definition, async (args, onProgress) => {
-        return mcpService.executeDynamicTool(definition.name, args, onProgress)
+        return mcpService.executeDynamicTool(definition.name, args, onProgress, allowedMcpServerIds)
       })
     }
   }
 
-  private async primeMcpTools (): Promise<void> {
+  private async primeMcpTools (allowedMcpServerIds?: string[]): Promise<void> {
     if (!this.services.mcpService) return
-    await this.services.mcpService.refreshEnabledServers()
+    await this.services.mcpService.refreshEnabledServers(allowedMcpServerIds)
   }
 
   /**
    * Handle a chat message from the user (non-streaming).
    */
   async chat (messages: ChatMessage[], options?: AIRequestOptions): Promise<ChatMessage> {
-    await this.primeMcpTools()
+    await this.primeMcpTools(options?.allowedMcpServerIds)
     return this.createAgent(options).run(messages)
   }
 
@@ -150,7 +164,7 @@ export class AIEngine {
    * Handle a chat message with streaming response.
    */
   async *chatStream (messages: ChatMessage[], onProgress?: ProgressCallback, options?: AIRequestOptions): AsyncGenerator<StreamEvent> {
-    await this.primeMcpTools()
+    await this.primeMcpTools(options?.allowedMcpServerIds)
     yield * this.createAgent(options).runStream(messages, onProgress, options?.abortSignal)
   }
 

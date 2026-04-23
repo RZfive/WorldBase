@@ -9,6 +9,14 @@ export interface ToolProgressEntry {
   detail?: string
 }
 
+export type TodoStatus = 'not-started' | 'in-progress' | 'completed'
+
+export interface TodoItem {
+  id: number
+  title: string
+  status: TodoStatus
+}
+
 export interface ToolRun {
   id: string
   name: string
@@ -47,6 +55,7 @@ export type ChatMessageBlock =
   | { id: string; kind: 'content'; content: ChatMessageContent }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
+  | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }

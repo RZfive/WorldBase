@@ -20,6 +20,11 @@ import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, t
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { AILogStore } from '../src/main/settings/ai-log-store.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
+import {
+  ScheduledTaskStore,
+  type ScheduledTaskDefinition,
+  type ScheduledTaskRunReport
+} from '../src/main/settings/scheduled-task-store.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../src/main/ai-engine/agent/tools/office-utils.js'
 import { AsyncTaskManager } from '../src/main/ai-engine/agent/tools/async-task-manager.js'
@@ -30,6 +35,7 @@ import { buildDocumentRenderPreview, readDocumentRenderAsset } from '../src/main
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../src/main/settings/settings-transfer.js'
 import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.js'
 import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
+import { ScheduledTaskService } from '../src/main/scheduler/scheduled-task-service.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -65,6 +71,8 @@ let settingsStore: SettingsStore | null = null
 let chatHistory: ChatHistoryStore | null = null
 let aiLogStore: AILogStore | null = null
 let skillStore: SkillStore | null = null
+let scheduledTaskStore: ScheduledTaskStore | null = null
+let scheduledTaskService: ScheduledTaskService | null = null
 let documentStore: DocumentStore | null = null
 let mcpService: MCPService | null = null
 let isClosingMainWindow = false
@@ -73,7 +81,7 @@ let hasFinishedQuitCleanup = false
 
 /** Track standalone project windows keyed by projectId */
 const projectWindows = new Map<string, BrowserWindow>()
-const activeChatStreams = new Map<string, AbortController>()
+const activeChatSessions = new Map<string, ActiveChatSession>()
 
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
 const MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
@@ -107,6 +115,11 @@ interface UploadedAttachmentResult {
   size: number
   fileType: string
   content: string
+}
+
+interface ActiveChatSession {
+  abortController: AbortController
+  authMode: { current: AIExecutionAuthMode }
 }
 
 function isSupportedTextAttachment (fileName: string): boolean {
@@ -604,6 +617,34 @@ function applyActiveProviderToAiEngine (): AIProvidersConfig {
   return normalizedConfig
 }
 
+function resolveProviderConfig (requestedProviderId?: string, requestedModelId?: string) {
+  const providersConfig = settingsStore!.getProviders()
+  const enabledProviderIds = new Set(providersConfig.enabledProviderIds)
+  const enabledProviders = providersConfig.providers.filter(provider => enabledProviderIds.has(provider.id))
+  const requestedProvider = requestedProviderId
+    ? enabledProviders.find(provider => provider.id === requestedProviderId)
+    : null
+  const defaultProvider = enabledProviders.find(provider => provider.id === providersConfig.activeProviderId)
+    || enabledProviders[0]
+    || providersConfig.providers.find(provider => provider.id === providersConfig.activeProviderId)
+    || providersConfig.providers[0]
+
+  const provider = requestedProvider || defaultProvider
+  if (!provider) return undefined
+
+  const resolvedModel = requestedModelId && provider.models.includes(requestedModelId)
+    ? requestedModelId
+    : provider.activeModel
+
+  return {
+    apiKey: provider.apiKey,
+    baseUrl: provider.baseUrl,
+    model: resolvedModel,
+    enableThinking: provider.enableThinking ?? false,
+    contextWindow: provider.modelContextWindows?.[resolvedModel]
+  }
+}
+
 function applyMcpServersToService (): MCPServerConfig[] {
   const servers = settingsStore!.getMcpServers()
   void mcpService!.updateServers(servers).catch((error) => {
@@ -621,6 +662,7 @@ async function initializeServices (): Promise<void> {
   chatHistory = new ChatHistoryStore(userDataPath)
   aiLogStore = new AILogStore(userDataPath)
   skillStore = new SkillStore(userDataPath)
+  scheduledTaskStore = new ScheduledTaskStore(userDataPath)
   mcpService = new MCPService()
   mcpService.on('stateChanged', (state: MCPStateSnapshot) => {
     broadcastToAppWindows('settings:mcpStateChanged', state)
@@ -664,8 +706,29 @@ async function initializeServices (): Promise<void> {
     notifySkillsChanged: (event) => {
       broadcastToAppWindows('skills:changed', event)
     },
-    mcpService
+    mcpService,
+    scheduledTaskService: undefined
   })
+
+  scheduledTaskService = new ScheduledTaskService({
+    store: scheduledTaskStore,
+    aiEngine,
+    skillStore,
+    getMainWindow: () => mainWindow,
+    resolveProviderConfig: () => resolveProviderConfig(),
+    getNotificationPreference: () => settingsStore?.getAIExecutionPreferences().notifyOnTaskComplete ?? true,
+    onTasksChanged: (tasks: ScheduledTaskDefinition[]) => {
+      broadcastToAppWindows('scheduler:tasksChanged', tasks)
+    },
+    onReportsChanged: (reports: ScheduledTaskRunReport[]) => {
+      broadcastToAppWindows('scheduler:reportsChanged', reports)
+    },
+    onReportNotificationClick: (report: ScheduledTaskRunReport) => {
+      broadcastToAppWindows('scheduler:reportRequested', report)
+    }
+  })
+  aiEngine.setScheduledTaskService(scheduledTaskService)
+  scheduledTaskService.start()
 
   // Apply saved AI settings on startup
   const providersConfig = applyActiveProviderToAiEngine()
@@ -765,34 +828,6 @@ function createWindow (): void {
 }
 
 function setupIPC (): void {
-  const resolveProviderConfig = (requestedProviderId?: string, requestedModelId?: string) => {
-    const providersConfig = settingsStore!.getProviders()
-    const enabledProviderIds = new Set(providersConfig.enabledProviderIds)
-    const enabledProviders = providersConfig.providers.filter(provider => enabledProviderIds.has(provider.id))
-    const requestedProvider = requestedProviderId
-      ? enabledProviders.find(provider => provider.id === requestedProviderId)
-      : null
-    const defaultProvider = enabledProviders.find(provider => provider.id === providersConfig.activeProviderId)
-      || enabledProviders[0]
-      || providersConfig.providers.find(provider => provider.id === providersConfig.activeProviderId)
-      || providersConfig.providers[0]
-
-    const provider = requestedProvider || defaultProvider
-    if (!provider) return undefined
-
-    const resolvedModel = requestedModelId && provider.models.includes(requestedModelId)
-      ? requestedModelId
-      : provider.activeModel
-
-    return {
-      apiKey: provider.apiKey,
-      baseUrl: provider.baseUrl,
-      model: resolvedModel,
-      enableThinking: provider.enableThinking ?? false,
-      contextWindow: provider.modelContextWindows?.[resolvedModel]
-    }
-  }
-
   // AI chat (non-streaming, kept for backward compat)
   ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string) => {
     return aiEngine!.chat(messages, {
@@ -805,6 +840,7 @@ function setupIPC (): void {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
+    const authModeRef = { current: authMode ?? 'strict' }
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
     const conversationTitle = getConversationTitleFromMessages(messages)
     const aiLogger = executionPreferences.enableAiLogging && aiLogStore && conversationId
@@ -819,7 +855,10 @@ function setupIPC (): void {
           targetProjectId: targetProjectId ?? null
         })
       : undefined
-    activeChatStreams.set(sessionId, abortController)
+    activeChatSessions.set(sessionId, {
+      abortController,
+      authMode: authModeRef
+    })
     // Progress callback: sends progress events directly to renderer in real-time
     const onProgress = (stageOrEvent: string | ProgressEvent, detail?: string) => {
       if (!sender.isDestroyed()) {
@@ -835,7 +874,8 @@ function setupIPC (): void {
           targetProjectId: targetProjectId ?? null,
           providerConfig: resolveProviderConfig(providerId, modelId),
           abortSignal: abortController.signal,
-          authMode: authMode ?? 'strict',
+          authMode: authModeRef.current,
+          getAuthMode: () => authModeRef.current,
           aiLogger
         })) {
         if (streamEvent.type === 'done') {
@@ -856,6 +896,13 @@ function setupIPC (): void {
             if ('error' in streamEvent) safe.error = String((streamEvent as { error?: string }).error || '')
             if ('stage' in streamEvent) safe.stage = String((streamEvent as { stage?: string }).stage || '')
             if ('detail' in streamEvent) safe.detail = String((streamEvent as { detail?: string }).detail || '')
+            if ('items' in streamEvent) {
+              try {
+                safe.items = JSON.parse(JSON.stringify((streamEvent as { items?: unknown }).items ?? []))
+              } catch {
+                safe.items = []
+              }
+            }
             if ('filePath' in streamEvent) safe.filePath = String((streamEvent as { filePath?: string }).filePath || '')
             if ('truncated' in streamEvent) safe.truncated = Boolean((streamEvent as { truncated?: boolean }).truncated)
             if ('query' in streamEvent) safe.query = String((streamEvent as { query?: string }).query || '')
@@ -907,13 +954,22 @@ function setupIPC (): void {
           : { type: 'error', error: errorMessage })
       }
     } finally {
-      activeChatStreams.delete(sessionId)
+      activeChatSessions.delete(sessionId)
     }
     return { ok: true }
   })
 
+  ipcMain.handle('ai:updateSessionAuthMode', async (_event: IpcMainInvokeEvent, sessionId: string, authMode: AIExecutionAuthMode) => {
+    const sessionState = activeChatSessions.get(sessionId)
+    if (!sessionState) {
+      return { ok: true, updated: false }
+    }
+    sessionState.authMode.current = authMode
+    return { ok: true, updated: true }
+  })
+
   ipcMain.handle('ai:stopStream', async (_event: IpcMainInvokeEvent, sessionId: string) => {
-    const controller = activeChatStreams.get(sessionId)
+    const controller = activeChatSessions.get(sessionId)?.abortController
     if (!controller || controller.signal.aborted) {
       return { ok: true, stopped: false }
     }
@@ -1584,6 +1640,30 @@ function setupIPC (): void {
     return { success: true }
   })
 
+  ipcMain.handle('scheduler:listTasks', async () => {
+    return scheduledTaskService!.listTasks()
+  })
+
+  ipcMain.handle('scheduler:saveTask', async (_event: IpcMainInvokeEvent, task: ScheduledTaskDefinition) => {
+    return scheduledTaskService!.saveTask(task)
+  })
+
+  ipcMain.handle('scheduler:deleteTask', async (_event: IpcMainInvokeEvent, taskId: string) => {
+    return scheduledTaskService!.deleteTask(taskId)
+  })
+
+  ipcMain.handle('scheduler:runNow', async (_event: IpcMainInvokeEvent, taskId: string) => {
+    return scheduledTaskService!.runNow(taskId)
+  })
+
+  ipcMain.handle('scheduler:listReports', async (_event: IpcMainInvokeEvent, taskId?: string) => {
+    return scheduledTaskService!.listReports(taskId)
+  })
+
+  ipcMain.handle('scheduler:getReport', async (_event: IpcMainInvokeEvent, reportId: string) => {
+    return scheduledTaskService!.getReport(reportId)
+  })
+
   // --- Open project in standalone window ---
   ipcMain.handle('runtime:openWindow', async (_event: IpcMainInvokeEvent, projectId: string) => {
     // Check if a window already exists for this project
@@ -1705,6 +1785,9 @@ app.on('before-quit', (event) => {
       }
       if (mcpService) {
         await mcpService.dispose()
+      }
+      if (scheduledTaskService) {
+        scheduledTaskService.dispose()
       }
     } finally {
       hasFinishedQuitCleanup = true

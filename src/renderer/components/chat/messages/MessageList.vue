@@ -23,7 +23,8 @@ const collapsedThinking = reactive<Record<string, boolean>>({})
 const activeMermaidPreview = ref<{ code: string } | null>(null)
 const scrollTop = ref(0)
 const viewportHeight = ref(0)
-const stickToBottom = ref(true)
+const autoStickEnabled = ref(true)
+const nearBottom = ref(true)
 const measuredMessageHeights = reactive<Record<number, number>>({})
 const messageObservers = new Map<number, ResizeObserver>()
 let containerObserver: ResizeObserver | null = null
@@ -32,6 +33,7 @@ const OVERSCAN_COUNT = 4
 const MESSAGE_GAP = 20
 const ESTIMATED_MESSAGE_HEIGHT = 220
 const AUTO_SCROLL_THRESHOLD = 96
+const RESTORE_AUTO_SCROLL_THRESHOLD = 4
 
 const latestAssistantMessageIndex = computed(() => {
   for (let i = props.messages.length - 1; i >= 0; i--) {
@@ -102,7 +104,8 @@ function scrollToBottom () {
     if (messagesContainer.value) {
       messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
       scrollTop.value = messagesContainer.value.scrollTop
-      stickToBottom.value = true
+      nearBottom.value = true
+      autoStickEnabled.value = true
     }
   })
 }
@@ -111,15 +114,37 @@ function isNearBottom (element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= AUTO_SCROLL_THRESHOLD
 }
 
+function isAtBottom (element: HTMLElement): boolean {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= RESTORE_AUTO_SCROLL_THRESHOLD
+}
+
 function syncViewportMetrics (): void {
   if (!messagesContainer.value) return
   scrollTop.value = messagesContainer.value.scrollTop
   viewportHeight.value = messagesContainer.value.clientHeight
-  stickToBottom.value = isNearBottom(messagesContainer.value)
+  nearBottom.value = isNearBottom(messagesContainer.value)
 }
 
 function handleScroll (): void {
+  if (!messagesContainer.value) return
+  const movingUp = messagesContainer.value.scrollTop < scrollTop.value
   syncViewportMetrics()
+
+  if (movingUp) {
+    autoStickEnabled.value = false
+    return
+  }
+
+  if (isAtBottom(messagesContainer.value)) {
+    autoStickEnabled.value = true
+  }
+}
+
+function handleWheel (event: WheelEvent): void {
+  if (!messagesContainer.value) return
+  if (event.deltaY < 0 && messagesContainer.value.scrollHeight > messagesContainer.value.clientHeight) {
+    autoStickEnabled.value = false
+  }
 }
 
 function getMessageHeight (index: number): number {
@@ -190,7 +215,7 @@ function updateMeasuredHeight (index: number, height: number): void {
   const nextHeight = Math.max(Math.ceil(height), 1)
   if (measuredMessageHeights[index] === nextHeight) return
   measuredMessageHeights[index] = nextHeight
-  if (stickToBottom.value) scrollToBottom()
+  if (autoStickEnabled.value) scrollToBottom()
 }
 
 function cleanupMessageObserver (index: number): void {
@@ -253,6 +278,7 @@ function getMessageSignature (msg?: ChatMessage): string {
     if (block.kind === 'web_fetch') return `webfetch:${block.query || ''}:${block.result.url}:${block.result.final_url || ''}:${block.result.ok}:${block.result.title || ''}:${block.result.error || ''}:${block.result.query_snippets?.join('|') || ''}`
     if (block.kind === 'attachment') return `attachment:${block.fileName}:${block.fileType}:${block.fileSizeLabel}:${block.previewText}`
     if (block.kind === 'auth_request') return `auth:${block.requestId}:${block.status}:${block.title}:${block.detail}`
+    if (block.kind === 'todo') return `todo:${block.items.map(item => `${item.id}:${item.status}:${item.title}`).join('|')}`
     return `tool:${block.toolRun.id}:${block.toolRun.status}:${block.toolRun.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`
   }).join('|')
   return [blockSignature, msg.thinking || '', msg.modelLabel || ''].join('::')
@@ -279,7 +305,6 @@ watch(
   () => props.messages,
   () => {
     resetVirtualMeasurements()
-    stickToBottom.value = true
     nextTick(syncViewportMetrics)
   }
 )
@@ -287,7 +312,7 @@ watch(
 watch(
   () => props.messages.length,
   () => {
-    if (stickToBottom.value) {
+    if (autoStickEnabled.value) {
       scrollToBottom()
       return
     }
@@ -298,7 +323,7 @@ watch(
 watch(
   () => getMessageSignature(props.messages[props.messages.length - 1]),
   () => {
-    if (stickToBottom.value) {
+    if (autoStickEnabled.value) {
       scrollToBottom()
       return
     }
@@ -309,7 +334,7 @@ watch(
 watch(
   () => [props.filePreview.active, props.filePreview.content],
   () => {
-    if (stickToBottom.value) {
+    if (autoStickEnabled.value) {
       scrollToBottom()
       return
     }
@@ -320,7 +345,7 @@ watch(
 watch(
   totalContentHeight,
   () => {
-    if (stickToBottom.value) {
+    if (autoStickEnabled.value) {
       scrollToBottom()
     }
   }
@@ -328,6 +353,9 @@ watch(
 
 onMounted(() => {
   syncViewportMetrics()
+  if (props.messages.length > 0) {
+    nextTick(scrollToBottom)
+  }
   if (typeof ResizeObserver === 'undefined') return
   containerObserver = new ResizeObserver(() => {
     syncViewportMetrics()
@@ -343,7 +371,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="chat-messages" ref="messagesContainer" @scroll.passive="handleScroll" @click.capture="handleMessageLinkClick">
+  <div class="chat-messages" ref="messagesContainer" @scroll.passive="handleScroll" @wheel.capture.passive="handleWheel" @click.capture="handleMessageLinkClick">
     <div v-if="props.messages.length === 0" class="empty-state">
       <div class="empty-state-card">
         <div class="empty-state-icon">AI</div>
@@ -395,6 +423,8 @@ onUnmounted(() => {
   overflow-y: auto;
   padding: 24px var(--chat-message-gutter, 28px) 20px;
   scrollbar-gutter: stable;
+  overscroll-behavior-y: contain;
+  overflow-anchor: none;
 }
 
 .message-item + .message-item {

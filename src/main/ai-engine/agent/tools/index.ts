@@ -28,6 +28,8 @@ import { toolEnterPlanMode, toolExitPlanMode } from './tool-plan-mode.js'
 import { toolRunSkill, toolListSkills } from './tool-run-skill.js'
 import { toolInstallSkill } from './tool-install-skill.js'
 import { toolInstallMcpServer } from './tool-install-mcp-server.js'
+import { toolCreateScheduledTask, toolListScheduledTasks } from './tool-scheduled-task.js'
+import { toolManageTodoList, type TodoItem } from './tool-manage-todo-list.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
 import type { AgentCore, SessionState } from '../agent-core.js'
@@ -39,6 +41,7 @@ import type { ProjectDataAccess } from '../../../project-data-access/data-access
 import type { SkillStore } from '../../../settings/skill-store.js'
 import type { SettingsStore } from '../../../settings/settings-store.js'
 import type { MCPService } from '../../../mcp/mcp-service.js'
+import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-service.js'
 import type { BrowserWindow } from 'electron'
 
 export interface ToolServices {
@@ -54,13 +57,19 @@ export interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   mcpService?: MCPService
+  scheduledTaskService?: ScheduledTaskService
 }
 
 /**
  * Register all tools to the agent.
  */
 export function registerAllTools (agent: AgentCore, services: ToolServices): void {
-  const getSessionState = (): SessionState => agent.sessionState
+  const getSessionState = (): SessionState => ({
+    ...agent.sessionState,
+    authMode: agent.getEffectiveAuthMode()
+  })
+  const getAbortSignal = (): AbortSignal | undefined => agent.getAbortSignal()
+  const todoState: { items: TodoItem[] } = { items: [] }
   const tools = [
     toolReadFile(services),
     toolDeleteFile(services),
@@ -81,9 +90,9 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolCreateProject(services, getSessionState),
     toolRebuildProject(services),
     toolClearProjectBuildFlag(services),
-    toolLocalFileRead(services, getSessionState),
-    toolLocalCommand(services, getSessionState),
-    toolLocalWriteFile(services, getSessionState),
+    toolLocalFileRead(services, getSessionState, getAbortSignal),
+    toolLocalCommand(services, getSessionState, getAbortSignal),
+    toolLocalWriteFile(services, getSessionState, getAbortSignal),
     toolGlobSearch(services),
     toolGrepSearch(services),
     toolWebSearch(),
@@ -93,7 +102,10 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolRunSkill(() => agent.getSkillEngine()),
     toolListSkills(() => agent.getSkillEngine()),
     toolInstallSkill(services, () => agent.getSkillEngine()),
-    toolInstallMcpServer(services)
+    toolInstallMcpServer(services),
+    toolManageTodoList(todoState),
+    toolListScheduledTasks(services),
+    toolCreateScheduledTask(services)
   ]
 
   // Register document tools if store is available

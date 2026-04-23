@@ -17,6 +17,7 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
  - When output includes mathematical expressions, always write them in valid LaTeX syntax so the chat UI can render them correctly. Use \`$...$\` for inline math and \`$$...$$\` for block math unless the user explicitly asks for another format.
  - You may mix Markdown with simple safe HTML when HTML communicates structure or layout more clearly.
  - Continue from existing context after interruptions instead of restarting.
+ - For multi-step implementation or debugging work, keep a concise todo list with the manage_todo_list tool and update it as progress changes.
  - Never create more than one new project in a single conversation.
  - Use npm / npx for project dependency and script commands unless the user explicitly requires something else.
  - When the user asks for any diagram, flow, architecture, sequence, state, ER, gantt, or mind map, output Mermaid code blocks first unless the user explicitly asks for another format.

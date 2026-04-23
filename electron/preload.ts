@@ -12,7 +12,7 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: ChatMessage
@@ -20,12 +20,21 @@ interface StreamEvent {
   error?: string
   stage?: string
   detail?: string
+  items?: TodoItem[]
   filePath?: string
   truncated?: boolean
   query?: string
   engine?: string
   results?: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }>
   result?: { url: string; final_url?: string; ok: boolean; status?: number; status_text?: string; content_type?: string; title?: string; description?: string; content: string; excerpt_strategy?: 'query_snippets' | 'leading_text'; query_snippets?: string[]; query_match_count?: number; truncated: boolean; fetched_at: string; error?: string }
+}
+
+type TodoStatus = 'not-started' | 'in-progress' | 'completed'
+
+interface TodoItem {
+  id: number
+  title: string
+  status: TodoStatus
 }
 
 interface ConversationSummary {
@@ -124,6 +133,77 @@ interface MCPServerConfig {
   timeoutMs: number
 }
 
+
+type ScheduledTaskStatus = 'idle' | 'running' | 'retrying' | 'completed' | 'failed'
+type ScheduledTaskRunStatus = 'running' | 'retrying' | 'completed' | 'failed'
+type ScheduledTaskTrigger = 'manual' | 'schedule'
+
+interface ScheduledTaskProgressEntry {
+  at: string
+  stage: string
+  detail?: string
+}
+
+interface ScheduledTaskRetryPolicy {
+  maxRetries: number
+  retryDelayMinutes: number
+}
+
+type ScheduledTaskSchedule =
+  | {
+    kind: 'once'
+    runAt: string
+  }
+  | {
+    kind: 'interval'
+    everyMinutes: number
+    startAt?: string
+  }
+  | {
+    kind: 'dates'
+    dates: string[]
+  }
+
+interface ScheduledTaskDefinition {
+  id: string
+  title: string
+  enabled: boolean
+  createdBy: 'manual' | 'ai'
+  prompt: string
+  schedule: ScheduledTaskSchedule
+  selectedSkillIds: string[]
+  selectedMcpServerIds: string[]
+  retryPolicy: ScheduledTaskRetryPolicy
+  createdAt: string
+  updatedAt: string
+  nextRunAt?: string | null
+  retryScheduledAt?: string | null
+  lastRunAt?: string | null
+  lastStatus?: ScheduledTaskStatus
+  lastReportId?: string | null
+}
+
+interface ScheduledTaskRunReport {
+  id: string
+  taskId: string
+  taskTitle: string
+  trigger: ScheduledTaskTrigger
+  status: ScheduledTaskRunStatus
+  scheduledFor?: string | null
+  startedAt: string
+  finishedAt?: string | null
+  attempt: number
+  prompt: string
+  summary: string
+  resultText?: string
+  error?: string
+  progress: ScheduledTaskProgressEntry[]
+  selectedSkillIds: string[]
+  selectedMcpServerIds: string[]
+  retryScheduledAt?: string | null
+  createdAt: string
+  updatedAt: string
+}
 interface MCPToolSummary {
   name: string
   localName: string
@@ -336,6 +416,7 @@ export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[]) => Promise<ChatMessage>
   chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => Promise<{ ok: boolean }>
+  updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
 
@@ -424,6 +505,15 @@ export interface ElectronAPI {
   saveLaunchpadLayout: (layout: LaunchpadLayout) => Promise<{ success: boolean }>
   getWebApps: () => Promise<WebAppShortcut[]>
   saveWebApps: (webApps: WebAppShortcut[]) => Promise<{ success: boolean }>
+  listScheduledTasks: () => Promise<ScheduledTaskDefinition[]>
+  saveScheduledTask: (task: ScheduledTaskDefinition) => Promise<ScheduledTaskDefinition>
+  deleteScheduledTask: (taskId: string) => Promise<boolean>
+  runScheduledTaskNow: (taskId: string) => Promise<ScheduledTaskRunReport>
+  listScheduledTaskReports: (taskId?: string) => Promise<ScheduledTaskRunReport[]>
+  getScheduledTaskReport: (reportId: string) => Promise<ScheduledTaskRunReport | null>
+  onScheduledTasksChanged: (callback: (tasks: ScheduledTaskDefinition[]) => void) => () => void
+  onScheduledTaskReportsChanged: (callback: (reports: ScheduledTaskRunReport[]) => void) => () => void
+  onScheduledTaskReportRequested: (callback: (report: ScheduledTaskRunReport) => void) => () => void
 
   // Skills
   listSkills: () => Promise<Array<{ id: string; name: string; description: string; content: string; createdAt: string; updatedAt: string }>>
@@ -465,6 +555,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[]) => ipcRenderer.invoke('ai:chat', messages),
   chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode),
+  updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
     const channel = `ai:stream-event:${sessionId}`
@@ -576,6 +667,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveLaunchpadLayout: (layout: LaunchpadLayout) => ipcRenderer.invoke('settings:saveLaunchpadLayout', layout),
   getWebApps: () => ipcRenderer.invoke('settings:getWebApps'),
   saveWebApps: (webApps: WebAppShortcut[]) => ipcRenderer.invoke('settings:saveWebApps', webApps),
+  listScheduledTasks: () => ipcRenderer.invoke('scheduler:listTasks'),
+  saveScheduledTask: (task: ScheduledTaskDefinition) => ipcRenderer.invoke('scheduler:saveTask', task),
+  deleteScheduledTask: (taskId: string) => ipcRenderer.invoke('scheduler:deleteTask', taskId),
+  runScheduledTaskNow: (taskId: string) => ipcRenderer.invoke('scheduler:runNow', taskId),
+  listScheduledTaskReports: (taskId?: string) => ipcRenderer.invoke('scheduler:listReports', taskId),
+  getScheduledTaskReport: (reportId: string) => ipcRenderer.invoke('scheduler:getReport', reportId),
+  onScheduledTasksChanged: (callback: (tasks: ScheduledTaskDefinition[]) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, tasks: ScheduledTaskDefinition[]) => callback(tasks)
+    ipcRenderer.on('scheduler:tasksChanged', handler)
+    return () => { ipcRenderer.removeListener('scheduler:tasksChanged', handler) }
+  },
+  onScheduledTaskReportsChanged: (callback: (reports: ScheduledTaskRunReport[]) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, reports: ScheduledTaskRunReport[]) => callback(reports)
+    ipcRenderer.on('scheduler:reportsChanged', handler)
+    return () => { ipcRenderer.removeListener('scheduler:reportsChanged', handler) }
+  },
+  onScheduledTaskReportRequested: (callback: (report: ScheduledTaskRunReport) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, report: ScheduledTaskRunReport) => callback(report)
+    ipcRenderer.on('scheduler:reportRequested', handler)
+    return () => { ipcRenderer.removeListener('scheduler:reportRequested', handler) }
+  },
 
   // Plan Mode
   setPlanMode: (active: boolean) => ipcRenderer.invoke('ai:setPlanMode', active),

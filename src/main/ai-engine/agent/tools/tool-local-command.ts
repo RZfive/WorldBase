@@ -23,7 +23,7 @@ export interface Tool {
 /**
  * Tool: local_run_command — 在用户本地电脑执行命令行命令（需要用户授权）
  */
-export function toolLocalCommand (services: ToolServices, getSessionState?: () => SessionState): Tool {
+export function toolLocalCommand (services: ToolServices, getSessionState?: () => SessionState, getAbortSignal?: () => AbortSignal | undefined): Tool {
   return {
     definition: {
       name: 'local_run_command',
@@ -56,6 +56,7 @@ export function toolLocalCommand (services: ToolServices, getSessionState?: () =
       const authorized = await requestUserAuth(
         services.getMainWindow,
         getSessionState,
+        getAbortSignal,
         'AI requests a local command',
         `The AI assistant wants to run this command:\n\n$ ${command}\n\nWorking directory: ${workDir}\nTimeout: ${timeoutSec} seconds\n\nAllow it?`
       )

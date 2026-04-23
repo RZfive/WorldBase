@@ -7,7 +7,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: { role: string; content: MessageContent }
@@ -15,6 +15,7 @@ interface StreamEvent {
   error?: string
   stage?: string
   detail?: string
+  items?: TodoItem[]
   filePath?: string
   truncated?: boolean
   query?: string
@@ -37,6 +38,14 @@ interface ConversationSummary {
 interface ToolProgressEntry {
   stage: string
   detail?: string
+}
+
+type TodoStatus = 'not-started' | 'in-progress' | 'completed'
+
+interface TodoItem {
+  id: number
+  title: string
+  status: TodoStatus
 }
 
 interface ToolRun {
@@ -77,6 +86,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'content'; content: MessageContent }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
+  | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
@@ -393,6 +403,77 @@ interface SkillInfo {
   updatedAt: string
 }
 
+type ScheduledTaskStatus = 'idle' | 'running' | 'retrying' | 'completed' | 'failed'
+type ScheduledTaskRunStatus = 'running' | 'retrying' | 'completed' | 'failed'
+type ScheduledTaskTrigger = 'manual' | 'schedule'
+
+interface ScheduledTaskProgressEntry {
+  at: string
+  stage: string
+  detail?: string
+}
+
+interface ScheduledTaskRetryPolicy {
+  maxRetries: number
+  retryDelayMinutes: number
+}
+
+type ScheduledTaskSchedule =
+  | {
+    kind: 'once'
+    runAt: string
+  }
+  | {
+    kind: 'interval'
+    everyMinutes: number
+    startAt?: string
+  }
+  | {
+    kind: 'dates'
+    dates: string[]
+  }
+
+interface ScheduledTaskDefinition {
+  id: string
+  title: string
+  enabled: boolean
+  createdBy: 'manual' | 'ai'
+  prompt: string
+  schedule: ScheduledTaskSchedule
+  selectedSkillIds: string[]
+  selectedMcpServerIds: string[]
+  retryPolicy: ScheduledTaskRetryPolicy
+  createdAt: string
+  updatedAt: string
+  nextRunAt?: string | null
+  retryScheduledAt?: string | null
+  lastRunAt?: string | null
+  lastStatus?: ScheduledTaskStatus
+  lastReportId?: string | null
+}
+
+interface ScheduledTaskRunReport {
+  id: string
+  taskId: string
+  taskTitle: string
+  trigger: ScheduledTaskTrigger
+  status: ScheduledTaskRunStatus
+  scheduledFor?: string | null
+  startedAt: string
+  finishedAt?: string | null
+  attempt: number
+  prompt: string
+  summary: string
+  resultText?: string
+  error?: string
+  progress: ScheduledTaskProgressEntry[]
+  selectedSkillIds: string[]
+  selectedMcpServerIds: string[]
+  retryScheduledAt?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 // Document types (renderer-side DTOs)
 type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'unknown'
 
@@ -452,6 +533,7 @@ interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>) => Promise<{ role: string; content: MessageContent }>
   chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => Promise<{ ok: boolean }>
+  updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
   setPlanMode: (active: boolean) => Promise<{ success: boolean }>
@@ -536,6 +618,15 @@ interface ElectronAPI {
   saveLaunchpadLayout: (layout: LaunchpadLayout) => Promise<{ success: boolean }>
   getWebApps: () => Promise<WebAppShortcut[]>
   saveWebApps: (webApps: WebAppShortcut[]) => Promise<{ success: boolean }>
+  listScheduledTasks: () => Promise<ScheduledTaskDefinition[]>
+  saveScheduledTask: (task: ScheduledTaskDefinition) => Promise<ScheduledTaskDefinition>
+  deleteScheduledTask: (taskId: string) => Promise<boolean>
+  runScheduledTaskNow: (taskId: string) => Promise<ScheduledTaskRunReport>
+  listScheduledTaskReports: (taskId?: string) => Promise<ScheduledTaskRunReport[]>
+  getScheduledTaskReport: (reportId: string) => Promise<ScheduledTaskRunReport | null>
+  onScheduledTasksChanged: (callback: (tasks: ScheduledTaskDefinition[]) => void) => () => void
+  onScheduledTaskReportsChanged: (callback: (reports: ScheduledTaskRunReport[]) => void) => () => void
+  onScheduledTaskReportRequested: (callback: (report: ScheduledTaskRunReport) => void) => () => void
 
   // Skills
   listSkills: () => Promise<SkillInfo[]>

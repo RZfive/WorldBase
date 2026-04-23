@@ -9,6 +9,7 @@ import TitleBar from './renderer/components/app/TitleBar.vue'
 import DockBar from './renderer/components/app/DockBar.vue'
 import BrowserWebView from './renderer/components/app/BrowserWebView.vue'
 import ProjectWindowShell from './renderer/components/app/ProjectWindowShell.vue'
+import ScheduledTaskReportDialog from './renderer/components/settings/ScheduledTaskReportDialog.vue'
 import { applyThemePreference, getAppliedThemePreference, watchSystemThemeChange } from './renderer/utils/theme'
 import { createWebAppId, getWebAppNameFromUrl, normalizeWebUrlInput, type SavedWebApp } from './renderer/utils/web-app'
 
@@ -121,9 +122,12 @@ let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
 let projectOpenInShellCleanup: (() => void) | null = null
 let browserOpenInDockCleanup: (() => void) | null = null
+let schedulerReportRequestedCleanup: (() => void) | null = null
 let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
 let runningAppsInterval: ReturnType<typeof setInterval> | null = null
+
+const scheduledTaskReport = ref<ScheduledTaskRunReport | null>(null)
 
 function clearEmbeddedApp (appId?: string) {
   if (appId) {
@@ -690,6 +694,10 @@ function closeLanModal () {
   lanModal.value.visible = false
 }
 
+function closeScheduledTaskReportDialog () {
+  scheduledTaskReport.value = null
+}
+
 function syncEmbeddedProjectStates (projects: ProjectListItem[]) {
   const projectStatusMap = new Map(projects.map(project => [project.id, project.runtime ?? { status: 'unknown' }]))
   const nextEmbeddedApps = new Map(embeddedApps.value)
@@ -836,6 +844,12 @@ onMounted(async () => {
       openWebLinkInApp(url)
     })
   }
+
+  if (window.electronAPI?.onScheduledTaskReportRequested) {
+    schedulerReportRequestedCleanup = window.electronAPI.onScheduledTaskReportRequested((report) => {
+      scheduledTaskReport.value = report
+    })
+  }
 })
 
 onUnmounted(() => {
@@ -852,6 +866,7 @@ onUnmounted(() => {
   windowClosedCleanup?.()
   projectOpenInShellCleanup?.()
   browserOpenInDockCleanup?.()
+  schedulerReportRequestedCleanup?.()
 })
 </script>
 
@@ -988,6 +1003,7 @@ onUnmounted(() => {
           </div>
         </div>
       </Teleport>
+      <ScheduledTaskReportDialog :report="scheduledTaskReport" @close="closeScheduledTaskReportDialog" />
     </template>
   </div>
 </template>
