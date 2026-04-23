@@ -13,9 +13,13 @@ const emit = defineEmits<{
   (e: 'toggle'): void
 }>()
 
+// Keep each rendered markdown slice small enough to avoid long synchronous parse/render stalls.
 const SEGMENT_TARGET_CHARS = 2200
+// Merge a few neighboring markdown blocks together so the viewport still scrolls naturally.
 const SEGMENT_BLOCK_LIMIT = 6
+// Render a small buffer above/below the viewport to avoid blank gaps while scrolling.
 const SEGMENT_OVERSCAN = 2
+// Approximate markdown slice height before ResizeObserver measurements arrive.
 const SEGMENT_ESTIMATED_HEIGHT = 220
 
 const viewportRef = ref<HTMLElement | null>(null)
@@ -60,6 +64,7 @@ function splitOversizedBlock (block: string, maxChars: number): string[] {
     let buffer: string[] = []
     let bufferLength = 0
     const wrapperLength = lines[0].length + lines[lines.length - 1].length + 2
+    // Preserve room for reopening/closing fenced code blocks while still keeping each slice useful.
     const safeMaxChars = Math.max(maxChars - wrapperLength, 400)
 
     for (const line of contentLines) {
