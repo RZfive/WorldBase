@@ -86,13 +86,13 @@ const messageText = computed(() => getMessageText())
 
       <div class="message-flow" :class="props.msg.role">
         <template v-for="(block, blockIndex) in blocks" :key="block.id">
-          <ThinkingBlock
-            v-if="block.kind === 'thinking' && hasRenderableBlock(block)"
-            :block="block"
-            :is-streaming="isStreamingAssistantMessage"
-            :is-collapsed="!!props.collapsedThinking[block.id]"
-            @toggle="emit('toggleThinking', block.id)"
-          />
+            <ThinkingBlock
+              v-if="block.kind === 'thinking' && hasRenderableBlock(block)"
+              :block="block"
+              :is-streaming="isStreamingAssistantMessage"
+              :is-collapsed="props.collapsedThinking[block.id] !== false"
+              @toggle="emit('toggleThinking', block.id)"
+            />
 
           <ToolRunBlock
             v-else-if="block.kind === 'tool'"
