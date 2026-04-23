@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch, nextTick } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { buildMessageBlocks, getContentParts } from '../message-utils'
 import type { ChatMessage, GalleryImage, FilePreviewState } from '../types'
 import MessageRow from './MessageRow.vue'
@@ -21,6 +21,17 @@ const messagesContainer = ref<HTMLElement | null>(null)
 const lightboxRef = ref<InstanceType<typeof ImageLightbox> | null>(null)
 const collapsedThinking = reactive<Record<string, boolean>>({})
 const activeMermaidPreview = ref<{ code: string } | null>(null)
+const scrollTop = ref(0)
+const viewportHeight = ref(0)
+const stickToBottom = ref(true)
+const measuredMessageHeights = reactive<Record<number, number>>({})
+const messageObservers = new Map<number, ResizeObserver>()
+let containerObserver: ResizeObserver | null = null
+
+const OVERSCAN_COUNT = 4
+const MESSAGE_GAP = 20
+const ESTIMATED_MESSAGE_HEIGHT = 220
+const AUTO_SCROLL_THRESHOLD = 96
 
 const latestAssistantMessageIndex = computed(() => {
   for (let i = props.messages.length - 1; i >= 0; i--) {
@@ -86,8 +97,130 @@ function scrollToBottom () {
   nextTick(() => {
     if (messagesContainer.value) {
       messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
+      scrollTop.value = messagesContainer.value.scrollTop
+      stickToBottom.value = true
     }
   })
+}
+
+function isNearBottom (element: HTMLElement): boolean {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= AUTO_SCROLL_THRESHOLD
+}
+
+function syncViewportMetrics (): void {
+  if (!messagesContainer.value) return
+  scrollTop.value = messagesContainer.value.scrollTop
+  viewportHeight.value = messagesContainer.value.clientHeight
+  stickToBottom.value = isNearBottom(messagesContainer.value)
+}
+
+function handleScroll (): void {
+  syncViewportMetrics()
+}
+
+function getMessageHeight (index: number): number {
+  return measuredMessageHeights[index] ?? ESTIMATED_MESSAGE_HEIGHT
+}
+
+function getMessageExtent (index: number): number {
+  return getMessageHeight(index) + (index > 0 ? MESSAGE_GAP : 0)
+}
+
+function getOffsetBefore (index: number): number {
+  let total = 0
+  for (let i = 0; i < index; i++) {
+    total += getMessageExtent(i)
+  }
+  return total
+}
+
+const totalContentHeight = computed(() => getOffsetBefore(props.messages.length))
+
+const visibleRange = computed(() => {
+  const messageCount = props.messages.length
+  if (messageCount === 0) {
+    return { start: 0, end: -1 }
+  }
+
+  const viewportBottom = scrollTop.value + Math.max(viewportHeight.value, 1)
+  let start = 0
+  let offset = 0
+
+  while (start < messageCount) {
+    const nextOffset = offset + getMessageExtent(start)
+    if (nextOffset >= scrollTop.value) break
+    offset = nextOffset
+    start++
+  }
+
+  let end = start
+  let visibleBottom = offset
+  while (end < messageCount && visibleBottom < viewportBottom) {
+    visibleBottom += getMessageExtent(end)
+    end++
+  }
+
+  return {
+    start: Math.max(0, start - OVERSCAN_COUNT),
+    end: Math.min(messageCount - 1, Math.max(start, end - 1) + OVERSCAN_COUNT)
+  }
+})
+
+const virtualRows = computed(() => {
+  if (visibleRange.value.end < visibleRange.value.start) return []
+  return props.messages
+    .slice(visibleRange.value.start, visibleRange.value.end + 1)
+    .map((msg, offset) => ({
+      msg,
+      index: visibleRange.value.start + offset
+    }))
+})
+
+const topSpacerHeight = computed(() => getOffsetBefore(visibleRange.value.start))
+const bottomSpacerHeight = computed(() => {
+  if (visibleRange.value.end < visibleRange.value.start) return 0
+  return Math.max(0, totalContentHeight.value - getOffsetBefore(visibleRange.value.end + 1))
+})
+
+function updateMeasuredHeight (index: number, height: number): void {
+  const nextHeight = Math.max(Math.ceil(height), 1)
+  if (measuredMessageHeights[index] === nextHeight) return
+  measuredMessageHeights[index] = nextHeight
+  if (stickToBottom.value) scrollToBottom()
+}
+
+function cleanupMessageObserver (index: number): void {
+  const observer = messageObservers.get(index)
+  if (!observer) return
+  observer.disconnect()
+  messageObservers.delete(index)
+}
+
+function setMessageItemRef (index: number, element: Element | null): void {
+  cleanupMessageObserver(index)
+
+  const item = element as HTMLElement | null
+  if (!item) return
+
+  updateMeasuredHeight(index, item.offsetHeight)
+  if (typeof ResizeObserver === 'undefined') return
+
+  const observer = new ResizeObserver(entries => {
+    const entry = entries[0]
+    if (entry) {
+      updateMeasuredHeight(index, entry.contentRect.height)
+    }
+  })
+  observer.observe(item)
+  messageObservers.set(index, observer)
+}
+
+function resetVirtualMeasurements (): void {
+  Object.keys(measuredMessageHeights).forEach(key => {
+    delete measuredMessageHeights[Number(key)]
+  })
+  messageObservers.forEach(observer => observer.disconnect())
+  messageObservers.clear()
 }
 
 function getMessageSignature (msg?: ChatMessage): string {
@@ -129,21 +262,75 @@ watch(
   }
 )
 
-watch(() => props.messages.length, scrollToBottom)
+watch(
+  () => props.messages,
+  () => {
+    resetVirtualMeasurements()
+    stickToBottom.value = true
+    nextTick(syncViewportMetrics)
+  }
+)
+
+watch(
+  () => props.messages.length,
+  () => {
+    if (stickToBottom.value) {
+      scrollToBottom()
+      return
+    }
+    nextTick(syncViewportMetrics)
+  }
+)
 
 watch(
   () => getMessageSignature(props.messages[props.messages.length - 1]),
-  scrollToBottom
+  () => {
+    if (stickToBottom.value) {
+      scrollToBottom()
+      return
+    }
+    nextTick(syncViewportMetrics)
+  }
 )
 
 watch(
   () => [props.filePreview.active, props.filePreview.content],
-  scrollToBottom
+  () => {
+    if (stickToBottom.value) {
+      scrollToBottom()
+      return
+    }
+    nextTick(syncViewportMetrics)
+  }
 )
+
+watch(
+  totalContentHeight,
+  () => {
+    if (stickToBottom.value) {
+      scrollToBottom()
+    }
+  }
+)
+
+onMounted(() => {
+  syncViewportMetrics()
+  if (typeof ResizeObserver === 'undefined') return
+  containerObserver = new ResizeObserver(() => {
+    syncViewportMetrics()
+  })
+  if (messagesContainer.value) containerObserver.observe(messagesContainer.value)
+})
+
+onUnmounted(() => {
+  containerObserver?.disconnect()
+  containerObserver = null
+  resetVirtualMeasurements()
+})
 </script>
 
 <template>
-  <div class="chat-messages" ref="messagesContainer" @click.capture="handleMessageLinkClick">
+  <div class="chat-messages" ref="messagesContainer" @scroll.passive="handleScroll" @click.capture="handleMessageLinkClick">
     <div v-if="props.messages.length === 0" class="empty-state">
       <div class="empty-state-card">
         <div class="empty-state-icon">AI</div>
@@ -158,20 +345,31 @@ watch(
       </div>
     </div>
 
-    <MessageRow
-      v-for="(msg, i) in props.messages"
-      :key="i"
-      :msg="msg"
-      :index="i"
-      :is-loading="props.isLoading"
-      :latest-assistant-message-index="latestAssistantMessageIndex"
-      :file-preview="props.filePreview"
-      :collapsed-thinking="collapsedThinking"
-      @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
-      @toggle-thinking="toggleThinking"
-      @open-lightbox="(mi, bi, pi) => openLightbox(mi, bi, pi)"
-      @open-mermaid-preview="openMermaidPreview"
-    />
+    <template v-else>
+      <div v-if="topSpacerHeight > 0" class="message-spacer" :style="{ height: `${topSpacerHeight}px` }" aria-hidden="true" />
+
+      <div
+        v-for="{ msg, index } in virtualRows"
+        :key="index"
+        :ref="(element) => setMessageItemRef(index, element)"
+        class="message-item"
+      >
+        <MessageRow
+          :msg="msg"
+          :index="index"
+          :is-loading="props.isLoading"
+          :latest-assistant-message-index="latestAssistantMessageIndex"
+          :file-preview="props.filePreview"
+          :collapsed-thinking="collapsedThinking"
+          @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
+          @toggle-thinking="toggleThinking"
+          @open-lightbox="(mi, bi, pi) => openLightbox(mi, bi, pi)"
+          @open-mermaid-preview="openMermaidPreview"
+        />
+      </div>
+
+      <div v-if="bottomSpacerHeight > 0" class="message-spacer" :style="{ height: `${bottomSpacerHeight}px` }" aria-hidden="true" />
+    </template>
 
     <ImageLightbox ref="lightboxRef" :images="galleryImages" />
     <MermaidPreviewDialog :diagram="activeMermaidPreview" @close="closeMermaidPreview" />
@@ -183,14 +381,20 @@ watch(
   flex: 1;
   overflow-y: auto;
   padding: 24px var(--chat-message-gutter, 28px) 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
   scrollbar-gutter: stable;
 }
 
+.message-item + .message-item {
+  margin-top: 20px;
+}
+
+.message-spacer {
+  width: 100%;
+  flex: 0 0 auto;
+}
+
 .empty-state {
-  flex: 1;
+  min-height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
