@@ -196,10 +196,14 @@ function cleanupMessageObserver (index: number): void {
   messageObservers.delete(index)
 }
 
-function setMessageItemRef (index: number, element: Element | null): void {
+function setMessageItemRef (index: number, element: unknown): void {
   cleanupMessageObserver(index)
 
-  const item = element as HTMLElement | null
+  const item = element instanceof HTMLElement
+    ? element
+    : (element && typeof element === 'object' && '$el' in element && (element as { $el?: unknown }).$el instanceof HTMLElement
+        ? (element as { $el: HTMLElement }).$el
+        : null)
   if (!item) return
 
   updateMeasuredHeight(index, item.offsetHeight)
