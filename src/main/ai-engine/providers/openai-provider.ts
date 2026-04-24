@@ -50,6 +50,7 @@ interface ChatCompletionBody {
   stream?: boolean
   stream_options?: { include_usage: boolean }
   modalities?: string[]
+  reasoning_effort?: 'minimal' | 'low' | 'medium' | 'high'
   tools?: { type: string; function: { name: string; description: string; parameters: Record<string, unknown> } }[]
   tool_choice?: string
 }
@@ -96,6 +97,7 @@ export class OpenAIProvider {
   private baseUrl: string
   private model: string
   private enableThinking: boolean
+  private reasoningEffort: 'low' | 'medium' | 'high' | 'max'
   private contextWindow: number
   private logger?: AILogSessionLogger
   private onUsage?: UsageCallback
@@ -105,7 +107,41 @@ export class OpenAIProvider {
     this.baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
     this.model = process.env.OPENAI_MODEL || 'gpt-4o'
     this.enableThinking = false
+    this.reasoningEffort = 'medium'
     this.contextWindow = 32000
+  }
+
+  private isOpenAIProvider (): boolean {
+    const normalizedBaseUrl = this.baseUrl.toLowerCase()
+    const normalizedModel = this.model.toLowerCase()
+    return normalizedBaseUrl.includes('openai') ||
+      normalizedModel.startsWith('gpt-') ||
+      /^o[134]/.test(normalizedModel)
+  }
+
+  private isDeepSeekProvider (): boolean {
+    const normalizedBaseUrl = this.baseUrl.toLowerCase()
+    const normalizedModel = this.model.toLowerCase()
+    return normalizedBaseUrl.includes('deepseek') || normalizedModel.includes('deepseek')
+  }
+
+  private resolveReasoningEffort (): ChatCompletionBody['reasoning_effort'] | undefined {
+    if (!this.enableThinking) return undefined
+
+    if (this.isOpenAIProvider() && this.model.toLowerCase().startsWith('gpt-5')) {
+      if (this.reasoningEffort === 'low') return 'minimal'
+      if (this.reasoningEffort === 'medium') return 'low'
+      if (this.reasoningEffort === 'high') return 'medium'
+      return 'high'
+    }
+
+    if (this.isDeepSeekProvider()) {
+      if (this.reasoningEffort === 'max') return 'high'
+      return this.reasoningEffort
+    }
+
+    if (this.reasoningEffort === 'max') return 'high'
+    return this.reasoningEffort
   }
 
   private isImageOutputModel (): boolean {
@@ -135,6 +171,11 @@ export class OpenAIProvider {
       body.stream = false
       body.modalities = ['text', 'image']
       return body
+    }
+
+    const reasoningEffort = this.resolveReasoningEffort()
+    if (reasoningEffort) {
+      body.reasoning_effort = reasoningEffort
     }
 
     if (tools.length > 0) {
@@ -314,6 +355,10 @@ export class OpenAIProvider {
 
   setEnableThinking (enable: boolean): void {
     this.enableThinking = enable
+  }
+
+  setReasoningEffort (effort: 'low' | 'medium' | 'high' | 'max'): void {
+    this.reasoningEffort = effort
   }
 
   setLogger (logger?: AILogSessionLogger): void {
