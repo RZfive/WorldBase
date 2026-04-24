@@ -116,7 +116,7 @@ export class OpenAIProvider {
     const normalizedModel = this.model.toLowerCase()
     return normalizedBaseUrl.includes('openai') ||
       normalizedModel.startsWith('gpt-') ||
-      /^o[134]/.test(normalizedModel)
+      /^o[1234]/.test(normalizedModel)
   }
 
   private isDeepSeekProvider (): boolean {
