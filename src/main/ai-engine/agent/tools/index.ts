@@ -29,6 +29,7 @@ import { toolRunSkill, toolListSkills } from './tool-run-skill.js'
 import { toolInstallSkill } from './tool-install-skill.js'
 import { toolInstallMcpServer } from './tool-install-mcp-server.js'
 import { toolCreateScheduledTask, toolListScheduledTasks } from './tool-scheduled-task.js'
+import { toolCreateAgent, toolCreateAgentGroup, toolListAgentWorkspaceCatalog } from './tool-agent-workspace.js'
 import { toolManageTodoList, type TodoItem } from './tool-manage-todo-list.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
@@ -38,6 +39,8 @@ import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js
 import type { BuilderService } from '../../../project-runtime/builder-service.js'
 import type { ProjectApiClient } from '../../../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../../../project-data-access/data-access.js'
+import type { AgentStore } from '../../../settings/agent-store.js'
+import type { AgentGroupStore } from '../../../settings/agent-group-store.js'
 import type { SkillStore } from '../../../settings/skill-store.js'
 import type { SettingsStore } from '../../../settings/settings-store.js'
 import type { MCPService } from '../../../mcp/mcp-service.js'
@@ -53,9 +56,12 @@ export interface ToolServices {
   asyncTaskManager: AsyncTaskManager
   documentStore?: DocumentStore
   skillStore?: SkillStore
+  agentStore?: AgentStore
+  agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
   getMainWindow?: () => BrowserWindow | null
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
+  notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
   mcpService?: MCPService
   scheduledTaskService?: ScheduledTaskService
 }
@@ -105,7 +111,10 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolInstallMcpServer(services),
     toolManageTodoList(todoState),
     toolListScheduledTasks(services),
-    toolCreateScheduledTask(services)
+    toolCreateScheduledTask(services),
+    toolListAgentWorkspaceCatalog(services, () => agent.getToolDefinitions()),
+    toolCreateAgent(services, () => agent.getToolDefinitions()),
+    toolCreateAgentGroup(services)
   ]
 
   // Register document tools if store is available

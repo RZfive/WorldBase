@@ -1,38 +1,45 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import type { TodoItem } from '../types'
+import { computed, ref, watch } from "vue";
+import type { TodoItem } from "../types";
 
 const props = defineProps<{
-  items: TodoItem[]
-  isLoading: boolean
-}>()
+  items: TodoItem[];
+  isLoading: boolean;
+}>();
 
-const collapsed = ref(true)
-const completedCount = computed(() => props.items.filter(item => item.status === 'completed').length)
-const inProgressItem = computed(() => props.items.find(item => item.status === 'in-progress') || null)
+const collapsed = ref(true);
+const completedCount = computed(
+  () => props.items.filter((item) => item.status === "completed").length,
+);
+const inProgressItem = computed(
+  () => props.items.find((item) => item.status === "in-progress") || null,
+);
 const progressPercent = computed(() => {
-  if (props.items.length === 0) return 0
-  return Math.round((completedCount.value / props.items.length) * 100)
-})
+  if (props.items.length === 0) return 0;
+  return Math.round((completedCount.value / props.items.length) * 100);
+});
 
 watch(
-  () => props.items.map(item => `${item.id}:${item.status}:${item.title}`).join('|'),
+  () =>
+    props.items
+      .map((item) => `${item.id}:${item.status}:${item.title}`)
+      .join("|"),
   (_next, previous) => {
     if (!previous && props.items.length > 0) {
-      collapsed.value = true
+      collapsed.value = true;
     }
   },
-  { immediate: true }
-)
+  { immediate: true },
+);
 
-function getStatusLabel (status: TodoItem['status']): string {
-  if (status === 'completed') return '已完成'
-  if (status === 'in-progress') return '进行中'
-  return '未开始'
+function getStatusLabel(status: TodoItem["status"]): string {
+  if (status === "completed") return "已完成";
+  if (status === "in-progress") return "进行中";
+  return "未开始";
 }
 
-function toggleCollapsed (): void {
-  collapsed.value = !collapsed.value
+function toggleCollapsed(): void {
+  collapsed.value = !collapsed.value;
 }
 </script>
 
@@ -43,18 +50,43 @@ function toggleCollapsed (): void {
         <div class="todo-summary-copy">
           <div class="todo-summary-kicker-row">
             <span class="todo-kicker">Todo</span>
-            <span class="todo-badge sync" :class="{ active: props.isLoading }">{{ props.isLoading ? '同步中' : '已暂停' }}</span>
+            <span
+              class="todo-badge sync"
+              :class="{ active: props.isLoading }"
+              >{{ props.isLoading ? "同步中" : "已暂停" }}</span
+            >
           </div>
           <div class="todo-heading">
-            {{ inProgressItem ? inProgressItem.title : `已完成 ${completedCount}/${props.items.length} 项` }}
+            {{
+              inProgressItem
+                ? inProgressItem.title
+                : `已完成 ${completedCount}/${props.items.length} 项`
+            }}
           </div>
-          <div class="todo-subtitle">{{ collapsed ? `共 ${props.items.length} 步` : '当前会话的 AI Todo 进度' }}</div>
+          <div class="todo-subtitle">
+            {{
+              collapsed
+                ? `共 ${props.items.length} 步`
+                : "当前会话的 AI Todo 进度"
+            }}
+          </div>
         </div>
 
         <div class="todo-summary-actions">
-          <div class="todo-progress-text">{{ completedCount }}/{{ props.items.length }}</div>
+          <div class="todo-progress-text">
+            {{ completedCount }}/{{ props.items.length }}
+          </div>
           <div class="todo-toggle" :class="{ collapsed }" aria-hidden="true">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </div>
@@ -63,23 +95,28 @@ function toggleCollapsed (): void {
 
       <div v-if="!collapsed" class="todo-detail">
         <div class="todo-progress-track" aria-hidden="true">
-          <div class="todo-progress-bar" :style="{ width: `${progressPercent}%` }" />
+          <div
+            class="todo-progress-bar"
+            :style="{ width: `${progressPercent}%` }"
+          />
         </div>
 
         <div class="todo-scroll">
-        <div
-          v-for="item in props.items"
-          :key="item.id"
-          class="todo-item"
-          :class="item.status"
-        >
-          <div class="todo-item-index">{{ item.id }}</div>
-          <div class="todo-item-copy">
-            <div class="todo-item-title">{{ item.title }}</div>
+          <div
+            v-for="item in props.items"
+            :key="item.id"
+            class="todo-item"
+            :class="item.status"
+          >
+            <div class="todo-item-index">{{ item.id }}</div>
+            <div class="todo-item-copy">
+              <div class="todo-item-title">{{ item.title }}</div>
+            </div>
+            <span class="todo-item-status" :class="item.status">{{
+              getStatusLabel(item.status)
+            }}</span>
           </div>
-          <span class="todo-item-status" :class="item.status">{{ getStatusLabel(item.status) }}</span>
         </div>
-      </div>
       </div>
     </div>
   </section>
@@ -88,16 +125,28 @@ function toggleCollapsed (): void {
 <style scoped>
 .todo-shell {
   padding: 8px var(--chat-message-gutter, 28px) 0;
+  position: absolute;
+  top: 54px;
+  right: -18px;
+  bottom: 0px;
+  width: 500px;
+  z-index: 1;
 }
 
 .todo-card {
   width: min(100%, 760px);
   margin: 0 auto;
-  border: 1px solid color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
+  border: 1px solid
+    color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
   border-radius: 16px;
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  background: linear-gradient(
+    180deg,
+    var(--app-panel),
+    var(--app-panel-subtle)
+  );
   box-shadow: var(--app-shadow);
   overflow: hidden;
+  background-color: var(--app-shell-bg);
 }
 
 .todo-summary {
@@ -173,7 +222,11 @@ function toggleCollapsed (): void {
 }
 
 .todo-badge.sync.active {
-  border-color: color-mix(in srgb, var(--app-accent) 28%, var(--app-border-strong));
+  border-color: color-mix(
+    in srgb,
+    var(--app-accent) 28%,
+    var(--app-border-strong)
+  );
   color: var(--app-accent);
   background: var(--app-accent-soft);
 }
@@ -194,7 +247,10 @@ function toggleCollapsed (): void {
   border: 1px solid var(--app-border-strong);
   background: var(--app-panel-strong);
   color: var(--app-text-muted);
-  transition: transform 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  transition:
+    transform 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease;
 }
 
 .todo-toggle.collapsed {
@@ -203,7 +259,11 @@ function toggleCollapsed (): void {
 
 .todo-card.expanded .todo-toggle {
   color: var(--app-accent);
-  border-color: color-mix(in srgb, var(--app-accent) 28%, var(--app-border-strong));
+  border-color: color-mix(
+    in srgb,
+    var(--app-accent) 28%,
+    var(--app-border-strong)
+  );
 }
 
 .todo-detail {
@@ -220,7 +280,11 @@ function toggleCollapsed (): void {
 .todo-progress-bar {
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, var(--app-accent), var(--app-accent-strong));
+  background: linear-gradient(
+    90deg,
+    var(--app-accent),
+    var(--app-accent-strong)
+  );
   transition: width 0.2s ease;
 }
 
@@ -289,13 +353,21 @@ function toggleCollapsed (): void {
 }
 
 .todo-item-status.in-progress {
-  border-color: color-mix(in srgb, var(--app-accent) 24%, var(--app-border-strong));
+  border-color: color-mix(
+    in srgb,
+    var(--app-accent) 24%,
+    var(--app-border-strong)
+  );
   color: var(--app-accent);
   background: var(--app-accent-soft);
 }
 
 .todo-item-status.completed {
-  border-color: color-mix(in srgb, var(--app-success) 22%, var(--app-border-strong));
+  border-color: color-mix(
+    in srgb,
+    var(--app-success) 22%,
+    var(--app-border-strong)
+  );
   color: var(--app-success);
   background: color-mix(in srgb, var(--app-success) 12%, var(--app-panel));
 }

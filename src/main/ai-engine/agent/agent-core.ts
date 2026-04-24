@@ -108,6 +108,9 @@ export class AgentCore {
   private maxDuplicateIterationFingerprints = 6
   private maxStreamRetries = 3
   private activeSkillContents: string[] = []
+  private systemPromptSections: string[] = []
+  private allowedToolNames = new Set<string>()
+  private deniedToolNames = new Set<string>()
   private logger?: AILogSessionLogger
   private permissionEngine: PermissionEngine
   private resultStorage: ToolResultStorage
@@ -146,6 +149,17 @@ export class AgentCore {
     }
   }
 
+  setSystemPromptSections (sections: string[]): void {
+    this.systemPromptSections = sections
+      .map(section => section.trim())
+      .filter(Boolean)
+  }
+
+  setToolVisibilityFilters (allowedToolNames?: string[], deniedToolNames?: string[]): void {
+    this.allowedToolNames = new Set((allowedToolNames || []).map(name => name.trim()).filter(Boolean))
+    this.deniedToolNames = new Set((deniedToolNames || []).map(name => name.trim()).filter(Boolean))
+  }
+
   /** Get the plan engine instance (used by plan mode tools). */
   getPlanEngine (): PlanEngine {
     return this.planEngine
@@ -180,7 +194,9 @@ export class AgentCore {
    * Get all tool definitions (for LLM function calling).
    */
   getToolDefinitions (): ToolDefinition[] {
-    return Array.from(this.tools.values()).map(t => t.definition)
+    return Array.from(this.tools.entries())
+      .filter(([name]) => this._isToolVisible(name))
+      .map(([, tool]) => tool.definition)
   }
 
   /**
@@ -222,6 +238,14 @@ export class AgentCore {
     this.planEngine.reset()
     this.loopDetector.reset()
     this.costTracker.reset()
+  }
+
+  private _isToolVisible (name: string): boolean {
+    if (this.allowedToolNames.size > 0 && !this.allowedToolNames.has(name)) {
+      return false
+    }
+
+    return !this.deniedToolNames.has(name)
   }
 
   private _resolveFinalAssistantContent (assistantContent: ChatMessage['content'], renderedContent: string): ChatMessage['content'] {
@@ -633,7 +657,8 @@ export class AgentCore {
       role: 'system',
       content: getSystemPrompt({
         skillContents: this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined,
-        targetProjectId: this.sessionState.targetProjectId
+        targetProjectId: this.sessionState.targetProjectId,
+        systemPromptSections: this.systemPromptSections
       })
     }
 
@@ -726,7 +751,8 @@ export class AgentCore {
       role: 'system',
       content: getSystemPrompt({
         skillContents: this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined,
-        targetProjectId: this.sessionState.targetProjectId
+        targetProjectId: this.sessionState.targetProjectId,
+        systemPromptSections: this.systemPromptSections
       })
     }
 
@@ -907,6 +933,10 @@ export class AgentCore {
    * Checks permissions first, then executes, then processes the result via ToolResultStorage.
    */
   async _executeTool (name: string, args: Record<string, unknown>, onProgress?: ProgressCallback): Promise<unknown> {
+    if (!this._isToolVisible(name)) {
+      throw new Error(`Tool not available in current agent context: ${name}`)
+    }
+
     const tool = this.tools.get(name)
     if (!tool) {
       throw new Error(`Unknown tool: ${name}`)

@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupTranscript, AgentMemoryScope, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 
 interface ChatMessage {
   role: string
@@ -12,7 +13,7 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_transcript' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: ChatMessage
@@ -23,6 +24,7 @@ interface StreamEvent {
   items?: TodoItem[]
   filePath?: string
   truncated?: boolean
+  transcript?: AgentGroupTranscript
   query?: string
   engine?: string
   results?: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }>
@@ -42,10 +44,14 @@ interface ConversationSummary {
   title: string
   createdAt: string
   updatedAt: string
+  authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string
   reasoningStrength?: 'low' | 'medium' | 'high' | 'max'
   targetProjectId?: string
+  agentId?: string
+  groupId?: string
+  channelBindingId?: string
 }
 
 interface ToolProgressEntry {
@@ -415,8 +421,8 @@ interface SystemStatusSnapshot {
  */
 export interface ElectronAPI {
   // AI
-  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => Promise<{ ok: boolean }>
+  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string) => Promise<ChatMessage>
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
@@ -426,6 +432,24 @@ export interface ElectronAPI {
   getConversation: (id: string) => Promise<Conversation | null>
   saveConversation: (conversation: Conversation) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
+  listAgents: () => Promise<AgentDefinition[]>
+  listAgentToolDefinitions: () => Promise<Array<{ name: string; description: string }>>
+  getAgent: (id: string) => Promise<AgentDefinition | null>
+  saveAgent: (agent: Partial<AgentDefinition>) => Promise<AgentDefinition>
+  deleteAgent: (id: string) => Promise<boolean>
+  listAgentGroups: () => Promise<AgentGroupDefinition[]>
+  getAgentGroup: (id: string) => Promise<AgentGroupDefinition | null>
+  saveAgentGroup: (group: Partial<AgentGroupDefinition>) => Promise<AgentGroupDefinition>
+  deleteAgentGroup: (id: string) => Promise<boolean>
+  onAgentWorkspaceChanged: (callback: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void) => () => void
+  listImConnectors: () => Promise<ConnectorDefinition[]>
+  listChannelBindings: () => Promise<ChannelBinding[]>
+  getChannelBinding: (id: string) => Promise<ChannelBinding | null>
+  saveChannelBinding: (binding: Partial<ChannelBinding>) => Promise<ChannelBinding>
+  deleteChannelBinding: (id: string) => Promise<boolean>
+  listMemory: (options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => Promise<MemoryEntry[]>
+  pinMemory: (id: string, pinned: boolean) => Promise<boolean>
+  deleteMemory: (id: string) => Promise<boolean>
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
@@ -554,8 +578,8 @@ export interface ElectronAPI {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
-  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength),
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength),
+  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId),
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
@@ -571,6 +595,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getConversation: (id: string) => ipcRenderer.invoke('conversations:get', id),
   saveConversation: (conversation: Conversation) => ipcRenderer.invoke('conversations:save', conversation),
   deleteConversation: (id: string) => ipcRenderer.invoke('conversations:delete', id),
+  listAgents: () => ipcRenderer.invoke('agents:list'),
+  listAgentToolDefinitions: () => ipcRenderer.invoke('agentWorkspace:listToolDefinitions'),
+  getAgent: (id: string) => ipcRenderer.invoke('agents:get', id),
+  saveAgent: (agent: Partial<AgentDefinition>) => ipcRenderer.invoke('agents:save', agent),
+  deleteAgent: (id: string) => ipcRenderer.invoke('agents:delete', id),
+  listAgentGroups: () => ipcRenderer.invoke('agentGroups:list'),
+  getAgentGroup: (id: string) => ipcRenderer.invoke('agentGroups:get', id),
+  saveAgentGroup: (group: Partial<AgentGroupDefinition>) => ipcRenderer.invoke('agentGroups:save', group),
+  deleteAgentGroup: (id: string) => ipcRenderer.invoke('agentGroups:delete', id),
+  onAgentWorkspaceChanged: (callback: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => callback(event)
+    ipcRenderer.on('agentWorkspace:changed', handler)
+    return () => { ipcRenderer.removeListener('agentWorkspace:changed', handler) }
+  },
+  listImConnectors: () => ipcRenderer.invoke('im:listConnectors'),
+  listChannelBindings: () => ipcRenderer.invoke('im:listBindings'),
+  getChannelBinding: (id: string) => ipcRenderer.invoke('im:getBinding', id),
+  saveChannelBinding: (binding: Partial<ChannelBinding>) => ipcRenderer.invoke('im:saveBinding', binding),
+  deleteChannelBinding: (id: string) => ipcRenderer.invoke('im:deleteBinding', id),
+  listMemory: (options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => ipcRenderer.invoke('memory:list', options),
+  pinMemory: (id: string, pinned: boolean) => ipcRenderer.invoke('memory:pin', id, pinned),
+  deleteMemory: (id: string) => ipcRenderer.invoke('memory:delete', id),
   saveImageToFile: (imageUrl: string, defaultName?: string) => ipcRenderer.invoke('media:saveImage', imageUrl, defaultName),
   readUploadedAttachmentFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedAttachmentFile', filePath),
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => ipcRenderer.invoke('chat:readUploadedAttachmentBuffer', payload),

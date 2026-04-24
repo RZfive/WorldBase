@@ -7,7 +7,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_transcript' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: { role: string; content: MessageContent }
@@ -18,6 +18,7 @@ interface StreamEvent {
   items?: TodoItem[]
   filePath?: string
   truncated?: boolean
+  transcript?: AgentGroupTranscript
   query?: string
   engine?: string
   results?: WebSearchResultItem[]
@@ -34,6 +35,125 @@ interface ConversationSummary {
   selectedModel?: string
   reasoningStrength?: 'low' | 'medium' | 'high' | 'max'
   targetProjectId?: string
+  agentId?: string
+  groupId?: string
+  channelBindingId?: string
+}
+
+type AgentReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+type AgentMemoryScope = 'user' | 'agent' | 'project' | 'group' | 'channel'
+type MemoryType = 'user_trait' | 'agent_skill' | 'step' | 'knowledge'
+type ConnectorType = 'feishu' | 'wecom' | 'slack' | 'discord' | 'telegram' | 'custom'
+
+interface AgentMemoryWritePolicy {
+  allowUserTraits: boolean
+  allowAgentSkills: boolean
+  allowSteps: boolean
+  allowKnowledge: boolean
+}
+
+interface AgentAutoReplyPolicy {
+  enabled: boolean
+  requireMention: boolean
+}
+
+interface AgentDefinition {
+  id: string
+  name: string
+  description: string
+  systemPrompt: string
+  providerId?: string
+  modelId?: string
+  reasoningStrength?: AgentReasoningStrength
+  skillIds: string[]
+  allowedTools?: string[]
+  deniedTools?: string[]
+  memoryScopes: AgentMemoryScope[]
+  memoryWritePolicy: AgentMemoryWritePolicy
+  autoReplyPolicy?: AgentAutoReplyPolicy
+  createdAt: string
+  updatedAt: string
+}
+
+interface AgentGroupDefinition {
+  id: string
+  name: string
+  description?: string
+  coordinatorAgentId: string
+  memberAgentIds: string[]
+  maxRounds: number
+  maxParallelWorkers: number
+  sharedMemoryScopes: Array<'group' | 'project' | 'channel'>
+  visibility: 'summary_only' | 'expandable_internal_transcript'
+  createdAt: string
+  updatedAt: string
+}
+
+interface AgentGroupTranscriptEntry {
+  id: string
+  round: number
+  agentId: string
+  agentName: string
+  content: string
+}
+
+interface AgentGroupTranscript {
+  groupId: string
+  groupName: string
+  visibility: AgentGroupDefinition['visibility']
+  roundCount: number
+  entryCount: number
+  summary: string
+  entries: AgentGroupTranscriptEntry[]
+}
+
+interface MemorySearchScope {
+  scopeType: AgentMemoryScope
+  scopeId: string
+}
+
+interface MemoryEntry {
+  id: string
+  scopeType: AgentMemoryScope
+  scopeId: string
+  memoryType: MemoryType
+  title: string
+  summary: string
+  details?: string
+  tags: string[]
+  sourceConversationId?: string
+  sourceSessionId?: string
+  sourceMessageIds?: string[]
+  importance: number
+  confidence: number
+  pinned: boolean
+  lastUsedAt?: string
+  createdAt: string
+  updatedAt: string
+}
+
+interface ConnectorDefinition {
+  id: ConnectorType
+  name: string
+  description: string
+  supportsThreads: boolean
+  supportsMentions: boolean
+  supportsAttachments: boolean
+}
+
+interface ChannelBinding {
+  id: string
+  connectorType: ConnectorType
+  externalChannelId: string
+  externalThreadId?: string
+  boundConversationId?: string
+  boundGroupId?: string
+  defaultAgentId?: string
+  targetProjectId?: string | null
+  autoReply: boolean
+  requireApprovalForRiskyTools: boolean
+  createdAt: string
+  updatedAt: string
 }
 
 interface ToolProgressEntry {
@@ -89,6 +209,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
@@ -532,8 +653,8 @@ interface DocumentSummaryDTO {
 
 interface ElectronAPI {
   // AI
-  chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => Promise<{ ok: boolean }>
+  chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string) => Promise<{ role: string; content: MessageContent }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
@@ -544,6 +665,24 @@ interface ElectronAPI {
   getConversation: (id: string) => Promise<ConversationData | null>
   saveConversation: (conversation: ConversationData) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
+  listAgents: () => Promise<AgentDefinition[]>
+  listAgentToolDefinitions: () => Promise<Array<{ name: string; description: string }>>
+  getAgent: (id: string) => Promise<AgentDefinition | null>
+  saveAgent: (agent: Partial<AgentDefinition>) => Promise<AgentDefinition>
+  deleteAgent: (id: string) => Promise<boolean>
+  listAgentGroups: () => Promise<AgentGroupDefinition[]>
+  getAgentGroup: (id: string) => Promise<AgentGroupDefinition | null>
+  saveAgentGroup: (group: Partial<AgentGroupDefinition>) => Promise<AgentGroupDefinition>
+  deleteAgentGroup: (id: string) => Promise<boolean>
+  onAgentWorkspaceChanged: (callback: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void) => () => void
+  listImConnectors: () => Promise<ConnectorDefinition[]>
+  listChannelBindings: () => Promise<ChannelBinding[]>
+  getChannelBinding: (id: string) => Promise<ChannelBinding | null>
+  saveChannelBinding: (binding: Partial<ChannelBinding>) => Promise<ChannelBinding>
+  deleteChannelBinding: (id: string) => Promise<boolean>
+  listMemory: (options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => Promise<MemoryEntry[]>
+  pinMemory: (id: string, pinned: boolean) => Promise<boolean>
+  deleteMemory: (id: string) => Promise<boolean>
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>

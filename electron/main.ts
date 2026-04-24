@@ -20,11 +20,16 @@ import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, t
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { AILogStore } from '../src/main/settings/ai-log-store.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
+import { AgentStore } from '../src/main/settings/agent-store.js'
+import { AgentGroupStore } from '../src/main/settings/agent-group-store.js'
 import {
   ScheduledTaskStore,
   type ScheduledTaskDefinition,
   type ScheduledTaskRunReport
 } from '../src/main/settings/scheduled-task-store.js'
+import { ChannelBindingStore } from '../src/main/im/channel-binding-store.js'
+import { MemoryStore } from '../src/main/ai-engine/memory/memory-store.js'
+import { MemoryEngine } from '../src/main/ai-engine/memory/memory-engine.js'
 import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../src/main/ai-engine/agent/tools/office-utils.js'
 import { AsyncTaskManager } from '../src/main/ai-engine/agent/tools/async-task-manager.js'
@@ -36,6 +41,7 @@ import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_
 import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.js'
 import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
 import { ScheduledTaskService } from '../src/main/scheduler/scheduled-task-service.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupTranscript, AgentMemoryScope, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -71,6 +77,11 @@ let settingsStore: SettingsStore | null = null
 let chatHistory: ChatHistoryStore | null = null
 let aiLogStore: AILogStore | null = null
 let skillStore: SkillStore | null = null
+let agentStore: AgentStore | null = null
+let agentGroupStore: AgentGroupStore | null = null
+let channelBindingStore: ChannelBindingStore | null = null
+let memoryStore: MemoryStore | null = null
+let memoryEngine: MemoryEngine | null = null
 let scheduledTaskStore: ScheduledTaskStore | null = null
 let scheduledTaskService: ScheduledTaskService | null = null
 let documentStore: DocumentStore | null = null
@@ -120,6 +131,23 @@ interface UploadedAttachmentResult {
 interface ActiveChatSession {
   abortController: AbortController
   authMode: { current: AIExecutionAuthMode }
+}
+
+interface ResolvedAgentRuntimeContext {
+  agent: AgentDefinition | null
+  group: AgentGroupDefinition | null
+  channelBinding: ChannelBinding | null
+  effectiveTargetProjectId: string | null
+  providerConfig: ReturnType<typeof resolveProviderConfig>
+  activeSkillContents: string[]
+  systemPromptSections: string[]
+  allowedToolNames: string[]
+  deniedToolNames: string[]
+}
+
+interface GroupDeliberationResult {
+  promptSection: string | null
+  transcript: AgentGroupTranscript | null
 }
 
 function isSupportedTextAttachment (fileName: string): boolean {
@@ -317,6 +345,123 @@ function getConversationTitleFromMessages (messages: Array<{ role: string; conte
   const text = getMessageText(firstUserMessage.content)
   if (!text) return '新对话'
   return text.length > 40 ? `${text.slice(0, 40)}...` : text
+}
+
+function getLastUserMessageText (messages: Array<{ role: string; content: MessageContent }>): string {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message.role !== 'user') continue
+    const text = getMessageText(message.content)
+    if (text) return text
+  }
+
+  return ''
+}
+
+function getAllUserMessageTexts (messages: Array<{ role: string; content: MessageContent }>): string[] {
+  return messages
+    .filter(message => message.role === 'user')
+    .map(message => getMessageText(message.content))
+    .filter(Boolean)
+}
+
+function notifyAgentWorkspaceChanged (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }): void {
+  broadcastToAppWindows('agentWorkspace:changed', event)
+}
+
+function firstNonEmptyLine (value: string): string {
+  return value
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .find(Boolean) || ''
+}
+
+function mergeUniqueStrings (...collections: Array<string[] | undefined>): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+
+  for (const collection of collections) {
+    if (!collection) continue
+    for (const item of collection) {
+      const normalized = item.trim()
+      if (!normalized || seen.has(normalized)) continue
+      seen.add(normalized)
+      result.push(normalized)
+    }
+  }
+
+  return result
+}
+
+function resolveSkillContentsByIds (skillIds?: string[]): string[] {
+  if (!skillStore || !skillIds || skillIds.length === 0) return []
+
+  const contents: string[] = []
+  for (const skillId of skillIds) {
+    const skill = skillStore.get(skillId)
+    if (skill?.content?.trim()) {
+      contents.push(skill.content)
+    }
+  }
+
+  return mergeUniqueStrings(contents)
+}
+
+function buildActiveAgentSection (agent: AgentDefinition): string {
+  const lines = [
+    '## Active custom agent',
+    `- Agent: ${agent.name}`,
+    `- Description: ${agent.description || 'N/A'}`,
+    `- Reasoning strength: ${agent.reasoningStrength || 'medium'}`,
+    `- Memory scopes: ${(agent.memoryScopes || []).join(', ') || 'user, agent, project'}`
+  ]
+
+  if (agent.allowedTools && agent.allowedTools.length > 0) {
+    lines.push(`- Allowed tools: ${agent.allowedTools.join(', ')}`)
+  }
+
+  if (agent.deniedTools && agent.deniedTools.length > 0) {
+    lines.push(`- Denied tools: ${agent.deniedTools.join(', ')}`)
+  }
+
+  if (agent.systemPrompt.trim()) {
+    lines.push('', '### Agent instructions', agent.systemPrompt.trim())
+  }
+
+  return lines.join('\n')
+}
+
+function buildActiveGroupSection (group: AgentGroupDefinition): string {
+  const coordinatorName = agentStore?.get(group.coordinatorAgentId)?.name || group.coordinatorAgentId || 'N/A'
+  const memberNames = group.memberAgentIds.map(agentId => agentStore?.get(agentId)?.name || agentId)
+
+  return [
+    '## Active agent group',
+    `- Group: ${group.name}`,
+    `- Description: ${group.description || 'N/A'}`,
+    `- Coordinator: ${coordinatorName}`,
+    `- Members: ${memberNames.join(', ') || 'N/A'}`,
+    `- Max rounds: ${group.maxRounds}`,
+    `- Max parallel workers: ${group.maxParallelWorkers}`,
+    `- Shared memory scopes: ${group.sharedMemoryScopes.join(', ') || 'group'}`,
+    `- Transcript visibility: ${group.visibility}`
+  ].join('\n')
+}
+
+function buildActiveChannelSection (binding: ChannelBinding): string {
+  const connector = channelBindingStore?.listConnectors().find(item => item.id === binding.connectorType)
+
+  return [
+    '## Active channel binding',
+    `- Connector: ${connector?.name || binding.connectorType}`,
+    `- External channel ID: ${binding.externalChannelId}`,
+    `- External thread ID: ${binding.externalThreadId || 'N/A'}`,
+    `- Bound group ID: ${binding.boundGroupId || 'N/A'}`,
+    `- Default agent ID: ${binding.defaultAgentId || 'N/A'}`,
+    `- Target project ID: ${binding.targetProjectId || 'N/A'}`,
+    `- Auto reply: ${binding.autoReply ? 'enabled' : 'disabled'}`,
+    `- Risky tools require approval: ${binding.requireApprovalForRiskyTools ? 'yes' : 'no'}`
+  ].join('\n')
 }
 
 function notifyAiTaskStatus (
@@ -647,6 +792,179 @@ function resolveProviderConfig (requestedProviderId?: string, requestedModelId?:
   }
 }
 
+function resolveAgentRuntimeContext (input: {
+  messages: Array<{ role: string; content: MessageContent }>
+  agentId?: string
+  groupId?: string
+  channelBindingId?: string
+  requestedProviderId?: string
+  requestedModelId?: string
+  requestedTargetProjectId?: string
+  requestedReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
+}): ResolvedAgentRuntimeContext {
+  const group = input.groupId ? agentGroupStore?.get(input.groupId) || null : null
+  const channelBinding = input.channelBindingId ? channelBindingStore?.get(input.channelBindingId) || null : null
+  const explicitAgent = input.agentId ? agentStore?.get(input.agentId) || null : null
+  const fallbackAgentId = channelBinding?.defaultAgentId || group?.coordinatorAgentId
+  const agent = explicitAgent || (fallbackAgentId ? agentStore?.get(fallbackAgentId) || null : null)
+  const effectiveTargetProjectId = input.requestedTargetProjectId ?? channelBinding?.targetProjectId ?? null
+  const effectiveReasoningStrength = input.requestedReasoningStrength || agent?.reasoningStrength || 'medium'
+  const providerConfig = resolveProviderConfig(
+    input.requestedProviderId || agent?.providerId,
+    input.requestedModelId || agent?.modelId,
+    effectiveReasoningStrength
+  )
+  const memoryContext = memoryEngine?.buildPromptContext({
+    agent,
+    group,
+    channelBinding,
+    userMessage: getLastUserMessageText(input.messages),
+    targetProjectId: effectiveTargetProjectId,
+    userId: 'local-user',
+    enabledScopeTypes: agent?.memoryScopes
+  })
+  const systemPromptSections = [
+    agent ? buildActiveAgentSection(agent) : null,
+    group ? buildActiveGroupSection(group) : null,
+    channelBinding ? buildActiveChannelSection(channelBinding) : null,
+    ...(memoryContext?.sections || [])
+  ].filter((value): value is string => Boolean(value))
+
+  return {
+    agent,
+    group,
+    channelBinding,
+    effectiveTargetProjectId,
+    providerConfig,
+    activeSkillContents: resolveSkillContentsByIds(agent?.skillIds),
+    systemPromptSections,
+    allowedToolNames: agent?.allowedTools || [],
+    deniedToolNames: agent?.deniedTools || []
+  }
+}
+
+function truncateSectionText (value: string, maxChars = 6000): string {
+  const normalized = value.trim()
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, maxChars)}\n...[truncated ${normalized.length - maxChars} chars]`
+}
+
+function buildGroupTranscriptSummary (group: AgentGroupDefinition, entries: AgentGroupTranscript['entries']): string {
+  const participantNames = Array.from(new Set(entries.map(entry => entry.agentName))).filter(Boolean)
+  const latestFocus = entries.length > 0
+    ? firstNonEmptyLine(entries[entries.length - 1].content)
+    : ''
+  const lines = [
+    `群组 ${group.name} 完成了 ${Math.max(...entries.map(entry => entry.round), 0)} 轮内部讨论，共生成 ${entries.length} 条工作笔记。`,
+    participantNames.length > 0 ? `参与 Agent：${participantNames.join('、')}。` : ''
+  ]
+
+  if (latestFocus) {
+    lines.push(`最近一条聚焦：${truncateSectionText(latestFocus, 220)}`)
+  }
+
+  return lines.filter(Boolean).join('\n')
+}
+
+async function buildGroupDeliberationSection (input: {
+  messages: Array<{ role: string; content: MessageContent }>
+  group: AgentGroupDefinition
+  channelBinding?: ChannelBinding | null
+  targetProjectId?: string | null
+  fallbackReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
+  onProgress?: (stageOrEvent: string | ProgressEvent, detail?: string) => void
+}): Promise<GroupDeliberationResult> {
+  if (!aiEngine || !agentStore) {
+    return { promptSection: null, transcript: null }
+  }
+
+  const allToolNames = aiEngine.getAvailableTools().map(tool => tool.name)
+  const memberIds = Array.from(new Set(input.group.memberAgentIds.filter(Boolean))).slice(0, input.group.maxParallelWorkers)
+  if (memberIds.length === 0) {
+    return { promptSection: null, transcript: null }
+  }
+
+  const notes: string[] = []
+  const entries: AgentGroupTranscript['entries'] = []
+  const latestUserMessage = getLastUserMessageText(input.messages)
+
+  for (let round = 1; round <= input.group.maxRounds; round++) {
+    for (const memberId of memberIds) {
+      const member = agentStore.get(memberId)
+      if (!member) continue
+
+      input.onProgress?.('🧩 Agent 群讨论中...', `第 ${round} 轮 · ${member.name}`)
+
+      const memberMemory = memoryEngine?.buildPromptContext({
+        agent: member,
+        group: input.group,
+        channelBinding: input.channelBinding,
+        userMessage: latestUserMessage,
+        targetProjectId: input.targetProjectId,
+        userId: 'local-user',
+        enabledScopeTypes: member.memoryScopes
+      })
+      const priorNotesSection = notes.length > 0
+        ? `## Prior agent group notes\n${truncateSectionText(notes.slice(-6).join('\n\n'), 3000)}`
+        : null
+
+      const response = await aiEngine.chat(input.messages, {
+        targetProjectId: input.targetProjectId ?? null,
+        providerConfig: resolveProviderConfig(
+          member.providerId,
+          member.modelId,
+          member.reasoningStrength || input.fallbackReasoningStrength || 'medium'
+        ),
+        activeSkillContents: resolveSkillContentsByIds(member.skillIds),
+        systemPromptSections: [
+          buildActiveAgentSection(member),
+          buildActiveGroupSection(input.group),
+          '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Focus on solution branches, risks, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- Do not use any tools in this internal round.',
+          ...(memberMemory?.sections || []),
+          ...(priorNotesSection ? [priorNotesSection] : [])
+        ],
+        deniedToolNames: allToolNames
+      })
+
+      const noteText = getMessageText(response.content)
+      if (!noteText) continue
+      entries.push({
+        id: `${input.group.id}_${round}_${member.id}_${entries.length}`,
+        round,
+        agentId: member.id,
+        agentName: member.name,
+        content: noteText
+      })
+      notes.push(`### Round ${round} · ${member.name}\n${noteText}`)
+    }
+  }
+
+  if (notes.length === 0) {
+    return { promptSection: null, transcript: null }
+  }
+
+  return {
+    promptSection: [
+    '## Agent group internal deliberation',
+    '- These are internal working notes synthesized from the selected group members.',
+    '- Use them to improve the final answer, but do not expose the full transcript unless the user asks for it.',
+    '',
+    truncateSectionText(notes.join('\n\n'), input.group.visibility === 'summary_only' ? 4000 : 8000)
+    ].join('\n'),
+    transcript: {
+      groupId: input.group.id,
+      groupName: input.group.name,
+      visibility: input.group.visibility,
+      roundCount: Math.max(...entries.map(entry => entry.round), 0),
+      entryCount: entries.length,
+      summary: buildGroupTranscriptSummary(input.group, entries),
+      entries: input.group.visibility === 'expandable_internal_transcript'
+        ? entries
+        : []
+    }
+  }
+}
+
 function applyMcpServersToService (): MCPServerConfig[] {
   const servers = settingsStore!.getMcpServers()
   void mcpService!.updateServers(servers).catch((error) => {
@@ -664,6 +982,11 @@ async function initializeServices (): Promise<void> {
   chatHistory = new ChatHistoryStore(userDataPath)
   aiLogStore = new AILogStore(userDataPath)
   skillStore = new SkillStore(userDataPath)
+  agentStore = new AgentStore(userDataPath)
+  agentGroupStore = new AgentGroupStore(userDataPath)
+  channelBindingStore = new ChannelBindingStore(userDataPath)
+  memoryStore = new MemoryStore(userDataPath)
+  memoryEngine = new MemoryEngine(memoryStore)
   scheduledTaskStore = new ScheduledTaskStore(userDataPath)
   mcpService = new MCPService()
   mcpService.on('stateChanged', (state: MCPStateSnapshot) => {
@@ -703,11 +1026,14 @@ async function initializeServices (): Promise<void> {
     asyncTaskManager,
     documentStore,
     skillStore,
+    agentStore,
+    agentGroupStore,
     settingsStore,
     getMainWindow: () => mainWindow,
     notifySkillsChanged: (event) => {
       broadcastToAppWindows('skills:changed', event)
     },
+    notifyAgentWorkspaceChanged,
     mcpService,
     scheduledTaskService: undefined
   })
@@ -831,30 +1157,68 @@ function createWindow (): void {
 
 function setupIPC (): void {
   // AI chat (non-streaming, kept for backward compat)
-  ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => {
+  ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string) => {
+    const runtimeContext = resolveAgentRuntimeContext({
+      messages,
+      agentId,
+      groupId,
+      channelBindingId,
+      requestedProviderId: providerId,
+      requestedModelId: modelId,
+      requestedTargetProjectId: targetProjectId,
+      requestedReasoningStrength: reasoningStrength
+    })
+    const groupDeliberation = runtimeContext.group
+      ? await buildGroupDeliberationSection({
+          messages,
+          group: runtimeContext.group,
+          channelBinding: runtimeContext.channelBinding,
+          targetProjectId: runtimeContext.effectiveTargetProjectId,
+          fallbackReasoningStrength: reasoningStrength
+        })
+      : { promptSection: null, transcript: null }
+
     return aiEngine!.chat(messages, {
-      providerConfig: resolveProviderConfig(providerId, modelId, reasoningStrength)
+      targetProjectId: runtimeContext.effectiveTargetProjectId,
+      providerConfig: runtimeContext.providerConfig,
+      activeSkillContents: runtimeContext.activeSkillContents,
+      systemPromptSections: groupDeliberation.promptSection
+        ? [...runtimeContext.systemPromptSections, groupDeliberation.promptSection]
+        : runtimeContext.systemPromptSections,
+      allowedToolNames: runtimeContext.allowedToolNames,
+      deniedToolNames: runtimeContext.deniedToolNames
     })
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string) => {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
     const authModeRef = { current: authMode ?? 'strict' }
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
+    const runtimeContext = resolveAgentRuntimeContext({
+      messages,
+      agentId,
+      groupId,
+      channelBindingId,
+      requestedProviderId: providerId,
+      requestedModelId: modelId,
+      requestedTargetProjectId: targetProjectId,
+      requestedReasoningStrength: reasoningStrength
+    })
     const conversationTitle = getConversationTitleFromMessages(messages)
+    const executedToolNames: string[] = []
     const aiLogger = executionPreferences.enableAiLogging && aiLogStore && conversationId
       ? aiLogStore.createSessionLogger({
           conversationId,
           title: conversationTitle,
           sessionId,
           uploadedMessages: messages,
-          providerId,
-          modelId,
+          providerId: providerId || runtimeContext.agent?.providerId,
+          modelId: modelId || runtimeContext.agent?.modelId,
           authMode,
-          targetProjectId: targetProjectId ?? null
+          targetProjectId: runtimeContext.effectiveTargetProjectId
         })
       : undefined
     activeChatSessions.set(sessionId, {
@@ -871,18 +1235,74 @@ function setupIPC (): void {
         sender.send(channel, stageOrEvent)
       }
     }
-      try {
-        for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
-          targetProjectId: targetProjectId ?? null,
-          providerConfig: resolveProviderConfig(providerId, modelId, reasoningStrength),
+    const groupDeliberation = runtimeContext.group
+      ? await buildGroupDeliberationSection({
+          messages,
+          group: runtimeContext.group,
+          channelBinding: runtimeContext.channelBinding,
+          targetProjectId: runtimeContext.effectiveTargetProjectId,
+          fallbackReasoningStrength: reasoningStrength,
+          onProgress
+        })
+      : { promptSection: null, transcript: null }
+    let groupTranscriptSent = false
+    const emitGroupTranscriptIfNeeded = () => {
+      if (groupTranscriptSent || !groupDeliberation.transcript || sender.isDestroyed()) {
+        return
+      }
+
+      sender.send(channel, {
+        type: 'group_transcript',
+        transcript: groupDeliberation.transcript
+      })
+      groupTranscriptSent = true
+    }
+    try {
+      for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
+          targetProjectId: runtimeContext.effectiveTargetProjectId,
+          providerConfig: runtimeContext.providerConfig,
           abortSignal: abortController.signal,
           authMode: authModeRef.current,
           getAuthMode: () => authModeRef.current,
-          aiLogger
+          aiLogger,
+          activeSkillContents: runtimeContext.activeSkillContents,
+          systemPromptSections: groupDeliberation.promptSection
+            ? [...runtimeContext.systemPromptSections, groupDeliberation.promptSection]
+            : runtimeContext.systemPromptSections,
+          allowedToolNames: runtimeContext.allowedToolNames,
+          deniedToolNames: runtimeContext.deniedToolNames
         })) {
+        if (streamEvent.type === 'tool_start' && streamEvent.name) {
+          executedToolNames.push(streamEvent.name)
+        }
+
         if (streamEvent.type === 'done') {
           notifyAiTaskStatus(executionPreferences, messages, 'completed')
           aiLogger?.finish('completed', streamEvent.message)
+
+          if (memoryEngine) {
+            try {
+              memoryEngine.ingestSessionMemory({
+                agent: runtimeContext.agent,
+                group: runtimeContext.group,
+                channelBinding: runtimeContext.channelBinding,
+                userMessages: getAllUserMessageTexts(messages),
+                finalAssistantText: getMessageText(streamEvent.message.content),
+                toolNames: executedToolNames,
+                targetProjectId: runtimeContext.effectiveTargetProjectId,
+                sourceConversationId: conversationId,
+                sourceSessionId: sessionId,
+                userId: 'local-user',
+                enabledScopeTypes: runtimeContext.agent?.memoryScopes
+              })
+            } catch (memoryError) {
+              console.error('[ai:chatStream] Failed to ingest memory:', memoryError)
+              aiLogger?.logError('session', memoryError as Error, { phase: 'memory-ingest', sessionId, conversationId })
+            }
+          }
+        }
+        if (streamEvent.type === 'done' || streamEvent.type === 'error') {
+          emitGroupTranscriptIfNeeded()
         }
         if (sender.isDestroyed()) break
         try {
@@ -951,6 +1371,7 @@ function setupIPC (): void {
       aiLogger?.logError('stream', err as Error, { sessionId, conversationId })
       aiLogger?.finish(finalStatus)
       if (!sender.isDestroyed()) {
+        emitGroupTranscriptIfNeeded()
         sender.send(channel, errorMessage === USER_ABORT_MESSAGE
           ? { type: 'stopped' }
           : { type: 'error', error: errorMessage })
@@ -995,6 +1416,106 @@ function setupIPC (): void {
 
   ipcMain.handle('conversations:delete', async (_event: IpcMainInvokeEvent, id: string) => {
     return chatHistory!.delete(id)
+  })
+
+  ipcMain.handle('agents:list', async () => {
+    return agentStore!.list()
+  })
+
+  ipcMain.handle('agents:get', async (_event: IpcMainInvokeEvent, id: string) => {
+    return agentStore!.get(id)
+  })
+
+  ipcMain.handle('agents:save', async (_event: IpcMainInvokeEvent, agent: Partial<AgentDefinition>) => {
+    const saved = agentStore!.save(agent)
+    notifyAgentWorkspaceChanged({ entity: 'agent', action: 'saved', id: saved.id })
+    return saved
+  })
+
+  ipcMain.handle('agents:delete', async (_event: IpcMainInvokeEvent, id: string) => {
+    const deleted = agentStore!.delete(id)
+    if (deleted) {
+      notifyAgentWorkspaceChanged({ entity: 'agent', action: 'deleted', id })
+    }
+    return deleted
+  })
+
+  ipcMain.handle('agentWorkspace:listToolDefinitions', async () => {
+    return aiEngine!.getAvailableTools()
+      .map(tool => ({
+        name: tool.name,
+        description: tool.description
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name, 'en'))
+  })
+
+  ipcMain.handle('agentGroups:list', async () => {
+    return agentGroupStore!.list()
+  })
+
+  ipcMain.handle('agentGroups:get', async (_event: IpcMainInvokeEvent, id: string) => {
+    return agentGroupStore!.get(id)
+  })
+
+  ipcMain.handle('agentGroups:save', async (_event: IpcMainInvokeEvent, group: Partial<AgentGroupDefinition>) => {
+    const saved = agentGroupStore!.save(group)
+    notifyAgentWorkspaceChanged({ entity: 'group', action: 'saved', id: saved.id })
+    return saved
+  })
+
+  ipcMain.handle('agentGroups:delete', async (_event: IpcMainInvokeEvent, id: string) => {
+    const deleted = agentGroupStore!.delete(id)
+    if (deleted) {
+      notifyAgentWorkspaceChanged({ entity: 'group', action: 'deleted', id })
+    }
+    return deleted
+  })
+
+  ipcMain.handle('im:listConnectors', async () => {
+    return channelBindingStore!.listConnectors()
+  })
+
+  ipcMain.handle('im:listBindings', async () => {
+    return channelBindingStore!.list()
+  })
+
+  ipcMain.handle('im:getBinding', async (_event: IpcMainInvokeEvent, id: string) => {
+    return channelBindingStore!.get(id)
+  })
+
+  ipcMain.handle('im:saveBinding', async (_event: IpcMainInvokeEvent, binding: Partial<ChannelBinding>) => {
+    const saved = channelBindingStore!.save(binding)
+    notifyAgentWorkspaceChanged({ entity: 'binding', action: 'saved', id: saved.id })
+    return saved
+  })
+
+  ipcMain.handle('im:deleteBinding', async (_event: IpcMainInvokeEvent, id: string) => {
+    const deleted = channelBindingStore!.delete(id)
+    if (deleted) {
+      notifyAgentWorkspaceChanged({ entity: 'binding', action: 'deleted', id })
+    }
+    return deleted
+  })
+
+  ipcMain.handle('memory:list', async (_event: IpcMainInvokeEvent, options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => {
+    const scopes = options?.scopes || (options?.scopeType && options?.scopeId
+      ? [{ scopeType: options.scopeType, scopeId: options.scopeId }]
+      : undefined)
+
+    return memoryStore!.search({
+      query: options?.query,
+      scopes,
+      memoryTypes: options?.memoryTypes,
+      limit: options?.limit
+    })
+  })
+
+  ipcMain.handle('memory:pin', async (_event: IpcMainInvokeEvent, id: string, pinned: boolean) => {
+    return memoryEngine!.pinMemory(id, pinned)
+  })
+
+  ipcMain.handle('memory:delete', async (_event: IpcMainInvokeEvent, id: string) => {
+    return memoryEngine!.deleteMemory(id)
   })
 
   ipcMain.handle('media:saveImage', async (event: IpcMainInvokeEvent, imageUrl: string, defaultName?: string) => {
@@ -1790,6 +2311,9 @@ app.on('before-quit', (event) => {
       }
       if (scheduledTaskService) {
         scheduledTaskService.dispose()
+      }
+      if (memoryStore) {
+        memoryStore.close()
       }
     } finally {
       hasFinishedQuitCleanup = true

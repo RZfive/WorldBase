@@ -26,6 +26,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
@@ -89,6 +90,9 @@ interface ConversationSummary {
   selectedModel?: string
   reasoningStrength?: ReasoningStrength
   targetProjectId?: string
+  agentId?: string
+  groupId?: string
+  channelBindingId?: string
 }
 
 interface ProviderOption {
@@ -184,6 +188,12 @@ const filePreview = ref<FilePreviewState>({
 
 const availableSkills = ref<SkillItem[]>([])
 const activeSkillIds = ref<Set<string>>(new Set())
+const availableAgents = ref<AgentDefinition[]>([])
+const availableAgentGroups = ref<AgentGroupDefinition[]>([])
+const availableChannelBindings = ref<ChannelBinding[]>([])
+const selectedAgentId = ref('')
+const selectedGroupId = ref('')
+const selectedChannelBindingId = ref('')
 const showSkillPicker = ref(false)
 const planModeActive = ref(false)
 const syncingProviderOptions = ref(false)
@@ -200,6 +210,9 @@ const backgroundStreamMessages = new Map<string, {
   providerId: string | null
   selectedModel: string | null
   reasoningStrength: ReasoningStrength
+  agentId: string | null
+  groupId: string | null
+  channelBindingId: string | null
 }>()
 const activeCleanups = new Map<string, () => void>()
 const activeStreamSessionIds = new Map<string, string>()
@@ -209,6 +222,7 @@ let authRequestCleanup: (() => void) | null = null
 let authResponseCleanup: (() => void) | null = null
 let authResolvedCleanup: (() => void) | null = null
 let skillsChangedCleanup: (() => void) | null = null
+let agentWorkspaceChangeCleanup: (() => void) | null = null
 const MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH = 180
 const MAX_IMAGE_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
 
@@ -244,6 +258,40 @@ async function loadSkills () {
     if (nextActiveIds.length !== activeSkillIds.value.size) {
       activeSkillIds.value = new Set(nextActiveIds)
       void syncActiveSkills()
+    }
+  } catch { /* ignore */ }
+}
+
+function getDefaultAgentId (): string {
+  return availableAgents.value.find(agent => agent.id === 'agent_default')?.id || ''
+}
+
+async function loadAgentWorkspaceOptions () {
+  if (!window.electronAPI?.listAgents || !window.electronAPI?.listAgentGroups || !window.electronAPI?.listChannelBindings) return
+
+  try {
+    const [agents, groups, bindings] = await Promise.all([
+      window.electronAPI.listAgents(),
+      window.electronAPI.listAgentGroups(),
+      window.electronAPI.listChannelBindings()
+    ])
+
+    availableAgents.value = agents
+    availableAgentGroups.value = groups
+    availableChannelBindings.value = bindings
+
+    if (selectedAgentId.value && !agents.some(agent => agent.id === selectedAgentId.value)) {
+      selectedAgentId.value = ''
+    }
+    if (selectedGroupId.value && !groups.some(group => group.id === selectedGroupId.value)) {
+      selectedGroupId.value = ''
+    }
+    if (selectedChannelBindingId.value && !bindings.some(binding => binding.id === selectedChannelBindingId.value)) {
+      selectedChannelBindingId.value = ''
+    }
+
+    if (!selectedAgentId.value) {
+      selectedAgentId.value = getDefaultAgentId()
     }
   } catch { /* ignore */ }
 }
@@ -352,6 +400,21 @@ function createFilePreviewBlock (filePath: string, truncated = false): ChatMessa
   }
 }
 
+function cloneGroupTranscript (transcript: AgentGroupTranscript): AgentGroupTranscript {
+  return {
+    ...transcript,
+    entries: transcript.entries.map(entry => ({ ...entry }))
+  }
+}
+
+function createGroupTranscriptBlock (transcript: AgentGroupTranscript): ChatMessageBlock {
+  return {
+    id: createBlockId('group_transcript'),
+    kind: 'group_transcript',
+    transcript: cloneGroupTranscript(transcript)
+  }
+}
+
 function createWebSearchBlock (query: string, engine: string, results: WebSearchResultItem[]): ChatMessageBlock {
   return {
     id: createBlockId('websearch'),
@@ -391,6 +454,47 @@ function createAuthRequestBlock (request: AuthRequestPayload): ChatMessageBlock 
     detail: request.detail,
     status: 'pending'
   }
+}
+
+function positionGroupTranscriptBlocks (message: ChatMessage): void {
+  const blocks = ensureBlocks(message)
+  const transcriptBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'group_transcript' }> => {
+    return block.kind === 'group_transcript'
+  })
+
+  if (transcriptBlocks.length === 0) return
+
+  const reorderedBlocks: ChatMessageBlock[] = blocks.filter(block => block.kind !== 'group_transcript')
+  let insertIndex = -1
+  for (let index = reorderedBlocks.length - 1; index >= 0; index--) {
+    if (reorderedBlocks[index].kind === 'content') {
+      insertIndex = index + 1
+      break
+    }
+  }
+
+  if (insertIndex < 0) {
+    reorderedBlocks.push(...transcriptBlocks)
+  } else {
+    reorderedBlocks.splice(insertIndex, 0, ...transcriptBlocks)
+  }
+
+  blocks.splice(0, blocks.length, ...reorderedBlocks)
+}
+
+function upsertGroupTranscriptBlock (message: ChatMessage, transcript: AgentGroupTranscript): void {
+  const blocks = ensureBlocks(message)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_transcript' }> => {
+    return block.kind === 'group_transcript'
+  })
+
+  if (existing) {
+    existing.transcript = cloneGroupTranscript(transcript)
+  } else {
+    blocks.push(createGroupTranscriptBlock(transcript))
+  }
+
+  positionGroupTranscriptBlocks(message)
 }
 
 function getLastBlock (blocks: ChatMessageBlock[]): ChatMessageBlock | null {
@@ -908,7 +1012,10 @@ function stashCurrentConversationForNavigation () {
       authMode: currentAuthMode.value,
       providerId: activeProviderId.value || null,
       selectedModel: selectedModel.value || null,
-      reasoningStrength: reasoningStrength.value
+      reasoningStrength: reasoningStrength.value,
+      agentId: selectedAgentId.value || null,
+      groupId: selectedGroupId.value || null,
+      channelBindingId: selectedChannelBindingId.value || null
     })
     void doSaveConversation(currentConversationId.value, messages.value, { targetProjectId: targetProjectId.value })
   }
@@ -927,6 +1034,9 @@ async function startOptimizationConversation (ctx: Record<string, unknown>) {
   targetProjectId.value = projectId
   currentAuthMode.value = 'strict'
   reasoningStrength.value = 'medium'
+  selectedAgentId.value = getDefaultAgentId()
+  selectedGroupId.value = ''
+  selectedChannelBindingId.value = ''
   inputText.value = `${projectRef}${projectRef ? '\n' : ''}请先检查这个项目的当前代码、运行状态和最近日志，明确告诉我这个项目现在的具体问题、风险点和可优化项，然后再继续修改。`
   pendingImages.value = []
   pendingFiles.value = []
@@ -1023,6 +1133,33 @@ async function handleAuthModeChange (authMode: AIExecutionAuthMode) {
   })
 }
 
+async function handleAgentSelectionChange (agentId: string) {
+  selectedAgentId.value = agentId
+  if (!currentConversationId.value) return
+  await doSaveConversation(currentConversationId.value, messages.value, {
+    targetProjectId: targetProjectId.value,
+    allowEmpty: true
+  })
+}
+
+async function handleGroupSelectionChange (groupId: string) {
+  selectedGroupId.value = groupId
+  if (!currentConversationId.value) return
+  await doSaveConversation(currentConversationId.value, messages.value, {
+    targetProjectId: targetProjectId.value,
+    allowEmpty: true
+  })
+}
+
+async function handleChannelBindingSelectionChange (channelBindingId: string) {
+  selectedChannelBindingId.value = channelBindingId
+  if (!currentConversationId.value) return
+  await doSaveConversation(currentConversationId.value, messages.value, {
+    targetProjectId: targetProjectId.value,
+    allowEmpty: true
+  })
+}
+
 async function togglePlanMode () {
   planModeActive.value = !planModeActive.value
   if (window.electronAPI?.setPlanMode) {
@@ -1062,6 +1199,9 @@ function newConversation () {
   targetProjectId.value = null
   currentAuthMode.value = 'strict'
   reasoningStrength.value = 'medium'
+  selectedAgentId.value = getDefaultAgentId()
+  selectedGroupId.value = ''
+  selectedChannelBindingId.value = ''
   inputText.value = ''
   resetTransientStreamState()
   pendingImages.value = []
@@ -1083,6 +1223,9 @@ async function loadConversation (id: string) {
     targetProjectId.value = bg.targetProjectId
     currentAuthMode.value = bg.authMode
     reasoningStrength.value = bg.reasoningStrength
+    selectedAgentId.value = bg.agentId || getDefaultAgentId()
+    selectedGroupId.value = bg.groupId || ''
+    selectedChannelBindingId.value = bg.channelBindingId || ''
     setConversationTarget(id, bg.targetProjectId)
     backgroundStreamMessages.delete(id)
     resetTransientStreamState()
@@ -1100,6 +1243,9 @@ async function loadConversation (id: string) {
     targetProjectId.value = conv.targetProjectId || null
     currentAuthMode.value = conv.authMode === 'auto' ? 'auto' : 'strict'
     reasoningStrength.value = conv.reasoningStrength || 'medium'
+    selectedAgentId.value = conv.agentId || getDefaultAgentId()
+    selectedGroupId.value = conv.groupId || ''
+    selectedChannelBindingId.value = conv.channelBindingId || ''
     setConversationTarget(conv.id, conv.targetProjectId || null)
     resetTransientStreamState()
     pendingFiles.value = []
@@ -1139,7 +1285,10 @@ async function doSaveConversation (
     providerId: activeProviderId.value || undefined,
     selectedModel: selectedModel.value || undefined,
     reasoningStrength: reasoningStrength.value,
-    targetProjectId: resolvedTargetProjectId || undefined
+    targetProjectId: resolvedTargetProjectId || undefined,
+    agentId: selectedAgentId.value || undefined,
+    groupId: selectedGroupId.value || undefined,
+    channelBindingId: selectedChannelBindingId.value || undefined
   })))
 
   await loadConversations()
@@ -1464,6 +1613,8 @@ async function sendMessage () {
             ensureBlocks(assistantMessage).push(createWebSearchBlock(event.query, event.engine || 'web', Array.isArray(event.results) ? event.results : []))
           } else if (event.type === 'web_fetch_result' && event.result) {
             ensureBlocks(assistantMessage).push(createWebFetchBlock(event.result as WebFetchResultEntry, event.query))
+          } else if (event.type === 'group_transcript' && event.transcript) {
+            upsertGroupTranscriptBlock(assistantMessage, event.transcript)
           } else if (event.type === 'tool_start' && event.name) {
             const toolRun = createToolRun(event.name)
             toolRuns.push(toolRun)
@@ -1503,6 +1654,7 @@ async function sendMessage () {
                 assistantMessage.thinking = event.thinking
                 ensureBlocks(assistantMessage).push(createThinkingBlock(event.thinking))
               }
+              positionGroupTranscriptBlocks(assistantMessage)
             } finally {
               finishSession(true)
             }
@@ -1554,7 +1706,10 @@ async function sendMessage () {
         selectedModel.value || undefined,
         targetProjectId.value ?? undefined,
         currentAuthMode.value,
-        reasoningStrength.value
+        reasoningStrength.value,
+        selectedAgentId.value || undefined,
+        selectedGroupId.value || undefined,
+        selectedChannelBindingId.value || undefined
       )
 
       if (streamingConvIds.has(convId)) {
@@ -1609,6 +1764,7 @@ onMounted(async () => {
   await loadConversations()
   await loadProviders()
   await loadSkills()
+  await loadAgentWorkspaceOptions()
 
   if (window.electronAPI?.onProvidersChanged) {
     providerChangeCleanup = window.electronAPI.onProvidersChanged((config) => {
@@ -1630,6 +1786,12 @@ onMounted(async () => {
     })
   }
 
+  if (window.electronAPI?.onAgentWorkspaceChanged) {
+    agentWorkspaceChangeCleanup = window.electronAPI.onAgentWorkspaceChanged(() => {
+      void loadAgentWorkspaceOptions()
+    })
+  }
+
   authResponseCleanup = onAuthResolution(handleAuthResolution)
 })
 
@@ -1647,6 +1809,8 @@ onUnmounted(() => {
   authResolvedCleanup = null
   skillsChangedCleanup?.()
   skillsChangedCleanup = null
+  agentWorkspaceChangeCleanup?.()
+  agentWorkspaceChangeCleanup = null
   authResponseCleanup?.()
   authResponseCleanup = null
 })
@@ -1669,6 +1833,12 @@ onUnmounted(() => {
         :active-provider-id="activeProviderId"
         :selected-model="selectedModel"
         :auth-mode="currentAuthMode"
+        :available-agents="availableAgents"
+        :selected-agent-id="selectedAgentId"
+        :available-agent-groups="availableAgentGroups"
+        :selected-group-id="selectedGroupId"
+        :available-channel-bindings="availableChannelBindings"
+        :selected-channel-binding-id="selectedChannelBindingId"
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
         :show-skill-picker="showSkillPicker"
@@ -1676,6 +1846,9 @@ onUnmounted(() => {
         @update:active-provider-id="handleProviderSelectionChange"
         @update:selected-model="handleModelSelectionChange"
         @update:auth-mode="handleAuthModeChange"
+        @update:selected-agent-id="handleAgentSelectionChange"
+        @update:selected-group-id="handleGroupSelectionChange"
+        @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
         @toggle-skill-picker="showSkillPicker = !showSkillPicker"
         @toggle-skill="toggleSkill"
         @toggle-plan-mode="togglePlanMode"
