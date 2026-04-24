@@ -481,7 +481,7 @@ function upsertErrorBlock (message: ChatMessage, errorMessage: string): void {
 }
 
 function setAssistantErrorState (message: ChatMessage, errorMessage: string): void {
-  if (!hasRenderableContent(message.content)) {
+  if (getMessageTextContent(message.content).length === 0) {
     message.content = `错误: ${errorMessage}`
   }
   upsertErrorBlock(message, errorMessage)
@@ -1496,7 +1496,7 @@ async function sendMessage () {
                 syncAssistantToolRuns()
               }
               finalizePendingAuthBlocks(assistantMessage)
-              setAssistantErrorState(assistantMessage, event.error)
+              setAssistantErrorState(assistantMessage, event.error || '未知错误')
             } finally {
               finishSession()
             }
