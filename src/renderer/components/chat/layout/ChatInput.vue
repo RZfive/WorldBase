@@ -627,7 +627,7 @@ function handleReasoningStrengthInput (event: Event) {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 4px;
   padding: 4px 8px 8px;
 }
 
