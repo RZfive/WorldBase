@@ -12,6 +12,22 @@ interface SkillItem {
   name: string
 }
 
+interface AgentOption {
+  id: string
+  name: string
+}
+
+interface AgentGroupOption {
+  id: string
+  name: string
+}
+
+interface ChannelBindingOption {
+  id: string
+  connectorType: string
+  externalChannelId: string
+}
+
 type AIExecutionAuthMode = 'strict' | 'auto'
 
 const props = defineProps<{
@@ -19,6 +35,12 @@ const props = defineProps<{
   activeProviderId: string
   selectedModel: string
   authMode: AIExecutionAuthMode
+  availableAgents: AgentOption[]
+  selectedAgentId: string
+  availableAgentGroups: AgentGroupOption[]
+  selectedGroupId: string
+  availableChannelBindings: ChannelBindingOption[]
+  selectedChannelBindingId: string
   availableSkills: SkillItem[]
   activeSkillIds: Set<string>
   showSkillPicker: boolean
@@ -29,6 +51,9 @@ const emit = defineEmits<{
   (e: 'update:activeProviderId', providerId: string): void
   (e: 'update:selectedModel', model: string): void
   (e: 'update:auth-mode', authMode: AIExecutionAuthMode): void
+  (e: 'update:selected-agent-id', agentId: string): void
+  (e: 'update:selected-group-id', groupId: string): void
+  (e: 'update:selected-channel-binding-id', channelBindingId: string): void
   (e: 'toggleSkillPicker'): void
   (e: 'toggleSkill', skillId: string): void
   (e: 'togglePlanMode'): void
@@ -48,6 +73,18 @@ function onModelChange (event: Event) {
 
 function onAuthModeChange (event: Event) {
   emit('update:auth-mode', (event.target as HTMLSelectElement).value as AIExecutionAuthMode)
+}
+
+function onAgentChange (event: Event) {
+  emit('update:selected-agent-id', (event.target as HTMLSelectElement).value)
+}
+
+function onGroupChange (event: Event) {
+  emit('update:selected-group-id', (event.target as HTMLSelectElement).value)
+}
+
+function onChannelBindingChange (event: Event) {
+  emit('update:selected-channel-binding-id', (event.target as HTMLSelectElement).value)
 }
 </script>
 
@@ -73,6 +110,29 @@ function onAuthModeChange (event: Event) {
         <select :value="authMode" class="select-input auth-mode-select" @change="onAuthModeChange">
           <option value="strict">严格授权</option>
           <option value="auto">自动执行</option>
+        </select>
+      </div>
+
+      <div v-if="availableAgents.length > 0" class="agent-selector">
+        <select :value="selectedAgentId" class="select-input" @change="onAgentChange">
+          <option value="">默认 Agent</option>
+          <option v-for="agent in availableAgents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
+        </select>
+      </div>
+
+      <div v-if="availableAgentGroups.length > 0" class="agent-group-selector">
+        <select :value="selectedGroupId" class="select-input" @change="onGroupChange">
+          <option value="">无群组</option>
+          <option v-for="group in availableAgentGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
+        </select>
+      </div>
+
+      <div v-if="availableChannelBindings.length > 0" class="channel-binding-selector">
+        <select :value="selectedChannelBindingId" class="select-input" @change="onChannelBindingChange">
+          <option value="">无 IM 绑定</option>
+          <option v-for="binding in availableChannelBindings" :key="binding.id" :value="binding.id">
+            {{ binding.connectorType }} · {{ binding.externalChannelId }}
+          </option>
         </select>
       </div>
 
@@ -138,6 +198,9 @@ function onAuthModeChange (event: Event) {
   align-items: center;
 }
 
+.agent-selector,
+.agent-group-selector,
+.channel-binding-selector,
 .auth-mode-selector {
   display: flex;
   align-items: center;

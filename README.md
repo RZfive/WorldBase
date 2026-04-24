@@ -43,6 +43,10 @@ the-world/
 
 详细架构文档请查看 [`docs/`](./docs/) 目录。
 
+重点方案文档：
+
+- [`docs/custom-agent-memory-im-architecture.md`](./docs/custom-agent-memory-im-architecture.md) — 自定义 Agent、长期记忆、群协作与未来 IM 接入的整体升级方案
+
 ## 开发
 
 ```bash

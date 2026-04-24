@@ -6,7 +6,7 @@ import { getNextJsStarterArchitectureDescription } from '../nextjs-starter-templ
  * Get the system prompt for the AI agent.
  * @param options Optional dynamic session context.
  */
-export function getSystemPrompt (options?: { skillContents?: string[]; targetProjectId?: string | null; planModeActive?: boolean }): string {
+export function getSystemPrompt (options?: { skillContents?: string[]; targetProjectId?: string | null; planModeActive?: boolean; systemPromptSections?: string[] }): string {
   const nextRuntimeProfile = getNextRuntimeCompatibilityProfile()
   const skillContents = options?.skillContents
   let prompt = `You are The World AI assistant. Complete the user's request accurately, use tools when needed, and avoid repeating finished work.
@@ -187,6 +187,14 @@ When the user asks to modify or optimize an existing project:
 
   if (options?.planModeActive) {
     prompt += '\n\n## 📋 Plan Mode Active\n\nYou are currently in **Plan Mode**. In this mode:\n- You can ONLY use read-only tools (read files, search, list, query) to analyze the codebase.\n- All write operations (create, write, patch, delete, run commands, rebuild, etc.) are BLOCKED.\n- Formulate a clear step-by-step plan for the task.\n- When your plan is ready, call `exit_plan_mode` with the plan summary and steps to begin execution.\n- Do NOT attempt write operations — they will be rejected.\n'
+  }
+
+  const extraSections = options?.systemPromptSections
+    ?.map(section => section.trim())
+    .filter(Boolean) || []
+
+  if (extraSections.length > 0) {
+    prompt += `\n\n${extraSections.join('\n\n')}`
   }
 
   return prompt

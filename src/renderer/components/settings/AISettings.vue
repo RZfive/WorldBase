@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import SkillManager from './SkillManager.vue'
+import AgentWorkspacePanel from './AgentWorkspacePanel.vue'
 import ProviderPanel from './ProviderPanel.vue'
 import DatabaseViewer from './DatabaseViewer.vue'
 import GeneralSettingsPanel from './GeneralSettingsPanel.vue'
@@ -9,7 +10,7 @@ import MCPSettingsPanel from './MCPSettingsPanel.vue'
 import ProcessManagerPanel from './ProcessManagerPanel.vue'
 import ScheduledTasksPanel from './ScheduledTasksPanel.vue'
 
-type CategoryId = 'general' | 'providers' | 'mcp' | 'skills' | 'scheduler' | 'logs' | 'database' | 'processes'
+type CategoryId = 'general' | 'providers' | 'mcp' | 'skills' | 'agent-workspace' | 'scheduler' | 'logs' | 'database' | 'processes'
 
 interface Category {
   id: CategoryId
@@ -22,6 +23,7 @@ const categories: Category[] = [
   { id: 'providers', icon: '🤖', label: '模型服务' },
   { id: 'mcp', icon: '🔌', label: 'MCP 管理' },
   { id: 'skills', icon: '✦', label: 'Skill 管理' },
+  { id: 'agent-workspace', icon: '🧠', label: 'Agent 工作台' },
   { id: 'scheduler', icon: '⏱', label: '定时任务' },
   { id: 'logs', icon: '🧾', label: '日志中心' },
   { id: 'database', icon: '🗄', label: '数据设置' },
@@ -52,6 +54,7 @@ const activeCategoryId = ref<CategoryId>('general')
       <ProviderPanel v-else-if="activeCategoryId === 'providers'" />
       <MCPSettingsPanel v-else-if="activeCategoryId === 'mcp'" />
       <SkillManager v-else-if="activeCategoryId === 'skills'" />
+      <AgentWorkspacePanel v-else-if="activeCategoryId === 'agent-workspace'" />
       <ScheduledTasksPanel v-else-if="activeCategoryId === 'scheduler'" />
       <LogCenterPanel v-else-if="activeCategoryId === 'logs'" />
       <DatabaseViewer v-else-if="activeCategoryId === 'database'" :active="activeCategoryId === 'database'" />

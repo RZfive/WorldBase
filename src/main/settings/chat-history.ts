@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { AIExecutionAuthMode } from './settings-store.js'
+import type { AgentGroupTranscript } from '../../shared/agent-workspace-types.js'
 
 export type ChatMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 export type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
@@ -59,6 +60,7 @@ export type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
@@ -89,6 +91,12 @@ export interface Conversation {
   reasoningStrength?: ReasoningStrength
   /** Existing project locked to this conversation for optimization/editing. */
   targetProjectId?: string
+  /** Active custom agent bound to this conversation. */
+  agentId?: string
+  /** Active agent group bound to this conversation. */
+  groupId?: string
+  /** Active IM channel binding bound to this conversation. */
+  channelBindingId?: string
 }
 
 /**
@@ -131,7 +139,10 @@ export class ChatHistoryStore {
           providerId: data.providerId,
           selectedModel: data.selectedModel,
           reasoningStrength: data.reasoningStrength,
-          targetProjectId: data.targetProjectId
+          targetProjectId: data.targetProjectId,
+          agentId: data.agentId,
+          groupId: data.groupId,
+          channelBindingId: data.channelBindingId
         })
       } catch {
         // skip corrupted files

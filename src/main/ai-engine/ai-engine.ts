@@ -15,6 +15,8 @@ import type { AILogSessionLogger } from '../settings/ai-log-store.js'
 import type { MCPService } from '../mcp/mcp-service.js'
 import type { SkillStore } from '../settings/skill-store.js'
 import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.js'
+import type { AgentStore } from '../settings/agent-store.js'
+import type { AgentGroupStore } from '../settings/agent-group-store.js'
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
 
@@ -27,9 +29,12 @@ export interface AIEngineServices {
   asyncTaskManager: AsyncTaskManager
   documentStore?: DocumentStore
   skillStore?: SkillStore
+  agentStore?: AgentStore
+  agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
   getMainWindow?: () => BrowserWindow | null
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
+  notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
   mcpService?: MCPService
   scheduledTaskService?: ScheduledTaskService
 }
@@ -52,6 +57,26 @@ export interface AIRequestOptions {
   aiLogger?: AILogSessionLogger
   activeSkillContents?: string[]
   allowedMcpServerIds?: string[]
+  systemPromptSections?: string[]
+  allowedToolNames?: string[]
+  deniedToolNames?: string[]
+}
+
+function mergeUniqueStrings (...collections: Array<string[] | undefined>): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+
+  for (const collection of collections) {
+    if (!collection) continue
+    for (const item of collection) {
+      const normalized = item.trim()
+      if (!normalized || seen.has(normalized)) continue
+      seen.add(normalized)
+      result.push(normalized)
+    }
+  }
+
+  return result
 }
 
 /**
@@ -108,7 +133,9 @@ export class AIEngine {
     agent.setAuthModeResolver(options?.getAuthMode)
     registerAllTools(agent, this.services)
     this.registerMcpTools(agent, options?.allowedMcpServerIds)
-    agent.setActiveSkills(options?.activeSkillContents ?? this.activeSkillContents)
+    agent.setActiveSkills(mergeUniqueStrings(this.activeSkillContents, options?.activeSkillContents))
+    agent.setSystemPromptSections(options?.systemPromptSections ?? [])
+    agent.setToolVisibilityFilters(options?.allowedToolNames, options?.deniedToolNames)
     agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
     agent.setAuthMode(options?.authMode ?? 'strict')
     agent.setLogger(options?.aiLogger)
