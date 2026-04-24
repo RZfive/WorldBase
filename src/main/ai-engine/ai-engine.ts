@@ -39,6 +39,7 @@ export interface AIConfigInput {
   baseUrl?: string
   model?: string
   enableThinking?: boolean
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
   contextWindow?: number
 }
 
@@ -86,6 +87,9 @@ export class AIEngine {
     }
     if (config.enableThinking !== undefined) {
       provider.setEnableThinking(config.enableThinking)
+    }
+    if (config.reasoningEffort !== undefined) {
+      provider.setReasoningEffort(config.reasoningEffort)
     }
     if (config.contextWindow !== undefined) {
       provider.setContextWindow(config.contextWindow)

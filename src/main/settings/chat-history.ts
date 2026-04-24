@@ -3,6 +3,7 @@ import path from 'node:path'
 import type { AIExecutionAuthMode } from './settings-store.js'
 
 export type ChatMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+export type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
 
 export interface ToolProgressEntry {
   stage: string
@@ -53,6 +54,7 @@ export interface WebFetchResultEntry {
 
 export type ChatMessageBlock =
   | { id: string; kind: 'content'; content: ChatMessageContent }
+  | { id: string; kind: 'error'; message: string }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
@@ -83,6 +85,8 @@ export interface Conversation {
   providerId?: string
   /** Model selected for this conversation */
   selectedModel?: string
+  /** Reasoning strength selected for this conversation */
+  reasoningStrength?: ReasoningStrength
   /** Existing project locked to this conversation for optimization/editing. */
   targetProjectId?: string
 }
@@ -126,6 +130,7 @@ export class ChatHistoryStore {
           authMode: data.authMode,
           providerId: data.providerId,
           selectedModel: data.selectedModel,
+          reasoningStrength: data.reasoningStrength,
           targetProjectId: data.targetProjectId
         })
       } catch {
