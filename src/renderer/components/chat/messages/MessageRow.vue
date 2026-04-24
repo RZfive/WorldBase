@@ -10,6 +10,7 @@ import WebFetchBlock from '../blocks/WebFetchBlock.vue'
 import AttachmentBlock from '../blocks/AttachmentBlock.vue'
 import AuthRequestBlock from '../blocks/AuthRequestBlock.vue'
 import ContentBlock from '../blocks/ContentBlock.vue'
+import ErrorBlock from '../blocks/ErrorBlock.vue'
 
 const props = defineProps<{
   msg: ChatMessage
@@ -123,6 +124,11 @@ const messageText = computed(() => getMessageText())
             v-else-if="block.kind === 'auth_request'"
             :block="block"
             @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
+          />
+
+          <ErrorBlock
+            v-else-if="block.kind === 'error'"
+            :block="block"
           />
 
           <ContentBlock

@@ -20,6 +20,7 @@ interface TodoItem {
 
 type ChatMessageBlock =
   | { id: string; kind: 'content'; content: MessageContent }
+  | { id: string; kind: 'error'; message: string }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
@@ -304,6 +305,14 @@ function createContentBlock (content: MessageContent = ''): ChatMessageBlock {
   }
 }
 
+function createErrorBlock (message: string): ChatMessageBlock {
+  return {
+    id: createBlockId('error'),
+    kind: 'error',
+    message
+  }
+}
+
 function createThinkingBlock (text = ''): ChatMessageBlock {
   return {
     id: createBlockId('thinking'),
@@ -459,6 +468,23 @@ function appendFinalContentBlock (message: ChatMessage, finalContent: MessageCon
       blocks.push(createContentBlock(imageParts))
     }
   }
+}
+
+function upsertErrorBlock (message: ChatMessage, errorMessage: string): void {
+  const blocks = ensureBlocks(message)
+  const existing = [...blocks].reverse().find((block): block is Extract<ChatMessageBlock, { kind: 'error' }> => block.kind === 'error')
+  if (existing) {
+    existing.message = errorMessage
+    return
+  }
+  blocks.push(createErrorBlock(errorMessage))
+}
+
+function setAssistantErrorState (message: ChatMessage, errorMessage: string): void {
+  if (!hasRenderableContent(message.content)) {
+    message.content = `错误: ${errorMessage}`
+  }
+  upsertErrorBlock(message, errorMessage)
 }
 
 function findLastRunningToolRun (toolRuns: ToolRun[], preferredName?: string): ToolRun | null {
@@ -1367,9 +1393,6 @@ async function sendMessage () {
             thinkingBlock.text += event.content
           } else if (event.type === 'reset') {
             thinkingAccum = ''
-            assistantMessage.content = ''
-            assistantMessage.thinking = ''
-            assistantMessage.blocks = []
             if (isForeground) {
               resetTransientStreamState()
             }
@@ -1473,8 +1496,7 @@ async function sendMessage () {
                 syncAssistantToolRuns()
               }
               finalizePendingAuthBlocks(assistantMessage)
-              assistantMessage.content = `错误: ${event.error}`
-              ensureBlocks(assistantMessage).push(createContentBlock(`错误: ${event.error}`))
+              setAssistantErrorState(assistantMessage, event.error)
             } finally {
               finishSession()
             }
@@ -1497,8 +1519,7 @@ async function sendMessage () {
           }
 
           finalizePendingAuthBlocks(assistantMessage)
-          assistantMessage.content = `错误: ${(err as Error).message}`
-          ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
+          setAssistantErrorState(assistantMessage, (err as Error).message)
           finishSession(true)
         }
       })
@@ -1548,8 +1569,7 @@ async function sendMessage () {
     }
   } catch (err) {
     releaseStreamSession(convId, sessionId)
-    assistantMessage.content = `错误: ${(err as Error).message}`
-    ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
+    setAssistantErrorState(assistantMessage, (err as Error).message)
     finalizePendingAuthBlocks(assistantMessage)
     if (currentConversationId.value === convId) {
       resetTransientStreamState()

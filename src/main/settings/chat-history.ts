@@ -53,6 +53,7 @@ export interface WebFetchResultEntry {
 
 export type ChatMessageBlock =
   | { id: string; kind: 'content'; content: ChatMessageContent }
+  | { id: string; kind: 'error'; message: string }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
