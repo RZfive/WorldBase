@@ -482,7 +482,7 @@ function upsertErrorBlock (message: ChatMessage, errorMessage: string): void {
 
 function setAssistantErrorState (message: ChatMessage, errorMessage: string): void {
   if (getMessageTextContent(message.content).length === 0) {
-    message.content = `错误: ${errorMessage}`
+    message.content = errorMessage
   }
   upsertErrorBlock(message, errorMessage)
 }
@@ -1496,7 +1496,7 @@ async function sendMessage () {
                 syncAssistantToolRuns()
               }
               finalizePendingAuthBlocks(assistantMessage)
-              setAssistantErrorState(assistantMessage, event.error || '未知错误')
+              setAssistantErrorState(assistantMessage, event.error || '流式响应失败，但未返回具体错误信息')
             } finally {
               finishSession()
             }
