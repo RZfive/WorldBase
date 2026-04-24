@@ -272,6 +272,7 @@ function getMessageSignature (msg?: ChatMessage): string {
         .map(part => part.type === 'image_url' ? part.image_url?.url || '' : part.text || '')
         .join('|')}`
     }
+    if (block.kind === 'error') return `error:${block.message}`
     if (block.kind === 'thinking') return `thinking:${block.text}`
     if (block.kind === 'file_preview') return `preview:${block.filePath}:${block.previewContent}:${block.truncated}:${block.active}`
     if (block.kind === 'web_search') return `websearch:${block.query}:${block.engine}:${block.results.map(item => `${item.rank}:${item.url}:${item.title}:${item.snippet}`).join('|')}`
