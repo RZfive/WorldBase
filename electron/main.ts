@@ -611,13 +611,14 @@ function applyActiveProviderToAiEngine (): AIProvidersConfig {
     baseUrl: active?.baseUrl ?? '',
     model: active?.activeModel ?? '',
     enableThinking: active?.enableThinking ?? false,
+    reasoningEffort: 'medium',
     contextWindow: active?.activeModel ? active.modelContextWindows?.[active.activeModel] : undefined
   })
 
   return normalizedConfig
 }
 
-function resolveProviderConfig (requestedProviderId?: string, requestedModelId?: string) {
+function resolveProviderConfig (requestedProviderId?: string, requestedModelId?: string, reasoningEffort: 'low' | 'medium' | 'high' | 'max' = 'medium') {
   const providersConfig = settingsStore!.getProviders()
   const enabledProviderIds = new Set(providersConfig.enabledProviderIds)
   const enabledProviders = providersConfig.providers.filter(provider => enabledProviderIds.has(provider.id))
@@ -641,6 +642,7 @@ function resolveProviderConfig (requestedProviderId?: string, requestedModelId?:
     baseUrl: provider.baseUrl,
     model: resolvedModel,
     enableThinking: provider.enableThinking ?? false,
+    reasoningEffort,
     contextWindow: provider.modelContextWindows?.[resolvedModel]
   }
 }
@@ -829,14 +831,14 @@ function createWindow (): void {
 
 function setupIPC (): void {
   // AI chat (non-streaming, kept for backward compat)
-  ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string) => {
+  ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => {
     return aiEngine!.chat(messages, {
-      providerConfig: resolveProviderConfig(providerId, modelId)
+      providerConfig: resolveProviderConfig(providerId, modelId, reasoningStrength)
     })
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max') => {
     const sender = event.sender
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
@@ -872,7 +874,7 @@ function setupIPC (): void {
       try {
         for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
           targetProjectId: targetProjectId ?? null,
-          providerConfig: resolveProviderConfig(providerId, modelId),
+          providerConfig: resolveProviderConfig(providerId, modelId, reasoningStrength),
           abortSignal: abortController.signal,
           authMode: authModeRef.current,
           getAuthMode: () => authModeRef.current,

@@ -27,6 +27,8 @@ interface ProjectTagChip {
   raw: string
 }
 
+type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+
 const props = defineProps<{
   modelValue: string
   isLoading: boolean
@@ -37,6 +39,7 @@ const props = defineProps<{
   availableSkills: SkillItem[]
   activeSkillIds: Set<string>
   documentDockVisible: boolean
+  reasoningStrength: ReasoningStrength
 }>()
 
 const emit = defineEmits<{
@@ -46,6 +49,7 @@ const emit = defineEmits<{
   (e: 'addAttachments', files: File[]): void
   (e: 'removeImage', index: number): void
   (e: 'removeFile', id: string): void
+  (e: 'update:reasoning-strength', value: ReasoningStrength): void
   (e: 'toggleSkill', id: string): void
   (e: 'toggleDocumentDock'): void
 }>()
@@ -56,6 +60,19 @@ const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 const inputFocused = ref(false)
 const dragDepth = ref(0)
 const dragActive = ref(false)
+const reasoningLevels: Array<{ value: ReasoningStrength; label: string }> = [
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'max', label: '最高' }
+]
+const currentReasoningIndex = computed(() => {
+  const index = reasoningLevels.findIndex(level => level.value === props.reasoningStrength)
+  return index >= 0 ? index : 1
+})
+const currentReasoningLabel = computed(() => {
+  return reasoningLevels[currentReasoningIndex.value]?.label || '中'
+})
 const projectTags = computed<ProjectTagChip[]>(() => {
   const seenIds = new Set<string>()
   const tags: ProjectTagChip[] = []
@@ -224,6 +241,13 @@ function handleDrop (e: DragEvent) {
   if (props.isLoading || props.isUploadingFiles || files.length === 0) return
   emit('addAttachments', files)
 }
+
+function handleReasoningStrengthInput (event: Event) {
+  const nextIndex = Number.parseInt((event.target as HTMLInputElement).value, 10)
+  const nextLevel = reasoningLevels[nextIndex]
+  if (!nextLevel) return
+  emit('update:reasoning-strength', nextLevel.value)
+}
 </script>
 
 <template>
@@ -296,6 +320,18 @@ function handleDrop (e: DragEvent) {
         <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" @click="emit('toggleDocumentDock')" title="文档工作台">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
         </button>
+        <label class="reasoning-slider" :title="`推理强度：${currentReasoningLabel}`">
+          <span class="reasoning-slider-label">思考 {{ currentReasoningLabel }}</span>
+          <input
+            class="reasoning-slider-input"
+            type="range"
+            min="0"
+            :max="reasoningLevels.length - 1"
+            step="1"
+            :value="currentReasoningIndex"
+            @input="handleReasoningStrengthInput"
+          >
+        </label>
         <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles" title="添加附件">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
           <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
@@ -591,8 +627,32 @@ function handleDrop (e: DragEvent) {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 8px;
   padding: 4px 8px 8px;
+}
+
+.reasoning-slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 154px;
+  padding: 0 8px;
+  height: 34px;
+  border-radius: 8px;
+  color: var(--app-text-muted);
+  background: var(--app-panel-muted);
+}
+
+.reasoning-slider-label {
+  flex-shrink: 0;
+  font-size: 0.74em;
+  color: var(--app-text-soft);
+  white-space: nowrap;
+}
+
+.reasoning-slider-input {
+  width: 76px;
+  accent-color: var(--app-accent);
 }
 
 .action-btn {

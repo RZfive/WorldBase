@@ -11,6 +11,7 @@ import { emitAuthResolution, onAuthResolution, type AuthResolutionPayload } from
 type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 type AIExecutionAuthMode = 'strict' | 'auto'
 type TodoStatus = 'not-started' | 'in-progress' | 'completed'
+type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
 
 interface TodoItem {
   id: number
@@ -86,6 +87,7 @@ interface ConversationSummary {
   authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string
+  reasoningStrength?: ReasoningStrength
   targetProjectId?: string
 }
 
@@ -167,6 +169,7 @@ const providersConfig = ref<ProvidersConfig>({
 })
 const activeProviderId = ref('')
 const selectedModel = ref('')
+const reasoningStrength = ref<ReasoningStrength>('medium')
 const currentAuthMode = ref<AIExecutionAuthMode>('strict')
 const pendingImages = ref<Array<{ base64: string; mimeType: string }>>([])
 const pendingFiles = ref<PendingAttachment[]>([])
@@ -196,6 +199,7 @@ const backgroundStreamMessages = new Map<string, {
   authMode: AIExecutionAuthMode
   providerId: string | null
   selectedModel: string | null
+  reasoningStrength: ReasoningStrength
 }>()
 const activeCleanups = new Map<string, () => void>()
 const activeStreamSessionIds = new Map<string, string>()
@@ -903,7 +907,8 @@ function stashCurrentConversationForNavigation () {
       targetProjectId: targetProjectId.value,
       authMode: currentAuthMode.value,
       providerId: activeProviderId.value || null,
-      selectedModel: selectedModel.value || null
+      selectedModel: selectedModel.value || null,
+      reasoningStrength: reasoningStrength.value
     })
     void doSaveConversation(currentConversationId.value, messages.value, { targetProjectId: targetProjectId.value })
   }
@@ -921,6 +926,7 @@ async function startOptimizationConversation (ctx: Record<string, unknown>) {
   messages.value = []
   targetProjectId.value = projectId
   currentAuthMode.value = 'strict'
+  reasoningStrength.value = 'medium'
   inputText.value = `${projectRef}${projectRef ? '\n' : ''}请先检查这个项目的当前代码、运行状态和最近日志，明确告诉我这个项目现在的具体问题、风险点和可优化项，然后再继续修改。`
   pendingImages.value = []
   pendingFiles.value = []
@@ -992,6 +998,15 @@ async function handleModelSelectionChange (model: string) {
   await persistConversationProviderMeta()
 }
 
+async function handleReasoningStrengthChange (value: ReasoningStrength) {
+  reasoningStrength.value = value
+  if (syncingProviderOptions.value || !currentConversationId.value) return
+  await doSaveConversation(currentConversationId.value, messages.value, {
+    targetProjectId: targetProjectId.value,
+    allowEmpty: true
+  })
+}
+
 async function handleAuthModeChange (authMode: AIExecutionAuthMode) {
   currentAuthMode.value = authMode
   const activeConversationId = currentConversationId.value
@@ -1046,6 +1061,7 @@ function newConversation () {
   messages.value = []
   targetProjectId.value = null
   currentAuthMode.value = 'strict'
+  reasoningStrength.value = 'medium'
   inputText.value = ''
   resetTransientStreamState()
   pendingImages.value = []
@@ -1066,6 +1082,7 @@ async function loadConversation (id: string) {
     messages.value = bg.messages
     targetProjectId.value = bg.targetProjectId
     currentAuthMode.value = bg.authMode
+    reasoningStrength.value = bg.reasoningStrength
     setConversationTarget(id, bg.targetProjectId)
     backgroundStreamMessages.delete(id)
     resetTransientStreamState()
@@ -1082,6 +1099,7 @@ async function loadConversation (id: string) {
     messages.value = conv.messages
     targetProjectId.value = conv.targetProjectId || null
     currentAuthMode.value = conv.authMode === 'auto' ? 'auto' : 'strict'
+    reasoningStrength.value = conv.reasoningStrength || 'medium'
     setConversationTarget(conv.id, conv.targetProjectId || null)
     resetTransientStreamState()
     pendingFiles.value = []
@@ -1120,6 +1138,7 @@ async function doSaveConversation (
     authMode: currentAuthMode.value,
     providerId: activeProviderId.value || undefined,
     selectedModel: selectedModel.value || undefined,
+    reasoningStrength: reasoningStrength.value,
     targetProjectId: resolvedTargetProjectId || undefined
   })))
 
@@ -1534,7 +1553,8 @@ async function sendMessage () {
         activeProviderId.value || undefined,
         selectedModel.value || undefined,
         targetProjectId.value ?? undefined,
-        currentAuthMode.value
+        currentAuthMode.value,
+        reasoningStrength.value
       )
 
       if (streamingConvIds.has(convId)) {
@@ -1693,11 +1713,13 @@ onUnmounted(() => {
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
         :document-dock-visible="documentDockVisible"
+        :reasoning-strength="reasoningStrength"
         @send="sendMessage"
         @stop="stopCurrentStream"
         @add-attachments="addAttachments"
         @remove-image="removeImage"
         @remove-file="removeFile"
+        @update:reasoning-strength="handleReasoningStrengthChange"
         @toggle-skill="toggleSkill"
         @toggle-document-dock="documentDockVisible = !documentDockVisible"
       />
