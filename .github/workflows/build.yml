@@ -73,14 +73,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build frontend
-        run: pnpm build
-
-      - name: Compile Electron TypeScript
-        run: pnpm build:electron
+      - name: Typecheck
+        run: pnpm typecheck
 
       - name: Build Electron (Windows)
-        run: pnpm exec electron-builder --win --publish never
+        run: pnpm electron:build:win
 
       - name: Package Windows build artifacts
         id: package_windows
@@ -128,14 +125,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build frontend
-        run: pnpm build
-
-      - name: Compile Electron TypeScript
-        run: pnpm build:electron
+      - name: Typecheck
+        run: pnpm typecheck
 
       - name: Build Electron (macOS ARM)
-        run: pnpm exec electron-builder --mac --arm64 --publish never
+        run: pnpm electron:build:mac:arm64
 
       - name: Package macOS ARM build artifacts
         id: package_mac_arm

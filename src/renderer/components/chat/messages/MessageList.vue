@@ -275,6 +275,7 @@ function getMessageSignature (msg?: ChatMessage): string {
     if (block.kind === 'error') return `error:${block.message}`
     if (block.kind === 'thinking') return `thinking:${block.text}`
     if (block.kind === 'file_preview') return `preview:${block.filePath}:${block.previewContent}:${block.truncated}:${block.active}`
+    if (block.kind === 'group_progress') return `groupprogress:${block.snapshot.groupId}:${block.snapshot.status}:${block.snapshot.activeRound}:${block.snapshot.items.map((item: typeof block.snapshot.items[number]) => `${item.agentId}:${item.status}:${item.currentRound}:${item.completedRounds}:${item.stage}:${item.detail || ''}:${item.summary || ''}:${item.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`).join('|')}`
     if (block.kind === 'group_transcript') return `grouptranscript:${block.transcript.groupId}:${block.transcript.visibility}:${block.transcript.entryCount}:${block.transcript.summary}:${block.transcript.entries.map((entry: typeof block.transcript.entries[number]) => `${entry.id}:${entry.round}:${entry.agentId}:${entry.content}`).join('|')}`
     if (block.kind === 'web_search') return `websearch:${block.query}:${block.engine}:${block.results.map(item => `${item.rank}:${item.url}:${item.title}:${item.snippet}`).join('|')}`
     if (block.kind === 'web_fetch') return `webfetch:${block.query || ''}:${block.result.url}:${block.result.final_url || ''}:${block.result.ok}:${block.result.title || ''}:${block.result.error || ''}:${block.result.query_snippets?.join('|') || ''}`

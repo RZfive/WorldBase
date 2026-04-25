@@ -7,7 +7,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_transcript' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_progress' | 'group_transcript' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: { role: string; content: MessageContent }
@@ -18,6 +18,7 @@ interface StreamEvent {
   items?: TodoItem[]
   filePath?: string
   truncated?: boolean
+  groupProgress?: AgentGroupProgressSnapshot
   transcript?: AgentGroupTranscript
   query?: string
   engine?: string
@@ -105,6 +106,41 @@ interface AgentGroupTranscript {
   entryCount: number
   summary: string
   entries: AgentGroupTranscriptEntry[]
+}
+
+interface AgentGroupProgressStep {
+  at: string
+  stage: string
+  detail?: string
+}
+
+interface AgentGroupProgressItem {
+  id: string
+  agentId: string
+  agentName: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  currentRound: number
+  completedRounds: number
+  totalRounds: number
+  stage: string
+  detail?: string
+  summary?: string
+  updatedAt: string
+  progress: AgentGroupProgressStep[]
+}
+
+interface AgentGroupProgressSnapshot {
+  groupId: string
+  groupName: string
+  status: 'running' | 'completed' | 'failed'
+  activeRound: number
+  totalRounds: number
+  maxParallelWorkers: number
+  queuedCount: number
+  runningCount: number
+  completedCount: number
+  failedCount: number
+  items: AgentGroupProgressItem[]
 }
 
 interface MemorySearchScope {
@@ -209,6 +245,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }

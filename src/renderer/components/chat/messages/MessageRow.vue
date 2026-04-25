@@ -5,6 +5,7 @@ import type { ChatMessage, ChatMessageBlock, FilePreviewState } from '../types'
 import ThinkingBlock from '../blocks/ThinkingBlock.vue'
 import ToolRunBlock from '../blocks/ToolRunBlock.vue'
 import FilePreviewBlock from '../blocks/FilePreviewBlock.vue'
+import GroupProgressBlock from '../blocks/GroupProgressBlock.vue'
 import GroupTranscriptBlock from '../blocks/GroupTranscriptBlock.vue'
 import WebSearchBlock from '../blocks/WebSearchBlock.vue'
 import WebFetchBlock from '../blocks/WebFetchBlock.vue'
@@ -103,6 +104,11 @@ const messageText = computed(() => getMessageText())
 
           <FilePreviewBlock
             v-else-if="block.kind === 'file_preview'"
+            :block="block"
+          />
+
+          <GroupProgressBlock
+            v-else-if="block.kind === 'group_progress'"
             :block="block"
           />
 

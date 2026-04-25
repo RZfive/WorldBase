@@ -68,6 +68,41 @@ export interface AgentGroupTranscript {
   entries: AgentGroupTranscriptEntry[]
 }
 
+export interface AgentGroupProgressStep {
+  at: string
+  stage: string
+  detail?: string
+}
+
+export interface AgentGroupProgressItem {
+  id: string
+  agentId: string
+  agentName: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  currentRound: number
+  completedRounds: number
+  totalRounds: number
+  stage: string
+  detail?: string
+  summary?: string
+  updatedAt: string
+  progress: AgentGroupProgressStep[]
+}
+
+export interface AgentGroupProgressSnapshot {
+  groupId: string
+  groupName: string
+  status: 'running' | 'completed' | 'failed'
+  activeRound: number
+  totalRounds: number
+  maxParallelWorkers: number
+  queuedCount: number
+  runningCount: number
+  completedCount: number
+  failedCount: number
+  items: AgentGroupProgressItem[]
+}
+
 export interface SharedBoardTask {
   id: string
   title: string
