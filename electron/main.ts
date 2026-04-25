@@ -41,9 +41,17 @@ import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_
 import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.js'
 import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
 import { ScheduledTaskService } from '../src/main/scheduler/scheduled-task-service.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentGroupTranscript, AgentMemoryScope, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const APP_DISPLAY_NAME = 'The World'
+const LEGACY_USER_DATA_DIR_NAMES = ['the-world']
+const CRITICAL_USER_DATA_DIR_NAMES = ['conversations', 'projects']
+const CRITICAL_USER_DATA_FILE_NAMES = ['settings.json']
+
+app.setName(APP_DISPLAY_NAME)
+app.setAppUserModelId('com.theworld.app')
+app.setPath('userData', path.join(app.getPath('appData'), APP_DISPLAY_NAME))
 
 // Ensure only one instance of the app is running.
 // This prevents file lock conflicts when the installer tries to
@@ -149,6 +157,11 @@ interface GroupDeliberationResult {
   promptSection: string | null
   transcript: AgentGroupTranscript | null
 }
+
+type GroupDeliberationProgressCallback = (
+  stageOrEvent: string | ProgressEvent | { type: 'group_progress'; groupProgress: AgentGroupProgressSnapshot },
+  detail?: string
+) => void
 
 function isSupportedTextAttachment (fileName: string): boolean {
   const normalizedName = path.basename(fileName).toLowerCase()
@@ -866,20 +879,112 @@ function buildGroupTranscriptSummary (group: AgentGroupDefinition, entries: Agen
   return lines.filter(Boolean).join('\n')
 }
 
+function createGroupProgressSnapshot (group: AgentGroupDefinition, memberIds: string[]): AgentGroupProgressSnapshot {
+  const totalRounds = Math.max(1, group.maxRounds)
+  const timestamp = new Date().toISOString()
+
+  return {
+    groupId: group.id,
+    groupName: group.name,
+    status: 'running',
+    activeRound: 0,
+    totalRounds,
+    maxParallelWorkers: Math.max(1, group.maxParallelWorkers),
+    queuedCount: memberIds.length,
+    runningCount: 0,
+    completedCount: 0,
+    failedCount: 0,
+    items: memberIds.map((memberId, index) => ({
+      id: `${group.id}_${memberId}_${index}`,
+      agentId: memberId,
+      agentName: agentStore?.get(memberId)?.name || memberId,
+      status: 'queued',
+      currentRound: 0,
+      completedRounds: 0,
+      totalRounds,
+      stage: '等待开始',
+      updatedAt: timestamp,
+      progress: []
+    }))
+  }
+}
+
+function cloneGroupProgressSnapshot (snapshot: AgentGroupProgressSnapshot): AgentGroupProgressSnapshot {
+  return {
+    ...snapshot,
+    items: snapshot.items.map(item => ({
+      ...item,
+      progress: item.progress.map(step => ({ ...step }))
+    }))
+  }
+}
+
+function getGroupProgressItem (snapshot: AgentGroupProgressSnapshot, agentId: string) {
+  return snapshot.items.find(item => item.agentId === agentId) || null
+}
+
+function appendGroupProgressStep (item: AgentGroupProgressSnapshot['items'][number], stage: string, detail?: string): void {
+  item.progress = [...item.progress, {
+    at: new Date().toISOString(),
+    stage,
+    detail
+  }].slice(-4)
+}
+
+function refreshGroupProgressSnapshot (snapshot: AgentGroupProgressSnapshot): void {
+  snapshot.queuedCount = snapshot.items.filter(item => item.status === 'queued').length
+  snapshot.runningCount = snapshot.items.filter(item => item.status === 'running').length
+  snapshot.completedCount = snapshot.items.filter(item => item.status === 'completed').length
+  snapshot.failedCount = snapshot.items.filter(item => item.status === 'failed').length
+  snapshot.status = snapshot.runningCount > 0 || snapshot.queuedCount > 0
+    ? 'running'
+    : snapshot.completedCount > 0
+      ? 'completed'
+      : 'failed'
+}
+
+function emitGroupProgressSnapshot (
+  onProgress: GroupDeliberationProgressCallback | undefined,
+  snapshot: AgentGroupProgressSnapshot
+): void {
+  refreshGroupProgressSnapshot(snapshot)
+  onProgress?.({
+    type: 'group_progress',
+    groupProgress: cloneGroupProgressSnapshot(snapshot)
+  })
+}
+
+function chunkStringArray (values: string[], chunkSize: number): string[][] {
+  const chunks: string[][] = []
+  const size = Math.max(1, chunkSize)
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size))
+  }
+  return chunks
+}
+
+function summarizeGroupNote (value: string): string {
+  const firstLine = firstNonEmptyLine(value)
+  return truncateSectionText(firstLine || value, 220)
+}
+
 async function buildGroupDeliberationSection (input: {
   messages: Array<{ role: string; content: MessageContent }>
   group: AgentGroupDefinition
   channelBinding?: ChannelBinding | null
   targetProjectId?: string | null
   fallbackReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
-  onProgress?: (stageOrEvent: string | ProgressEvent, detail?: string) => void
+  onProgress?: GroupDeliberationProgressCallback
 }): Promise<GroupDeliberationResult> {
   if (!aiEngine || !agentStore) {
     return { promptSection: null, transcript: null }
   }
 
-  const allToolNames = aiEngine.getAvailableTools().map(tool => tool.name)
-  const memberIds = Array.from(new Set(input.group.memberAgentIds.filter(Boolean))).slice(0, input.group.maxParallelWorkers)
+  const runtimeAiEngine = aiEngine
+  const runtimeAgentStore = agentStore
+
+  const allToolNames = runtimeAiEngine.getAvailableTools().map(tool => tool.name)
+  const memberIds = Array.from(new Set(input.group.memberAgentIds.filter(Boolean)))
   if (memberIds.length === 0) {
     return { promptSection: null, transcript: null }
   }
@@ -887,57 +992,142 @@ async function buildGroupDeliberationSection (input: {
   const notes: string[] = []
   const entries: AgentGroupTranscript['entries'] = []
   const latestUserMessage = getLastUserMessageText(input.messages)
+  const snapshot = createGroupProgressSnapshot(input.group, memberIds)
+
+  emitGroupProgressSnapshot(input.onProgress, snapshot)
 
   for (let round = 1; round <= input.group.maxRounds; round++) {
-    for (const memberId of memberIds) {
-      const member = agentStore.get(memberId)
-      if (!member) continue
+    snapshot.activeRound = round
+    const roundMemberIds = memberIds.filter(memberId => {
+      const item = getGroupProgressItem(snapshot, memberId)
+      if (!item) return false
+      return item.status !== 'failed' && item.completedRounds < input.group.maxRounds
+    })
 
-      input.onProgress?.('🧩 Agent 群讨论中...', `第 ${round} 轮 · ${member.name}`)
+    if (roundMemberIds.length === 0) {
+      break
+    }
 
-      const memberMemory = memoryEngine?.buildPromptContext({
-        agent: member,
-        group: input.group,
-        channelBinding: input.channelBinding,
-        userMessage: latestUserMessage,
-        targetProjectId: input.targetProjectId,
-        userId: 'local-user',
-        enabledScopeTypes: member.memoryScopes
-      })
+    for (const batch of chunkStringArray(roundMemberIds, input.group.maxParallelWorkers)) {
       const priorNotesSection = notes.length > 0
         ? `## Prior agent group notes\n${truncateSectionText(notes.slice(-6).join('\n\n'), 3000)}`
         : null
 
-      const response = await aiEngine.chat(input.messages, {
-        targetProjectId: input.targetProjectId ?? null,
-        providerConfig: resolveProviderConfig(
-          member.providerId,
-          member.modelId,
-          member.reasoningStrength || input.fallbackReasoningStrength || 'medium'
-        ),
-        activeSkillContents: resolveSkillContentsByIds(member.skillIds),
-        systemPromptSections: [
-          buildActiveAgentSection(member),
-          buildActiveGroupSection(input.group),
-          '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Focus on solution branches, risks, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- Do not use any tools in this internal round.',
-          ...(memberMemory?.sections || []),
-          ...(priorNotesSection ? [priorNotesSection] : [])
-        ],
-        deniedToolNames: allToolNames
-      })
+      const results = await Promise.all(batch.map(async memberId => {
+        const item = getGroupProgressItem(snapshot, memberId)
+        if (!item) {
+          return { memberId, error: 'Missing progress item for member', noteText: '' }
+        }
 
-      const noteText = getMessageText(response.content)
-      if (!noteText) continue
-      entries.push({
-        id: `${input.group.id}_${round}_${member.id}_${entries.length}`,
-        round,
-        agentId: member.id,
-        agentName: member.name,
-        content: noteText
-      })
-      notes.push(`### Round ${round} · ${member.name}\n${noteText}`)
+        const member = runtimeAgentStore.get(memberId)
+        if (!member) {
+          item.status = 'failed'
+          item.currentRound = round
+          item.stage = '配置无效'
+          item.detail = `找不到 Agent: ${memberId}`
+          item.updatedAt = new Date().toISOString()
+          appendGroupProgressStep(item, '配置无效', item.detail)
+          emitGroupProgressSnapshot(input.onProgress, snapshot)
+          return { memberId, error: item.detail, noteText: '' }
+        }
+
+        item.agentName = member.name
+        item.status = 'running'
+        item.currentRound = round
+        item.stage = '准备上下文'
+        item.detail = `第 ${round} 轮`
+        item.updatedAt = new Date().toISOString()
+        appendGroupProgressStep(item, '准备上下文', item.detail)
+        emitGroupProgressSnapshot(input.onProgress, snapshot)
+
+        const memberMemory = memoryEngine?.buildPromptContext({
+          agent: member,
+          group: input.group,
+          channelBinding: input.channelBinding,
+          userMessage: latestUserMessage,
+          targetProjectId: input.targetProjectId,
+          userId: 'local-user',
+          enabledScopeTypes: member.memoryScopes
+        })
+
+        item.stage = '内部讨论'
+        item.detail = `第 ${round} 轮`
+        item.updatedAt = new Date().toISOString()
+        appendGroupProgressStep(item, '内部讨论', item.detail)
+        emitGroupProgressSnapshot(input.onProgress, snapshot)
+
+        try {
+          const response = await runtimeAiEngine.chat(input.messages, {
+            targetProjectId: input.targetProjectId ?? null,
+            providerConfig: resolveProviderConfig(
+              member.providerId,
+              member.modelId,
+              member.reasoningStrength || input.fallbackReasoningStrength || 'medium'
+            ),
+            activeSkillContents: resolveSkillContentsByIds(member.skillIds),
+            systemPromptSections: [
+              buildActiveAgentSection(member),
+              buildActiveGroupSection(input.group),
+              '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Focus on solution branches, risks, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- Do not use any tools in this internal round.',
+              ...(memberMemory?.sections || []),
+              ...(priorNotesSection ? [priorNotesSection] : [])
+            ],
+            deniedToolNames: allToolNames
+          })
+
+          return {
+            memberId,
+            member,
+            noteText: getMessageText(response.content),
+            error: ''
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error)
+          item.status = 'failed'
+          item.stage = '失败'
+          item.detail = truncateSectionText(errorMessage, 200)
+          item.updatedAt = new Date().toISOString()
+          appendGroupProgressStep(item, '失败', item.detail)
+          emitGroupProgressSnapshot(input.onProgress, snapshot)
+          return { memberId, member, error: errorMessage, noteText: '' }
+        }
+      }))
+
+      for (const result of results) {
+        const item = getGroupProgressItem(snapshot, result.memberId)
+        if (!item || item.status === 'failed') continue
+
+        item.currentRound = round
+        item.completedRounds = Math.max(item.completedRounds, round)
+        item.updatedAt = new Date().toISOString()
+
+        if (result.noteText) {
+          entries.push({
+            id: `${input.group.id}_${round}_${result.memberId}_${entries.length}`,
+            round,
+            agentId: result.memberId,
+            agentName: result.member?.name || item.agentName,
+            content: result.noteText
+          })
+          notes.push(`### Round ${round} · ${result.member?.name || item.agentName}\n${result.noteText}`)
+          item.summary = summarizeGroupNote(result.noteText)
+        } else {
+          item.summary = undefined
+        }
+
+        const finishedDetail = result.noteText
+          ? `第 ${round} 轮已完成`
+          : `第 ${round} 轮未产出工作笔记`
+        item.status = round >= input.group.maxRounds ? 'completed' : 'queued'
+        item.stage = round >= input.group.maxRounds ? '已完成' : '等待下一轮'
+        item.detail = round >= input.group.maxRounds ? '全部轮次完成' : finishedDetail
+        appendGroupProgressStep(item, result.noteText ? '本轮完成' : '未产出笔记', finishedDetail)
+        emitGroupProgressSnapshot(input.onProgress, snapshot)
+      }
     }
   }
+
+  emitGroupProgressSnapshot(input.onProgress, snapshot)
 
   if (notes.length === 0) {
     return { promptSection: null, transcript: null }
@@ -973,7 +1163,85 @@ function applyMcpServersToService (): MCPServerConfig[] {
   return servers
 }
 
+async function pathExists (targetPath: string): Promise<boolean> {
+  try {
+    await fs.access(targetPath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function getDirectoryEntryCount (targetPath: string): Promise<number> {
+  try {
+    return (await fs.readdir(targetPath)).length
+  } catch {
+    return 0
+  }
+}
+
+async function getFileByteSize (targetPath: string): Promise<number> {
+  try {
+    const stats = await fs.stat(targetPath)
+    return stats.isFile() ? stats.size : 0
+  } catch {
+    return 0
+  }
+}
+
+async function getCriticalUserDataPresence (basePath: string): Promise<boolean> {
+  const criticalDirectoryCounts = await Promise.all(
+    CRITICAL_USER_DATA_DIR_NAMES.map(name => getDirectoryEntryCount(path.join(basePath, name)))
+  )
+  if (criticalDirectoryCounts.some(count => count > 0)) {
+    return true
+  }
+
+  const criticalFileSizes = await Promise.all(
+    CRITICAL_USER_DATA_FILE_NAMES.map(name => getFileByteSize(path.join(basePath, name)))
+  )
+  return criticalFileSizes.some(size => size > 0)
+}
+
+async function ensureStableUserDataPath (): Promise<void> {
+  const userDataPath = app.getPath('userData')
+  const userDataExists = await pathExists(userDataPath)
+  const appDataPath = app.getPath('appData')
+
+  for (const legacyName of LEGACY_USER_DATA_DIR_NAMES) {
+    const legacyPath = path.join(appDataPath, legacyName)
+    if (!(await pathExists(legacyPath))) {
+      continue
+    }
+
+    if (!userDataExists) {
+      try {
+        await fs.mkdir(path.dirname(userDataPath), { recursive: true })
+        await fs.rename(legacyPath, userDataPath)
+        console.log(`[main] Migrated userData from ${legacyPath} to ${userDataPath}`)
+      } catch (error) {
+        console.warn(`[main] Failed to migrate userData from ${legacyPath} to ${userDataPath}; continuing with legacy path`, error)
+        app.setPath('userData', legacyPath)
+      }
+      return
+    }
+
+    const [currentHasCriticalData, legacyHasCriticalData] = await Promise.all([
+      getCriticalUserDataPresence(userDataPath),
+      getCriticalUserDataPresence(legacyPath)
+    ])
+
+    if (!currentHasCriticalData && legacyHasCriticalData) {
+      console.log(`[main] Using legacy userData path ${legacyPath} because ${userDataPath} has no settings/projects history yet`)
+      app.setPath('userData', legacyPath)
+    }
+    return
+  }
+}
+
 async function initializeServices (): Promise<void> {
+  await ensureStableUserDataPath()
+
   const projectsDir = getProjectsDir()
   const snapshotsDir = getSnapshotsDir()
   const userDataPath = app.getPath('userData')
@@ -1226,7 +1494,7 @@ function setupIPC (): void {
       authMode: authModeRef
     })
     // Progress callback: sends progress events directly to renderer in real-time
-    const onProgress = (stageOrEvent: string | ProgressEvent, detail?: string) => {
+    const onProgress: GroupDeliberationProgressCallback = (stageOrEvent, detail) => {
       if (!sender.isDestroyed()) {
         if (typeof stageOrEvent === 'string') {
           sender.send(channel, { type: 'progress', stage: stageOrEvent, detail })

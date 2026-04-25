@@ -1,12 +1,40 @@
 {
   "appId": "com.theworld.app",
   "productName": "The World",
+  "compression": "maximum",
+  "electronLanguages": [
+    "en-US",
+    "zh-CN"
+  ],
   "directories": {
     "output": "release"
   },
   "files": [
-    "dist/**/*",
-    "dist-electron/**/*"
+    "package.json",
+    {
+      "from": "dist",
+      "to": "dist",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "dist-electron/electron",
+      "to": "dist-electron/electron",
+      "filter": [
+        "**/*"
+      ]
+    },
+    "!**/*.map",
+    "!**/.github/**",
+    "!**/.vscode/**",
+    "!**/{test,tests,__tests__,powered-test}/**",
+    "!**/{example,examples}/**",
+    "!**/{doc,docs}/**",
+    "!**/*.md",
+    "!**/*.markdown",
+    "!**/tsconfig.json",
+    "!**/*.tsbuildinfo"
   ],
   "mac": {
     "target": [

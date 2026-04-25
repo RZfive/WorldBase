@@ -26,6 +26,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
@@ -400,6 +401,24 @@ function createFilePreviewBlock (filePath: string, truncated = false): ChatMessa
   }
 }
 
+function cloneGroupProgressSnapshot (snapshot: AgentGroupProgressSnapshot): AgentGroupProgressSnapshot {
+  return {
+    ...snapshot,
+    items: snapshot.items.map(item => ({
+      ...item,
+      progress: item.progress.map(step => ({ ...step }))
+    }))
+  }
+}
+
+function createGroupProgressBlock (snapshot: AgentGroupProgressSnapshot): ChatMessageBlock {
+  return {
+    id: createBlockId('group_progress'),
+    kind: 'group_progress',
+    snapshot: cloneGroupProgressSnapshot(snapshot)
+  }
+}
+
 function cloneGroupTranscript (transcript: AgentGroupTranscript): AgentGroupTranscript {
   return {
     ...transcript,
@@ -456,15 +475,18 @@ function createAuthRequestBlock (request: AuthRequestPayload): ChatMessageBlock 
   }
 }
 
-function positionGroupTranscriptBlocks (message: ChatMessage): void {
+function positionGroupMetaBlocks (message: ChatMessage): void {
   const blocks = ensureBlocks(message)
+  const progressBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'group_progress' }> => {
+    return block.kind === 'group_progress'
+  })
   const transcriptBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'group_transcript' }> => {
     return block.kind === 'group_transcript'
   })
 
-  if (transcriptBlocks.length === 0) return
+  if (progressBlocks.length === 0 && transcriptBlocks.length === 0) return
 
-  const reorderedBlocks: ChatMessageBlock[] = blocks.filter(block => block.kind !== 'group_transcript')
+  const reorderedBlocks: ChatMessageBlock[] = blocks.filter(block => block.kind !== 'group_progress' && block.kind !== 'group_transcript')
   let insertIndex = -1
   for (let index = reorderedBlocks.length - 1; index >= 0; index--) {
     if (reorderedBlocks[index].kind === 'content') {
@@ -474,12 +496,28 @@ function positionGroupTranscriptBlocks (message: ChatMessage): void {
   }
 
   if (insertIndex < 0) {
+    reorderedBlocks.push(...progressBlocks)
     reorderedBlocks.push(...transcriptBlocks)
   } else {
-    reorderedBlocks.splice(insertIndex, 0, ...transcriptBlocks)
+    reorderedBlocks.splice(insertIndex, 0, ...progressBlocks, ...transcriptBlocks)
   }
 
   blocks.splice(0, blocks.length, ...reorderedBlocks)
+}
+
+function upsertGroupProgressBlock (message: ChatMessage, snapshot: AgentGroupProgressSnapshot): void {
+  const blocks = ensureBlocks(message)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_progress' }> => {
+    return block.kind === 'group_progress'
+  })
+
+  if (existing) {
+    existing.snapshot = cloneGroupProgressSnapshot(snapshot)
+  } else {
+    blocks.push(createGroupProgressBlock(snapshot))
+  }
+
+  positionGroupMetaBlocks(message)
 }
 
 function upsertGroupTranscriptBlock (message: ChatMessage, transcript: AgentGroupTranscript): void {
@@ -494,7 +532,7 @@ function upsertGroupTranscriptBlock (message: ChatMessage, transcript: AgentGrou
     blocks.push(createGroupTranscriptBlock(transcript))
   }
 
-  positionGroupTranscriptBlocks(message)
+  positionGroupMetaBlocks(message)
 }
 
 function getLastBlock (blocks: ChatMessageBlock[]): ChatMessageBlock | null {
@@ -1613,6 +1651,8 @@ async function sendMessage () {
             ensureBlocks(assistantMessage).push(createWebSearchBlock(event.query, event.engine || 'web', Array.isArray(event.results) ? event.results : []))
           } else if (event.type === 'web_fetch_result' && event.result) {
             ensureBlocks(assistantMessage).push(createWebFetchBlock(event.result as WebFetchResultEntry, event.query))
+          } else if (event.type === 'group_progress' && event.groupProgress) {
+            upsertGroupProgressBlock(assistantMessage, event.groupProgress)
           } else if (event.type === 'group_transcript' && event.transcript) {
             upsertGroupTranscriptBlock(assistantMessage, event.transcript)
           } else if (event.type === 'tool_start' && event.name) {
@@ -1654,7 +1694,7 @@ async function sendMessage () {
                 assistantMessage.thinking = event.thinking
                 ensureBlocks(assistantMessage).push(createThinkingBlock(event.thinking))
               }
-              positionGroupTranscriptBlocks(assistantMessage)
+              positionGroupMetaBlocks(assistantMessage)
             } finally {
               finishSession(true)
             }

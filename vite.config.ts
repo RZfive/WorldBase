@@ -10,5 +10,11 @@ export default defineConfig({
       }
     }
   })],
-  base: './'
+  base: './',
+  build: {
+    target: 'chrome140',
+    cssTarget: 'chrome140',
+    modulePreload: false,
+    minify: 'esbuild'
+  }
 })

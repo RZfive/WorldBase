@@ -1,0 +1,9 @@
+{
+  "name": "vite-plugin-bytecode",
+  "version": "0.0.0",
+  "description": "Compile v8 bytecode for Node.js, Electron",
+  "main": "index.js",
+  "repository": "https://github.com/electron-vite/vite-plugin-bytecode.git",
+  "author": "草鞋没号 <308487730@qq.com>",
+  "license": "MIT"
+}
