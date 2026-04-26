@@ -33,6 +33,7 @@ let workspaceChangeCleanup: (() => void) | null = null
 const draftAgent = reactive({
   id: '',
   name: '',
+  icon: '🤖',
   description: '',
   systemPrompt: '',
   providerId: '',
@@ -53,6 +54,7 @@ const draftAgent = reactive({
 const draftGroup = reactive({
   id: '',
   name: '',
+  icon: '👥',
   description: '',
   coordinatorAgentId: '',
   memberAgentIds: [] as string[],
@@ -157,6 +159,7 @@ function resetAgentDraft () {
   const defaults = getDefaultProviderSelection()
   draftAgent.id = ''
   draftAgent.name = ''
+  draftAgent.icon = '🤖'
   draftAgent.description = ''
   draftAgent.systemPrompt = ''
   draftAgent.providerId = defaults.providerId
@@ -182,6 +185,7 @@ function loadAgentIntoDraft (agent?: AgentDefinition | null) {
 
   draftAgent.id = agent.id
   draftAgent.name = agent.name
+  draftAgent.icon = agent.icon || '🤖'
   draftAgent.description = agent.description
   draftAgent.systemPrompt = agent.systemPrompt
   draftAgent.providerId = agent.providerId || ''
@@ -203,6 +207,7 @@ function loadAgentIntoDraft (agent?: AgentDefinition | null) {
 function resetGroupDraft () {
   draftGroup.id = ''
   draftGroup.name = ''
+  draftGroup.icon = '👥'
   draftGroup.description = ''
   draftGroup.coordinatorAgentId = ''
   draftGroup.memberAgentIds = []
@@ -220,6 +225,7 @@ function loadGroupIntoDraft (group?: AgentGroupDefinition | null) {
 
   draftGroup.id = group.id
   draftGroup.name = group.name
+  draftGroup.icon = group.icon || '👥'
   draftGroup.description = group.description || ''
   draftGroup.coordinatorAgentId = group.coordinatorAgentId
   draftGroup.memberAgentIds = [...group.memberAgentIds]
@@ -358,6 +364,7 @@ async function saveAgent () {
   const saved = await window.electronAPI.saveAgent({
     id: draftAgent.id || undefined,
     name: draftAgent.name,
+    icon: draftAgent.icon.trim() || undefined,
     description: draftAgent.description,
     systemPrompt: draftAgent.systemPrompt,
     providerId: draftAgent.providerId || undefined,
@@ -400,6 +407,7 @@ async function saveGroup () {
   const saved = await window.electronAPI.saveAgentGroup({
     id: draftGroup.id || undefined,
     name: draftGroup.name,
+    icon: draftGroup.icon.trim() || undefined,
     description: draftGroup.description || undefined,
     coordinatorAgentId: draftGroup.coordinatorAgentId,
     memberAgentIds: [...draftGroup.memberAgentIds],
@@ -531,8 +539,13 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
           :class="['list-item', { active: draftAgent.id === agent.id }]"
           @click="loadAgentIntoDraft(agent)"
         >
-          <strong>{{ agent.name }}</strong>
-          <span>{{ agent.description || '无描述' }}</span>
+          <div class="list-item-main">
+            <span class="list-item-icon">{{ agent.icon || '🤖' }}</span>
+            <div>
+              <strong>{{ agent.name }}</strong>
+              <span>{{ agent.description || '无描述' }}</span>
+            </div>
+          </div>
         </button>
       </aside>
 
@@ -542,6 +555,13 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
             <span>名称</span>
             <input v-model="draftAgent.name" class="input" placeholder="例如：前端实施 Agent">
           </label>
+          <label>
+            <span>图标</span>
+            <input v-model="draftAgent.icon" class="input" maxlength="4" placeholder="例如：🤖">
+          </label>
+        </div>
+
+        <div class="form-grid two-col">
           <label>
             <span>推理强度</span>
             <select v-model="draftAgent.reasoningStrength" class="input">
@@ -651,8 +671,13 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
           :class="['list-item', { active: draftGroup.id === group.id }]"
           @click="loadGroupIntoDraft(group)"
         >
-          <strong>{{ group.name }}</strong>
-          <span>{{ group.description || '无描述' }}</span>
+          <div class="list-item-main">
+            <span class="list-item-icon group">{{ group.icon || '👥' }}</span>
+            <div>
+              <strong>{{ group.name }}</strong>
+              <span>{{ group.description || '无描述' }}</span>
+            </div>
+          </div>
         </button>
       </aside>
 
@@ -662,6 +687,13 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
             <span>群组名称</span>
             <input v-model="draftGroup.name" class="input" placeholder="例如：前端修复组">
           </label>
+          <label>
+            <span>图标</span>
+            <input v-model="draftGroup.icon" class="input" maxlength="4" placeholder="例如：👥">
+          </label>
+        </div>
+
+        <div class="form-grid two-col">
           <label>
             <span>协调 Agent</span>
             <select v-model="draftGroup.coordinatorAgentId" class="input">
@@ -949,6 +981,29 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
   color: var(--app-text);
   cursor: pointer;
   text-align: left;
+}
+
+.list-item-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+}
+
+.list-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-accent) 12%, var(--app-panel));
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.list-item-icon.group {
+  background: color-mix(in srgb, #14b8a6 16%, var(--app-panel));
 }
 
 .list-item.active {

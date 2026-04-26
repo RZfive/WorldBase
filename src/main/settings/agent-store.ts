@@ -48,6 +48,7 @@ function normalizeAgent (value: Partial<AgentDefinition>, existing?: AgentDefini
   return {
     id: sanitizeId(value.id || existing?.id || createAgentId(value.name || 'custom')),
     name: typeof value.name === 'string' && value.name.trim() ? value.name.trim() : (existing?.name || '未命名 Agent'),
+    icon: typeof value.icon === 'string' && value.icon.trim() ? value.icon.trim() : existing?.icon,
     description: typeof value.description === 'string' ? value.description.trim() : (existing?.description || ''),
     systemPrompt: typeof value.systemPrompt === 'string' ? value.systemPrompt : (existing?.systemPrompt || ''),
     providerId: typeof value.providerId === 'string' && value.providerId.trim() ? value.providerId.trim() : existing?.providerId,
@@ -79,6 +80,7 @@ function buildDefaultAgent (): AgentDefinition {
   return {
     id: DEFAULT_AGENT_ID,
     name: '主 Agent',
+    icon: '🤖',
     description: '默认主 Agent，适合通用开发、调试和方案推进。',
     systemPrompt: 'You are the primary The World agent. Coordinate user requests pragmatically, favor grounded implementation, and reuse available skills and memory before inventing new flows.',
     reasoningStrength: 'medium',

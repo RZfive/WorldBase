@@ -28,6 +28,19 @@ interface ProjectTagChip {
 }
 
 type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+type AIExecutionAuthMode = 'strict' | 'auto'
+
+interface ProviderItem {
+  id: string
+  name: string
+  models: string[]
+}
+
+interface AgentOption {
+  id: string
+  name: string
+  icon?: string
+}
 
 const props = defineProps<{
   modelValue: string
@@ -40,6 +53,15 @@ const props = defineProps<{
   activeSkillIds: Set<string>
   documentDockVisible: boolean
   reasoningStrength: ReasoningStrength
+  authMode: AIExecutionAuthMode
+  planModeActive: boolean
+  providers?: ProviderItem[]
+  activeProviderId?: string
+  selectedModel?: string
+  showProviderSelector?: boolean
+  availableAgents?: AgentOption[]
+  selectedAgentId?: string
+  isNewConversation?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -52,6 +74,11 @@ const emit = defineEmits<{
   (e: 'update:reasoning-strength', value: ReasoningStrength): void
   (e: 'toggleSkill', id: string): void
   (e: 'toggleDocumentDock'): void
+  (e: 'update:auth-mode', value: AIExecutionAuthMode): void
+  (e: 'togglePlanMode'): void
+  (e: 'update:active-provider-id', id: string): void
+  (e: 'update:selected-model', model: string): void
+  (e: 'update:selected-agent-id', id: string): void
 }>()
 
 const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
@@ -317,6 +344,61 @@ function handleReasoningStrengthInput (event: Event) {
         rows="3"
       />
       <div class="input-actions">
+        <div class="input-actions-left">
+          <template v-if="props.isNewConversation && props.availableAgents && props.availableAgents.length > 0">
+            <select
+              class="context-select agent-select"
+              :value="props.selectedAgentId || ''"
+              @change="emit('update:selected-agent-id', ($event.target as HTMLSelectElement).value)"
+              title="选择 Agent"
+            >
+              <option value="">默认 Agent</option>
+              <option v-for="agent in props.availableAgents" :key="agent.id" :value="agent.id">
+                {{ agent.icon ? agent.icon + ' ' : '' }}{{ agent.name }}
+              </option>
+            </select>
+          </template>
+          <template v-if="props.showProviderSelector && props.providers && props.providers.length > 0">
+            <select
+              class="context-select provider-select"
+              :value="props.activeProviderId"
+              @change="emit('update:active-provider-id', ($event.target as HTMLSelectElement).value)"
+              title="切换供应商"
+            >
+              <option v-for="p in props.providers" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+            <select
+              class="context-select model-select"
+              :value="props.selectedModel"
+              @change="emit('update:selected-model', ($event.target as HTMLSelectElement).value)"
+              title="切换模型"
+            >
+              <option
+                v-for="model in (props.providers.find(p => p.id === props.activeProviderId)?.models ?? [])"
+                :key="model"
+                :value="model"
+              >{{ model }}</option>
+            </select>
+          </template>
+          <select
+            class="context-select"
+            :value="props.authMode"
+            @change="emit('update:auth-mode', ($event.target as HTMLSelectElement).value as AIExecutionAuthMode)"
+            title="授权模式"
+          >
+            <option value="strict">严格授权</option>
+            <option value="auto">自动执行</option>
+          </select>
+          <button
+            class="plan-mode-btn"
+            :class="{ active: props.planModeActive }"
+            @click="emit('togglePlanMode')"
+            :title="props.planModeActive ? '退出规划模式' : '进入规划模式'"
+          >
+            📋 {{ props.planModeActive ? '规划中' : '规划' }}
+          </button>
+        </div>
+        <div class="input-actions-right">
         <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" @click="emit('toggleDocumentDock')" title="文档工作台">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
         </button>
@@ -346,6 +428,7 @@ function handleReasoningStrengthInput (event: Event) {
           <svg v-if="!props.isLoading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
         </button>
+        </div>
       </div>
     </div>
     <div v-if="props.uploadFeedback" class="upload-feedback" role="status">{{ props.uploadFeedback }}</div>
@@ -626,9 +709,82 @@ function handleReasoningStrengthInput (event: Event) {
 .input-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 4px;
   padding: 4px 8px 8px;
+}
+
+.input-actions-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.input-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.context-select {
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-input-border);
+  border-radius: 6px;
+  color: var(--app-text);
+  padding: 4px 8px;
+  font-size: 0.76em;
+  cursor: pointer;
+  height: 28px;
+  transition: border-color 0.15s;
+  min-width: 0;
+}
+
+.context-select option {
+  background: var(--app-input-bg);
+  color: var(--app-text);
+}
+
+.context-select:focus {
+  outline: none;
+  border-color: var(--app-accent);
+}
+
+.agent-select {
+  max-width: 130px;
+}
+
+.provider-select {
+  max-width: 110px;
+}
+
+.model-select {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plan-mode-btn {
+  padding: 4px 10px;
+  height: 28px;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-input-border);
+  border-radius: 6px;
+  color: var(--app-text-muted);
+  font-size: 0.76em;
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+
+.plan-mode-btn:hover {
+  border-color: var(--app-accent);
+  color: var(--app-text);
+}
+
+.plan-mode-btn.active {
+  border-color: #f59e0b;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
 }
 
 .reasoning-slider {

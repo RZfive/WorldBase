@@ -96,6 +96,38 @@ interface ConversationSummary {
   channelBindingId?: string
 }
 
+interface SidebarAgentItem {
+  id: string
+  conversationId: string | null
+  title: string
+  subtitle: string
+  icon: string
+  modelId: string
+  providerName: string
+  modelOptions: string[]
+  isStreaming: boolean
+  isActive: boolean
+}
+
+interface SidebarGroupItem {
+  id: string
+  conversationId: string | null
+  title: string
+  subtitle: string
+  icon: string
+  isStreaming: boolean
+  isActive: boolean
+}
+
+interface SidebarConversationItem {
+  id: string
+  title: string
+  subtitle: string
+  icon: string
+  isStreaming: boolean
+  isActive: boolean
+}
+
 interface ProviderOption {
   id: string
   name: string
@@ -242,7 +274,219 @@ const isLoading = computed(() => {
 
 const activeTodoItems = computed(() => getLatestVisibleTodoItems(messages.value, isLoading.value))
 
+const shouldUseConversationProviderOverride = computed(() => {
+  if (selectedGroupId.value || selectedChannelBindingId.value) return false
+  if (!currentConversationId.value) return true  // new conversation: always allow override
+  const defaultId = getDefaultAgentId()
+  return !selectedAgentId.value || selectedAgentId.value === defaultId
+})
+
+const nonDefaultAgents = computed(() => {
+  const defaultId = getDefaultAgentId()
+  return availableAgents.value.filter(agent => agent.id !== defaultId)
+})
+
+const agentSelectorValue = computed(() => {
+  const defaultId = getDefaultAgentId()
+  return selectedAgentId.value === defaultId ? '' : selectedAgentId.value
+})
+
+const providersById = computed(() => {
+  return new Map(providersConfig.value.providers.map(provider => [provider.id, provider]))
+})
+
+const agentsById = computed(() => {
+  return new Map(availableAgents.value.map(agent => [agent.id, agent]))
+})
+
+const groupsById = computed(() => {
+  return new Map(availableAgentGroups.value.map(group => [group.id, group]))
+})
+
+const currentAgentDefinition = computed(() => {
+  return selectedAgentId.value ? agentsById.value.get(selectedAgentId.value) || null : null
+})
+
+const currentGroupDefinition = computed(() => {
+  return selectedGroupId.value ? groupsById.value.get(selectedGroupId.value) || null : null
+})
+
+function getAgentIcon (agent?: Pick<AgentDefinition, 'icon'> | null): string {
+  return agent?.icon?.trim() || '🤖'
+}
+
+function getGroupIcon (group?: Pick<AgentGroupDefinition, 'icon'> | null): string {
+  return group?.icon?.trim() || '👥'
+}
+
+function getAgentProvider (agent?: AgentDefinition | null): ProviderOption | null {
+  if (agent?.providerId) {
+    return providersById.value.get(agent.providerId) || null
+  }
+
+  return activeProviderId.value
+    ? providersById.value.get(activeProviderId.value) || null
+    : null
+}
+
+function getAgentModelSelection (agent?: AgentDefinition | null): {
+  providerName: string
+  modelId: string
+  modelOptions: string[]
+} {
+  const provider = getAgentProvider(agent)
+  const modelOptions = provider?.models || []
+  const modelId = agent?.modelId || provider?.activeModel || modelOptions[0] || ''
+
+  return {
+    providerName: provider?.name || '未配置供应商',
+    modelId,
+    modelOptions
+  }
+}
+
+function resolveConversationIcon (conversation: ConversationSummary): string {
+  if (conversation.groupId) {
+    return getGroupIcon(groupsById.value.get(conversation.groupId) || null)
+  }
+
+  if (conversation.agentId) {
+    return getAgentIcon(agentsById.value.get(conversation.agentId) || null)
+  }
+
+  return '💬'
+}
+
+function formatConversationSubtitle (updatedAt: string): string {
+  try {
+    return new Date(updatedAt).toLocaleString('zh-CN', {
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  } catch {
+    return updatedAt
+  }
+}
+
+function getPinnedAgentConversation (agentId: string): ConversationSummary | null {
+  return conversations.value.find(conversation => {
+    return conversation.agentId === agentId && !conversation.groupId && !conversation.channelBindingId
+  }) || null
+}
+
+function getPinnedGroupConversation (groupId: string): ConversationSummary | null {
+  return conversations.value.find(conversation => conversation.groupId === groupId) || null
+}
+
+const agentSidebarItems = computed<SidebarAgentItem[]>(() => {
+  const defaultAgentId = getDefaultAgentId()
+
+  return availableAgents.value
+    .filter(agent => agent.id !== defaultAgentId)
+    .map((agent) => {
+      const conversation = getPinnedAgentConversation(agent.id)
+      const selection = getAgentModelSelection(agent)
+
+      return {
+        id: agent.id,
+        conversationId: conversation?.id || null,
+        title: agent.name,
+        subtitle: `${selection.providerName} · ${selection.modelId || '未配置模型'}`,
+        icon: getAgentIcon(agent),
+        modelId: selection.modelId,
+        providerName: selection.providerName,
+        modelOptions: selection.modelOptions,
+        isStreaming: conversation ? streamingConvIds.has(conversation.id) : false,
+        isActive: Boolean(conversation && currentConversationId.value === conversation.id)
+      }
+    })
+})
+
+const groupSidebarItems = computed<SidebarGroupItem[]>(() => {
+  return availableAgentGroups.value.map((group) => {
+    const conversation = getPinnedGroupConversation(group.id)
+    const coordinatorName = group.coordinatorAgentId
+      ? agentsById.value.get(group.coordinatorAgentId)?.name || '未设置协调 Agent'
+      : '未设置协调 Agent'
+
+    return {
+      id: group.id,
+      conversationId: conversation?.id || null,
+      title: group.name,
+      subtitle: `${group.memberAgentIds.length} 位 Agent · 协调 ${coordinatorName}`,
+      icon: getGroupIcon(group),
+      isStreaming: conversation ? streamingConvIds.has(conversation.id) : false,
+      isActive: Boolean(conversation && currentConversationId.value === conversation.id)
+    }
+  })
+})
+
+const conversationSidebarItems = computed<SidebarConversationItem[]>(() => {
+  const defaultAgentId = getDefaultAgentId()
+  const pinnedConversationIds = new Set<string>([
+    ...agentSidebarItems.value.map(item => item.conversationId).filter((value): value is string => Boolean(value)),
+    ...groupSidebarItems.value.map(item => item.conversationId).filter((value): value is string => Boolean(value))
+  ])
+
+  return conversations.value
+    .filter((conversation) => {
+      if (pinnedConversationIds.has(conversation.id)) {
+        return false
+      }
+
+      if (conversation.groupId && groupsById.value.has(conversation.groupId)) {
+        return false
+      }
+
+      if (conversation.agentId && conversation.agentId !== defaultAgentId && agentsById.value.has(conversation.agentId)) {
+        return false
+      }
+
+      return true
+    })
+    .map((conversation) => ({
+      id: conversation.id,
+      title: conversation.title,
+      subtitle: formatConversationSubtitle(conversation.updatedAt),
+      icon: resolveConversationIcon(conversation),
+      isStreaming: streamingConvIds.has(conversation.id),
+      isActive: currentConversationId.value === conversation.id
+    }))
+})
+
+const currentContextLabel = computed(() => {
+  if (currentGroupDefinition.value) {
+    return `${getGroupIcon(currentGroupDefinition.value)} ${currentGroupDefinition.value.name}`
+  }
+
+  if (currentAgentDefinition.value) {
+    return `${getAgentIcon(currentAgentDefinition.value)} ${currentAgentDefinition.value.name}`
+  }
+
+  return '💬 新对话'
+})
+
+const currentContextDetail = computed(() => {
+  if (currentGroupDefinition.value) {
+    return `${currentGroupDefinition.value.memberAgentIds.length} 位 Agent 协作，各自使用自己的模型`
+  }
+
+  return currentModelLabel.value
+})
+
 const currentModelLabel = computed(() => {
+  if (currentGroupDefinition.value) {
+    return `群组协作 · ${currentGroupDefinition.value.name}`
+  }
+
+  if (currentAgentDefinition.value) {
+    const selection = getAgentModelSelection(currentAgentDefinition.value)
+    const labelParts = [selection.modelId, selection.providerName].filter(Boolean)
+    return labelParts.length > 0 ? labelParts.join(' · ') : currentAgentDefinition.value.name
+  }
+
   const provider = providers.value.find(item => item.id === activeProviderId.value)
   const labelParts = [selectedModel.value, provider?.name].filter(Boolean)
   return labelParts.length > 0 ? labelParts.join(' · ') : 'The World AI'
@@ -291,10 +535,110 @@ async function loadAgentWorkspaceOptions () {
       selectedChannelBindingId.value = ''
     }
 
-    if (!selectedAgentId.value) {
+    if (!selectedAgentId.value && !selectedGroupId.value && !selectedChannelBindingId.value) {
       selectedAgentId.value = getDefaultAgentId()
     }
   } catch { /* ignore */ }
+}
+
+function resetConversationComposerState (): void {
+  messages.value = []
+  targetProjectId.value = null
+  currentAuthMode.value = 'strict'
+  reasoningStrength.value = 'medium'
+  inputText.value = ''
+  resetTransientStreamState()
+  pendingImages.value = []
+  pendingFiles.value = []
+  uploadFeedback.value = ''
+}
+
+function resolveConversationAgentSelection (value: { agentId?: string | null; groupId?: string | null; channelBindingId?: string | null }): string {
+  if (value.groupId || value.channelBindingId) {
+    return value.agentId || ''
+  }
+
+  return value.agentId || getDefaultAgentId()
+}
+
+function getPinnedContextTitle (): string | null {
+  if (currentGroupDefinition.value) {
+    return currentGroupDefinition.value.name
+  }
+
+  if (selectedAgentId.value && selectedAgentId.value !== getDefaultAgentId() && currentAgentDefinition.value) {
+    return currentAgentDefinition.value.name
+  }
+
+  return null
+}
+
+async function createWorkspaceConversation (context: {
+  agentId?: string
+  groupId?: string
+  channelBindingId?: string
+  title: string
+}): Promise<void> {
+  const conversationId = generateId()
+
+  stashCurrentConversationForNavigation()
+
+  currentConversationId.value = conversationId
+  resetConversationComposerState()
+  selectedAgentId.value = context.agentId || ''
+  selectedGroupId.value = context.groupId || ''
+  selectedChannelBindingId.value = context.channelBindingId || ''
+
+  await doSaveConversation(conversationId, [], {
+    titleOverride: context.title,
+    targetProjectId: null,
+    allowEmpty: true
+  })
+}
+
+async function openAgentWorkspaceConversation (agentId: string): Promise<void> {
+  const existingConversation = getPinnedAgentConversation(agentId)
+  if (existingConversation) {
+    await loadConversation(existingConversation.id)
+    return
+  }
+
+  const agent = agentsById.value.get(agentId)
+  if (!agent) return
+
+  await createWorkspaceConversation({
+    agentId: agent.id,
+    title: agent.name
+  })
+}
+
+async function openGroupWorkspaceConversation (groupId: string): Promise<void> {
+  const existingConversation = getPinnedGroupConversation(groupId)
+  if (existingConversation) {
+    await loadConversation(existingConversation.id)
+    return
+  }
+
+  const group = groupsById.value.get(groupId)
+  if (!group) return
+
+  await createWorkspaceConversation({
+    groupId: group.id,
+    title: group.name
+  })
+}
+
+async function handleSidebarAgentModelChange (payload: { agentId: string; modelId: string }): Promise<void> {
+  if (!window.electronAPI?.saveAgent) return
+
+  const agent = agentsById.value.get(payload.agentId)
+  if (!agent) return
+
+  await window.electronAPI.saveAgent({
+    ...agent,
+    modelId: payload.modelId || undefined
+  })
+  await loadAgentWorkspaceOptions()
 }
 
 function toggleSkill (id: string) {
@@ -1048,8 +1392,8 @@ function stashCurrentConversationForNavigation () {
       assistantIdx: messages.value.length - 1,
       targetProjectId: targetProjectId.value,
       authMode: currentAuthMode.value,
-      providerId: activeProviderId.value || null,
-      selectedModel: selectedModel.value || null,
+      providerId: shouldUseConversationProviderOverride.value ? (activeProviderId.value || null) : null,
+      selectedModel: shouldUseConversationProviderOverride.value ? (selectedModel.value || null) : null,
       reasoningStrength: reasoningStrength.value,
       agentId: selectedAgentId.value || null,
       groupId: selectedGroupId.value || null,
@@ -1233,18 +1577,10 @@ function newConversation () {
   stashCurrentConversationForNavigation()
 
   currentConversationId.value = null
-  messages.value = []
-  targetProjectId.value = null
-  currentAuthMode.value = 'strict'
-  reasoningStrength.value = 'medium'
+  resetConversationComposerState()
   selectedAgentId.value = getDefaultAgentId()
   selectedGroupId.value = ''
   selectedChannelBindingId.value = ''
-  inputText.value = ''
-  resetTransientStreamState()
-  pendingImages.value = []
-  pendingFiles.value = []
-  uploadFeedback.value = ''
 }
 
 async function loadConversation (id: string) {
@@ -1261,7 +1597,7 @@ async function loadConversation (id: string) {
     targetProjectId.value = bg.targetProjectId
     currentAuthMode.value = bg.authMode
     reasoningStrength.value = bg.reasoningStrength
-    selectedAgentId.value = bg.agentId || getDefaultAgentId()
+    selectedAgentId.value = resolveConversationAgentSelection(bg)
     selectedGroupId.value = bg.groupId || ''
     selectedChannelBindingId.value = bg.channelBindingId || ''
     setConversationTarget(id, bg.targetProjectId)
@@ -1281,7 +1617,7 @@ async function loadConversation (id: string) {
     targetProjectId.value = conv.targetProjectId || null
     currentAuthMode.value = conv.authMode === 'auto' ? 'auto' : 'strict'
     reasoningStrength.value = conv.reasoningStrength || 'medium'
-    selectedAgentId.value = conv.agentId || getDefaultAgentId()
+    selectedAgentId.value = resolveConversationAgentSelection(conv)
     selectedGroupId.value = conv.groupId || ''
     selectedChannelBindingId.value = conv.channelBindingId || ''
     setConversationTarget(conv.id, conv.targetProjectId || null)
@@ -1304,7 +1640,7 @@ async function doSaveConversation (
 
   const firstUserMsg = msgs.find(m => m.role === 'user')
   const titleText = getConversationTitleText(firstUserMsg)
-  const resolvedTitle = options?.titleOverride || (titleText
+  const resolvedTitle = options?.titleOverride || getPinnedContextTitle() || (titleText
     ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
     : (existingConversation?.title || '新对话'))
   const resolvedTargetProjectId = options && Object.prototype.hasOwnProperty.call(options, 'targetProjectId')
@@ -1320,8 +1656,8 @@ async function doSaveConversation (
     createdAt: getConversationCreatedAt(convId),
     updatedAt: new Date().toISOString(),
     authMode: currentAuthMode.value,
-    providerId: activeProviderId.value || undefined,
-    selectedModel: selectedModel.value || undefined,
+    providerId: shouldUseConversationProviderOverride.value ? (activeProviderId.value || undefined) : undefined,
+    selectedModel: shouldUseConversationProviderOverride.value ? (selectedModel.value || undefined) : undefined,
     reasoningStrength: reasoningStrength.value,
     targetProjectId: resolvedTargetProjectId || undefined,
     agentId: selectedAgentId.value || undefined,
@@ -1742,8 +2078,8 @@ async function sendMessage () {
         chatMessages,
         sessionId,
         convId,
-        activeProviderId.value || undefined,
-        selectedModel.value || undefined,
+        shouldUseConversationProviderOverride.value ? (activeProviderId.value || undefined) : undefined,
+        shouldUseConversationProviderOverride.value ? (selectedModel.value || undefined) : undefined,
         targetProjectId.value ?? undefined,
         currentAuthMode.value,
         reasoningStrength.value,
@@ -1859,39 +2195,28 @@ onUnmounted(() => {
 <template>
   <div class="chat-layout">
     <ConversationSidebar
-      :conversations="conversations"
-      :current-conversation-id="currentConversationId"
-      :streaming-conv-ids="streamingConvIds"
+      :agent-items="agentSidebarItems"
+      :group-items="groupSidebarItems"
+      :conversation-items="conversationSidebarItems"
       @new-conversation="newConversation"
       @select-conversation="loadConversation"
+      @open-agent="openAgentWorkspaceConversation"
+      @open-group="openGroupWorkspaceConversation"
       @delete-conversation="deleteConversation"
     />
 
     <div class="chat-panel">
       <ChatHeader
-        :providers="providers"
-        :active-provider-id="activeProviderId"
-        :selected-model="selectedModel"
-        :auth-mode="currentAuthMode"
-        :available-agents="availableAgents"
-        :selected-agent-id="selectedAgentId"
-        :available-agent-groups="availableAgentGroups"
-        :selected-group-id="selectedGroupId"
+        :context-label="currentContextLabel"
+        :context-detail="currentContextDetail"
         :available-channel-bindings="availableChannelBindings"
         :selected-channel-binding-id="selectedChannelBindingId"
         :available-skills="availableSkills"
         :active-skill-ids="activeSkillIds"
         :show-skill-picker="showSkillPicker"
-        :plan-mode-active="planModeActive"
-        @update:active-provider-id="handleProviderSelectionChange"
-        @update:selected-model="handleModelSelectionChange"
-        @update:auth-mode="handleAuthModeChange"
-        @update:selected-agent-id="handleAgentSelectionChange"
-        @update:selected-group-id="handleGroupSelectionChange"
         @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
         @toggle-skill-picker="showSkillPicker = !showSkillPicker"
         @toggle-skill="toggleSkill"
-        @toggle-plan-mode="togglePlanMode"
       />
 
       <PinnedTodoPanel
@@ -1927,6 +2252,15 @@ onUnmounted(() => {
         :active-skill-ids="activeSkillIds"
         :document-dock-visible="documentDockVisible"
         :reasoning-strength="reasoningStrength"
+        :auth-mode="currentAuthMode"
+        :plan-mode-active="planModeActive"
+        :providers="providers"
+        :active-provider-id="activeProviderId"
+        :selected-model="selectedModel"
+        :show-provider-selector="shouldUseConversationProviderOverride"
+        :available-agents="nonDefaultAgents"
+        :selected-agent-id="agentSelectorValue"
+        :is-new-conversation="!currentConversationId"
         @send="sendMessage"
         @stop="stopCurrentStream"
         @add-attachments="addAttachments"
@@ -1935,6 +2269,11 @@ onUnmounted(() => {
         @update:reasoning-strength="handleReasoningStrengthChange"
         @toggle-skill="toggleSkill"
         @toggle-document-dock="documentDockVisible = !documentDockVisible"
+        @update:auth-mode="handleAuthModeChange"
+        @toggle-plan-mode="togglePlanMode"
+        @update:active-provider-id="handleProviderSelectionChange"
+        @update:selected-model="handleModelSelectionChange"
+        @update:selected-agent-id="handleAgentSelectionChange"
       />
     </div>
   </div>

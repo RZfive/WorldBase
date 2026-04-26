@@ -46,6 +46,8 @@ import type { SettingsStore } from '../../../settings/settings-store.js'
 import type { MCPService } from '../../../mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-service.js'
 import type { BrowserWindow } from 'electron'
+import type { SubagentService } from '../subagent-service.js'
+import { toolSpawnSubagents } from './tool-spawn-subagent.js'
 
 export interface ToolServices {
   projectFS: ProjectFS
@@ -64,6 +66,8 @@ export interface ToolServices {
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
   mcpService?: MCPService
   scheduledTaskService?: ScheduledTaskService
+  /** Optional subagent service — injects the spawn_subagents tool when provided. */
+  subagentService?: SubagentService
 }
 
 /**
@@ -116,6 +120,18 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolCreateAgent(services, () => agent.getToolDefinitions()),
     toolCreateAgentGroup(services)
   ]
+
+  // Register spawn_subagents tool only when a subagent service is available
+  // (prevents subagents from spawning their own subagents).
+  if (services.subagentService) {
+    const subagentService = services.subagentService
+    tools.push(
+      toolSpawnSubagents(
+        () => subagentService,
+        getAbortSignal
+      )
+    )
+  }
 
   // Register document tools if store is available
   if (services.documentStore) {

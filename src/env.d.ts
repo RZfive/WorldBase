@@ -61,6 +61,7 @@ interface AgentAutoReplyPolicy {
 interface AgentDefinition {
   id: string
   name: string
+  icon?: string
   description: string
   systemPrompt: string
   providerId?: string
@@ -79,6 +80,7 @@ interface AgentDefinition {
 interface AgentGroupDefinition {
   id: string
   name: string
+  icon?: string
   description?: string
   coordinatorAgentId: string
   memberAgentIds: string[]

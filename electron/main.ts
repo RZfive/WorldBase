@@ -781,7 +781,7 @@ function resolveProviderConfig (requestedProviderId?: string, requestedModelId?:
   const enabledProviderIds = new Set(providersConfig.enabledProviderIds)
   const enabledProviders = providersConfig.providers.filter(provider => enabledProviderIds.has(provider.id))
   const requestedProvider = requestedProviderId
-    ? enabledProviders.find(provider => provider.id === requestedProviderId)
+    ? providersConfig.providers.find(provider => provider.id === requestedProviderId)
     : null
   const defaultProvider = enabledProviders.find(provider => provider.id === providersConfig.activeProviderId)
     || enabledProviders[0]

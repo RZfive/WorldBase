@@ -21,6 +21,7 @@ export interface AgentAutoReplyPolicy {
 export interface AgentDefinition {
   id: string
   name: string
+  icon?: string
   description: string
   systemPrompt: string
   providerId?: string
@@ -39,6 +40,7 @@ export interface AgentDefinition {
 export interface AgentGroupDefinition {
   id: string
   name: string
+  icon?: string
   description?: string
   coordinatorAgentId: string
   memberAgentIds: string[]

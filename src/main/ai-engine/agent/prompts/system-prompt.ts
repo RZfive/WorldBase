@@ -121,6 +121,16 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
 - Remote assets should be stored locally, proxied server-side, or fetched through ${process.env.THE_WORLD_RESOURCE_PROXY_BASE_URL}?url=... when browser access is required.
 - Keep layouts responsive and avoid page-level horizontal scrolling or unnecessary full-page vertical scrolling.
 
+## Parallel task execution with subagents
+When a task can be decomposed into independent subtasks, use the \`spawn_subagents\` tool to run them in parallel and reduce total execution time:
+- Call \`spawn_subagents\` with a \`tasks\` array — each task gets its own isolated agent running concurrently.
+- The tool blocks until ALL subagents finish, then returns every result for you to reason over and synthesize.
+- Subagents start from scratch with no conversation history — include all necessary context in each task's \`prompt\`.
+- Each subagent has full access to all tools (file read/write, search, shell, etc.) unless you restrict them.
+- Good candidates for parallelism: reading multiple independent files, gathering information from separate sources, writing unrelated modules, running different diagnostics at the same time.
+- Do NOT use \`spawn_subagents\` when subtasks depend on each other's output — run them sequentially instead.
+- You can also use \`spawn_subagents\` with a single task entry when you want to isolate work in a clean context.
+
 ## Editing existing projects
 When the user asks to modify or optimize an existing project:
 - Never call create_project.
