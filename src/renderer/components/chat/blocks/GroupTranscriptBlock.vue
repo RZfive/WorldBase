@@ -33,6 +33,12 @@ const rounds = computed(() => {
     .map(([round, entries]) => ({ round, entries }))
 })
 
+function getAgentAvatar (name: string): string {
+  const trimmed = name.trim()
+  if (!trimmed) return 'AI'
+  return trimmed.length <= 2 ? trimmed : trimmed.slice(0, 2)
+}
+
 function toggleExpanded (): void {
   if (!canExpand.value) return
   expanded.value = !expanded.value
@@ -77,8 +83,14 @@ function toggleExpanded (): void {
           :key="entry.id"
           class="group-transcript-entry"
         >
-          <div class="group-transcript-entry-agent">{{ entry.agentName }}</div>
-          <div class="group-transcript-entry-body markdown-body" v-html="entry.html" />
+          <div class="group-transcript-entry-avatar">{{ getAgentAvatar(entry.agentName) }}</div>
+          <div class="group-transcript-entry-bubble">
+            <div class="group-transcript-entry-head">
+              <div class="group-transcript-entry-agent">{{ entry.agentName }}</div>
+              <span class="group-transcript-entry-round">第 {{ round.round }} 轮</span>
+            </div>
+            <div class="group-transcript-entry-body markdown-body" v-html="entry.html" />
+          </div>
         </article>
       </section>
     </div>
@@ -175,17 +187,54 @@ function toggleExpanded (): void {
 }
 
 .group-transcript-entry {
-  padding: 12px 13px;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.group-transcript-entry-avatar {
+  width: 40px;
+  height: 40px;
   border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--app-accent) 18%, var(--app-panel-strong));
+  color: var(--app-accent-strong);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.group-transcript-entry-bubble {
+  padding: 12px 13px;
+  border-radius: 16px;
   border: 1px solid var(--app-border);
   background: color-mix(in srgb, var(--app-panel) 68%, white 32%);
 }
 
-.group-transcript-entry-agent {
+.group-transcript-entry-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin-bottom: 8px;
+}
+
+.group-transcript-entry-agent {
   font-size: 0.78rem;
   font-weight: 700;
   color: var(--app-accent-strong);
+}
+
+.group-transcript-entry-round {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--app-panel-strong);
+  color: var(--app-text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
 }
 
 .group-transcript-entry-body,
@@ -202,6 +251,10 @@ function toggleExpanded (): void {
 
   .group-transcript-toggle {
     width: 100%;
+  }
+
+  .group-transcript-entry {
+    grid-template-columns: 1fr;
   }
 }
 </style>

@@ -1,6 +1,7 @@
 import { AgentCore, type StreamEvent, type ProgressCallback, type ProgressEvent } from './agent/agent-core.js'
 import { OpenAIProvider } from './providers/openai-provider.js'
 import { registerAllTools } from './agent/tools/index.js'
+import { SubagentService } from './agent/subagent-service.js'
 import type { ChatMessage, ToolDefinition } from './providers/openai-provider.js'
 import type { ProjectFS } from '../project-fs/project-fs.js'
 import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
@@ -121,7 +122,7 @@ export class AIEngine {
     }
   }
 
-  private createAgent (options?: AIRequestOptions): AgentCore {
+  private createAgent (options?: AIRequestOptions, includeSubagentService = true): AgentCore {
     const provider = new OpenAIProvider()
     this.applyConfigToProvider(provider, this.baseConfig)
     if (options?.providerConfig) {
@@ -131,7 +132,29 @@ export class AIEngine {
 
     const agent = new AgentCore(provider, this.services as unknown as Record<string, unknown>)
     agent.setAuthModeResolver(options?.getAuthMode)
-    registerAllTools(agent, this.services)
+
+    // Build a SubagentService that creates isolated subagent cores (without
+    // their own SubagentService to prevent infinite nesting).
+    const subagentService = includeSubagentService
+      ? new SubagentService((subOpts) => {
+          const subagent = this.createAgent(
+            {
+              ...options,
+              allowedToolNames: subOpts?.allowedTools,
+              deniedToolNames: subOpts?.deniedTools,
+              systemPromptSections: subOpts?.systemPromptSections ?? options?.systemPromptSections
+            },
+            false // no nested spawn_subagents
+          )
+          return subagent
+        })
+      : undefined
+
+    const toolServices = subagentService
+      ? { ...this.services, subagentService }
+      : this.services
+
+    registerAllTools(agent, toolServices)
     this.registerMcpTools(agent, options?.allowedMcpServerIds)
     agent.setActiveSkills(mergeUniqueStrings(this.activeSkillContents, options?.activeSkillContents))
     agent.setSystemPromptSections(options?.systemPromptSections ?? [])

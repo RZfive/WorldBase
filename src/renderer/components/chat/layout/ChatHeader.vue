@@ -1,23 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-
-interface ProviderOption {
-  id: string
-  name: string
-  models: string[]
-}
 
 interface SkillItem {
-  id: string
-  name: string
-}
-
-interface AgentOption {
-  id: string
-  name: string
-}
-
-interface AgentGroupOption {
   id: string
   name: string
 }
@@ -28,60 +11,21 @@ interface ChannelBindingOption {
   externalChannelId: string
 }
 
-type AIExecutionAuthMode = 'strict' | 'auto'
-
 const props = defineProps<{
-  providers: ProviderOption[]
-  activeProviderId: string
-  selectedModel: string
-  authMode: AIExecutionAuthMode
-  availableAgents: AgentOption[]
-  selectedAgentId: string
-  availableAgentGroups: AgentGroupOption[]
-  selectedGroupId: string
+  contextLabel: string
+  contextDetail: string
   availableChannelBindings: ChannelBindingOption[]
   selectedChannelBindingId: string
   availableSkills: SkillItem[]
   activeSkillIds: Set<string>
   showSkillPicker: boolean
-  planModeActive: boolean
 }>()
 
 const emit = defineEmits<{
-  (e: 'update:activeProviderId', providerId: string): void
-  (e: 'update:selectedModel', model: string): void
-  (e: 'update:auth-mode', authMode: AIExecutionAuthMode): void
-  (e: 'update:selected-agent-id', agentId: string): void
-  (e: 'update:selected-group-id', groupId: string): void
   (e: 'update:selected-channel-binding-id', channelBindingId: string): void
   (e: 'toggleSkillPicker'): void
   (e: 'toggleSkill', skillId: string): void
-  (e: 'togglePlanMode'): void
 }>()
-
-const activeProvider = computed(() =>
-  props.providers.find(provider => provider.id === props.activeProviderId) || null
-)
-
-function onProviderChange (event: Event) {
-  emit('update:activeProviderId', (event.target as HTMLSelectElement).value)
-}
-
-function onModelChange (event: Event) {
-  emit('update:selectedModel', (event.target as HTMLSelectElement).value)
-}
-
-function onAuthModeChange (event: Event) {
-  emit('update:auth-mode', (event.target as HTMLSelectElement).value as AIExecutionAuthMode)
-}
-
-function onAgentChange (event: Event) {
-  emit('update:selected-agent-id', (event.target as HTMLSelectElement).value)
-}
-
-function onGroupChange (event: Event) {
-  emit('update:selected-group-id', (event.target as HTMLSelectElement).value)
-}
 
 function onChannelBindingChange (event: Event) {
   emit('update:selected-channel-binding-id', (event.target as HTMLSelectElement).value)
@@ -90,43 +34,11 @@ function onChannelBindingChange (event: Event) {
 
 <template>
   <div class="chat-header">
-    <h2>💬 AI 对话</h2>
+    <div class="chat-header-copy">
+      <h2>{{ contextLabel }}</h2>
+      <p>{{ contextDetail }}</p>
+    </div>
     <div class="header-controls">
-      <div v-if="providers.length > 0" class="provider-selector">
-        <select :value="activeProviderId" class="select-input" @change="onProviderChange">
-          <option v-for="provider in providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
-        </select>
-        <select
-          v-if="activeProvider?.models?.length"
-          :value="selectedModel"
-          class="select-input"
-          @change="onModelChange"
-        >
-          <option v-for="model in (activeProvider?.models || [])" :key="model" :value="model">{{ model }}</option>
-        </select>
-      </div>
-
-      <div class="auth-mode-selector">
-        <select :value="authMode" class="select-input auth-mode-select" @change="onAuthModeChange">
-          <option value="strict">严格授权</option>
-          <option value="auto">自动执行</option>
-        </select>
-      </div>
-
-      <div v-if="availableAgents.length > 0" class="agent-selector">
-        <select :value="selectedAgentId" class="select-input" @change="onAgentChange">
-          <option value="">默认 Agent</option>
-          <option v-for="agent in availableAgents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
-        </select>
-      </div>
-
-      <div v-if="availableAgentGroups.length > 0" class="agent-group-selector">
-        <select :value="selectedGroupId" class="select-input" @change="onGroupChange">
-          <option value="">无群组</option>
-          <option v-for="group in availableAgentGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
-        </select>
-      </div>
-
       <div v-if="availableChannelBindings.length > 0" class="channel-binding-selector">
         <select :value="selectedChannelBindingId" class="select-input" @change="onChannelBindingChange">
           <option value="">无 IM 绑定</option>
@@ -135,15 +47,6 @@ function onChannelBindingChange (event: Event) {
           </option>
         </select>
       </div>
-
-      <button
-        class="plan-mode-btn"
-        :class="{ active: planModeActive }"
-        @click="emit('togglePlanMode')"
-        :title="planModeActive ? '退出规划模式' : '进入规划模式'"
-      >
-        📋 {{ planModeActive ? '规划中' : '规划模式' }}
-      </button>
 
       <div v-if="availableSkills.length > 0" class="skill-selector">
         <button
@@ -182,8 +85,20 @@ function onChannelBindingChange (event: Event) {
 .chat-header h2 {
   margin: 0;
   font-size: 1.1em;
-  white-space: nowrap;
   color: var(--app-text-strong);
+}
+
+.chat-header-copy {
+  min-width: 0;
+}
+
+.chat-header-copy p {
+  margin: 4px 0 0;
+  color: var(--app-text-soft);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .header-controls {
@@ -192,14 +107,6 @@ function onChannelBindingChange (event: Event) {
   gap: 12px;
 }
 
-.provider-selector {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.agent-selector,
-.agent-group-selector,
 .channel-binding-selector,
 .auth-mode-selector {
   display: flex;
@@ -216,37 +123,21 @@ function onChannelBindingChange (event: Event) {
   cursor: pointer;
 }
 
+.select-input option {
+  background: var(--app-input-bg);
+  color: var(--app-text);
+}
+
+.select-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .select-input:focus {
   outline: none;
   border-color: var(--app-accent);
 }
 
-.auth-mode-select {
-  min-width: 96px;
-}
-
-.plan-mode-btn {
-  padding: 4px 12px;
-  background: var(--app-input-bg);
-  border: 1px solid var(--app-input-border);
-  border-radius: 6px;
-  color: var(--app-text-muted);
-  font-size: 0.8em;
-  cursor: pointer;
-  transition: all 0.12s;
-  white-space: nowrap;
-}
-
-.plan-mode-btn:hover {
-  border-color: var(--app-accent);
-  color: var(--app-text);
-}
-
-.plan-mode-btn.active {
-  border-color: #f59e0b;
-  color: #f59e0b;
-  background: rgba(245, 158, 11, 0.1);
-}
 
 .skill-selector {
   position: relative;

@@ -44,6 +44,39 @@ function parseStringArrayJson (value: unknown): string[] {
   }
 }
 
+function escapeFtsPhrase (value: string): string {
+  return value.replace(/"/g, '""')
+}
+
+function escapeLikePattern (value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&')
+}
+
+function buildFtsQuery (value: string): string | null {
+  const normalized = value.normalize('NFKC').replace(/\s+/g, ' ').trim()
+  if (!normalized) return null
+
+  const rawTerms = normalized.match(/[\p{L}\p{N}_-]+/gu) || []
+  const seen = new Set<string>()
+  const terms: string[] = []
+
+  for (const rawTerm of rawTerms) {
+    const term = rawTerm.replace(/^[-_]+|[-_]+$/g, '')
+    if (!term) continue
+
+    const key = term.toLocaleLowerCase()
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    terms.push(term)
+    if (terms.length >= 8) break
+  }
+
+  if (terms.length === 0) return null
+
+  return terms.map(term => `"${escapeFtsPhrase(term)}"`).join(' OR ')
+}
+
 function mapRowToMemoryEntry (row: Record<string, unknown>): MemoryEntry {
   return {
     id: String(row.id || ''),
@@ -230,6 +263,30 @@ export class MemoryStore {
     return row ? mapRowToMemoryEntry(row) : null
   }
 
+  private searchByLike (scopes: MemorySearchScope[], memoryTypes: MemoryType[], rawQuery: string, limit: number): MemoryEntry[] {
+    const params: unknown[] = []
+    const whereClauses = this.buildWhereClauses('', scopes, memoryTypes, params)
+    const escapedQuery = `%${escapeLikePattern(rawQuery)}%`
+
+    whereClauses.push(`(
+      title LIKE ? ESCAPE '\\'
+      OR summary LIKE ? ESCAPE '\\'
+      OR COALESCE(details, '') LIKE ? ESCAPE '\\'
+      OR tags_json LIKE ? ESCAPE '\\'
+    )`)
+
+    const sql = `
+      SELECT *
+      FROM memory_entries
+      WHERE ${whereClauses.join(' AND ')}
+      ORDER BY pinned DESC, importance DESC, confidence DESC, COALESCE(last_used_at, updated_at) DESC
+      LIMIT ?
+    `
+
+    params.push(escapedQuery, escapedQuery, escapedQuery, escapedQuery, limit)
+    return this.db.prepare(sql).all(...params).map(mapRowToMemoryEntry)
+  }
+
   search (options: MemorySearchOptions): MemoryEntry[] {
     const params: unknown[] = []
     const scopes = options.scopes || []
@@ -238,6 +295,11 @@ export class MemoryStore {
     const rawQuery = typeof options.query === 'string' ? options.query.trim() : ''
 
     if (rawQuery) {
+      const ftsQuery = buildFtsQuery(rawQuery)
+      if (!ftsQuery) {
+        return this.searchByLike(scopes, memoryTypes, rawQuery, limit)
+      }
+
       const whereClauses = this.buildWhereClauses('e', scopes, memoryTypes, params)
       const sql = `
         SELECT e.*
@@ -248,9 +310,13 @@ export class MemoryStore {
         LIMIT ?
       `
 
-      params.push(rawQuery.replace(/\s+/g, ' ').trim())
+      params.push(ftsQuery)
       params.push(limit)
-      return this.db.prepare(sql).all(...params).map(mapRowToMemoryEntry)
+      try {
+        return this.db.prepare(sql).all(...params).map(mapRowToMemoryEntry)
+      } catch {
+        return this.searchByLike(scopes, memoryTypes, rawQuery, limit)
+      }
     }
 
     const whereClauses = this.buildWhereClauses('', scopes, memoryTypes, params)
