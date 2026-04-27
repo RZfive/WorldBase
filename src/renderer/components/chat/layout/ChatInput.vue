@@ -357,7 +357,7 @@ function appendMentionToken (token: string) {
         rows="3"
       />
       <div v-if="props.groupMentionHints && props.groupMentionHints.length > 0" class="group-mention-bar">
-        <span class="group-mention-copy">群组快捷 @：</span>
+        <span class="group-mention-copy">群组快捷：</span>
         <button
           v-for="hint in props.groupMentionHints"
           :key="hint.token"
