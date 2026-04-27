@@ -49,7 +49,7 @@ function toggleExpanded (): void {
   <div class="message-event-card group-transcript-card">
     <div class="group-transcript-header">
       <div class="group-transcript-header-main">
-        <span class="group-transcript-label">Agent 群内部讨论</span>
+        <span class="group-transcript-label">Agent 协作摘要</span>
         <h4 class="group-transcript-title">{{ transcript.groupName }}</h4>
         <div class="group-transcript-meta">
           <span>{{ transcript.roundCount }} 轮</span>

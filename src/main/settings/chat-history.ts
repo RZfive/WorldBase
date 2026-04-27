@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { AIExecutionAuthMode } from './settings-store.js'
-import type { AgentGroupProgressSnapshot, AgentGroupTranscript } from '../../shared/agent-workspace-types.js'
+import type { AgentGroupProgressSnapshot, AgentGroupTranscript, AgentSidechatSession } from '../../shared/agent-workspace-types.js'
 
 export type ChatMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 export type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
@@ -60,6 +60,7 @@ export type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
