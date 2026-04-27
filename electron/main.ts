@@ -1350,7 +1350,7 @@ async function buildGroupDeliberationSection (input: {
 
         const finishedDetail = result.noteText
           ? `第 ${round} 轮已完成`
-          : `第 ${round} 轮未产出内容`
+          : `第 ${round} 轮未产出工作笔记`
         item.status = round >= totalRounds ? 'completed' : 'queued'
         item.stage = round >= totalRounds ? '已完成' : '等待下一轮'
         item.detail = round >= totalRounds ? '全部轮次完成' : finishedDetail
