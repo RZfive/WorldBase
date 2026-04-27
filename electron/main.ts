@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { networkInterfaces } from 'node:os'
-import { AIEngine, type ProgressEvent } from '../src/main/ai-engine/ai-engine.js'
+import { AIEngine, type ProgressCallback, type ProgressEvent } from '../src/main/ai-engine/ai-engine.js'
 import { USER_ABORT_MESSAGE } from '../src/main/ai-engine/abort-utils.js'
 import { ProjectFS } from '../src/main/project-fs/project-fs.js'
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
@@ -41,7 +41,7 @@ import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_
 import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.js'
 import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
 import { ScheduledTaskService } from '../src/main/scheduler/scheduled-task-service.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP_DISPLAY_NAME = 'The World'
@@ -158,8 +158,16 @@ interface GroupDeliberationResult {
   transcript: AgentGroupTranscript | null
 }
 
+type GroupDeliberationMode = 'coordinator_only' | 'targeted' | 'full_group'
+
+interface ParsedGroupRouting {
+  mode: GroupDeliberationMode
+  selectedMemberIds: string[]
+  normalizedRequest: string
+}
+
 type GroupDeliberationProgressCallback = (
-  stageOrEvent: string | ProgressEvent | { type: 'group_progress'; groupProgress: AgentGroupProgressSnapshot },
+  stageOrEvent: string | ProgressEvent | { type: 'group_progress'; groupProgress: AgentGroupProgressSnapshot } | { type: 'agent_sidechat'; sidechat: AgentSidechatSession },
   detail?: string
 ) => void
 
@@ -862,13 +870,167 @@ function truncateSectionText (value: string, maxChars = 6000): string {
   return `${normalized.slice(0, maxChars)}\n...[truncated ${normalized.length - maxChars} chars]`
 }
 
-function buildGroupTranscriptSummary (group: AgentGroupDefinition, entries: AgentGroupTranscript['entries']): string {
+function normalizeMentionToken (value: string): string {
+  return value
+    .replace(/^@+/, '')
+    .replace(/[【】\[\]（）(){}<>《》「」『』"'“”‘’`~!?,.:;，。！？、：；]/g, '')
+    .replace(/\s+/g, '')
+    .trim()
+    .toLowerCase()
+}
+
+function extractMentionTokens (value: string): string[] {
+  const matches = value.match(/@([^\s@]+)/g) || []
+  return matches.map(token => normalizeMentionToken(token))
+}
+
+function stripKnownMentions (value: string, knownMentions: Set<string>): string {
+  return value
+    .replace(/@([^\s@]+)/g, (match) => {
+      const normalized = normalizeMentionToken(match)
+      return knownMentions.has(normalized) ? ' ' : match
+    })
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim()
+}
+
+function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: string): ParsedGroupRouting {
+  const workerMemberIds = Array.from(new Set(group.memberAgentIds.filter(memberId => memberId && memberId !== group.coordinatorAgentId)))
+  if (workerMemberIds.length === 0) {
+    return {
+      mode: 'coordinator_only',
+      selectedMemberIds: [],
+      normalizedRequest: latestUserMessage.trim()
+    }
+  }
+
+  const mentionTokens = extractMentionTokens(latestUserMessage)
+  const knownMentions = new Set<string>([
+    '主agent',
+    '主agengt',
+    '主协调',
+    '协调agent',
+    'coordinator',
+    'mainagent',
+    'all',
+    'everyone',
+    '全组',
+    '全员',
+    '全部agent',
+    '所有agent'
+  ])
+  const memberMentions = new Map<string, string>()
+  for (const memberId of workerMemberIds) {
+    const agent = agentStore?.get(memberId)
+    const tokens = [
+      normalizeMentionToken(memberId),
+      normalizeMentionToken(agent?.name || '')
+    ].filter(Boolean)
+    for (const token of tokens) {
+      memberMentions.set(token, memberId)
+      knownMentions.add(token)
+    }
+  }
+
+  const normalizedRequest = stripKnownMentions(latestUserMessage, knownMentions) || latestUserMessage.trim()
+  const fullGroupRequested = mentionTokens.some(token => {
+    return token === 'all' || token === 'everyone' || token === '全组' || token === '全员' || token === '全部agent' || token === '所有agent'
+  })
+  const selectedMemberIds = Array.from(new Set(mentionTokens.map(token => memberMentions.get(token)).filter((value): value is string => Boolean(value))))
+
+  if (fullGroupRequested) {
+    return {
+      mode: 'full_group',
+      selectedMemberIds: workerMemberIds,
+      normalizedRequest
+    }
+  }
+
+  if (selectedMemberIds.length > 0) {
+    return {
+      mode: 'targeted',
+      selectedMemberIds,
+      normalizedRequest
+    }
+  }
+
+  return {
+    mode: 'coordinator_only',
+    selectedMemberIds: [],
+    normalizedRequest
+  }
+}
+
+function createAgentSidechatSession (input: {
+  group: AgentGroupDefinition
+  memberId: string
+  agentName: string
+  mode: AgentSidechatSession['mode']
+  initiatedByName: string
+  reportToName: string
+  request: string
+  round: number
+}): AgentSidechatSession {
+  const timestamp = new Date().toISOString()
+  return {
+    id: `${input.group.id}_${input.memberId}_${input.round}`,
+    groupId: input.group.id,
+    groupName: input.group.name,
+    agentId: input.memberId,
+    agentName: input.agentName,
+    mode: input.mode,
+    initiatedByName: input.initiatedByName,
+    reportToName: input.reportToName,
+    request: input.request,
+    response: '',
+    status: 'running',
+    round: input.round,
+    updatedAt: timestamp,
+    progress: []
+  }
+}
+
+function appendAgentSidechatProgress (session: AgentSidechatSession, stage: string, detail?: string): void {
+  session.updatedAt = new Date().toISOString()
+  session.progress = [...session.progress, {
+    at: session.updatedAt,
+    stage,
+    detail
+  }].slice(-6)
+}
+
+function cloneAgentSidechatSession (session: AgentSidechatSession): AgentSidechatSession {
+  return {
+    ...session,
+    progress: session.progress.map(step => ({ ...step }))
+  }
+}
+
+function emitAgentSidechatSession (
+  onProgress: GroupDeliberationProgressCallback | undefined,
+  session: AgentSidechatSession
+): void {
+  onProgress?.({
+    type: 'agent_sidechat',
+    sidechat: cloneAgentSidechatSession(session)
+  })
+}
+
+function buildGroupTranscriptSummary (
+  group: AgentGroupDefinition,
+  entries: AgentGroupTranscript['entries'],
+  mode: Exclude<GroupDeliberationMode, 'coordinator_only'>
+): string {
   const participantNames = Array.from(new Set(entries.map(entry => entry.agentName))).filter(Boolean)
   const latestFocus = entries.length > 0
     ? firstNonEmptyLine(entries[entries.length - 1].content)
     : ''
   const lines = [
-    `群组 ${group.name} 完成了 ${Math.max(...entries.map(entry => entry.round), 0)} 轮内部讨论，共生成 ${entries.length} 条工作笔记。`,
+    mode === 'full_group'
+      ? `群组 ${group.name} 完成了 ${Math.max(...entries.map(entry => entry.round), 0)} 轮协作讨论，共生成 ${entries.length} 条工作笔记。`
+      : `群组 ${group.name} 完成了 ${entries.length} 条定向单聊回复。`,
     participantNames.length > 0 ? `参与 Agent：${participantNames.join('、')}。` : ''
   ]
 
@@ -879,8 +1041,8 @@ function buildGroupTranscriptSummary (group: AgentGroupDefinition, entries: Agen
   return lines.filter(Boolean).join('\n')
 }
 
-function createGroupProgressSnapshot (group: AgentGroupDefinition, memberIds: string[]): AgentGroupProgressSnapshot {
-  const totalRounds = Math.max(1, group.maxRounds)
+function createGroupProgressSnapshot (group: AgentGroupDefinition, memberIds: string[], totalRounds = group.maxRounds): AgentGroupProgressSnapshot {
+  const normalizedTotalRounds = Math.max(1, totalRounds)
   const timestamp = new Date().toISOString()
 
   return {
@@ -888,7 +1050,7 @@ function createGroupProgressSnapshot (group: AgentGroupDefinition, memberIds: st
     groupName: group.name,
     status: 'running',
     activeRound: 0,
-    totalRounds,
+    totalRounds: normalizedTotalRounds,
     maxParallelWorkers: Math.max(1, group.maxParallelWorkers),
     queuedCount: memberIds.length,
     runningCount: 0,
@@ -901,7 +1063,7 @@ function createGroupProgressSnapshot (group: AgentGroupDefinition, memberIds: st
       status: 'queued',
       currentRound: 0,
       completedRounds: 0,
-      totalRounds,
+      totalRounds: normalizedTotalRounds,
       stage: '等待开始',
       updatedAt: timestamp,
       progress: []
@@ -984,24 +1146,33 @@ async function buildGroupDeliberationSection (input: {
   const runtimeAgentStore = agentStore
 
   const allToolNames = runtimeAiEngine.getAvailableTools().map(tool => tool.name)
-  const memberIds = Array.from(new Set(input.group.memberAgentIds.filter(Boolean)))
-  if (memberIds.length === 0) {
+  const latestUserMessage = getLastUserMessageText(input.messages)
+  const coordinator = runtimeAgentStore.get(input.group.coordinatorAgentId)
+  const workerMemberIds = Array.from(new Set(input.group.memberAgentIds.filter(memberId => memberId && memberId !== input.group.coordinatorAgentId)))
+  const routing = parseGroupRouting(input.group, latestUserMessage)
+  const memberIds = routing.mode === 'full_group' ? workerMemberIds : routing.selectedMemberIds
+  const totalRounds = routing.mode === 'full_group' ? input.group.maxRounds : 1
+  if (memberIds.length === 0 || routing.mode === 'coordinator_only') {
     return { promptSection: null, transcript: null }
   }
 
   const notes: string[] = []
   const entries: AgentGroupTranscript['entries'] = []
-  const latestUserMessage = getLastUserMessageText(input.messages)
-  const snapshot = createGroupProgressSnapshot(input.group, memberIds)
+  const coordinatorName = coordinator?.name || '主 Agent'
+  const initiatorName = routing.mode === 'targeted' ? '用户' : coordinatorName
+  const sidechatMode: AgentSidechatSession['mode'] = routing.mode === 'full_group'
+    ? 'group_deliberation'
+    : 'user_targeted'
+  const snapshot = createGroupProgressSnapshot(input.group, memberIds, totalRounds)
 
   emitGroupProgressSnapshot(input.onProgress, snapshot)
 
-  for (let round = 1; round <= input.group.maxRounds; round++) {
+  for (let round = 1; round <= totalRounds; round++) {
     snapshot.activeRound = round
     const roundMemberIds = memberIds.filter(memberId => {
       const item = getGroupProgressItem(snapshot, memberId)
       if (!item) return false
-      return item.status !== 'failed' && item.completedRounds < input.group.maxRounds
+      return item.status !== 'failed' && item.completedRounds < totalRounds
     })
 
     if (roundMemberIds.length === 0) {
@@ -1009,7 +1180,7 @@ async function buildGroupDeliberationSection (input: {
     }
 
     for (const batch of chunkStringArray(roundMemberIds, input.group.maxParallelWorkers)) {
-      const priorNotesSection = notes.length > 0
+      const priorNotesSection = routing.mode === 'full_group' && notes.length > 0
         ? `## Prior agent group notes\n${truncateSectionText(notes.slice(-6).join('\n\n'), 3000)}`
         : null
 
@@ -1049,15 +1220,37 @@ async function buildGroupDeliberationSection (input: {
           userId: 'local-user',
           enabledScopeTypes: member.memoryScopes
         })
+        const sidechatSession = createAgentSidechatSession({
+          group: input.group,
+          memberId,
+          agentName: member.name,
+          mode: sidechatMode,
+          initiatedByName: initiatorName,
+          reportToName: coordinatorName,
+          request: routing.normalizedRequest || latestUserMessage,
+          round
+        })
+        emitAgentSidechatSession(input.onProgress, sidechatSession)
 
-        item.stage = '内部讨论'
+        item.stage = routing.mode === 'full_group' ? '群内协作' : '定向单聊'
         item.detail = `第 ${round} 轮`
         item.updatedAt = new Date().toISOString()
-        appendGroupProgressStep(item, '内部讨论', item.detail)
+        appendGroupProgressStep(item, item.stage, item.detail)
         emitGroupProgressSnapshot(input.onProgress, snapshot)
+        appendAgentSidechatProgress(sidechatSession, item.stage, item.detail)
+        emitAgentSidechatSession(input.onProgress, sidechatSession)
 
         try {
-          const response = await runtimeAiEngine.chat(input.messages, {
+          let noteText = ''
+          const sidechatProgress = ((progressEventOrStage: string | ProgressEvent, detail?: string) => {
+            if (typeof progressEventOrStage === 'string') {
+              appendAgentSidechatProgress(sidechatSession, progressEventOrStage, detail)
+            } else if (progressEventOrStage.type === 'progress') {
+              appendAgentSidechatProgress(sidechatSession, progressEventOrStage.stage, progressEventOrStage.detail)
+            }
+            emitAgentSidechatSession(input.onProgress, sidechatSession)
+          }) as unknown as ProgressCallback
+          for await (const streamEvent of runtimeAiEngine.chatStream(input.messages, sidechatProgress, {
             targetProjectId: input.targetProjectId ?? null,
             providerConfig: resolveProviderConfig(
               member.providerId,
@@ -1068,21 +1261,56 @@ async function buildGroupDeliberationSection (input: {
             systemPromptSections: [
               buildActiveAgentSection(member),
               buildActiveGroupSection(input.group),
-              '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Focus on solution branches, risks, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- Do not use any tools in this internal round.',
+              routing.mode === 'full_group'
+                ? '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Focus on your unique contribution, risks, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- Do not use any tools in this internal round.'
+                : '## Targeted sidechat instructions\n- The user explicitly routed this turn to you inside the selected agent group.\n- Reply for the coordinator, not directly for the end user.\n- Focus on the assigned topic only and provide a concise actionable result.\n- If you use tools, keep the final answer short and grounded in what you observed.',
               ...(memberMemory?.sections || []),
               ...(priorNotesSection ? [priorNotesSection] : [])
             ],
-            deniedToolNames: allToolNames
-          })
+            allowedToolNames: member.allowedTools || [],
+            deniedToolNames: routing.mode === 'full_group' ? allToolNames : (member.deniedTools || [])
+          })) {
+            if (streamEvent.type === 'token' && streamEvent.content) {
+              sidechatSession.response += streamEvent.content
+              sidechatSession.updatedAt = new Date().toISOString()
+              emitAgentSidechatSession(input.onProgress, sidechatSession)
+            } else if (streamEvent.type === 'thinking' && streamEvent.content) {
+              appendAgentSidechatProgress(sidechatSession, '思考中', truncateSectionText(streamEvent.content, 120))
+              emitAgentSidechatSession(input.onProgress, sidechatSession)
+            } else if (streamEvent.type === 'tool_start' && streamEvent.name) {
+              appendAgentSidechatProgress(sidechatSession, '调用工具', streamEvent.name)
+              emitAgentSidechatSession(input.onProgress, sidechatSession)
+            } else if (streamEvent.type === 'tool_end' && streamEvent.name) {
+              appendAgentSidechatProgress(sidechatSession, '工具完成', streamEvent.name)
+              emitAgentSidechatSession(input.onProgress, sidechatSession)
+            } else if (streamEvent.type === 'progress' && streamEvent.stage) {
+              appendAgentSidechatProgress(sidechatSession, streamEvent.stage, streamEvent.detail)
+              emitAgentSidechatSession(input.onProgress, sidechatSession)
+            } else if (streamEvent.type === 'done') {
+              noteText = getMessageText(streamEvent.message.content)
+              sidechatSession.response = noteText
+              sidechatSession.status = 'completed'
+              sidechatSession.updatedAt = new Date().toISOString()
+              appendAgentSidechatProgress(sidechatSession, '单聊完成', `第 ${round} 轮`)
+              emitAgentSidechatSession(input.onProgress, sidechatSession)
+            } else if (streamEvent.type === 'error') {
+              throw new Error(streamEvent.error)
+            }
+          }
 
           return {
             memberId,
             member,
-            noteText: getMessageText(response.content),
+            noteText,
             error: ''
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error)
+          sidechatSession.status = 'failed'
+          sidechatSession.error = truncateSectionText(errorMessage, 200)
+          sidechatSession.updatedAt = new Date().toISOString()
+          appendAgentSidechatProgress(sidechatSession, '失败', sidechatSession.error)
+          emitAgentSidechatSession(input.onProgress, sidechatSession)
           item.status = 'failed'
           item.stage = '失败'
           item.detail = truncateSectionText(errorMessage, 200)
@@ -1095,7 +1323,13 @@ async function buildGroupDeliberationSection (input: {
 
       for (const result of results) {
         const item = getGroupProgressItem(snapshot, result.memberId)
-        if (!item || item.status === 'failed') continue
+        if (!item) continue
+        if (item.status === 'failed') {
+          if (result.error) {
+            notes.push(`### Round ${round} · ${result.member?.name || item.agentName}\n失败：${truncateSectionText(result.error, 300)}`)
+          }
+          continue
+        }
 
         item.currentRound = round
         item.completedRounds = Math.max(item.completedRounds, round)
@@ -1117,10 +1351,10 @@ async function buildGroupDeliberationSection (input: {
 
         const finishedDetail = result.noteText
           ? `第 ${round} 轮已完成`
-          : `第 ${round} 轮未产出工作笔记`
-        item.status = round >= input.group.maxRounds ? 'completed' : 'queued'
-        item.stage = round >= input.group.maxRounds ? '已完成' : '等待下一轮'
-        item.detail = round >= input.group.maxRounds ? '全部轮次完成' : finishedDetail
+          : `第 ${round} 轮未产出内容`
+        item.status = round >= totalRounds ? 'completed' : 'queued'
+        item.stage = round >= totalRounds ? '已完成' : '等待下一轮'
+        item.detail = round >= totalRounds ? '全部轮次完成' : finishedDetail
         appendGroupProgressStep(item, result.noteText ? '本轮完成' : '未产出笔记', finishedDetail)
         emitGroupProgressSnapshot(input.onProgress, snapshot)
       }
@@ -1135,23 +1369,29 @@ async function buildGroupDeliberationSection (input: {
 
   return {
     promptSection: [
-    '## Agent group internal deliberation',
-    '- These are internal working notes synthesized from the selected group members.',
-    '- Use them to improve the final answer, but do not expose the full transcript unless the user asks for it.',
-    '',
-    truncateSectionText(notes.join('\n\n'), input.group.visibility === 'summary_only' ? 4000 : 8000)
+      routing.mode === 'full_group'
+        ? '## Agent group internal deliberation'
+        : '## Targeted agent sidechat results',
+      routing.mode === 'full_group'
+        ? '- These are internal working notes synthesized from the selected group members.'
+        : '- These are targeted sidechat results from the explicitly mentioned group members.',
+      '- Use them to improve the final answer, but do not expose the full transcript unless the user asks for it.',
+      '',
+      truncateSectionText(notes.join('\n\n'), input.group.visibility === 'summary_only' ? 4000 : 8000)
     ].join('\n'),
-    transcript: {
-      groupId: input.group.id,
-      groupName: input.group.name,
-      visibility: input.group.visibility,
-      roundCount: Math.max(...entries.map(entry => entry.round), 0),
-      entryCount: entries.length,
-      summary: buildGroupTranscriptSummary(input.group, entries),
-      entries: input.group.visibility === 'expandable_internal_transcript'
-        ? entries
-        : []
-    }
+    transcript: entries.length > 0
+      ? {
+          groupId: input.group.id,
+          groupName: input.group.name,
+          visibility: input.group.visibility,
+          roundCount: Math.max(...entries.map(entry => entry.round), 0),
+          entryCount: entries.length,
+          summary: buildGroupTranscriptSummary(input.group, entries, routing.mode),
+          entries: input.group.visibility === 'expandable_internal_transcript'
+            ? entries
+            : []
+        }
+      : null
   }
 }
 
