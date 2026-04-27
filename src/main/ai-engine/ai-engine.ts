@@ -53,6 +53,8 @@ export interface AIRequestOptions {
   targetProjectId?: string | null
   providerConfig?: AIConfigInput
   abortSignal?: AbortSignal
+  conversationId?: string
+  sessionId?: string
   authMode?: AIExecutionAuthMode
   getAuthMode?: () => AIExecutionAuthMode
   aiLogger?: AILogSessionLogger
@@ -167,6 +169,8 @@ export class AIEngine {
       getMainWindow: this.services.getMainWindow,
       getSessionState: () => ({
         ...agent.sessionState,
+        conversationId: options?.conversationId,
+        sessionId: options?.sessionId,
         authMode: agent.getEffectiveAuthMode()
       }),
       getAbortSignal: () => agent.getAbortSignal()

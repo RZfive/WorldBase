@@ -9,6 +9,7 @@ interface AgentSidebarItem {
   providerName: string
   modelOptions: string[]
   isStreaming: boolean
+  pendingAuthCount: number
   isActive: boolean
 }
 
@@ -19,6 +20,7 @@ interface GroupSidebarItem {
   subtitle: string
   icon: string
   isStreaming: boolean
+  pendingAuthCount: number
   isActive: boolean
 }
 
@@ -28,6 +30,7 @@ interface ConversationSidebarItem {
   subtitle: string
   icon: string
   isStreaming: boolean
+  pendingAuthCount: number
   isActive: boolean
 }
 
@@ -55,7 +58,7 @@ const emit = defineEmits<{
         <div
           v-for="item in props.agentItems"
           :key="`agent-${item.id}`"
-          :class="['conv-item', 'agent-item', { active: item.isActive }]"
+          :class="['conv-item', 'agent-item', { active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }]"
           @click="emit('openAgent', item.id)"
         >
           <div class="conv-main">
@@ -63,7 +66,14 @@ const emit = defineEmits<{
             <div class="conv-copy">
               <div class="conv-title-row">
                 <span class="conv-title">{{ item.title }}</span>
-                <span v-if="item.isStreaming" class="conv-streaming" title="生成中">⟳</span>
+                <span v-if="item.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`">
+                  <span class="conv-status-dot"></span>
+                  待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
+                </span>
+                <span v-else-if="item.isStreaming" class="conv-status streaming" title="生成中">
+                  <span class="conv-status-dot"></span>
+                  运行中
+                </span>
               </div>
               <span class="conv-subtitle">{{ item.subtitle }}</span>
             </div>
@@ -83,7 +93,7 @@ const emit = defineEmits<{
         <div
           v-for="item in props.groupItems"
           :key="`group-${item.id}`"
-          :class="['conv-item', 'group-item', { active: item.isActive }]"
+          :class="['conv-item', 'group-item', { active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }]"
           @click="emit('openGroup', item.id)"
         >
           <div class="conv-main">
@@ -91,7 +101,14 @@ const emit = defineEmits<{
             <div class="conv-copy">
               <div class="conv-title-row">
                 <span class="conv-title">{{ item.title }}</span>
-                <span v-if="item.isStreaming" class="conv-streaming" title="生成中">⟳</span>
+                <span v-if="item.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`">
+                  <span class="conv-status-dot"></span>
+                  待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
+                </span>
+                <span v-else-if="item.isStreaming" class="conv-status streaming" title="生成中">
+                  <span class="conv-status-dot"></span>
+                  运行中
+                </span>
               </div>
               <span class="conv-subtitle">{{ item.subtitle }}</span>
             </div>
@@ -110,7 +127,7 @@ const emit = defineEmits<{
         <div
           v-for="conv in props.conversationItems"
           :key="conv.id"
-          :class="['conv-item', 'conversation-item', { active: conv.isActive }]"
+          :class="['conv-item', 'conversation-item', { active: conv.isActive, streaming: conv.isStreaming, waitingAuth: conv.pendingAuthCount > 0 }]"
           @click="emit('selectConversation', conv.id)"
         >
           <div class="conv-main">
@@ -118,7 +135,14 @@ const emit = defineEmits<{
             <div class="conv-copy">
               <div class="conv-title-row">
                 <span class="conv-title">{{ conv.title }}</span>
-                <span v-if="conv.isStreaming" class="conv-streaming" title="生成中">⟳</span>
+                <span v-if="conv.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${conv.pendingAuthCount > 1 ? ` ${conv.pendingAuthCount} 项` : ''}`">
+                  <span class="conv-status-dot"></span>
+                  待授权<span v-if="conv.pendingAuthCount > 1" class="conv-status-count">{{ conv.pendingAuthCount }}</span>
+                </span>
+                <span v-else-if="conv.isStreaming" class="conv-status streaming" title="生成中">
+                  <span class="conv-status-dot"></span>
+                  运行中
+                </span>
               </div>
               <span class="conv-subtitle">{{ conv.subtitle }}</span>
             </div>
@@ -209,6 +233,16 @@ const emit = defineEmits<{
   color: var(--app-text-strong);
 }
 
+.conv-item.streaming {
+  border-color: color-mix(in srgb, var(--app-accent-glow) 60%, transparent);
+  box-shadow: 0 0 0 1px rgba(91, 140, 255, 0.06), 0 10px 24px rgba(91, 140, 255, 0.08);
+}
+
+.conv-item.waitingAuth {
+  border-color: rgba(245, 158, 11, 0.38);
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.08), 0 10px 24px rgba(245, 158, 11, 0.12);
+}
+
 .agent-item {
   background: color-mix(in srgb, var(--app-panel) 86%, var(--app-accent-soft) 14%);
 }
@@ -291,16 +325,52 @@ const emit = defineEmits<{
   color: var(--app-danger);
 }
 
-.conv-streaming {
+.conv-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.67rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
   flex-shrink: 0;
-  font-size: 0.85em;
-  color: var(--app-accent);
-  animation: spin 1.2s linear infinite;
 }
 
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+.conv-status.streaming {
+  color: var(--app-accent-strong);
+  background: color-mix(in srgb, var(--app-accent-soft) 82%, transparent);
+}
+
+.conv-status.auth {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.16);
+}
+
+.conv-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: currentColor;
+}
+
+.conv-status.streaming .conv-status-dot {
+  animation: pulse-dot 1.15s ease-in-out infinite;
+}
+
+.conv-status.auth .conv-status-dot {
+  animation: pulse-dot 1.45s ease-in-out infinite;
+}
+
+.conv-status-count {
+  font-size: 0.64rem;
+  opacity: 0.86;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(0.85); opacity: 0.72; }
+  50% { transform: scale(1.15); opacity: 1; }
 }
 
 .conv-empty {

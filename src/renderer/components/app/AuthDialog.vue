@@ -4,6 +4,8 @@ import { emitAuthResolution, onAuthResolution } from '../../utils/auth-events'
 
 interface AuthRequest {
   requestId: string
+  conversationId?: string
+  sessionId?: string
   title: string
   detail: string
 }

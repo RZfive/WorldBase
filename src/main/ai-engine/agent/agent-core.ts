@@ -74,6 +74,10 @@ export interface SessionState {
   createdProjectId: string | null
   /** An existing project ID the user wants to edit/optimize (set via chat context). */
   targetProjectId: string | null
+  /** Conversation identifier that owns the current execution. */
+  conversationId?: string
+  /** Renderer-side streaming session identifier for routing UI events back to the right chat. */
+  sessionId?: string
   /** Authorization mode for local sensitive actions in this conversation. */
   authMode: AIExecutionAuthMode
 }
