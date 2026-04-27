@@ -42,6 +42,11 @@ interface AgentOption {
   icon?: string
 }
 
+interface GroupMentionHint {
+  token: string
+  label: string
+}
+
 const props = defineProps<{
   modelValue: string
   isLoading: boolean
@@ -62,6 +67,7 @@ const props = defineProps<{
   showProviderSelector?: boolean
   availableAgents?: AgentOption[]
   selectedAgentId?: string
+  groupMentionHints?: GroupMentionHint[]
   isNewConversation?: boolean
 }>()
 
@@ -287,6 +293,13 @@ function handleReasoningStrengthInput (event: Event) {
   if (!nextLevel) return
   emit('update:reasoning-strength', nextLevel.value)
 }
+
+function appendMentionToken (token: string) {
+  if (props.isLoading || props.isUploadingFiles) return
+  const currentValue = props.modelValue || ''
+  const spacer = currentValue.length > 0 && !/\s$/.test(currentValue) ? ' ' : ''
+  emit('update:modelValue', `${currentValue}${spacer}${token} `.trimStart())
+}
 </script>
 
 <template>
@@ -358,6 +371,18 @@ function handleReasoningStrengthInput (event: Event) {
       <div v-if="props.isLoading" class="runtime-status-bar" :class="{ waitingAuth: (props.pendingAuthCount || 0) > 0 }" role="status" aria-live="polite">
         <span class="runtime-status-indicator"></span>
         <span class="runtime-status-copy">{{ runtimeStatusLabel }}</span>
+      </div>
+      <div v-if="props.groupMentionHints && props.groupMentionHints.length > 0" class="group-mention-bar">
+        <span class="group-mention-copy">群组快捷：</span>
+        <button
+          v-for="hint in props.groupMentionHints"
+          :key="hint.token"
+          class="group-mention-chip"
+          type="button"
+          @click="appendMentionToken(hint.token)"
+        >
+          {{ hint.label }}
+        </button>
       </div>
       <div class="input-actions">
         <div class="input-actions-left">
@@ -613,6 +638,34 @@ function handleReasoningStrengthInput (event: Event) {
   flex-wrap: wrap;
   gap: 8px;
   padding: 10px 12px 0;
+}
+
+.group-mention-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px 0;
+}
+
+.group-mention-copy {
+  font-size: 0.76em;
+  color: var(--app-text-muted);
+}
+
+.group-mention-chip {
+  border: 1px solid color-mix(in srgb, var(--app-accent) 24%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 38%, transparent);
+  color: var(--app-text-soft);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.76em;
+  cursor: pointer;
+}
+
+.group-mention-chip:hover {
+  color: var(--app-text-strong);
+  border-color: var(--app-accent);
 }
 
 .project-tag-chip {

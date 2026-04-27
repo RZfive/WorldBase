@@ -26,6 +26,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
@@ -129,6 +130,11 @@ interface SidebarConversationItem {
   isStreaming: boolean
   pendingAuthCount: number
   isActive: boolean
+}
+
+interface GroupMentionHint {
+  token: string
+  label: string
 }
 
 interface ProviderOption {
@@ -483,10 +489,34 @@ const currentContextLabel = computed(() => {
 
 const currentContextDetail = computed(() => {
   if (currentGroupDefinition.value) {
-    return `${currentGroupDefinition.value.memberAgentIds.length} 位 Agent 协作，各自使用自己的模型`
+    return `${currentGroupDefinition.value.memberAgentIds.length} 位 Agent 协作 · 可 @主Agent / @成员 单聊，@all 发起全组讨论`
   }
 
   return currentModelLabel.value
+})
+
+const groupMentionHints = computed<GroupMentionHint[]>(() => {
+  const group = currentGroupDefinition.value
+  if (!group) return []
+
+  const hints: GroupMentionHint[] = [
+    { token: '@主Agent', label: '主 Agent' },
+    { token: '@all', label: '全组讨论' }
+  ]
+  const seenTokens = new Set(hints.map(item => item.token))
+
+  for (const memberId of group.memberAgentIds) {
+    const agent = agentsById.value.get(memberId)
+    const token = `@${agent?.name || memberId}`
+    if (seenTokens.has(token)) continue
+    seenTokens.add(token)
+    hints.push({
+      token,
+      label: agent?.name || memberId
+    })
+  }
+
+  return hints
 })
 
 const currentModelLabel = computed(() => {
@@ -758,6 +788,21 @@ function createFilePreviewBlock (filePath: string, truncated = false): ChatMessa
   }
 }
 
+function cloneAgentSidechatSession (session: AgentSidechatSession): AgentSidechatSession {
+  return {
+    ...session,
+    progress: session.progress.map(step => ({ ...step }))
+  }
+}
+
+function createAgentSidechatBlock (session: AgentSidechatSession): ChatMessageBlock {
+  return {
+    id: createBlockId('sidechat'),
+    kind: 'agent_sidechat',
+    session: cloneAgentSidechatSession(session)
+  }
+}
+
 function cloneGroupProgressSnapshot (snapshot: AgentGroupProgressSnapshot): AgentGroupProgressSnapshot {
   return {
     ...snapshot,
@@ -834,6 +879,7 @@ function createAuthRequestBlock (request: AuthRequestPayload): ChatMessageBlock 
 
 function positionGroupMetaBlocks (message: ChatMessage): void {
   const blocks = ensureBlocks(message)
+  if (blocks.some(block => block.kind === 'agent_sidechat')) return
   const progressBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'group_progress' }> => {
     return block.kind === 'group_progress'
   })
@@ -860,6 +906,20 @@ function positionGroupMetaBlocks (message: ChatMessage): void {
   }
 
   blocks.splice(0, blocks.length, ...reorderedBlocks)
+}
+
+function upsertAgentSidechatBlock (message: ChatMessage, session: AgentSidechatSession): void {
+  const blocks = ensureBlocks(message)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'agent_sidechat' }> => {
+    return block.kind === 'agent_sidechat' && block.session.id === session.id
+  })
+
+  if (existing) {
+    existing.session = cloneAgentSidechatSession(session)
+    return
+  }
+
+  blocks.push(createAgentSidechatBlock(session))
 }
 
 function upsertGroupProgressBlock (message: ChatMessage, snapshot: AgentGroupProgressSnapshot): void {
@@ -2123,6 +2183,8 @@ async function sendMessage () {
             ensureBlocks(assistantMessage).push(createWebFetchBlock(event.result as WebFetchResultEntry, event.query))
           } else if (event.type === 'group_progress' && event.groupProgress) {
             upsertGroupProgressBlock(assistantMessage, event.groupProgress)
+          } else if (event.type === 'agent_sidechat' && event.sidechat) {
+            upsertAgentSidechatBlock(assistantMessage, event.sidechat)
           } else if (event.type === 'group_transcript' && event.transcript) {
             upsertGroupTranscriptBlock(assistantMessage, event.transcript)
           } else if (event.type === 'tool_start' && event.name) {
@@ -2395,6 +2457,7 @@ onUnmounted(() => {
         :show-provider-selector="shouldUseConversationProviderOverride"
         :available-agents="nonDefaultAgents"
         :selected-agent-id="agentSelectorValue"
+        :group-mention-hints="groupMentionHints"
         :is-new-conversation="!currentConversationId"
         @send="sendMessage"
         @stop="stopCurrentStream"
