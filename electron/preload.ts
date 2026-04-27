@@ -46,6 +46,8 @@ interface ConversationSummary {
   title: string
   createdAt: string
   updatedAt: string
+  previewText?: string
+  searchText?: string
   authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string

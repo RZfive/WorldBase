@@ -74,6 +74,7 @@ export interface ChatMessage {
   role: string
   content: MessageContent
   thinking?: string
+  speakerName?: string
   modelLabel?: string
   toolRuns?: ToolRun[]
   blocks?: ChatMessageBlock[]

@@ -32,6 +32,8 @@ interface ConversationSummary {
   title: string
   createdAt: string
   updatedAt: string
+  previewText?: string
+  searchText?: string
   authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string
@@ -279,6 +281,7 @@ interface ConversationData extends ConversationSummary {
     role: string
     content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
     thinking?: string
+    speakerName?: string
     modelLabel?: string
     toolRuns?: ToolRun[]
     blocks?: ChatMessageBlock[]
