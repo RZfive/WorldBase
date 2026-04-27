@@ -7,7 +7,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_progress' | 'group_transcript' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: { role: string; content: MessageContent }
@@ -20,6 +20,7 @@ interface StreamEvent {
   truncated?: boolean
   groupProgress?: AgentGroupProgressSnapshot
   transcript?: AgentGroupTranscript
+  sidechat?: AgentSidechatSession
   query?: string
   engine?: string
   results?: WebSearchResultItem[]
@@ -145,6 +146,24 @@ interface AgentGroupProgressSnapshot {
   items: AgentGroupProgressItem[]
 }
 
+interface AgentSidechatSession {
+  id: string
+  groupId: string
+  groupName: string
+  agentId: string
+  agentName: string
+  mode: 'user_targeted' | 'coordinator_assigned' | 'group_deliberation'
+  initiatedByName: string
+  reportToName: string
+  request: string
+  response: string
+  status: 'running' | 'completed' | 'failed'
+  round: number
+  updatedAt: string
+  error?: string
+  progress: AgentGroupProgressStep[]
+}
+
 interface MemorySearchScope {
   scopeType: AgentMemoryScope
   scopeId: string
@@ -247,6 +266,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
