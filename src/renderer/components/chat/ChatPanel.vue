@@ -106,6 +106,7 @@ interface SidebarAgentItem {
   providerName: string
   modelOptions: string[]
   isStreaming: boolean
+  pendingAuthCount: number
   isActive: boolean
 }
 
@@ -116,6 +117,7 @@ interface SidebarGroupItem {
   subtitle: string
   icon: string
   isStreaming: boolean
+  pendingAuthCount: number
   isActive: boolean
 }
 
@@ -125,6 +127,7 @@ interface SidebarConversationItem {
   subtitle: string
   icon: string
   isStreaming: boolean
+  pendingAuthCount: number
   isActive: boolean
 }
 
@@ -172,6 +175,8 @@ interface UploadedAttachmentResult {
 
 interface AuthRequestPayload {
   requestId: string
+  conversationId?: string
+  sessionId?: string
   title: string
   detail: string
 }
@@ -235,6 +240,7 @@ const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
 const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 
 const streamingConvIds = reactive(new Set<string>())
+const pendingAuthRequestsByConversation = reactive(new Map<string, AuthRequestPayload[]>())
 const backgroundStreamMessages = new Map<string, {
   messages: ChatMessage[]
   assistantIdx: number
@@ -270,6 +276,10 @@ function getEnabledProviders (config: ProvidersConfig): ProviderOption[] {
 
 const isLoading = computed(() => {
   return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
+})
+
+const currentPendingAuthCount = computed(() => {
+  return currentConversationId.value ? getPendingAuthRequests(currentConversationId.value).length : 0
 })
 
 const activeTodoItems = computed(() => getLatestVisibleTodoItems(messages.value, isLoading.value))
@@ -399,6 +409,7 @@ const agentSidebarItems = computed<SidebarAgentItem[]>(() => {
         providerName: selection.providerName,
         modelOptions: selection.modelOptions,
         isStreaming: conversation ? streamingConvIds.has(conversation.id) : false,
+        pendingAuthCount: conversation ? getPendingAuthRequests(conversation.id).length : 0,
         isActive: Boolean(conversation && currentConversationId.value === conversation.id)
       }
     })
@@ -418,6 +429,7 @@ const groupSidebarItems = computed<SidebarGroupItem[]>(() => {
       subtitle: `${group.memberAgentIds.length} 位 Agent · 协调 ${coordinatorName}`,
       icon: getGroupIcon(group),
       isStreaming: conversation ? streamingConvIds.has(conversation.id) : false,
+      pendingAuthCount: conversation ? getPendingAuthRequests(conversation.id).length : 0,
       isActive: Boolean(conversation && currentConversationId.value === conversation.id)
     }
   })
@@ -452,6 +464,7 @@ const conversationSidebarItems = computed<SidebarConversationItem[]>(() => {
       subtitle: formatConversationSubtitle(conversation.updatedAt),
       icon: resolveConversationIcon(conversation),
       isStreaming: streamingConvIds.has(conversation.id),
+      pendingAuthCount: getPendingAuthRequests(conversation.id).length,
       isActive: currentConversationId.value === conversation.id
     }))
 })
@@ -1184,6 +1197,66 @@ function finalizePendingAuthBlocks (message: ChatMessage): void {
   }
 }
 
+function resolveAuthConversationId (request: Pick<AuthRequestPayload, 'conversationId' | 'sessionId'>): string | null {
+  if (request.conversationId) {
+    return request.conversationId
+  }
+
+  if (!request.sessionId) {
+    return null
+  }
+
+  for (const [convId, activeSessionId] of activeStreamSessionIds.entries()) {
+    if (activeSessionId === request.sessionId) {
+      return convId
+    }
+  }
+
+  return null
+}
+
+function getPendingAuthRequests (conversationId?: string | null): AuthRequestPayload[] {
+  if (!conversationId) {
+    return []
+  }
+
+  return pendingAuthRequestsByConversation.get(conversationId) ?? []
+}
+
+function trackPendingAuthRequest (request: AuthRequestPayload): AuthRequestPayload | null {
+  const conversationId = resolveAuthConversationId(request)
+  if (!conversationId) {
+    return null
+  }
+
+  const normalizedRequest: AuthRequestPayload = {
+    ...request,
+    conversationId
+  }
+  const currentRequests = getPendingAuthRequests(conversationId)
+  if (!currentRequests.some(item => item.requestId === normalizedRequest.requestId)) {
+    pendingAuthRequestsByConversation.set(conversationId, [...currentRequests, normalizedRequest])
+  }
+
+  return normalizedRequest
+}
+
+function clearPendingAuthRequest (requestId: string): void {
+  for (const [conversationId, requests] of pendingAuthRequestsByConversation.entries()) {
+    const nextRequests = requests.filter(item => item.requestId !== requestId)
+    if (nextRequests.length === requests.length) {
+      continue
+    }
+
+    if (nextRequests.length > 0) {
+      pendingAuthRequestsByConversation.set(conversationId, nextRequests)
+    } else {
+      pendingAuthRequestsByConversation.delete(conversationId)
+    }
+    return
+  }
+}
+
 function markToolRunStopped (toolRun: ToolRun): void {
   toolRun.status = 'completed'
   const alreadyMarked = toolRun.progress.some(step => step.stage === '已停止')
@@ -1223,6 +1296,78 @@ function releaseStreamSession (convId: string, sessionId: string): void {
   activeStreamSessionIds.delete(convId)
   streamingConvIds.delete(convId)
   backgroundStreamMessages.delete(convId)
+}
+
+function getTrackedMessagesBySessionId (sessionId?: string): ChatMessage[] | null {
+  if (!sessionId) return null
+
+  for (const [convId, activeSessionId] of activeStreamSessionIds.entries()) {
+    if (activeSessionId !== sessionId) continue
+    if (currentConversationId.value === convId) {
+      return messages.value
+    }
+    return backgroundStreamMessages.get(convId)?.messages ?? null
+  }
+
+  return null
+}
+
+function getTrackedMessagesByConversationId (conversationId?: string): ChatMessage[] | null {
+  if (!conversationId) return null
+
+  if (currentConversationId.value === conversationId) {
+    return messages.value
+  }
+
+  return backgroundStreamMessages.get(conversationId)?.messages ?? null
+}
+
+function ensureAuthRequestBlockInMessages (targetMessages: ChatMessage[], request: AuthRequestPayload): void {
+  let assistantMessage = findLatestAssistantMessage(targetMessages)
+
+  if (!assistantMessage) {
+    const placeholder: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      blocks: []
+    }
+    targetMessages.push(placeholder)
+    assistantMessage = placeholder
+  }
+
+  const blocks = ensureBlocks(assistantMessage)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'auth_request' }> => {
+    return block.kind === 'auth_request' && block.requestId === request.requestId
+  })
+  if (existing) return
+
+  const toolBlock = findLastRunningToolBlock(assistantMessage)
+  if (toolBlock) {
+    const alreadyLogged = toolBlock.toolRun.progress.some(step => step.stage === '等待授权' && step.detail === request.title)
+    if (!alreadyLogged) {
+      toolBlock.toolRun.progress.push({ stage: '等待授权', detail: request.title })
+    }
+  }
+
+  blocks.push(createAuthRequestBlock(request))
+}
+
+function syncPendingAuthRequestsIntoMessages (conversationId: string, targetMessages: ChatMessage[]): void {
+  for (const request of getPendingAuthRequests(conversationId)) {
+    ensureAuthRequestBlockInMessages(targetMessages, request)
+  }
+}
+
+function getTrackedMessageCollections (): ChatMessage[][] {
+  const collections: ChatMessage[][] = [messages.value]
+
+  for (const { messages: trackedMessages } of backgroundStreamMessages.values()) {
+    if (!collections.includes(trackedMessages)) {
+      collections.push(trackedMessages)
+    }
+  }
+
+  return collections
 }
 
 function formatFileSize (size: number): string {
@@ -1594,6 +1739,7 @@ async function loadConversation (id: string) {
   if (bg) {
     currentConversationId.value = id
     messages.value = bg.messages
+    syncPendingAuthRequestsIntoMessages(id, messages.value)
     targetProjectId.value = bg.targetProjectId
     currentAuthMode.value = bg.authMode
     reasoningStrength.value = bg.reasoningStrength
@@ -1614,6 +1760,7 @@ async function loadConversation (id: string) {
   if (conv) {
     currentConversationId.value = conv.id
     messages.value = conv.messages
+    syncPendingAuthRequestsIntoMessages(conv.id, messages.value)
     targetProjectId.value = conv.targetProjectId || null
     currentAuthMode.value = conv.authMode === 'auto' ? 'auto' : 'strict'
     reasoningStrength.value = conv.reasoningStrength || 'medium'
@@ -1772,45 +1919,32 @@ function insertDocumentTag (tag: string) {
 }
 
 function handleAuthRequest (request: AuthRequestPayload) {
-  let assistantMessage = findLatestAssistantMessage()
-
-  // If no assistant message exists (edge case), create one so the auth card has a home
-  if (!assistantMessage) {
-    const placeholder: ChatMessage = {
-      role: 'assistant',
-      content: '',
-      blocks: []
-    }
-    messages.value.push(placeholder)
-    assistantMessage = placeholder
+  const trackedRequest = trackPendingAuthRequest(request)
+  if (!trackedRequest) {
+    console.warn('[chat] Ignoring auth request that could not be routed to a conversation', request)
+    return
   }
 
-  const blocks = ensureBlocks(assistantMessage)
-  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'auth_request' }> => {
-    return block.kind === 'auth_request' && block.requestId === request.requestId
-  })
-  if (existing) return
+  const targetMessages = getTrackedMessagesByConversationId(trackedRequest.conversationId)
+    ?? getTrackedMessagesBySessionId(trackedRequest.sessionId)
 
-  const toolBlock = findLastRunningToolBlock(assistantMessage)
-  if (toolBlock) {
-    const alreadyLogged = toolBlock.toolRun.progress.some(step => step.stage === '等待授权' && step.detail === request.title)
-    if (!alreadyLogged) {
-      toolBlock.toolRun.progress.push({ stage: '等待授权', detail: request.title })
-    }
+  if (targetMessages) {
+    ensureAuthRequestBlockInMessages(targetMessages, trackedRequest)
   }
-
-  blocks.push(createAuthRequestBlock(request))
 }
 
 function applyAuthResolution (requestId: string, approved: boolean) {
-  for (const message of messages.value) {
-    if (!Array.isArray(message.blocks)) continue
-    const block = message.blocks.find((item): item is Extract<ChatMessageBlock, { kind: 'auth_request' }> => {
-      return item.kind === 'auth_request' && item.requestId === requestId
-    })
-    if (!block) continue
-    block.status = approved ? 'approved' : 'denied'
-    break
+  clearPendingAuthRequest(requestId)
+  for (const chatMessages of getTrackedMessageCollections()) {
+    for (const message of chatMessages) {
+      if (!Array.isArray(message.blocks)) continue
+      const block = message.blocks.find((item): item is Extract<ChatMessageBlock, { kind: 'auth_request' }> => {
+        return item.kind === 'auth_request' && item.requestId === requestId
+      })
+      if (!block) continue
+      block.status = approved ? 'approved' : 'denied'
+      return
+    }
   }
 }
 
@@ -2244,6 +2378,7 @@ onUnmounted(() => {
       <ChatInput
         v-model="inputText"
         :is-loading="isLoading"
+        :pending-auth-count="currentPendingAuthCount"
         :pending-images="pendingImages"
         :pending-files="pendingFiles"
         :is-uploading-files="isUploadingFiles"

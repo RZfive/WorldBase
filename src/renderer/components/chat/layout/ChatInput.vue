@@ -45,6 +45,7 @@ interface AgentOption {
 const props = defineProps<{
   modelValue: string
   isLoading: boolean
+  pendingAuthCount?: number
   pendingImages: Array<{ base64: string; mimeType: string }>
   pendingFiles: PendingAttachment[]
   isUploadingFiles: boolean
@@ -141,6 +142,17 @@ const hasDraftContent = computed(() => {
   return props.modelValue.trim().length > 0 || props.pendingImages.length > 0 || props.pendingFiles.length > 0
 })
 const isSendDisabled = computed(() => props.isUploadingFiles || (!props.isLoading && !hasDraftContent.value))
+const runtimeStatusLabel = computed(() => {
+  if (!props.isLoading) {
+    return ''
+  }
+
+  if ((props.pendingAuthCount || 0) > 0) {
+    return props.pendingAuthCount === 1 ? '等待授权以继续执行' : `等待 ${props.pendingAuthCount} 项授权以继续执行`
+  }
+
+  return '执行中，请稍候'
+})
 
 function buildDraftValue (tags: DocumentTagChip[], text: string): string {
   const tagSegment = tags.map(tag => tag.raw).join(' ')
@@ -294,7 +306,7 @@ function handleReasoningStrengthInput (event: Event) {
     <!-- Unified input container -->
     <div
       class="input-container"
-      :class="{ focused: inputFocused, dragging: dragActive }"
+      :class="{ focused: inputFocused, dragging: dragActive, busy: props.isLoading, waitingAuth: (props.pendingAuthCount || 0) > 0 }"
       @dragenter="handleDragEnter"
       @dragover="handleDragOver"
       @dragleave="handleDragLeave"
@@ -343,6 +355,10 @@ function handleReasoningStrengthInput (event: Event) {
         @blur="inputFocused = false"
         rows="3"
       />
+      <div v-if="props.isLoading" class="runtime-status-bar" :class="{ waitingAuth: (props.pendingAuthCount || 0) > 0 }" role="status" aria-live="polite">
+        <span class="runtime-status-indicator"></span>
+        <span class="runtime-status-copy">{{ runtimeStatusLabel }}</span>
+      </div>
       <div class="input-actions">
         <div class="input-actions-left">
           <template v-if="props.isNewConversation && props.availableAgents && props.availableAgents.length > 0">
@@ -420,7 +436,7 @@ function handleReasoningStrengthInput (event: Event) {
         </label>
         <button
           class="action-btn send-btn"
-          :class="{ stopping: props.isLoading }"
+          :class="{ stopping: props.isLoading, waitingAuth: (props.pendingAuthCount || 0) > 0 }"
           @click="props.isLoading ? emit('stop') : emit('send')"
           :disabled="isSendDisabled"
           :title="props.isUploadingFiles ? '文件处理中...' : (props.isLoading ? '停止生成' : '发送')"
@@ -466,6 +482,17 @@ function handleReasoningStrengthInput (event: Event) {
   border-color: var(--app-accent);
   box-shadow: 0 0 0 2px var(--app-accent-soft);
   background: color-mix(in srgb, var(--app-accent-soft) 26%, var(--app-input-bg));
+}
+
+.input-container.busy {
+  border-color: color-mix(in srgb, var(--app-accent-glow) 72%, transparent);
+  box-shadow: 0 0 0 1px rgba(91, 140, 255, 0.08), 0 18px 36px rgba(91, 140, 255, 0.08);
+}
+
+.input-container.waitingAuth {
+  border-color: rgba(245, 158, 11, 0.42);
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12), 0 18px 36px rgba(245, 158, 11, 0.12);
+  background: color-mix(in srgb, rgba(245, 158, 11, 0.08) 32%, var(--app-input-bg));
 }
 
 .image-preview-bar {
@@ -706,6 +733,35 @@ function handleReasoningStrengthInput (event: Event) {
   cursor: progress;
 }
 
+.runtime-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 4px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-accent-soft) 72%, transparent);
+  color: var(--app-accent-strong);
+}
+
+.runtime-status-bar.waitingAuth {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+.runtime-status-indicator {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: runtime-pulse 1.2s ease-in-out infinite;
+}
+
+.runtime-status-copy {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
 .input-actions {
   display: flex;
   align-items: center;
@@ -852,10 +908,20 @@ function handleReasoningStrengthInput (event: Event) {
 
 .action-btn.send-btn.stopping {
   background: var(--app-danger);
+  box-shadow: 0 10px 24px rgba(220, 38, 38, 0.24);
 }
 
 .action-btn.send-btn.stopping:hover:not(:disabled) {
   background: #dc2626;
+}
+
+.action-btn.send-btn.stopping.waitingAuth {
+  background: #f59e0b;
+  box-shadow: 0 10px 24px rgba(245, 158, 11, 0.28);
+}
+
+.action-btn.send-btn.stopping.waitingAuth:hover:not(:disabled) {
+  background: #d97706;
 }
 
 .action-btn.send-btn:disabled {
@@ -895,4 +961,9 @@ function handleReasoningStrengthInput (event: Event) {
 }
 
 .skill-badge-remove:hover { color: var(--app-danger); }
+
+@keyframes runtime-pulse {
+  0%, 100% { transform: scale(0.9); opacity: 0.72; }
+  50% { transform: scale(1.2); opacity: 1; }
+}
 </style>

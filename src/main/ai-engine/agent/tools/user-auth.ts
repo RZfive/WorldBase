@@ -41,11 +41,15 @@ function requestUserAuthViaRenderer (
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const requestId = `auth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const conversationId = getSessionState?.().conversationId
+    const sessionId = getSessionState?.().sessionId
     type AuthResponseHandler = (_event: Electron.IpcMainEvent, data: { requestId: string; approved: boolean }) => void
 
     // Send auth request to renderer first so the conversation can render the auth card.
     win.webContents.send('auth:request', {
       requestId,
+      conversationId,
+      sessionId,
       title,
       detail
     })

@@ -1527,6 +1527,8 @@ function setupIPC (): void {
     }
     try {
       for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
+          conversationId,
+          sessionId,
           targetProjectId: runtimeContext.effectiveTargetProjectId,
           providerConfig: runtimeContext.providerConfig,
           abortSignal: abortController.signal,

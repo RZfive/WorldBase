@@ -822,7 +822,7 @@ interface ElectronAPI {
   isMaximized: () => Promise<boolean>
 
   // Auth (in-app authorization dialogs)
-  onAuthRequest: (callback: (request: { requestId: string; title: string; detail: string }) => void) => () => void
+  onAuthRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; title: string; detail: string }) => void) => () => void
   onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
 
