@@ -57,11 +57,11 @@ function hasRenderableBlock (block: ChatMessageBlock): boolean {
 }
 
 function getMessageAuthor (): string {
-  return props.msg.role === 'assistant' ? 'The World AI' : '你'
+  return props.msg.role === 'assistant' ? (props.msg.speakerName || 'The World AI') : '你'
 }
 
 function getAvatarLabel (): string {
-  return props.msg.role === 'assistant' ? 'AI' : '你'
+  return props.msg.role === 'assistant' ? (props.msg.speakerName || 'AI') : '你'
 }
 
 function getModelLabel (): string {
@@ -79,8 +79,8 @@ const messageText = computed(() => getMessageText())
 </script>
 
 <template>
-  <div class="message-row" :class="props.msg.role">
-    <div v-if="props.msg.role === 'assistant'" class="message-avatar assistant-avatar">{{ getAvatarLabel() }}</div>
+  <div class="message-row" :class="[props.msg.role, { 'named-assistant': props.msg.role === 'assistant' && Boolean(props.msg.speakerName) }]">
+    <div v-if="props.msg.role === 'assistant'" class="message-avatar assistant-avatar" :class="{ named: Boolean(props.msg.speakerName) }">{{ getAvatarLabel() }}</div>
 
     <div class="message-column" :class="props.msg.role">
       <div class="message-meta" :class="props.msg.role">
@@ -170,11 +170,18 @@ const messageText = computed(() => getMessageText())
 
 <style scoped>
 .message-row {
+  --message-dual-avatar-footprint: var(--chat-dual-avatar-footprint, 108px);
   display: flex;
   align-items: flex-end;
   gap: var(--chat-avatar-gap, 14px);
   width: min(100%, var(--chat-message-track-max, 1480px));
   margin: 0 auto;
+}
+
+.message-row.named-assistant {
+  --assistant-name-avatar-width: 72px;
+  --assistant-name-avatar-footprint: calc(var(--assistant-name-avatar-width) + var(--chat-avatar-gap, 14px));
+  --message-dual-avatar-footprint: calc(var(--assistant-name-avatar-footprint) + var(--chat-avatar-footprint, 54px));
 }
 
 .message-row.user {
@@ -199,6 +206,20 @@ const messageText = computed(() => getMessageText())
   box-shadow: 0 14px 32px rgba(0, 0, 0, 0.12);
 }
 
+.message-avatar.named {
+  width: var(--assistant-name-avatar-width, 72px);
+  min-height: var(--chat-avatar-size, 40px);
+  height: auto;
+  padding: 6px 8px;
+  border-radius: 14px;
+  font-size: 0.62rem;
+  line-height: 1.15;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: normal;
+  word-break: break-word;
+}
+
 .assistant-avatar {
   background: linear-gradient(135deg, var(--app-accent), #7aa7ff);
   color: #ffffff;
@@ -210,8 +231,8 @@ const messageText = computed(() => getMessageText())
 }
 
 .message-column {
-  width: min(var(--chat-message-column-max, 1120px), calc(100% - var(--chat-dual-avatar-footprint, 108px)));
-  max-width: calc(100% - var(--chat-dual-avatar-footprint, 108px));
+  width: min(var(--chat-message-column-max, 1120px), calc(100% - var(--message-dual-avatar-footprint)));
+  max-width: calc(100% - var(--message-dual-avatar-footprint));
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -275,14 +296,26 @@ const messageText = computed(() => getMessageText())
     gap: 10px;
   }
 
+  .message-row.named-assistant {
+    --assistant-name-avatar-width: 60px;
+    --message-dual-avatar-footprint: 106px;
+  }
+
   .message-avatar {
     width: 36px;
     height: 36px;
   }
 
+  .message-avatar.named {
+    width: var(--assistant-name-avatar-width, 60px);
+    min-height: 36px;
+    padding: 5px 6px;
+    font-size: 0.58rem;
+  }
+
   .message-column {
-    width: min(100%, calc(100% - 46px));
-    max-width: calc(100% - 46px);
+    width: min(100%, calc(100% - var(--message-dual-avatar-footprint, 46px)));
+    max-width: calc(100% - var(--message-dual-avatar-footprint, 46px));
   }
 }
 </style>

@@ -285,7 +285,7 @@ function getMessageSignature (msg?: ChatMessage): string {
     if (block.kind === 'todo') return `todo:${block.items.map(item => `${item.id}:${item.status}:${item.title}`).join('|')}`
     return `tool:${block.toolRun.id}:${block.toolRun.status}:${block.toolRun.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`
   }).join('|')
-  return [blockSignature, msg.thinking || '', msg.modelLabel || ''].join('::')
+  return [blockSignature, msg.thinking || '', msg.speakerName || '', msg.modelLabel || ''].join('::')
 }
 
 // Auto-collapse thinking blocks when streaming finishes

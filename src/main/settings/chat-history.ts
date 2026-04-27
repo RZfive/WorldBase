@@ -72,6 +72,7 @@ export interface ChatMessage {
   role: string
   content: ChatMessageContent
   thinking?: string
+  speakerName?: string
   modelLabel?: string
   toolRuns?: ToolRun[]
   blocks?: ChatMessageBlock[]
@@ -101,6 +102,60 @@ export interface Conversation {
   channelBindingId?: string
 }
 
+interface ConversationListEntry extends Omit<Conversation, 'messages'> {
+  previewText?: string
+  searchText?: string
+}
+
+function getMessageContentText (message: ChatMessage): string {
+  const contentText = typeof message.content === 'string'
+    ? message.content.trim()
+    : message.content
+      .filter(part => part.type === 'text')
+      .map(part => part.text || '')
+      .join(' ')
+      .trim()
+
+  const blockText = (message.blocks || [])
+    .flatMap((block) => {
+      switch (block.kind) {
+        case 'content':
+          return typeof block.content === 'string'
+            ? [block.content]
+            : block.content.filter(part => part.type === 'text').map(part => part.text || '')
+        case 'attachment':
+          return [block.fileName, block.previewText]
+        case 'error':
+          return [block.message]
+        case 'auth_request':
+          return [block.title, block.detail]
+        default:
+          return []
+      }
+    })
+    .join(' ')
+    .trim()
+
+  return [message.speakerName, contentText, blockText]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function buildConversationIndex (messages: ChatMessage[]): Pick<ConversationListEntry, 'previewText' | 'searchText'> {
+  const searchSegments = messages
+    .map(getMessageContentText)
+    .filter(Boolean)
+
+  const latestPreview = [...searchSegments].reverse().find(Boolean) || ''
+
+  return {
+    previewText: latestPreview ? (latestPreview.length > 96 ? `${latestPreview.slice(0, 96)}...` : latestPreview) : undefined,
+    searchText: searchSegments.join('\n').slice(0, 6000) || undefined
+  }
+}
+
 /**
  * ChatHistoryStore — 对话历史持久化
  * 将每个对话保存为 userData/conversations/ 下的独立 JSON 文件
@@ -124,19 +179,22 @@ export class ChatHistoryStore {
   /**
    * List all conversations (sorted by updatedAt desc).
    */
-  list (): Omit<Conversation, 'messages'>[] {
+  list (): ConversationListEntry[] {
     const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
-    const convos: Omit<Conversation, 'messages'>[] = []
+    const convos: ConversationListEntry[] = []
 
     for (const file of files) {
       try {
         const raw = fs.readFileSync(path.join(this.dir, file), 'utf-8')
         const data = JSON.parse(raw) as Conversation
+        const conversationIndex = buildConversationIndex(data.messages || [])
         convos.push({
           id: data.id,
           title: data.title,
           createdAt: data.createdAt,
           updatedAt: data.updatedAt,
+          previewText: conversationIndex.previewText,
+          searchText: conversationIndex.searchText,
           authMode: data.authMode,
           providerId: data.providerId,
           selectedModel: data.selectedModel,

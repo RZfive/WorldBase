@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 interface SkillItem {
   id: string
@@ -45,6 +45,15 @@ interface AgentOption {
 interface GroupMentionHint {
   token: string
   label: string
+  aliases?: string[]
+}
+
+interface MentionQueryState {
+  start: number
+  end: number
+  query: string
+  top: number
+  left: number
 }
 
 const props = defineProps<{
@@ -94,6 +103,10 @@ const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 const inputFocused = ref(false)
 const dragDepth = ref(0)
 const dragActive = ref(false)
+const textareaRef = ref<HTMLTextAreaElement | null>(null)
+const activeMention = ref<MentionQueryState | null>(null)
+const activeMentionIndex = ref(0)
+const pendingSelection = ref<{ start: number; end: number } | null>(null)
 const reasoningLevels: Array<{ value: ReasoningStrength; label: string }> = [
   { value: 'low', label: '低' },
   { value: 'medium', label: '中' },
@@ -159,11 +172,248 @@ const runtimeStatusLabel = computed(() => {
 
   return '执行中，请稍候'
 })
+const mentionOptions = computed<GroupMentionHint[]>(() => {
+  const mention = activeMention.value
+  const hints = props.groupMentionHints || []
+  if (!mention || hints.length === 0) {
+    return []
+  }
+
+  const query = normalizeMentionToken(mention.query)
+  const scored = hints.map((hint, index) => {
+    const searchableTokens = Array.from(new Set([
+      hint.label,
+      hint.token,
+      ...(hint.aliases || [])
+    ].map(normalizeMentionToken).filter(Boolean)))
+
+    let score = query.length === 0 ? 1 : Number.POSITIVE_INFINITY
+    for (const token of searchableTokens) {
+      if (query.length === 0) {
+        score = Math.min(score, 1)
+        continue
+      }
+      if (token === query) {
+        score = 0
+        break
+      }
+      if (token.startsWith(query)) {
+        score = Math.min(score, 1)
+        continue
+      }
+      if (token.includes(query)) {
+        score = Math.min(score, 2)
+      }
+    }
+
+    return { hint, index, score }
+  }).filter(item => Number.isFinite(item.score))
+
+  scored.sort((left, right) => {
+    if (left.score !== right.score) {
+      return left.score - right.score
+    }
+    return left.index - right.index
+  })
+
+  return scored.map(item => item.hint)
+})
+const showMentionDropdown = computed(() => {
+  return Boolean(activeMention.value) && mentionOptions.value.length > 0 && !props.isLoading && !props.isUploadingFiles
+})
+const mentionDropdownStyle = computed(() => {
+  const mention = activeMention.value
+  const textarea = textareaRef.value
+  if (!mention || !textarea) {
+    return {}
+  }
+
+  const availableWidth = Math.max(220, textarea.clientWidth - 16)
+  const longestOptionLength = mentionOptions.value.reduce((maxLength, hint) => {
+    return Math.max(maxLength, `${hint.label} ${hint.token}`.trim().length)
+  }, 0)
+  const preferredWidth = Math.min(
+    Math.max(260, longestOptionLength * 9 + 72),
+    Math.min(420, availableWidth)
+  )
+  const maxLeft = Math.max(8, textarea.clientWidth - preferredWidth - 8)
+
+  return {
+    top: `${Math.max(8, mention.top)}px`,
+    left: `${Math.min(Math.max(8, mention.left), maxLeft)}px`,
+    width: `${preferredWidth}px`,
+    maxWidth: `${availableWidth}px`
+  }
+})
+
+watch(mentionOptions, (options) => {
+  if (options.length === 0) {
+    activeMentionIndex.value = 0
+    return
+  }
+  if (activeMentionIndex.value >= options.length) {
+    activeMentionIndex.value = 0
+  }
+})
+
+watch(() => props.modelValue, () => {
+  if (!pendingSelection.value) return
+
+  nextTick(() => {
+    const textarea = textareaRef.value
+    const selection = pendingSelection.value
+    if (!textarea || !selection) return
+    textarea.focus()
+    textarea.setSelectionRange(selection.start, selection.end)
+    pendingSelection.value = null
+    refreshMentionState(textarea.value)
+  })
+})
 
 function buildDraftValue (tags: DocumentTagChip[], text: string): string {
   const tagSegment = tags.map(tag => tag.raw).join(' ')
   if (tagSegment && text) return `${tagSegment}\n${text}`
   return tagSegment || text
+}
+
+function buildTaggedDraftValue (text: string): string {
+  const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
+  const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment].filter(Boolean).join(' ')
+  if (tagSegment && text) return `${tagSegment}\n${text}`
+  return tagSegment || text
+}
+
+function normalizeMentionToken (value: string): string {
+  return value
+    .replace(/^@+/, '')
+    .replace(/[【】\[\]（）(){}<>《》「」『』"'“”‘’`~!?,.:;，。！？、：；]/g, '')
+    .replace(/\s+/g, '')
+    .trim()
+    .toLowerCase()
+}
+
+function measureMentionPosition (textarea: HTMLTextAreaElement, text: string, caretIndex: number): { top: number; left: number } {
+  const style = window.getComputedStyle(textarea)
+  const mirror = document.createElement('div')
+  const marker = document.createElement('span')
+  const properties = [
+    'boxSizing',
+    'width',
+    'height',
+    'overflowX',
+    'overflowY',
+    'borderTopWidth',
+    'borderRightWidth',
+    'borderBottomWidth',
+    'borderLeftWidth',
+    'paddingTop',
+    'paddingRight',
+    'paddingBottom',
+    'paddingLeft',
+    'fontStyle',
+    'fontVariant',
+    'fontWeight',
+    'fontStretch',
+    'fontSize',
+    'fontSizeAdjust',
+    'lineHeight',
+    'fontFamily',
+    'letterSpacing',
+    'textTransform',
+    'textIndent',
+    'textDecoration',
+    'textAlign',
+    'wordSpacing',
+    'tabSize'
+  ] as const
+
+  mirror.style.position = 'absolute'
+  mirror.style.visibility = 'hidden'
+  mirror.style.whiteSpace = 'pre-wrap'
+  mirror.style.wordWrap = 'break-word'
+  mirror.style.overflow = 'hidden'
+  mirror.style.top = '0'
+  mirror.style.left = '-9999px'
+
+  for (const property of properties) {
+    mirror.style[property] = style[property]
+  }
+
+  mirror.textContent = text.slice(0, caretIndex)
+  if (mirror.textContent.endsWith('\n')) {
+    mirror.textContent += '\u200b'
+  }
+
+  marker.textContent = text.slice(caretIndex) || '\u200b'
+  mirror.appendChild(marker)
+  document.body.appendChild(mirror)
+
+  const lineHeight = Number.parseFloat(style.lineHeight || '20') || 20
+  const top = marker.offsetTop - textarea.scrollTop + lineHeight + 4
+  const left = marker.offsetLeft - textarea.scrollLeft
+
+  document.body.removeChild(mirror)
+  return { top, left }
+}
+
+function computeMentionState (text: string, textarea: HTMLTextAreaElement): MentionQueryState | null {
+  const caret = textarea.selectionStart ?? text.length
+  const beforeCaret = text.slice(0, caret)
+  const match = /(?:^|\s)@([^\s@]*)$/.exec(beforeCaret)
+  if (!match) {
+    return null
+  }
+
+  const query = match[1] || ''
+  const start = caret - query.length - 1
+  const position = measureMentionPosition(textarea, text, caret)
+
+  return {
+    start,
+    end: caret,
+    query,
+    top: position.top,
+    left: position.left
+  }
+}
+
+function refreshMentionState (text?: string) {
+  const textarea = textareaRef.value
+  if (!textarea || props.isLoading || props.isUploadingFiles || !props.groupMentionHints?.length) {
+    activeMention.value = null
+    activeMentionIndex.value = 0
+    return
+  }
+
+  activeMention.value = computeMentionState(text ?? textarea.value, textarea)
+  if (!activeMention.value) {
+    activeMentionIndex.value = 0
+  }
+}
+
+function scheduleMentionRefresh () {
+  requestAnimationFrame(() => {
+    refreshMentionState()
+  })
+}
+
+function chooseMention (hint: GroupMentionHint) {
+  const textarea = textareaRef.value
+  const mention = activeMention.value
+  if (!textarea || !mention) return
+
+  const text = textarea.value
+  const before = text.slice(0, mention.start)
+  const after = text.slice(mention.end)
+  const suffixSpace = after.length === 0 || !/^\s/.test(after) ? ' ' : ''
+  const nextText = `${before}${hint.token}${suffixSpace}${after}`
+  const nextCaret = before.length + hint.token.length + suffixSpace.length
+
+  pendingSelection.value = { start: nextCaret, end: nextCaret }
+  activeMention.value = null
+  activeMentionIndex.value = 0
+  emit('update:modelValue', buildTaggedDraftValue(nextText))
 }
 
 function removeProjectTag (projectId: string) {
@@ -178,11 +428,8 @@ function removeProjectTag (projectId: string) {
 
 function handleTextInput (e: Event) {
   const nextText = (e.target as HTMLTextAreaElement).value
-  const projectSegment = projectTags.value.map(t => t.raw).join(' ')
-  const docSegment = documentTags.value.map(t => t.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment].filter(Boolean).join(' ')
-  if (tagSegment && nextText) { emit('update:modelValue', `${tagSegment}\n${nextText}`); return }
-  emit('update:modelValue', tagSegment || nextText)
+  emit('update:modelValue', buildTaggedDraftValue(nextText))
+  refreshMentionState(nextText)
 }
 
 function removeDocumentTag (regionId: string) {
@@ -192,6 +439,29 @@ function removeDocumentTag (regionId: string) {
 
 function handleKeydown (e: KeyboardEvent) {
   if (props.isLoading) return
+  if (showMentionDropdown.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      activeMentionIndex.value = (activeMentionIndex.value + 1) % mentionOptions.value.length
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      activeMentionIndex.value = (activeMentionIndex.value - 1 + mentionOptions.value.length) % mentionOptions.value.length
+      return
+    }
+    if ((e.key === 'Enter' || e.key === 'Tab') && mentionOptions.value[activeMentionIndex.value]) {
+      e.preventDefault()
+      chooseMention(mentionOptions.value[activeMentionIndex.value])
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      activeMention.value = null
+      activeMentionIndex.value = 0
+      return
+    }
+  }
   if (e.key === 'Backspace' && plainDraftText.value.trim().length === 0) {
     if (documentTags.value.length > 0) {
       e.preventDefault()
@@ -294,11 +564,15 @@ function handleReasoningStrengthInput (event: Event) {
   emit('update:reasoning-strength', nextLevel.value)
 }
 
-function appendMentionToken (token: string) {
-  if (props.isLoading || props.isUploadingFiles) return
-  const currentValue = props.modelValue || ''
-  const spacer = currentValue.length > 0 && !/\s$/.test(currentValue) ? ' ' : ''
-  emit('update:modelValue', `${currentValue}${spacer}${token} `.trimStart())
+function handleTextareaFocus () {
+  inputFocused.value = true
+  scheduleMentionRefresh()
+}
+
+function handleTextareaBlur () {
+  inputFocused.value = false
+  activeMention.value = null
+  activeMentionIndex.value = 0
 }
 </script>
 
@@ -356,33 +630,41 @@ function appendMentionToken (token: string) {
           <button class="document-tag-chip-remove" @click="removeDocumentTag(tag.regionId)" title="移除文档标签">×</button>
         </div>
       </div>
-      <textarea
-        :value="plainDraftText"
-        :class="{ busy: props.isLoading }"
-        placeholder="输入消息… (Enter 发送, Shift+Enter 换行)"
-        :aria-busy="props.isLoading ? 'true' : 'false'"
-        @input="handleTextInput"
-        @keydown="handleKeydown"
-        @paste="handlePaste"
-        @focus="inputFocused = true"
-        @blur="inputFocused = false"
-        rows="3"
-      />
+      <div class="textarea-shell">
+        <textarea
+          ref="textareaRef"
+          :value="plainDraftText"
+          :class="{ busy: props.isLoading }"
+          placeholder="输入消息… (Enter 发送, Shift+Enter 换行)"
+          :aria-busy="props.isLoading ? 'true' : 'false'"
+          @input="handleTextInput"
+          @keydown="handleKeydown"
+          @keyup="scheduleMentionRefresh"
+          @click="scheduleMentionRefresh"
+          @mouseup="scheduleMentionRefresh"
+          @scroll="scheduleMentionRefresh"
+          @paste="handlePaste"
+          @focus="handleTextareaFocus"
+          @blur="handleTextareaBlur"
+          rows="3"
+        />
+        <div v-if="showMentionDropdown" class="mention-dropdown" :style="mentionDropdownStyle">
+          <button
+            v-for="(hint, hintIndex) in mentionOptions"
+            :key="hint.token"
+            class="mention-option"
+            :class="{ active: hintIndex === activeMentionIndex }"
+            type="button"
+            @mousedown.prevent="chooseMention(hint)"
+          >
+            <span class="mention-option-label">{{ hint.label }}</span>
+            <span class="mention-option-token">{{ hint.token }}</span>
+          </button>
+        </div>
+      </div>
       <div v-if="props.isLoading" class="runtime-status-bar" :class="{ waitingAuth: (props.pendingAuthCount || 0) > 0 }" role="status" aria-live="polite">
         <span class="runtime-status-indicator"></span>
         <span class="runtime-status-copy">{{ runtimeStatusLabel }}</span>
-      </div>
-      <div v-if="props.groupMentionHints && props.groupMentionHints.length > 0" class="group-mention-bar">
-        <span class="group-mention-copy">群组快捷：</span>
-        <button
-          v-for="hint in props.groupMentionHints"
-          :key="hint.token"
-          class="group-mention-chip"
-          type="button"
-          @click="appendMentionToken(hint.token)"
-        >
-          {{ hint.label }}
-        </button>
       </div>
       <div class="input-actions">
         <div class="input-actions-left">
@@ -494,7 +776,7 @@ function appendMentionToken (token: string) {
   border: 1px solid var(--app-input-border);
   border-radius: 12px;
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-  overflow: hidden;
+  overflow: visible;
   box-shadow: var(--app-shadow);
 }
 
@@ -640,32 +922,64 @@ function appendMentionToken (token: string) {
   padding: 10px 12px 0;
 }
 
-.group-mention-bar {
+.textarea-shell {
+  position: relative;
+  z-index: 2;
+}
+
+.mention-dropdown {
+  position: absolute;
+  z-index: 8;
+  min-width: 220px;
+  max-width: min(420px, calc(100% - 16px));
+  max-height: min(320px, 45vh);
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid var(--app-border-strong);
+  background: color-mix(in srgb, var(--app-panel-strong) 92%, white 8%);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  padding: 10px 12px 0;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.group-mention-copy {
-  font-size: 0.76em;
-  color: var(--app-text-muted);
-}
-
-.group-mention-chip {
-  border: 1px solid color-mix(in srgb, var(--app-accent) 24%, var(--app-border));
-  background: color-mix(in srgb, var(--app-accent-soft) 38%, transparent);
-  color: var(--app-text-soft);
-  border-radius: 999px;
-  padding: 5px 10px;
-  font-size: 0.76em;
+.mention-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text);
   cursor: pointer;
+  text-align: left;
 }
 
-.group-mention-chip:hover {
+.mention-option:hover,
+.mention-option.active {
+  background: var(--app-accent-soft);
+}
+
+.mention-option-label {
+  min-width: 0;
+  width: 100%;
+  font-size: 0.82em;
+  font-weight: 600;
   color: var(--app-text-strong);
-  border-color: var(--app-accent);
+  white-space: normal;
+  word-break: break-word;
+}
+
+.mention-option-token {
+  width: 100%;
+  font-size: 0.72em;
+  color: var(--app-text-muted);
+  white-space: normal;
+  word-break: break-word;
 }
 
 .project-tag-chip {
