@@ -105,6 +105,24 @@ export interface AgentGroupProgressSnapshot {
   items: AgentGroupProgressItem[]
 }
 
+export interface AgentSidechatSession {
+  id: string
+  groupId: string
+  groupName: string
+  agentId: string
+  agentName: string
+  mode: 'user_targeted' | 'coordinator_assigned' | 'group_deliberation'
+  initiatedByName: string
+  reportToName: string
+  request: string
+  response: string
+  status: 'running' | 'completed' | 'failed'
+  round: number
+  updatedAt: string
+  error?: string
+  progress: AgentGroupProgressStep[]
+}
+
 export interface SharedBoardTask {
   id: string
   title: string
