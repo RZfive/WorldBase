@@ -909,7 +909,6 @@ function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: stri
   const mentionTokens = extractMentionTokens(latestUserMessage)
   const knownMentions = new Set<string>([
     '主agent',
-    '主agengt',
     '主协调',
     '协调agent',
     'coordinator',
@@ -1250,7 +1249,7 @@ async function buildGroupDeliberationSection (input: {
             }
             emitAgentSidechatSession(input.onProgress, sidechatSession)
           }) as unknown as ProgressCallback
-          for await (const streamEvent of runtimeAiEngine.chatStream(input.messages, sidechatProgress, {
+          for await (const sidechatEvent of runtimeAiEngine.chatStream(input.messages, sidechatProgress, {
             targetProjectId: input.targetProjectId ?? null,
             providerConfig: resolveProviderConfig(
               member.providerId,
@@ -1270,31 +1269,31 @@ async function buildGroupDeliberationSection (input: {
             allowedToolNames: member.allowedTools || [],
             deniedToolNames: routing.mode === 'full_group' ? allToolNames : (member.deniedTools || [])
           })) {
-            if (streamEvent.type === 'token' && streamEvent.content) {
-              sidechatSession.response += streamEvent.content
+            if (sidechatEvent.type === 'token' && sidechatEvent.content) {
+              sidechatSession.response += sidechatEvent.content
               sidechatSession.updatedAt = new Date().toISOString()
               emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (streamEvent.type === 'thinking' && streamEvent.content) {
-              appendAgentSidechatProgress(sidechatSession, '思考中', truncateSectionText(streamEvent.content, 120))
+            } else if (sidechatEvent.type === 'thinking' && sidechatEvent.content) {
+              appendAgentSidechatProgress(sidechatSession, '思考中', truncateSectionText(sidechatEvent.content, 120))
               emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (streamEvent.type === 'tool_start' && streamEvent.name) {
-              appendAgentSidechatProgress(sidechatSession, '调用工具', streamEvent.name)
+            } else if (sidechatEvent.type === 'tool_start' && sidechatEvent.name) {
+              appendAgentSidechatProgress(sidechatSession, '调用工具', sidechatEvent.name)
               emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (streamEvent.type === 'tool_end' && streamEvent.name) {
-              appendAgentSidechatProgress(sidechatSession, '工具完成', streamEvent.name)
+            } else if (sidechatEvent.type === 'tool_end' && sidechatEvent.name) {
+              appendAgentSidechatProgress(sidechatSession, '工具完成', sidechatEvent.name)
               emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (streamEvent.type === 'progress' && streamEvent.stage) {
-              appendAgentSidechatProgress(sidechatSession, streamEvent.stage, streamEvent.detail)
+            } else if (sidechatEvent.type === 'progress' && sidechatEvent.stage) {
+              appendAgentSidechatProgress(sidechatSession, sidechatEvent.stage, sidechatEvent.detail)
               emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (streamEvent.type === 'done') {
-              noteText = getMessageText(streamEvent.message.content)
+            } else if (sidechatEvent.type === 'done') {
+              noteText = getMessageText(sidechatEvent.message.content)
               sidechatSession.response = noteText
               sidechatSession.status = 'completed'
               sidechatSession.updatedAt = new Date().toISOString()
               appendAgentSidechatProgress(sidechatSession, '单聊完成', `第 ${round} 轮`)
               emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (streamEvent.type === 'error') {
-              throw new Error(streamEvent.error)
+            } else if (sidechatEvent.type === 'error') {
+              throw new Error(sidechatEvent.error)
             }
           }
 
