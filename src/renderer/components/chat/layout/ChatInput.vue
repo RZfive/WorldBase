@@ -108,6 +108,8 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const activeMention = ref<MentionQueryState | null>(null)
 const activeMentionIndex = ref(0)
 const pendingSelection = ref<{ start: number; end: number } | null>(null)
+const MAX_MENTION_DROPDOWN_HEIGHT = 320
+const MIN_MENTION_DROPDOWN_HEIGHT = 120
 const reasoningLevels: Array<{ value: ReasoningStrength; label: string }> = [
   { value: 'low', label: '低' },
   { value: 'medium', label: '中' },
@@ -242,7 +244,7 @@ const mentionDropdownStyle = computed<CSSProperties>(() => {
   const spaceBelow = window.innerHeight - baseTop - viewportPadding
   const spaceAbove = mention.top - viewportPadding - 8
   const placeAbove = spaceBelow < 180 && spaceAbove > spaceBelow
-  const resolvedMaxHeight = Math.min(320, Math.max(120, placeAbove ? spaceAbove : spaceBelow))
+  const resolvedMaxHeight = Math.min(MAX_MENTION_DROPDOWN_HEIGHT, Math.max(MIN_MENTION_DROPDOWN_HEIGHT, placeAbove ? spaceAbove : spaceBelow))
   const resolvedTop = placeAbove
     ? Math.max(viewportPadding, mention.top - resolvedMaxHeight - 8)
     : Math.max(viewportPadding, baseTop)
