@@ -59,6 +59,10 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
           <span>并发上限 {{ snapshot.maxParallelWorkers }}</span>
           <span>{{ snapshot.items.length }} 个子 Agent</span>
         </div>
+        <div v-if="snapshot.request" class="group-progress-request">
+          <span class="group-progress-request-label">讨论内容</span>
+          <p>{{ snapshot.request }}</p>
+        </div>
       </div>
 
       <div class="group-progress-counters">
@@ -159,6 +163,33 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.group-progress-request {
+  margin-top: 12px;
+  padding: 12px 13px;
+  border-radius: 14px;
+  border: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-panel-strong) 88%, white 12%);
+}
+
+.group-progress-request-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, #0ea5e9 10%, var(--app-panel));
+  color: #0369a1;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.group-progress-request p {
+  margin: 8px 0 0;
+  color: var(--app-text);
+  font-size: 0.8rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 .group-progress-counter {

@@ -377,6 +377,12 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       })
     }
 
+    hints.push({
+      token: '@all',
+      label: `${group.name} 全组讨论`,
+      aliases: ['all', 'everyone', '全组', '全员', '全部agent', '所有agent']
+    })
+
     const seenTokens = new Set(hints.map(item => item.token))
     const workerMemberIds = Array.from(new Set(group.memberAgentIds.filter(memberId => memberId && memberId !== group.coordinatorAgentId)))
 
