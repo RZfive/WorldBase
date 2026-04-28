@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch, type CSSProperties } from 'vue'
 
 interface SkillItem {
   id: string
@@ -54,6 +54,7 @@ interface MentionQueryState {
   query: string
   top: number
   left: number
+  lineHeight: number
 }
 
 const props = defineProps<{
@@ -107,6 +108,8 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const activeMention = ref<MentionQueryState | null>(null)
 const activeMentionIndex = ref(0)
 const pendingSelection = ref<{ start: number; end: number } | null>(null)
+const MAX_MENTION_DROPDOWN_HEIGHT = 320
+const MIN_MENTION_DROPDOWN_HEIGHT = 120
 const reasoningLevels: Array<{ value: ReasoningStrength; label: string }> = [
   { value: 'low', label: '低' },
   { value: 'medium', label: '中' },
@@ -221,7 +224,7 @@ const mentionOptions = computed<GroupMentionHint[]>(() => {
 const showMentionDropdown = computed(() => {
   return Boolean(activeMention.value) && mentionOptions.value.length > 0 && !props.isLoading && !props.isUploadingFiles
 })
-const mentionDropdownStyle = computed(() => {
+const mentionDropdownStyle = computed<CSSProperties>(() => {
   const mention = activeMention.value
   const textarea = textareaRef.value
   if (!mention || !textarea) {
@@ -232,17 +235,28 @@ const mentionDropdownStyle = computed(() => {
   const longestOptionLength = mentionOptions.value.reduce((maxLength, hint) => {
     return Math.max(maxLength, `${hint.label} ${hint.token}`.trim().length)
   }, 0)
+  const viewportPadding = 12
   const preferredWidth = Math.min(
     Math.max(260, longestOptionLength * 9 + 72),
-    Math.min(420, availableWidth)
+    Math.min(420, availableWidth, window.innerWidth - viewportPadding * 2)
   )
-  const maxLeft = Math.max(8, textarea.clientWidth - preferredWidth - 8)
+  const baseTop = mention.top + mention.lineHeight + 8
+  const spaceBelow = window.innerHeight - baseTop - viewportPadding
+  const spaceAbove = mention.top - viewportPadding - 8
+  const placeAbove = spaceBelow < 180 && spaceAbove > spaceBelow
+  const resolvedMaxHeight = Math.min(MAX_MENTION_DROPDOWN_HEIGHT, Math.max(MIN_MENTION_DROPDOWN_HEIGHT, placeAbove ? spaceAbove : spaceBelow))
+  const resolvedTop = placeAbove
+    ? Math.max(viewportPadding, mention.top - resolvedMaxHeight - 8)
+    : Math.max(viewportPadding, baseTop)
+  const maxLeft = Math.max(viewportPadding, window.innerWidth - preferredWidth - viewportPadding)
 
   return {
-    top: `${Math.max(8, mention.top)}px`,
-    left: `${Math.min(Math.max(8, mention.left), maxLeft)}px`,
+    position: 'fixed',
+    top: `${resolvedTop}px`,
+    left: `${Math.min(Math.max(viewportPadding, mention.left), maxLeft)}px`,
     width: `${preferredWidth}px`,
-    maxWidth: `${availableWidth}px`
+    maxWidth: `${Math.max(220, Math.min(window.innerWidth - viewportPadding * 2, availableWidth))}px`,
+    maxHeight: `${resolvedMaxHeight}px`
   }
 })
 
@@ -293,8 +307,9 @@ function normalizeMentionToken (value: string): string {
     .toLowerCase()
 }
 
-function measureMentionPosition (textarea: HTMLTextAreaElement, text: string, caretIndex: number): { top: number; left: number } {
+function measureMentionPosition (textarea: HTMLTextAreaElement, text: string, caretIndex: number): { top: number; left: number; lineHeight: number } {
   const style = window.getComputedStyle(textarea)
+  const rect = textarea.getBoundingClientRect()
   const mirror = document.createElement('div')
   const marker = document.createElement('span')
   const properties = [
@@ -350,11 +365,11 @@ function measureMentionPosition (textarea: HTMLTextAreaElement, text: string, ca
   document.body.appendChild(mirror)
 
   const lineHeight = Number.parseFloat(style.lineHeight || '20') || 20
-  const top = marker.offsetTop - textarea.scrollTop + lineHeight + 4
-  const left = marker.offsetLeft - textarea.scrollLeft
+  const top = rect.top + marker.offsetTop - textarea.scrollTop
+  const left = rect.left + marker.offsetLeft - textarea.scrollLeft
 
   document.body.removeChild(mirror)
-  return { top, left }
+  return { top, left, lineHeight }
 }
 
 function computeMentionState (text: string, textarea: HTMLTextAreaElement): MentionQueryState | null {
@@ -374,7 +389,8 @@ function computeMentionState (text: string, textarea: HTMLTextAreaElement): Ment
     end: caret,
     query,
     top: position.top,
-    left: position.left
+    left: position.left,
+    lineHeight: position.lineHeight
   }
 }
 
@@ -925,15 +941,16 @@ function handleTextareaBlur () {
 .textarea-shell {
   position: relative;
   z-index: 2;
+  overflow: visible;
 }
 
 .mention-dropdown {
-  position: absolute;
-  z-index: 8;
+  z-index: 60;
   min-width: 220px;
   max-width: min(420px, calc(100% - 16px));
   max-height: min(320px, 45vh);
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 6px;
   border-radius: 12px;
   border: 1px solid var(--app-border-strong);

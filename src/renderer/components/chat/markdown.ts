@@ -161,14 +161,32 @@ function sanitizeNode (node: Element): void {
           else el.removeAttribute(attr.name)
           continue
         }
-        if ((name === 'href' || name === 'src') && /^\s*(javascript|data|vbscript):/i.test(attr.value)) {
-          el.removeAttribute(attr.name)
+        if (name === 'href' || name === 'src') {
+          const sanitizedUrl = sanitizeUrlValue(name, attr.value)
+          if (sanitizedUrl) {
+            el.setAttribute(attr.name, sanitizedUrl)
+          } else {
+            el.removeAttribute(attr.name)
+          }
         }
       }
 
       sanitizeNode(el)
     }
   }
+}
+
+function sanitizeUrlValue (attrName: string, value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (/^\s*(javascript|vbscript):/i.test(trimmed)) return null
+  if (attrName === 'href' && /^\s*data:/i.test(trimmed)) return null
+  if (attrName === 'src' && /^\s*data:/i.test(trimmed)) {
+    return /^data:image\/(?:png|gif|jpe?g|webp|bmp|x-icon);base64,(?:[a-z0-9+/]{4})*(?:[a-z0-9+/]{2}==|[a-z0-9+/]{3}=)?$/i.test(trimmed)
+      ? trimmed
+      : null
+  }
+  return trimmed
 }
 
 function isEscaped (text: string, index: number): boolean {

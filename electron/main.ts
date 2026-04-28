@@ -344,6 +344,25 @@ function getMessageText (content: MessageContent): string {
     .trim()
 }
 
+function serializeMessageContentForDisplay (content: MessageContent): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+
+  return content
+    .map((part, index) => {
+      if (part.type === 'text') {
+        return part.text || ''
+      }
+      if (part.type === 'image_url' && part.image_url?.url) {
+        return `![内部讨论图片 ${index + 1}](<${encodeURI(part.image_url.url)}>)`
+      }
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n\n')
+    .trim()
+}
+
 function getTaskLabelFromMessages (messages: Array<{ role: string; content: MessageContent }>): string {
   if (messages.length === 0) {
     return '未命名任务'
@@ -934,6 +953,9 @@ function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: stri
   }
 
   const normalizedRequest = stripKnownMentions(latestUserMessage, knownMentions) || latestUserMessage.trim()
+  const coordinatorOnlyRequested = mentionTokens.some(token => {
+    return token === '主agent' || token === '主协调' || token === '协调agent' || token === 'coordinator' || token === 'mainagent'
+  })
   const fullGroupRequested = mentionTokens.some(token => {
     return token === 'all' || token === 'everyone' || token === '全组' || token === '全员' || token === '全部agent' || token === '所有agent'
   })
@@ -955,9 +977,17 @@ function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: stri
     }
   }
 
+  if (coordinatorOnlyRequested) {
+    return {
+      mode: 'coordinator_only',
+      selectedMemberIds: [],
+      normalizedRequest
+    }
+  }
+
   return {
-    mode: 'coordinator_only',
-    selectedMemberIds: [],
+    mode: 'full_group',
+    selectedMemberIds: workerMemberIds,
     normalizedRequest
   }
 }
@@ -1040,13 +1070,19 @@ function buildGroupTranscriptSummary (
   return lines.filter(Boolean).join('\n')
 }
 
-function createGroupProgressSnapshot (group: AgentGroupDefinition, memberIds: string[], totalRounds = group.maxRounds): AgentGroupProgressSnapshot {
+function createGroupProgressSnapshot (
+  group: AgentGroupDefinition,
+  memberIds: string[],
+  request: string,
+  totalRounds = group.maxRounds
+): AgentGroupProgressSnapshot {
   const normalizedTotalRounds = Math.max(1, totalRounds)
   const timestamp = new Date().toISOString()
 
   return {
     groupId: group.id,
     groupName: group.name,
+    request,
     status: 'running',
     activeRound: 0,
     totalRounds: normalizedTotalRounds,
@@ -1162,7 +1198,8 @@ async function buildGroupDeliberationSection (input: {
   const sidechatMode: AgentSidechatSession['mode'] = routing.mode === 'full_group'
     ? 'group_deliberation'
     : 'user_targeted'
-  const snapshot = createGroupProgressSnapshot(input.group, memberIds, totalRounds)
+  const discussionRequest = truncateSectionText(routing.normalizedRequest || latestUserMessage, 600)
+  const snapshot = createGroupProgressSnapshot(input.group, memberIds, discussionRequest, totalRounds)
 
   emitGroupProgressSnapshot(input.onProgress, snapshot)
 
@@ -1186,7 +1223,7 @@ async function buildGroupDeliberationSection (input: {
       const results = await Promise.all(batch.map(async memberId => {
         const item = getGroupProgressItem(snapshot, memberId)
         if (!item) {
-          return { memberId, error: 'Missing progress item for member', noteText: '' }
+          return { memberId, member: null, error: 'Missing progress item for member', noteText: '', noteDisplayText: '' }
         }
 
         const member = runtimeAgentStore.get(memberId)
@@ -1198,7 +1235,7 @@ async function buildGroupDeliberationSection (input: {
           item.updatedAt = new Date().toISOString()
           appendGroupProgressStep(item, '配置无效', item.detail)
           emitGroupProgressSnapshot(input.onProgress, snapshot)
-          return { memberId, error: item.detail, noteText: '' }
+          return { memberId, member: null, error: item.detail, noteText: '', noteDisplayText: '' }
         }
 
         item.agentName = member.name
@@ -1241,6 +1278,7 @@ async function buildGroupDeliberationSection (input: {
 
         try {
           let noteText = ''
+          let noteDisplayText = ''
           const sidechatProgress = ((progressEventOrStage: string | ProgressEvent, detail?: string) => {
             if (typeof progressEventOrStage === 'string') {
               appendAgentSidechatProgress(sidechatSession, progressEventOrStage, detail)
@@ -1287,7 +1325,8 @@ async function buildGroupDeliberationSection (input: {
               emitAgentSidechatSession(input.onProgress, sidechatSession)
             } else if (sidechatEvent.type === 'done') {
               noteText = getMessageText(sidechatEvent.message.content)
-              sidechatSession.response = noteText
+              noteDisplayText = serializeMessageContentForDisplay(sidechatEvent.message.content) || noteText
+              sidechatSession.response = noteDisplayText
               sidechatSession.status = 'completed'
               sidechatSession.updatedAt = new Date().toISOString()
               appendAgentSidechatProgress(sidechatSession, '单聊完成', `第 ${round} 轮`)
@@ -1301,6 +1340,7 @@ async function buildGroupDeliberationSection (input: {
             memberId,
             member,
             noteText,
+            noteDisplayText,
             error: ''
           }
         } catch (error) {
@@ -1316,7 +1356,7 @@ async function buildGroupDeliberationSection (input: {
           item.updatedAt = new Date().toISOString()
           appendGroupProgressStep(item, '失败', item.detail)
           emitGroupProgressSnapshot(input.onProgress, snapshot)
-          return { memberId, member, error: errorMessage, noteText: '' }
+          return { memberId, member, error: errorMessage, noteText: '', noteDisplayText: '' }
         }
       }))
 
@@ -1340,7 +1380,7 @@ async function buildGroupDeliberationSection (input: {
             round,
             agentId: result.memberId,
             agentName: result.member?.name || item.agentName,
-            content: result.noteText
+            content: result.noteDisplayText || result.noteText
           })
           notes.push(`### Round ${round} · ${result.member?.name || item.agentName}\n${result.noteText}`)
           item.summary = summarizeGroupNote(result.noteText)
@@ -1379,9 +1419,10 @@ async function buildGroupDeliberationSection (input: {
       truncateSectionText(notes.join('\n\n'), input.group.visibility === 'summary_only' ? 4000 : 8000)
     ].join('\n'),
     transcript: entries.length > 0
-      ? {
+        ? {
           groupId: input.group.id,
           groupName: input.group.name,
+          request: discussionRequest,
           visibility: input.group.visibility,
           roundCount: Math.max(...entries.map(entry => entry.round), 0),
           entryCount: entries.length,
