@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch, type CSSProperties } from 'vue'
 
 interface SkillItem {
   id: string
@@ -222,7 +222,7 @@ const mentionOptions = computed<GroupMentionHint[]>(() => {
 const showMentionDropdown = computed(() => {
   return Boolean(activeMention.value) && mentionOptions.value.length > 0 && !props.isLoading && !props.isUploadingFiles
 })
-const mentionDropdownStyle = computed(() => {
+const mentionDropdownStyle = computed<CSSProperties>(() => {
   const mention = activeMention.value
   const textarea = textareaRef.value
   if (!mention || !textarea) {
