@@ -182,7 +182,7 @@ function sanitizeUrlValue (attrName: string, value: string): string | null {
   if (/^\s*(javascript|vbscript):/i.test(trimmed)) return null
   if (attrName === 'href' && /^\s*data:/i.test(trimmed)) return null
   if (attrName === 'src' && /^\s*data:/i.test(trimmed)) {
-    return /^\s*data:image\/(?:png|gif|jpe?g|webp|bmp|x-icon);base64,[a-z0-9+/=]+$/i.test(trimmed)
+    return /^data:image\/(?:png|gif|jpe?g|webp|bmp|x-icon);base64,(?:[a-z0-9+/]{4})*(?:[a-z0-9+/]{2}==|[a-z0-9+/]{3}=)?$/i.test(trimmed)
       ? trimmed
       : null
   }

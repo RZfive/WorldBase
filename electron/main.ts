@@ -354,7 +354,7 @@ function serializeMessageContentForDisplay (content: MessageContent): string {
         return part.text || ''
       }
       if (part.type === 'image_url' && part.image_url?.url) {
-        return `![内部讨论图片 ${index + 1}](${part.image_url.url})`
+        return `![内部讨论图片 ${index + 1}](<${encodeURI(part.image_url.url)}>)`
       }
       return ''
     })
