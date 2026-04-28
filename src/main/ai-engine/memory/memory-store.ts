@@ -74,7 +74,7 @@ function buildFtsQuery (value: string): string | null {
 
   if (terms.length === 0) return null
 
-  return terms.map(term => `"${escapeFtsPhrase(term)}"`).join(' OR ')
+  return terms.map(term => `"${escapeFtsPhrase(term)}"`).join(' AND ')
 }
 
 function mapRowToMemoryEntry (row: Record<string, unknown>): MemoryEntry {
