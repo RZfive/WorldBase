@@ -192,7 +192,9 @@ export function createAuthRequestBlock (request: AuthRequestPayload): ChatMessag
 
 export function positionGroupMetaBlocks (message: ChatMessage): void {
   const blocks = ensureBlocks(message)
-  if (blocks.some(block => block.kind === 'agent_sidechat')) return
+  const sidechatBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'agent_sidechat' }> => {
+    return block.kind === 'agent_sidechat'
+  })
   const progressBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'group_progress' }> => {
     return block.kind === 'group_progress'
   })
@@ -200,23 +202,20 @@ export function positionGroupMetaBlocks (message: ChatMessage): void {
     return block.kind === 'group_transcript'
   })
 
-  if (progressBlocks.length === 0 && transcriptBlocks.length === 0) return
+  if (sidechatBlocks.length === 0 && progressBlocks.length === 0 && transcriptBlocks.length === 0) return
 
-  const reorderedBlocks: ChatMessageBlock[] = blocks.filter(block => block.kind !== 'group_progress' && block.kind !== 'group_transcript')
-  let insertIndex = -1
-  for (let index = reorderedBlocks.length - 1; index >= 0; index--) {
+  const reorderedBlocks: ChatMessageBlock[] = blocks.filter((block) => {
+    return block.kind !== 'agent_sidechat' && block.kind !== 'group_progress' && block.kind !== 'group_transcript'
+  })
+  let insertIndex = reorderedBlocks.length
+  for (let index = 0; index < reorderedBlocks.length; index++) {
     if (reorderedBlocks[index].kind === 'content') {
-      insertIndex = index + 1
+      insertIndex = index
       break
     }
   }
 
-  if (insertIndex < 0) {
-    reorderedBlocks.push(...progressBlocks)
-    reorderedBlocks.push(...transcriptBlocks)
-  } else {
-    reorderedBlocks.splice(insertIndex, 0, ...progressBlocks, ...transcriptBlocks)
-  }
+  reorderedBlocks.splice(insertIndex, 0, ...progressBlocks, ...sidechatBlocks, ...transcriptBlocks)
 
   blocks.splice(0, blocks.length, ...reorderedBlocks)
 }
@@ -229,10 +228,10 @@ export function upsertAgentSidechatBlock (message: ChatMessage, session: AgentSi
 
   if (existing) {
     existing.session = cloneAgentSidechatSession(session)
-    return
+  } else {
+    blocks.push(createAgentSidechatBlock(session))
   }
-
-  blocks.push(createAgentSidechatBlock(session))
+  positionGroupMetaBlocks(message)
 }
 
 export function upsertGroupProgressBlock (message: ChatMessage, snapshot: AgentGroupProgressSnapshot): void {

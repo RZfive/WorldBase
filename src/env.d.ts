@@ -106,6 +106,7 @@ interface AgentGroupTranscriptEntry {
 interface AgentGroupTranscript {
   groupId: string
   groupName: string
+  request: string
   visibility: AgentGroupDefinition['visibility']
   roundCount: number
   entryCount: number
@@ -137,6 +138,7 @@ interface AgentGroupProgressItem {
 interface AgentGroupProgressSnapshot {
   groupId: string
   groupName: string
+  request: string
   status: 'running' | 'completed' | 'failed'
   activeRound: number
   totalRounds: number
