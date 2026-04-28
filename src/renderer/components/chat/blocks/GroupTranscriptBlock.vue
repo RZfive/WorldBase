@@ -56,6 +56,10 @@ function toggleExpanded (): void {
           <span>{{ transcript.entryCount }} 条工作笔记</span>
           <span>{{ canExpand ? '可展开 transcript' : '仅摘要可见' }}</span>
         </div>
+        <div v-if="transcript.request" class="group-transcript-request">
+          <span class="group-transcript-request-label">讨论内容</span>
+          <p>{{ transcript.request }}</p>
+        </div>
       </div>
 
       <button
@@ -167,6 +171,33 @@ function toggleExpanded (): void {
   background: var(--app-panel-strong);
 }
 
+.group-transcript-request {
+  margin-top: 12px;
+  padding: 12px 13px;
+  border-radius: 14px;
+  border: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-panel-strong) 88%, white 12%);
+}
+
+.group-transcript-request-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-accent) 12%, var(--app-panel));
+  color: var(--app-accent-strong);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.group-transcript-request p {
+  margin: 8px 0 0;
+  color: var(--app-text);
+  font-size: 0.8rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .group-transcript-rounds {
   margin-top: 14px;
   display: flex;
@@ -242,6 +273,19 @@ function toggleExpanded (): void {
   color: var(--app-text);
   font-size: 0.82rem;
   line-height: 1.6;
+}
+
+.group-transcript-summary :deep(img),
+.group-transcript-entry-body :deep(img) {
+  display: block;
+  width: auto;
+  max-width: min(100%, 420px);
+  max-height: 420px;
+  margin-top: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel);
+  object-fit: contain;
 }
 
 @media (max-width: 760px) {
