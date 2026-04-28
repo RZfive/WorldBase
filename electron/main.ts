@@ -158,7 +158,7 @@ interface GroupDeliberationResult {
   transcript: AgentGroupTranscript | null
 }
 
-type GroupDeliberationMode = 'coordinator_only' | 'targeted' | 'discussion'
+type GroupDeliberationMode = 'coordinator_only' | 'targeted' | 'discussion' | 'coordinator_decides'
 
 interface ParsedGroupRouting {
   mode: GroupDeliberationMode
@@ -1060,7 +1060,7 @@ function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: stri
 
   if (coordinatorOnlyRequested) {
     return {
-      mode: 'discussion',
+      mode: 'coordinator_decides',
       selectedMemberIds: workerMemberIds,
       normalizedRequest
     }
@@ -1138,7 +1138,7 @@ function buildGroupTranscriptSummary (
     ? firstNonEmptyLine(entries[entries.length - 1].content)
     : ''
   const lines = [
-    mode === 'discussion'
+    mode === 'discussion' || mode === 'coordinator_decides'
       ? `群组 ${group.name} 完成了 ${Math.max(...entries.map(entry => entry.round), 0)} 轮协作讨论，共生成 ${entries.length} 条工作笔记。`
       : `群组 ${group.name} 完成了 ${entries.length} 条定向单聊回复。`,
     participantNames.length > 0 ? `参与 Agent：${participantNames.join('、')}。` : ''
@@ -1364,10 +1364,11 @@ async function buildGroupDeliberationSection (input: {
   const coordinator = runtimeAgentStore.get(input.group.coordinatorAgentId)
   const workerMemberIds = Array.from(new Set(input.group.memberAgentIds.filter(memberId => memberId && memberId !== input.group.coordinatorAgentId)))
   const routing = parseGroupRouting(input.group, latestUserMessage)
-  const memberIds = routing.mode === 'discussion'
+  const isDiscussionMode = routing.mode === 'discussion' || routing.mode === 'coordinator_decides'
+  const memberIds = isDiscussionMode
     ? (routing.selectedMemberIds.length > 0 ? routing.selectedMemberIds : workerMemberIds)
     : routing.selectedMemberIds
-  const totalRounds = routing.mode === 'discussion' ? input.group.maxRounds : 1
+  const totalRounds = isDiscussionMode ? input.group.maxRounds : 1
   if (memberIds.length === 0 || routing.mode === 'coordinator_only') {
     return { promptSection: null, transcript: null }
   }
@@ -1376,14 +1377,12 @@ async function buildGroupDeliberationSection (input: {
   const entries: AgentGroupTranscript['entries'] = []
   const coordinatorName = coordinator?.name || '主 Agent'
   const initiatorName = routing.mode === 'targeted' ? '用户' : coordinatorName
-  const sidechatMode: AgentSidechatSession['mode'] = routing.mode === 'discussion'
+  const sidechatMode: AgentSidechatSession['mode'] = isDiscussionMode
     ? 'group_deliberation'
     : 'user_targeted'
   const discussionRequest = truncateSectionText(routing.normalizedRequest || latestUserMessage, 600)
   const snapshot = createGroupProgressSnapshot(input.group, memberIds, discussionRequest, totalRounds)
-  const discussionSelectionSource = extractMentionTokens(latestUserMessage).length > 0
-    ? 'explicit_mentions'
-    : 'coordinator_decides'
+  const discussionSelectionSource = routing.mode === 'discussion' ? 'explicit_mentions' : 'coordinator_decides'
 
   emitGroupProgressSnapshot(input.onProgress, snapshot)
 
@@ -1399,7 +1398,7 @@ async function buildGroupDeliberationSection (input: {
       break
     }
 
-    const roundPlan = routing.mode === 'discussion'
+    const roundPlan = isDiscussionMode
       ? await buildGroupRoundCoordinatorPlan({
           runtimeAiEngine,
           coordinator,
@@ -1424,7 +1423,7 @@ async function buildGroupDeliberationSection (input: {
         }
     const roundMemberIds = roundPlan.selectedMemberIds.filter(memberId => candidateMemberIds.includes(memberId))
 
-    if (routing.mode === 'discussion') {
+    if (isDiscussionMode) {
       for (const memberId of candidateMemberIds) {
         if (roundMemberIds.includes(memberId)) continue
         const item = getGroupProgressItem(snapshot, memberId)
@@ -1443,10 +1442,10 @@ async function buildGroupDeliberationSection (input: {
     }
 
     for (const batch of chunkStringArray(roundMemberIds, input.group.maxParallelWorkers)) {
-      const priorNotesSection = routing.mode === 'discussion' && notes.length > 0
+      const priorNotesSection = isDiscussionMode && notes.length > 0
         ? `## Prior agent group notes\n${truncateSectionText(notes.slice(-6).join('\n\n'), 3000)}`
         : null
-      const roundBriefSection = routing.mode === 'discussion'
+      const roundBriefSection = isDiscussionMode
         ? [
             '## Discussion round brief',
             `- Round: ${round}/${totalRounds}`,
@@ -1505,12 +1504,12 @@ async function buildGroupDeliberationSection (input: {
           mode: sidechatMode,
           initiatedByName: initiatorName,
           reportToName: coordinatorName,
-          request: routing.mode === 'discussion' ? roundPlan.request : (routing.normalizedRequest || latestUserMessage),
+          request: isDiscussionMode ? roundPlan.request : (routing.normalizedRequest || latestUserMessage),
           round
         })
         emitAgentSidechatSession(input.onProgress, sidechatSession)
 
-        item.stage = routing.mode === 'discussion' ? '群内协作' : '定向单聊'
+        item.stage = isDiscussionMode ? '群内协作' : '定向单聊'
         item.detail = roundPlan.focus || `第 ${round} 轮`
         item.updatedAt = new Date().toISOString()
         appendGroupProgressStep(item, item.stage, item.detail)
@@ -1540,7 +1539,7 @@ async function buildGroupDeliberationSection (input: {
             systemPromptSections: [
               buildActiveAgentSection(member),
               buildActiveGroupSection(input.group),
-              routing.mode === 'discussion'
+              isDiscussionMode
                 ? '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Use the refined round brief below, plus prior notes, to deepen or correct the group result.\n- Focus on your unique contribution, defects to fix, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- Do not use any tools in this internal round.'
                 : '## Targeted sidechat instructions\n- The user explicitly routed this turn to you inside the selected agent group.\n- Reply for the coordinator, not directly for the end user.\n- Focus on the assigned topic only and provide a concise actionable result.\n- If you use tools, keep the final answer short and grounded in what you observed.',
               roundBriefSection,
@@ -1548,7 +1547,7 @@ async function buildGroupDeliberationSection (input: {
               ...(priorNotesSection ? [priorNotesSection] : [])
             ],
             allowedToolNames: member.allowedTools || [],
-            deniedToolNames: routing.mode === 'discussion' ? allToolNames : (member.deniedTools || [])
+            deniedToolNames: isDiscussionMode ? allToolNames : (member.deniedTools || [])
           })) {
             if (sidechatEvent.type === 'token' && sidechatEvent.content) {
               sidechatSession.response += sidechatEvent.content
@@ -1660,10 +1659,10 @@ async function buildGroupDeliberationSection (input: {
 
   return {
     promptSection: [
-      routing.mode === 'discussion'
+      isDiscussionMode
         ? '## Agent group internal deliberation'
         : '## Targeted agent sidechat results',
-      routing.mode === 'discussion'
+      isDiscussionMode
         ? '- These are internal working notes synthesized from the selected group members.'
         : '- These are targeted sidechat results from the explicitly mentioned group members.',
       '- Use them to improve the final answer, but do not expose the full transcript unless the user asks for it.',
