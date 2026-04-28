@@ -24,7 +24,7 @@ const skills = ref<SkillInfo[]>([])
 const agentTools = ref<ToolCatalogEntry[]>([])
 const memoryQuery = ref('')
 const memoryScopeType = ref<AgentMemoryScope>('user')
-const memoryScopeId = ref('local-user')
+const memoryScopeId = ref('')
 const statusMessage = ref('')
 let providerChangeCleanup: (() => void) | null = null
 let skillsChangeCleanup: (() => void) | null = null
@@ -508,6 +508,11 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
   if (!nextProviderId || nextProviderId === previousProviderId) return
   syncDraftAgentModel(true)
 })
+
+watch(activeTab, (nextTab, previousTab) => {
+  if (nextTab !== 'memory' || nextTab === previousTab) return
+  void loadMemory()
+})
 </script>
 
 <template>
@@ -843,7 +848,7 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
           <option value="group">group</option>
           <option value="channel">channel</option>
         </select>
-        <input v-model="memoryScopeId" class="input" placeholder="scope id，如 local-user 或 agent_xxx">
+        <input v-model="memoryScopeId" class="input" placeholder="留空查看全部，或输入 local-user / agent_xxx 等 scope id">
         <button class="primary-btn" @click="loadMemory">查询</button>
       </div>
 

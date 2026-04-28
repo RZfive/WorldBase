@@ -158,6 +158,11 @@ interface GroupDeliberationResult {
   transcript: AgentGroupTranscript | null
 }
 
+interface DirectGroupReplyRoute {
+  targetAgentId: string
+  normalizedRequest: string
+}
+
 type GroupDeliberationMode = 'coordinator_only' | 'targeted' | 'discussion' | 'coordinator_decides'
 
 interface ParsedGroupRouting {
@@ -1073,6 +1078,36 @@ function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: stri
   }
 }
 
+function resolveDirectGroupReplyRoute (
+  group: AgentGroupDefinition | null,
+  messages: Array<{ role: string; content: MessageContent }>
+): DirectGroupReplyRoute | null {
+  if (!group) return null
+
+  const latestUserMessage = getLastUserMessageText(messages)
+  if (!latestUserMessage.trim()) return null
+
+  const routing = parseGroupRouting(group, latestUserMessage)
+  if (routing.mode !== 'targeted' || routing.selectedMemberIds.length !== 1) {
+    return null
+  }
+
+  return {
+    targetAgentId: routing.selectedMemberIds[0],
+    normalizedRequest: routing.normalizedRequest || latestUserMessage.trim()
+  }
+}
+
+function buildDirectGroupReplyPromptSection (route: DirectGroupReplyRoute): string {
+  return [
+    '## Direct group mention routing',
+    '- The user explicitly mentioned you inside the selected agent group.',
+    '- Reply directly to the user as yourself.',
+    '- Do not relay through the coordinator and do not describe any internal group discussion unless asked.',
+    `- Cleaned user request: ${truncateSectionText(route.normalizedRequest, 600)}`
+  ].join('\n')
+}
+
 function createAgentSidechatSession (input: {
   group: AgentGroupDefinition
   memberId: string
@@ -1957,7 +1992,7 @@ function createWindow (): void {
 function setupIPC (): void {
   // AI chat (non-streaming, kept for backward compat)
   ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string) => {
-    const runtimeContext = resolveAgentRuntimeContext({
+    const baseRuntimeContext = resolveAgentRuntimeContext({
       messages,
       agentId,
       groupId,
@@ -1967,7 +2002,23 @@ function setupIPC (): void {
       requestedTargetProjectId: targetProjectId,
       requestedReasoningStrength: reasoningStrength
     })
-    const groupDeliberation = runtimeContext.group
+    const directGroupReply = resolveDirectGroupReplyRoute(baseRuntimeContext.group, messages)
+    const runtimeContext = directGroupReply
+      ? resolveAgentRuntimeContext({
+          messages,
+          agentId: directGroupReply.targetAgentId,
+          groupId,
+          channelBindingId,
+          requestedProviderId: providerId,
+          requestedModelId: modelId,
+          requestedTargetProjectId: targetProjectId,
+          requestedReasoningStrength: reasoningStrength
+        })
+      : baseRuntimeContext
+    const directGroupReplyPromptSection = directGroupReply
+      ? buildDirectGroupReplyPromptSection(directGroupReply)
+      : null
+    const groupDeliberation = runtimeContext.group && !directGroupReply
       ? await buildGroupDeliberationSection({
           messages,
           group: runtimeContext.group,
@@ -1981,9 +2032,11 @@ function setupIPC (): void {
       targetProjectId: runtimeContext.effectiveTargetProjectId,
       providerConfig: runtimeContext.providerConfig,
       activeSkillContents: runtimeContext.activeSkillContents,
-      systemPromptSections: groupDeliberation.promptSection
-        ? [...runtimeContext.systemPromptSections, groupDeliberation.promptSection]
-        : runtimeContext.systemPromptSections,
+      systemPromptSections: [
+        ...runtimeContext.systemPromptSections,
+        ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),
+        ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
+      ],
       allowedToolNames: runtimeContext.allowedToolNames,
       deniedToolNames: runtimeContext.deniedToolNames
     })
@@ -1996,7 +2049,7 @@ function setupIPC (): void {
     const abortController = new AbortController()
     const authModeRef = { current: authMode ?? 'strict' }
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
-    const runtimeContext = resolveAgentRuntimeContext({
+    const baseRuntimeContext = resolveAgentRuntimeContext({
       messages,
       agentId,
       groupId,
@@ -2006,6 +2059,22 @@ function setupIPC (): void {
       requestedTargetProjectId: targetProjectId,
       requestedReasoningStrength: reasoningStrength
     })
+    const directGroupReply = resolveDirectGroupReplyRoute(baseRuntimeContext.group, messages)
+    const runtimeContext = directGroupReply
+      ? resolveAgentRuntimeContext({
+          messages,
+          agentId: directGroupReply.targetAgentId,
+          groupId,
+          channelBindingId,
+          requestedProviderId: providerId,
+          requestedModelId: modelId,
+          requestedTargetProjectId: targetProjectId,
+          requestedReasoningStrength: reasoningStrength
+        })
+      : baseRuntimeContext
+    const directGroupReplyPromptSection = directGroupReply
+      ? buildDirectGroupReplyPromptSection(directGroupReply)
+      : null
     const conversationTitle = getConversationTitleFromMessages(messages)
     const executedToolNames: string[] = []
     const aiLogger = executionPreferences.enableAiLogging && aiLogStore && conversationId
@@ -2034,7 +2103,7 @@ function setupIPC (): void {
         sender.send(channel, stageOrEvent)
       }
     }
-    const groupDeliberation = runtimeContext.group
+    const groupDeliberation = runtimeContext.group && !directGroupReply
       ? await buildGroupDeliberationSection({
           messages,
           group: runtimeContext.group,
@@ -2067,9 +2136,11 @@ function setupIPC (): void {
           getAuthMode: () => authModeRef.current,
           aiLogger,
           activeSkillContents: runtimeContext.activeSkillContents,
-          systemPromptSections: groupDeliberation.promptSection
-            ? [...runtimeContext.systemPromptSections, groupDeliberation.promptSection]
-            : runtimeContext.systemPromptSections,
+          systemPromptSections: [
+            ...runtimeContext.systemPromptSections,
+            ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),
+            ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
+          ],
           allowedToolNames: runtimeContext.allowedToolNames,
           deniedToolNames: runtimeContext.deniedToolNames
         })) {
