@@ -1263,7 +1263,7 @@ async function buildGroupRoundCoordinatorPlan (input: {
   selectionSource: 'explicit_mentions' | 'coordinator_decides'
 }): Promise<GroupRoundCoordinatorPlan> {
   const fallbackRequest = truncateSectionText(input.normalizedRequest || input.latestUserMessage, 600)
-  const fallbackMemberIds = input.round === 1 ? input.candidateMemberIds : input.candidateMemberIds
+  const fallbackMemberIds = input.candidateMemberIds
   if (!input.coordinator || input.candidateMemberIds.length === 0) {
     return {
       shouldContinue: fallbackMemberIds.length > 0,
@@ -1299,7 +1299,7 @@ async function buildGroupRoundCoordinatorPlan (input: {
       ? '- The user explicitly selected the candidate members below; you must only choose from that list.'
       : '- The coordinator may choose whichever candidate members are most useful for this round.',
     '- If no member input is needed, return shouldContinue=false and an empty memberIds array.',
-    '- Respond with strict JSON only. No markdown fences, no extra prose.',
+    '- Respond with strict JSON only. Plain JSON is preferred; fenced JSON is tolerated as a fallback.',
     '',
     `Round: ${input.round}/${input.totalRounds}`,
     `User request: ${fallbackRequest}`,
