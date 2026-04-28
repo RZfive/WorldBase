@@ -333,7 +333,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   const currentContextDetail = computed(() => {
     if (currentGroupDefinition.value) {
-      return `${currentGroupDefinition.value.memberAgentIds.length} 位 Agent 协作 · 可 @主Agent / @成员 单聊，@all 发起全组讨论`
+      return `${currentGroupDefinition.value.memberAgentIds.length} 位 Agent 协作 · 可 @主Agent 发起协调，单独 @成员 定向回复，@多人 / @all 发起讨论`
     }
 
     return currentModelLabel.value
