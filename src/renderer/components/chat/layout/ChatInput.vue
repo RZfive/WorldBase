@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch, type CSSProperties } from 'vue'
+import ProviderDropdown from './ProviderDropdown.vue'
 
 interface SkillItem {
   id: string
@@ -573,13 +574,6 @@ function handleDrop (e: DragEvent) {
   emit('addAttachments', files)
 }
 
-function handleReasoningStrengthInput (event: Event) {
-  const nextIndex = Number.parseInt((event.target as HTMLInputElement).value, 10)
-  const nextLevel = reasoningLevels[nextIndex]
-  if (!nextLevel) return
-  emit('update:reasoning-strength', nextLevel.value)
-}
-
 function handleTextareaFocus () {
   inputFocused.value = true
   scheduleMentionRefresh()
@@ -684,89 +678,102 @@ function handleTextareaBlur () {
       </div>
       <div class="input-actions">
         <div class="input-actions-left">
-          <template v-if="props.isNewConversation && props.availableAgents && props.availableAgents.length > 0">
-            <select
-              class="context-select agent-select"
-              :value="props.selectedAgentId || ''"
-              @change="emit('update:selected-agent-id', ($event.target as HTMLSelectElement).value)"
-              title="选择 Agent"
-            >
-              <option value="">默认 Agent</option>
-              <option v-for="agent in props.availableAgents" :key="agent.id" :value="agent.id">
-                {{ agent.icon ? agent.icon + ' ' : '' }}{{ agent.name }}
-              </option>
-            </select>
-          </template>
+          <ProviderDropdown
+            v-if="props.isNewConversation && props.availableAgents && props.availableAgents.length > 0"
+            :model-value="props.selectedAgentId || ''"
+            :options="[{ value: '', label: '默认 Agent' }, ...props.availableAgents.map(a => ({ value: a.id, label: (a.icon ? a.icon + ' ' : '') + a.name }))]"
+            title="选择 Agent"
+            @update:model-value="emit('update:selected-agent-id', $event)"
+          />
           <template v-if="props.showProviderSelector && props.providers && props.providers.length > 0">
-            <select
-              class="context-select provider-select"
-              :value="props.activeProviderId"
-              @change="emit('update:active-provider-id', ($event.target as HTMLSelectElement).value)"
-              title="切换供应商"
-            >
-              <option v-for="p in props.providers" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
-            <select
-              class="context-select model-select"
-              :value="props.selectedModel"
-              @change="emit('update:selected-model', ($event.target as HTMLSelectElement).value)"
-              title="切换模型"
-            >
-              <option
-                v-for="model in (props.providers.find(p => p.id === props.activeProviderId)?.models ?? [])"
-                :key="model"
-                :value="model"
-              >{{ model }}</option>
-            </select>
+            <ProviderDropdown
+              :model-value="props.activeProviderId || ''"
+              :options="props.providers.map(p => ({ value: p.id, label: p.name }))"
+              title="供应商"
+              @update:model-value="emit('update:active-provider-id', $event)"
+            />
+            <ProviderDropdown
+              :model-value="props.selectedModel || ''"
+              :options="(props.providers.find(p => p.id === props.activeProviderId)?.models ?? []).map(m => ({ value: m, label: m }))"
+              title="模型"
+              @update:model-value="emit('update:selected-model', $event)"
+            />
           </template>
-          <select
-            class="context-select"
-            :value="props.authMode"
-            @change="emit('update:auth-mode', ($event.target as HTMLSelectElement).value as AIExecutionAuthMode)"
-            title="授权模式"
-          >
-            <option value="strict">严格授权</option>
-            <option value="auto">自动执行</option>
-          </select>
-          <button
-            class="plan-mode-btn"
-            :class="{ active: props.planModeActive }"
-            @click="emit('togglePlanMode')"
-            :title="props.planModeActive ? '退出规划模式' : '进入规划模式'"
-          >
-            📋 {{ props.planModeActive ? '规划中' : '规划' }}
-          </button>
+          <!-- Reasoning strength: segmented pill control -->
+          <div class="tooltip-container reasoning-tooltip">
+            <div class="reasoning-segmented">
+              <svg class="reasoning-icon" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+              </svg>
+              <button
+                v-for="level in reasoningLevels"
+                :key="level.value"
+                class="reasoning-pill"
+                :class="{ active: props.reasoningStrength === level.value }"
+                type="button"
+                @click="emit('update:reasoning-strength', level.value)"
+              >{{ level.label }}</button>
+            </div>
+            <span class="tooltip-text">推理强度</span>
+          </div>
         </div>
         <div class="input-actions-right">
-        <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" @click="emit('toggleDocumentDock')" title="文档工作台">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-        </button>
-        <label class="reasoning-slider" :title="`推理强度：${currentReasoningLabel}`">
-          <span class="reasoning-slider-label">思考 {{ currentReasoningLabel }}</span>
-          <input
-            class="reasoning-slider-input"
-            type="range"
-            min="0"
-            :max="reasoningLevels.length - 1"
-            step="1"
-            :value="currentReasoningIndex"
-            @input="handleReasoningStrengthInput"
+          <!-- Auth mode: icon toggle (lock = strict, unlock = auto) -->
+          <div class="tooltip-container">
+            <button
+            class="action-btn auth-mode-btn"
+            :class="{ auto: props.authMode === 'auto' }"
+            type="button"
+            @click="emit('update:auth-mode', props.authMode === 'strict' ? 'auto' : 'strict')"
           >
-        </label>
-        <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles" title="添加附件">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
-          <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
-        </label>
-        <button
-          class="action-btn send-btn"
-          :class="{ stopping: props.isLoading, waitingAuth: (props.pendingAuthCount || 0) > 0 }"
-          @click="props.isLoading ? emit('stop') : emit('send')"
-          :disabled="isSendDisabled"
-          :title="props.isUploadingFiles ? '文件处理中...' : (props.isLoading ? '停止生成' : '发送')"
-        >
-          <svg v-if="!props.isLoading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-          <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-        </button>
+            <svg v-if="props.authMode === 'strict'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+            <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>
+            </svg>
+          </button>
+          <span class="tooltip-text">{{ props.authMode === 'strict' ? '严格授权 — 执行前需人工确认' : '自动执行 — 无需人工确认' }}</span>
+          </div>
+          <!-- Plan mode: icon toggle -->
+          <div class="tooltip-container">
+            <button
+              class="action-btn plan-mode-btn"
+              :class="{ active: props.planModeActive }"
+              type="button"
+              @click="emit('togglePlanMode')"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+                <polyline points="3 6 4 7 6 5"/><polyline points="3 12 4 13 6 11"/><polyline points="3 18 4 19 6 17"/>
+              </svg>
+            </button>
+            <span class="tooltip-text">{{ props.planModeActive ? '退出规划模式' : '进入规划模式' }}</span>
+          </div>
+          <div class="tooltip-container">
+            <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" type="button" @click="emit('toggleDocumentDock')">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            </button>
+            <span class="tooltip-text">文档中心</span>
+          </div>
+          <div class="tooltip-container">
+            <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
+              <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
+            </label>
+            <span class="tooltip-text">添加附件</span>
+          </div>
+          <button
+            class="action-btn send-btn"
+            :class="{ stopping: props.isLoading, waitingAuth: (props.pendingAuthCount || 0) > 0 }"
+            type="button"
+            @click="props.isLoading ? emit('stop') : emit('send')"
+            :disabled="isSendDisabled"
+            :title="props.isUploadingFiles ? '文件处理中...' : (props.isLoading ? '停止生成' : '发送')"
+          >
+            <svg v-if="!props.isLoading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
         </div>
       </div>
     </div>
@@ -1166,89 +1173,68 @@ function handleTextareaBlur () {
   gap: 4px;
 }
 
-.context-select {
-  background: var(--app-input-bg);
-  border: 1px solid var(--app-input-border);
-  border-radius: 6px;
-  color: var(--app-text);
-  padding: 4px 8px;
-  font-size: 0.76em;
-  cursor: pointer;
-  height: 28px;
-  transition: border-color 0.15s;
-  min-width: 0;
-}
-
-.context-select option {
-  background: var(--app-input-bg);
-  color: var(--app-text);
-}
-
-.context-select:focus {
-  outline: none;
-  border-color: var(--app-accent);
-}
-
-.agent-select {
-  max-width: 130px;
-}
-
-.provider-select {
-  max-width: 110px;
-}
-
-.model-select {
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.plan-mode-btn {
-  padding: 4px 10px;
-  height: 28px;
-  background: var(--app-input-bg);
-  border: 1px solid var(--app-input-border);
-  border-radius: 6px;
-  color: var(--app-text-muted);
-  font-size: 0.76em;
-  cursor: pointer;
-  transition: all 0.12s;
-  white-space: nowrap;
-}
-
-.plan-mode-btn:hover {
-  border-color: var(--app-accent);
-  color: var(--app-text);
-}
-
 .plan-mode-btn.active {
-  border-color: #f59e0b;
   color: #f59e0b;
-  background: rgba(245, 158, 11, 0.1);
+  background: rgba(245, 158, 11, 0.12);
 }
 
-.reasoning-slider {
+.plan-mode-btn.active:hover {
+  background: rgba(245, 158, 11, 0.18);
+  color: #d97706;
+}
+
+.reasoning-segmented {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-width: 154px;
-  padding: 0 8px;
-  height: 34px;
+  gap: 1px;
+  height: 28px;
+  padding: 3px;
   border-radius: 8px;
-  color: var(--app-text-muted);
   background: var(--app-panel-muted);
+  border: 1px solid var(--app-border);
 }
 
-.reasoning-slider-label {
+.reasoning-icon {
+  color: var(--app-accent);
+  margin: 0 3px 0 3px;
   flex-shrink: 0;
-  font-size: 0.74em;
-  color: var(--app-text-soft);
-  white-space: nowrap;
+  opacity: 0.75;
 }
 
-.reasoning-slider-input {
-  width: 76px;
-  accent-color: var(--app-accent);
+.reasoning-pill {
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 0.72em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
+  line-height: 22px;
+}
+
+.reasoning-pill:hover {
+  background: color-mix(in srgb, var(--app-panel) 70%, transparent);
+  color: var(--app-text);
+}
+
+.reasoning-pill.active {
+  background: var(--app-accent);
+  color: #ffffff;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--app-accent) 45%, transparent);
+}
+
+.auth-mode-btn.auto {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.auth-mode-btn.auto:hover {
+  background: rgba(34, 197, 94, 0.16);
+  color: #16a34a;
 }
 
 .action-btn {
@@ -1264,6 +1250,48 @@ function handleTextareaBlur () {
   cursor: pointer;
   transition: all 0.15s;
   flex-shrink: 0;
+}
+
+.tooltip-container {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.tooltip-container .tooltip-text {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%) translateY(4px);
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  padding: 5px 9px;
+  border-radius: 8px;
+  font-size: 0.76em;
+  line-height: 1.3;
+  color: var(--app-text-soft);
+  background: var(--app-panel-strong);
+  border: 1px solid var(--app-border);
+  box-shadow: var(--app-shadow);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  z-index: 10;
+}
+
+.tooltip-container:hover .tooltip-text,
+.tooltip-container:focus-within .tooltip-text {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.tooltip-text::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--app-panel-strong);
 }
 
 .action-btn:hover { background: var(--app-panel-muted); color: var(--app-text); }

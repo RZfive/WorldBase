@@ -97,6 +97,10 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
   }
   return !collapsedSections[key]
 }
+
+// ── Collapse/expand ──────────────────────────────────────────────────────────
+// Uses CSS grid-template-rows transition (0fr ↔ 1fr) to avoid layout thrashing
+// that occurs when animating height on every frame.
 </script>
 
 <template>
@@ -139,46 +143,49 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
             </svg>
           </span>
         </button>
-        <Transition name="conv-collapse">
-          <div v-if="isSectionExpanded('agents', filteredAgentItems.length)" class="conv-section-body">
-          <div
-            v-for="item in filteredAgentItems"
-            :key="`agent-${item.id}`"
-            :class="['conv-item', 'agent-item', { active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }]"
-            @click="emit('openAgent', item.id)"
-          >
-            <div class="conv-main">
-              <span class="conv-avatar-shell agent">
-                <span class="conv-icon">{{ item.icon }}</span>
-              </span>
-              <div class="conv-copy">
-                <div class="conv-title-row">
-                  <div class="conv-title-stack">
-                    <span class="conv-title">{{ item.title }}</span>
+        <div
+          class="conv-section-body"
+          :class="{ collapsed: !isSectionExpanded('agents', filteredAgentItems.length) }"
+        >
+          <div class="conv-section-body-inner">
+            <div
+              v-for="item in filteredAgentItems"
+              :key="`agent-${item.id}`"
+              :class="['conv-item', 'agent-item', { active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }]"
+              @click="emit('openAgent', item.id)"
+            >
+              <div class="conv-main">
+                <span class="conv-avatar-shell agent">
+                  <span class="conv-icon">{{ item.icon }}</span>
+                </span>
+                <div class="conv-copy">
+                  <div class="conv-title-row">
+                    <div class="conv-title-stack">
+                      <span class="conv-title">{{ item.title }}</span>
+                    </div>
+                    <span v-if="item.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`">
+                      <span class="conv-status-dot"></span>
+                      待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
+                    </span>
+                    <span v-else-if="item.isStreaming" class="conv-status streaming" title="生成中">
+                      <span class="conv-status-dot"></span>
+                      运行中
+                    </span>
                   </div>
-                  <span v-if="item.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`">
-                    <span class="conv-status-dot"></span>
-                    待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
-                  </span>
-                  <span v-else-if="item.isStreaming" class="conv-status streaming" title="生成中">
-                    <span class="conv-status-dot"></span>
-                    运行中
-                  </span>
+                  <span class="conv-subtitle">{{ item.subtitle }}</span>
                 </div>
-                <span class="conv-subtitle">{{ item.subtitle }}</span>
               </div>
-            </div>
 
-            <button
-              v-if="item.conversationId"
-              class="conv-delete"
-              type="button"
-              title="删除该 Agent 会话"
-              @click.stop="emit('deleteConversation', item.conversationId)"
-            >×</button>
+              <button
+                v-if="item.conversationId"
+                class="conv-delete"
+                type="button"
+                title="删除该 Agent 会话"
+                @click.stop="emit('deleteConversation', item.conversationId)"
+              >×</button>
+            </div>
           </div>
-          </div>
-        </Transition>
+        </div>
       </section>
 
       <section v-if="props.groupItems.length > 0" class="conv-section">
@@ -199,45 +206,48 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
             </svg>
           </span>
         </button>
-        <Transition name="conv-collapse">
-          <div v-if="isSectionExpanded('groups', filteredGroupItems.length)" class="conv-section-body">
-          <div
-            v-for="item in filteredGroupItems"
-            :key="`group-${item.id}`"
-            :class="['conv-item', 'group-item', { active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }]"
-            @click="emit('openGroup', item.id)"
-          >
-            <div class="conv-main">
-              <span class="conv-avatar-shell group">
-                <span class="conv-icon group">{{ item.icon }}</span>
-              </span>
-              <div class="conv-copy">
-                <div class="conv-title-row">
-                  <div class="conv-title-stack">
-                    <span class="conv-title">{{ item.title }}</span>
+        <div
+          class="conv-section-body"
+          :class="{ collapsed: !isSectionExpanded('groups', filteredGroupItems.length) }"
+        >
+          <div class="conv-section-body-inner">
+            <div
+              v-for="item in filteredGroupItems"
+              :key="`group-${item.id}`"
+              :class="['conv-item', 'group-item', { active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }]"
+              @click="emit('openGroup', item.id)"
+            >
+              <div class="conv-main">
+                <span class="conv-avatar-shell group">
+                  <span class="conv-icon group">{{ item.icon }}</span>
+                </span>
+                <div class="conv-copy">
+                  <div class="conv-title-row">
+                    <div class="conv-title-stack">
+                      <span class="conv-title">{{ item.title }}</span>
+                    </div>
+                    <span v-if="item.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`">
+                      <span class="conv-status-dot"></span>
+                      待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
+                    </span>
+                    <span v-else-if="item.isStreaming" class="conv-status streaming" title="生成中">
+                      <span class="conv-status-dot"></span>
+                      运行中
+                    </span>
                   </div>
-                  <span v-if="item.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`">
-                    <span class="conv-status-dot"></span>
-                    待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
-                  </span>
-                  <span v-else-if="item.isStreaming" class="conv-status streaming" title="生成中">
-                    <span class="conv-status-dot"></span>
-                    运行中
-                  </span>
+                  <span class="conv-subtitle">{{ item.subtitle }}</span>
                 </div>
-                <span class="conv-subtitle">{{ item.subtitle }}</span>
               </div>
+              <button
+                v-if="item.conversationId"
+                class="conv-delete"
+                type="button"
+                title="删除该群组会话"
+                @click.stop="emit('deleteConversation', item.conversationId)"
+              >×</button>
             </div>
-            <button
-              v-if="item.conversationId"
-              class="conv-delete"
-              type="button"
-              title="删除该群组会话"
-              @click.stop="emit('deleteConversation', item.conversationId)"
-            >×</button>
           </div>
-          </div>
-        </Transition>
+        </div>
       </section>
 
       <section v-if="props.conversationItems.length > 0" class="conv-section">
@@ -258,39 +268,42 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
             </svg>
           </span>
         </button>
-        <Transition name="conv-collapse">
-          <div v-if="isSectionExpanded('conversations', filteredConversationItems.length)" class="conv-section-body">
-          <div
-            v-for="conv in filteredConversationItems"
-            :key="conv.id"
-            :class="['conv-item', 'conversation-item', { active: conv.isActive, streaming: conv.isStreaming, waitingAuth: conv.pendingAuthCount > 0 }]"
-            @click="emit('selectConversation', conv.id)"
-          >
-            <div class="conv-main">
-              <span class="conv-avatar-shell conversation">
-                <span class="conv-icon conversation">{{ conv.icon }}</span>
-              </span>
-              <div class="conv-copy">
-                <div class="conv-title-row">
-                  <div class="conv-title-stack">
-                    <span class="conv-title">{{ conv.title }}</span>
+        <div
+          class="conv-section-body"
+          :class="{ collapsed: !isSectionExpanded('conversations', filteredConversationItems.length) }"
+        >
+          <div class="conv-section-body-inner">
+            <div
+              v-for="conv in filteredConversationItems"
+              :key="conv.id"
+              :class="['conv-item', 'conversation-item', { active: conv.isActive, streaming: conv.isStreaming, waitingAuth: conv.pendingAuthCount > 0 }]"
+              @click="emit('selectConversation', conv.id)"
+            >
+              <div class="conv-main">
+                <span class="conv-avatar-shell conversation">
+                  <span class="conv-icon conversation">{{ conv.icon }}</span>
+                </span>
+                <div class="conv-copy">
+                  <div class="conv-title-row">
+                    <div class="conv-title-stack">
+                      <span class="conv-title">{{ conv.title }}</span>
+                    </div>
+                    <span v-if="conv.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${conv.pendingAuthCount > 1 ? ` ${conv.pendingAuthCount} 项` : ''}`">
+                      <span class="conv-status-dot"></span>
+                      待授权<span v-if="conv.pendingAuthCount > 1" class="conv-status-count">{{ conv.pendingAuthCount }}</span>
+                    </span>
+                    <span v-else-if="conv.isStreaming" class="conv-status streaming" title="生成中">
+                      <span class="conv-status-dot"></span>
+                      运行中
+                    </span>
                   </div>
-                  <span v-if="conv.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${conv.pendingAuthCount > 1 ? ` ${conv.pendingAuthCount} 项` : ''}`">
-                    <span class="conv-status-dot"></span>
-                    待授权<span v-if="conv.pendingAuthCount > 1" class="conv-status-count">{{ conv.pendingAuthCount }}</span>
-                  </span>
-                  <span v-else-if="conv.isStreaming" class="conv-status streaming" title="生成中">
-                    <span class="conv-status-dot"></span>
-                    运行中
-                  </span>
+                  <span class="conv-subtitle">{{ conv.subtitle }}</span>
                 </div>
-                <span class="conv-subtitle">{{ conv.subtitle }}</span>
               </div>
+              <button class="conv-delete" type="button" @click.stop="emit('deleteConversation', conv.id)" title="删除">×</button>
             </div>
-            <button class="conv-delete" type="button" @click.stop="emit('deleteConversation', conv.id)" title="删除">×</button>
           </div>
-          </div>
-        </Transition>
+        </div>
       </section>
 
       <div v-if="!hasVisibleItems" class="conv-empty">{{ isSearching ? '没有找到匹配的对话内容' : '暂无对话记录' }}</div>
@@ -472,31 +485,32 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
   transform: rotate(-90deg);
 }
 
+/* ── Grid-based collapse (no layout thrashing) ──────────────────────────── */
+
 .conv-section-body {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  overflow: hidden;
+}
+
+.conv-section-body.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.conv-section-body-inner {
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  transition: opacity 0.2s ease;
 }
 
-.conv-collapse-enter-active,
-.conv-collapse-leave-active {
-  overflow: hidden;
-  transition: max-height 0.28s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.22s ease, transform 0.22s ease;
-}
-
-.conv-collapse-enter-from,
-.conv-collapse-leave-to {
-  max-height: 0;
+.conv-section-body.collapsed .conv-section-body-inner {
   opacity: 0;
-  transform: translateY(-8px);
 }
 
-.conv-collapse-enter-to,
-.conv-collapse-leave-from {
-  max-height: 960px;
-  opacity: 1;
-  transform: translateY(0);
-}
+/* ────────────────────────────────────────────────────────────────────────── */
 
 .conv-item {
   position: relative;
