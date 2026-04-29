@@ -504,6 +504,7 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
   flex-direction: column;
   gap: 4px;
   transition: opacity 0.2s ease;
+  width: 229px;
 }
 
 .conv-section-body.collapsed .conv-section-body-inner {
@@ -542,6 +543,7 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
   background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
   border-color: color-mix(in srgb, var(--app-accent) 12%, var(--app-border));
   color: var(--app-text);
+  width: 229px;
 }
 
 .conv-item.active {
