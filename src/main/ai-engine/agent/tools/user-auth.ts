@@ -2,6 +2,67 @@ import { type BrowserWindow, ipcMain } from 'electron'
 import type { SessionState } from '../agent-core.js'
 
 /**
+ * Request a sudo password from the user via an inline conversation block.
+ * Returns the password string the user typed, or null if cancelled / aborted.
+ * The password is never forwarded to the AI model.
+ */
+export async function requestSudoPassword (
+  getMainWindow: (() => BrowserWindow | null) | undefined,
+  getSessionState: (() => SessionState) | undefined,
+  getAbortSignal: (() => AbortSignal | undefined) | undefined,
+  command: string
+): Promise<string | null> {
+  const win = getMainWindow?.() ?? null
+  if (!win || win.isDestroyed()) return null
+
+  return new Promise((resolve) => {
+    const requestId = `sudo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const conversationId = getSessionState?.().conversationId
+    const sessionId = getSessionState?.().sessionId
+
+    win.webContents.send('auth:sudo-request', { requestId, conversationId, sessionId, command })
+
+    let settled = false
+    type SudoResponseHandler = (_event: Electron.IpcMainEvent, data: { requestId: string; password: string | null }) => void
+    let handler: SudoResponseHandler | null = null
+    let abortSignal: AbortSignal | undefined
+    let abortListener: (() => void) | null = null
+
+    function cleanup () {
+      if (handler) {
+        ipcMain.removeListener('auth:sudo-response', handler)
+        handler = null
+      }
+      if (abortSignal && abortListener) {
+        abortSignal.removeEventListener('abort', abortListener)
+        abortListener = null
+      }
+    }
+
+    const finish = (password: string | null) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(password)
+    }
+
+    handler = (_event, data) => {
+      if (data.requestId !== requestId) return
+      finish(data.password)
+    }
+    ipcMain.on('auth:sudo-response', handler)
+
+    abortSignal = getAbortSignal?.()
+    if (abortSignal?.aborted) {
+      finish(null)
+      return
+    }
+    abortListener = () => finish(null)
+    abortSignal?.addEventListener('abort', abortListener, { once: true })
+  })
+}
+
+/**
  * Show a confirmation request inside the app before executing a sensitive operation.
  * Returns true if the user approved, false otherwise.
  */

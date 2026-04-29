@@ -12,6 +12,7 @@ import WebSearchBlock from '../blocks/WebSearchBlock.vue'
 import WebFetchBlock from '../blocks/WebFetchBlock.vue'
 import AttachmentBlock from '../blocks/AttachmentBlock.vue'
 import AuthRequestBlock from '../blocks/AuthRequestBlock.vue'
+import SudoPasswordBlock from '../blocks/SudoPasswordBlock.vue'
 import ContentBlock from '../blocks/ContentBlock.vue'
 import ErrorBlock from '../blocks/ErrorBlock.vue'
 
@@ -26,6 +27,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'respondAuth', requestId: string, approved: boolean): void
+  (e: 'respondSudoPassword', requestId: string, password: string | null): void
   (e: 'toggleThinking', blockId: string): void
   (e: 'openLightbox', messageIndex: number, blockIndex: number, partIndex: number): void
   (e: 'openMermaidPreview', code: string): void
@@ -142,6 +144,12 @@ const messageText = computed(() => getMessageText())
             v-else-if="block.kind === 'auth_request'"
             :block="block"
             @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
+          />
+
+          <SudoPasswordBlock
+            v-else-if="block.kind === 'sudo_password_request'"
+            :block="block"
+            @respond-sudo-password="(requestId, password) => emit('respondSudoPassword', requestId, password)"
           />
 
           <ErrorBlock

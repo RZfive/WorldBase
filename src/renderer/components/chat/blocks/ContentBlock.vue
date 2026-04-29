@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { renderMarkdown } from '../markdown'
 import { getContentParts, hasRenderableContent, collapseWhitespace } from '../message-utils'
 import { splitMarkdownWithMermaid } from '../mermaid'
+import { buildAssistantExportBaseName, downloadDataUrlFile, downloadMarkdownFile, messageContentToMarkdown, renderElementToPngDataUrl } from '../export-utils'
 import type { ChatMessageBlock } from '../types'
 import MermaidDiagram from '../media/MermaidDiagram.vue'
+
+type ExportState = 'idle' | 'pending' | 'done' | 'error'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'content' }>
@@ -19,55 +23,192 @@ const emit = defineEmits<{
   (e: 'openMermaidPreview', code: string): void
 }>()
 
+const exportCaptureRef = ref<HTMLElement | null>(null)
+const markdownExportState = ref<ExportState>('idle')
+const imageExportState = ref<ExportState>('idle')
+
+let markdownResetTimer: number | null = null
+let imageResetTimer: number | null = null
+
+const canExport = computed(() => {
+  return props.role === 'assistant' && !props.isStreamingBlock && hasRenderableContent(props.block.content)
+})
+
 function getTextSegments (text?: string) {
   return splitMarkdownWithMermaid(text || '')
 }
+
+function clearResetTimer (kind: 'md' | 'image') {
+  const timer = kind === 'md' ? markdownResetTimer : imageResetTimer
+  if (timer != null) {
+    window.clearTimeout(timer)
+  }
+
+  if (kind === 'md') {
+    markdownResetTimer = null
+  } else {
+    imageResetTimer = null
+  }
+}
+
+function setExportState (kind: 'md' | 'image', state: ExportState) {
+  clearResetTimer(kind)
+
+  if (kind === 'md') {
+    markdownExportState.value = state
+  } else {
+    imageExportState.value = state
+  }
+
+  if (state === 'done' || state === 'error') {
+    const timeoutId = window.setTimeout(() => {
+      if (kind === 'md') {
+        markdownExportState.value = 'idle'
+        markdownResetTimer = null
+      } else {
+        imageExportState.value = 'idle'
+        imageResetTimer = null
+      }
+    }, 2200)
+
+    if (kind === 'md') {
+      markdownResetTimer = timeoutId
+    } else {
+      imageResetTimer = timeoutId
+    }
+  }
+}
+
+function getExportLabel (kind: 'md' | 'image'): string {
+  const state = kind === 'md' ? markdownExportState.value : imageExportState.value
+  if (state === 'pending') return kind === 'md' ? '导出中…' : '生成中…'
+  if (state === 'done') return '已保存'
+  if (state === 'error') return '失败'
+  return kind === 'md' ? '导出 MD' : '导出长图'
+}
+
+async function exportMarkdown (): Promise<void> {
+  if (!canExport.value || markdownExportState.value === 'pending') return
+
+  setExportState('md', 'pending')
+  try {
+    const markdown = messageContentToMarkdown(props.block.content)
+    const fileName = `${buildAssistantExportBaseName()}.md`
+
+    if (window.electronAPI?.saveMarkdownToFile) {
+      const result = await window.electronAPI.saveMarkdownToFile(markdown, fileName)
+      if (result?.canceled) {
+        setExportState('md', 'idle')
+        return
+      }
+    } else {
+      downloadMarkdownFile(markdown, fileName)
+    }
+
+    setExportState('md', 'done')
+  } catch (error) {
+    console.error('Failed to export markdown:', error)
+    setExportState('md', 'error')
+  }
+}
+
+async function exportLongImage (): Promise<void> {
+  if (!canExport.value || imageExportState.value === 'pending' || !exportCaptureRef.value) return
+
+  setExportState('image', 'pending')
+  try {
+    const dataUrl = await renderElementToPngDataUrl(exportCaptureRef.value)
+    const fileName = `${buildAssistantExportBaseName()}.png`
+
+    if (window.electronAPI?.saveImageToFile) {
+      const result = await window.electronAPI.saveImageToFile(dataUrl, fileName)
+      if (result?.canceled) {
+        setExportState('image', 'idle')
+        return
+      }
+    } else {
+      downloadDataUrlFile(dataUrl, fileName)
+    }
+
+    setExportState('image', 'done')
+  } catch (error) {
+    console.error('Failed to export long image:', error)
+    setExportState('image', 'error')
+  }
+}
+
+onBeforeUnmount(() => {
+  clearResetTimer('md')
+  clearResetTimer('image')
+})
 </script>
 
 <template>
   <div
+    ref="exportCaptureRef"
     class="message-bubble"
     :class="[props.role, { streaming: props.isStreamingBlock }]"
   >
     <template v-if="hasRenderableContent(props.block.content)">
-      <template
-        v-for="(part, partIndex) in getContentParts(props.block.content)"
-        :key="`${props.block.id}-${partIndex}`"
-      >
-        <div
-          v-if="part.type === 'text' && part.text"
-          class="message-text-group"
+      <div class="message-content-body">
+        <template
+          v-for="(part, partIndex) in getContentParts(props.block.content)"
+          :key="`${props.block.id}-${partIndex}`"
         >
-          <template
-            v-for="(segment, segmentIndex) in getTextSegments(part.text)"
-            :key="`${props.block.id}-${partIndex}-${segmentIndex}`"
+          <div
+            v-if="part.type === 'text' && part.text"
+            class="message-text-group"
           >
-            <div
-              v-if="segment.type === 'markdown'"
-              class="message-text markdown-body"
-              v-html="renderMarkdown(segment.text)"
-            ></div>
+            <template
+              v-for="(segment, segmentIndex) in getTextSegments(part.text)"
+              :key="`${props.block.id}-${partIndex}-${segmentIndex}`"
+            >
+              <div
+                v-if="segment.type === 'markdown'"
+                class="message-text markdown-body"
+                v-html="renderMarkdown(segment.text)"
+              ></div>
 
-            <MermaidDiagram
-              v-else
-              class="message-mermaid-card"
-              :code="segment.text"
-              previewable
-              @open-preview="emit('openMermaidPreview', segment.text)"
-            />
-          </template>
-        </div>
+              <MermaidDiagram
+                v-else
+                class="message-mermaid-card"
+                :code="segment.text"
+                previewable
+                @open-preview="emit('openMermaidPreview', segment.text)"
+              />
+            </template>
+          </div>
 
+          <button
+            v-else-if="part.type === 'image_url' && part.image_url?.url"
+            class="message-image-card"
+            type="button"
+            @click="emit('openLightbox', props.messageIndex, props.blockIndex, partIndex)"
+          >
+            <img :src="part.image_url.url" class="message-image" />
+            <span class="message-image-action">点击查看大图</span>
+          </button>
+        </template>
+      </div>
+
+      <div v-if="canExport" class="message-export-bar" data-export-ignore="true">
         <button
-          v-else-if="part.type === 'image_url' && part.image_url?.url"
-          class="message-image-card"
+          class="message-export-action"
           type="button"
-          @click="emit('openLightbox', props.messageIndex, props.blockIndex, partIndex)"
+          :disabled="markdownExportState === 'pending'"
+          @click="exportMarkdown"
         >
-          <img :src="part.image_url.url" class="message-image" />
-          <span class="message-image-action">点击查看大图</span>
+          {{ getExportLabel('md') }}
         </button>
-      </template>
+        <button
+          class="message-export-action"
+          type="button"
+          :disabled="imageExportState === 'pending'"
+          @click="exportLongImage"
+        >
+          {{ getExportLabel('image') }}
+        </button>
+      </div>
     </template>
     <div v-else class="message-placeholder">
       {{ props.role === 'assistant' ? '正在流式输出…' : collapseWhitespace(props.messageText) }}
@@ -106,6 +247,14 @@ function getTextSegments (text?: string) {
 .message-placeholder {
   color: var(--app-text-muted);
   min-width: 160px;
+}
+
+.message-content-body {
+  width: 100%;
+}
+
+.message-content-body > * + * {
+  margin-top: 12px;
 }
 
 .message-text + .message-text {
@@ -166,6 +315,47 @@ function getTextSegments (text?: string) {
 .message-image-action {
   font-size: 0.78rem;
   color: var(--app-text-muted);
+}
+
+.message-export-bar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 12px;
+  opacity: 0.62;
+  transition: opacity 0.18s ease;
+}
+
+.message-bubble:hover .message-export-bar,
+.message-export-bar:focus-within {
+  opacity: 0.92;
+}
+
+.message-export-action {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--app-border-strong) 80%, transparent);
+  background: color-mix(in srgb, var(--app-panel-subtle) 72%, transparent);
+  color: var(--app-text-muted);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.message-export-action:hover:not(:disabled),
+.message-export-action:focus-visible {
+  color: var(--app-text);
+  border-color: var(--app-border-strong);
+  background: color-mix(in srgb, var(--app-panel) 84%, transparent);
+  outline: none;
+}
+
+.message-export-action:disabled {
+  cursor: wait;
+  opacity: 0.82;
 }
 
 /* Markdown deep styles */

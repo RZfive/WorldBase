@@ -14,6 +14,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'respondAuth', requestId: string, approved: boolean): void
+  (e: 'respondSudoPassword', requestId: string, password: string | null): void
   (e: 'openLink', url: string): void
 }>()
 
@@ -282,8 +283,9 @@ function getMessageSignature (msg?: ChatMessage): string {
     if (block.kind === 'web_fetch') return `webfetch:${block.query || ''}:${block.result.url}:${block.result.final_url || ''}:${block.result.ok}:${block.result.title || ''}:${block.result.error || ''}:${block.result.query_snippets?.join('|') || ''}`
     if (block.kind === 'attachment') return `attachment:${block.fileName}:${block.fileType}:${block.fileSizeLabel}:${block.previewText}`
     if (block.kind === 'auth_request') return `auth:${block.requestId}:${block.status}:${block.title}:${block.detail}`
+    if (block.kind === 'sudo_password_request') return `sudo:${block.requestId}:${block.status}`
     if (block.kind === 'todo') return `todo:${block.items.map(item => `${item.id}:${item.status}:${item.title}`).join('|')}`
-    return `tool:${block.toolRun.id}:${block.toolRun.status}:${block.toolRun.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`
+    return `tool:${block.toolRun.id}:${block.toolRun.status}:${block.toolRun.progress.map((step: { stage: string; detail?: string }) => `${step.stage}:${step.detail || ''}`).join('>')}`
   }).join('|')
   return [blockSignature, msg.thinking || '', msg.speakerName || '', msg.modelLabel || ''].join('::')
 }
@@ -407,6 +409,7 @@ onUnmounted(() => {
           :file-preview="props.filePreview"
           :collapsed-thinking="collapsedThinking"
           @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
+          @respond-sudo-password="(requestId, password) => emit('respondSudoPassword', requestId, password)"
           @toggle-thinking="toggleThinking"
           @open-lightbox="(mi, bi, pi) => openLightbox(mi, bi, pi)"
           @open-mermaid-preview="openMermaidPreview"

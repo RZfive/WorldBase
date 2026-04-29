@@ -190,6 +190,16 @@ export function createAuthRequestBlock (request: AuthRequestPayload): ChatMessag
   }
 }
 
+export function createSudoPasswordRequestBlock (requestId: string, command: string): ChatMessageBlock {
+  return {
+    id: createBlockId('sudo'),
+    kind: 'sudo_password_request',
+    requestId,
+    command,
+    status: 'pending'
+  }
+}
+
 export function positionGroupMetaBlocks (message: ChatMessage): void {
   const blocks = ensureBlocks(message)
   const sidechatBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'agent_sidechat' }> => {

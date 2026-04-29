@@ -237,7 +237,10 @@ export class AgentCore {
     this.sessionState = {
       createdProjectId: null,
       targetProjectId: this.sessionState.targetProjectId,
-      authMode: this.getEffectiveAuthMode()
+      authMode: this.getEffectiveAuthMode(),
+      // Preserve routing context so tool-level requestUserAuth can find the conversation.
+      conversationId: this.sessionState.conversationId,
+      sessionId: this.sessionState.sessionId
     }
     this.planEngine.reset()
     this.loopDetector.reset()
