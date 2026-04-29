@@ -164,6 +164,11 @@ export class AIEngine {
     agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
     agent.setAuthMode(options?.authMode ?? 'strict')
     agent.setLogger(options?.aiLogger)
+    // Store conversation/session context in sessionState so the getSessionState closure
+    // inside registerAllTools (used by tool-level requestUserAuth) can route auth requests
+    // back to the correct conversation in the renderer.
+    agent.sessionState.conversationId = options?.conversationId
+    agent.sessionState.sessionId = options?.sessionId
     // Wire up permission engine with window context for user-auth dialogs
     agent.setPermissionContext({
       getMainWindow: this.services.getMainWindow,

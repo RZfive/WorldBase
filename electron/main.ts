@@ -2420,6 +2420,34 @@ function setupIPC (): void {
     return { success: true, filePath: result.filePath }
   })
 
+  ipcMain.handle('media:saveMarkdown', async (event: IpcMainInvokeEvent, markdown: string, defaultName?: string) => {
+    const senderWindow = getSenderWindow(event) || mainWindow
+    const safeDefaultName = (defaultName && defaultName.trim()) || 'the-world-ai-response.md'
+    const finalDefaultName = safeDefaultName.toLowerCase().endsWith('.md') ? safeDefaultName : `${safeDefaultName}.md`
+
+    const dialogOptions = {
+      title: '导出 Markdown',
+      defaultPath: finalDefaultName,
+      filters: [
+        {
+          name: 'Markdown',
+          extensions: ['md']
+        }
+      ]
+    }
+
+    const result = senderWindow
+      ? await dialog.showSaveDialog(senderWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
+
+    if (result.canceled || !result.filePath) {
+      return { canceled: true }
+    }
+
+    await fs.writeFile(result.filePath, markdown, 'utf-8')
+    return { success: true, filePath: result.filePath }
+  })
+
   ipcMain.handle('chat:readUploadedOfficeFile', async (_event: IpcMainInvokeEvent, filePath: string) => {
     const resolvedPath = path.resolve(filePath)
     const stat = await fs.stat(resolvedPath)

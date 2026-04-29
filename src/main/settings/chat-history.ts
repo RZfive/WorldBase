@@ -67,6 +67,7 @@ export type ChatMessageBlock =
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
   | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
+  | { id: string; kind: 'sudo_password_request'; requestId: string; command: string; status: 'pending' | 'submitted' | 'canceled' }
 
 export interface ChatMessage {
   role: string

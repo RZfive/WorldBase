@@ -62,6 +62,7 @@ watch(
       <button
         v-if="props.previewable && props.mode === 'inline'"
         class="mermaid-diagram-action"
+        data-export-ignore="true"
         type="button"
         @click="emit('openPreview')"
       >

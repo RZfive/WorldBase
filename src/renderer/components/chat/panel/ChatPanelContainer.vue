@@ -54,6 +54,7 @@ const {
   removeFile,
   removeImage,
   respondToAuthRequest,
+  respondToSudoPasswordRequest,
   selectedChannelBindingId,
   selectedModel,
   sendMessage,
@@ -108,6 +109,7 @@ const {
         :is-loading="isLoading"
         :file-preview="filePreview"
         @respond-auth="respondToAuthRequest"
+        @respond-sudo-password="respondToSudoPasswordRequest"
         @open-link="(url) => emit('openWebLink', url)"
       />
 

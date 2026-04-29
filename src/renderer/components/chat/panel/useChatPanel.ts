@@ -17,6 +17,7 @@ import {
   createAttachmentBlock,
   createContentBlock,
   createFilePreviewBlock,
+  createSudoPasswordRequestBlock,
   createThinkingBlock,
   createToolBlock,
   createToolRun,
@@ -135,6 +136,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const conversationTargets = new Map<string, string | null>()
   let providerChangeCleanup: (() => void) | null = null
   let authRequestCleanup: (() => void) | null = null
+  let sudoPasswordRequestCleanup: (() => void) | null = null
   let authResponseCleanup: (() => void) | null = null
   let authResolvedCleanup: (() => void) | null = null
   let skillsChangedCleanup: (() => void) | null = null
@@ -1144,6 +1146,42 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     window.electronAPI?.respondAuth(requestId, approved)
   }
 
+  function handleSudoPasswordRequest (req: { requestId: string; conversationId?: string; sessionId?: string; command: string }) {
+    const targetMessages = getTrackedMessagesByConversationId(req.conversationId)
+      ?? getTrackedMessagesBySessionId(req.sessionId)
+
+    if (!targetMessages) {
+      // Cannot route — cancel immediately so the tool is not left waiting forever
+      window.electronAPI?.respondSudoPassword(req.requestId, null)
+      return
+    }
+
+    let assistantMessage = findLatestAssistantMessage(targetMessages)
+    if (!assistantMessage) {
+      const placeholder: ChatMessage = { role: 'assistant', content: '', blocks: [] }
+      targetMessages.push(placeholder)
+      assistantMessage = placeholder
+    }
+    ensureBlocks(assistantMessage).push(createSudoPasswordRequestBlock(req.requestId, req.command))
+  }
+
+  function respondToSudoPasswordRequest (requestId: string, password: string | null) {
+    for (const chatMessages of getTrackedMessageCollections()) {
+      for (const message of chatMessages) {
+        if (!Array.isArray(message.blocks)) continue
+        const block = message.blocks.find(
+          (b): b is Extract<ChatMessageBlock, { kind: 'sudo_password_request' }> =>
+            b.kind === 'sudo_password_request' && (b as Extract<ChatMessageBlock, { kind: 'sudo_password_request' }>).requestId === requestId
+        )
+        if (block) {
+          block.status = password !== null ? 'submitted' : 'canceled'
+          break
+        }
+      }
+    }
+    window.electronAPI?.respondSudoPassword(requestId, password)
+  }
+
   async function sendMessage () {
     const text = inputText.value.trim()
     if ((!text && pendingImages.value.length === 0 && pendingFiles.value.length === 0) || isLoading.value || isUploadingFiles.value) return
@@ -1476,6 +1514,10 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       authRequestCleanup = window.electronAPI.onAuthRequest(handleAuthRequest)
     }
 
+    if (window.electronAPI?.onSudoPasswordRequest) {
+      sudoPasswordRequestCleanup = window.electronAPI.onSudoPasswordRequest(handleSudoPasswordRequest)
+    }
+
     if (window.electronAPI?.onAuthResolved) {
       authResolvedCleanup = window.electronAPI.onAuthResolved(handleAuthResolution)
     }
@@ -1505,6 +1547,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     providerChangeCleanup = null
     authRequestCleanup?.()
     authRequestCleanup = null
+    sudoPasswordRequestCleanup?.()
+    sudoPasswordRequestCleanup = null
     authResolvedCleanup?.()
     authResolvedCleanup = null
     skillsChangedCleanup?.()
@@ -1559,6 +1603,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     removeFile,
     removeImage,
     respondToAuthRequest,
+    respondToSudoPasswordRequest,
     selectedChannelBindingId,
     selectedModel,
     sendMessage,

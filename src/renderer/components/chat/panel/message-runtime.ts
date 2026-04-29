@@ -103,6 +103,9 @@ export function finalizePendingAuthBlocks (message: ChatMessage): void {
     if (block.kind === 'auth_request' && block.status === 'pending') {
       block.status = 'denied'
     }
+    if (block.kind === 'sudo_password_request' && block.status === 'pending') {
+      block.status = 'canceled'
+    }
   }
 }
 

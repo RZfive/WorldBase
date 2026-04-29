@@ -455,6 +455,7 @@ export interface ElectronAPI {
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
+  saveMarkdownToFile: (markdown: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
@@ -562,6 +563,8 @@ export interface ElectronAPI {
   onAuthRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; title: string; detail: string }) => void) => () => void
   onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
+  onSudoPasswordRequest: (callback: (req: { requestId: string; conversationId?: string; sessionId?: string; command: string }) => void) => () => void
+  respondSudoPassword: (requestId: string, password: string | null) => void
 
   // Document import / preview / selection
   pickDocumentFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
@@ -622,6 +625,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pinMemory: (id: string, pinned: boolean) => ipcRenderer.invoke('memory:pin', id, pinned),
   deleteMemory: (id: string) => ipcRenderer.invoke('memory:delete', id),
   saveImageToFile: (imageUrl: string, defaultName?: string) => ipcRenderer.invoke('media:saveImage', imageUrl, defaultName),
+  saveMarkdownToFile: (markdown: string, defaultName?: string) => ipcRenderer.invoke('media:saveMarkdown', markdown, defaultName),
   readUploadedAttachmentFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedAttachmentFile', filePath),
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => ipcRenderer.invoke('chat:readUploadedAttachmentBuffer', payload),
   readUploadedOfficeFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedOfficeFile', filePath),
@@ -778,6 +782,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   respondAuth: (requestId: string, approved: boolean) => {
     ipcRenderer.send('auth:response', { requestId, approved })
+  },
+  onSudoPasswordRequest: (callback: (req: { requestId: string; conversationId?: string; sessionId?: string; command: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, req: { requestId: string; conversationId?: string; sessionId?: string; command: string }) => callback(req)
+    ipcRenderer.on('auth:sudo-request', handler)
+    return () => { ipcRenderer.removeListener('auth:sudo-request', handler) }
+  },
+  respondSudoPassword: (requestId: string, password: string | null) => {
+    ipcRenderer.send('auth:sudo-response', { requestId, password })
   },
 
   // Document import / preview / selection
