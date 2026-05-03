@@ -15,6 +15,15 @@ interface SubagentTaskInput {
   system_prompt?: string
 }
 
+const SPAWN_SUBAGENTS_TOOL_DESCRIPTION = [
+  'Spawn one or more independent subagents that execute their tasks in parallel.',
+  'All subagents run concurrently; the tool blocks until every subagent has completed or failed.',
+  'Use this tool to decompose a large task into independent subtasks and accelerate execution through parallelism.',
+  'Each subagent has access to all standard tools and runs with its own isolated conversation context.',
+  'Nested spawning is allowed only for one additional layer of clearly independent work; deeper recursive nesting is blocked.',
+  'After the tool returns, inspect the returned task statuses and results before deciding the next step.'
+].join(' ')
+
 function normalizeTaskList (raw: unknown): SubagentTaskInput[] {
   if (!Array.isArray(raw)) return []
   return raw.filter((item): item is SubagentTaskInput => {
@@ -49,19 +58,13 @@ function normalizeStringArray (value: unknown): string[] | undefined {
  */
 export function toolSpawnSubagents (
   getSubagentService: () => SubagentService | undefined,
-  getAbortSignal: () => AbortSignal | undefined
+  getAbortSignal: () => AbortSignal | undefined,
+  toolName = 'spawn_subagents'
 ): Tool {
   return {
     definition: {
-      name: 'spawn_subagents',
-      description: [
-        'Spawn one or more independent subagents that execute their tasks in parallel.',
-        'All subagents run concurrently; the tool blocks until every subagent has completed or failed.',
-        'Use this tool to decompose a large task into independent subtasks and accelerate execution through parallelism.',
-        'Each subagent has access to all standard tools and runs with its own isolated conversation context.',
-        'Subagents cannot spawn their own subagents — nesting is not supported.',
-        'Prefer this tool when subtasks are independent and can proceed without each other\'s intermediate results.'
-      ].join(' '),
+      name: toolName,
+      description: `${SPAWN_SUBAGENTS_TOOL_DESCRIPTION} Prefer this tool when subtasks are independent and can proceed without each other's intermediate results.`,
       parameters: {
         type: 'object',
         properties: {
@@ -147,6 +150,11 @@ export function toolSpawnSubagents (
       )
 
       return {
+        status: failedCount > 0 ? 'completed_with_failures' : 'completed',
+        all_tasks_finished: true,
+        completed_count: completedCount,
+        failed_count: failedCount,
+        duration_ms: elapsedMs,
         results: results.map(r => ({
           description: r.description,
           status: r.status,
@@ -154,7 +162,10 @@ export function toolSpawnSubagents (
           ...(r.error ? { error: r.error } : {}),
           ...(r.tokenUsage ? { token_usage: r.tokenUsage } : {})
         })),
-        summary: `${completedCount}/${tasks.length} 个子 Agent 成功完成，耗时 ${elapsedSec}s`
+        summary: `${completedCount}/${tasks.length} 个子 Agent 成功完成，耗时 ${elapsedSec}s`,
+        next_step: failedCount > 0
+          ? '所有任务都已返回。请先检查失败任务和已完成结果，再决定是否重试或继续。'
+          : '所有任务都已返回。请先阅读结果，再决定是否继续细化或直接回答。'
       }
     }
   }

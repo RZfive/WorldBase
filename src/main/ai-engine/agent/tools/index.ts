@@ -123,14 +123,19 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolCreateAgentGroup(services)
   ]
 
-  // Register spawn_subagents tool only when a subagent service is available
-  // (prevents subagents from spawning their own subagents).
+  // Register spawn_subagents plus a compatibility alias only when a subagent
+  // service is available. Nested spawning depth is capped inside AIEngine.
   if (services.subagentService) {
     const subagentService = services.subagentService
     tools.push(
       toolSpawnSubagents(
         () => subagentService,
         getAbortSignal
+      ),
+      toolSpawnSubagents(
+        () => subagentService,
+        getAbortSignal,
+        'spawn_subagentstasks'
       )
     )
   }

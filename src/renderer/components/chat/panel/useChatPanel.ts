@@ -34,6 +34,7 @@ import {
   syncLegacyToolRuns,
   syncTodoBlock,
   upsertAgentSidechatBlock,
+  upsertGroupCollaborationPlanBlock,
   upsertGroupProgressBlock,
   upsertGroupTranscriptBlock
 } from './message-blocks'
@@ -336,7 +337,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   const currentContextDetail = computed(() => {
     if (currentGroupDefinition.value) {
-      return `${currentGroupDefinition.value.memberAgentIds.length} 位 Agent 协作 · 可 @主Agent 发起协调，单独 @成员 定向回复，@多人 / @all 发起讨论`
+      return `${currentGroupDefinition.value.memberAgentIds.length} 位 Agent 协作 · 默认全群讨论，@主Agent 或协调者可决定是否拉群，单独 @成员 直接回复，@多人 / @all 指定讨论范围`
     }
 
     return currentModelLabel.value
@@ -351,9 +352,44 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       .toLowerCase()
   }
 
-  function extractMentionTokens (value: string): string[] {
-    const matches = value.match(/@([^\s@]+)/g) || []
-    return matches.map(token => normalizeMentionToken(token))
+  function resolveKnownMentionMatch (candidate: string, normalizedKnownMentions: string[]): string | null {
+    for (const token of normalizedKnownMentions) {
+      for (let endOffset = 1; endOffset <= candidate.length; endOffset++) {
+        if (normalizeMentionToken(candidate.slice(0, endOffset)) === token) {
+          return token
+        }
+      }
+    }
+
+    return null
+  }
+
+  function extractMentionTokens (value: string, knownMentions: Iterable<string> = []): string[] {
+    const normalizedKnownMentions = Array.from(new Set(Array.from(knownMentions)
+      .map(token => normalizeMentionToken(token))
+      .filter(Boolean)))
+      .sort((left, right) => right.length - left.length)
+
+    if (normalizedKnownMentions.length === 0) {
+      const matches = value.match(/@([^\s@]+)/g) || []
+      return matches.map(token => normalizeMentionToken(token))
+    }
+
+    const matches: string[] = []
+    for (let index = 0; index < value.length; index++) {
+      if (value[index] !== '@') continue
+
+      const nextAt = value.indexOf('@', index + 1)
+      const candidateEnd = nextAt >= 0 ? nextAt : value.length
+      const candidate = value.slice(index + 1, candidateEnd)
+      const resolved = resolveKnownMentionMatch(candidate, normalizedKnownMentions)
+      if (!resolved) continue
+
+      matches.push(resolved)
+      index = Math.max(index, candidateEnd - 1)
+    }
+
+    return matches
   }
 
   const groupMentionHints = computed<GroupMentionHint[]>(() => {
@@ -406,7 +442,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   function resolveAssistantSpeakerName (sourceText: string): string {
     if (currentGroupDefinition.value) {
-      const mentionTokens = extractMentionTokens(sourceText)
+      const knownMentionValues = groupMentionHints.value.flatMap((hint) => [hint.token, hint.label, ...(hint.aliases || [])])
+      const mentionTokens = extractMentionTokens(sourceText, knownMentionValues)
       const fullGroupRequested = mentionTokens.some(token => {
         return token === 'all' || token === 'everyone' || token === '全组' || token === '全员' || token === '全部agent' || token === '所有agent'
       })
@@ -1399,6 +1436,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
             } else if (event.type === 'web_fetch_result' && event.result) {
               flushPendingStreamText()
               ensureBlocks(assistantMessage).push(createWebFetchBlock(event.result as WebFetchResultEntry, event.query))
+            } else if (event.type === 'group_collaboration_plan' && event.plan) {
+              flushPendingStreamText()
+              upsertGroupCollaborationPlanBlock(assistantMessage, event.plan)
             } else if (event.type === 'group_progress' && event.groupProgress) {
               flushPendingStreamText()
               upsertGroupProgressBlock(assistantMessage, event.groupProgress)

@@ -116,16 +116,21 @@ function resolveIcon (app: RunningApp) {
 
 <style scoped>
 .dock-bar {
+  --dock-width: 70px;
+  --dock-slot-size: 60px;
+  --dock-surface-size: 56px;
+  --dock-icon-size: 30px;
   --dock-accent: var(--app-accent);
   --dock-accent-soft: var(--app-accent-soft);
   --dock-accent-glow: var(--app-accent-glow);
-  width: 90px;
+  box-sizing: border-box;
+  width: var(--dock-width);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 16px 12px 18px;
+  gap: 10px;
+  padding: 8px calc((var(--dock-width) - var(--dock-slot-size)) / 2) 7px;
   background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
   border-right: 1px solid var(--app-border);
 }
@@ -141,20 +146,21 @@ function resolveIcon (app: RunningApp) {
 
 .dock-apps {
   flex: 1;
-  gap: 10px;
-  padding: 10px 0;
+  gap: 8px;
+  padding: 8px 0;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
 .dock-apps::-webkit-scrollbar { width: 0; }
 
-.dock-bottom { gap: 10px; }
+.dock-bottom { gap: 8px; }
 
 .dock-item {
   position: relative;
-  width: 60px;
-  height: 60px;
+  width: var(--dock-slot-size);
+  height: var(--dock-slot-size);
+  flex: 0 0 var(--dock-slot-size);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -166,10 +172,10 @@ function resolveIcon (app: RunningApp) {
 .dock-item::before {
   content: '';
   position: absolute;
-  left: 4px;
+  left: 0;
   top: 50%;
   width: 4px;
-  height: 22px;
+  height: 24px;
   border-radius: 999px;
   background: linear-gradient(180deg, var(--dock-accent), var(--app-accent-strong));
   box-shadow: 0 0 14px var(--dock-accent-glow);
@@ -181,8 +187,8 @@ function resolveIcon (app: RunningApp) {
 
 .dock-item-surface {
   position: relative;
-  width: 56px;
-  height: 56px;
+  width: var(--dock-surface-size);
+  height: var(--dock-surface-size);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -235,7 +241,7 @@ function resolveIcon (app: RunningApp) {
 .dock-item.dock-active .dock-item-surface::after {
   content: '';
   position: absolute;
-  inset: 7px;
+  inset: 6px;
   border-radius: 15px;
   background: radial-gradient(circle at 50% 12%, var(--dock-accent-glow), transparent 68%);
   opacity: 0.9;
@@ -244,7 +250,7 @@ function resolveIcon (app: RunningApp) {
 
 .dock-tooltip {
   position: absolute;
-  left: calc(100% + 12px);
+  left: calc(100% + 10px);
   top: 50%;
   transform: translateY(-50%) translateX(-4px);
   background: var(--app-panel-strong);
@@ -270,8 +276,8 @@ function resolveIcon (app: RunningApp) {
 .dock-item-icon-wrap {
   position: relative;
   z-index: 1;
-  width: 28px;
-  height: 28px;
+  width: var(--dock-icon-size);
+  height: var(--dock-icon-size);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -280,15 +286,15 @@ function resolveIcon (app: RunningApp) {
 .dock-item-icon {
   position: relative;
   z-index: 1;
-  font-size: 1.5em;
+  font-size: 1.65em;
   line-height: 1;
   transition: transform 0.18s ease, filter 0.18s ease;
   filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.22));
 }
 
 .dock-item-icon-image {
-  width: 24px;
-  height: 24px;
+  width: calc(var(--dock-icon-size) - 2px);
+  height: calc(var(--dock-icon-size) - 2px);
   object-fit: contain;
   border-radius: 6px;
 }
@@ -309,13 +315,13 @@ function resolveIcon (app: RunningApp) {
 
 .dock-window-badge {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  font-size: 0.56em;
+  top: 5px;
+  right: 5px;
+  font-size: 0.58em;
   background: var(--dock-accent);
   color: var(--app-text-strong);
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   border-radius: 999px;
   display: flex;
   align-items: center;
@@ -326,10 +332,10 @@ function resolveIcon (app: RunningApp) {
 
 .dock-close-btn {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 16px;
-  height: 16px;
+  top: 5px;
+  right: 5px;
+  width: 17px;
+  height: 17px;
   padding: 0;
   border: none;
   border-radius: 999px;
@@ -358,9 +364,9 @@ function resolveIcon (app: RunningApp) {
 
 .dock-running-dot {
   position: absolute;
-  bottom: 6px;
-  width: 5px;
-  height: 5px;
+  bottom: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 999px;
   background: var(--app-success);
   box-shadow: 0 0 8px rgba(34, 197, 94, 0.36);

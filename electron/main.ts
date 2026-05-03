@@ -6,6 +6,7 @@ import { networkInterfaces } from 'node:os'
 import { AIEngine, type ProgressCallback, type ProgressEvent } from '../src/main/ai-engine/ai-engine.js'
 import { USER_ABORT_MESSAGE } from '../src/main/ai-engine/abort-utils.js'
 import { ProjectFS } from '../src/main/project-fs/project-fs.js'
+import { ProjectPackageService, PROJECT_PACKAGE_EXTENSION } from '../src/main/project-fs/project-package-service.js'
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
 import { BuilderService } from '../src/main/project-runtime/builder-service.js'
 import { AppGateway } from '../src/main/project-runtime/app-gateway.js'
@@ -41,7 +42,7 @@ import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_
 import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.js'
 import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
 import { ScheduledTaskService } from '../src/main/scheduler/scheduled-task-service.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupParticipant, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP_DISPLAY_NAME = 'The World'
@@ -79,6 +80,7 @@ let processManagerService: ProcessManagerService | null = null
 let systemService: SystemService | null = null
 let apiClient: ProjectApiClient | null = null
 let dataAccess: ProjectDataAccess | null = null
+let projectPackageService: ProjectPackageService | null = null
 let asyncTaskManager: AsyncTaskManager | null = null
 let lanServer: LanServer | null = null
 let settingsStore: SettingsStore | null = null
@@ -163,12 +165,14 @@ interface DirectGroupReplyRoute {
   normalizedRequest: string
 }
 
-type GroupDeliberationMode = 'coordinator_only' | 'targeted' | 'discussion' | 'coordinator_decides'
+type GroupDeliberationMode = AgentGroupCollaborationMode
 
 interface ParsedGroupRouting {
   mode: GroupDeliberationMode
   selectedMemberIds: string[]
+  mentionedMemberIds: string[]
   normalizedRequest: string
+  plannerAgentId?: string
 }
 
 interface GroupRoundCoordinatorPlan {
@@ -178,8 +182,13 @@ interface GroupRoundCoordinatorPlan {
   focus: string
 }
 
+interface GroupPlannerReview {
+  memberId: string
+  review: string
+}
+
 type GroupDeliberationProgressCallback = (
-  stageOrEvent: string | ProgressEvent | { type: 'group_progress'; groupProgress: AgentGroupProgressSnapshot } | { type: 'agent_sidechat'; sidechat: AgentSidechatSession },
+  stageOrEvent: string | ProgressEvent | { type: 'group_collaboration_plan'; plan: AgentGroupCollaborationPlan } | { type: 'group_progress'; groupProgress: AgentGroupProgressSnapshot } | { type: 'agent_sidechat'; sidechat: AgentSidechatSession },
   detail?: string
 ) => void
 
@@ -737,6 +746,22 @@ function getSenderWindow (event: IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(event.sender)
 }
 
+function sanitizeProjectPackageBaseName (value: string): string {
+  const normalized = value
+    .normalize('NFKC')
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return normalized || 'the-world-app'
+}
+
+function createProjectPackageDefaultName (projectName: string, projectId: string): string {
+  const now = new Date()
+  const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+  return `${sanitizeProjectPackageBaseName(projectName || projectId)}-${stamp}.${PROJECT_PACKAGE_EXTENSION}`
+}
+
 function guessImageExtension (mimeType: string): string {
   const normalized = mimeType.toLowerCase()
   if (normalized.includes('png')) return 'png'
@@ -910,17 +935,68 @@ function normalizeMentionToken (value: string): string {
     .toLowerCase()
 }
 
-function extractMentionTokens (value: string): string[] {
-  const matches = value.match(/@([^\s@]+)/g) || []
-  return matches.map(token => normalizeMentionToken(token))
+function resolveKnownMentionMatch (candidate: string, normalizedKnownMentions: string[]): { token: string; endOffset: number } | null {
+  for (const token of normalizedKnownMentions) {
+    for (let endOffset = 1; endOffset <= candidate.length; endOffset++) {
+      if (normalizeMentionToken(candidate.slice(0, endOffset)) === token) {
+        return { token, endOffset }
+      }
+    }
+  }
+
+  return null
 }
 
-function stripKnownMentions (value: string, knownMentions: Set<string>): string {
-  return value
-    .replace(/@([^\s@]+)/g, (match) => {
-      const normalized = normalizeMentionToken(match)
-      return knownMentions.has(normalized) ? ' ' : match
+function collectKnownMentionMatches (value: string, knownMentions: Iterable<string>): Array<{ start: number; end: number; token: string }> {
+  const normalizedKnownMentions = Array.from(new Set(Array.from(knownMentions)
+    .map(token => normalizeMentionToken(token))
+    .filter(Boolean)))
+    .sort((left, right) => right.length - left.length)
+
+  if (normalizedKnownMentions.length === 0) return []
+
+  const matches: Array<{ start: number; end: number; token: string }> = []
+
+  for (let index = 0; index < value.length; index++) {
+    if (value[index] !== '@') continue
+
+    const nextAt = value.indexOf('@', index + 1)
+    const candidateEnd = nextAt >= 0 ? nextAt : value.length
+    const candidate = value.slice(index + 1, candidateEnd)
+    const resolved = resolveKnownMentionMatch(candidate, normalizedKnownMentions)
+    if (!resolved) continue
+
+    let end = index + 1 + resolved.endOffset
+    while (end < value.length && /[\s【】\[\]（）(){}<>《》「」『』"'“”‘’`~!?,.:;，。！？、：；]/.test(value[end])) {
+      end++
+    }
+
+    matches.push({
+      start: index,
+      end,
+      token: resolved.token
     })
+
+    index = Math.max(index, end - 1)
+  }
+
+  return matches
+}
+
+function extractMentionTokens (value: string, knownMentions: Iterable<string>): string[] {
+  return collectKnownMentionMatches(value, knownMentions).map(match => match.token)
+}
+
+function stripKnownMentions (value: string, knownMentions: Iterable<string>): string {
+  const matches = collectKnownMentionMatches(value, knownMentions)
+  if (matches.length === 0) return value.trim()
+
+  let result = value
+  for (const match of [...matches].reverse()) {
+    result = `${result.slice(0, match.start)} ${result.slice(match.end)}`
+  }
+
+  return result
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n[ \t]+/g, '\n')
     .replace(/[ \t]+\n/g, '\n')
@@ -956,11 +1032,12 @@ function parseGroupRoundCoordinatorPlan (input: {
   candidateIds: string[]
   fallbackMemberIds: string[]
   fallbackRequest: string
+  fallbackShouldContinue: boolean
 }): GroupRoundCoordinatorPlan {
   const fallbackSelection = sanitizeGroupMemberSelection(input.candidateIds, input.fallbackMemberIds)
   const fallbackPlan: GroupRoundCoordinatorPlan = {
-    shouldContinue: fallbackSelection.length > 0,
-    selectedMemberIds: fallbackSelection,
+    shouldContinue: input.fallbackShouldContinue && fallbackSelection.length > 0,
+    selectedMemberIds: input.fallbackShouldContinue ? fallbackSelection : [],
     request: truncateSectionText(input.fallbackRequest, 600),
     focus: ''
   }
@@ -995,15 +1072,17 @@ function parseGroupRoundCoordinatorPlan (input: {
 
 function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: string): ParsedGroupRouting {
   const workerMemberIds = Array.from(new Set(group.memberAgentIds.filter(memberId => memberId && memberId !== group.coordinatorAgentId)))
+  const coordinator = group.coordinatorAgentId ? agentStore?.get(group.coordinatorAgentId) || null : null
   if (workerMemberIds.length === 0) {
     return {
       mode: 'coordinator_only',
       selectedMemberIds: [],
-      normalizedRequest: latestUserMessage.trim()
+      mentionedMemberIds: [],
+      normalizedRequest: latestUserMessage.trim(),
+      plannerAgentId: group.coordinatorAgentId
     }
   }
 
-  const mentionTokens = extractMentionTokens(latestUserMessage)
   const knownMentions = new Set<string>([
     '主agent',
     '主协调',
@@ -1017,6 +1096,13 @@ function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: stri
     '全部agent',
     '所有agent'
   ])
+  const coordinatorTokens = [
+    normalizeMentionToken(group.coordinatorAgentId),
+    normalizeMentionToken(coordinator?.name || '')
+  ].filter(Boolean)
+  for (const token of coordinatorTokens) {
+    knownMentions.add(token)
+  }
   const memberMentions = new Map<string, string>()
   for (const memberId of workerMemberIds) {
     const agent = agentStore?.get(memberId)
@@ -1030,9 +1116,10 @@ function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: stri
     }
   }
 
+  const mentionTokens = extractMentionTokens(latestUserMessage, knownMentions)
   const normalizedRequest = stripKnownMentions(latestUserMessage, knownMentions) || latestUserMessage.trim()
   const coordinatorOnlyRequested = mentionTokens.some(token => {
-    return token === '主agent' || token === '主协调' || token === '协调agent' || token === 'coordinator' || token === 'mainagent'
+    return token === '主agent' || token === '主协调' || token === '协调agent' || token === 'coordinator' || token === 'mainagent' || coordinatorTokens.includes(token)
   })
   const fullGroupRequested = mentionTokens.some(token => {
     return token === 'all' || token === 'everyone' || token === '全组' || token === '全员' || token === '全部agent' || token === '所有agent'
@@ -1043,23 +1130,9 @@ function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: stri
     return {
       mode: 'discussion',
       selectedMemberIds: workerMemberIds,
-      normalizedRequest
-    }
-  }
-
-  if (selectedMemberIds.length === 1) {
-    return {
-      mode: 'targeted',
-      selectedMemberIds,
-      normalizedRequest
-    }
-  }
-
-  if (selectedMemberIds.length > 1) {
-    return {
-      mode: 'discussion',
-      selectedMemberIds,
-      normalizedRequest
+      mentionedMemberIds: selectedMemberIds,
+      normalizedRequest,
+      plannerAgentId: group.coordinatorAgentId
     }
   }
 
@@ -1067,27 +1140,53 @@ function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: stri
     return {
       mode: 'coordinator_decides',
       selectedMemberIds: workerMemberIds,
-      normalizedRequest
+      mentionedMemberIds: selectedMemberIds,
+      normalizedRequest,
+      plannerAgentId: group.coordinatorAgentId
+    }
+  }
+
+  if (selectedMemberIds.length === 1) {
+    const plannerAgentId = selectedMemberIds[0]
+    return {
+      mode: 'targeted',
+      selectedMemberIds,
+      mentionedMemberIds: selectedMemberIds,
+      normalizedRequest,
+      plannerAgentId
+    }
+  }
+
+  if (selectedMemberIds.length > 1) {
+    return {
+      mode: 'discussion',
+      selectedMemberIds,
+      mentionedMemberIds: selectedMemberIds,
+      normalizedRequest,
+      plannerAgentId: group.coordinatorAgentId
     }
   }
 
   return {
     mode: 'discussion',
     selectedMemberIds: workerMemberIds,
-    normalizedRequest
+    mentionedMemberIds: [],
+    normalizedRequest,
+    plannerAgentId: group.coordinatorAgentId
   }
 }
 
 function resolveDirectGroupReplyRoute (
   group: AgentGroupDefinition | null,
-  messages: Array<{ role: string; content: MessageContent }>
+  messages: Array<{ role: string; content: MessageContent }>,
+  routingOverride?: ParsedGroupRouting | null
 ): DirectGroupReplyRoute | null {
   if (!group) return null
 
   const latestUserMessage = getLastUserMessageText(messages)
   if (!latestUserMessage.trim()) return null
 
-  const routing = parseGroupRouting(group, latestUserMessage)
+  const routing = routingOverride || parseGroupRouting(group, latestUserMessage)
   if (routing.mode !== 'targeted' || routing.selectedMemberIds.length !== 1) {
     return null
   }
@@ -1102,9 +1201,31 @@ function buildDirectGroupReplyPromptSection (route: DirectGroupReplyRoute): stri
   return [
     '## Direct group mention routing',
     '- The user explicitly mentioned you inside the selected agent group.',
+    '- The active agent section defines who you are. Do not claim to be the group coordinator unless the active agent and the coordinator are the same agent.',
     '- Reply directly to the user as yourself.',
     '- Do not relay through the coordinator and do not describe any internal group discussion unless asked.',
     `- Cleaned user request: ${truncateSectionText(route.normalizedRequest, 600)}`
+  ].join('\n')
+}
+
+function buildGroupMemberRoleSection (input: {
+  memberName: string
+  coordinatorName: string
+  reportToName: string
+  initiatedByName: string
+  isDiscussionMode: boolean
+}): string {
+  return [
+    '## Current role in this group turn',
+    `- You are: ${input.memberName}`,
+    `- Group coordinator: ${input.coordinatorName}`,
+    `- This request was initiated by: ${input.initiatedByName}`,
+    `- Report your work to: ${input.reportToName}`,
+    '- You are not the coordinator unless your own identity exactly matches the coordinator above.',
+    '- Do not speak as the coordinator, do not say you are leading the whole group, and do not present other agents\' work as your own.',
+    input.isDiscussionMode
+      ? '- Produce only your own internal contribution for the coordinator to review and synthesize.'
+      : '- Produce only your own supporting result for the coordinator unless a direct-user reply is explicitly requested elsewhere.'
   ].join('\n')
 }
 
@@ -1173,7 +1294,7 @@ function buildGroupTranscriptSummary (
     ? firstNonEmptyLine(entries[entries.length - 1].content)
     : ''
   const lines = [
-    mode === 'discussion' || mode === 'coordinator_decides'
+    mode === 'discussion' || mode === 'coordinator_decides' || mode === 'mentioned_agent_decides'
       ? `群组 ${group.name} 完成了 ${Math.max(...entries.map(entry => entry.round), 0)} 轮协作讨论，共生成 ${entries.length} 条工作笔记。`
       : `群组 ${group.name} 完成了 ${entries.length} 条定向单聊回复。`,
     participantNames.length > 0 ? `参与 Agent：${participantNames.join('、')}。` : ''
@@ -1267,6 +1388,130 @@ function emitGroupProgressSnapshot (
   })
 }
 
+function createGroupParticipantSummary (agentId: string): AgentGroupParticipant {
+  return {
+    agentId,
+    agentName: agentStore?.get(agentId)?.name || agentId
+  }
+}
+
+function createGroupParticipantSummaries (agentIds: string[]): AgentGroupParticipant[] {
+  return Array.from(new Set(agentIds.filter(Boolean))).map((agentId) => createGroupParticipantSummary(agentId))
+}
+
+function buildGroupCollaborationPlanReason (input: {
+  phase: AgentGroupCollaborationPlan['phase']
+  mode: GroupDeliberationMode
+  plannerName: string
+  reportToName: string
+  mentionedParticipants: AgentGroupParticipant[]
+  invitedParticipants: AgentGroupParticipant[]
+  round?: number
+  focus?: string
+  shouldContinue?: boolean
+}): string {
+  const mentionedNames = input.mentionedParticipants.map(participant => participant.agentName)
+  const invitedNames = input.invitedParticipants.map(participant => participant.agentName)
+  const invitedSummary = invitedNames.join('、')
+
+  if (input.phase === 'planning') {
+    if (input.mode === 'coordinator_only') {
+      return `${input.plannerName} 将直接处理这次请求，因为当前群组没有其他可协作成员。`
+    }
+    if (input.mode === 'mentioned_agent_decides') {
+      return `${input.plannerName} 被用户单独点名，先由其判断能否独立完成；如需补充信息，再由其决定是否邀请其他成员协作。`
+    }
+    if (input.mode === 'coordinator_decides') {
+      return `${input.plannerName} 被用户点名为协调者，先由其判断是否需要拉群，再决定协作范围。`
+    }
+    if (input.mode === 'discussion' && mentionedNames.length > 0) {
+      return `这次会按用户点名的范围发起协作，当前优先涉及：${mentionedNames.join('、')}。`
+    }
+    return '用户没有点名具体成员，当前按群组默认协作模式准备讨论。'
+  }
+
+  if (input.phase === 'executing') {
+    if (!input.shouldContinue || invitedNames.length === 0) {
+      return `${input.plannerName} 判断当前无需再扩群，准备由 ${input.reportToName} 直接整理回复。`
+    }
+    const focusSuffix = input.focus ? ` 聚焦点：${truncateSectionText(input.focus, 180)}` : ''
+    if (input.mode === 'mentioned_agent_decides') {
+      return `${input.plannerName} 判断需要补充协作，已邀请 ${invitedSummary} 加入。${focusSuffix}`.trim()
+    }
+    return `${input.plannerName} 在第 ${input.round || 1} 轮邀请 ${invitedSummary} 协作。${focusSuffix}`.trim()
+  }
+
+  if (invitedNames.length > 0) {
+    return `内部协作已结束，${input.reportToName} 正在汇总 ${invitedSummary} 的结果并整理最终回复。`
+  }
+  return `${input.reportToName} 未继续扩群，准备直接整理最终回复。`
+}
+
+function createGroupCollaborationPlan (input: {
+  group: AgentGroupDefinition
+  routing: ParsedGroupRouting
+  plannerName: string
+  reportToName: string
+  originalRequest: string
+  phase: AgentGroupCollaborationPlan['phase']
+  candidateMemberIds: string[]
+  invitedMemberIds: string[]
+  round?: number
+  focus?: string
+  shouldContinue?: boolean
+}): AgentGroupCollaborationPlan {
+  const plannerId = input.routing.plannerAgentId || input.group.coordinatorAgentId
+  const mentionedParticipants = createGroupParticipantSummaries(input.routing.mentionedMemberIds)
+  const invitedParticipants = createGroupParticipantSummaries(input.invitedMemberIds)
+
+  return {
+    groupId: input.group.id,
+    groupName: input.group.name,
+    mode: input.routing.mode,
+    phase: input.phase,
+    planner: createGroupParticipantSummary(plannerId),
+    reportToName: input.reportToName,
+    originalRequest: input.originalRequest,
+    normalizedRequest: input.routing.normalizedRequest || input.originalRequest,
+    reason: buildGroupCollaborationPlanReason({
+      phase: input.phase,
+      mode: input.routing.mode,
+      plannerName: input.plannerName,
+      reportToName: input.reportToName,
+      mentionedParticipants,
+      invitedParticipants,
+      round: input.round,
+      focus: input.focus,
+      shouldContinue: input.shouldContinue
+    }),
+    round: input.round,
+    mentionedParticipants,
+    candidateParticipants: createGroupParticipantSummaries(input.candidateMemberIds),
+    invitedParticipants,
+    updatedAt: new Date().toISOString()
+  }
+}
+
+function cloneGroupCollaborationPlan (plan: AgentGroupCollaborationPlan): AgentGroupCollaborationPlan {
+  return {
+    ...plan,
+    planner: { ...plan.planner },
+    mentionedParticipants: plan.mentionedParticipants.map(participant => ({ ...participant })),
+    candidateParticipants: plan.candidateParticipants.map(participant => ({ ...participant })),
+    invitedParticipants: plan.invitedParticipants.map(participant => ({ ...participant }))
+  }
+}
+
+function emitGroupCollaborationPlan (
+  onProgress: GroupDeliberationProgressCallback | undefined,
+  plan: AgentGroupCollaborationPlan
+): void {
+  onProgress?.({
+    type: 'group_collaboration_plan',
+    plan: cloneGroupCollaborationPlan(plan)
+  })
+}
+
 function chunkStringArray (values: string[], chunkSize: number): string[][] {
   const chunks: string[][] = []
   const size = Math.max(1, chunkSize)
@@ -1283,61 +1528,92 @@ function summarizeGroupNote (value: string): string {
 
 async function buildGroupRoundCoordinatorPlan (input: {
   runtimeAiEngine: AIEngine
-  coordinator: AgentDefinition | null
+  planner: AgentDefinition | null
   group: AgentGroupDefinition
   messages: Array<{ role: string; content: MessageContent }>
   channelBinding?: ChannelBinding | null
   targetProjectId?: string | null
   fallbackReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
   candidateMemberIds: string[]
-  priorNotes: string[]
+  priorNotes: GroupPlannerReview[]
   latestUserMessage: string
   normalizedRequest: string
+  mentionedMemberIds: string[]
   round: number
   totalRounds: number
-  selectionSource: 'explicit_mentions' | 'coordinator_decides'
+  selectionSource: 'explicit_mentions' | 'coordinator_decides' | 'mentioned_agent_decides' | 'default_group_discussion'
 }): Promise<GroupRoundCoordinatorPlan> {
   const fallbackRequest = truncateSectionText(input.normalizedRequest || input.latestUserMessage, 600)
-  const fallbackMemberIds = input.candidateMemberIds
-  if (!input.coordinator || input.candidateMemberIds.length === 0) {
+  const fallbackMemberIds = input.selectionSource === 'mentioned_agent_decides'
+    ? []
+    : input.candidateMemberIds
+  const reviewedCandidateIds = new Set(input.priorNotes.map(review => review.memberId))
+  const fallbackShouldContinue = fallbackMemberIds.some(memberId => !reviewedCandidateIds.has(memberId))
+  if (!input.planner || input.candidateMemberIds.length === 0) {
     return {
-      shouldContinue: fallbackMemberIds.length > 0,
-      selectedMemberIds: fallbackMemberIds,
+      shouldContinue: fallbackShouldContinue,
+      selectedMemberIds: fallbackShouldContinue ? fallbackMemberIds : [],
       request: fallbackRequest,
       focus: ''
     }
   }
 
-  const coordinatorMemory = memoryEngine?.buildPromptContext({
-    agent: input.coordinator,
+  const plannerMemory = memoryEngine?.buildPromptContext({
+    agent: input.planner,
     group: input.group,
     channelBinding: input.channelBinding,
     userMessage: input.latestUserMessage,
     targetProjectId: input.targetProjectId,
     userId: 'local-user',
-    enabledScopeTypes: input.coordinator.memoryScopes
+    enabledScopeTypes: input.planner.memoryScopes
   })
   const candidateLines = input.candidateMemberIds.map((memberId) => {
     const member = agentStore?.get(memberId)
     return `- ${member?.name || memberId} (${memberId})`
   }).join('\n')
-  const priorNotesSection = input.priorNotes.length > 0
-    ? `## Prior round notes\n${truncateSectionText(input.priorNotes.slice(-8).join('\n\n'), 4000)}`
-    : '## Prior round notes\n- No prior round notes yet.'
+  const mentionedLines = input.mentionedMemberIds.map((memberId) => {
+    const member = agentStore?.get(memberId)
+    return `- ${member?.name || memberId} (${memberId})`
+  }).join('\n')
+  const latestPriorReviews = input.candidateMemberIds.map((memberId) => {
+    const member = agentStore?.get(memberId)
+    const latestReview = [...input.priorNotes].reverse().find(review => review.memberId === memberId)
+    if (latestReview) {
+      return latestReview.review
+    }
+    return [
+      `### Latest review · ${member?.name || memberId} (${memberId})`,
+      'No returned note yet.'
+    ].join('\n')
+  })
+  const priorNotesSection = latestPriorReviews.length > 0
+    ? `## Latest candidate assignment reviews\n${truncateSectionText(latestPriorReviews.join('\n\n'), 6000)}`
+    : '## Latest candidate assignment reviews\n- No prior round reviews yet.'
   const planningPrompt = [
-    '## Internal discussion coordinator instructions',
+    '## Internal discussion planner instructions',
     '- Decide whether another internal discussion round is needed.',
     '- Choose only the members that should contribute in this round.',
+    '- If a member\'s existing note no longer needs modification, do not select them again; omitted members with completed work will be treated as finished.',
+    '- Compare each candidate member\'s latest returned note against the user request and the most recent assigned brief/focus recorded below.',
+    '- The review section below already gives you the latest known review for each current candidate member. Base your decision on those latest reviews instead of continuing by default.',
+    '- If a candidate\'s latest note already satisfies the assigned task and the user request for that slice, omit them so their work stops here.',
+    '- Only continue a member into another round when you can name concrete defects, missing evidence, unanswered requirements, or requested revisions.',
     '- Write a clearer round brief that reflects the user request plus gaps, defects, contradictions, or missing evidence from prior notes.',
     '- Do not repeat the original request verbatim when a sharper follow-up is possible.',
     input.selectionSource === 'explicit_mentions'
       ? '- The user explicitly selected the candidate members below; you must only choose from that list.'
-      : '- The coordinator may choose whichever candidate members are most useful for this round.',
+      : input.selectionSource === 'mentioned_agent_decides'
+        ? '- You were explicitly mentioned inside the group. First decide whether you can complete the task yourself. Only if you need help should you choose some or all teammates from the candidate list below.'
+        : input.selectionSource === 'default_group_discussion'
+          ? '- The user did not specify exact members, so you may choose from the default candidate list below based on who is most useful.'
+        : '- The coordinator may choose whichever candidate members are most useful for this round.',
     '- If no member input is needed, return shouldContinue=false and an empty memberIds array.',
     '- Respond with strict JSON only. Plain JSON is preferred; fenced JSON is tolerated as a fallback.',
     '',
     `Round: ${input.round}/${input.totalRounds}`,
     `User request: ${fallbackRequest}`,
+    input.mentionedMemberIds.length > 0 ? 'Explicitly mentioned members:' : '',
+    input.mentionedMemberIds.length > 0 ? mentionedLines : '',
     'Candidate members:',
     candidateLines || '- None',
     priorNotesSection,
@@ -1350,15 +1626,15 @@ async function buildGroupRoundCoordinatorPlan (input: {
     const response = await input.runtimeAiEngine.chat(input.messages, {
       targetProjectId: input.targetProjectId ?? null,
       providerConfig: resolveProviderConfig(
-        input.coordinator.providerId,
-        input.coordinator.modelId,
-        input.coordinator.reasoningStrength || input.fallbackReasoningStrength || 'medium'
+        input.planner.providerId,
+        input.planner.modelId,
+        input.planner.reasoningStrength || input.fallbackReasoningStrength || 'medium'
       ),
-      activeSkillContents: resolveSkillContentsByIds(input.coordinator.skillIds),
+      activeSkillContents: resolveSkillContentsByIds(input.planner.skillIds),
       systemPromptSections: [
-        buildActiveAgentSection(input.coordinator),
+        buildActiveAgentSection(input.planner),
         buildActiveGroupSection(input.group),
-        ...(coordinatorMemory?.sections || []),
+        ...(plannerMemory?.sections || []),
         planningPrompt
       ],
       deniedToolNames: input.runtimeAiEngine.getAvailableTools().map(tool => tool.name)
@@ -1367,12 +1643,13 @@ async function buildGroupRoundCoordinatorPlan (input: {
       rawText: getMessageText(response.content),
       candidateIds: input.candidateMemberIds,
       fallbackMemberIds,
-      fallbackRequest
+      fallbackRequest,
+      fallbackShouldContinue
     })
   } catch {
     return {
-      shouldContinue: fallbackMemberIds.length > 0,
-      selectedMemberIds: fallbackMemberIds,
+      shouldContinue: fallbackShouldContinue,
+      selectedMemberIds: fallbackShouldContinue ? fallbackMemberIds : [],
       request: fallbackRequest,
       focus: ''
     }
@@ -1382,6 +1659,7 @@ async function buildGroupRoundCoordinatorPlan (input: {
 async function buildGroupDeliberationSection (input: {
   messages: Array<{ role: string; content: MessageContent }>
   group: AgentGroupDefinition
+  routing?: ParsedGroupRouting
   channelBinding?: ChannelBinding | null
   targetProjectId?: string | null
   fallbackReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
@@ -1396,28 +1674,61 @@ async function buildGroupDeliberationSection (input: {
 
   const allToolNames = runtimeAiEngine.getAvailableTools().map(tool => tool.name)
   const latestUserMessage = getLastUserMessageText(input.messages)
+  const routing = input.routing || parseGroupRouting(input.group, latestUserMessage)
   const coordinator = runtimeAgentStore.get(input.group.coordinatorAgentId)
-  const workerMemberIds = Array.from(new Set(input.group.memberAgentIds.filter(memberId => memberId && memberId !== input.group.coordinatorAgentId)))
-  const routing = parseGroupRouting(input.group, latestUserMessage)
-  const isDiscussionMode = routing.mode === 'discussion' || routing.mode === 'coordinator_decides'
-  const memberIds = isDiscussionMode
-    ? (routing.selectedMemberIds.length > 0 ? routing.selectedMemberIds : workerMemberIds)
-    : routing.selectedMemberIds
+  const planner = routing.mode === 'mentioned_agent_decides' && routing.plannerAgentId
+    ? runtimeAgentStore.get(routing.plannerAgentId)
+    : coordinator
+  const isDiscussionMode = routing.mode === 'discussion' || routing.mode === 'coordinator_decides' || routing.mode === 'mentioned_agent_decides'
+  const memberIds = routing.selectedMemberIds
   const totalRounds = isDiscussionMode ? input.group.maxRounds : 1
-  if (memberIds.length === 0 || routing.mode === 'coordinator_only') {
-    return { promptSection: null, transcript: null }
-  }
-
-  const notes: string[] = []
-  const entries: AgentGroupTranscript['entries'] = []
-  const coordinatorName = coordinator?.name || '主 Agent'
-  const initiatorName = routing.mode === 'targeted' ? '用户' : coordinatorName
+  const plannerName = planner?.name || coordinator?.name || '主 Agent'
+  const coordinatorName = coordinator?.name || plannerName
+  const reportToName = routing.mode === 'mentioned_agent_decides' ? plannerName : coordinatorName
+  const initiatorName = routing.mode === 'targeted' ? '用户' : reportToName
   const sidechatMode: AgentSidechatSession['mode'] = isDiscussionMode
     ? 'group_deliberation'
     : 'user_targeted'
   const discussionRequest = truncateSectionText(routing.normalizedRequest || latestUserMessage, 600)
   const snapshot = createGroupProgressSnapshot(input.group, memberIds, discussionRequest, totalRounds)
-  const discussionSelectionSource = routing.mode === 'discussion' ? 'explicit_mentions' : 'coordinator_decides'
+  const discussionSelectionSource = routing.mode === 'discussion'
+    ? (routing.mentionedMemberIds.length > 0 ? 'explicit_mentions' : 'default_group_discussion')
+    : routing.mode === 'mentioned_agent_decides'
+      ? 'mentioned_agent_decides'
+      : 'coordinator_decides'
+  const originalRequest = latestUserMessage.trim()
+  const initialInvitedMemberIds = routing.mode === 'discussion' ? memberIds : []
+  let latestInvitedMemberIds = [...initialInvitedMemberIds]
+
+  emitGroupCollaborationPlan(input.onProgress, createGroupCollaborationPlan({
+    group: input.group,
+    routing,
+    plannerName,
+    reportToName,
+    originalRequest,
+    phase: 'planning',
+    candidateMemberIds: memberIds,
+    invitedMemberIds: initialInvitedMemberIds
+  }))
+
+  if (memberIds.length === 0 || routing.mode === 'coordinator_only') {
+    emitGroupCollaborationPlan(input.onProgress, createGroupCollaborationPlan({
+      group: input.group,
+      routing,
+      plannerName,
+      reportToName,
+      originalRequest,
+      phase: 'completed',
+      candidateMemberIds: memberIds,
+      invitedMemberIds: [],
+      shouldContinue: false
+    }))
+    return { promptSection: null, transcript: null }
+  }
+
+  const notes: string[] = []
+  const plannerNotes: GroupPlannerReview[] = []
+  const entries: AgentGroupTranscript['entries'] = []
 
   emitGroupProgressSnapshot(input.onProgress, snapshot)
 
@@ -1426,7 +1737,7 @@ async function buildGroupDeliberationSection (input: {
     const candidateMemberIds = memberIds.filter(memberId => {
       const item = getGroupProgressItem(snapshot, memberId)
       if (!item) return false
-      return item.status !== 'failed' && item.completedRounds < totalRounds
+      return item.status !== 'failed' && item.status !== 'completed'
     })
 
     if (candidateMemberIds.length === 0) {
@@ -1436,16 +1747,17 @@ async function buildGroupDeliberationSection (input: {
     const roundPlan = isDiscussionMode
       ? await buildGroupRoundCoordinatorPlan({
           runtimeAiEngine,
-          coordinator,
+          planner,
           group: input.group,
           messages: input.messages,
           channelBinding: input.channelBinding,
           targetProjectId: input.targetProjectId,
           fallbackReasoningStrength: input.fallbackReasoningStrength,
           candidateMemberIds,
-          priorNotes: notes,
+          priorNotes: plannerNotes,
           latestUserMessage,
           normalizedRequest: discussionRequest,
+          mentionedMemberIds: routing.mentionedMemberIds,
           round,
           totalRounds,
           selectionSource: discussionSelectionSource
@@ -1457,6 +1769,21 @@ async function buildGroupDeliberationSection (input: {
           focus: ''
         }
     const roundMemberIds = roundPlan.selectedMemberIds.filter(memberId => candidateMemberIds.includes(memberId))
+    latestInvitedMemberIds = [...roundMemberIds]
+
+    emitGroupCollaborationPlan(input.onProgress, createGroupCollaborationPlan({
+      group: input.group,
+      routing,
+      plannerName,
+      reportToName,
+      originalRequest,
+      phase: 'executing',
+      candidateMemberIds,
+      invitedMemberIds: roundMemberIds,
+      round,
+      focus: roundPlan.focus,
+      shouldContinue: roundPlan.shouldContinue
+    }))
 
     if (isDiscussionMode) {
       for (const memberId of candidateMemberIds) {
@@ -1464,10 +1791,14 @@ async function buildGroupDeliberationSection (input: {
         const item = getGroupProgressItem(snapshot, memberId)
         if (!item || item.status === 'failed') continue
         item.currentRound = round
-        item.status = 'queued'
-        item.stage = '等待下一轮'
-        item.detail = roundPlan.shouldContinue ? '本轮未被选中' : '协调结束讨论'
+        const canFinishWithoutMoreChanges = roundPlan.shouldContinue && item.completedRounds > 0
+        item.status = canFinishWithoutMoreChanges ? 'completed' : 'queued'
+        item.stage = canFinishWithoutMoreChanges ? '已完成' : '等待下一轮'
+        item.detail = canFinishWithoutMoreChanges
+          ? '主协调判断无需继续修改'
+          : (roundPlan.shouldContinue ? '本轮未被选中' : '协调结束讨论')
         item.updatedAt = new Date().toISOString()
+        appendGroupProgressStep(item, canFinishWithoutMoreChanges ? '完成' : '等待', item.detail)
       }
       emitGroupProgressSnapshot(input.onProgress, snapshot)
     }
@@ -1538,7 +1869,7 @@ async function buildGroupDeliberationSection (input: {
           agentName: member.name,
           mode: sidechatMode,
           initiatedByName: initiatorName,
-          reportToName: coordinatorName,
+          reportToName,
           request: isDiscussionMode ? roundPlan.request : (routing.normalizedRequest || latestUserMessage),
           round
         })
@@ -1574,9 +1905,16 @@ async function buildGroupDeliberationSection (input: {
             systemPromptSections: [
               buildActiveAgentSection(member),
               buildActiveGroupSection(input.group),
+              buildGroupMemberRoleSection({
+                memberName: member.name,
+                coordinatorName,
+                reportToName,
+                initiatedByName: initiatorName,
+                isDiscussionMode
+              }),
               isDiscussionMode
-                ? '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Use the refined round brief below, plus prior notes, to deepen or correct the group result.\n- Focus on your unique contribution, defects to fix, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- Do not use any tools in this internal round.'
-                : '## Targeted sidechat instructions\n- The user explicitly routed this turn to you inside the selected agent group.\n- Reply for the coordinator, not directly for the end user.\n- Focus on the assigned topic only and provide a concise actionable result.\n- If you use tools, keep the final answer short and grounded in what you observed.',
+                ? '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Do not claim to be the coordinator.\n- Use the refined round brief below, plus prior notes, to deepen or correct the group result.\n- Focus on your unique contribution, defects to fix, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- Do not use any tools in this internal round.'
+                : '## Targeted sidechat instructions\n- The user explicitly routed this turn to you inside the selected agent group.\n- Provide supporting material for the coordinator, not a coordinator-style response.\n- Do not address the end user directly unless another prompt section explicitly asks for a direct reply.\n- Focus on the assigned topic only and provide a concise actionable result.\n- If you use tools, keep the final answer short and grounded in what you observed.',
               roundBriefSection,
               ...(memberMemory?.sections || []),
               ...(priorNotesSection ? [priorNotesSection] : [])
@@ -1643,6 +1981,18 @@ async function buildGroupDeliberationSection (input: {
         if (item.status === 'failed') {
           if (result.error) {
             notes.push(`### Round ${round} · ${result.member?.name || item.agentName}\n失败：${truncateSectionText(result.error, 300)}`)
+            plannerNotes.push({
+              memberId: result.memberId,
+              review: [
+              `### Latest review · ${result.member?.name || item.agentName} (${result.memberId})`,
+              `Round: ${round}/${totalRounds}`,
+              `Assigned brief: ${roundPlan.request}`,
+              roundPlan.focus ? `Assigned focus: ${roundPlan.focus}` : '',
+              `User request alignment target: ${discussionRequest}`,
+              `Result: failed`,
+              `Failure detail: ${truncateSectionText(result.error, 300)}`
+            ].filter(Boolean).join('\n')
+            })
           }
           continue
         }
@@ -1660,8 +2010,31 @@ async function buildGroupDeliberationSection (input: {
             content: result.noteDisplayText || result.noteText
           })
           notes.push(`### Round ${round} · ${result.member?.name || item.agentName}\n${result.noteText}`)
+          plannerNotes.push({
+            memberId: result.memberId,
+            review: [
+            `### Latest review · ${result.member?.name || item.agentName} (${result.memberId})`,
+            `Round: ${round}/${totalRounds}`,
+            `Assigned brief: ${roundPlan.request}`,
+            roundPlan.focus ? `Assigned focus: ${roundPlan.focus}` : '',
+            `User request alignment target: ${discussionRequest}`,
+            'Returned note excerpt:',
+            truncateSectionText(result.noteText, 1200)
+          ].filter(Boolean).join('\n')
+          })
           item.summary = summarizeGroupNote(result.noteText)
         } else {
+          plannerNotes.push({
+            memberId: result.memberId,
+            review: [
+            `### Latest review · ${result.member?.name || item.agentName} (${result.memberId})`,
+            `Round: ${round}/${totalRounds}`,
+            `Assigned brief: ${roundPlan.request}`,
+            roundPlan.focus ? `Assigned focus: ${roundPlan.focus}` : '',
+            `User request alignment target: ${discussionRequest}`,
+            'Returned note: (empty)'
+          ].filter(Boolean).join('\n')
+          })
           item.summary = undefined
         }
 
@@ -1687,6 +2060,18 @@ async function buildGroupDeliberationSection (input: {
   }
 
   emitGroupProgressSnapshot(input.onProgress, snapshot)
+  emitGroupCollaborationPlan(input.onProgress, createGroupCollaborationPlan({
+    group: input.group,
+    routing,
+    plannerName,
+    reportToName,
+    originalRequest,
+    phase: 'completed',
+    candidateMemberIds: memberIds,
+    invitedMemberIds: latestInvitedMemberIds,
+    round: snapshot.activeRound || undefined,
+    shouldContinue: false
+  }))
 
   if (notes.length === 0) {
     return { promptSection: null, transcript: null }
@@ -1834,6 +2219,7 @@ async function initializeServices (): Promise<void> {
   builderService.setRuntimeManager(runtimeManager)
   apiClient = new ProjectApiClient(runtimeManager)
   dataAccess = new ProjectDataAccess(projectsDir)
+  projectPackageService = new ProjectPackageService(projectFS, dataAccess)
   asyncTaskManager = new AsyncTaskManager(builderService)
 
   // Wire up the external database delegate.
@@ -2002,11 +2388,17 @@ function setupIPC (): void {
       requestedTargetProjectId: targetProjectId,
       requestedReasoningStrength: reasoningStrength
     })
-    const directGroupReply = resolveDirectGroupReplyRoute(baseRuntimeContext.group, messages)
-    const runtimeContext = directGroupReply
+    const groupRouting = baseRuntimeContext.group
+      ? parseGroupRouting(baseRuntimeContext.group, getLastUserMessageText(messages))
+      : null
+    const directGroupReply = resolveDirectGroupReplyRoute(baseRuntimeContext.group, messages, groupRouting)
+    const routedAgentId = groupRouting?.mode === 'mentioned_agent_decides'
+      ? groupRouting.plannerAgentId
+      : directGroupReply?.targetAgentId
+    const runtimeContext = routedAgentId
       ? resolveAgentRuntimeContext({
           messages,
-          agentId: directGroupReply.targetAgentId,
+          agentId: routedAgentId,
           groupId,
           channelBindingId,
           requestedProviderId: providerId,
@@ -2022,6 +2414,7 @@ function setupIPC (): void {
       ? await buildGroupDeliberationSection({
           messages,
           group: runtimeContext.group,
+          routing: groupRouting || undefined,
           channelBinding: runtimeContext.channelBinding,
           targetProjectId: runtimeContext.effectiveTargetProjectId,
           fallbackReasoningStrength: reasoningStrength
@@ -2059,11 +2452,17 @@ function setupIPC (): void {
       requestedTargetProjectId: targetProjectId,
       requestedReasoningStrength: reasoningStrength
     })
-    const directGroupReply = resolveDirectGroupReplyRoute(baseRuntimeContext.group, messages)
-    const runtimeContext = directGroupReply
+    const groupRouting = baseRuntimeContext.group
+      ? parseGroupRouting(baseRuntimeContext.group, getLastUserMessageText(messages))
+      : null
+    const directGroupReply = resolveDirectGroupReplyRoute(baseRuntimeContext.group, messages, groupRouting)
+    const routedAgentId = groupRouting?.mode === 'mentioned_agent_decides'
+      ? groupRouting.plannerAgentId
+      : directGroupReply?.targetAgentId
+    const runtimeContext = routedAgentId
       ? resolveAgentRuntimeContext({
           messages,
-          agentId: directGroupReply.targetAgentId,
+          agentId: routedAgentId,
           groupId,
           channelBindingId,
           requestedProviderId: providerId,
@@ -2242,6 +2641,7 @@ function setupIPC (): void {
       ? await buildGroupDeliberationSection({
           messages,
           group: runtimeContext.group,
+          routing: groupRouting || undefined,
           channelBinding: runtimeContext.channelBinding,
           targetProjectId: runtimeContext.effectiveTargetProjectId,
           fallbackReasoningStrength: reasoningStrength,
@@ -2731,6 +3131,92 @@ function setupIPC (): void {
     await projectFS!.deleteProject(projectId)
     broadcastToAppWindows('projects:changed', { action: 'deleted', projectId })
     return { success: true }
+  })
+
+  ipcMain.handle('projects:exportPackage', async (event: IpcMainInvokeEvent, projectId: string) => {
+    if (!projectId || typeof projectId !== 'string') {
+      throw new TypeError(`Invalid project ID: ${String(projectId)}`)
+    }
+
+    const meta = await projectFS!.getProjectMeta(projectId)
+    const senderWindow = getSenderWindow(event) || mainWindow
+    const dialogOptions = {
+      title: '导出应用包',
+      defaultPath: createProjectPackageDefaultName((meta.name as string) || projectId, projectId),
+      filters: [
+        { name: 'The World 应用包', extensions: [PROJECT_PACKAGE_EXTENSION] }
+      ]
+    }
+
+    const result = senderWindow
+      ? await dialog.showSaveDialog(senderWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
+
+    if (result.canceled || !result.filePath) {
+      return { success: false, canceled: true }
+    }
+
+    const exported = await projectPackageService!.exportPackage(projectId, result.filePath)
+    return {
+      success: true,
+      filePath: exported.filePath,
+      projectId: exported.projectId,
+      projectName: exported.projectName,
+      includedBuildArtifacts: exported.includedBuildArtifacts
+    }
+  })
+
+  ipcMain.handle('projects:importPackage', async (event: IpcMainInvokeEvent) => {
+    const senderWindow = getSenderWindow(event) || mainWindow
+    const dialogOptions = {
+      title: '导入应用包',
+      filters: [
+        { name: 'The World 应用包', extensions: [PROJECT_PACKAGE_EXTENSION] }
+      ],
+      properties: ['openFile' as const, 'multiSelections' as const]
+    }
+
+    const result = senderWindow
+      ? await dialog.showOpenDialog(senderWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions)
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true, importedProjects: [] }
+    }
+
+    const importedProjects = [] as Array<{ projectId: string; name: string; filePath: string }>
+    for (const filePath of result.filePaths) {
+      const imported = await projectPackageService!.importPackage(filePath)
+      importedProjects.push({
+        projectId: imported.projectId,
+        name: (imported.meta.name as string) || imported.projectId,
+        filePath: imported.filePath
+      })
+      broadcastToAppWindows('projects:changed', { action: 'imported', projectId: imported.projectId })
+    }
+
+    return {
+      success: true,
+      filePaths: result.filePaths,
+      importedProjects
+    }
+  })
+
+  ipcMain.handle('projects:importPackageFromFile', async (_event: IpcMainInvokeEvent, filePath: string) => {
+    if (!filePath || typeof filePath !== 'string') {
+      throw new TypeError(`Invalid package file path: ${String(filePath)}`)
+    }
+
+    const imported = await projectPackageService!.importPackage(filePath)
+    broadcastToAppWindows('projects:changed', { action: 'imported', projectId: imported.projectId })
+    return {
+      success: true,
+      filePath: imported.filePath,
+      importedProject: {
+        projectId: imported.projectId,
+        name: (imported.meta.name as string) || imported.projectId
+      }
+    }
   })
 
   // Runtime management

@@ -129,13 +129,15 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
 - Keep layouts responsive and avoid page-level horizontal scrolling or unnecessary full-page vertical scrolling.
 
 ## Parallel task execution with subagents
-When a task can be decomposed into independent subtasks, use the \`spawn_subagents\` tool to run them in parallel and reduce total execution time:
-- Call \`spawn_subagents\` with a \`tasks\` array — each task gets its own isolated agent running concurrently.
+When a task can be decomposed into independent subtasks, use the \`spawn_subagents\` tool to run them in parallel and reduce total execution time. If a model emits the legacy name \`spawn_subagentstasks\`, treat it as the same tool:
+- Call \`spawn_subagents\` or \`spawn_subagentstasks\` with a \`tasks\` array — each task gets its own isolated agent running concurrently.
 - The tool blocks until ALL subagents finish, then returns every result for you to reason over and synthesize.
+- After the tool returns, inspect every returned task status and result before deciding the next action. Do not skip straight to a final answer or treat the work as pending once the tool result is back.
 - Subagents start from scratch with no conversation history — include all necessary context in each task's \`prompt\`.
 - Each subagent has full access to all tools (file read/write, search, shell, etc.) unless you restrict them.
+- Spawned subagents may decompose work one more level when the remaining work is still clearly independent, but keep nesting shallow and avoid recursive fan-out.
 - Good candidates for parallelism: reading multiple independent files, gathering information from separate sources, writing unrelated modules, running different diagnostics at the same time.
-- Do NOT use \`spawn_subagents\` when subtasks depend on each other's output — run them sequentially instead.
+- Do NOT use \`spawn_subagents\` or \`spawn_subagentstasks\` when subtasks depend on each other's output — run them sequentially instead.
 - You can also use \`spawn_subagents\` with a single task entry when you want to isolate work in a clean context.
 
 ## Editing existing projects

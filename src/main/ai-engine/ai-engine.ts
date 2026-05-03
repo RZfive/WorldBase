@@ -63,7 +63,13 @@ export interface AIRequestOptions {
   systemPromptSections?: string[]
   allowedToolNames?: string[]
   deniedToolNames?: string[]
+  /** Internal nesting depth used when this agent was spawned by another agent. */
+  subagentNestingDepth?: number
 }
+
+const MAX_SUBAGENT_NESTING_DEPTH = 2
+const BLOCK_ALL_TOOLS_SENTINEL = '__blocked_subagent_tools__'
+const SUBAGENT_TOOL_ALIASES = ['spawn_subagents', 'spawn_subagentstasks'] as const
 
 function mergeUniqueStrings (...collections: Array<string[] | undefined>): string[] {
   const seen = new Set<string>()
@@ -80,6 +86,62 @@ function mergeUniqueStrings (...collections: Array<string[] | undefined>): strin
   }
 
   return result
+}
+
+function expandToolAliases (names?: string[]): string[] | undefined {
+  const normalized = mergeUniqueStrings(names)
+  if (normalized.length === 0) return undefined
+
+  const expanded = new Set(normalized)
+  if (SUBAGENT_TOOL_ALIASES.some(name => expanded.has(name))) {
+    for (const alias of SUBAGENT_TOOL_ALIASES) {
+      expanded.add(alias)
+    }
+  }
+
+  return Array.from(expanded)
+}
+
+function mergeDeniedToolNames (...collections: Array<string[] | undefined>): string[] | undefined {
+  const merged = mergeUniqueStrings(...collections.map(collection => expandToolAliases(collection)))
+  return merged.length > 0 ? merged : undefined
+}
+
+function intersectAllowedToolNames (parentAllowed?: string[], childAllowed?: string[]): string[] | undefined {
+  const normalizedParent = expandToolAliases(parentAllowed) ?? []
+  const normalizedChild = expandToolAliases(childAllowed) ?? []
+
+  if (normalizedParent.length === 0) {
+    return normalizedChild.length > 0 ? normalizedChild : undefined
+  }
+
+  if (normalizedChild.length === 0) {
+    return normalizedParent
+  }
+
+  const childSet = new Set(normalizedChild)
+  const intersection = normalizedParent.filter(name => childSet.has(name))
+  return intersection.length > 0 ? intersection : [BLOCK_ALL_TOOLS_SENTINEL]
+}
+
+function buildNestedSubagentPromptSection (nestingDepth: number, canSpawnMoreSubagents: boolean): string {
+  const lines = [
+    '## Nested subagent execution',
+    `- You are a spawned subagent at nesting depth ${nestingDepth}.`,
+    '- If you call `spawn_subagents` or the compatibility alias `spawn_subagentstasks`, those tools return only after every spawned task has finished or failed.',
+    '- After the tool returns, read the returned task statuses and results before deciding whether to continue, retry, or answer. Do not skip directly to a final conclusion before the tool result arrives.'
+  ]
+
+  if (canSpawnMoreSubagents) {
+    lines.push(
+      '- You may decompose work one more time only when the remaining work is clearly independent and parallelizable.',
+      '- Keep nested spawning shallow. If the task is already narrow enough, finish it directly instead of spawning more agents.'
+    )
+  } else {
+    lines.push('- Your nesting limit is reached in this run. Do not try to spawn more subagents; finish with the tools already available.')
+  }
+
+  return lines.join('\n')
 }
 
 /**
@@ -124,7 +186,7 @@ export class AIEngine {
     }
   }
 
-  private createAgent (options?: AIRequestOptions, includeSubagentService = true): AgentCore {
+  private createAgent (options?: AIRequestOptions): AgentCore {
     const provider = new OpenAIProvider()
     this.applyConfigToProvider(provider, this.baseConfig)
     if (options?.providerConfig) {
@@ -135,18 +197,27 @@ export class AIEngine {
     const agent = new AgentCore(provider, this.services as unknown as Record<string, unknown>)
     agent.setAuthModeResolver(options?.getAuthMode)
 
-    // Build a SubagentService that creates isolated subagent cores (without
-    // their own SubagentService to prevent infinite nesting).
-    const subagentService = includeSubagentService
+    const subagentNestingDepth = Math.max(0, options?.subagentNestingDepth ?? 0)
+    const canSpawnMoreSubagents = subagentNestingDepth < MAX_SUBAGENT_NESTING_DEPTH
+    const systemPromptSections = mergeUniqueStrings(
+      options?.systemPromptSections,
+      subagentNestingDepth > 0
+        ? [buildNestedSubagentPromptSection(subagentNestingDepth, canSpawnMoreSubagents)]
+        : undefined
+    )
+
+    // Build a SubagentService that creates isolated subagent cores while
+    // keeping nesting shallow enough to avoid recursive fan-out loops.
+    const subagentService = canSpawnMoreSubagents
       ? new SubagentService((subOpts) => {
           const subagent = this.createAgent(
             {
               ...options,
-              allowedToolNames: subOpts?.allowedTools,
-              deniedToolNames: subOpts?.deniedTools,
-              systemPromptSections: subOpts?.systemPromptSections ?? options?.systemPromptSections
-            },
-            false // no nested spawn_subagents
+              allowedToolNames: intersectAllowedToolNames(options?.allowedToolNames, subOpts?.allowedTools),
+              deniedToolNames: mergeDeniedToolNames(options?.deniedToolNames, subOpts?.deniedTools),
+              systemPromptSections: mergeUniqueStrings(options?.systemPromptSections, subOpts?.systemPromptSections),
+              subagentNestingDepth: subagentNestingDepth + 1
+            }
           )
           return subagent
         })
@@ -159,7 +230,7 @@ export class AIEngine {
     registerAllTools(agent, toolServices)
     this.registerMcpTools(agent, options?.allowedMcpServerIds)
     agent.setActiveSkills(mergeUniqueStrings(this.activeSkillContents, options?.activeSkillContents))
-    agent.setSystemPromptSections(options?.systemPromptSections ?? [])
+    agent.setSystemPromptSections(systemPromptSections)
     agent.setToolVisibilityFilters(options?.allowedToolNames, options?.deniedToolNames)
     agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
     agent.setAuthMode(options?.authMode ?? 'strict')

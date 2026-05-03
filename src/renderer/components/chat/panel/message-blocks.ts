@@ -1,3 +1,4 @@
+import type { AgentGroupCollaborationPlan } from '../../../../shared/agent-workspace-types.js'
 import type {
   AgentGroupProgressSnapshot,
   AgentGroupTranscript,
@@ -98,6 +99,24 @@ export function createFilePreviewBlock (filePath: string, truncated = false): Ch
     previewContent: '',
     truncated,
     active: true
+  }
+}
+
+function cloneGroupCollaborationPlan (plan: AgentGroupCollaborationPlan): AgentGroupCollaborationPlan {
+  return {
+    ...plan,
+    planner: { ...plan.planner },
+    mentionedParticipants: plan.mentionedParticipants.map((participant: AgentGroupCollaborationPlan['mentionedParticipants'][number]) => ({ ...participant })),
+    candidateParticipants: plan.candidateParticipants.map((participant: AgentGroupCollaborationPlan['candidateParticipants'][number]) => ({ ...participant })),
+    invitedParticipants: plan.invitedParticipants.map((participant: AgentGroupCollaborationPlan['invitedParticipants'][number]) => ({ ...participant }))
+  }
+}
+
+export function createGroupCollaborationPlanBlock (plan: AgentGroupCollaborationPlan): ChatMessageBlock {
+  return {
+    id: createBlockId('groupplan'),
+    kind: 'group_collaboration_plan',
+    plan: cloneGroupCollaborationPlan(plan)
   }
 }
 
@@ -202,6 +221,9 @@ export function createSudoPasswordRequestBlock (requestId: string, command: stri
 
 export function positionGroupMetaBlocks (message: ChatMessage): void {
   const blocks = ensureBlocks(message)
+  const collaborationPlanBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'group_collaboration_plan' }> => {
+    return block.kind === 'group_collaboration_plan'
+  })
   const sidechatBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'agent_sidechat' }> => {
     return block.kind === 'agent_sidechat'
   })
@@ -212,10 +234,10 @@ export function positionGroupMetaBlocks (message: ChatMessage): void {
     return block.kind === 'group_transcript'
   })
 
-  if (sidechatBlocks.length === 0 && progressBlocks.length === 0 && transcriptBlocks.length === 0) return
+  if (collaborationPlanBlocks.length === 0 && sidechatBlocks.length === 0 && progressBlocks.length === 0 && transcriptBlocks.length === 0) return
 
   const reorderedBlocks: ChatMessageBlock[] = blocks.filter((block) => {
-    return block.kind !== 'agent_sidechat' && block.kind !== 'group_progress' && block.kind !== 'group_transcript'
+    return block.kind !== 'group_collaboration_plan' && block.kind !== 'agent_sidechat' && block.kind !== 'group_progress' && block.kind !== 'group_transcript'
   })
   let insertIndex = reorderedBlocks.length
   for (let index = 0; index < reorderedBlocks.length; index++) {
@@ -225,9 +247,24 @@ export function positionGroupMetaBlocks (message: ChatMessage): void {
     }
   }
 
-  reorderedBlocks.splice(insertIndex, 0, ...progressBlocks, ...sidechatBlocks, ...transcriptBlocks)
+  reorderedBlocks.splice(insertIndex, 0, ...collaborationPlanBlocks, ...progressBlocks, ...sidechatBlocks, ...transcriptBlocks)
 
   blocks.splice(0, blocks.length, ...reorderedBlocks)
+}
+
+export function upsertGroupCollaborationPlanBlock (message: ChatMessage, plan: AgentGroupCollaborationPlan): void {
+  const blocks = ensureBlocks(message)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_collaboration_plan' }> => {
+    return block.kind === 'group_collaboration_plan'
+  })
+
+  if (existing) {
+    existing.plan = cloneGroupCollaborationPlan(plan)
+  } else {
+    blocks.push(createGroupCollaborationPlanBlock(plan))
+  }
+
+  positionGroupMetaBlocks(message)
 }
 
 export function upsertAgentSidechatBlock (message: ChatMessage, session: AgentSidechatSession): void {
