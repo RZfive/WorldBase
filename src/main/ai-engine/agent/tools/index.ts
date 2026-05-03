@@ -13,6 +13,7 @@ import { toolLocalFileRead } from './tool-local-file-read.js'
 import { toolLocalCommand } from './tool-local-command.js'
 import { toolLocalWriteFile } from './tool-local-file-write.js'
 import { toolRebuildProject } from './tool-rebuild-project.js'
+import { toolFinalizeProject } from './tool-finalize-project.js'
 import { toolClearProjectBuildFlag } from './tool-clear-build-flag.js'
 import { toolGetProjectLogs } from './tool-get-project-logs.js'
 import { toolGetProjectStatus } from './tool-get-project-status.js'
@@ -99,6 +100,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolAnalyzeData(services),
     toolCreateProject(services, getSessionState),
     toolRebuildProject(services),
+    toolFinalizeProject(services),
     toolClearProjectBuildFlag(services),
     toolLocalFileRead(services, getSessionState, getAbortSignal),
     toolLocalCommand(services, getSessionState, getAbortSignal),

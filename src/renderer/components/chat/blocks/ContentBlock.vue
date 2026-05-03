@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { renderMarkdown } from '../markdown'
 import { getContentParts, hasRenderableContent, collapseWhitespace } from '../message-utils'
-import { splitMarkdownWithMermaid } from '../mermaid'
+import { splitMarkdownWithMermaid, type MarkdownSegment } from '../mermaid'
 import { buildAssistantExportBaseName, downloadDataUrlFile, downloadMarkdownFile, messageContentToMarkdown, renderElementToPngDataUrl } from '../export-utils'
 import type { ChatMessageBlock } from '../types'
 import MermaidDiagram from '../media/MermaidDiagram.vue'
@@ -35,7 +35,20 @@ const canExport = computed(() => {
 })
 
 function getTextSegments (text?: string) {
+  if (props.isStreamingBlock) {
+    const value = text || ''
+    return value ? [{ type: 'markdown', text: value }] satisfies MarkdownSegment[] : []
+  }
+
   return splitMarkdownWithMermaid(text || '')
+}
+
+function getStreamingPreviewText (segment: MarkdownSegment): string {
+  if (segment.type === 'mermaid') {
+    return `\`\`\`mermaid\n${segment.text}\n\`\`\``
+  }
+
+  return segment.text
 }
 
 function clearResetTimer (kind: 'md' | 'image') {
@@ -164,18 +177,28 @@ onBeforeUnmount(() => {
               :key="`${props.block.id}-${partIndex}-${segmentIndex}`"
             >
               <div
-                v-if="segment.type === 'markdown'"
+                v-if="segment.type === 'markdown' && !props.isStreamingBlock"
                 class="message-text markdown-body"
                 v-html="renderMarkdown(segment.text)"
               ></div>
 
+              <pre
+                v-else-if="segment.type === 'markdown'"
+                class="message-stream-preview"
+              >{{ getStreamingPreviewText(segment) }}</pre>
+
               <MermaidDiagram
-                v-else
+                v-else-if="!props.isStreamingBlock"
                 class="message-mermaid-card"
                 :code="segment.text"
                 previewable
                 @open-preview="emit('openMermaidPreview', segment.text)"
               />
+
+              <pre
+                v-else
+                class="message-stream-preview"
+              >{{ getStreamingPreviewText(segment) }}</pre>
             </template>
           </div>
 
@@ -275,6 +298,21 @@ onBeforeUnmount(() => {
 .message-image-card + .message-text-group,
 .message-text-group + .message-text-group {
   margin-top: 12px;
+}
+
+.message-stream-preview {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--app-border-strong);
+  background: color-mix(in srgb, var(--app-panel-muted) 78%, transparent);
+  color: var(--app-text);
+  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.84rem;
+  line-height: 1.58;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .message-mermaid-card {

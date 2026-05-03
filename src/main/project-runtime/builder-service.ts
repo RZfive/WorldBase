@@ -7,7 +7,7 @@ import crypto from 'node:crypto'
 import { LAN_SERVER_PORT } from '../constants.js'
 import { createBundledRuntimeEnv } from './bundled-runtime.js'
 import { ensureNextRuntimeCompatiblePackageJson } from './next-runtime-compat.js'
-import type { RuntimeManager } from './runtime-manager.js'
+import type { ProjectFailurePhase, ProjectFailureSnapshot, RuntimeManager } from './runtime-manager.js'
 
 const NEXT_CONFIG_TEMPLATE = `/** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -65,10 +65,23 @@ export interface CleanupResult {
   error?: string
 }
 
+export interface CleanupOptions {
+  removeNodeModules?: boolean
+  removeBuildCache?: boolean
+}
+
+export interface RebuildOptions {
+  cleanInstall?: boolean
+  cleanupDependenciesAfterSuccess?: boolean
+  cleanupBuildCacheAfterSuccess?: boolean
+}
+
 interface CommandExecutionResult {
   code: number | null
   output: string
 }
+
+const BUILD_FAILURE_EXCERPT_LINES = 12
 
 /**
  * BuilderService — 编译服务
@@ -78,6 +91,7 @@ interface CommandExecutionResult {
 export class BuilderService {
   private projectsDir: string
   private runtimeManager: Pick<RuntimeManager, 'getStatus' | 'getLogs' | 'start' | 'stop'> | null = null
+  private lastBuildFailures = new Map<string, ProjectFailureSnapshot>()
 
   constructor (projectsDir: string) {
     this.projectsDir = projectsDir
@@ -96,6 +110,8 @@ export class BuilderService {
     const metaPath = path.join(projectDir, '.world-meta.json')
     const startTime = Date.now()
     const isNextProject = await this._isNextProject(projectDir)
+
+    this.lastBuildFailures.delete(projectId)
 
     if (isNextProject) {
       await this._normalizeNextProjectFiles(projectDir)
@@ -128,6 +144,12 @@ export class BuilderService {
 
         if (isNextProject && !this._hasStandaloneOutput(projectDir)) {
           await this._updateBuildStatus(metaPath, 'failed')
+          this._recordBuildFailure(projectId, {
+            phase: 'standalone_output_missing',
+            summary: 'Next.js build completed but standalone output is missing',
+            error: 'Next.js build completed but did not generate .next/standalone/server.js. Ensure next.config.js sets output: \'standalone\'.',
+            output
+          })
           return {
             success: false,
             buildStatus: 'failed',
@@ -143,6 +165,12 @@ export class BuilderService {
       }
 
       await this._updateBuildStatus(metaPath, 'failed')
+      this._recordBuildFailure(projectId, {
+        phase: 'build_failed',
+        summary: `Build failed with exit code ${code}`,
+        error: `Build failed with exit code ${code}`,
+        output
+      })
       return {
         success: false,
         buildStatus: 'failed',
@@ -153,6 +181,11 @@ export class BuilderService {
     } catch (err) {
       const duration = Date.now() - startTime
       await this._updateBuildStatus(metaPath, 'failed')
+      this._recordBuildFailure(projectId, {
+        phase: 'build_failed',
+        summary: `Build failed: ${(err as Error).message}`,
+        error: (err as Error).message
+      })
       return {
         success: false,
         buildStatus: 'failed',
@@ -166,15 +199,17 @@ export class BuilderService {
    * Cleanup after build — remove node_modules and build cache
    * to reduce disk usage. Only keep .next/standalone/, source, and public/.
    */
-  async cleanup (projectId: string): Promise<CleanupResult> {
+  async cleanup (projectId: string, options: CleanupOptions = {}): Promise<CleanupResult> {
     const projectDir = path.join(this.projectsDir, projectId)
+    const removeNodeModules = options.removeNodeModules !== false
+    const removeBuildCache = options.removeBuildCache !== false
 
     try {
       let freedBytes = 0
 
       // Remove node_modules
       const nodeModulesPath = path.join(projectDir, 'node_modules')
-      if (existsSync(nodeModulesPath)) {
+      if (removeNodeModules && existsSync(nodeModulesPath)) {
         const size = await this._getDirSize(nodeModulesPath)
         await fs.rm(nodeModulesPath, { recursive: true, force: true })
         freedBytes += size
@@ -182,7 +217,7 @@ export class BuilderService {
 
       // Remove .next/cache
       const nextCachePath = path.join(projectDir, '.next', 'cache')
-      if (existsSync(nextCachePath)) {
+      if (removeBuildCache && existsSync(nextCachePath)) {
         const size = await this._getDirSize(nextCachePath)
         await fs.rm(nextCachePath, { recursive: true, force: true })
         freedBytes += size
@@ -223,18 +258,27 @@ export class BuilderService {
    * Full rebuild: install deps → build → cleanup.
    * Used when source files have been modified.
    */
-  async rebuild (projectId: string): Promise<BuildResult> {
+  async rebuild (projectId: string, options: RebuildOptions = {}): Promise<BuildResult> {
     const projectDir = path.join(this.projectsDir, projectId)
     const packageJsonPath = path.join(projectDir, 'package.json')
     const runtimeStatusBeforeRebuild = this.runtimeManager?.getStatus(projectId)
+    const cleanInstall = options.cleanInstall === true
+    const cleanupDependenciesAfterSuccess = options.cleanupDependenciesAfterSuccess === true
+    const cleanupBuildCacheAfterSuccess = options.cleanupBuildCacheAfterSuccess === true
 
     if (this.runtimeManager && runtimeStatusBeforeRebuild?.status !== 'not_started') {
       await this.runtimeManager.stop(projectId)
     }
 
-    const needsPreRebuildCleanup = existsSync(path.join(projectDir, 'node_modules')) || existsSync(path.join(projectDir, '.next', 'cache'))
+    const needsPreRebuildCleanup = cleanInstall && (
+      existsSync(path.join(projectDir, 'node_modules')) ||
+      existsSync(path.join(projectDir, '.next', 'cache'))
+    )
     if (needsPreRebuildCleanup) {
-      const cleanupResult = await this.cleanup(projectId)
+      const cleanupResult = await this.cleanup(projectId, {
+        removeNodeModules: true,
+        removeBuildCache: true
+      })
       if (!cleanupResult.success) {
         return {
           success: false,
@@ -245,11 +289,13 @@ export class BuilderService {
       }
     }
 
-    // Remove stale lockfiles that may have been left by a previously failed install
-    for (const lockfile of ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']) {
-      const lockfilePath = path.join(projectDir, lockfile)
-      if (existsSync(lockfilePath)) {
-        try { await fs.rm(lockfilePath, { force: true }) } catch { /* best-effort */ }
+    if (cleanInstall) {
+      // Remove stale lockfiles only for explicit clean installs.
+      for (const lockfile of ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']) {
+        const lockfilePath = path.join(projectDir, lockfile)
+        if (existsSync(lockfilePath)) {
+          try { await fs.rm(lockfilePath, { force: true }) } catch { /* best-effort */ }
+        }
       }
     }
 
@@ -261,7 +307,18 @@ export class BuilderService {
     const result = await this.build(projectId)
 
     if (result.success) {
-      await this.cleanup(projectId)
+      const canCleanupDependenciesAfterSuccess = cleanupDependenciesAfterSuccess && this._hasStandaloneOutput(projectDir)
+      if (cleanupDependenciesAfterSuccess || cleanupBuildCacheAfterSuccess) {
+        const cleanupResult = await this.cleanup(projectId, {
+          removeNodeModules: canCleanupDependenciesAfterSuccess,
+          removeBuildCache: cleanupBuildCacheAfterSuccess
+        })
+        if (!cleanupResult.success) {
+          result.output = [result.output, `Cleanup failed: ${cleanupResult.error}`].filter(Boolean).join('\n')
+        } else if (cleanupDependenciesAfterSuccess && !canCleanupDependenciesAfterSuccess) {
+          result.output = [result.output, 'Skipped node_modules cleanup because this runtime still requires installed dependencies after restart.'].filter(Boolean).join('\n')
+        }
+      }
       if (this.runtimeManager) {
         try {
           const startResult = await this.runtimeManager.start(projectId)
@@ -306,8 +363,44 @@ export class BuilderService {
     return this._hasStandaloneOutput(projectDir)
   }
 
+  getLastFailure (projectId: string): ProjectFailureSnapshot | null {
+    return this.lastBuildFailures.get(projectId) ?? null
+  }
+
   private _hasStandaloneOutput (projectDir: string): boolean {
     return existsSync(path.join(projectDir, '.next', 'standalone', 'server.js'))
+  }
+
+  private _recordBuildFailure (
+    projectId: string,
+    failure: {
+      phase: Extract<ProjectFailurePhase, 'build_failed' | 'standalone_output_missing'>
+      summary: string
+      error?: string
+      output?: string
+    }
+  ): void {
+    this.lastBuildFailures.set(projectId, {
+      source: 'build',
+      phase: failure.phase,
+      status: 'failed',
+      summary: failure.summary,
+      time: new Date().toISOString(),
+      error: failure.error,
+      stderrExcerpt: this._buildOutputExcerpt(failure.output)
+    })
+  }
+
+  private _buildOutputExcerpt (output?: string): string[] {
+    if (!output) {
+      return []
+    }
+
+    return output
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .slice(-BUILD_FAILURE_EXCERPT_LINES)
   }
 
   private async _isNextProject (projectDir: string): Promise<boolean> {

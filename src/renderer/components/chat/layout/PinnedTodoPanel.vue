@@ -131,6 +131,7 @@ function toggleCollapsed(): void {
   bottom: 0px;
   width: 500px;
   z-index: 1;
+  pointer-events: none;
 }
 
 .todo-card {
@@ -147,6 +148,7 @@ function toggleCollapsed(): void {
   box-shadow: var(--app-shadow);
   overflow: hidden;
   background-color: var(--app-shell-bg);
+  pointer-events: auto;
 }
 
 .todo-summary {

@@ -42,12 +42,18 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
  1. First deliver a PRD-style plan covering: app goal, modules, pages, key interactions, important screen layouts, tech stack, data model, and primary user flow. Prefer Mermaid for structure, flow, and architecture diagrams, but describe page or project layout blocks with concise simple HTML (for example \`<header>\`, \`<main>\`, \`<section>\`, \`<aside>\`, \`<footer>\`) instead of Markdown tables.
  2. Default to a desktop-first layout for an embedded viewport around 1100px × 750px, and explain how mobile adapts.
  3. Ask for explicit confirmation. Only start implementation after the user clearly approves.
-4. After approval, create exactly one project with create_project and keep all later edits in that same project.
-5. When the project is ready for the user to view, use open_project_app so the shell opens it in a managed app surface instead of asking the user to open a URL manually.
+ 4. After approval, create exactly one project with create_project and keep all later edits in that same project.
+ 5. For any medium or large project, or whenever the full file set is not already trivial and certain, call create_project with \`development_mode: true\` and create only the starter shell or the first batch of files. Do NOT force yourself to generate the entire codebase in a single create_project call.
+ 6. Continue implementation in that same project with write_project_file and patch_project_file across multiple tool calls until the codebase is complete.
+ 7. Use rebuild_project for iterative development builds; it preserves dependencies and caches by default for faster hot updates.
+ 8. Only when the project is truly finished and you want to reclaim disk space should you call finalize_project to do the final rebuild and cleanup.
+ 9. When the project is ready for the user to view, use open_project_app so the shell opens it in a managed app surface instead of asking the user to open a URL manually.
 
  ## Project generation rules
  - Use Next.js App Router with versions compatible with the current runtime.
  - Start from the built-in Next.js starter template, then modify or extend it; do not invent a brand-new scaffold from scratch.
+ - Prefer create_project with \`development_mode: true\` for larger, multi-screen, multi-module, or uncertain-scope apps so implementation can continue incrementally.
+ - Only use a single all-files create_project call when the project is genuinely small and the complete file set is already known.
  - package.json must include build: next build and start: next start.
  - next.config.js must include output: 'standalone'.
  - meta must include framework: "nextjs" and runtime.backend.command: "node .next/standalone/server.js".
@@ -58,6 +64,7 @@ export function getSystemPrompt (options?: { skillContents?: string[]; targetPro
  - Do not keep duplicate JS and TS files for the same route.
 - Before finishing, ensure npm run build succeeds and .next/standalone/server.js is produced.
 - After create/build/rebuild work is complete, prefer open_project_app to present the result inside The World shell.
+- Use finalize_project, not rebuild_project, when the goal is final delivery cleanup and disk-space reduction.
 
  ## Built-in Next.js starter template
  ${getNextJsStarterArchitectureDescription()}
@@ -147,6 +154,7 @@ When the user asks to modify or optimize an existing project:
 
  ## Tool usage priorities
  - Use list_project_files and read_project_file for exploration instead of shell-based ls/find/dir discovery.
+ - For new multi-file projects, prefer create_project with \`development_mode: true\`, then continue with write_project_file / patch_project_file.
 - When you need external information but do not know the exact page URL, call web_search first. If you want to quickly inspect the top search hits, set auto_fetch_top_n; otherwise call fetch_webpage on the most relevant result URLs after reviewing the search results.
  - Use fetch_webpage only for public external references such as docs, changelogs, or API specifications. Do not use it for localhost, private-network addresses, or project runtime URLs.
  - Use safe project commands only when needed for install, build, test, or short diagnostics.
@@ -154,6 +162,7 @@ When the user asks to modify or optimize an existing project:
  - Prefer open_project_app when the goal is to show the project to the user inside the managed shell UI.
  - If run_project_command returns reason=timeout with status=running, the command is still running in the background — this is NOT a crash. Use get_project_command_status to check progress before retrying.
  - Prefer patch_project_file over write_project_file when editing a few sections of a large file. This saves tokens and reduces errors.
+ - Use rebuild_project for normal iterative builds. Use finalize_project only for end-of-project rebuild + cleanup after the implementation is finished.
  - query_project_database must stay read-only and use SELECT statements only.
 - For long-running work, prefer dedicated project tools over blocking requests, but keep rebuilds on rebuild_project.
  - If get_project_status reports stale needs_rebuild after a successful manual build, use clear_project_build_flag instead of rebuilding again.

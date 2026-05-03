@@ -427,11 +427,13 @@ onUnmounted(() => {
 <style scoped>
 .chat-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 24px var(--chat-message-gutter, 28px) 20px;
   scrollbar-gutter: stable;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
+  position: relative;
 }
 
 .message-item + .message-item {

@@ -24,7 +24,7 @@ export function toolGetProjectStatus (services: ToolServices): Tool {
   return {
     definition: {
       name: 'get_project_status',
-      description: 'Get the current project runtime status, port, PID, start time, dependency/build state, and recent error summary.',
+      description: 'Get the current project runtime status, port, PID, start time, dependency/build state, and the most recent structured runtime failure summary.',
       parameters: {
         type: 'object',
         properties: {
@@ -39,6 +39,7 @@ export function toolGetProjectStatus (services: ToolServices): Tool {
     handler: async (args) => {
       const { project_id } = args as unknown as GetProjectStatusArgs
       const status = services.runtimeManager.getStatus(project_id)
+      const buildFailure = services.builderService.getLastFailure(project_id) || undefined
       const projectDir = path.join(services.projectFS.projectsDir, project_id)
       const packageJsonPath = path.join(projectDir, 'package.json')
       const nodeModulesPath = path.join(projectDir, 'node_modules')
@@ -78,6 +79,8 @@ export function toolGetProjectStatus (services: ToolServices): Tool {
         standaloneBuildPresent,
         needsRebuild
       })
+      const lastFailure = pickLatestFailure(status.lastFailure, buildFailure)
+      const recommendedNextDebugStep = getRecommendedNextDebugStep(status.status, lastFailure, recentLogs.length > 0)
 
       return {
         ...status,
@@ -89,6 +92,13 @@ export function toolGetProjectStatus (services: ToolServices): Tool {
         dependency_status: dependencyStatus,
         needs_rebuild: needsRebuild,
         recommended_prepare_action: recommendedPrepareAction,
+        last_failure: lastFailure,
+        last_error_source: lastFailure?.source,
+        last_error_phase: lastFailure?.phase,
+        last_error_time: lastFailure?.time,
+        last_error_summary: lastFailure?.summary || status.error,
+        last_error_excerpt: lastFailure?.stderrExcerpt || recentLogs.map(entry => entry.text),
+        recommended_next_debug_step: recommendedNextDebugStep,
         recent_error_logs: recentLogs
       }
     }
@@ -155,4 +165,48 @@ function getRecommendedPrepareAction ({
   }
 
   return 'install_dependencies'
+}
+
+function getRecommendedNextDebugStep (
+  runtimeStatus: string,
+  lastFailure: { source?: string; phase?: string; stderrExcerpt?: string[] } | undefined,
+  hasRecentErrorLogs: boolean
+): 'none' | 'check_build_output' | 'check_stderr_logs' | 'inspect_startup_failure' | 'restart_project_server' {
+  if (lastFailure?.source === 'build') {
+    return 'check_build_output'
+  }
+
+  if (lastFailure?.phase === 'terminated_before_ready' || lastFailure?.phase === 'ready_timeout' || lastFailure?.phase === 'spawn') {
+    return 'inspect_startup_failure'
+  }
+
+  if (runtimeStatus === 'crashed' || runtimeStatus === 'error') {
+    return hasRecentErrorLogs || (lastFailure?.stderrExcerpt?.length ?? 0) > 0
+      ? 'check_stderr_logs'
+      : 'restart_project_server'
+  }
+
+  return 'none'
+}
+
+function pickLatestFailure<T extends { time?: string }> (runtimeFailure: T | undefined, buildFailure: T | undefined): T | undefined {
+  if (!runtimeFailure) {
+    return buildFailure
+  }
+
+  if (!buildFailure) {
+    return runtimeFailure
+  }
+
+  if (!runtimeFailure.time) {
+    return buildFailure
+  }
+
+  if (!buildFailure.time) {
+    return runtimeFailure
+  }
+
+  return runtimeFailure.time >= buildFailure.time
+    ? runtimeFailure
+    : buildFailure
 }

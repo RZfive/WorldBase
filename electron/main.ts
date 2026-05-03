@@ -2093,14 +2093,149 @@ function setupIPC (): void {
       abortController,
       authMode: authModeRef
     })
+    const TEXT_STREAM_FLUSH_INTERVAL_MS = 33
+    let pendingTokenContent = ''
+    let pendingThinkingContent = ''
+    let textFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+    const sendEventToRenderer = (event: Record<string, unknown>) => {
+      if (sender.isDestroyed()) return
+
+      try {
+        sender.send(channel, event)
+      } catch (serErr) {
+        console.error('[ai:chatStream] Stream event serialization failed:', serErr)
+        aiLogger?.logError('stream', serErr as Error, {
+          streamEventType: typeof event.type === 'string' ? event.type : 'unknown'
+        })
+
+        try {
+          const safe: Record<string, unknown> = { type: typeof event.type === 'string' ? event.type : 'unknown' }
+          if ('content' in event) safe.content = String(event.content || '')
+          if ('name' in event) safe.name = String(event.name || '')
+          if ('error' in event) safe.error = String(event.error || '')
+          if ('stage' in event) safe.stage = String(event.stage || '')
+          if ('detail' in event) safe.detail = String(event.detail || '')
+          if ('active' in event) safe.active = Boolean(event.active)
+          if ('totalCost' in event) safe.totalCost = Number(event.totalCost || 0)
+          if ('inputTokens' in event) safe.inputTokens = Number(event.inputTokens || 0)
+          if ('outputTokens' in event) safe.outputTokens = Number(event.outputTokens || 0)
+          if ('items' in event) {
+            try {
+              safe.items = JSON.parse(JSON.stringify(event.items ?? []))
+            } catch {
+              safe.items = []
+            }
+          }
+          if ('filePath' in event) safe.filePath = String(event.filePath || '')
+          if ('truncated' in event) safe.truncated = Boolean(event.truncated)
+          if ('query' in event) safe.query = String(event.query || '')
+          if ('engine' in event) safe.engine = String(event.engine || '')
+          if ('results' in event) {
+            try {
+              safe.results = JSON.parse(JSON.stringify(event.results ?? []))
+            } catch {
+              safe.results = []
+            }
+          }
+          if ('result' in event) {
+            try {
+              safe.result = JSON.parse(JSON.stringify(event.result))
+            } catch {
+              safe.result = String(event.result ?? '')
+            }
+          }
+          if ('groupProgress' in event) {
+            try {
+              safe.groupProgress = JSON.parse(JSON.stringify(event.groupProgress))
+            } catch {
+              safe.groupProgress = null
+            }
+          }
+          if ('sidechat' in event) {
+            try {
+              safe.sidechat = JSON.parse(JSON.stringify(event.sidechat))
+            } catch {
+              safe.sidechat = null
+            }
+          }
+          if ('transcript' in event) {
+            try {
+              safe.transcript = JSON.parse(JSON.stringify(event.transcript))
+            } catch {
+              safe.transcript = null
+            }
+          }
+          if ('plan' in event) {
+            try {
+              safe.plan = JSON.parse(JSON.stringify(event.plan))
+            } catch {
+              safe.plan = null
+            }
+          }
+          if ('message' in event) {
+            const msg = event.message as { role?: unknown; content?: unknown } | undefined
+            if (msg) {
+              safe.message = {
+                role: typeof msg.role === 'string' ? msg.role : 'assistant',
+                content: typeof msg.content === 'string' ? msg.content : ''
+              }
+            }
+          }
+          sender.send(channel, safe)
+        } catch (fallbackErr) {
+          console.error('[ai:chatStream] Fallback send also failed:', fallbackErr)
+          aiLogger?.logError('stream', fallbackErr as Error, {
+            phase: 'fallback-send',
+            streamEventType: typeof event.type === 'string' ? event.type : 'unknown'
+          })
+        }
+      }
+    }
+
+    const flushBufferedTextEvents = () => {
+      if (textFlushTimer) {
+        clearTimeout(textFlushTimer)
+        textFlushTimer = null
+      }
+
+      if (pendingThinkingContent) {
+        sendEventToRenderer({ type: 'thinking', content: pendingThinkingContent })
+        pendingThinkingContent = ''
+      }
+
+      if (pendingTokenContent) {
+        sendEventToRenderer({ type: 'token', content: pendingTokenContent })
+        pendingTokenContent = ''
+      }
+    }
+
+    const scheduleBufferedTextFlush = () => {
+      if (textFlushTimer || sender.isDestroyed()) return
+
+      textFlushTimer = setTimeout(() => {
+        textFlushTimer = null
+        flushBufferedTextEvents()
+      }, TEXT_STREAM_FLUSH_INTERVAL_MS)
+    }
+
+    const enqueueBufferedTextEvent = (event: { type: 'token' | 'thinking'; content: string }) => {
+      if (event.type === 'thinking') {
+        pendingThinkingContent += event.content
+      } else {
+        pendingTokenContent += event.content
+      }
+      scheduleBufferedTextFlush()
+    }
     // Progress callback: sends progress events directly to renderer in real-time
     const onProgress: GroupDeliberationProgressCallback = (stageOrEvent, detail) => {
       if (!sender.isDestroyed()) {
+        flushBufferedTextEvents()
         if (typeof stageOrEvent === 'string') {
-          sender.send(channel, { type: 'progress', stage: stageOrEvent, detail })
+          sendEventToRenderer({ type: 'progress', stage: stageOrEvent, detail })
           return
         }
-        sender.send(channel, stageOrEvent)
+        sendEventToRenderer(stageOrEvent as unknown as Record<string, unknown>)
       }
     }
     const groupDeliberation = runtimeContext.group && !directGroupReply
@@ -2119,7 +2254,8 @@ function setupIPC (): void {
         return
       }
 
-      sender.send(channel, {
+      flushBufferedTextEvents()
+      sendEventToRenderer({
         type: 'group_transcript',
         transcript: groupDeliberation.transcript
       })
@@ -2177,61 +2313,16 @@ function setupIPC (): void {
           emitGroupTranscriptIfNeeded()
         }
         if (sender.isDestroyed()) break
-        try {
-          sender.send(channel, JSON.parse(JSON.stringify(streamEvent)))
-        } catch (serErr) {
-          console.error('[ai:chatStream] Stream event serialization failed:', serErr)
-          aiLogger?.logError('stream', serErr as Error, { streamEventType: streamEvent.type })
-          // Fallback: send a safe subset if serialization fails (e.g. circular refs in tool results)
-          try {
-            const safe: Record<string, unknown> = { type: (streamEvent as { type: string }).type }
-            if ('content' in streamEvent) safe.content = String((streamEvent as { content?: string }).content || '')
-            if ('name' in streamEvent) safe.name = String((streamEvent as { name?: string }).name || '')
-            if ('error' in streamEvent) safe.error = String((streamEvent as { error?: string }).error || '')
-            if ('stage' in streamEvent) safe.stage = String((streamEvent as { stage?: string }).stage || '')
-            if ('detail' in streamEvent) safe.detail = String((streamEvent as { detail?: string }).detail || '')
-            if ('items' in streamEvent) {
-              try {
-                safe.items = JSON.parse(JSON.stringify((streamEvent as { items?: unknown }).items ?? []))
-              } catch {
-                safe.items = []
-              }
-            }
-            if ('filePath' in streamEvent) safe.filePath = String((streamEvent as { filePath?: string }).filePath || '')
-            if ('truncated' in streamEvent) safe.truncated = Boolean((streamEvent as { truncated?: boolean }).truncated)
-            if ('query' in streamEvent) safe.query = String((streamEvent as { query?: string }).query || '')
-            if ('engine' in streamEvent) safe.engine = String((streamEvent as { engine?: string }).engine || '')
-            if ('results' in streamEvent) {
-              try {
-                safe.results = JSON.parse(JSON.stringify((streamEvent as { results?: unknown }).results ?? []))
-              } catch {
-                safe.results = []
-              }
-            }
-            if ('result' in streamEvent) {
-              try {
-                safe.result = JSON.parse(JSON.stringify((streamEvent as { result?: unknown }).result))
-              } catch {
-                safe.result = String((streamEvent as { result?: unknown }).result ?? '')
-              }
-            }
-            if ('message' in streamEvent) {
-              const msg = (streamEvent as { message?: { role: string; content: unknown } }).message
-              if (msg) {
-                safe.message = {
-                  role: msg.role,
-                  content: typeof msg.content === 'string' ? msg.content : ''
-                }
-              }
-            }
-            sender.send(channel, safe)
-          } catch (fallbackErr) {
-            console.error('[ai:chatStream] Fallback send also failed:', fallbackErr)
-            aiLogger?.logError('stream', fallbackErr as Error, { phase: 'fallback-send', streamEventType: streamEvent.type })
-          }
+        if ((streamEvent.type === 'token' || streamEvent.type === 'thinking') && streamEvent.content) {
+          enqueueBufferedTextEvent(streamEvent)
+          continue
         }
+
+        flushBufferedTextEvents()
+        sendEventToRenderer(streamEvent as unknown as Record<string, unknown>)
       }
     } catch (err) {
+      flushBufferedTextEvents()
       const errorMessage = (err as Error).message
       const finalStatus = errorMessage === USER_ABORT_MESSAGE ? 'stopped' : 'failed'
       notifyAiTaskStatus(
@@ -2244,11 +2335,12 @@ function setupIPC (): void {
       aiLogger?.finish(finalStatus)
       if (!sender.isDestroyed()) {
         emitGroupTranscriptIfNeeded()
-        sender.send(channel, errorMessage === USER_ABORT_MESSAGE
+        sendEventToRenderer(errorMessage === USER_ABORT_MESSAGE
           ? { type: 'stopped' }
           : { type: 'error', error: errorMessage })
       }
     } finally {
+      flushBufferedTextEvents()
       activeChatSessions.delete(sessionId)
     }
     return { ok: true }
