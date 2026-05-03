@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch, type CSSProperties } from 'vue'
 import ProviderDropdown from './ProviderDropdown.vue'
+import ProviderModelDropdown from './ProviderModelDropdown.vue'
 
 interface SkillItem {
   id: string
@@ -686,17 +687,13 @@ function handleTextareaBlur () {
             @update:model-value="emit('update:selected-agent-id', $event)"
           />
           <template v-if="props.showProviderSelector && props.providers && props.providers.length > 0">
-            <ProviderDropdown
-              :model-value="props.activeProviderId || ''"
-              :options="props.providers.map(p => ({ value: p.id, label: p.name }))"
-              title="供应商"
-              @update:model-value="emit('update:active-provider-id', $event)"
-            />
-            <ProviderDropdown
-              :model-value="props.selectedModel || ''"
-              :options="(props.providers.find(p => p.id === props.activeProviderId)?.models ?? []).map(m => ({ value: m, label: m }))"
-              title="模型"
-              @update:model-value="emit('update:selected-model', $event)"
+            <ProviderModelDropdown
+              :providers="props.providers"
+              :active-provider-id="props.activeProviderId"
+              :selected-model="props.selectedModel"
+              title="供应商 / 模型"
+              @update:active-provider-id="emit('update:active-provider-id', $event)"
+              @update:selected-model="emit('update:selected-model', $event)"
             />
           </template>
           <!-- Reasoning strength: segmented pill control -->

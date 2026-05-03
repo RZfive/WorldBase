@@ -284,7 +284,70 @@ export class OpenAIProvider {
       }
     })
 
-    return this.ensureUserMessage(normalized)
+    return this.ensureUserMessage(this.sanitizeToolMessageSequence(normalized))
+  }
+
+  private sanitizeToolMessageSequence (messages: ChatMessage[]): ChatMessage[] {
+    const sanitized: ChatMessage[] = []
+
+    for (let index = 0; index < messages.length; index++) {
+      const message = messages[index]
+
+      if (message.role === 'tool') {
+        continue
+      }
+
+      if (message.role !== 'assistant' || !message.tool_calls || message.tool_calls.length === 0) {
+        sanitized.push(message)
+        continue
+      }
+
+      const normalizedToolCalls = this.normalizeToolCalls(message.tool_calls)
+      if (!normalizedToolCalls || normalizedToolCalls.length === 0) {
+        sanitized.push({
+          ...message,
+          tool_calls: undefined
+        })
+        continue
+      }
+
+      const expectedToolCallIds = new Set(normalizedToolCalls.map(toolCall => toolCall.id.trim()).filter(Boolean))
+      if (expectedToolCallIds.size !== normalizedToolCalls.length) {
+        continue
+      }
+
+      const toolMessages: ChatMessage[] = []
+      let nextIndex = index + 1
+      while (nextIndex < messages.length && messages[nextIndex].role === 'tool') {
+        toolMessages.push(messages[nextIndex])
+        nextIndex++
+      }
+
+      const matchedToolCallIds = new Set<string>()
+      let hasInvalidToolResponse = toolMessages.length === 0
+
+      for (const toolMessage of toolMessages) {
+        const toolCallId = toolMessage.tool_call_id?.trim()
+        if (!toolCallId || !expectedToolCallIds.has(toolCallId) || matchedToolCallIds.has(toolCallId)) {
+          hasInvalidToolResponse = true
+          break
+        }
+
+        matchedToolCallIds.add(toolCallId)
+      }
+
+      if (!hasInvalidToolResponse && matchedToolCallIds.size === expectedToolCallIds.size) {
+        sanitized.push({
+          ...message,
+          tool_calls: normalizedToolCalls
+        })
+        sanitized.push(...toolMessages)
+      }
+
+      index = nextIndex - 1
+    }
+
+    return sanitized
   }
 
   private ensureUserMessage (messages: ChatMessage[]): ChatMessage[] {
@@ -457,8 +520,8 @@ export class OpenAIProvider {
 
       const decoder = new TextDecoder()
       let buffer = ''
-      let fullContent = ''
-      let fullReasoning = ''
+      const fullContentChunks: string[] = []
+      const fullReasoningChunks: string[] = []
       const toolCallsMap = new Map<number, ToolCall>()
 
       try {
@@ -496,12 +559,12 @@ export class OpenAIProvider {
 
             // Handle reasoning_content (thinking) from compatible models
             if (delta.reasoning_content) {
-              fullReasoning += delta.reasoning_content
+              fullReasoningChunks.push(delta.reasoning_content)
               yield { type: 'thinking', content: delta.reasoning_content }
             }
 
             if (delta.content) {
-              fullContent += delta.content
+              fullContentChunks.push(delta.content)
               yield { type: 'token', content: delta.content }
             }
 
@@ -525,6 +588,8 @@ export class OpenAIProvider {
       } finally {
         reader.releaseLock()
       }
+      const fullContent = fullContentChunks.join('')
+      const fullReasoning = fullReasoningChunks.join('')
       const message: ChatMessage = {
         role: 'assistant',
         content: fullContent || ''

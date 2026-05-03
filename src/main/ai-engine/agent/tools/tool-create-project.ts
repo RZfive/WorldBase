@@ -22,8 +22,13 @@ interface ToolServices {
 interface CreateProjectArgs {
   name: string
   type: string
-  files: unknown
+  files?: unknown
   meta?: unknown
+  development_mode?: boolean
+  install_dependencies?: boolean
+  build_and_start?: boolean
+  cleanup_dependencies_on_success?: boolean
+  cleanup_build_cache_on_success?: boolean
 }
 
 const MAX_PROJECT_SLUG_LENGTH = 20
@@ -41,7 +46,7 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
   return {
     definition: {
       name: 'create_project',
-      description: 'Create a new project from AI-generated code, including name, type, files, and metadata.',
+      description: 'Create a new project shell or a full AI-generated project. For large projects, prefer development_mode=true so you can create the project first, then add or modify files incrementally with write_project_file / patch_project_file instead of sending every file in one tool call.',
       parameters: {
         type: 'object',
         properties: {
@@ -56,25 +61,59 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
           },
           files: {
             type: 'object',
-            description: 'File content map {relativePath: fileContent}'
+            description: 'Optional file content map {relativePath: fileContent}. In development_mode this may be omitted or partial so the AI can continue writing files incrementally afterward.'
           },
           meta: {
             type: 'object',
             description: '.world-meta.json content, including runtime config, API definitions, and data schema'
+          },
+          development_mode: {
+            type: 'boolean',
+            description: 'When true, create the project in incremental development mode. The AI can then call write_project_file / patch_project_file multiple times instead of generating all code in one response.'
+          },
+          install_dependencies: {
+            type: 'boolean',
+            description: 'When true, install dependencies immediately after project creation. Defaults to false in development_mode and true otherwise when package.json exists.'
+          },
+          build_and_start: {
+            type: 'boolean',
+            description: 'When true, build (if needed) and start the project immediately. Defaults to false in development_mode and true otherwise.'
+          },
+          cleanup_dependencies_on_success: {
+            type: 'boolean',
+            description: 'When true, remove node_modules after a successful build/start to save disk space. Leave false during iterative development.'
+          },
+          cleanup_build_cache_on_success: {
+            type: 'boolean',
+            description: 'When true, remove build caches such as .next/cache after a successful build/start to save disk space.'
           }
         },
-        required: ['name', 'type', 'files']
+        required: ['name', 'type']
       }
     },
     handler: async (args, onProgress) => {
-      const { name, type, meta } = args as unknown as CreateProjectArgs
-      let files = normalizeCreateProjectFiles((args as Record<string, unknown>).files)
+      const {
+        name,
+        type,
+        meta,
+        development_mode,
+        install_dependencies,
+        build_and_start,
+        cleanup_dependencies_on_success,
+        cleanup_build_cache_on_success
+      } = args as unknown as CreateProjectArgs
+      const developmentMode = development_mode === true
+      let files = normalizeCreateProjectFiles((args as Record<string, unknown>).files, developmentMode)
       let normalizedMeta = normalizeProjectMeta(parsePossiblyStringifiedObject(meta, 'meta') ?? meta)
       const session = getSessionState?.()
+      const shouldBuildAndStart = build_and_start ?? !developmentMode
+      const shouldCleanupDependenciesOnSuccess = cleanup_dependencies_on_success === true
+      const shouldCleanupBuildCacheOnSuccess = cleanup_build_cache_on_success === true
 
       const preparedTemplate = applyNextJsStarterTemplate(files, normalizedMeta)
       files = preparedTemplate.files
       normalizedMeta = normalizeProjectMeta(preparedTemplate.meta)
+      const shouldInstallDependencies = install_dependencies ?? (!developmentMode && Boolean(files['package.json']))
 
       if (files['package.json'] && (!!files['next.config.js'] || normalizedMeta.framework === 'nextjs')) {
         try {
@@ -173,6 +212,13 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
         createdAt: new Date().toISOString(),
         ...(detectedFramework ? { framework: detectedFramework } : {}),
         ...normalizedMeta,
+        workflow: {
+          mode: developmentMode ? 'development' : 'direct',
+          incremental: developmentMode,
+          ...((normalizedMeta.workflow && typeof normalizedMeta.workflow === 'object')
+            ? normalizedMeta.workflow as Record<string, unknown>
+            : {})
+        },
         runtime
       })
 
@@ -205,8 +251,8 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
         win.webContents.send('projects:changed', { action: 'created', projectId })
       }
 
-      // Auto-install dependencies if package.json exists
-      if (files['package.json']) {
+      // Auto-install dependencies if requested and package.json exists
+      if (files['package.json'] && shouldInstallDependencies) {
         try {
           onProgress?.('📦 正在安装依赖...', 'npm install')
           console.log(`[tool:create_project] Installing dependencies for ${projectId}...`)
@@ -220,7 +266,10 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
           // Clean up partially-installed node_modules and lockfiles to prevent
           // dirty state on retry via rebuild_project.
           try {
-            await services.builderService.cleanup(projectId)
+            await services.builderService.cleanup(projectId, {
+              removeNodeModules: true,
+              removeBuildCache: true
+            })
           } catch { /* best-effort */ }
 
           return {
@@ -236,9 +285,20 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
         }
       }
 
+      if (developmentMode && !shouldBuildAndStart) {
+        return {
+          success: true,
+          ready: false,
+          development_mode: true,
+          project,
+          projectId,
+          message: `Project "${name}" created with ID: ${projectId}. Development mode is active. Continue with write_project_file or patch_project_file to add/update files incrementally, then call rebuild_project when you want to install/build/restart without deleting dependencies by default.`
+        }
+      }
+
       // Build step for Next.js projects — compile to standalone mode
       const isNextJS = (fullMeta.framework === 'nextjs') || !!files['next.config.js']
-      if (isNextJS && files['package.json']) {
+      if (shouldBuildAndStart && isNextJS && files['package.json']) {
         try {
           onProgress?.('🔨 正在编译项目...', 'npm run build (standalone)')
           console.log(`[tool:create_project] Building standalone for ${projectId}...`)
@@ -247,13 +307,18 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
             onProgress?.('✅ 编译完成', `耗时 ${Math.round(buildResult.duration / 1000)}s`)
             console.log(`[tool:create_project] Build succeeded for ${projectId} in ${buildResult.duration}ms`)
 
-            // Cleanup node_modules to save disk space
-            onProgress?.('🧹 正在清理依赖缓存...', '删除 node_modules')
-            const cleanResult = await services.builderService.cleanup(projectId)
-            if (cleanResult.success && cleanResult.freedBytes) {
-              const freedMB = Math.round(cleanResult.freedBytes / 1024 / 1024)
-              onProgress?.('✅ 清理完成', `释放 ${freedMB}MB 磁盘空间`)
-              console.log(`[tool:create_project] Cleanup freed ${freedMB}MB for ${projectId}`)
+            if (shouldCleanupDependenciesOnSuccess || shouldCleanupBuildCacheOnSuccess) {
+              const cleanupTarget = shouldCleanupDependenciesOnSuccess ? '删除 node_modules' : '删除构建缓存'
+              onProgress?.('🧹 正在清理构建产物...', cleanupTarget)
+              const cleanResult = await services.builderService.cleanup(projectId, {
+                removeNodeModules: shouldCleanupDependenciesOnSuccess,
+                removeBuildCache: shouldCleanupBuildCacheOnSuccess
+              })
+              if (cleanResult.success && cleanResult.freedBytes) {
+                const freedMB = Math.round(cleanResult.freedBytes / 1024 / 1024)
+                onProgress?.('✅ 清理完成', `释放 ${freedMB}MB 磁盘空间`)
+                console.log(`[tool:create_project] Cleanup freed ${freedMB}MB for ${projectId}`)
+              }
             }
           } else {
             onProgress?.('❌ 编译失败，项目未启动', buildResult.error || '')
@@ -288,25 +353,27 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
 
       // Auto-start the project after creation
       let startResult: { port?: number; status?: string } = {}
-      try {
-        onProgress?.('🚀 正在启动项目...', projectId)
-        console.log(`[tool:create_project] Auto-starting project ${projectId}...`)
-        startResult = await services.runtimeManager.start(projectId)
-        onProgress?.('✅ 项目已启动', `端口: ${startResult.port}`)
-        console.log(`[tool:create_project] Project ${projectId} started on port ${startResult.port}`)
-      } catch (err) {
-        onProgress?.('⚠️ 启动失败', (err as Error).message)
-        console.warn(`[tool:create_project] Failed to auto-start: ${(err as Error).message}`)
-        return {
-          success: false,
-          ready: false,
-          recoverable: true,
-          stage: 'start',
-          project,
-          projectId,
-          logs: services.runtimeManager.getLogs(projectId, 40),
-          error: (err as Error).message,
-          message: `Project "${name}" files were created (ID: ${projectId}), but the project failed to start. It is NOT running. Error: ${(err as Error).message}. Please check the project files and configuration.`
+      if (shouldBuildAndStart) {
+        try {
+          onProgress?.('🚀 正在启动项目...', projectId)
+          console.log(`[tool:create_project] Auto-starting project ${projectId}...`)
+          startResult = await services.runtimeManager.start(projectId)
+          onProgress?.('✅ 项目已启动', `端口: ${startResult.port}`)
+          console.log(`[tool:create_project] Project ${projectId} started on port ${startResult.port}`)
+        } catch (err) {
+          onProgress?.('⚠️ 启动失败', (err as Error).message)
+          console.warn(`[tool:create_project] Failed to auto-start: ${(err as Error).message}`)
+          return {
+            success: false,
+            ready: false,
+            recoverable: true,
+            stage: 'start',
+            project,
+            projectId,
+            logs: services.runtimeManager.getLogs(projectId, 40),
+            error: (err as Error).message,
+            message: `Project "${name}" files were created (ID: ${projectId}), but the project failed to start. It is NOT running. Error: ${(err as Error).message}. Please check the project files and configuration.`
+          }
         }
       }
 
@@ -320,7 +387,8 @@ export function toolCreateProject (services: ToolServices, getSessionState?: () 
         project,
         port: startResult.port,
         status: startResult.status || 'created',
-        message: `Project "${name}" created with ID: ${projectId}. Dependencies installed. Runtime configured with command: ${(runtime.backend as Record<string, unknown>).command}${startResult.port ? `. Running on port ${startResult.port}` : ''}`
+        development_mode: developmentMode,
+        message: `Project "${name}" created with ID: ${projectId}.${shouldInstallDependencies ? ' Dependencies installed.' : ' Dependencies were not auto-installed.'} Runtime configured with command: ${(runtime.backend as Record<string, unknown>).command}${startResult.port ? `. Running on port ${startResult.port}` : shouldBuildAndStart ? '' : '. Continue editing files and call rebuild_project when ready.'}`
       }
     }
   }
@@ -359,15 +427,18 @@ function generateProjectId (name: string): string {
   return `proj_${asciiSlug}_${suffix}`
 }
 
-function normalizeCreateProjectFiles (rawFiles: unknown): Record<string, string> {
+function normalizeCreateProjectFiles (rawFiles: unknown, allowEmpty: boolean): Record<string, string> {
   const parsedFiles = parsePossiblyStringifiedObject(rawFiles, 'files')
 
   if (!parsedFiles) {
-    throw new Error('create_project 的 files 参数必须是 { "路径": "完整文件内容" } 对象，不能是普通字符串。')
+    if (allowEmpty && (rawFiles === undefined || rawFiles === null || rawFiles === '')) {
+      return {}
+    }
+    throw new Error('create_project 的 files 参数必须是 { "路径": "完整文件内容" } 对象；如果要分阶段开发，请设置 development_mode=true，并且可以暂时省略 files 或只传部分文件。')
   }
 
   const entries = Object.entries(parsedFiles)
-  if (entries.length === 0) {
+  if (entries.length === 0 && !allowEmpty) {
     throw new Error('create_project 的 files 参数至少要包含一个文件。')
   }
 

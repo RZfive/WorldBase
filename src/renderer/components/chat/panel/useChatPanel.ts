@@ -141,6 +141,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   let authResolvedCleanup: (() => void) | null = null
   let skillsChangedCleanup: (() => void) | null = null
   let agentWorkspaceChangeCleanup: (() => void) | null = null
+  const STREAM_RENDER_FLUSH_INTERVAL_MS = 50
 
   const isLoading = computed(() => {
     return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
@@ -1256,10 +1257,60 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     const assistantMessage = targetMessages[targetMessages.length - 1]
     const sessionId = generateId()
     let thinkingAccum = ''
+    let contentAccum = ''
     const toolRuns: ToolRun[] = []
+    let pendingThinkingText = ''
+    let pendingContentText = ''
+    let streamFlushTimer: number | null = null
 
     const syncAssistantToolRuns = () => {
       syncLegacyToolRuns(assistantMessage, toolRuns)
+    }
+
+    const clearPendingStreamFlush = () => {
+      if (streamFlushTimer != null) {
+        window.clearTimeout(streamFlushTimer)
+        streamFlushTimer = null
+      }
+    }
+
+    const flushPendingStreamText = () => {
+      clearPendingStreamFlush()
+
+      if (pendingThinkingText) {
+        thinkingAccum += pendingThinkingText
+        assistantMessage.thinking = thinkingAccum
+        const thinkingBlock = ensureThinkingBlock(assistantMessage)
+        thinkingBlock.text = thinkingAccum
+        pendingThinkingText = ''
+      }
+
+      if (pendingContentText) {
+        contentAccum += pendingContentText
+        assistantMessage.content = contentAccum
+        const contentBlock = ensureStreamingContentBlock(assistantMessage)
+        contentBlock.content = contentAccum
+        pendingContentText = ''
+      }
+    }
+
+    const schedulePendingStreamFlush = () => {
+      if (streamFlushTimer != null) return
+
+      streamFlushTimer = window.setTimeout(() => {
+        streamFlushTimer = null
+        flushPendingStreamText()
+      }, STREAM_RENDER_FLUSH_INTERVAL_MS)
+    }
+
+    const enqueueThinkingText = (chunk: string) => {
+      pendingThinkingText += chunk
+      schedulePendingStreamFlush()
+    }
+
+    const enqueueContentText = (chunk: string) => {
+      pendingContentText += chunk
+      schedulePendingStreamFlush()
     }
 
     const ensureActiveToolRun = (name = '执行中') => {
@@ -1279,6 +1330,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {
           const isForeground = currentConversationId.value === convId
           const finishSession = (saveConversation = false) => {
+            flushPendingStreamText()
             releaseStreamSession(convId, sessionId)
             if (saveConversation) {
               void doSaveConversation(convId, targetMessages)
@@ -1290,20 +1342,18 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
           try {
             if (event.type === 'thinking' && event.content) {
-              thinkingAccum += event.content
-              assistantMessage.thinking = thinkingAccum
-              const thinkingBlock = ensureThinkingBlock(assistantMessage)
-              thinkingBlock.text += event.content
+              enqueueThinkingText(event.content)
             } else if (event.type === 'reset') {
+              flushPendingStreamText()
               thinkingAccum = ''
+              contentAccum = typeof assistantMessage.content === 'string' ? assistantMessage.content : ''
               if (isForeground) {
                 resetTransientStreamState()
               }
             } else if (event.type === 'token' && event.content) {
-              assistantMessage.content = `${typeof assistantMessage.content === 'string' ? assistantMessage.content : ''}${event.content}`
-              const contentBlock = ensureStreamingContentBlock(assistantMessage)
-              contentBlock.content = `${typeof contentBlock.content === 'string' ? contentBlock.content : ''}${event.content}`
+              enqueueContentText(event.content)
             } else if (event.type === 'file_preview_start' && event.filePath) {
+              flushPendingStreamText()
               const activeToolRun = ensureActiveToolRun('文件生成')
               const alreadyLogged = activeToolRun.progress.some(step => step.stage === '文件预览' && step.detail === event.filePath)
               if (!alreadyLogged) {
@@ -1344,27 +1394,36 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
                 }
               }
             } else if (event.type === 'web_search_result' && event.query) {
+              flushPendingStreamText()
               ensureBlocks(assistantMessage).push(createWebSearchBlock(event.query, event.engine || 'web', Array.isArray(event.results) ? event.results : []))
             } else if (event.type === 'web_fetch_result' && event.result) {
+              flushPendingStreamText()
               ensureBlocks(assistantMessage).push(createWebFetchBlock(event.result as WebFetchResultEntry, event.query))
             } else if (event.type === 'group_progress' && event.groupProgress) {
+              flushPendingStreamText()
               upsertGroupProgressBlock(assistantMessage, event.groupProgress)
             } else if (event.type === 'agent_sidechat' && event.sidechat) {
+              flushPendingStreamText()
               upsertAgentSidechatBlock(assistantMessage, event.sidechat)
             } else if (event.type === 'group_transcript' && event.transcript) {
+              flushPendingStreamText()
               upsertGroupTranscriptBlock(assistantMessage, event.transcript)
             } else if (event.type === 'tool_start' && event.name) {
+              flushPendingStreamText()
               const toolRun = createToolRun(event.name)
               toolRuns.push(toolRun)
               ensureBlocks(assistantMessage).push(createToolBlock(toolRun))
               syncAssistantToolRuns()
             } else if (event.type === 'todo_update' && Array.isArray(event.items)) {
+              flushPendingStreamText()
               syncTodoBlock(assistantMessage, event.items)
             } else if (event.type === 'progress' && event.stage) {
+              flushPendingStreamText()
               const activeToolRun = ensureActiveToolRun()
               activeToolRun.progress.push({ stage: event.stage, detail: event.detail })
               syncAssistantToolRuns()
             } else if (event.type === 'tool_end') {
+              flushPendingStreamText()
               const activeToolRun = findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
               if (activeToolRun) {
                 activeToolRun.status = 'completed'
@@ -1372,6 +1431,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
               }
             } else if (event.type === 'done') {
               try {
+                flushPendingStreamText()
                 for (const toolRun of toolRuns) {
                   if (toolRun.status === 'running') {
                     toolRun.status = 'completed'
@@ -1382,14 +1442,17 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
                 if (event.message?.content !== undefined) {
                   assistantMessage.content = event.message.content
+                  contentAccum = typeof event.message.content === 'string' ? event.message.content : ''
                   appendFinalContentBlock(assistantMessage, event.message.content)
                 }
                 if (!hasRenderableContent(assistantMessage)) {
                   assistantMessage.content = '(无响应)'
+                  contentAccum = '(无响应)'
                   ensureBlocks(assistantMessage).push(createContentBlock('(无响应)'))
                 }
                 if (event.thinking && !assistantMessage.thinking) {
                   assistantMessage.thinking = event.thinking
+                  thinkingAccum = event.thinking
                   ensureBlocks(assistantMessage).push(createThinkingBlock(event.thinking))
                 }
                 positionGroupMetaBlocks(assistantMessage)
@@ -1398,6 +1461,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
               }
             } else if (event.type === 'error') {
               try {
+                flushPendingStreamText()
                 const activeToolRun = findLastRunningToolRun(toolRuns)
                 if (activeToolRun) {
                   activeToolRun.status = 'failed'
@@ -1411,6 +1475,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
               }
             } else if (event.type === 'stopped') {
               try {
+                flushPendingStreamText()
                 markAssistantMessageStopped(assistantMessage)
                 syncAssistantToolRuns()
               } finally {
@@ -1418,6 +1483,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
               }
             }
           } catch (err) {
+            flushPendingStreamText()
             console.error('[chat] Failed to handle stream event:', event, err)
 
             const activeToolRun = findLastRunningToolRun(toolRuns)

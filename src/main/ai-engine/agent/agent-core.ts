@@ -1019,7 +1019,7 @@ export class AgentCore {
         continue
       }
 
-      const recentMessages = keepCount > 0 ? summaryTarget.slice(-keepCount) : []
+      const recentMessages = keepCount > 0 ? this._sliceRecentMessagesForCompression(summaryTarget, keepCount) : []
       compressed = [systemMessage, summaryMessage, ...recentMessages]
 
       if (this._estimateTokens(compressed) <= warningThreshold || keepCount === 0) {
@@ -1030,6 +1030,17 @@ export class AgentCore {
 
     onProgress?.('✅ Context compressed', `${this._estimateTokens(compressed)}/${contextWindow}`)
     return compressed
+  }
+
+  private _sliceRecentMessagesForCompression (messages: ChatMessage[], keepCount: number): ChatMessage[] {
+    const candidateMessages = messages.slice(-keepCount)
+    let startIndex = 0
+
+    while (startIndex < candidateMessages.length && candidateMessages[startIndex].role === 'tool') {
+      startIndex++
+    }
+
+    return candidateMessages.slice(startIndex)
   }
 
   private _buildContextSummaryPrompt (messages: ChatMessage[]): ChatMessage[] {

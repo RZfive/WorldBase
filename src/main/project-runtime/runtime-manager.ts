@@ -15,6 +15,27 @@ export interface LogEntry {
   time: number
 }
 
+export type ProjectFailureSource = 'build' | 'start' | 'runtime'
+
+export type ProjectFailurePhase =
+  | 'build_failed'
+  | 'standalone_output_missing'
+  | 'spawn'
+  | 'crash'
+  | 'terminated_before_ready'
+  | 'ready_timeout'
+
+export interface ProjectFailureSnapshot {
+  source: ProjectFailureSource
+  phase: ProjectFailurePhase
+  status: string
+  summary: string
+  time: string
+  exitCode?: number | null
+  error?: string
+  stderrExcerpt?: string[]
+}
+
 interface ProjectRunInfo {
   process: ChildProcess
   port: number
@@ -23,6 +44,7 @@ interface ProjectRunInfo {
   startedAt: string
   exitCode?: number | null
   error?: string
+  lastFailure?: ProjectFailureSnapshot
 }
 
 export interface ProjectStatus {
@@ -33,6 +55,7 @@ export interface ProjectStatus {
   startedAt?: string
   exitCode?: number | null
   error?: string
+  lastFailure?: ProjectFailureSnapshot
 }
 
 export interface ProjectProcessSnapshot {
@@ -44,6 +67,7 @@ export interface ProjectProcessSnapshot {
   uptimeSeconds?: number
   exitCode?: number | null
   error?: string
+  lastFailure?: ProjectFailureSnapshot
 }
 
 interface StartResult {
@@ -61,6 +85,9 @@ interface InstallResult {
   success: boolean
   output: string
 }
+
+const MAX_LOG_ENTRIES = 500
+const FAILURE_STDERR_EXCERPT_LINES = 12
 
 /** Check whether a project has a Next.js standalone build output. */
 function _hasStandaloneBuild (projectDir: string): boolean {
@@ -238,31 +265,36 @@ export class RuntimeManager {
 
     // Capture stdout/stderr
     childProcess.stdout?.on('data', (data: Buffer) => {
-      const line = data.toString()
-      projectInfo.logs.push({ type: 'stdout', text: line, time: Date.now() })
-      // Keep only last 500 log lines
-      if (projectInfo.logs.length > 500) {
-        projectInfo.logs = projectInfo.logs.slice(-500)
-      }
+      this._appendLog(projectInfo, 'stdout', data.toString())
     })
 
     childProcess.stderr?.on('data', (data: Buffer) => {
-      const line = data.toString()
-      projectInfo.logs.push({ type: 'stderr', text: line, time: Date.now() })
-      if (projectInfo.logs.length > 500) {
-        projectInfo.logs = projectInfo.logs.slice(-500)
-      }
+      this._appendLog(projectInfo, 'stderr', data.toString())
     })
 
     childProcess.on('exit', (code) => {
       projectInfo.status = code === 0 ? 'stopped' : 'crashed'
       projectInfo.exitCode = code
+      if (code !== 0) {
+        this._recordFailure(projectInfo, {
+          source: projectInfo.status === 'starting' ? 'start' : 'runtime',
+          phase: 'crash',
+          summary: `Project process exited with code ${code}`,
+          exitCode: code
+        })
+      }
       this.portManager.release(projectId)
     })
 
     childProcess.on('error', (err) => {
       projectInfo.status = 'error'
       projectInfo.error = err.message
+      this._recordFailure(projectInfo, {
+        source: 'start',
+        phase: 'spawn',
+        summary: `Project process failed to start: ${err.message}`,
+        error: err.message
+      })
       this.portManager.release(projectId)
     })
 
@@ -272,11 +304,25 @@ export class RuntimeManager {
     // dependency warmup and framework startup before the port becomes reachable.
     const ready = await this.processMonitor.waitForReady(port, 15000)
     if (projectInfo.status === 'crashed' || projectInfo.status === 'error') {
+      this._recordFailure(projectInfo, {
+        source: 'start',
+        phase: 'terminated_before_ready',
+        summary: 'Project process terminated before it became ready',
+        exitCode: projectInfo.exitCode,
+        error: projectInfo.error
+      })
       const recentLogs = this.getLogs(projectId, 40).map(log => log.text).join('\n')
       throw new Error(`Project process terminated before ready.${recentLogs ? `\n${recentLogs}` : ''}`)
     }
     if (!ready) {
       await this.stop(projectId)
+      this._recordFailure(projectInfo, {
+        source: 'start',
+        phase: 'ready_timeout',
+        summary: `Project did not become ready on port ${port} within 15 seconds`,
+        exitCode: projectInfo.exitCode,
+        error: projectInfo.error
+      })
       const recentLogs = this.getLogs(projectId, 40).map(log => log.text).join('\n')
       throw new Error(`Project did not become ready on port ${port} within 15 seconds.${recentLogs ? `\n${recentLogs}` : ''}`)
     }
@@ -384,7 +430,8 @@ export class RuntimeManager {
       pid: info.process.pid,
       startedAt: info.startedAt,
       exitCode: info.exitCode,
-      error: info.error
+      error: info.error,
+      lastFailure: info.lastFailure
     }
   }
 
@@ -405,7 +452,8 @@ export class RuntimeManager {
             ? Math.max(0, Math.round(uptimeMs / 100) / 10)
             : undefined,
           exitCode: info.exitCode,
-          error: info.error
+          error: info.error,
+          lastFailure: info.lastFailure
         }
       })
       .sort((left, right) => left.projectId.localeCompare(right.projectId))
@@ -431,6 +479,48 @@ export class RuntimeManager {
       return []
     }
     return info.logs.slice(-lines)
+  }
+
+  private _appendLog (projectInfo: ProjectRunInfo, type: LogEntry['type'], text: string): void {
+    projectInfo.logs.push({ type, text, time: Date.now() })
+    if (projectInfo.logs.length > MAX_LOG_ENTRIES) {
+      projectInfo.logs = projectInfo.logs.slice(-MAX_LOG_ENTRIES)
+    }
+  }
+
+  private _recordFailure (
+    projectInfo: ProjectRunInfo,
+    failure: {
+      source: ProjectFailureSource
+      phase: ProjectFailurePhase
+      summary: string
+      exitCode?: number | null
+      error?: string
+    }
+  ): void {
+    projectInfo.lastFailure = {
+      source: failure.source,
+      phase: failure.phase,
+      status: projectInfo.status,
+      summary: failure.summary,
+      time: new Date().toISOString(),
+      exitCode: failure.exitCode,
+      error: failure.error,
+      stderrExcerpt: this._getRecentLogExcerpt(projectInfo, 'stderr', FAILURE_STDERR_EXCERPT_LINES)
+    }
+  }
+
+  private _getRecentLogExcerpt (
+    projectInfo: ProjectRunInfo,
+    type: LogEntry['type'],
+    maxLines: number
+  ): string[] {
+    return projectInfo.logs
+      .filter(entry => entry.type === type)
+      .flatMap(entry => entry.text.split(/\r?\n/))
+      .map(line => line.trim())
+      .filter(Boolean)
+      .slice(-maxLines)
   }
 
   /**
