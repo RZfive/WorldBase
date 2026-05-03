@@ -7,7 +7,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_collaboration_plan' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: { role: string; content: MessageContent }
@@ -18,6 +18,7 @@ interface StreamEvent {
   items?: TodoItem[]
   filePath?: string
   truncated?: boolean
+  plan?: AgentGroupCollaborationPlan
   groupProgress?: AgentGroupProgressSnapshot
   transcript?: AgentGroupTranscript
   sidechat?: AgentSidechatSession
@@ -92,6 +93,31 @@ interface AgentGroupDefinition {
   sharedMemoryScopes: Array<'group' | 'project' | 'channel'>
   visibility: 'summary_only' | 'expandable_internal_transcript'
   createdAt: string
+  updatedAt: string
+}
+
+type AgentGroupCollaborationMode = 'coordinator_only' | 'targeted' | 'discussion' | 'coordinator_decides' | 'mentioned_agent_decides'
+type AgentGroupCollaborationPhase = 'planning' | 'executing' | 'completed'
+
+interface AgentGroupParticipant {
+  agentId: string
+  agentName: string
+}
+
+interface AgentGroupCollaborationPlan {
+  groupId: string
+  groupName: string
+  mode: AgentGroupCollaborationMode
+  phase: AgentGroupCollaborationPhase
+  planner: AgentGroupParticipant
+  reportToName: string
+  originalRequest: string
+  normalizedRequest: string
+  reason: string
+  round?: number
+  mentionedParticipants: AgentGroupParticipant[]
+  candidateParticipants: AgentGroupParticipant[]
+  invitedParticipants: AgentGroupParticipant[]
   updatedAt: string
 }
 
@@ -270,6 +296,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'group_collaboration_plan'; plan: AgentGroupCollaborationPlan }
   | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
@@ -761,6 +788,9 @@ interface ElectronAPI {
   readFile: (projectId: string, filePath: string) => Promise<string>
   writeFile: (projectId: string, filePath: string, content: string) => Promise<{ success: boolean }>
   updateProjectAppearance: (projectId: string, updates: { name?: string; icon?: string }) => Promise<Record<string, unknown>>
+  exportProjectPackage: (projectId: string) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; projectId?: string; projectName?: string; includedBuildArtifacts?: string[] }>
+  importProjectPackage: () => Promise<{ success: boolean; canceled?: boolean; filePaths?: string[]; importedProjects?: Array<{ projectId: string; name: string; filePath: string }> }>
+  importProjectPackageFromFile: (filePath: string) => Promise<{ success: boolean; filePath?: string; importedProject?: { projectId: string; name: string } }>
   openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
   deleteProject: (projectId: string) => Promise<{ success: boolean }>
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void

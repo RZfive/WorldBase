@@ -27,6 +27,9 @@ const folders = ref<LaunchFolder[]>([])
 const topLevelOrder = ref<string[]>([])
 const isLoading = ref(false)
 const error = ref<string | null>(null)
+const isPackageActionPending = ref(false)
+const isPackageDragActive = ref(false)
+const packageDragDepth = ref(0)
 const searchQuery = ref('')
 const searchRef = ref<HTMLInputElement | null>(null)
 
@@ -53,9 +56,66 @@ const appearanceDialog = ref<{ visible: boolean; project: Project | null }>({
 })
 
 let projectChangedCleanup: (() => void) | null = null
+const PROJECT_PACKAGE_EXTENSION = 'twapp'
 
 function projectKey (projectId: string): string {
   return `project:${projectId}`
+}
+
+function getElectronFilePath (file: File): string | null {
+  const candidate = (file as File & { path?: string }).path
+  return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate : null
+}
+
+function isProjectPackageFileName (fileName: string): boolean {
+  return fileName.toLowerCase().endsWith(`.${PROJECT_PACKAGE_EXTENSION}`)
+}
+
+function extractProjectPackagePaths (dataTransfer: DataTransfer | null): string[] {
+  if (!dataTransfer) return []
+
+  const seen = new Set<string>()
+  const paths: string[] = []
+  for (const file of Array.from(dataTransfer.files || [])) {
+    if (!isProjectPackageFileName(file.name)) continue
+    const filePath = getElectronFilePath(file)
+    if (!filePath || seen.has(filePath)) continue
+    seen.add(filePath)
+    paths.push(filePath)
+  }
+
+  return paths
+}
+
+function hasProjectPackageDrag (dataTransfer: DataTransfer | null): boolean {
+  return extractProjectPackagePaths(dataTransfer).length > 0 || Array.from(dataTransfer?.files || []).some(file => isProjectPackageFileName(file.name))
+}
+
+function resetProjectPackageDragState () {
+  packageDragDepth.value = 0
+  isPackageDragActive.value = false
+}
+
+function handleProjectPackageDragOver (e: DragEvent): boolean {
+  if (dragItem.value || !hasProjectPackageDrag(e.dataTransfer)) return false
+
+  e.preventDefault()
+  e.stopPropagation()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+  isPackageDragActive.value = true
+  return true
+}
+
+function handleProjectPackageDrop (e: DragEvent): boolean {
+  if (dragItem.value) return false
+
+  const projectPackagePaths = extractProjectPackagePaths(e.dataTransfer)
+  if (projectPackagePaths.length === 0) return false
+
+  e.preventDefault()
+  e.stopPropagation()
+  void importProjectPackagesFromPaths(projectPackagePaths)
+  return true
 }
 
 function folderKey (folderId: string): string {
@@ -522,6 +582,56 @@ async function stopProject (project: Project) {
   }
 }
 
+async function exportProjectPackage (project: Project) {
+  if (project.kind === 'web' || !window.electronAPI?.exportProjectPackage) return
+
+  isPackageActionPending.value = true
+  error.value = null
+  try {
+    await window.electronAPI.exportProjectPackage(project.id)
+  } catch (err) {
+    error.value = (err as Error).message
+  } finally {
+    isPackageActionPending.value = false
+  }
+}
+
+async function importProjectPackagesFromDialog () {
+  if (!window.electronAPI?.importProjectPackage) return
+
+  isPackageActionPending.value = true
+  error.value = null
+  try {
+    const result = await window.electronAPI.importProjectPackage()
+    if (result.success && (result.importedProjects?.length || 0) > 0) {
+      await loadProjects()
+    }
+  } catch (err) {
+    error.value = (err as Error).message
+  } finally {
+    isPackageActionPending.value = false
+    resetProjectPackageDragState()
+  }
+}
+
+async function importProjectPackagesFromPaths (filePaths: string[]) {
+  if (!window.electronAPI?.importProjectPackageFromFile || filePaths.length === 0) return
+
+  isPackageActionPending.value = true
+  error.value = null
+  try {
+    for (const filePath of filePaths) {
+      await window.electronAPI.importProjectPackageFromFile(filePath)
+    }
+    await loadProjects()
+  } catch (err) {
+    error.value = (err as Error).message
+  } finally {
+    isPackageActionPending.value = false
+    resetProjectPackageDragState()
+  }
+}
+
 async function openInWindow (project: Project) {
   if (project.kind === 'web') return
   if (!window.electronAPI) return
@@ -770,12 +880,34 @@ function onDragStart (e: DragEvent, itemId: string, itemType: 'project' | 'folde
 }
 
 function onGridContainerDragOver (e: DragEvent) {
+  if (handleProjectPackageDragOver(e)) return
+
   if (!dragItem.value) return
   e.preventDefault()
   dropTarget.value = { id: '__grid__', type: 'grid', action: 'append' }
 }
 
+function onGridContainerDragEnter (e: DragEvent) {
+  if (dragItem.value || !hasProjectPackageDrag(e.dataTransfer)) return
+  e.preventDefault()
+  e.stopPropagation()
+  packageDragDepth.value += 1
+  isPackageDragActive.value = true
+}
+
+function onGridContainerDragLeave (e: DragEvent) {
+  if (dragItem.value || !hasProjectPackageDrag(e.dataTransfer)) return
+  e.preventDefault()
+  e.stopPropagation()
+  packageDragDepth.value = Math.max(0, packageDragDepth.value - 1)
+  if (packageDragDepth.value === 0) {
+    isPackageDragActive.value = false
+  }
+}
+
 function onGridContainerDrop (e: DragEvent) {
+  if (handleProjectPackageDrop(e)) return
+
   if (!dragItem.value) return
   e.preventDefault()
   appendToTopLevel(dragItem.value)
@@ -783,12 +915,16 @@ function onGridContainerDrop (e: DragEvent) {
 }
 
 function onDragOver (e: DragEvent, targetId: string, targetType: 'project' | 'folder') {
+  if (handleProjectPackageDragOver(e)) return
+
   e.preventDefault()
   e.stopPropagation()
   dropTarget.value = resolveTopLevelDropTarget(e, targetId, targetType)
 }
 
 function onFolderProjectDragOver (e: DragEvent, targetProjectId: string, folderId: string) {
+  if (handleProjectPackageDragOver(e)) return
+
   e.preventDefault()
   e.stopPropagation()
   dropTarget.value = resolveFolderDropTarget(e, targetProjectId, folderId)
@@ -799,6 +935,8 @@ function onDragLeave () {
 }
 
 function onDrop (e: DragEvent, targetId: string, targetType: 'project' | 'folder') {
+  if (handleProjectPackageDrop(e)) return
+
   if (!dragItem.value) return
   e.preventDefault()
   e.stopPropagation()
@@ -831,6 +969,8 @@ function onDrop (e: DragEvent, targetId: string, targetType: 'project' | 'folder
 }
 
 function onFolderProjectDrop (e: DragEvent, targetProjectId: string, folderId: string) {
+  if (handleProjectPackageDrop(e)) return
+
   if (!dragItem.value) return
   e.preventDefault()
   e.stopPropagation()
@@ -849,6 +989,8 @@ function onFolderProjectDrop (e: DragEvent, targetProjectId: string, folderId: s
 }
 
 function onFolderBodyDragOver (e: DragEvent) {
+  if (handleProjectPackageDragOver(e)) return
+
   if (!dragItem.value || !openFolderData.value || dragItem.value.type !== 'project') return
   e.preventDefault()
   e.stopPropagation()
@@ -861,6 +1003,8 @@ function onFolderBodyDragOver (e: DragEvent) {
 }
 
 function onFolderBodyDrop (e: DragEvent) {
+  if (handleProjectPackageDrop(e)) return
+
   if (!dragItem.value || !openFolderData.value || dragItem.value.type !== 'project') return
   e.preventDefault()
   e.stopPropagation()
@@ -898,12 +1042,16 @@ function cancelRename () {
 }
 
 function onFolderOverlayDragOver (e: DragEvent) {
+  if (handleProjectPackageDragOver(e)) return
+
   if (!dragItem.value || !openFolderData.value || dragItem.value.type !== 'project') return
   if (!openFolderData.value.projectIds.includes(dragItem.value.id)) return
   e.preventDefault()
 }
 
 function onFolderOverlayDrop (e: DragEvent) {
+  if (handleProjectPackageDrop(e)) return
+
   if (e.target !== e.currentTarget || !dragItem.value || !openFolderData.value) return
   if (dragItem.value.type !== 'project') return
   if (!openFolderData.value.projectIds.includes(dragItem.value.id)) return
@@ -962,6 +1110,7 @@ onUnmounted(() => {
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('keydown', onKeydown)
   projectChangedCleanup?.()
+  resetProjectPackageDragState()
 })
 </script>
 
@@ -970,17 +1119,22 @@ onUnmounted(() => {
     <div class="lp-content" @click.self="emit('close')">
       <!-- Search bar -->
       <div class="lp-search-bar">
-        <div class="lp-search-box">
-          <span class="lp-search-icon">🔍</span>
-          <input
-            ref="searchRef"
-            v-model="searchQuery"
-            type="text"
-            placeholder="搜索应用或输入网址…"
-            class="lp-search-input"
-            @click.stop
-            @keydown.enter.prevent="handleSearchEnter"
-          />
+        <div class="lp-toolbar">
+          <div class="lp-search-box">
+            <span class="lp-search-icon">🔍</span>
+            <input
+              ref="searchRef"
+              v-model="searchQuery"
+              type="text"
+              placeholder="搜索应用或输入网址…"
+              class="lp-search-input"
+              @click.stop
+              @keydown.enter.prevent="handleSearchEnter"
+            />
+          </div>
+          <button class="lp-import-btn" type="button" :disabled="isPackageActionPending" @click="importProjectPackagesFromDialog">
+            {{ isPackageActionPending ? '处理中…' : '导入应用' }}
+          </button>
         </div>
       </div>
 
@@ -1005,13 +1159,21 @@ onUnmounted(() => {
         v-else
         class="lp-grid-container"
         @contextmenu="showCtxMenu($event, null, 'blank')"
+        @dragenter="onGridContainerDragEnter"
         @dragover="onGridContainerDragOver"
+        @dragleave="onGridContainerDragLeave"
         @drop="onGridContainerDrop"
       >
+        <div v-if="isPackageDragActive" class="lp-import-drop-overlay">
+          <div class="lp-import-drop-card">
+            {{ isPackageActionPending ? '正在安装应用…' : '释放鼠标以安装 The World 应用包 (.twapp)' }}
+          </div>
+        </div>
+
         <div v-if="gridItems.length === 0" class="lp-empty">
           <div class="lp-empty-icon">🚀</div>
           <p>还没有应用</p>
-          <p class="lp-empty-hint">在 AI 对话中输入需求即可创建新应用</p>
+          <p class="lp-empty-hint">在 AI 对话中输入需求即可创建新应用，或导入 .twapp 应用包</p>
         </div>
 
         <LaunchpadGrid
@@ -1078,6 +1240,7 @@ onUnmounted(() => {
       @edit-project="openEditProject($event)"
       @open-project="emit('select', $event)"
       @view-source="openSourceCode($event)"
+      @export-project="exportProjectPackage($event)"
       @open-in-window="openInWindow($event)"
       @start-project="startProject($event)"
       @stop-project="stopProject($event)"
@@ -1089,6 +1252,7 @@ onUnmounted(() => {
       @rename-folder="startRenameFolder($event)"
       @delete-folder="deleteFolder($event)"
       @create-folder="createEmptyFolder"
+      @import-package="importProjectPackagesFromDialog"
       @refresh="loadProjects"
     />
 
@@ -1180,6 +1344,13 @@ onUnmounted(() => {
   flex-shrink: 0;
   margin-bottom: 20px;
 }
+
+.lp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .lp-search-box {
   display: flex;
   align-items: center;
@@ -1212,6 +1383,31 @@ onUnmounted(() => {
 }
 .lp-search-input::placeholder { color: var(--app-text-faint); }
 
+.lp-import-btn {
+  height: 42px;
+  padding: 0 16px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
+  color: var(--app-text-strong);
+  font-size: 0.85em;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--app-shadow);
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.lp-import-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--lp-accent-strong);
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-muted));
+}
+
+.lp-import-btn:disabled {
+  opacity: 0.62;
+  cursor: wait;
+}
+
 /* ============ Status / empty ============ */
 .lp-status {
   color: var(--app-text-muted);
@@ -1232,6 +1428,7 @@ onUnmounted(() => {
 
 /* ============ Grid container ============ */
 .lp-grid-container {
+  position: relative;
   flex: 1;
   width: 100%;
   max-width: 100%;
@@ -1241,6 +1438,30 @@ onUnmounted(() => {
 }
 .lp-grid-container::-webkit-scrollbar { width: 4px; }
 .lp-grid-container::-webkit-scrollbar-thumb { background: var(--app-scrollbar); border-radius: 2px; }
+
+.lp-import-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--app-shell-bg) 46%, transparent);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+.lp-import-drop-card {
+  padding: 18px 22px;
+  border-radius: 18px;
+  border: 1px dashed var(--lp-accent-strong);
+  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
+  color: var(--app-text-strong);
+  font-size: 0.95em;
+  font-weight: 600;
+  box-shadow: var(--app-shadow);
+}
 
 .lp-grid {
   display: grid;

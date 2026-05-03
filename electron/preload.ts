@@ -467,6 +467,9 @@ export interface ElectronAPI {
   readFile: (projectId: string, filePath: string) => Promise<string>
   writeFile: (projectId: string, filePath: string, content: string) => Promise<{ success: boolean }>
   updateProjectAppearance: (projectId: string, updates: { name?: string; icon?: string }) => Promise<Record<string, unknown>>
+  exportProjectPackage: (projectId: string) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; projectId?: string; projectName?: string; includedBuildArtifacts?: string[] }>
+  importProjectPackage: () => Promise<{ success: boolean; canceled?: boolean; filePaths?: string[]; importedProjects?: Array<{ projectId: string; name: string; filePath: string }> }>
+  importProjectPackageFromFile: (filePath: string) => Promise<{ success: boolean; filePath?: string; importedProject?: { projectId: string; name: string } }>
   openProjectFolder: (projectId: string) => Promise<{ success: boolean }>
   deleteProject: (projectId: string) => Promise<{ success: boolean }>
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => () => void
@@ -637,6 +640,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readFile: (projectId: string, filePath: string) => ipcRenderer.invoke('projects:readFile', projectId, filePath),
   writeFile: (projectId: string, filePath: string, content: string) => ipcRenderer.invoke('projects:writeFile', projectId, filePath, content),
   updateProjectAppearance: (projectId: string, updates: { name?: string; icon?: string }) => ipcRenderer.invoke('projects:updateAppearance', projectId, updates),
+  exportProjectPackage: (projectId: string) => ipcRenderer.invoke('projects:exportPackage', projectId),
+  importProjectPackage: () => ipcRenderer.invoke('projects:importPackage'),
+  importProjectPackageFromFile: (filePath: string) => ipcRenderer.invoke('projects:importPackageFromFile', filePath),
   openProjectFolder: (projectId: string) => ipcRenderer.invoke('projects:openFolder', projectId),
   deleteProject: (projectId: string) => ipcRenderer.invoke('projects:delete', projectId),
   onProjectChanged: (callback: (event: { action: string; projectId: string; port?: number }) => void) => {

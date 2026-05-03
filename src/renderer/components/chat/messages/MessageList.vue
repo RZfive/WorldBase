@@ -276,6 +276,7 @@ function getMessageSignature (msg?: ChatMessage): string {
     if (block.kind === 'error') return `error:${block.message}`
     if (block.kind === 'thinking') return `thinking:${block.text}`
     if (block.kind === 'file_preview') return `preview:${block.filePath}:${block.previewContent}:${block.truncated}:${block.active}`
+    if (block.kind === 'group_collaboration_plan') return `groupplan:${block.plan.groupId}:${block.plan.phase}:${block.plan.mode}:${block.plan.planner.agentId}:${block.plan.reportToName}:${block.plan.originalRequest}:${block.plan.normalizedRequest}:${block.plan.reason}:${block.plan.round || 0}:${block.plan.mentionedParticipants.map(item => `${item.agentId}:${item.agentName}`).join('|')}:${block.plan.candidateParticipants.map(item => `${item.agentId}:${item.agentName}`).join('|')}:${block.plan.invitedParticipants.map(item => `${item.agentId}:${item.agentName}`).join('|')}`
     if (block.kind === 'agent_sidechat') return `sidechat:${block.session.id}:${block.session.status}:${block.session.round}:${block.session.agentId}:${block.session.request}:${block.session.response}:${block.session.error || ''}:${block.session.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`
     if (block.kind === 'group_progress') return `groupprogress:${block.snapshot.groupId}:${block.snapshot.status}:${block.snapshot.activeRound}:${block.snapshot.items.map((item: typeof block.snapshot.items[number]) => `${item.agentId}:${item.status}:${item.currentRound}:${item.completedRounds}:${item.stage}:${item.detail || ''}:${item.summary || ''}:${item.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`).join('|')}`
     if (block.kind === 'group_transcript') return `grouptranscript:${block.transcript.groupId}:${block.transcript.visibility}:${block.transcript.entryCount}:${block.transcript.summary}:${block.transcript.entries.map((entry: typeof block.transcript.entries[number]) => `${entry.id}:${entry.round}:${entry.agentId}:${entry.content}`).join('|')}`
@@ -400,6 +401,7 @@ onUnmounted(() => {
         :key="index"
         :ref="(element) => setMessageItemRef(index, element)"
         class="message-item"
+        :class="{ 'with-leading-gap': index > 0 }"
       >
         <MessageRow
           :msg="msg"
@@ -436,7 +438,7 @@ onUnmounted(() => {
   position: relative;
 }
 
-.message-item + .message-item {
+.message-item.with-leading-gap {
   margin-top: 20px;
 }
 

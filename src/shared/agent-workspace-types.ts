@@ -52,6 +52,32 @@ export interface AgentGroupDefinition {
   updatedAt: string
 }
 
+export type AgentGroupCollaborationMode = 'coordinator_only' | 'targeted' | 'discussion' | 'coordinator_decides' | 'mentioned_agent_decides'
+
+export type AgentGroupCollaborationPhase = 'planning' | 'executing' | 'completed'
+
+export interface AgentGroupParticipant {
+  agentId: string
+  agentName: string
+}
+
+export interface AgentGroupCollaborationPlan {
+  groupId: string
+  groupName: string
+  mode: AgentGroupCollaborationMode
+  phase: AgentGroupCollaborationPhase
+  planner: AgentGroupParticipant
+  reportToName: string
+  originalRequest: string
+  normalizedRequest: string
+  reason: string
+  round?: number
+  mentionedParticipants: AgentGroupParticipant[]
+  candidateParticipants: AgentGroupParticipant[]
+  invitedParticipants: AgentGroupParticipant[]
+  updatedAt: string
+}
+
 export interface AgentGroupTranscriptEntry {
   id: string
   round: number

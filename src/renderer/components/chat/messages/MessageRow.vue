@@ -5,6 +5,7 @@ import type { ChatMessage, ChatMessageBlock, FilePreviewState } from '../types'
 import ThinkingBlock from '../blocks/ThinkingBlock.vue'
 import ToolRunBlock from '../blocks/ToolRunBlock.vue'
 import FilePreviewBlock from '../blocks/FilePreviewBlock.vue'
+import GroupCollaborationPlanBlock from '../blocks/GroupCollaborationPlanBlock.vue'
 import AgentSidechatBlock from '../blocks/AgentSidechatBlock.vue'
 import GroupProgressBlock from '../blocks/GroupProgressBlock.vue'
 import GroupTranscriptBlock from '../blocks/GroupTranscriptBlock.vue'
@@ -107,6 +108,11 @@ const messageText = computed(() => getMessageText())
 
           <FilePreviewBlock
             v-else-if="block.kind === 'file_preview'"
+            :block="block"
+          />
+
+          <GroupCollaborationPlanBlock
+            v-else-if="block.kind === 'group_collaboration_plan'"
             :block="block"
           />
 
