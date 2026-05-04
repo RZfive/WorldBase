@@ -5,8 +5,6 @@
 import ExcelJS from 'exceljs'
 import type { DocumentNode } from './document-types.js'
 
-const MAX_PREVIEW_ROWS = 200
-
 let nodeCounter = 0
 function nextId (): string {
   return `xls_${++nodeCounter}`
@@ -54,11 +52,7 @@ export async function parseExcelToNodes (input: string | Buffer): Promise<Docume
       meta: { rowCount: worksheet.rowCount, columnCount: worksheet.columnCount, headers }
     }
 
-    let rowNum = 0
     worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-      if (rowNum >= MAX_PREVIEW_ROWS) return
-      rowNum++
-
       const cells: string[] = []
       row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
         cells[colNumber - 1] = formatCellValue(cell)
@@ -78,16 +72,6 @@ export async function parseExcelToNodes (input: string | Buffer): Promise<Docume
         meta: { rowNumber, cells }
       })
     })
-
-    if (worksheet.rowCount > MAX_PREVIEW_ROWS) {
-      sheetNode.children!.push({
-        id: nextId(),
-        type: 'paragraph',
-        text: `... 省略余下 ${worksheet.rowCount - MAX_PREVIEW_ROWS} 行`,
-        level: 1,
-        pageIndex: sheetIdx + 1
-      })
-    }
 
     nodes.push(sheetNode)
   })

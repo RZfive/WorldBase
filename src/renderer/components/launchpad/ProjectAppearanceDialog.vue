@@ -1,13 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { getProjectIcon } from '../../utils/project-icon'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import 'emoji-picker-element'
+import { resolveProjectIcon } from '../../utils/project-icon'
 import type { Project } from './types'
 
-const EMOJI_OPTIONS = [
-  '🚀', '🎨', '⚙️', '📦', '🌍', '🧠', '📊', '🎧',
-  '📚', '📝', '🎬', '🛒', '🍅', '🛰️', '🧩', '💎',
-  '🧪', '🔮', '🎯', '🌤️', '🗺️', '📷', '🎮', '🧱'
-]
+type EmojiClickEvent = CustomEvent<{
+  unicode?: string
+}>
 
 const props = defineProps<{
   visible: boolean
@@ -21,19 +20,58 @@ const emit = defineEmits<{
 
 const draftName = ref('')
 const draftIcon = ref('')
+const emojiPickerHost = ref<HTMLElement | null>(null)
+let emojiPickerEl: HTMLElement | null = null
 
 watch(
   () => [props.visible, props.project?.id],
-  () => {
-    if (!props.visible || !props.project) return
+  async () => {
+    if (!props.visible || !props.project) {
+      unmountEmojiPicker()
+      return
+    }
+
     draftName.value = props.project.name || props.project.id
     draftIcon.value = typeof props.project.icon === 'string' ? props.project.icon : ''
+
+    await nextTick()
+    mountEmojiPicker()
   },
   { immediate: true }
 )
 
 const previewIcon = computed(() => {
-  return getProjectIcon(props.project?.type, draftIcon.value)
+  return resolveProjectIcon(props.project?.type, draftIcon.value)
+})
+
+function handleEmojiClick (event: Event) {
+  const emoji = (event as EmojiClickEvent).detail?.unicode?.trim()
+  if (!emoji) return
+  draftIcon.value = emoji
+}
+
+function mountEmojiPicker () {
+  if (!emojiPickerHost.value || emojiPickerEl?.isConnected) return
+
+  const picker = document.createElement('emoji-picker') as HTMLElement
+  picker.className = 'appearance-emoji-picker'
+  picker.setAttribute('locale', 'zh-Hans')
+  picker.setAttribute('preview-position', 'none')
+  picker.addEventListener('emoji-click', handleEmojiClick as EventListener)
+
+  emojiPickerHost.value.replaceChildren(picker)
+  emojiPickerEl = picker
+}
+
+function unmountEmojiPicker () {
+  if (!emojiPickerEl) return
+  emojiPickerEl.removeEventListener('emoji-click', handleEmojiClick as EventListener)
+  emojiPickerEl.remove()
+  emojiPickerEl = null
+}
+
+onBeforeUnmount(() => {
+  unmountEmojiPicker()
 })
 
 function save () {
@@ -60,7 +98,10 @@ function save () {
           </div>
 
           <div class="appearance-preview">
-            <div class="appearance-preview-icon">{{ previewIcon }}</div>
+            <div class="appearance-preview-icon">
+              <img v-if="previewIcon.kind === 'image'" :src="previewIcon.value" alt="" class="appearance-preview-image" />
+              <span v-else>{{ previewIcon.value }}</span>
+            </div>
             <div class="appearance-preview-meta">
               <div class="appearance-preview-name">{{ draftName || project.id }}</div>
               <div class="appearance-preview-type">{{ project.type || '应用' }}</div>
@@ -79,33 +120,26 @@ function save () {
           </label>
 
           <label class="appearance-field">
-            <span>自定义 Emoji</span>
+            <span>图标</span>
             <div class="appearance-icon-row">
               <input
                 v-model="draftIcon"
                 type="text"
                 class="appearance-input appearance-input-icon"
-                placeholder="留空则按类型自动选择"
-                maxlength="8"
+                placeholder="支持任意 Emoji 或图片地址，留空则按类型自动选择"
               />
-              <button class="appearance-reset" @click="draftIcon = ''">恢复默认</button>
+              <button class="appearance-reset" type="button" @click="draftIcon = ''">恢复默认</button>
             </div>
+            <div class="appearance-hint">支持完整 Emoji 集合。可直接输入、粘贴，或在下方搜索选择。</div>
           </label>
 
-          <div class="appearance-emoji-grid">
-            <button
-              v-for="emoji in EMOJI_OPTIONS"
-              :key="emoji"
-              :class="['appearance-emoji-btn', { active: draftIcon === emoji }]"
-              @click="draftIcon = emoji"
-            >
-              {{ emoji }}
-            </button>
+          <div class="appearance-picker-shell">
+            <div ref="emojiPickerHost" class="appearance-picker-host"></div>
           </div>
 
           <div class="appearance-actions">
-            <button class="appearance-btn appearance-btn-secondary" @click="emit('cancel')">取消</button>
-            <button class="appearance-btn appearance-btn-primary" @click="save">保存</button>
+            <button class="appearance-btn appearance-btn-secondary" type="button" @click="emit('cancel')">取消</button>
+            <button class="appearance-btn appearance-btn-primary" type="button" @click="save">保存</button>
           </div>
         </div>
       </div>
@@ -126,7 +160,8 @@ function save () {
 }
 
 .appearance-dialog {
-  width: min(560px, calc(100vw - 32px));
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
   background:
     radial-gradient(circle at top right, var(--app-accent-soft), transparent 30%),
     linear-gradient(180deg, var(--app-panel), var(--app-panel-strong));
@@ -135,6 +170,7 @@ function save () {
   box-shadow: var(--app-shadow);
   padding: 24px;
   color: var(--app-text);
+  overflow-y: auto;
 }
 
 .appearance-header {
@@ -193,6 +229,13 @@ function save () {
   font-size: 2.3em;
   background: linear-gradient(135deg, var(--app-accent-soft), var(--app-panel-subtle));
   box-shadow: inset 0 1px 0 var(--app-border), 0 18px 36px rgba(15, 23, 42, 0.16);
+}
+
+.appearance-preview-image {
+  width: 58px;
+  height: 58px;
+  object-fit: contain;
+  border-radius: 16px;
 }
 
 .appearance-preview-name {
@@ -261,32 +304,39 @@ function save () {
   color: var(--app-text-strong);
 }
 
-.appearance-emoji-grid {
+.appearance-hint {
   margin-top: 16px;
-  display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 10px;
+  font-size: 0.78em;
+  color: var(--app-text-muted);
 }
 
-.appearance-emoji-btn {
-  height: 48px;
-  border-radius: 16px;
+.appearance-picker-shell {
+  margin-top: 18px;
+  border-radius: 18px;
   border: 1px solid var(--app-border);
-  background: var(--app-panel-subtle);
-  font-size: 1.35em;
-  cursor: pointer;
-  transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+  background: linear-gradient(180deg, var(--app-panel-subtle), var(--app-panel-muted));
+  padding: 10px;
 }
 
-.appearance-emoji-btn:hover {
-  transform: translateY(-2px);
-  border-color: var(--app-accent-glow);
-  background: var(--app-accent-soft);
+.appearance-picker-host {
+  min-height: 380px;
 }
 
-.appearance-emoji-btn.active {
-  background: var(--app-accent-soft);
-  border-color: var(--app-accent-glow);
+.appearance-picker-host :deep(.appearance-emoji-picker) {
+  width: 100%;
+  height: 380px;
+  --background: transparent;
+  --border-color: transparent;
+  --border-radius: 14px;
+  --button-hover-background: var(--app-accent-soft);
+  --category-button-color: var(--app-text-soft);
+  --category-button-active-color: var(--app-text-strong);
+  --indicator-color: var(--app-accent);
+  --input-border-color: var(--app-input-border);
+  --input-font-color: var(--app-text-strong);
+  --input-background-color: var(--app-input-bg);
+  --outline-color: var(--app-accent-glow);
+  --shadow: none;
 }
 
 .appearance-actions {

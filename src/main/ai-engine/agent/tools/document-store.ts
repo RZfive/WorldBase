@@ -4,11 +4,27 @@
  */
 import type {
   DocumentArtifact,
+  DocumentNode,
   SelectionRegion,
   SelectionRef,
   DocumentSummary,
   CreateSelectionPayload
 } from './document-types.js'
+
+interface DocumentChunkEntry {
+  nodeId: string
+  pageIndex: number
+  text: string
+}
+
+export interface DocumentArtifactChunk {
+  chunkIndex: number
+  content: string
+  startNodeId: string | null
+  endNodeId: string | null
+  startPageIndex: number | null
+  endPageIndex: number | null
+}
 
 function generateId (): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') {
@@ -162,9 +178,146 @@ export class DocumentStore {
     return artifact?.plainText ?? null
   }
 
+  /** Build bounded, structure-aware chunks for AI reads of large documents. */
+  getArtifactChunks (artifactId: string, maxChars = 12000): DocumentArtifactChunk[] | null {
+    const artifact = this.artifacts.get(artifactId)
+    if (!artifact) return null
+
+    const normalizedMaxChars = this.normalizeChunkSize(maxChars)
+    return this.buildArtifactChunks(artifact.nodes, normalizedMaxChars, artifact.plainText)
+  }
+
   // --- Internal helpers ---
 
-  private collectAllNodeIds (nodes: import('./document-types.js').DocumentNode[]): string[] {
+  private normalizeChunkSize (maxChars: number): number {
+    if (!Number.isFinite(maxChars)) return 12000
+    return Math.min(30000, Math.max(2000, Math.floor(maxChars)))
+  }
+
+  private buildArtifactChunks (nodes: DocumentNode[], maxChars: number, fallbackText: string): DocumentArtifactChunk[] {
+    const entries = this.collectChunkEntries(nodes)
+
+    if (entries.length === 0) {
+      return [{
+        chunkIndex: 0,
+        content: fallbackText.trim() || '(无文本内容)',
+        startNodeId: null,
+        endNodeId: null,
+        startPageIndex: null,
+        endPageIndex: null
+      }]
+    }
+
+    const rawChunks: Array<Omit<DocumentArtifactChunk, 'chunkIndex'>> = []
+    let currentEntries: DocumentChunkEntry[] = []
+    let currentLength = 0
+
+    const flushCurrentEntries = () => {
+      if (currentEntries.length === 0) return
+      rawChunks.push({
+        content: currentEntries.map(entry => entry.text).join('\n\n'),
+        startNodeId: currentEntries[0]?.nodeId ?? null,
+        endNodeId: currentEntries[currentEntries.length - 1]?.nodeId ?? null,
+        startPageIndex: currentEntries[0]?.pageIndex ?? null,
+        endPageIndex: currentEntries[currentEntries.length - 1]?.pageIndex ?? null
+      })
+      currentEntries = []
+      currentLength = 0
+    }
+
+    for (const entry of entries) {
+      const segments = this.segmentChunkEntry(entry, maxChars)
+
+      for (const segment of segments) {
+        const nextLength = currentLength === 0
+          ? segment.text.length
+          : currentLength + 2 + segment.text.length
+
+        if (currentEntries.length > 0 && nextLength > maxChars) {
+          flushCurrentEntries()
+        }
+
+        currentEntries.push(segment)
+        currentLength = currentLength === 0
+          ? segment.text.length
+          : currentLength + 2 + segment.text.length
+      }
+    }
+
+    flushCurrentEntries()
+
+    return rawChunks.map((chunk, chunkIndex) => ({
+      chunkIndex,
+      ...chunk
+    }))
+  }
+
+  private collectChunkEntries (nodes: DocumentNode[]): DocumentChunkEntry[] {
+    const entries: DocumentChunkEntry[] = []
+
+    const walk = (list: DocumentNode[]) => {
+      for (const node of list) {
+        const text = this.formatChunkNodeText(node)
+        if (text) {
+          entries.push({
+            nodeId: node.id,
+            pageIndex: node.pageIndex,
+            text
+          })
+        }
+
+        if (node.children?.length) {
+          walk(node.children)
+        }
+      }
+    }
+
+    walk(nodes)
+    return entries
+  }
+
+  private formatChunkNodeText (node: DocumentNode): string {
+    const text = node.text?.trim()
+    if (!text) return ''
+
+    switch (node.type) {
+      case 'heading':
+        return `${'#'.repeat(Math.min(Math.max(node.level || 1, 1), 6))} ${text}`
+      case 'page':
+        return `[页面 ${node.pageIndex}]`
+      case 'sheet':
+        return `[工作表 ${text}]`
+      case 'slide':
+        return `[幻灯片 ${node.pageIndex}]`
+      case 'table_row':
+      case 'list_item':
+        return `- ${text}`
+      case 'image_placeholder':
+        return `[图片占位] ${text}`
+      default:
+        return text
+    }
+  }
+
+  private segmentChunkEntry (entry: DocumentChunkEntry, maxChars: number): DocumentChunkEntry[] {
+    if (entry.text.length <= maxChars) {
+      return [entry]
+    }
+
+    const segments: DocumentChunkEntry[] = []
+    let cursor = 0
+    while (cursor < entry.text.length) {
+      segments.push({
+        ...entry,
+        text: entry.text.slice(cursor, cursor + maxChars)
+      })
+      cursor += maxChars
+    }
+
+    return segments
+  }
+
+  private collectAllNodeIds (nodes: DocumentNode[]): string[] {
     const ids: string[] = []
     for (const node of nodes) {
       ids.push(node.id)
@@ -173,9 +326,9 @@ export class DocumentStore {
     return ids
   }
 
-  private buildNodeMap (nodes: import('./document-types.js').DocumentNode[]): Map<string, import('./document-types.js').DocumentNode> {
-    const map = new Map<string, import('./document-types.js').DocumentNode>()
-    const walk = (list: import('./document-types.js').DocumentNode[]) => {
+  private buildNodeMap (nodes: DocumentNode[]): Map<string, DocumentNode> {
+    const map = new Map<string, DocumentNode>()
+    const walk = (list: DocumentNode[]) => {
       for (const node of list) {
         map.set(node.id, node)
         if (node.children) walk(node.children)

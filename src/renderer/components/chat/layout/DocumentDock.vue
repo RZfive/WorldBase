@@ -341,6 +341,7 @@ watch(() => props.visible, (visible) => {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           导入文档
         </button>
+        <div class="import-hint">支持单个文档最大 100MB，大型文档会由 AI 分片读取。</div>
 
         <div v-if="importError" class="import-error">{{ importError }}</div>
 
@@ -406,7 +407,7 @@ watch(() => props.visible, (visible) => {
         <div v-else class="preview-empty">
           <div class="empty-icon">📂</div>
           <div class="empty-text">选择左侧文档查看内容</div>
-          <div class="empty-hint">支持 PDF、Excel、Word、PowerPoint</div>
+          <div class="empty-hint">支持 PDF、Excel、Word、PowerPoint，单个文档最大 100MB</div>
         </div>
       </div>
     </div>
@@ -516,6 +517,13 @@ watch(() => props.visible, (visible) => {
 
 .import-btn:hover { background: var(--app-accent-strong); }
 .import-btn.disabled { opacity: 0.6; pointer-events: none; }
+
+.import-hint {
+  margin: 0 10px 8px;
+  font-size: 0.72em;
+  line-height: 1.45;
+  color: var(--app-text-muted);
+}
 
 .import-error {
   margin: 0 10px 6px;

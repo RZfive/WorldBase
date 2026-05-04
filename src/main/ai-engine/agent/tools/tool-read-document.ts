@@ -9,7 +9,7 @@ export function toolReadDocument (documentStore: DocumentStore) {
   return {
     definition: {
       name: 'read_document',
-      description: 'Read imported document content, either the full text or selected regions.',
+      description: 'Read imported document content in bounded chunks, or return specific selected regions.',
       parameters: {
         type: 'object' as const,
         properties: {
@@ -21,6 +21,14 @@ export function toolReadDocument (documentStore: DocumentStore) {
             type: 'array',
             items: { type: 'string' },
             description: 'Optional list of selection IDs. If provided, only those selections are returned.'
+          },
+          chunk_index: {
+            type: 'number',
+            description: 'Optional zero-based chunk index for traversing large documents. Defaults to 0.'
+          },
+          max_chars: {
+            type: 'number',
+            description: 'Optional maximum characters per chunk. Defaults to 12000 and is clamped for safety.'
           }
         },
         required: ['artifact_id']
@@ -29,6 +37,8 @@ export function toolReadDocument (documentStore: DocumentStore) {
     handler: async (args: Record<string, unknown>): Promise<unknown> => {
       const artifactId = String(args.artifact_id || '')
       const regionIds = Array.isArray(args.region_ids) ? args.region_ids.map(String) : undefined
+      const chunkIndex = Number.isFinite(Number(args.chunk_index)) ? Math.max(0, Math.floor(Number(args.chunk_index))) : 0
+      const maxChars = Number.isFinite(Number(args.max_chars)) ? Math.floor(Number(args.max_chars)) : 12000
 
       const artifact = documentStore.getArtifact(artifactId)
       if (!artifact) {
@@ -48,14 +58,51 @@ export function toolReadDocument (documentStore: DocumentStore) {
         }
       }
 
-      // Return full document text (possibly truncated)
-      const maxLength = 80000
-      const text = artifact.plainText
+      const chunks = documentStore.getArtifactChunks(artifactId, maxChars)
+      if (!chunks || chunks.length === 0) {
+        return {
+          fileName: artifact.fileName,
+          fileType: artifact.fileType,
+          totalLength: artifact.plainText.length,
+          totalChunks: 0,
+          chunkIndex: 0,
+          hasMore: false,
+          content: ''
+        }
+      }
+
+      if (chunkIndex >= chunks.length) {
+        return {
+          error: `文档分块索引超出范围: ${chunkIndex}，可用范围为 0-${Math.max(0, chunks.length - 1)}`,
+          fileName: artifact.fileName,
+          fileType: artifact.fileType,
+          totalLength: artifact.plainText.length,
+          totalChunks: chunks.length,
+          requestedChunkIndex: chunkIndex
+        }
+      }
+
+      const chunk = chunks[chunkIndex]
       return {
+        strategy: 'chunk',
         fileName: artifact.fileName,
         fileType: artifact.fileType,
-        totalLength: text.length,
-        content: text.length > maxLength ? text.substring(0, maxLength) + '\n... (内容已截断)' : text
+        totalLength: artifact.plainText.length,
+        totalChunks: chunks.length,
+        chunkIndex: chunk.chunkIndex,
+        maxChars,
+        hasMore: chunk.chunkIndex < chunks.length - 1,
+        nextChunkIndex: chunk.chunkIndex < chunks.length - 1 ? chunk.chunkIndex + 1 : null,
+        range: {
+          startNodeId: chunk.startNodeId,
+          endNodeId: chunk.endNodeId,
+          startPageIndex: chunk.startPageIndex,
+          endPageIndex: chunk.endPageIndex
+        },
+        guidance: chunk.chunkIndex < chunks.length - 1
+          ? `继续读取请再次调用 read_document，并传入 artifact_id=${artifactId} 与 chunk_index=${chunk.chunkIndex + 1}`
+          : '已到达文档末尾。',
+        content: chunk.content
       }
     }
   }
