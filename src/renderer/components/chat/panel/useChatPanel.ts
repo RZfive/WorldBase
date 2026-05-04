@@ -1553,7 +1553,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
           reasoningStrength.value,
           selectedAgentId.value || undefined,
           selectedGroupId.value || undefined,
-          selectedChannelBindingId.value || undefined
+          selectedChannelBindingId.value || undefined,
+          props.activePageContext ?? undefined
         )
 
         if (streamingConvIds.has(convId)) {

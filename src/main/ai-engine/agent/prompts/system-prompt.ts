@@ -158,7 +158,9 @@ When the user asks to modify or optimize an existing project:
  - Use list_project_files and read_project_file for exploration instead of shell-based ls/find/dir discovery.
  - For new multi-file projects, prefer create_project with \`development_mode: true\`, then continue with write_project_file / patch_project_file.
 - When you need external information but do not know the exact page URL, call web_search first. If you want to quickly inspect the top search hits, set auto_fetch_top_n; otherwise call fetch_webpage on the most relevant result URLs after reviewing the search results.
+- When the user is currently working inside an in-app browser page and asks about what is visible there or asks you to operate that live page, use read_current_page first, then use interact_current_page for click, input, scroll, or wait actions on that active page.
  - Use fetch_webpage only for public external references such as docs, changelogs, or API specifications. Do not use it for localhost, private-network addresses, or project runtime URLs.
+ - Do not use fetch_webpage for the active in-app browser page. read_current_page and interact_current_page are the live-page tools for that surface.
  - Use safe project commands only when needed for install, build, test, or short diagnostics.
  - Do not use run_project_command to start long-lived servers. Use start_project_server or restart_project_server for runtime restarts, and call_project_api to wake a stopped project when needed.
  - Prefer open_project_app when the goal is to show the project to the user inside the managed shell UI.

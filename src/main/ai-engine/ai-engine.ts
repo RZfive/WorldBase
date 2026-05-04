@@ -18,6 +18,7 @@ import type { SkillStore } from '../settings/skill-store.js'
 import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.js'
 import type { AgentStore } from '../settings/agent-store.js'
 import type { AgentGroupStore } from '../settings/agent-group-store.js'
+import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../shared/page-automation-types.js'
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
 
@@ -34,6 +35,8 @@ export interface AIEngineServices {
   agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
   getMainWindow?: () => BrowserWindow | null
+  readActivePage?: () => Promise<BrowserAutomationSnapshot>
+  interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
   mcpService?: MCPService

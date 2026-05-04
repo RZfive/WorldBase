@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed, watch } from 'vue'
 import ConversationSidebar from '../layout/ConversationSidebar.vue'
 import MessageList from '../messages/MessageList.vue'
 import ChatInput from '../layout/ChatInput.vue'
@@ -68,6 +69,23 @@ const {
 } = useChatPanel(props, {
   onContextConsumed: () => emit('contextConsumed')
 })
+
+const chatSurfaceStatus = computed(() => ({
+  contextLabel: currentContextLabel.value,
+  contextDetail: currentContextDetail.value,
+  isLoading: isLoading.value,
+  pendingAuthCount: currentPendingAuthCount.value,
+  activeTodoCount: activeTodoItems.value.length,
+  primaryTaskTitle: activeTodoItems.value[0]?.title || null
+}))
+
+watch(
+  chatSurfaceStatus,
+  (status) => {
+    emit('statusChange', status)
+  },
+  { immediate: true }
+)
 </script>
 
 <template>

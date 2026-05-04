@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { resolveProjectIcon } from "../../utils/project-icon";
+import type {
+  BrowserAutomationAction,
+  BrowserAutomationActionResult,
+  BrowserAutomationSnapshot,
+} from "../../../shared/page-automation-types.js";
 
 interface BrowserAppStatePayload {
   appId: string;
@@ -19,6 +24,7 @@ interface WebviewLikeElement extends HTMLElement {
   src: string;
   getURL: () => string;
   loadURL?: (url: string) => void;
+  executeJavaScript?: <T>(code: string, userGesture?: boolean) => Promise<T>;
 }
 
 const props = defineProps<{
@@ -41,6 +47,137 @@ const currentIcon = ref(props.icon);
 const resolvedIcon = computed(() =>
   resolveProjectIcon("browser", currentIcon.value),
 );
+
+async function executeInPage<T>(runner: string, payload?: unknown): Promise<T> {
+  const webview = webviewRef.value;
+  if (!webview || typeof webview.executeJavaScript !== "function") {
+    throw new Error("Browser automation is unavailable for this page surface.");
+  }
+
+  return await webview.executeJavaScript<T>(
+    `(() => {
+      const payload = ${JSON.stringify(payload ?? null)};
+      ${runner}
+    })()`,
+    true,
+  );
+}
+
+async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
+  return await executeInPage<BrowserAutomationSnapshot>(`
+    const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const buildSelector = (element) => {
+      if (!(element instanceof Element)) return null;
+      if (element.id) return '#' + CSS.escape(element.id);
+
+      const tokens = [
+        ['data-testid', element.getAttribute('data-testid')],
+        ['data-test', element.getAttribute('data-test')],
+        ['name', element.getAttribute('name')],
+        ['aria-label', element.getAttribute('aria-label')],
+      ].filter((entry) => entry[1]);
+
+      if (tokens.length > 0) {
+        const [attribute, value] = tokens[0];
+        return element.tagName.toLowerCase() + '[' + attribute + '="' + CSS.escape(value) + '"]';
+      }
+
+      const path = [];
+      let node = element;
+      while (node instanceof Element && path.length < 5) {
+        let segment = node.tagName.toLowerCase();
+        const parent = node.parentElement;
+        if (parent) {
+          const siblings = Array.from(parent.children).filter((child) => child.tagName === node.tagName);
+          if (siblings.length > 1) {
+            segment += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
+          }
+        }
+        path.unshift(segment);
+        node = parent;
+      }
+      return path.join(' > ');
+    };
+
+    const interactiveElements = Array.from(document.querySelectorAll('a, button, input, textarea, select, [role="button"], [onclick]'))
+      .slice(0, 24)
+      .map((element) => ({
+        selector: buildSelector(element),
+        tag: element.tagName.toLowerCase(),
+        text: normalizeText(element.textContent || element.getAttribute('value') || element.getAttribute('placeholder')).slice(0, 120),
+        role: element.getAttribute('role'),
+      }))
+      .filter((entry) => Boolean(entry.selector));
+
+    return {
+      url: location.href,
+      title: document.title,
+      origin: location.origin || null,
+      textPreview: normalizeText(document.body?.innerText || '').slice(0, 1600),
+      interactiveElements,
+      capturedAt: Date.now(),
+    };
+  `);
+}
+
+async function runAutomationAction(action: BrowserAutomationAction): Promise<BrowserAutomationActionResult> {
+  return await executeInPage<BrowserAutomationActionResult>(`
+    const ensureElement = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        throw new Error('Element not found for selector: ' + selector);
+      }
+      return element;
+    };
+
+    switch (payload?.type) {
+      case 'click': {
+        const element = ensureElement(payload.selector);
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+        element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+        element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        return { ok: true, type: payload.type, selector: payload.selector };
+      }
+
+      case 'input': {
+        const element = ensureElement(payload.selector);
+        if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
+          throw new Error('Selected element does not accept text input: ' + payload.selector);
+        }
+        element.focus();
+        if ('value' in element) {
+          element.value = payload.text;
+        }
+        element.dispatchEvent(new InputEvent('input', { bubbles: true, data: payload.text }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, type: payload.type, selector: payload.selector, textLength: payload.text.length };
+      }
+
+      case 'scroll': {
+        window.scrollTo({ top: payload.top || 0, left: payload.left || 0, behavior: 'auto' });
+        return { ok: true, type: payload.type, top: window.scrollY, left: window.scrollX };
+      }
+
+      case 'wait': {
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({ ok: true, type: payload.type, timeoutMs: payload.timeoutMs });
+          }, Math.max(0, Number(payload.timeoutMs) || 0));
+        });
+      }
+
+      default:
+        throw new Error('Unsupported browser automation action.');
+    }
+  `, action);
+}
+
+defineExpose({
+  captureAutomationSnapshot,
+  runAutomationAction,
+});
 
 function emitStateChange() {
   emit("stateChange", {

@@ -90,6 +90,7 @@ const ALWAYS_SAFE_TOOLS = new Set([
   'grep_search',
   'web_search',
   'fetch_webpage',
+  'read_current_page',
   'list_documents',
   'mcp_list_servers',
   'mcp_list_resources',
@@ -104,7 +105,8 @@ const ALWAYS_SAFE_TOOLS = new Set([
 const HIGH_RISK_TOOLS = new Set([
   'local_file_read',
   'local_file_write',
-  'local_run_command'
+  'local_run_command',
+  'interact_current_page'
 ])
 
 /**

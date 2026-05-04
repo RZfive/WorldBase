@@ -25,6 +25,7 @@ import { toolGlobSearch } from './tool-glob-search.js'
 import { toolGrepSearch } from './tool-grep-search.js'
 import { toolWebSearch } from './tool-web-search.js'
 import { toolFetchWebpage } from './tool-fetch-webpage.js'
+import { toolInteractCurrentPage, toolReadCurrentPage } from './tool-active-page.js'
 import { toolEnterPlanMode, toolExitPlanMode } from './tool-plan-mode.js'
 import { toolRunSkill, toolListSkills } from './tool-run-skill.js'
 import { toolInstallSkill } from './tool-install-skill.js'
@@ -49,6 +50,7 @@ import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-ser
 import type { BrowserWindow } from 'electron'
 import type { SubagentService } from '../subagent-service.js'
 import { toolSpawnSubagents } from './tool-spawn-subagent.js'
+import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
 
 export interface ToolServices {
   projectFS: ProjectFS
@@ -63,6 +65,8 @@ export interface ToolServices {
   agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
   getMainWindow?: () => BrowserWindow | null
+  readActivePage?: () => Promise<BrowserAutomationSnapshot>
+  interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
   mcpService?: MCPService
@@ -122,6 +126,14 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolCreateAgent(services, () => agent.getToolDefinitions()),
     toolCreateAgentGroup(services)
   ]
+
+  if (services.readActivePage) {
+    tools.push(toolReadCurrentPage(services))
+  }
+
+  if (services.readActivePage && services.interactWithActivePage) {
+    tools.push(toolInteractCurrentPage(services))
+  }
 
   // Register spawn_subagents plus a compatibility alias only when a subagent
   // service is available. Nested spawning depth is capped inside AIEngine.
