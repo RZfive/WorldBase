@@ -105,6 +105,7 @@ const projectWindows = new Map<string, BrowserWindow>()
 const activeChatSessions = new Map<string, ActiveChatSession>()
 
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
+const ALLOWED_WEBVIEW_POPUP_PROTOCOLS = new Set(['http:', 'https:'])
 const MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
 const MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
@@ -335,16 +336,14 @@ function openWebviewPopupInDock (url: string): void {
     return
   }
 
-  if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('browser:openUrlInDock', { url: parsedUrl.toString() })
-    }
+  if (!ALLOWED_WEBVIEW_POPUP_PROTOCOLS.has(parsedUrl.protocol)) {
+    console.warn('[main] Blocked external popup URL from webview:', parsedUrl.toString())
     return
   }
 
-  void shell.openExternal(parsedUrl.toString()).catch((error) => {
-    console.error('[main] Failed to open external popup URL:', error)
-  })
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('browser:openUrlInDock', { url: parsedUrl.toString() })
+  }
 }
 
 function attachMainWindowWebviewHandlers (win: BrowserWindow): void {
