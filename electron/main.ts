@@ -105,7 +105,8 @@ const projectWindows = new Map<string, BrowserWindow>()
 const activeChatSessions = new Map<string, ActiveChatSession>()
 
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
-const MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
+const MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
+const MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
 const VIRTUAL_INTERFACE_NAME_PATTERN = /(loopback|virtual|vmware|vbox|virtualbox|docker|podman|wsl|hyper-v|vethernet|tailscale|zerotier|utun|tun|tap|bridge)/i
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
@@ -245,7 +246,7 @@ async function readUploadedAttachmentFromBuffer (
     throw new Error('附件缺少文件名')
   }
 
-  if (buffer.byteLength > MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
+  if (buffer.byteLength > MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
     throw new Error(`文件过大 (${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB)，最大支持 10 MB`)
   }
 
@@ -2948,7 +2949,7 @@ function setupIPC (): void {
       throw new Error(`路径不是一个文件: ${resolvedPath}`)
     }
 
-    if (stat.size > MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
+    if (stat.size > MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
       throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)} MB)，最大支持 10 MB`)
     }
 
@@ -2985,8 +2986,8 @@ function setupIPC (): void {
     const resolvedPath = path.resolve(filePath)
     const stat = await fs.stat(resolvedPath)
     if (!stat.isFile()) throw new Error(`路径不是一个文件: ${resolvedPath}`)
-    if (stat.size > MAX_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
-      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)} MB)，最大支持 10 MB`)
+    if (stat.size > MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES) {
+      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)} MB)，文档工作台最大支持 100 MB`)
     }
     if (!isSupportedDocument(resolvedPath)) {
       throw new Error(`不支持的文档格式: ${path.extname(resolvedPath) || 'unknown'}`)

@@ -5,8 +5,6 @@
 import mammoth from 'mammoth'
 import type { DocumentNode } from './document-types.js'
 
-const MAX_TEXT_LENGTH = 100000
-
 let nodeCounter = 0
 function nextId (): string {
   return `doc_${++nodeCounter}`
@@ -37,16 +35,8 @@ export async function parseWordToNodes (buffer: Buffer): Promise<DocumentNode[]>
 
   // Split raw text into paragraphs
   const rawParagraphs = text.split(/\n+/).filter(p => p.trim())
-  let truncated = false
-  let charCount = 0
 
   for (const para of rawParagraphs) {
-    if (charCount + para.length > MAX_TEXT_LENGTH) {
-      truncated = true
-      break
-    }
-    charCount += para.length
-
     // Check if this paragraph matches a heading
     const headingMatch = headings.find(h => para.trim().startsWith(h.text.substring(0, 20)))
     const isHeading = Boolean(headingMatch)
@@ -56,16 +46,6 @@ export async function parseWordToNodes (buffer: Buffer): Promise<DocumentNode[]>
       type: isHeading ? 'heading' : 'paragraph',
       text: para.trim(),
       level: isHeading ? (headingMatch!.level) : 0,
-      pageIndex: pageIdx
-    })
-  }
-
-  if (truncated) {
-    nodes.push({
-      id: nextId(),
-      type: 'paragraph',
-      text: `... 内容已截断 (共 ${text.length} 字符)`,
-      level: 0,
       pageIndex: pageIdx
     })
   }
