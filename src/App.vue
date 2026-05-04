@@ -8,8 +8,18 @@ import SourceViewer from './renderer/components/viewer/SourceViewer.vue'
 import TitleBar from './renderer/components/app/TitleBar.vue'
 import DockBar from './renderer/components/app/DockBar.vue'
 import BrowserWebView from './renderer/components/app/BrowserWebView.vue'
+import FloatingTaskBubble from './renderer/components/app/FloatingTaskBubble.vue'
 import ProjectWindowShell from './renderer/components/app/ProjectWindowShell.vue'
 import ScheduledTaskReportDialog from './renderer/components/settings/ScheduledTaskReportDialog.vue'
+import type { ChatSurfaceStatusSummary } from './renderer/components/chat/panel/types'
+import type {
+  ActivePageAutomationContext,
+  BrowserAutomationAction,
+  BrowserAutomationActionResult,
+  BrowserAutomationSnapshot,
+  PageAutomationRequestEnvelope,
+  PageAutomationResponseEnvelope
+} from './shared/page-automation-types'
 import { applyThemePreference, getAppliedThemePreference, watchSystemThemeChange } from './renderer/utils/theme'
 import { createWebAppId, getWebAppNameFromUrl, normalizeWebUrlInput, type SavedWebApp } from './renderer/utils/web-app'
 
@@ -51,6 +61,8 @@ const standaloneProjectId = new URLSearchParams(window.location.search).get('pro
 const isStandaloneProjectWindow = Boolean(standaloneProjectId)
 
 type MainView = 'chat' | 'app' | 'source' | 'settings'
+type AppChatPresentation = 'full' | 'bubble' | 'overlay'
+type ChatShellMode = 'full' | 'overlay' | 'hidden'
 
 interface EmbeddedAppState {
   url: string
@@ -58,6 +70,21 @@ interface EmbeddedAppState {
   kind: 'project' | 'browser'
   sandbox: string
   projectPort?: number
+}
+
+interface ActivePageSurfaceSummary {
+  appId: string
+  kind: 'project' | 'browser'
+  title: string
+  icon?: string
+  url: string | null
+  origin: string | null
+  loading: boolean
+}
+
+interface BrowserAutomationViewHandle {
+  captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
+  runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
 }
 
 /** Maximum seconds to wait for a project's port to become available after starting. */
@@ -94,11 +121,21 @@ function toPlainSavedWebApps (webApps: SavedWebApp[]): SavedWebApp[] {
 }
 
 const currentView = ref<MainView>('chat')
+const appChatPresentation = ref<AppChatPresentation>('full')
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
 const embeddedApps = ref(new Map<string, EmbeddedAppState>())
 const activeEmbeddedProjectId = ref<string | null>(null)
 const sourceProject = ref<Record<string, unknown> | null>(null)
 const showLaunchpad = ref(false)
+const chatSurfaceStatus = ref<ChatSurfaceStatusSummary>({
+  contextLabel: '💬 新对话',
+  contextDetail: 'The World AI',
+  isLoading: false,
+  pendingAuthCount: 0,
+  activeTodoCount: 0,
+  primaryTaskTitle: null
+})
+const browserAutomationHandles = new Map<string, BrowserAutomationViewHandle>()
 
 const runningApps = ref(new Map<string, RunningApp>())
 const browserApps = ref(new Map<string, RunningApp>())
@@ -109,6 +146,77 @@ const dockApps = computed(() => {
     apps.set(appId, app)
   }
   return apps
+})
+
+function resolveUrlOrigin (value: string | null | undefined): string | null {
+  if (!value) return null
+
+  try {
+    return new URL(value).origin
+  } catch {
+    return null
+  }
+}
+
+const activePageSurface = computed<ActivePageSurfaceSummary | null>(() => {
+  const appId = activeEmbeddedProjectId.value
+  if (!appId) return null
+
+  const appState = embeddedApps.value.get(appId)
+  if (!appState) return null
+
+  if (appState.kind === 'browser') {
+    const browserApp = browserApps.value.get(appId)
+    const url = appState.url || browserApp?.url || null
+    return {
+      appId,
+      kind: 'browser',
+      title: browserApp?.name || appState.url || appId,
+      icon: browserApp?.icon || '🌐',
+      url,
+      origin: resolveUrlOrigin(url),
+      loading: appState.loading
+    }
+  }
+
+  const runningApp = runningApps.value.get(appId)
+  const url = appState.url || null
+  return {
+    appId,
+    kind: 'project',
+    title: runningApp?.name || appId,
+    icon: runningApp?.icon || '🧩',
+    url,
+    origin: resolveUrlOrigin(url),
+    loading: appState.loading
+  }
+})
+
+const chatShellMode = computed<ChatShellMode>(() => {
+  if (showLaunchpad.value) return 'hidden'
+  if (currentView.value === 'chat') return 'full'
+  if (currentView.value === 'app' && appChatPresentation.value === 'overlay') return 'overlay'
+  return 'hidden'
+})
+
+const showAppChatBubble = computed(() => (
+  currentView.value === 'app'
+  && !showLaunchpad.value
+  && appChatPresentation.value === 'bubble'
+  && Boolean(activePageSurface.value)
+))
+
+const activePageAutomationContext = computed<ActivePageAutomationContext | null>(() => {
+  if (currentView.value !== 'app') return null
+  if (!activePageSurface.value || activePageSurface.value.kind !== 'browser') return null
+
+  return {
+    appId: activePageSurface.value.appId,
+    kind: 'browser',
+    title: activePageSurface.value.title,
+    url: activePageSurface.value.url,
+    origin: activePageSurface.value.origin
+  }
 })
 
 const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | null }>({
@@ -123,6 +231,7 @@ let windowClosedCleanup: (() => void) | null = null
 let projectOpenInShellCleanup: (() => void) | null = null
 let browserOpenInDockCleanup: (() => void) | null = null
 let schedulerReportRequestedCleanup: (() => void) | null = null
+let pageAutomationRequestCleanup: (() => void) | null = null
 let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
 let runningAppsInterval: ReturnType<typeof setInterval> | null = null
@@ -133,6 +242,7 @@ function clearEmbeddedApp (appId?: string) {
   if (appId) {
     const embeddedApp = embeddedApps.value.get(appId)
     embeddedApps.value.delete(appId)
+    browserAutomationHandles.delete(appId)
     if (embeddedApp?.kind === 'browser') {
       const nextBrowserApps = new Map(browserApps.value)
       nextBrowserApps.delete(appId)
@@ -143,12 +253,67 @@ function clearEmbeddedApp (appId?: string) {
       const remaining = [...embeddedApps.value.keys()]
       activeEmbeddedProjectId.value = remaining.length > 0 ? remaining[remaining.length - 1] : null
     }
-    if (embeddedApps.value.size === 0) currentView.value = 'chat'
+    if (embeddedApps.value.size === 0) {
+      appChatPresentation.value = 'full'
+      currentView.value = 'chat'
+    }
   } else {
     embeddedApps.value.clear()
     activeEmbeddedProjectId.value = null
     browserApps.value.clear()
+    browserAutomationHandles.clear()
+    appChatPresentation.value = 'full'
   }
+}
+
+function setBrowserAutomationHandle (appId: string, instance: unknown) {
+  const handle = instance as BrowserAutomationViewHandle | null
+  if (handle) {
+    browserAutomationHandles.set(appId, handle)
+    return
+  }
+  browserAutomationHandles.delete(appId)
+}
+
+function getActiveBrowserAutomationHandle (): BrowserAutomationViewHandle | null {
+  const appId = activeEmbeddedProjectId.value
+  if (!appId) return null
+
+  const appState = embeddedApps.value.get(appId)
+  if (!appState || appState.kind !== 'browser') return null
+
+  return browserAutomationHandles.get(appId) || null
+}
+
+async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelope) {
+  const respond = window.electronAPI?.respondPageAutomationRequest
+  if (!respond) return
+
+  let response: PageAutomationResponseEnvelope
+  try {
+    const handle = getActiveBrowserAutomationHandle()
+    if (!handle) {
+      throw new Error('当前没有可供 AI 操作的活动网页，请先打开并聚焦一个内嵌网页。')
+    }
+
+    const result = payload.request.type === 'snapshot'
+      ? await handle.captureAutomationSnapshot()
+      : await handle.runAutomationAction(payload.request.action)
+
+    response = {
+      requestId: payload.requestId,
+      ok: true,
+      result
+    }
+  } catch (error) {
+    response = {
+      requestId: payload.requestId,
+      ok: false,
+      error: error instanceof Error ? error.message : '页面操作失败'
+    }
+  }
+
+  respond(response)
 }
 
 async function fetchProjectMeta (projectId: string) {
@@ -242,12 +407,14 @@ interface BrowserAppOpenOptions {
 }
 
 function openChat () {
+  appChatPresentation.value = 'full'
   currentView.value = 'chat'
   showLaunchpad.value = false
   hideDockCtx()
 }
 
 function openSettings () {
+  appChatPresentation.value = 'full'
   currentView.value = 'settings'
   showLaunchpad.value = false
   hideDockCtx()
@@ -255,8 +422,24 @@ function openSettings () {
 
 function optimizeProjectInChat (project: Record<string, unknown>) {
   chatProjectContext.value = project
+  appChatPresentation.value = 'full'
   currentView.value = 'chat'
   showLaunchpad.value = false
+}
+
+function openPageChatOverlay () {
+  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value) return
+  appChatPresentation.value = 'overlay'
+  hideDockCtx()
+}
+
+function collapsePageChatToBubble () {
+  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value) return
+  appChatPresentation.value = 'bubble'
+}
+
+function handleChatSurfaceStatusChange (status: ChatSurfaceStatusSummary) {
+  chatSurfaceStatus.value = status
 }
 
 function toggleLaunchpad () {
@@ -273,6 +456,7 @@ async function openEmbeddedProject (projectId: string) {
   if (!window.electronAPI) return
 
   showLaunchpad.value = false
+  appChatPresentation.value = 'bubble'
   currentView.value = 'app'
   activeEmbeddedProjectId.value = projectId
 
@@ -338,6 +522,7 @@ async function openEmbeddedProject (projectId: string) {
         activeEmbeddedProjectId.value = remaining[remaining.length - 1]
       } else {
         activeEmbeddedProjectId.value = null
+        appChatPresentation.value = 'full'
         currentView.value = 'chat'
       }
     }
@@ -378,6 +563,7 @@ function openWebLinkInApp (rawUrl: string, options: BrowserAppOpenOptions = {}) 
     sandbox: BROWSER_IFRAME_SANDBOX
   })
   activeEmbeddedProjectId.value = appId
+  appChatPresentation.value = 'bubble'
   currentView.value = 'app'
   showLaunchpad.value = false
   hideDockCtx()
@@ -436,6 +622,7 @@ async function openProjectSource (project: Record<string, unknown>) {
   const projectId = project.id as string | undefined
   if (!projectId) return
   showLaunchpad.value = false
+  appChatPresentation.value = 'full'
   sourceProject.value = project
   currentView.value = 'source'
 }
@@ -494,6 +681,7 @@ async function openProjectInShell (projectId: string, mode: 'embed' | 'window' =
 async function switchToApp (app: RunningApp) {
   if (app.kind === 'browser') {
     showLaunchpad.value = false
+    appChatPresentation.value = 'bubble'
     currentView.value = 'app'
     activeEmbeddedProjectId.value = app.id
     return
@@ -850,6 +1038,12 @@ onMounted(async () => {
       scheduledTaskReport.value = report
     })
   }
+
+  if (window.electronAPI?.onPageAutomationRequest) {
+    pageAutomationRequestCleanup = window.electronAPI.onPageAutomationRequest((payload) => {
+      void handlePageAutomationRequest(payload)
+    })
+  }
 })
 
 onUnmounted(() => {
@@ -867,6 +1061,7 @@ onUnmounted(() => {
   projectOpenInShellCleanup?.()
   browserOpenInDockCleanup?.()
   schedulerReportRequestedCleanup?.()
+  pageAutomationRequestCleanup?.()
 })
 </script>
 
@@ -896,13 +1091,6 @@ onUnmounted(() => {
         />
 
         <main class="main-content">
-          <ChatPanel
-            v-show="currentView === 'chat'"
-            :projectContext="chatProjectContext"
-            @contextConsumed="chatProjectContext = null"
-            @open-web-link="openWebLinkInApp"
-          />
-
           <!-- Embedded apps: each app keeps its iframe alive, only the active one is visible -->
           <div v-show="currentView === 'app'" class="embedded-app">
             <template v-for="[appId, appState] in embeddedApps" :key="appId">
@@ -920,6 +1108,7 @@ onUnmounted(() => {
                   allowfullscreen
                 ></iframe>
                 <BrowserWebView
+                  :ref="(instance) => setBrowserAutomationHandle(appId, instance)"
                   v-else-if="appState.kind === 'browser' && appState.url"
                   :app-id="appId"
                   :url="appState.url"
@@ -932,17 +1121,48 @@ onUnmounted(() => {
                 <div v-else class="embedded-unavailable">
                   <p>应用未能启动</p>
                   <button v-if="appState.kind === 'project'" class="embedded-retry-btn" @click="openEmbeddedProject(appId)">🔄 重试</button>
-                  <button v-else class="embedded-retry-btn" @click="activeEmbeddedProjectId = null; currentView = 'chat'">↩️ 返回对话</button>
+                  <button v-else class="embedded-retry-btn" @click="openChat">↩️ 返回对话</button>
                 </div>
               </div>
             </template>
           </div>
 
+          <div :class="['chat-shell', `chat-shell-${chatShellMode}`]">
+            <div class="chat-shell-body">
+              <div v-if="chatShellMode === 'overlay' && activePageSurface" class="chat-overlay-banner">
+                <div class="chat-overlay-banner-copy">
+                  <span class="chat-overlay-kicker">页面操作对话</span>
+                  <span class="chat-overlay-title">{{ activePageSurface.title }}</span>
+                  <span class="chat-overlay-subtitle">{{ activePageSurface.origin || activePageSurface.url || '当前应用页面' }}</span>
+                </div>
+                <button class="chat-overlay-collapse-btn" type="button" @click="collapsePageChatToBubble">收起圆球</button>
+              </div>
+
+              <div class="chat-shell-panel">
+                <ChatPanel
+                  :projectContext="chatProjectContext"
+                  :active-page-context="activePageAutomationContext"
+                  @contextConsumed="chatProjectContext = null"
+                  @open-web-link="openWebLinkInApp"
+                  @status-change="handleChatSurfaceStatusChange"
+                />
+              </div>
+            </div>
+          </div>
+
+          <FloatingTaskBubble
+            v-if="showAppChatBubble && activePageSurface"
+            :is-loading="chatSurfaceStatus.isLoading || activePageSurface.loading"
+            :pending-auth-count="chatSurfaceStatus.pendingAuthCount"
+            :active-todo-count="chatSurfaceStatus.activeTodoCount"
+            @open="openPageChatOverlay"
+          />
+
           <!-- Source code viewer -->
           <SourceViewer
             v-if="currentView === 'source' && sourceProject"
             :project="sourceProject"
-            @back="sourceProject = null; currentView = 'chat'"
+            @back="sourceProject = null; openChat()"
           />
 
           <AISettings v-if="currentView === 'settings'" />
@@ -1041,6 +1261,148 @@ onUnmounted(() => {
   overflow: hidden;
   position: relative;
   background: var(--app-main-surface);
+}
+
+.chat-shell {
+  min-height: 0;
+}
+
+.chat-shell-body,
+.chat-shell-panel {
+  min-height: 0;
+}
+
+.chat-shell-full {
+  display: flex;
+  height: 100%;
+  width: 100%;
+}
+
+.chat-shell-full .chat-shell-body {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+}
+
+.chat-shell-full .chat-shell-body,
+.chat-shell-full .chat-shell-panel {
+  flex: 1;
+}
+
+.chat-shell-full .chat-shell-panel {
+  min-width: 0;
+}
+
+.chat-shell-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 34;
+  display: flex;
+  padding: 18px clamp(16px, 2.6vw, 28px) 22px;
+  background: color-mix(in srgb, var(--app-shell-bg) 28%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.chat-shell-overlay .chat-shell-body {
+  width: min(1220px, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 24px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top left, var(--app-shell-tint-1), transparent 32%),
+    var(--app-panel-strong);
+  box-shadow: 0 28px 70px color-mix(in srgb, var(--app-shadow) 86%, transparent);
+}
+
+.chat-shell-overlay .chat-shell-panel {
+  flex: 1;
+  background: transparent;
+}
+
+.chat-shell-hidden {
+  position: absolute;
+  inset: 0;
+  z-index: 18;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.chat-shell-hidden .chat-shell-body,
+.chat-shell-hidden .chat-shell-panel {
+  height: 100%;
+}
+
+.chat-overlay-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--app-border);
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--app-accent-soft) 92%, transparent),
+      color-mix(in srgb, var(--app-shell-tint-2) 88%, transparent)
+    ),
+    var(--app-panel);
+}
+
+.chat-overlay-banner-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-overlay-kicker,
+.chat-overlay-title,
+.chat-overlay-subtitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-overlay-kicker {
+  color: var(--app-accent-strong);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.chat-overlay-title {
+  color: var(--app-text-strong);
+  font-size: 0.94rem;
+  font-weight: 700;
+}
+
+.chat-overlay-subtitle {
+  color: var(--app-text-muted);
+  font-size: 0.78rem;
+}
+
+.chat-overlay-collapse-btn {
+  flex-shrink: 0;
+  padding: 9px 14px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 999px;
+  background: var(--app-panel-muted);
+  color: var(--app-text-strong);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+}
+
+.chat-overlay-collapse-btn:hover {
+  background: var(--app-accent-soft);
+  border-color: color-mix(in srgb, var(--app-border-strong) 46%, var(--app-accent-glow));
+  transform: translateY(-1px);
 }
 
 /* Embedded app view */
@@ -1265,5 +1627,20 @@ onUnmounted(() => {
 .lan-copy-btn:hover {
   background: var(--dock-accent-soft);
   border-color: rgba(56, 189, 248, 0.3);
+}
+
+@media (max-width: 720px) {
+  .chat-shell-overlay {
+    padding: 10px 10px 14px;
+  }
+
+  .chat-overlay-banner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .chat-overlay-collapse-btn {
+    width: 100%;
+  }
 }
 </style>

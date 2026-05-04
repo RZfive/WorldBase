@@ -9,7 +9,9 @@ const emit = defineEmits<ChatPanelEmit>()
 <template>
   <ChatPanelContainer
     :project-context="props.projectContext"
+    :active-page-context="props.activePageContext"
     @context-consumed="emit('contextConsumed')"
     @open-web-link="(url) => emit('openWebLink', url)"
+    @status-change="(status) => emit('statusChange', status)"
   />
 </template>

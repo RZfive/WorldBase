@@ -6,6 +6,7 @@ import type {
   AgentSidechatSession,
   ChannelBinding
 } from '../../../../shared/agent-workspace-types.js'
+import type { ActivePageAutomationContext } from '../../../../shared/page-automation-types.js'
 import type {
   ChatMessage,
   ChatMessageBlock,
@@ -58,11 +59,22 @@ export interface ConversationSummary {
 
 export interface ChatPanelProps {
   projectContext?: Record<string, unknown> | null
+  activePageContext?: ActivePageAutomationContext | null
+}
+
+export interface ChatSurfaceStatusSummary {
+  contextLabel: string
+  contextDetail: string
+  isLoading: boolean
+  pendingAuthCount: number
+  activeTodoCount: number
+  primaryTaskTitle: string | null
 }
 
 export interface ChatPanelEmit {
   (e: 'contextConsumed'): void
   (e: 'openWebLink', url: string): void
+  (e: 'statusChange', status: ChatSurfaceStatusSummary): void
 }
 
 export interface SidebarAgentItem {

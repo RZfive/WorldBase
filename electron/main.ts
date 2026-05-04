@@ -1,4 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, session, Notification, type IpcMainInvokeEvent } from 'electron'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,6 +45,7 @@ import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.j
 import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
 import { ScheduledTaskService } from '../src/main/scheduler/scheduled-task-service.js'
 import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupParticipant, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { ActivePageAutomationContext, BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot, PageAutomationRendererRequest, PageAutomationRendererResult, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP_DISPLAY_NAME = 'The World'
@@ -100,15 +103,24 @@ let isClosingMainWindow = false
 let isQuitCleanupRunning = false
 let hasFinishedQuitCleanup = false
 
+type PendingPageAutomationRequest = {
+  resolve: (result: PageAutomationRendererResult) => void
+  reject: (error: Error) => void
+  timeout: ReturnType<typeof setTimeout>
+}
+
 /** Track standalone project windows keyed by projectId */
 const projectWindows = new Map<string, BrowserWindow>()
 const activeChatSessions = new Map<string, ActiveChatSession>()
+const aiRequestWindowStorage = new AsyncLocalStorage<BrowserWindow | null>()
+const pendingPageAutomationRequests = new Map<string, PendingPageAutomationRequest>()
 
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
 const ALLOWED_WEBVIEW_POPUP_PROTOCOLS = new Set(['http:', 'https:'])
 const MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
 const MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
+const PAGE_AUTOMATION_REQUEST_TIMEOUT_MS = 15000
 const VIRTUAL_INTERFACE_NAME_PATTERN = /(loopback|virtual|vmware|vbox|virtualbox|docker|podman|wsl|hyper-v|vethernet|tailscale|zerotier|utun|tun|tap|bridge)/i
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   '.txt', '.md', '.mdx', '.markdown',
@@ -744,6 +756,56 @@ function broadcastToAppWindows (channel: string, payload: unknown): void {
 
 function getSenderWindow (event: IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(event.sender)
+}
+
+function getActiveAiRequestWindow (): BrowserWindow | null {
+  return aiRequestWindowStorage.getStore() ?? mainWindow
+}
+
+function runWithAiRequestWindow<T> (win: BrowserWindow | null, task: () => Promise<T>): Promise<T> {
+  return aiRequestWindowStorage.run(win, task)
+}
+
+async function requestPageAutomationFromRenderer<T extends PageAutomationRendererResult> (request: PageAutomationRendererRequest): Promise<T> {
+  const targetWindow = getActiveAiRequestWindow()
+  if (!targetWindow || targetWindow.isDestroyed() || targetWindow.webContents.isDestroyed()) {
+    throw new Error('当前没有可用的应用窗口来执行网页操作。')
+  }
+
+  return await new Promise<T>((resolve, reject) => {
+    const requestId = randomUUID()
+    const timeout = setTimeout(() => {
+      pendingPageAutomationRequests.delete(requestId)
+      reject(new Error('等待页面操作响应超时，请确认当前网页仍处于活动状态。'))
+    }, PAGE_AUTOMATION_REQUEST_TIMEOUT_MS)
+
+    pendingPageAutomationRequests.set(requestId, {
+      resolve: (result) => resolve(result as T),
+      reject,
+      timeout
+    })
+
+    targetWindow.webContents.send('pageAutomation:request', {
+      requestId,
+      request
+    })
+  })
+}
+
+function buildActivePagePromptSection (activePageContext?: ActivePageAutomationContext | null): string | null {
+  if (!activePageContext || activePageContext.kind !== 'browser') return null
+
+  const lines = [
+    '## Active in-app browser page',
+    '- The user currently has a live browser page open inside the app shell.',
+    `- Active page title: ${activePageContext.title || '(untitled page)'}`,
+    `- Active page URL: ${activePageContext.url || '(unknown URL)'}`,
+    `- Active page origin: ${activePageContext.origin || '(unknown origin)'}`,
+    '- If the user asks what is on this page or asks you to operate it, call read_current_page first to inspect the live DOM, then use interact_current_page for click, input, scroll, or wait actions.',
+    '- Do not use fetch_webpage for this active in-app page. fetch_webpage is only for public external references, not the live embedded browser surface.'
+  ]
+
+  return lines.join('\n')
 }
 
 function sanitizeProjectPackageBaseName (value: string): string {
@@ -2249,7 +2311,13 @@ async function initializeServices (): Promise<void> {
     agentStore,
     agentGroupStore,
     settingsStore,
-    getMainWindow: () => mainWindow,
+    getMainWindow: () => getActiveAiRequestWindow(),
+    readActivePage: async () => {
+      return await requestPageAutomationFromRenderer<BrowserAutomationSnapshot>({ type: 'snapshot' })
+    },
+    interactWithActivePage: async (action: BrowserAutomationAction) => {
+      return await requestPageAutomationFromRenderer<BrowserAutomationActionResult>({ type: 'action', action })
+    },
     notifySkillsChanged: (event) => {
       broadcastToAppWindows('skills:changed', event)
     },
@@ -2376,8 +2444,28 @@ function createWindow (): void {
 }
 
 function setupIPC (): void {
+  ipcMain.on('pageAutomation:response', (_event, payload: PageAutomationResponseEnvelope) => {
+    const pending = pendingPageAutomationRequests.get(payload.requestId)
+    if (!pending) return
+
+    pendingPageAutomationRequests.delete(payload.requestId)
+    clearTimeout(pending.timeout)
+
+    if (!payload.ok) {
+      pending.reject(new Error(payload.error || '页面操作失败'))
+      return
+    }
+
+    if (typeof payload.result === 'undefined') {
+      pending.reject(new Error('页面操作返回了空结果'))
+      return
+    }
+
+    pending.resolve(payload.result)
+  })
+
   // AI chat (non-streaming, kept for backward compat)
-  ipcMain.handle('ai:chat', async (_event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string) => {
+  ipcMain.handle('ai:chat', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext) => {
     const baseRuntimeContext = resolveAgentRuntimeContext({
       messages,
       agentId,
@@ -2410,6 +2498,7 @@ function setupIPC (): void {
     const directGroupReplyPromptSection = directGroupReply
       ? buildDirectGroupReplyPromptSection(directGroupReply)
       : null
+    const activePagePromptSection = buildActivePagePromptSection(activePageContext)
     const groupDeliberation = runtimeContext.group && !directGroupReply
       ? await buildGroupDeliberationSection({
           messages,
@@ -2421,23 +2510,27 @@ function setupIPC (): void {
         })
       : { promptSection: null, transcript: null }
 
-    return aiEngine!.chat(messages, {
-      targetProjectId: runtimeContext.effectiveTargetProjectId,
-      providerConfig: runtimeContext.providerConfig,
-      activeSkillContents: runtimeContext.activeSkillContents,
-      systemPromptSections: [
-        ...runtimeContext.systemPromptSections,
-        ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),
-        ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
-      ],
-      allowedToolNames: runtimeContext.allowedToolNames,
-      deniedToolNames: runtimeContext.deniedToolNames
+    return await runWithAiRequestWindow(getSenderWindow(event) || mainWindow, async () => {
+      return await aiEngine!.chat(messages, {
+        targetProjectId: runtimeContext.effectiveTargetProjectId,
+        providerConfig: runtimeContext.providerConfig,
+        activeSkillContents: runtimeContext.activeSkillContents,
+        systemPromptSections: [
+          ...runtimeContext.systemPromptSections,
+          ...(activePagePromptSection ? [activePagePromptSection] : []),
+          ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),
+          ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
+        ],
+        allowedToolNames: runtimeContext.allowedToolNames,
+        deniedToolNames: runtimeContext.deniedToolNames
+      })
     })
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext) => {
     const sender = event.sender
+    const senderWindow = getSenderWindow(event) || mainWindow
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
     const authModeRef = { current: authMode ?? 'strict' }
@@ -2474,6 +2567,7 @@ function setupIPC (): void {
     const directGroupReplyPromptSection = directGroupReply
       ? buildDirectGroupReplyPromptSection(directGroupReply)
       : null
+    const activePagePromptSection = buildActivePagePromptSection(activePageContext)
     const conversationTitle = getConversationTitleFromMessages(messages)
     const executedToolNames: string[] = []
     const aiLogger = executionPreferences.enableAiLogging && aiLogStore && conversationId
@@ -2638,14 +2732,20 @@ function setupIPC (): void {
       }
     }
     const groupDeliberation = runtimeContext.group && !directGroupReply
-      ? await buildGroupDeliberationSection({
-          messages,
-          group: runtimeContext.group,
-          routing: groupRouting || undefined,
-          channelBinding: runtimeContext.channelBinding,
-          targetProjectId: runtimeContext.effectiveTargetProjectId,
-          fallbackReasoningStrength: reasoningStrength,
-          onProgress
+      ? await runWithAiRequestWindow(senderWindow, async () => {
+          const group = runtimeContext.group
+          if (!group) {
+            return { promptSection: null, transcript: null }
+          }
+          return await buildGroupDeliberationSection({
+            messages,
+            group,
+            routing: groupRouting || undefined,
+            channelBinding: runtimeContext.channelBinding,
+            targetProjectId: runtimeContext.effectiveTargetProjectId,
+            fallbackReasoningStrength: reasoningStrength,
+            onProgress
+          })
         })
       : { promptSection: null, transcript: null }
     let groupTranscriptSent = false
@@ -2662,65 +2762,68 @@ function setupIPC (): void {
       groupTranscriptSent = true
     }
     try {
-      for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
-          conversationId,
-          sessionId,
-          targetProjectId: runtimeContext.effectiveTargetProjectId,
-          providerConfig: runtimeContext.providerConfig,
-          abortSignal: abortController.signal,
-          authMode: authModeRef.current,
-          getAuthMode: () => authModeRef.current,
-          aiLogger,
-          activeSkillContents: runtimeContext.activeSkillContents,
-          systemPromptSections: [
-            ...runtimeContext.systemPromptSections,
-            ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),
-            ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
-          ],
-          allowedToolNames: runtimeContext.allowedToolNames,
-          deniedToolNames: runtimeContext.deniedToolNames
-        })) {
-        if (streamEvent.type === 'tool_start' && streamEvent.name) {
-          executedToolNames.push(streamEvent.name)
-        }
+      await runWithAiRequestWindow(senderWindow, async () => {
+        for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
+            conversationId,
+            sessionId,
+            targetProjectId: runtimeContext.effectiveTargetProjectId,
+            providerConfig: runtimeContext.providerConfig,
+            abortSignal: abortController.signal,
+            authMode: authModeRef.current,
+            getAuthMode: () => authModeRef.current,
+            aiLogger,
+            activeSkillContents: runtimeContext.activeSkillContents,
+            systemPromptSections: [
+              ...runtimeContext.systemPromptSections,
+              ...(activePagePromptSection ? [activePagePromptSection] : []),
+              ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),
+              ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
+            ],
+            allowedToolNames: runtimeContext.allowedToolNames,
+            deniedToolNames: runtimeContext.deniedToolNames
+          })) {
+          if (streamEvent.type === 'tool_start' && streamEvent.name) {
+            executedToolNames.push(streamEvent.name)
+          }
 
-        if (streamEvent.type === 'done') {
-          notifyAiTaskStatus(executionPreferences, messages, 'completed')
-          aiLogger?.finish('completed', streamEvent.message)
+          if (streamEvent.type === 'done') {
+            notifyAiTaskStatus(executionPreferences, messages, 'completed')
+            aiLogger?.finish('completed', streamEvent.message)
 
-          if (memoryEngine) {
-            try {
-              memoryEngine.ingestSessionMemory({
-                agent: runtimeContext.agent,
-                group: runtimeContext.group,
-                channelBinding: runtimeContext.channelBinding,
-                userMessages: getAllUserMessageTexts(messages),
-                finalAssistantText: getMessageText(streamEvent.message.content),
-                toolNames: executedToolNames,
-                targetProjectId: runtimeContext.effectiveTargetProjectId,
-                sourceConversationId: conversationId,
-                sourceSessionId: sessionId,
-                userId: 'local-user',
-                enabledScopeTypes: runtimeContext.agent?.memoryScopes
-              })
-            } catch (memoryError) {
-              console.error('[ai:chatStream] Failed to ingest memory:', memoryError)
-              aiLogger?.logError('session', memoryError as Error, { phase: 'memory-ingest', sessionId, conversationId })
+            if (memoryEngine) {
+              try {
+                memoryEngine.ingestSessionMemory({
+                  agent: runtimeContext.agent,
+                  group: runtimeContext.group,
+                  channelBinding: runtimeContext.channelBinding,
+                  userMessages: getAllUserMessageTexts(messages),
+                  finalAssistantText: getMessageText(streamEvent.message.content),
+                  toolNames: executedToolNames,
+                  targetProjectId: runtimeContext.effectiveTargetProjectId,
+                  sourceConversationId: conversationId,
+                  sourceSessionId: sessionId,
+                  userId: 'local-user',
+                  enabledScopeTypes: runtimeContext.agent?.memoryScopes
+                })
+              } catch (memoryError) {
+                console.error('[ai:chatStream] Failed to ingest memory:', memoryError)
+                aiLogger?.logError('session', memoryError as Error, { phase: 'memory-ingest', sessionId, conversationId })
+              }
             }
           }
-        }
-        if (streamEvent.type === 'done' || streamEvent.type === 'error') {
-          emitGroupTranscriptIfNeeded()
-        }
-        if (sender.isDestroyed()) break
-        if ((streamEvent.type === 'token' || streamEvent.type === 'thinking') && streamEvent.content) {
-          enqueueBufferedTextEvent(streamEvent)
-          continue
-        }
+          if (streamEvent.type === 'done' || streamEvent.type === 'error') {
+            emitGroupTranscriptIfNeeded()
+          }
+          if (sender.isDestroyed()) break
+          if ((streamEvent.type === 'token' || streamEvent.type === 'thinking') && streamEvent.content) {
+            enqueueBufferedTextEvent(streamEvent)
+            continue
+          }
 
-        flushBufferedTextEvents()
-        sendEventToRenderer(streamEvent as unknown as Record<string, unknown>)
-      }
+          flushBufferedTextEvents()
+          sendEventToRenderer(streamEvent as unknown as Record<string, unknown>)
+        }
+      })
     } catch (err) {
       flushBufferedTextEvents()
       const errorMessage = (err as Error).message
