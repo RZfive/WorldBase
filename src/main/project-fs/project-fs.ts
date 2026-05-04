@@ -56,13 +56,29 @@ export class ProjectFS {
    * Resolve and validate a path within a project directory.
    * Prevents directory traversal attacks.
    */
-  _resolveProjectPath (projectId: string, relativePath = ''): string {
-    const projectRoot = path.join(this.projectsDir, projectId)
-    const resolved = path.resolve(projectRoot, relativePath)
+  private _assertValidProjectId (projectId: string): string {
+    const normalizedProjectId = typeof projectId === 'string' ? projectId.trim() : ''
+    if (!normalizedProjectId || normalizedProjectId === '.' || normalizedProjectId === '..') {
+      throw new Error(`Invalid project id: ${projectId}`)
+    }
 
-    if (!resolved.startsWith(projectRoot)) {
+    if (/[\\/\0:]/.test(normalizedProjectId)) {
+      throw new Error(`Invalid project id: ${projectId}`)
+    }
+
+    return normalizedProjectId
+  }
+
+  _resolveProjectPath (projectId: string, relativePath = ''): string {
+    const safeProjectId = this._assertValidProjectId(projectId)
+    const projectRoot = path.resolve(this.projectsDir, safeProjectId)
+    const resolved = path.resolve(projectRoot, relativePath)
+    const relativeToRoot = path.relative(projectRoot, resolved)
+
+    if (relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
       throw new Error(`Path traversal detected: ${relativePath}`)
     }
+
     return resolved
   }
 
@@ -120,7 +136,7 @@ export class ProjectFS {
   async saveProjectMeta (projectId: string, meta: ProjectMeta): Promise<void> {
     const metaPath = this._resolveProjectPath(projectId, '.world-meta.json')
     const normalizedMeta = normalizeProjectMeta(meta) as ProjectMeta
-    await fs.writeFile(metaPath, JSON.stringify(normalizedMeta, null, 2), 'utf-8')
+    await this.safeWriter.safeWrite(metaPath, JSON.stringify(normalizedMeta, null, 2))
   }
 
   /**
