@@ -203,19 +203,27 @@ const showAppChatBubble = computed(() => (
   currentView.value === 'app'
   && !showLaunchpad.value
   && appChatPresentation.value === 'bubble'
-  && Boolean(activePageSurface.value)
+  && Boolean(activeBrowserPageSurface.value)
 ))
+
+const activeBrowserPageSurface = computed(() => {
+  return activePageSurface.value?.kind === 'browser' ? activePageSurface.value : null
+})
+
+const shouldMountChatShell = computed(() => {
+  return currentView.value !== 'app' || Boolean(activeBrowserPageSurface.value)
+})
 
 const activePageAutomationContext = computed<ActivePageAutomationContext | null>(() => {
   if (currentView.value !== 'app') return null
-  if (!activePageSurface.value || activePageSurface.value.kind !== 'browser') return null
+  if (!activeBrowserPageSurface.value) return null
 
   return {
-    appId: activePageSurface.value.appId,
+    appId: activeBrowserPageSurface.value.appId,
     kind: 'browser',
-    title: activePageSurface.value.title,
-    url: activePageSurface.value.url,
-    origin: activePageSurface.value.origin
+    title: activeBrowserPageSurface.value.title,
+    url: activeBrowserPageSurface.value.url,
+    origin: activeBrowserPageSurface.value.origin
   }
 })
 
@@ -428,13 +436,13 @@ function optimizeProjectInChat (project: Record<string, unknown>) {
 }
 
 function openPageChatOverlay () {
-  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value) return
+  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeBrowserPageSurface.value) return
   appChatPresentation.value = 'overlay'
   hideDockCtx()
 }
 
 function collapsePageChatToBubble () {
-  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value) return
+  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeBrowserPageSurface.value) return
   appChatPresentation.value = 'bubble'
 }
 
@@ -1127,13 +1135,13 @@ onUnmounted(() => {
             </template>
           </div>
 
-          <div :class="['chat-shell', `chat-shell-${chatShellMode}`]">
+          <div v-if="shouldMountChatShell" :class="['chat-shell', `chat-shell-${chatShellMode}`]">
             <div class="chat-shell-body">
-              <div v-if="chatShellMode === 'overlay' && activePageSurface" class="chat-overlay-banner">
+              <div v-if="chatShellMode === 'overlay' && activeBrowserPageSurface" class="chat-overlay-banner">
                 <div class="chat-overlay-banner-copy">
                   <span class="chat-overlay-kicker">页面操作对话</span>
-                  <span class="chat-overlay-title">{{ activePageSurface.title }}</span>
-                  <span class="chat-overlay-subtitle">{{ activePageSurface.origin || activePageSurface.url || '当前应用页面' }}</span>
+                  <span class="chat-overlay-title">{{ activeBrowserPageSurface.title }}</span>
+                  <span class="chat-overlay-subtitle">{{ activeBrowserPageSurface.origin || activeBrowserPageSurface.url || '当前应用页面' }}</span>
                 </div>
                 <button class="chat-overlay-collapse-btn" type="button" @click="collapsePageChatToBubble">收起圆球</button>
               </div>
@@ -1151,8 +1159,8 @@ onUnmounted(() => {
           </div>
 
           <FloatingTaskBubble
-            v-if="showAppChatBubble && activePageSurface"
-            :is-loading="chatSurfaceStatus.isLoading || activePageSurface.loading"
+            v-if="showAppChatBubble && activeBrowserPageSurface"
+            :is-loading="chatSurfaceStatus.isLoading || activeBrowserPageSurface.loading"
             :pending-auth-count="chatSurfaceStatus.pendingAuthCount"
             :active-todo-count="chatSurfaceStatus.activeTodoCount"
             @open="openPageChatOverlay"
