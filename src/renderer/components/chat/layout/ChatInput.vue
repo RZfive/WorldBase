@@ -71,6 +71,7 @@ const props = defineProps<{
   availableAgents?: AgentOption[]
   selectedAgentId?: string
   groupMentionHints?: GroupMentionHint[]
+  isGroupConversation?: boolean
   isNewConversation?: boolean
 }>()
 
@@ -114,6 +115,9 @@ const currentReasoningIndex = computed(() => {
 })
 const currentReasoningLabel = computed(() => {
   return reasoningLevels[currentReasoningIndex.value]?.label || '中'
+})
+const groupReasoningTitle = computed(() => {
+  return `群聊中此处不单独调节思考强度，当前会沿用群内各 Agent 自身的思考强度配置（当前界面值：${currentReasoningLabel.value}）。`
 })
 const projectTags = computed<ProjectTagChip[]>(() => {
   const seenIds = new Set<string>()
@@ -676,20 +680,31 @@ function handleTextareaBlur () {
           </template>
           <!-- Reasoning strength: segmented pill control -->
           <div class="tooltip-container reasoning-tooltip">
-            <div class="reasoning-segmented">
-              <svg class="reasoning-icon" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-              </svg>
-              <button
-                v-for="level in reasoningLevels"
-                :key="level.value"
-                class="reasoning-pill"
-                :class="{ active: props.reasoningStrength === level.value }"
-                type="button"
-                @click="emit('update:reasoning-strength', level.value)"
-              >{{ level.label }}</button>
-            </div>
-            <span class="tooltip-text">推理强度</span>
+            <template v-if="!props.isGroupConversation">
+              <div class="reasoning-segmented">
+                <svg class="reasoning-icon" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                </svg>
+                <button
+                  v-for="level in reasoningLevels"
+                  :key="level.value"
+                  class="reasoning-pill"
+                  :class="{ active: props.reasoningStrength === level.value }"
+                  type="button"
+                  @click="emit('update:reasoning-strength', level.value)"
+                >{{ level.label }}</button>
+              </div>
+              <span class="tooltip-text">推理强度</span>
+            </template>
+            <template v-else>
+              <div class="reasoning-group-indicator" :title="groupReasoningTitle">
+                <svg class="reasoning-icon" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                </svg>
+                <span>群聊沿用 Agent 思考强度</span>
+              </div>
+              <span class="tooltip-text">{{ groupReasoningTitle }}</span>
+            </template>
           </div>
         </div>
         <div class="input-actions-right">
@@ -1167,6 +1182,21 @@ function handleTextareaBlur () {
   border-radius: 8px;
   background: var(--app-panel-muted);
   border: 1px solid var(--app-border);
+}
+
+.reasoning-group-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--app-panel-muted);
+  border: 1px dashed var(--app-border);
+  color: var(--app-text-soft);
+  font-size: 0.72em;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .reasoning-icon {
