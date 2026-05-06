@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 
 interface SkillItem {
   id: string
@@ -24,12 +25,18 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'update:selected-channel-binding-id', channelBindingId: string): void
   (e: 'toggleSkillPicker'): void
+  (e: 'selectAllSkills'): void
+  (e: 'clearSkills'): void
   (e: 'toggleSkill', skillId: string): void
 }>()
 
 function onChannelBindingChange (event: Event) {
   emit('update:selected-channel-binding-id', (event.target as HTMLSelectElement).value)
 }
+
+const allSkillsSelected = computed(() => {
+  return props.availableSkills.length > 0 && props.activeSkillIds.size === props.availableSkills.length
+})
 </script>
 
 <template>
@@ -57,6 +64,10 @@ function onChannelBindingChange (event: Event) {
           🧠 Skills{{ activeSkillIds.size > 0 ? ` (${activeSkillIds.size})` : '' }}
         </button>
         <div v-if="showSkillPicker" class="skill-dropdown">
+          <div class="skill-dropdown-actions">
+            <button type="button" class="skill-dropdown-action" :disabled="allSkillsSelected" @click="emit('selectAllSkills')">全选</button>
+            <button type="button" class="skill-dropdown-action" :disabled="activeSkillIds.size === 0" @click="emit('clearSkills')">清空</button>
+          </div>
           <div
             v-for="skill in availableSkills"
             :key="skill.id"
@@ -183,6 +194,33 @@ function onChannelBindingChange (event: Event) {
   box-shadow: var(--app-shadow);
   backdrop-filter: blur(14px);
   overscroll-behavior: contain;
+}
+
+.skill-dropdown-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 4px 4px 8px;
+}
+
+.skill-dropdown-action {
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-strong);
+  color: var(--app-text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.76em;
+  cursor: pointer;
+}
+
+.skill-dropdown-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.skill-dropdown-action:not(:disabled):hover {
+  border-color: var(--app-accent);
+  color: var(--app-text-strong);
 }
 
 .skill-option {
