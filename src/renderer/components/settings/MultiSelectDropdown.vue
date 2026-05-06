@@ -195,12 +195,21 @@ function onDocumentClick (event: MouseEvent): void {
 
 onMounted(() => {
   document.addEventListener('click', onDocumentClick, true)
-  document.addEventListener('scroll', handleViewportChange, true)
-  window.addEventListener('resize', handleViewportChange)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocumentClick, true)
+  document.removeEventListener('scroll', handleViewportChange, true)
+  window.removeEventListener('resize', handleViewportChange)
+})
+
+watch(open, (isOpen) => {
+  if (isOpen) {
+    document.addEventListener('scroll', handleViewportChange, true)
+    window.addEventListener('resize', handleViewportChange)
+    return
+  }
+
   document.removeEventListener('scroll', handleViewportChange, true)
   window.removeEventListener('resize', handleViewportChange)
 })
