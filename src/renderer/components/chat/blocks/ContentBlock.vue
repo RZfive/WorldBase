@@ -109,6 +109,7 @@ function setResetTimer (kind: ExportKind, timer: number | null): void {
       return
     case 'copy':
       copyResetTimer = timer
+      return
   }
 }
 
