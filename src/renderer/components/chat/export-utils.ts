@@ -220,7 +220,6 @@ export async function copyTextToClipboard (content: string): Promise<void> {
   textarea.style.left = '-9999px'
   textarea.style.pointerEvents = 'none'
   document.body.appendChild(textarea)
-  textarea.focus()
   textarea.select()
 
   try {
