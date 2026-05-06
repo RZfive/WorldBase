@@ -325,7 +325,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     }
 
     const defaultAgentId = getDefaultAgentId()
-    if (currentAgentDefinition.value && selectedAgentId.value && selectedAgentId.value !== defaultAgentId) {
+    const isNonDefaultAgent = Boolean(selectedAgentId.value) && selectedAgentId.value !== defaultAgentId
+    if (currentAgentDefinition.value && isNonDefaultAgent) {
       const selection = getAgentModelSelection(currentAgentDefinition.value, providersById.value, activeProviderId.value)
       const labelParts = [selection.modelId, selection.providerName].filter(Boolean)
       return labelParts.length > 0 ? labelParts.join(' · ') : currentAgentDefinition.value.name
