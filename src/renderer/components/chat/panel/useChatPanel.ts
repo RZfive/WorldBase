@@ -847,6 +847,30 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     })
   }
 
+  function syncProviderSelectionForAgent (agentId: string) {
+    const defaultAgentId = getDefaultAgentId()
+    if (!agentId || agentId === defaultAgentId) {
+      return
+    }
+
+    const agent = agentsById.value.get(agentId)
+    if (!agent) {
+      return
+    }
+
+    const provider = agent.providerId
+      ? providersById.value.get(agent.providerId) || null
+      : null
+    if (!provider) {
+      return
+    }
+
+    activeProviderId.value = provider.id
+    selectedModel.value = provider.models.includes(agent.modelId || '')
+      ? (agent.modelId || '')
+      : (provider.activeModel || provider.models[0] || '')
+  }
+
   async function handleProviderSelectionChange (providerId: string) {
     activeProviderId.value = providerId
     const provider = providers.value.find(item => item.id === providerId)
@@ -889,6 +913,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   async function handleAgentSelectionChange (agentId: string) {
     selectedAgentId.value = agentId
+    syncProviderSelectionForAgent(agentId)
     if (!currentConversationId.value) return
     await doSaveConversation(currentConversationId.value, messages.value, {
       targetProjectId: targetProjectId.value,

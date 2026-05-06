@@ -2,28 +2,26 @@
  * PDF → DocumentNode[] parser.
  * Uses pdf-parse v2 (PDFParse class) to extract text per page.
  */
-import path from 'node:path'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import type { DocumentNode } from './document-types.js'
 
 let nodeCounter = 0
 let pdfWorkerConfigured = false
-let pdfWorkerSrc: string | null = null
+let pdfWorkerModulePromise: Promise<{ getData: () => string }> | null = null
 const moduleRequire = createRequire(import.meta.url)
 
 function nextId (): string {
   return `pdf_${++nodeCounter}`
 }
 
-function resolvePdfWorkerSrc (): string {
-  if (pdfWorkerSrc) return pdfWorkerSrc
+async function loadPdfWorkerModule (): Promise<{ getData: () => string }> {
+  if (!pdfWorkerModulePromise) {
+    const workerModuleUrl = pathToFileURL(moduleRequire.resolve('pdf-parse/worker')).href
+    pdfWorkerModulePromise = import(workerModuleUrl) as Promise<{ getData: () => string }>
+  }
 
-  const workerEntryPath = moduleRequire.resolve('pdf-parse/worker')
-  const workerPath = path.resolve(path.dirname(workerEntryPath), '../pdf.worker.mjs')
-  pdfWorkerSrc = pathToFileURL(workerPath).href
-
-  return pdfWorkerSrc
+  return pdfWorkerModulePromise
 }
 
 export async function parsePdfToNodes (buffer: Buffer): Promise<DocumentNode[]> {
@@ -31,7 +29,8 @@ export async function parsePdfToNodes (buffer: Buffer): Promise<DocumentNode[]> 
   const { PDFParse } = await import('pdf-parse')
 
   if (!pdfWorkerConfigured) {
-    PDFParse.setWorker(resolvePdfWorkerSrc())
+    const { getData } = await loadPdfWorkerModule()
+    PDFParse.setWorker(getData())
     pdfWorkerConfigured = true
   }
 
