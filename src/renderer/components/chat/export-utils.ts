@@ -215,8 +215,9 @@ export async function copyTextToClipboard (content: string): Promise<void> {
   const textarea = document.createElement('textarea')
   textarea.value = content
   textarea.setAttribute('readonly', 'true')
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
+  textarea.setAttribute('aria-hidden', 'true')
+  textarea.style.position = 'absolute'
+  textarea.style.left = '-9999px'
   textarea.style.pointerEvents = 'none'
   document.body.appendChild(textarea)
   textarea.focus()

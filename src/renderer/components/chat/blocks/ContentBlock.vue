@@ -36,14 +36,16 @@ const markdownExportState = ref<ExportState>('idle')
 const imageExportState = ref<ExportState>('idle')
 const copyExportState = ref<ExportState>('idle')
 
-let markdownResetTimer: number | null = null
-let imageResetTimer: number | null = null
-let copyResetTimer: number | null = null
-
 const exportStateRefs: Record<ExportKind, Ref<ExportState>> = {
   md: markdownExportState,
   image: imageExportState,
   copy: copyExportState
+}
+
+const exportResetTimers: Record<ExportKind, number | null> = {
+  md: null,
+  image: null,
+  copy: null
 }
 
 const exportStateLabels: Record<ExportKind, Record<ExportState, string>> = {
@@ -88,41 +90,16 @@ function getStreamingPreviewText (segment: MarkdownSegment): string {
   return segment.text
 }
 
-function getResetTimer (kind: ExportKind): number | null {
-  switch (kind) {
-    case 'md':
-      return markdownResetTimer
-    case 'image':
-      return imageResetTimer
-    case 'copy':
-      return copyResetTimer
-  }
-}
-
-function setResetTimer (kind: ExportKind, timer: number | null): void {
-  switch (kind) {
-    case 'md':
-      markdownResetTimer = timer
-      return
-    case 'image':
-      imageResetTimer = timer
-      return
-    case 'copy':
-      copyResetTimer = timer
-      return
-  }
-}
-
 function getExportState (kind: ExportKind): ExportState {
   return exportStateRefs[kind].value
 }
 
 function clearResetTimer (kind: ExportKind) {
-  const timer = getResetTimer(kind)
+  const timer = exportResetTimers[kind]
   if (timer != null) {
     window.clearTimeout(timer)
   }
-  setResetTimer(kind, null)
+  exportResetTimers[kind] = null
 }
 
 function setExportState (kind: ExportKind, state: ExportState) {
@@ -132,9 +109,9 @@ function setExportState (kind: ExportKind, state: ExportState) {
   if (state === 'done' || state === 'error') {
     const timeoutId = window.setTimeout(() => {
       exportStateRefs[kind].value = 'idle'
-      setResetTimer(kind, null)
+      exportResetTimers[kind] = null
     }, 2200)
-    setResetTimer(kind, timeoutId)
+    exportResetTimers[kind] = timeoutId
   }
 }
 
