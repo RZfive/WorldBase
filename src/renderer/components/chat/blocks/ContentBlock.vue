@@ -3,7 +3,14 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import { renderMarkdown } from '../markdown'
 import { getContentParts, hasRenderableContent, collapseWhitespace } from '../message-utils'
 import { splitMarkdownWithMermaid, type MarkdownSegment } from '../mermaid'
-import { buildAssistantExportBaseName, downloadDataUrlFile, downloadMarkdownFile, messageContentToMarkdown, renderElementToPngDataUrl } from '../export-utils'
+import {
+  buildAssistantExportBaseName,
+  copyTextToClipboard,
+  downloadDataUrlFile,
+  downloadMarkdownFile,
+  messageContentToMarkdown,
+  renderElementToPngDataUrl
+} from '../export-utils'
 import type { ChatMessageBlock } from '../types'
 import MermaidDiagram from '../media/MermaidDiagram.vue'
 
@@ -26,9 +33,11 @@ const emit = defineEmits<{
 const exportCaptureRef = ref<HTMLElement | null>(null)
 const markdownExportState = ref<ExportState>('idle')
 const imageExportState = ref<ExportState>('idle')
+const copyExportState = ref<ExportState>('idle')
 
 let markdownResetTimer: number | null = null
 let imageResetTimer: number | null = null
+let copyResetTimer: number | null = null
 
 const canExport = computed(() => {
   return props.role === 'assistant' && !props.isStreamingBlock && hasRenderableContent(props.block.content)
@@ -51,26 +60,34 @@ function getStreamingPreviewText (segment: MarkdownSegment): string {
   return segment.text
 }
 
-function clearResetTimer (kind: 'md' | 'image') {
-  const timer = kind === 'md' ? markdownResetTimer : imageResetTimer
+function clearResetTimer (kind: 'md' | 'image' | 'copy') {
+  const timer = kind === 'md'
+    ? markdownResetTimer
+    : kind === 'image'
+      ? imageResetTimer
+      : copyResetTimer
   if (timer != null) {
     window.clearTimeout(timer)
   }
 
   if (kind === 'md') {
     markdownResetTimer = null
-  } else {
+  } else if (kind === 'image') {
     imageResetTimer = null
+  } else {
+    copyResetTimer = null
   }
 }
 
-function setExportState (kind: 'md' | 'image', state: ExportState) {
+function setExportState (kind: 'md' | 'image' | 'copy', state: ExportState) {
   clearResetTimer(kind)
 
   if (kind === 'md') {
     markdownExportState.value = state
-  } else {
+  } else if (kind === 'image') {
     imageExportState.value = state
+  } else {
+    copyExportState.value = state
   }
 
   if (state === 'done' || state === 'error') {
@@ -78,26 +95,41 @@ function setExportState (kind: 'md' | 'image', state: ExportState) {
       if (kind === 'md') {
         markdownExportState.value = 'idle'
         markdownResetTimer = null
-      } else {
+      } else if (kind === 'image') {
         imageExportState.value = 'idle'
         imageResetTimer = null
+      } else {
+        copyExportState.value = 'idle'
+        copyResetTimer = null
       }
     }, 2200)
 
     if (kind === 'md') {
       markdownResetTimer = timeoutId
-    } else {
+    } else if (kind === 'image') {
       imageResetTimer = timeoutId
+    } else {
+      copyResetTimer = timeoutId
     }
   }
 }
 
-function getExportLabel (kind: 'md' | 'image'): string {
-  const state = kind === 'md' ? markdownExportState.value : imageExportState.value
-  if (state === 'pending') return kind === 'md' ? '导出中…' : '生成中…'
-  if (state === 'done') return '已保存'
+function getExportLabel (kind: 'md' | 'image' | 'copy'): string {
+  const state = kind === 'md'
+    ? markdownExportState.value
+    : kind === 'image'
+      ? imageExportState.value
+      : copyExportState.value
+  if (state === 'pending') {
+    if (kind === 'md') return '导出中…'
+    if (kind === 'image') return '生成中…'
+    return '复制中…'
+  }
+  if (state === 'done') return kind === 'copy' ? '已复制' : '已保存'
   if (state === 'error') return '失败'
-  return kind === 'md' ? '导出 MD' : '导出长图'
+  if (kind === 'md') return '导出 MD'
+  if (kind === 'image') return '导出长图'
+  return '复制'
 }
 
 async function exportMarkdown (): Promise<void> {
@@ -150,9 +182,23 @@ async function exportLongImage (): Promise<void> {
   }
 }
 
+async function copyMessageContent (): Promise<void> {
+  if (!canExport.value || copyExportState.value === 'pending') return
+
+  setExportState('copy', 'pending')
+  try {
+    await copyTextToClipboard(messageContentToMarkdown(props.block.content))
+    setExportState('copy', 'done')
+  } catch (error) {
+    console.error('Failed to copy message content:', error)
+    setExportState('copy', 'error')
+  }
+}
+
 onBeforeUnmount(() => {
   clearResetTimer('md')
   clearResetTimer('image')
+  clearResetTimer('copy')
 })
 </script>
 
@@ -215,6 +261,14 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="canExport" class="message-export-bar" data-export-ignore="true">
+        <button
+          class="message-export-action"
+          type="button"
+          :disabled="copyExportState === 'pending'"
+          @click="copyMessageContent"
+        >
+          {{ getExportLabel('copy') }}
+        </button>
         <button
           class="message-export-action"
           type="button"
