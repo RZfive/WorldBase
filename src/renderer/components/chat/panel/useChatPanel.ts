@@ -866,9 +866,10 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     }
 
     const agentModelId = agent.modelId || ''
+    const providerFallbackModel = provider.activeModel || provider.models[0] || ''
     const resolvedModelId = provider.models.includes(agentModelId)
       ? agentModelId
-      : (provider.activeModel || provider.models[0] || '')
+      : providerFallbackModel
 
     activeProviderId.value = provider.id
     selectedModel.value = resolvedModelId

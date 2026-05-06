@@ -69,8 +69,9 @@ const panelStyle = computed(() => {
   const spaceAbove = rect.top - viewportPadding
   const preferredHeight = 360
   const minHeight = 220
+  const minAvailableHeight = 180
   const placeAbove = spaceBelow < preferredHeight && spaceAbove > spaceBelow
-  const availableHeight = Math.max(180, placeAbove ? spaceAbove : spaceBelow)
+  const availableHeight = Math.max(minAvailableHeight, placeAbove ? spaceAbove : spaceBelow)
   const maxHeight = availableHeight >= minHeight
     ? Math.min(preferredHeight, availableHeight)
     : availableHeight
@@ -367,13 +368,13 @@ onBeforeUnmount(() => {
 }
 
 .multi-select-panel {
-  z-index: 10000;
+  z-index: var(--multi-select-panel-z-index, 10000);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--app-border-strong);
   border-radius: 16px;
-  background: var(--app-panel-strong);
+  background-color: var(--app-panel-strong);
   background: color-mix(in srgb, var(--app-panel-strong) 92%, transparent);
   backdrop-filter: blur(20px);
   box-shadow: var(--app-shadow);
