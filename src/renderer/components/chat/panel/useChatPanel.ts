@@ -161,6 +161,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   })
 
   const activeTodoItems = computed(() => getLatestVisibleTodoItems(messages.value, isLoading.value))
+  const isGroupConversation = computed(() => Boolean(selectedGroupId.value))
 
   const shouldUseConversationProviderOverride = computed(() => {
     if (selectedGroupId.value || selectedChannelBindingId.value) return false
@@ -521,6 +522,10 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       if (!selectedAgentId.value && !selectedGroupId.value && !selectedChannelBindingId.value) {
         selectedAgentId.value = getDefaultAgentId()
       }
+
+      if (!currentConversationId.value && !selectedGroupId.value && !selectedChannelBindingId.value && selectedAgentId.value) {
+        syncProviderSelectionForAgent(selectedAgentId.value)
+      }
     } catch { /* ignore */ }
   }
 
@@ -626,6 +631,16 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     } else {
       activeSkillIds.value.add(id)
     }
+    void syncActiveSkills()
+  }
+
+  function selectAllSkills () {
+    activeSkillIds.value = new Set(availableSkills.value.map(skill => skill.id))
+    void syncActiveSkills()
+  }
+
+  function clearSkills () {
+    activeSkillIds.value = new Set()
     void syncActiveSkills()
   }
 
@@ -793,6 +808,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     selectedAgentId.value = getDefaultAgentId()
     selectedGroupId.value = ''
     selectedChannelBindingId.value = ''
+    syncProviderSelectionForAgent(selectedAgentId.value)
     inputText.value = `${projectRef}${projectRef ? '\n' : ''}请先检查这个项目的当前代码、运行状态和最近日志，明确告诉我这个项目现在的具体问题、风险点和可优化项，然后再继续修改。`
     pendingImages.value = []
     pendingFiles.value = []
@@ -985,6 +1001,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     selectedAgentId.value = getDefaultAgentId()
     selectedGroupId.value = ''
     selectedChannelBindingId.value = ''
+    syncProviderSelectionForAgent(selectedAgentId.value)
   }
 
   async function loadConversation (id: string) {
@@ -1726,6 +1743,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     handleReasoningStrengthChange,
     inputText,
     insertDocumentTag,
+    isGroupConversation,
     isLoading,
     isUploadingFiles,
     loadConversation,
@@ -1745,12 +1763,14 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     respondToSudoPasswordRequest,
     selectedChannelBindingId,
     selectedModel,
+    selectAllSkills,
     sendMessage,
     shouldUseConversationProviderOverride,
     showSkillPicker,
     stopCurrentStream,
     togglePlanMode,
     toggleSkill,
+    clearSkills,
     uploadFeedback,
     addAttachments
   }

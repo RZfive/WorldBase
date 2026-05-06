@@ -39,6 +39,7 @@ const {
   handleReasoningStrengthChange,
   inputText,
   insertDocumentTag,
+  isGroupConversation,
   isLoading,
   isUploadingFiles,
   loadConversation,
@@ -58,12 +59,14 @@ const {
   respondToSudoPasswordRequest,
   selectedChannelBindingId,
   selectedModel,
+  selectAllSkills,
   sendMessage,
   shouldUseConversationProviderOverride,
   showSkillPicker,
   stopCurrentStream,
   togglePlanMode,
   toggleSkill,
+  clearSkills,
   uploadFeedback,
   addAttachments
 } = useChatPanel(props, {
@@ -112,6 +115,8 @@ watch(
         :show-skill-picker="showSkillPicker"
         @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
         @toggle-skill-picker="showSkillPicker = !showSkillPicker"
+        @select-all-skills="selectAllSkills"
+        @clear-skills="clearSkills"
         @toggle-skill="toggleSkill"
       />
 
@@ -157,6 +162,7 @@ watch(
         :available-agents="nonDefaultAgents"
         :selected-agent-id="agentSelectorValue"
         :group-mention-hints="groupMentionHints"
+        :is-group-conversation="isGroupConversation"
         :is-new-conversation="!currentConversationId"
         @send="sendMessage"
         @stop="stopCurrentStream"
