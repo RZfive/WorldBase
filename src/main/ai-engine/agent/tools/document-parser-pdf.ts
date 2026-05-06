@@ -3,17 +3,27 @@
  * Uses pdf-parse v2 (PDFParse class) to extract text per page.
  */
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
 import type { DocumentNode } from './document-types.js'
 
 interface PdfWorkerModule {
   getData: () => string
 }
 
+interface PdfParseModule {
+  PDFParse: {
+    new (options: { data: Buffer }): {
+      getText: () => Promise<{ pages: Array<{ num: number, text: string }> }>
+      destroy: () => Promise<void>
+    }
+    setWorker: (workerDataUrl: string) => void
+  }
+}
+
 let nodeCounter = 0
 let pdfWorkerConfigured = false
-let pdfWorkerModulePromise: Promise<PdfWorkerModule> | null = null
 const moduleRequire = createRequire(import.meta.url)
+const pdfParseModule = moduleRequire('pdf-parse') as PdfParseModule
+const pdfWorkerModule = moduleRequire('pdf-parse/worker') as PdfWorkerModule
 
 function nextId (): string {
   return `pdf_${++nodeCounter}`
@@ -25,26 +35,20 @@ function isPdfWorkerModule (value: unknown): value is PdfWorkerModule {
     && typeof (value as { getData?: unknown }).getData === 'function'
 }
 
-async function loadPdfWorkerModule (): Promise<PdfWorkerModule> {
-  if (!pdfWorkerModulePromise) {
-    const workerModuleUrl = pathToFileURL(moduleRequire.resolve('pdf-parse/worker')).href
-    pdfWorkerModulePromise = import(workerModuleUrl).then((module) => {
-      if (!isPdfWorkerModule(module)) {
-        throw new Error('pdf-parse worker 模块缺少 getData 导出')
-      }
-      return module
-    })
+function loadPdfWorkerModule (): PdfWorkerModule {
+  if (!isPdfWorkerModule(pdfWorkerModule)) {
+    throw new Error('pdf-parse worker 模块缺少 getData 导出')
   }
 
-  return pdfWorkerModulePromise
+  return pdfWorkerModule
 }
 
 export async function parsePdfToNodes (buffer: Buffer): Promise<DocumentNode[]> {
   nodeCounter = 0
-  const { PDFParse } = await import('pdf-parse')
+  const { PDFParse } = pdfParseModule
 
   if (!pdfWorkerConfigured) {
-    const { getData } = await loadPdfWorkerModule()
+    const { getData } = loadPdfWorkerModule()
     PDFParse.setWorker(getData())
     pdfWorkerConfigured = true
   }
