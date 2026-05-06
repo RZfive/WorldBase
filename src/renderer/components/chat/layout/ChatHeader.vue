@@ -172,6 +172,9 @@ function onChannelBindingChange (event: Event) {
   right: 0;
   margin-top: 6px;
   min-width: 200px;
+  max-width: min(320px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 140px));
+  overflow-y: auto;
   background: var(--app-panel);
   border: 1px solid var(--app-border-strong);
   border-radius: 8px;
@@ -179,6 +182,7 @@ function onChannelBindingChange (event: Event) {
   z-index: 50;
   box-shadow: var(--app-shadow);
   backdrop-filter: blur(14px);
+  overscroll-behavior: contain;
 }
 
 .skill-option {

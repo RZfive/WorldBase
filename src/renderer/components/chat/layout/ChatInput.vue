@@ -3,13 +3,6 @@ import { computed, nextTick, ref, watch, type CSSProperties } from 'vue'
 import ProviderDropdown from './ProviderDropdown.vue'
 import ProviderModelDropdown from './ProviderModelDropdown.vue'
 
-interface SkillItem {
-  id: string
-  name: string
-  description?: string
-  content?: string
-}
-
 interface PendingAttachment {
   id: string
   name: string
@@ -67,8 +60,6 @@ const props = defineProps<{
   pendingFiles: PendingAttachment[]
   isUploadingFiles: boolean
   uploadFeedback: string
-  availableSkills: SkillItem[]
-  activeSkillIds: Set<string>
   documentDockVisible: boolean
   reasoningStrength: ReasoningStrength
   authMode: AIExecutionAuthMode
@@ -91,7 +82,6 @@ const emit = defineEmits<{
   (e: 'removeImage', index: number): void
   (e: 'removeFile', id: string): void
   (e: 'update:reasoning-strength', value: ReasoningStrength): void
-  (e: 'toggleSkill', id: string): void
   (e: 'toggleDocumentDock'): void
   (e: 'update:auth-mode', value: AIExecutionAuthMode): void
   (e: 'togglePlanMode'): void
@@ -589,18 +579,6 @@ function handleTextareaBlur () {
 
 <template>
   <div class="chat-input">
-    <!-- Active skill badges -->
-    <div v-if="props.activeSkillIds.size > 0" class="active-skills-bar">
-      <span
-        v-for="skill in props.availableSkills.filter(s => props.activeSkillIds.has(s.id))"
-        :key="skill.id"
-        class="skill-badge"
-      >
-        🧠 {{ skill.name }}
-        <button class="skill-badge-remove" @click="emit('toggleSkill', skill.id)">×</button>
-      </span>
-    </div>
-
     <!-- Unified input container -->
     <div
       class="input-container"
@@ -1338,38 +1316,6 @@ function handleTextareaBlur () {
   color: var(--app-text-faint);
   cursor: not-allowed;
 }
-
-/* Active skills bar */
-.active-skills-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding-bottom: 8px;
-}
-
-.skill-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 10px;
-  background: var(--app-accent-soft);
-  border: 1px solid var(--app-accent-glow);
-  border-radius: 999px;
-  font-size: 0.75em;
-  color: var(--app-text-soft);
-}
-
-.skill-badge-remove {
-  background: none;
-  border: none;
-  color: var(--app-accent);
-  cursor: pointer;
-  font-size: 1em;
-  padding: 0 2px;
-  line-height: 1;
-}
-
-.skill-badge-remove:hover { color: var(--app-danger); }
 
 @keyframes runtime-pulse {
   0%, 100% { transform: scale(0.9); opacity: 0.72; }
