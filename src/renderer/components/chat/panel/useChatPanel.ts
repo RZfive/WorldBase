@@ -865,10 +865,13 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       return
     }
 
-    activeProviderId.value = provider.id
-    selectedModel.value = provider.models.includes(agent.modelId || '')
-      ? (agent.modelId || '')
+    const agentModelId = agent.modelId || ''
+    const resolvedModelId = provider.models.includes(agentModelId)
+      ? agentModelId
       : (provider.activeModel || provider.models[0] || '')
+
+    activeProviderId.value = provider.id
+    selectedModel.value = resolvedModelId
   }
 
   async function handleProviderSelectionChange (providerId: string) {

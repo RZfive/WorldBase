@@ -59,7 +59,10 @@ const panelStyle = computed(() => {
   const rect = triggerRef.value.getBoundingClientRect()
   const viewportPadding = 12
   const availableWidth = window.innerWidth - viewportPadding * 2
-  const width = Math.min(Math.max(rect.width, 300), Math.max(280, Math.min(420, availableWidth)))
+  const minWidth = 280
+  const preferredWidth = Math.max(rect.width, 300)
+  const maxWidth = Math.max(minWidth, Math.min(420, availableWidth))
+  const width = Math.min(preferredWidth, maxWidth)
   const maxLeft = Math.max(viewportPadding, window.innerWidth - width - viewportPadding)
   const left = Math.min(Math.max(viewportPadding, rect.left), maxLeft)
   const spaceBelow = window.innerHeight - rect.bottom - viewportPadding
@@ -370,6 +373,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   border: 1px solid var(--app-border-strong);
   border-radius: 16px;
+  background: var(--app-panel-strong);
   background: color-mix(in srgb, var(--app-panel-strong) 92%, transparent);
   backdrop-filter: blur(20px);
   box-shadow: var(--app-shadow);
