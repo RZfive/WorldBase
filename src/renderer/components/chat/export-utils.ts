@@ -205,3 +205,28 @@ export function downloadMarkdownFile (content: string, fileName: string): void {
 export function downloadDataUrlFile (dataUrl: string, fileName: string): void {
   triggerDownload(dataUrl, fileName)
 }
+
+export async function copyTextToClipboard (content: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(content)
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = content
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  textarea.style.pointerEvents = 'none'
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+
+  try {
+    if (!document.execCommand('copy')) {
+      throw new Error('Clipboard copy command failed')
+    }
+  } finally {
+    textarea.remove()
+  }
+}
