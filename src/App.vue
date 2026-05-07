@@ -211,7 +211,7 @@ const activeBrowserPageSurface = computed(() => {
 })
 
 const shouldMountChatShell = computed(() => {
-  return currentView.value !== 'app' || Boolean(activePageSurface.value)
+  return currentView.value !== 'app' || Boolean(activeEmbeddedProjectId.value)
 })
 
 const activePageAutomationContext = computed<ActivePageAutomationContext | null>(() => {
