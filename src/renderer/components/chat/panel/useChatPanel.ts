@@ -60,6 +60,8 @@ import {
   resolveConversationIcon
 } from './provider-utils'
 import type {
+  AgentDefinition,
+  AgentGroupDefinition,
   AIExecutionAuthMode,
   BackgroundStreamState,
   AuthRequestPayload,
@@ -87,61 +89,97 @@ interface UseChatPanelBindings {
   onContextConsumed: () => void
 }
 
-export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindings) {
-  const messages = ref<ChatMessage[]>([])
-  const inputText = ref('')
-  const conversations = ref<ConversationSummary[]>([])
-  const currentConversationId = ref<string | null>(null)
-  const targetProjectId = ref<string | null>(null)
-  const providers = ref<ProviderOption[]>([])
-  const providersConfig = ref<ProvidersConfig>({
-    providers: [],
-    activeProviderId: '',
-    enabledProviderIds: []
-  })
-  const activeProviderId = ref('')
-  const selectedModel = ref('')
-  const reasoningStrength = ref<ReasoningStrength>('medium')
-  const currentAuthMode = ref<AIExecutionAuthMode>('strict')
-  const pendingImages = ref<PendingImage[]>([])
-  const pendingFiles = ref<PendingAttachment[]>([])
-  const isUploadingFiles = ref(false)
-  const uploadFeedback = ref('')
-  const filePreview = ref<FilePreviewState>({
-    active: false,
-    filePath: '',
-    content: '',
-    truncated: false
-  })
+const sharedMessages = ref<ChatMessage[]>([])
+const sharedInputText = ref('')
+const sharedConversations = ref<ConversationSummary[]>([])
+const sharedCurrentConversationId = ref<string | null>(null)
+const sharedTargetProjectId = ref<string | null>(null)
+const sharedProviders = ref<ProviderOption[]>([])
+const sharedProvidersConfig = ref<ProvidersConfig>({
+  providers: [],
+  activeProviderId: '',
+  enabledProviderIds: []
+})
+const sharedActiveProviderId = ref('')
+const sharedSelectedModel = ref('')
+const sharedReasoningStrength = ref<ReasoningStrength>('medium')
+const sharedCurrentAuthMode = ref<AIExecutionAuthMode>('strict')
+const sharedPendingImages = ref<PendingImage[]>([])
+const sharedPendingFiles = ref<PendingAttachment[]>([])
+const sharedIsUploadingFiles = ref(false)
+const sharedUploadFeedback = ref('')
+const sharedFilePreview = ref<FilePreviewState>({
+  active: false,
+  filePath: '',
+  content: '',
+  truncated: false
+})
+const sharedAvailableSkills = ref<SkillItem[]>([])
+const sharedActiveSkillIds = ref<Set<string>>(new Set())
+const sharedAvailableAgents = ref<AgentDefinition[]>([])
+const sharedAvailableAgentGroups = ref<AgentGroupDefinition[]>([])
+const sharedAvailableChannelBindings = ref<ChannelBinding[]>([])
+const sharedSelectedAgentId = ref('')
+const sharedSelectedGroupId = ref('')
+const sharedSelectedChannelBindingId = ref('')
+const sharedShowSkillPicker = ref(false)
+const sharedPlanModeActive = ref(false)
+const sharedSyncingProviderOptions = ref(false)
+const sharedDocumentDockVisible = ref(false)
+const sharedStreamingConvIds = reactive(new Set<string>())
+const sharedPendingAuthRequestsByConversation = reactive(new Map<string, AuthRequestPayload[]>())
+const sharedBackgroundStreamMessages = new Map<string, BackgroundStreamState>()
+const sharedActiveCleanups = new Map<string, () => void>()
+const sharedActiveStreamSessionIds = new Map<string, string>()
+const sharedConversationTargets = new Map<string, string | null>()
+let sharedProviderChangeCleanup: (() => void) | null = null
+let sharedAuthRequestCleanup: (() => void) | null = null
+let sharedSudoPasswordRequestCleanup: (() => void) | null = null
+let sharedAuthResponseCleanup: (() => void) | null = null
+let sharedAuthResolvedCleanup: (() => void) | null = null
+let sharedSkillsChangedCleanup: (() => void) | null = null
+let sharedAgentWorkspaceChangeCleanup: (() => void) | null = null
+let sharedLifecycleBindingsReady = false
 
-  const availableSkills = ref<SkillItem[]>([])
-  const activeSkillIds = ref<Set<string>>(new Set())
-  const availableAgents = ref<AgentDefinition[]>([])
-  const availableAgentGroups = ref<AgentGroupDefinition[]>([])
-  const availableChannelBindings = ref<ChannelBinding[]>([])
-  const selectedAgentId = ref('')
-  const selectedGroupId = ref('')
-  const selectedChannelBindingId = ref('')
-  const showSkillPicker = ref(false)
-  const planModeActive = ref(false)
-  const syncingProviderOptions = ref(false)
-  const documentDockVisible = ref(false)
+export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindings) {
+  const messages = sharedMessages
+  const inputText = sharedInputText
+  const conversations = sharedConversations
+  const currentConversationId = sharedCurrentConversationId
+  const targetProjectId = sharedTargetProjectId
+  const providers = sharedProviders
+  const providersConfig = sharedProvidersConfig
+  const activeProviderId = sharedActiveProviderId
+  const selectedModel = sharedSelectedModel
+  const reasoningStrength = sharedReasoningStrength
+  const currentAuthMode = sharedCurrentAuthMode
+  const pendingImages = sharedPendingImages
+  const pendingFiles = sharedPendingFiles
+  const isUploadingFiles = sharedIsUploadingFiles
+  const uploadFeedback = sharedUploadFeedback
+  const filePreview = sharedFilePreview
+
+  const availableSkills = sharedAvailableSkills
+  const activeSkillIds = sharedActiveSkillIds
+  const availableAgents = sharedAvailableAgents
+  const availableAgentGroups = sharedAvailableAgentGroups
+  const availableChannelBindings = sharedAvailableChannelBindings
+  const selectedAgentId = sharedSelectedAgentId
+  const selectedGroupId = sharedSelectedGroupId
+  const selectedChannelBindingId = sharedSelectedChannelBindingId
+  const showSkillPicker = sharedShowSkillPicker
+  const planModeActive = sharedPlanModeActive
+  const syncingProviderOptions = sharedSyncingProviderOptions
+  const documentDockVisible = sharedDocumentDockVisible
   const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
   const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 
-  const streamingConvIds = reactive(new Set<string>())
-  const pendingAuthRequestsByConversation = reactive(new Map<string, AuthRequestPayload[]>())
-  const backgroundStreamMessages = new Map<string, BackgroundStreamState>()
-  const activeCleanups = new Map<string, () => void>()
-  const activeStreamSessionIds = new Map<string, string>()
-  const conversationTargets = new Map<string, string | null>()
-  let providerChangeCleanup: (() => void) | null = null
-  let authRequestCleanup: (() => void) | null = null
-  let sudoPasswordRequestCleanup: (() => void) | null = null
-  let authResponseCleanup: (() => void) | null = null
-  let authResolvedCleanup: (() => void) | null = null
-  let skillsChangedCleanup: (() => void) | null = null
-  let agentWorkspaceChangeCleanup: (() => void) | null = null
+  const streamingConvIds = sharedStreamingConvIds
+  const pendingAuthRequestsByConversation = sharedPendingAuthRequestsByConversation
+  const backgroundStreamMessages = sharedBackgroundStreamMessages
+  const activeCleanups = sharedActiveCleanups
+  const activeStreamSessionIds = sharedActiveStreamSessionIds
+  const conversationTargets = sharedConversationTargets
   const STREAM_RENDER_FLUSH_INTERVAL_MS = 50
 
   const isLoading = computed(() => {
@@ -1654,65 +1692,56 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     })
   }, { immediate: true })
 
-  onMounted(async () => {
-    await loadConversations()
-    await loadProviders()
-    await loadSkills()
-    await loadAgentWorkspaceOptions()
+  function ensureSharedLifecycleBindings () {
+    if (sharedLifecycleBindingsReady) {
+      return
+    }
 
     if (window.electronAPI?.onProvidersChanged) {
-      providerChangeCleanup = window.electronAPI.onProvidersChanged((config) => {
+      sharedProviderChangeCleanup = window.electronAPI.onProvidersChanged((config) => {
         void applyProvidersConfig(config, activeProviderId.value, selectedModel.value)
       })
     }
 
     if (window.electronAPI?.onAuthRequest) {
-      authRequestCleanup = window.electronAPI.onAuthRequest(handleAuthRequest)
+      sharedAuthRequestCleanup = window.electronAPI.onAuthRequest(handleAuthRequest)
     }
 
     if (window.electronAPI?.onSudoPasswordRequest) {
-      sudoPasswordRequestCleanup = window.electronAPI.onSudoPasswordRequest(handleSudoPasswordRequest)
+      sharedSudoPasswordRequestCleanup = window.electronAPI.onSudoPasswordRequest(handleSudoPasswordRequest)
     }
 
     if (window.electronAPI?.onAuthResolved) {
-      authResolvedCleanup = window.electronAPI.onAuthResolved(handleAuthResolution)
+      sharedAuthResolvedCleanup = window.electronAPI.onAuthResolved(handleAuthResolution)
     }
 
     if (window.electronAPI?.onSkillsChanged) {
-      skillsChangedCleanup = window.electronAPI.onSkillsChanged(() => {
+      sharedSkillsChangedCleanup = window.electronAPI.onSkillsChanged(() => {
         void loadSkills()
       })
     }
 
     if (window.electronAPI?.onAgentWorkspaceChanged) {
-      agentWorkspaceChangeCleanup = window.electronAPI.onAgentWorkspaceChanged(() => {
+      sharedAgentWorkspaceChangeCleanup = window.electronAPI.onAgentWorkspaceChanged(() => {
         void loadAgentWorkspaceOptions()
       })
     }
 
-    authResponseCleanup = onAuthResolution(handleAuthResolution)
+    sharedAuthResponseCleanup = onAuthResolution(handleAuthResolution)
+    sharedLifecycleBindingsReady = true
+  }
+
+  onMounted(async () => {
+    await loadConversations()
+    await loadProviders()
+    await loadSkills()
+    await loadAgentWorkspaceOptions()
+    ensureSharedLifecycleBindings()
   })
 
   onUnmounted(() => {
-    for (const cleanup of activeCleanups.values()) {
-      cleanup()
-    }
-    activeCleanups.clear()
-    activeStreamSessionIds.clear()
-    providerChangeCleanup?.()
-    providerChangeCleanup = null
-    authRequestCleanup?.()
-    authRequestCleanup = null
-    sudoPasswordRequestCleanup?.()
-    sudoPasswordRequestCleanup = null
-    authResolvedCleanup?.()
-    authResolvedCleanup = null
-    skillsChangedCleanup?.()
-    skillsChangedCleanup = null
-    agentWorkspaceChangeCleanup?.()
-    agentWorkspaceChangeCleanup = null
-    authResponseCleanup?.()
-    authResponseCleanup = null
+    // Keep shared stream subscriptions alive so in-flight thinking/text continues
+    // updating when the chat shell is temporarily unmounted or hidden.
   })
 
   return {
