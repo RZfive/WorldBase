@@ -140,6 +140,31 @@ let sharedAuthResolvedCleanup: (() => void) | null = null
 let sharedSkillsChangedCleanup: (() => void) | null = null
 let sharedAgentWorkspaceChangeCleanup: (() => void) | null = null
 let sharedLifecycleBindingsReady = false
+let sharedBeforeUnloadCleanupRegistered = false
+
+function cleanupSharedChatPanelResources (): void {
+  for (const cleanup of sharedActiveCleanups.values()) {
+    cleanup()
+  }
+  sharedActiveCleanups.clear()
+  sharedActiveStreamSessionIds.clear()
+  sharedProviderChangeCleanup?.()
+  sharedProviderChangeCleanup = null
+  sharedAuthRequestCleanup?.()
+  sharedAuthRequestCleanup = null
+  sharedSudoPasswordRequestCleanup?.()
+  sharedSudoPasswordRequestCleanup = null
+  sharedAuthResolvedCleanup?.()
+  sharedAuthResolvedCleanup = null
+  sharedSkillsChangedCleanup?.()
+  sharedSkillsChangedCleanup = null
+  sharedAgentWorkspaceChangeCleanup?.()
+  sharedAgentWorkspaceChangeCleanup = null
+  sharedAuthResponseCleanup?.()
+  sharedAuthResponseCleanup = null
+  sharedLifecycleBindingsReady = false
+  sharedBeforeUnloadCleanupRegistered = false
+}
 
 export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindings) {
   const messages = sharedMessages
@@ -1696,39 +1721,48 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     if (sharedLifecycleBindingsReady) {
       return
     }
-
-    if (window.electronAPI?.onProvidersChanged) {
-      sharedProviderChangeCleanup = window.electronAPI.onProvidersChanged((config) => {
-        void applyProvidersConfig(config, activeProviderId.value, selectedModel.value)
-      })
-    }
-
-    if (window.electronAPI?.onAuthRequest) {
-      sharedAuthRequestCleanup = window.electronAPI.onAuthRequest(handleAuthRequest)
-    }
-
-    if (window.electronAPI?.onSudoPasswordRequest) {
-      sharedSudoPasswordRequestCleanup = window.electronAPI.onSudoPasswordRequest(handleSudoPasswordRequest)
-    }
-
-    if (window.electronAPI?.onAuthResolved) {
-      sharedAuthResolvedCleanup = window.electronAPI.onAuthResolved(handleAuthResolution)
-    }
-
-    if (window.electronAPI?.onSkillsChanged) {
-      sharedSkillsChangedCleanup = window.electronAPI.onSkillsChanged(() => {
-        void loadSkills()
-      })
-    }
-
-    if (window.electronAPI?.onAgentWorkspaceChanged) {
-      sharedAgentWorkspaceChangeCleanup = window.electronAPI.onAgentWorkspaceChanged(() => {
-        void loadAgentWorkspaceOptions()
-      })
-    }
-
-    sharedAuthResponseCleanup = onAuthResolution(handleAuthResolution)
     sharedLifecycleBindingsReady = true
+    try {
+      if (window.electronAPI?.onProvidersChanged) {
+        sharedProviderChangeCleanup = window.electronAPI.onProvidersChanged((config) => {
+          void applyProvidersConfig(config, activeProviderId.value, selectedModel.value)
+        })
+      }
+
+      if (window.electronAPI?.onAuthRequest) {
+        sharedAuthRequestCleanup = window.electronAPI.onAuthRequest(handleAuthRequest)
+      }
+
+      if (window.electronAPI?.onSudoPasswordRequest) {
+        sharedSudoPasswordRequestCleanup = window.electronAPI.onSudoPasswordRequest(handleSudoPasswordRequest)
+      }
+
+      if (window.electronAPI?.onAuthResolved) {
+        sharedAuthResolvedCleanup = window.electronAPI.onAuthResolved(handleAuthResolution)
+      }
+
+      if (window.electronAPI?.onSkillsChanged) {
+        sharedSkillsChangedCleanup = window.electronAPI.onSkillsChanged(() => {
+          void loadSkills()
+        })
+      }
+
+      if (window.electronAPI?.onAgentWorkspaceChanged) {
+        sharedAgentWorkspaceChangeCleanup = window.electronAPI.onAgentWorkspaceChanged(() => {
+          void loadAgentWorkspaceOptions()
+        })
+      }
+
+      sharedAuthResponseCleanup = onAuthResolution(handleAuthResolution)
+
+      if (!sharedBeforeUnloadCleanupRegistered) {
+        window.addEventListener('beforeunload', cleanupSharedChatPanelResources)
+        sharedBeforeUnloadCleanupRegistered = true
+      }
+    } catch (error) {
+      sharedLifecycleBindingsReady = false
+      throw error
+    }
   }
 
   onMounted(async () => {
