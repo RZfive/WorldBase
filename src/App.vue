@@ -211,7 +211,7 @@ const activeBrowserPageSurface = computed(() => {
 })
 
 const shouldMountChatShell = computed(() => {
-  return currentView.value !== 'app' || Boolean(activeBrowserPageSurface.value)
+  return currentView.value !== 'app' || Boolean(activeEmbeddedProjectId.value)
 })
 
 const activePageAutomationContext = computed<ActivePageAutomationContext | null>(() => {
@@ -1135,7 +1135,7 @@ onUnmounted(() => {
             </template>
           </div>
 
-          <div v-if="shouldMountChatShell" :class="['chat-shell', `chat-shell-${chatShellMode}`]">
+          <div v-show="shouldMountChatShell" :class="['chat-shell', `chat-shell-${chatShellMode}`]">
             <div class="chat-shell-body">
               <div v-if="chatShellMode === 'overlay' && activeBrowserPageSurface" class="chat-overlay-banner">
                 <div class="chat-overlay-banner-copy">
