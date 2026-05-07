@@ -82,7 +82,16 @@ export function toolLocalWriteFile (services: ToolServices, getSessionState?: ()
                   properties: {
                     name: { type: 'string' },
                     headers: { type: 'array', items: { type: 'string' } },
-                    rows: { type: 'array', items: { type: 'array' } }
+                    rows: {
+                      type: 'array',
+                      items: {
+                        type: 'array',
+                        items: {
+                          type: 'string',
+                          description: 'Cell value as text. Convert numbers, dates, and other values to strings before writing.'
+                        }
+                      }
+                    }
                   }
                 }
               },
