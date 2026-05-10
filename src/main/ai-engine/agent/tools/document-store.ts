@@ -67,6 +67,7 @@ export class DocumentStore {
         .filter(sel => sel.artifactId === artifact.id).length
       result.push({
         id: artifact.id,
+        filePath: artifact.filePath,
         fileName: artifact.fileName,
         fileType: artifact.fileType,
         fileSize: artifact.fileSize,

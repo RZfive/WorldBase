@@ -59,6 +59,17 @@ interface ConversationSummary {
   channelBindingId?: string
 }
 
+interface ConversationDocumentReference {
+  filePath: string
+  fileName: string
+}
+
+interface ConversationDocumentWorkspaceState {
+  documents?: ConversationDocumentReference[]
+  activeFilePath?: string
+  width?: number
+}
+
 interface ToolProgressEntry {
   stage: string
   detail?: string
@@ -73,6 +84,7 @@ interface ToolRun {
 
 interface Conversation extends ConversationSummary {
   messages: Array<ChatMessage & { thinking?: string; modelLabel?: string; toolRuns?: ToolRun[] }>
+  documentWorkspace?: ConversationDocumentWorkspaceState
 }
 
 interface AIProvider {
@@ -564,6 +576,9 @@ export interface ElectronAPI {
   maximizeWindow: () => Promise<void>
   closeWindow: () => Promise<void>
   isMaximized: () => Promise<boolean>
+  getWindowBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>
+  ensureWindowWidth: (minimumWidth: number, options?: { animate?: boolean; durationMs?: number; allowShrink?: boolean }) => Promise<{ applied: boolean; width: number }>
+  setMinimumWindowWidth: (minimumWidth: number) => Promise<{ success: boolean; width: number }>
 
   // Auth (in-app authorization dialogs)
   onAuthRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; title: string; detail: string }) => void) => () => void
@@ -785,6 +800,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  getWindowBounds: () => ipcRenderer.invoke('window:getBounds'),
+  ensureWindowWidth: (minimumWidth: number, options?: { animate?: boolean; durationMs?: number; allowShrink?: boolean }) => ipcRenderer.invoke('window:ensureWidth', minimumWidth, options),
+  setMinimumWindowWidth: (minimumWidth: number) => ipcRenderer.invoke('window:setMinimumWidth', minimumWidth),
 
   // Auth (in-app authorization dialogs)
   onAuthRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; title: string; detail: string }) => void) => {

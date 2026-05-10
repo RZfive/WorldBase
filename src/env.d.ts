@@ -49,6 +49,17 @@ interface ConversationSummary {
   channelBindingId?: string
 }
 
+interface ConversationDocumentReference {
+  filePath: string
+  fileName: string
+}
+
+interface ConversationDocumentWorkspaceState {
+  documents?: ConversationDocumentReference[]
+  activeFilePath?: string
+  width?: number
+}
+
 type AgentReasoningStrength = 'low' | 'medium' | 'high' | 'max'
 type AgentMemoryScope = 'user' | 'agent' | 'project' | 'group' | 'channel'
 type MemoryType = 'user_trait' | 'agent_skill' | 'step' | 'knowledge'
@@ -320,6 +331,7 @@ interface ConversationData extends ConversationSummary {
     toolRuns?: ToolRun[]
     blocks?: ChatMessageBlock[]
   }>
+  documentWorkspace?: ConversationDocumentWorkspaceState
 }
 
 interface AIProviderConfig {
@@ -739,6 +751,7 @@ interface DocumentSelectionDTO {
 
 interface DocumentSummaryDTO {
   id: string
+  filePath: string
   fileName: string
   fileType: DocumentFileType
   fileSize: number
@@ -883,6 +896,9 @@ interface ElectronAPI {
   maximizeWindow: () => Promise<void>
   closeWindow: () => Promise<void>
   isMaximized: () => Promise<boolean>
+  getWindowBounds: () => Promise<{ x: number; y: number; width: number; height: number } | null>
+  ensureWindowWidth: (minimumWidth: number, options?: { animate?: boolean; durationMs?: number; allowShrink?: boolean }) => Promise<{ applied: boolean; width: number }>
+  setMinimumWindowWidth: (minimumWidth: number) => Promise<{ success: boolean; width: number }>
 
   // Auth (in-app authorization dialogs)
   onAuthRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; title: string; detail: string }) => void) => () => void

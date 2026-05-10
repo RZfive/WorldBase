@@ -164,6 +164,7 @@ export interface BackgroundStreamState {
   agentId: string | null
   groupId: string | null
   channelBindingId: string | null
+  documentWorkspace?: ConversationDocumentWorkspaceState
 }
 
 export interface UploadedAttachmentResult {
