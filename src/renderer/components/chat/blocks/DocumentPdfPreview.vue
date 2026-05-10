@@ -38,6 +38,40 @@ let pdfViewer: PDFViewer | null = null
 let loadingTask: PDFDocumentLoadingTask | null = null
 let pdfDocument: PDFDocumentProxy | null = null
 let activeLoadId = 0
+let containerObserver: ResizeObserver | null = null
+
+function getPreferredScaleValue (): 'page-fit' | 'page-width' {
+  const container = containerRef.value
+  if (!container) return 'page-width'
+
+  const hasUsableHeight = container.clientHeight >= 240
+  const hasUsableWidth = container.clientWidth >= 280
+  return hasUsableHeight && hasUsableWidth ? 'page-fit' : 'page-width'
+}
+
+function syncPdfScaleToViewport (): void {
+  if (!pdfViewer || !pdfDocument) return
+  pdfViewer.currentScaleValue = getPreferredScaleValue()
+  pdfViewer.update()
+}
+
+function schedulePdfScaleSync (): void {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      syncPdfScaleToViewport()
+    })
+  })
+}
+
+function observePdfViewport (): void {
+  if (typeof ResizeObserver === 'undefined' || !containerRef.value) return
+
+  containerObserver?.disconnect()
+  containerObserver = new ResizeObserver(() => {
+    schedulePdfScaleSync()
+  })
+  containerObserver.observe(containerRef.value)
+}
 
 async function ensureViewerReady () {
   await nextTick()
@@ -57,10 +91,10 @@ async function ensureViewerReady () {
   linkService.setViewer(pdfViewer)
 
   eventBus.on('pagesinit', () => {
-    if (pdfViewer) {
-      pdfViewer.currentScaleValue = 'page-width'
-    }
+    schedulePdfScaleSync()
   })
+
+  observePdfViewport()
 }
 
 async function destroyPdfDocument () {
@@ -117,6 +151,8 @@ async function loadPdfDocument (bytes: Uint8Array) {
     pdfDocument = nextDocument
     pdfViewer?.setDocument(pdfDocument)
     linkService?.setDocument(pdfDocument)
+    await nextTick()
+    schedulePdfScaleSync()
   } catch (error) {
     if (loadId !== activeLoadId) return
     loadError.value = `PDF 预览加载失败: ${(error as Error).message}`
@@ -161,11 +197,14 @@ watch(() => props.pdfBytes, (bytes) => {
 })
 
 onMounted(() => {
+  observePdfViewport()
   void loadPdfDocument(props.pdfBytes)
 })
 
 onBeforeUnmount(() => {
   activeLoadId++
+  containerObserver?.disconnect()
+  containerObserver = null
   void destroyPdfDocument()
 })
 </script>
@@ -185,14 +224,19 @@ onBeforeUnmount(() => {
 <style scoped>
 .pdf-preview-root {
   position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   height: 100%;
-  min-height: 100%;
+  min-height: 0;
 }
 
 .pdf-shell {
   position: relative;
-  min-height: 360px;
+  display: flex;
+  flex: 1;
   height: 100%;
+  min-height: 360px;
 }
 
 .pdf-container {
@@ -226,6 +270,7 @@ onBeforeUnmount(() => {
 
 :deep(.pdfViewer) {
   --scale-factor: 1;
+  min-height: 100%;
 }
 
 :deep(.pdfViewer .page) {

@@ -134,11 +134,19 @@ watch(() => `${props.artifact.id}:${props.artifact.render?.generatedAt || ''}`, 
 
 <style scoped>
 .document-render-host {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   height: 100%;
-
+  min-height: 0;
 }
 
 .render-surface {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
   min-height: 100%;
 }
 

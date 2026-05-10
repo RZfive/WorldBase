@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, session, Notification, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, session, Notification, screen, type IpcMainInvokeEvent } from 'electron'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
@@ -52,6 +52,9 @@ const APP_DISPLAY_NAME = 'The World'
 const LEGACY_USER_DATA_DIR_NAMES = ['the-world']
 const CRITICAL_USER_DATA_DIR_NAMES = ['conversations', 'projects']
 const CRITICAL_USER_DATA_FILE_NAMES = ['settings.json']
+const DEFAULT_MAIN_WINDOW_MIN_WIDTH = 800
+const DEFAULT_MAIN_WINDOW_MIN_HEIGHT = 500
+const DEFAULT_WINDOW_EXPAND_ANIMATION_DURATION_MS = 240
 
 app.setName(APP_DISPLAY_NAME)
 app.setAppUserModelId('com.theworld.app')
@@ -103,10 +106,22 @@ let isClosingMainWindow = false
 let isQuitCleanupRunning = false
 let hasFinishedQuitCleanup = false
 
+type WindowBounds = ReturnType<BrowserWindow['getBounds']>
+type EnsureWindowWidthOptions = {
+  animate?: boolean
+  durationMs?: number
+  allowShrink?: boolean
+}
+
 type PendingPageAutomationRequest = {
   resolve: (result: PageAutomationRendererResult) => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
+}
+
+type ActiveWindowWidthAnimation = {
+  timer: ReturnType<typeof setInterval>
+  resolve: (result: { applied: boolean; width: number }) => void
 }
 
 /** Track standalone project windows keyed by projectId */
@@ -114,6 +129,7 @@ const projectWindows = new Map<string, BrowserWindow>()
 const activeChatSessions = new Map<string, ActiveChatSession>()
 const aiRequestWindowStorage = new AsyncLocalStorage<BrowserWindow | null>()
 const pendingPageAutomationRequests = new Map<string, PendingPageAutomationRequest>()
+const activeWindowWidthAnimations = new Map<number, ActiveWindowWidthAnimation>()
 
 const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
 const ALLOWED_WEBVIEW_POPUP_PROTOCOLS = new Set(['http:', 'https:'])
@@ -2403,8 +2419,8 @@ function createWindow (): void {
     frame: false,
     transparent: false,
     backgroundColor: '#0f0f10',
-    minWidth: 800,
-    minHeight: 500,
+    minWidth: DEFAULT_MAIN_WINDOW_MIN_WIDTH,
+    minHeight: DEFAULT_MAIN_WINDOW_MIN_HEIGHT,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -2439,8 +2455,158 @@ function createWindow (): void {
   })
 
   mainWindow.on('closed', () => {
+    stopWindowWidthAnimation(mainWindow)
     mainWindow = null
   })
+}
+
+function stopWindowWidthAnimation (targetWindow: BrowserWindow | null, result?: { applied: boolean; width: number }): void {
+  if (!targetWindow) return
+
+  const animation = activeWindowWidthAnimations.get(targetWindow.id)
+  if (!animation) return
+
+  clearInterval(animation.timer)
+  activeWindowWidthAnimations.delete(targetWindow.id)
+  animation.resolve(result ?? {
+    applied: false,
+    width: targetWindow.isDestroyed() ? 0 : targetWindow.getBounds().width
+  })
+}
+
+function resolveWindowBoundsForMinimumWidth (
+  targetWindow: BrowserWindow,
+  requestedWidth: number,
+  options?: EnsureWindowWidthOptions
+): { currentBounds: WindowBounds; nextBounds: WindowBounds; canResize: boolean } {
+  const currentBounds = targetWindow.getBounds()
+
+  if (!Number.isFinite(requestedWidth) || requestedWidth <= 0 || targetWindow.isMaximized() || targetWindow.isFullScreen()) {
+    return { currentBounds, nextBounds: currentBounds, canResize: false }
+  }
+
+  const [minimumWindowWidth] = targetWindow.getMinimumSize()
+  const desiredWidth = Math.max(minimumWindowWidth || 0, Math.round(requestedWidth))
+  const display = screen.getDisplayMatching(currentBounds)
+  const maxDisplayWidth = display.workArea.width >= minimumWindowWidth
+    ? display.workArea.width
+    : minimumWindowWidth
+  const nextWidth = Math.min(desiredWidth, maxDisplayWidth)
+  const allowShrink = Boolean(options?.allowShrink)
+
+  if (currentBounds.width === nextWidth || (!allowShrink && currentBounds.width >= nextWidth)) {
+    return { currentBounds, nextBounds: currentBounds, canResize: false }
+  }
+
+  const maxX = display.workArea.x + display.workArea.width - nextWidth
+  const nextX = maxX < display.workArea.x
+    ? display.workArea.x
+    : Math.min(
+        Math.max(display.workArea.x, Math.round(currentBounds.x - (nextWidth - currentBounds.width) / 2)),
+        maxX
+      )
+  const maxY = display.workArea.y + display.workArea.height - currentBounds.height
+  const nextY = maxY < display.workArea.y
+    ? display.workArea.y
+    : Math.min(Math.max(display.workArea.y, currentBounds.y), maxY)
+
+  return {
+    currentBounds,
+    nextBounds: {
+      x: nextX,
+      y: nextY,
+      width: nextWidth,
+      height: currentBounds.height
+    },
+    canResize: true
+  }
+}
+
+async function animateWindowBounds (targetWindow: BrowserWindow, currentBounds: WindowBounds, nextBounds: WindowBounds, durationMs?: number): Promise<{ applied: boolean; width: number }> {
+  const duration = Number.isFinite(durationMs)
+    ? Math.max(120, Math.round(durationMs || 0))
+    : DEFAULT_WINDOW_EXPAND_ANIMATION_DURATION_MS
+
+  if (
+    duration <= 0
+    || (currentBounds.width === nextBounds.width
+      && currentBounds.x === nextBounds.x
+      && currentBounds.y === nextBounds.y
+      && currentBounds.height === nextBounds.height)
+  ) {
+    targetWindow.setBounds(nextBounds)
+    return { applied: true, width: nextBounds.width }
+  }
+
+  stopWindowWidthAnimation(targetWindow)
+
+  return await new Promise((resolve) => {
+    const startTime = Date.now()
+    const deltaX = nextBounds.x - currentBounds.x
+    const deltaY = nextBounds.y - currentBounds.y
+    const deltaWidth = nextBounds.width - currentBounds.width
+    const deltaHeight = nextBounds.height - currentBounds.height
+    const timer = setInterval(() => {
+      if (targetWindow.isDestroyed()) {
+        stopWindowWidthAnimation(targetWindow, { applied: false, width: 0 })
+        return
+      }
+
+      const elapsed = Date.now() - startTime
+      const progress = Math.min(1, elapsed / duration)
+      const easedProgress = 1 - Math.pow(1 - progress, 3)
+
+      targetWindow.setBounds({
+        x: Math.round(currentBounds.x + deltaX * easedProgress),
+        y: Math.round(currentBounds.y + deltaY * easedProgress),
+        width: Math.round(currentBounds.width + deltaWidth * easedProgress),
+        height: Math.round(currentBounds.height + deltaHeight * easedProgress)
+      })
+
+      if (progress >= 1) {
+        targetWindow.setBounds(nextBounds)
+        stopWindowWidthAnimation(targetWindow, { applied: true, width: nextBounds.width })
+      }
+    }, 16)
+
+    activeWindowWidthAnimations.set(targetWindow.id, { timer, resolve })
+  })
+}
+
+function setWindowMinimumWidth (targetWindow: BrowserWindow, requestedWidth: number): { success: boolean; width: number } {
+  if (!Number.isFinite(requestedWidth) || requestedWidth <= 0) {
+    return {
+      success: false,
+      width: targetWindow.getMinimumSize()[0] || DEFAULT_MAIN_WINDOW_MIN_WIDTH
+    }
+  }
+
+  const display = screen.getDisplayMatching(targetWindow.getBounds())
+  const [, minimumHeight] = targetWindow.getMinimumSize()
+  const nextMinimumWidth = Math.min(Math.round(requestedWidth), display.workArea.width)
+  targetWindow.setMinimumSize(nextMinimumWidth, minimumHeight || DEFAULT_MAIN_WINDOW_MIN_HEIGHT)
+
+  return {
+    success: true,
+    width: nextMinimumWidth
+  }
+}
+
+async function ensureWindowHasMinimumWidth (targetWindow: BrowserWindow, requestedWidth: number, options?: EnsureWindowWidthOptions): Promise<{ applied: boolean; width: number }> {
+  const { currentBounds, nextBounds, canResize } = resolveWindowBoundsForMinimumWidth(targetWindow, requestedWidth, options)
+
+  if (!canResize) {
+    return { applied: false, width: currentBounds.width }
+  }
+
+  if (options?.animate) {
+    return await animateWindowBounds(targetWindow, currentBounds, nextBounds, options.durationMs)
+  }
+
+  stopWindowWidthAnimation(targetWindow)
+  targetWindow.setBounds(nextBounds)
+
+  return { applied: true, width: nextBounds.width }
 }
 
 function setupIPC (): void {
@@ -3602,6 +3768,28 @@ function setupIPC (): void {
 
   ipcMain.handle('window:isMaximized', (event: IpcMainInvokeEvent) => {
     return getSenderWindow(event)?.isMaximized() ?? false
+  })
+
+  ipcMain.handle('window:getBounds', (event: IpcMainInvokeEvent) => {
+    return getSenderWindow(event)?.getBounds() ?? null
+  })
+
+  ipcMain.handle('window:ensureWidth', async (event: IpcMainInvokeEvent, width: number, options?: EnsureWindowWidthOptions) => {
+    const targetWindow = getSenderWindow(event)
+    if (!targetWindow) {
+      return { applied: false, width: 0 }
+    }
+
+    return await ensureWindowHasMinimumWidth(targetWindow, width, options)
+  })
+
+  ipcMain.handle('window:setMinimumWidth', (event: IpcMainInvokeEvent, width: number) => {
+    const targetWindow = getSenderWindow(event)
+    if (!targetWindow) {
+      return { success: false, width: 0 }
+    }
+
+    return setWindowMinimumWidth(targetWindow, width)
   })
 
   // Open project folder in system file explorer

@@ -126,6 +126,10 @@ const sharedShowSkillPicker = ref(false)
 const sharedPlanModeActive = ref(false)
 const sharedSyncingProviderOptions = ref(false)
 const sharedDocumentDockVisible = ref(false)
+const DEFAULT_DOCUMENT_WORKSPACE_WIDTH = 900
+const sharedDocumentWorkspaceDocuments = ref<ConversationDocumentReference[]>([])
+const sharedDocumentWorkspaceActiveFilePath = ref<string | null>(null)
+const sharedDocumentWorkspaceWidth = ref(DEFAULT_DOCUMENT_WORKSPACE_WIDTH)
 const sharedStreamingConvIds = reactive(new Set<string>())
 const sharedPendingAuthRequestsByConversation = reactive(new Map<string, AuthRequestPayload[]>())
 const sharedBackgroundStreamMessages = new Map<string, BackgroundStreamState>()
@@ -196,6 +200,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const planModeActive = sharedPlanModeActive
   const syncingProviderOptions = sharedSyncingProviderOptions
   const documentDockVisible = sharedDocumentDockVisible
+  const documentWorkspaceDocuments = sharedDocumentWorkspaceDocuments
+  const documentWorkspaceActiveFilePath = sharedDocumentWorkspaceActiveFilePath
+  const documentWorkspaceWidth = sharedDocumentWorkspaceWidth
   const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
   const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 
@@ -601,6 +608,71 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     }
   }
 
+  function getDocumentFileName (filePath: string, fallback?: string | null): string {
+    const normalizedFallback = fallback?.trim()
+    if (normalizedFallback) return normalizedFallback
+    const segments = filePath.split(/[\\/]/).filter(Boolean)
+    return segments[segments.length - 1] || filePath
+  }
+
+  function normalizeDocumentFileKey (filePath?: string | null): string {
+    return (filePath || '')
+      .trim()
+      .replace(/\//g, '\\')
+      .toLowerCase()
+  }
+
+  function sanitizeDocumentWorkspaceDocuments (documents?: ConversationDocumentReference[] | null): ConversationDocumentReference[] {
+    const uniqueDocuments = new Map<string, ConversationDocumentReference>()
+
+    for (const documentRef of documents || []) {
+      const filePath = documentRef?.filePath?.trim()
+      if (!filePath) continue
+      const fileKey = normalizeDocumentFileKey(filePath)
+      if (!fileKey || uniqueDocuments.has(fileKey)) continue
+      uniqueDocuments.set(fileKey, {
+        filePath,
+        fileName: getDocumentFileName(filePath, documentRef.fileName)
+      })
+    }
+
+    return Array.from(uniqueDocuments.values())
+  }
+
+  function applyDocumentWorkspaceState (state?: ConversationDocumentWorkspaceState | null): void {
+    const nextDocuments = sanitizeDocumentWorkspaceDocuments(state?.documents)
+    documentWorkspaceDocuments.value = nextDocuments
+
+    const normalizedActiveFileKey = normalizeDocumentFileKey(state?.activeFilePath)
+    const activeDocument = nextDocuments.find(item => normalizeDocumentFileKey(item.filePath) === normalizedActiveFileKey)
+    documentWorkspaceActiveFilePath.value = activeDocument?.filePath || nextDocuments[0]?.filePath || null
+
+    const nextWidth = state?.width
+    documentWorkspaceWidth.value = typeof nextWidth === 'number' && Number.isFinite(nextWidth)
+      ? Math.round(nextWidth)
+      : DEFAULT_DOCUMENT_WORKSPACE_WIDTH
+  }
+
+  function buildCurrentDocumentWorkspaceState (): ConversationDocumentWorkspaceState | undefined {
+    const documents = sanitizeDocumentWorkspaceDocuments(documentWorkspaceDocuments.value)
+    if (documents.length === 0) return undefined
+
+    const activeFilePath = documents.find(item => item.filePath === documentWorkspaceActiveFilePath.value)?.filePath
+      || documents[0]?.filePath
+
+    return {
+      documents,
+      activeFilePath,
+      width: documentWorkspaceWidth.value
+    }
+  }
+
+  function resetDocumentWorkspaceState (): void {
+    documentWorkspaceDocuments.value = []
+    documentWorkspaceActiveFilePath.value = null
+    documentWorkspaceWidth.value = DEFAULT_DOCUMENT_WORKSPACE_WIDTH
+  }
+
   function resetConversationComposerState (): void {
     messages.value = []
     targetProjectId.value = null
@@ -611,6 +683,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     pendingImages.value = []
     pendingFiles.value = []
     uploadFeedback.value = ''
+    resetDocumentWorkspaceState()
   }
 
   function resolveConversationAgentSelection (value: { agentId?: string | null; groupId?: string | null; channelBindingId?: string | null }): string {
@@ -849,7 +922,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         reasoningStrength: reasoningStrength.value,
         agentId: selectedAgentId.value || null,
         groupId: selectedGroupId.value || null,
-        channelBindingId: selectedChannelBindingId.value || null
+        channelBindingId: selectedChannelBindingId.value || null,
+        documentWorkspace: buildCurrentDocumentWorkspaceState()
       })
       void doSaveConversation(currentConversationId.value, messages.value, { targetProjectId: targetProjectId.value })
     }
@@ -877,6 +951,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     pendingFiles.value = []
     uploadFeedback.value = ''
     resetTransientStreamState()
+    resetDocumentWorkspaceState()
     setConversationTarget(conversationId, projectId)
 
     await doSaveConversation(conversationId, [], {
@@ -1085,6 +1160,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       selectedAgentId.value = resolveConversationAgentSelection(bg)
       selectedGroupId.value = bg.groupId || ''
       selectedChannelBindingId.value = bg.channelBindingId || ''
+      applyDocumentWorkspaceState(bg.documentWorkspace)
       setConversationTarget(id, bg.targetProjectId)
       backgroundStreamMessages.delete(id)
       resetTransientStreamState()
@@ -1106,6 +1182,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       selectedAgentId.value = resolveConversationAgentSelection(conv)
       selectedGroupId.value = conv.groupId || ''
       selectedChannelBindingId.value = conv.channelBindingId || ''
+      applyDocumentWorkspaceState(conv.documentWorkspace)
       setConversationTarget(conv.id, conv.targetProjectId || null)
       resetTransientStreamState()
       pendingFiles.value = []
@@ -1148,7 +1225,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       targetProjectId: resolvedTargetProjectId || undefined,
       agentId: selectedAgentId.value || undefined,
       groupId: selectedGroupId.value || undefined,
-      channelBindingId: selectedChannelBindingId.value || undefined
+      channelBindingId: selectedChannelBindingId.value || undefined,
+      documentWorkspace: buildCurrentDocumentWorkspaceState()
     })))
 
     await loadConversations()
@@ -1255,6 +1333,15 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   function insertDocumentTag (tag: string) {
     const spacer = inputText.value.length > 0 && !/\s$/.test(inputText.value) ? ' ' : ''
     inputText.value = `${inputText.value}${spacer}${tag} `
+  }
+
+  function updateDocumentWorkspaceState (state: ConversationDocumentWorkspaceState) {
+    applyDocumentWorkspaceState(state)
+    if (!currentConversationId.value) return
+    void doSaveConversation(currentConversationId.value, messages.value, {
+      targetProjectId: targetProjectId.value,
+      allowEmpty: true
+    })
   }
 
   function handleAuthRequest (request: AuthRequestPayload) {
@@ -1795,6 +1882,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     currentPendingAuthCount,
     deleteConversation,
     documentDockVisible,
+    documentWorkspaceActiveFilePath,
+    documentWorkspaceDocuments,
+    documentWorkspaceWidth,
     filePreview,
     groupMentionHints,
     groupSidebarItems,
@@ -1834,6 +1924,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     togglePlanMode,
     toggleSkill,
     clearSkills,
+    updateDocumentWorkspaceState,
     uploadFeedback,
     addAttachments
   }

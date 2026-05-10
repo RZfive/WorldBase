@@ -79,6 +79,17 @@ export interface ChatMessage {
   blocks?: ChatMessageBlock[]
 }
 
+export interface ConversationDocumentReference {
+  filePath: string
+  fileName: string
+}
+
+export interface ConversationDocumentWorkspaceState {
+  documents?: ConversationDocumentReference[]
+  activeFilePath?: string
+  width?: number
+}
+
 export interface Conversation {
   id: string
   title: string
@@ -101,6 +112,8 @@ export interface Conversation {
   groupId?: string
   /** Active IM channel binding bound to this conversation. */
   channelBindingId?: string
+  /** Conversation-scoped document workspace state. */
+  documentWorkspace?: ConversationDocumentWorkspaceState
 }
 
 interface ConversationListEntry extends Omit<Conversation, 'messages'> {

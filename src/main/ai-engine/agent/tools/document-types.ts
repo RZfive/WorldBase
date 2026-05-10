@@ -115,6 +115,7 @@ export interface CreateSelectionPayload {
 /** Summary info sent to the renderer for the document dock list. */
 export interface DocumentSummary {
   id: string
+  filePath: string
   fileName: string
   fileType: DocumentFileType
   fileSize: number
