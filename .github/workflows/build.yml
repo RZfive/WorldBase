@@ -79,18 +79,15 @@ jobs:
       - name: Build Electron (Windows)
         run: pnpm electron:build:win
 
-      - name: Package Windows build artifacts
-        id: package_windows
-        shell: bash
-        run: |
-          archive="$(bash .github/scripts/package-release-archive.sh "release/windows-build.zip" "release/*.exe" "release/*.blockmap" "release/latest.yml")"
-          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
-
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v7
         with:
           name: windows-build
-          path: ${{ steps.package_windows.outputs.archive }}
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          compression-level: 0
           if-no-files-found: error
 
   build-mac-arm:
@@ -131,16 +128,12 @@ jobs:
       - name: Build Electron (macOS ARM)
         run: pnpm electron:build:mac:arm64
 
-      - name: Package macOS ARM build artifacts
-        id: package_mac_arm
-        shell: bash
-        run: |
-          archive="$(bash .github/scripts/package-release-archive.sh "release/mac-arm-build.zip" "release/*.dmg" "release/*.dmg.blockmap")"
-          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
-
       - name: Upload macOS ARM artifacts
         uses: actions/upload-artifact@v7
         with:
           name: mac-arm-build
-          path: ${{ steps.package_mac_arm.outputs.archive }}
+          path: |
+            release/*.dmg
+            release/*.dmg.blockmap
+          compression-level: 0
           if-no-files-found: error
