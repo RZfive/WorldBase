@@ -95,6 +95,7 @@ export class OpenAIProvider {
   private static readonly STANDARD_REQUEST_TIMEOUT_MS = 60000
   /** Streaming responses should only time out when no bytes arrive for too long. */
   private static readonly STREAM_IDLE_TIMEOUT_MS = 90000
+  private static readonly STREAM_IDLE_TIMEOUT_MESSAGE = 'AI stream idle timed out'
   private apiKey: string
   private baseUrl: string
   private model: string
@@ -743,16 +744,17 @@ export class OpenAIProvider {
     let timeout: ReturnType<typeof setTimeout> | null = null
 
     try {
-      return await new Promise<StreamReadResult>((resolve, reject) => {
+      const readPromise = reader.read()
+      const timeoutPromise = new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(() => {
-          void reader.cancel('AI stream idle timed out').catch(() => {
+          void reader.cancel(OpenAIProvider.STREAM_IDLE_TIMEOUT_MESSAGE).catch(() => {
             // Ignore reader cancellation failures and surface the timeout instead.
           })
-          reject(new Error('AI stream idle timed out'))
+          reject(new Error(OpenAIProvider.STREAM_IDLE_TIMEOUT_MESSAGE))
         }, timeoutMs)
-
-        reader.read().then(resolve, reject)
       })
+
+      return await Promise.race([readPromise, timeoutPromise])
     } finally {
       if (timeout) clearTimeout(timeout)
     }
