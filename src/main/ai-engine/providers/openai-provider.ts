@@ -645,7 +645,7 @@ export class OpenAIProvider {
         abortSignal.addEventListener('abort', onAbort, { once: true })
       }
       const timeoutMs = options?.timeoutMs ?? (stream ? undefined : OpenAIProvider.STANDARD_REQUEST_TIMEOUT_MS)
-      const timeout = timeoutMs != null
+      const timeout = timeoutMs !== undefined
         ? setTimeout(() => controller.abort(new Error('AI request timed out')), timeoutMs)
         : null
 
@@ -744,12 +744,10 @@ export class OpenAIProvider {
 
     try {
       return await new Promise<StreamReadResult>((resolve, reject) => {
-        timeout = setTimeout(async () => {
-          try {
-            await reader.cancel('AI stream idle timed out')
-          } catch {
+        timeout = setTimeout(() => {
+          void reader.cancel('AI stream idle timed out').catch(() => {
             // Ignore reader cancellation failures and surface the timeout instead.
-          }
+          })
           reject(new Error('AI stream idle timed out'))
         }, timeoutMs)
 
