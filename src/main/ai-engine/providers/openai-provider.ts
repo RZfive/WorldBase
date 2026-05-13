@@ -91,8 +91,8 @@ interface StreamDelta {
 export class OpenAIProvider {
   /** Standard requests should fail fast to surface provider issues promptly. */
   private static readonly STANDARD_REQUEST_TIMEOUT_MS = 60000
-  /** Streaming responses get a longer timeout because token generation can stay open much longer. */
-  private static readonly STREAM_REQUEST_TIMEOUT_MS = 90000
+  /** Streaming responses should only time out when no bytes arrive for too long. */
+  private static readonly STREAM_IDLE_TIMEOUT_MS = 90000
   private apiKey: string
   private baseUrl: string
   private model: string
@@ -529,7 +529,7 @@ export class OpenAIProvider {
           if (abortSignal?.aborted) {
             throw normalizeAbortReason(abortSignal.reason)
           }
-          const { done, value } = await reader.read()
+          const { done, value } = await this.readStreamChunkWithIdleTimeout(reader, OpenAIProvider.STREAM_IDLE_TIMEOUT_MS)
           if (done) break
 
           buffer += decoder.decode(value, { stream: true })
@@ -642,10 +642,10 @@ export class OpenAIProvider {
         }
         abortSignal.addEventListener('abort', onAbort, { once: true })
       }
-      const timeout = setTimeout(
-        () => controller.abort(new Error('AI request timed out')),
-        options?.timeoutMs ?? (stream ? OpenAIProvider.STREAM_REQUEST_TIMEOUT_MS : OpenAIProvider.STANDARD_REQUEST_TIMEOUT_MS)
-      )
+      const timeoutMs = options?.timeoutMs ?? (stream ? undefined : OpenAIProvider.STANDARD_REQUEST_TIMEOUT_MS)
+      const timeout = timeoutMs != null
+        ? setTimeout(() => controller.abort(new Error('AI request timed out')), timeoutMs)
+        : null
 
       try {
         const response = await fetch(this.getChatCompletionUrl(), {
@@ -659,7 +659,7 @@ export class OpenAIProvider {
         })
 
         if (response.ok) {
-          clearTimeout(timeout)
+          if (timeout) clearTimeout(timeout)
           if (abortSignal) {
             abortSignal.removeEventListener('abort', onAbort)
           }
@@ -668,7 +668,7 @@ export class OpenAIProvider {
 
         const errorText = await response.text()
         const error = new Error(`OpenAI API error (${response.status}): ${errorText}`)
-        clearTimeout(timeout)
+        if (timeout) clearTimeout(timeout)
         if (abortSignal) {
           abortSignal.removeEventListener('abort', onAbort)
         }
@@ -679,7 +679,7 @@ export class OpenAIProvider {
 
         lastError = error
       } catch (err) {
-        clearTimeout(timeout)
+        if (timeout) clearTimeout(timeout)
         if (abortSignal) {
           abortSignal.removeEventListener('abort', onAbort)
         }
@@ -732,5 +732,29 @@ export class OpenAIProvider {
 
   private async delay (ms: number): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, ms))
+  }
+
+  private async readStreamChunkWithIdleTimeout (
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    timeoutMs: number
+  ): Promise<ReadableStreamReadResult<Uint8Array>> {
+    let timeout: ReturnType<typeof setTimeout> | null = null
+
+    try {
+      return await new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+        timeout = setTimeout(async () => {
+          try {
+            await reader.cancel('AI stream idle timed out')
+          } catch {
+            // Ignore reader cancellation failures and surface the timeout instead.
+          }
+          reject(new Error('AI stream idle timed out'))
+        }, timeoutMs)
+
+        reader.read().then(resolve, reject)
+      })
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
   }
 }
