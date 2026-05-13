@@ -84,6 +84,8 @@ interface StreamDelta {
   }>
 }
 
+type StreamReadResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>
+
 /**
  * OpenAIProvider — OpenAI 兼容 API 提供者
  * 支持 OpenAI, Azure OpenAI, 以及任何兼容 API
@@ -737,11 +739,11 @@ export class OpenAIProvider {
   private async readStreamChunkWithIdleTimeout (
     reader: ReadableStreamDefaultReader<Uint8Array>,
     timeoutMs: number
-  ): Promise<ReadableStreamReadResult<Uint8Array>> {
+  ): Promise<StreamReadResult> {
     let timeout: ReturnType<typeof setTimeout> | null = null
 
     try {
-      return await new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+      return await new Promise<StreamReadResult>((resolve, reject) => {
         timeout = setTimeout(async () => {
           try {
             await reader.cancel('AI stream idle timed out')
