@@ -74,20 +74,11 @@ const canExport = computed(() => {
 })
 
 function getTextSegments (text?: string) {
-  if (props.isStreamingBlock) {
-    const value = text || ''
-    return value ? [{ type: 'markdown', text: value }] satisfies MarkdownSegment[] : []
-  }
-
   return splitMarkdownWithMermaid(text || '')
 }
 
-function getStreamingPreviewText (segment: MarkdownSegment): string {
-  if (segment.type === 'mermaid') {
-    return `\`\`\`mermaid\n${segment.text}\n\`\`\``
-  }
-
-  return segment.text
+function getMermaidPreviewText (code: string): string {
+  return `\`\`\`mermaid\n${code}\n\`\`\``
 }
 
 function getExportState (kind: ExportKind): ExportState {
@@ -210,15 +201,10 @@ onBeforeUnmount(() => {
               :key="`${props.block.id}-${partIndex}-${segmentIndex}`"
             >
               <div
-                v-if="segment.type === 'markdown' && !props.isStreamingBlock"
+                v-if="segment.type === 'markdown'"
                 class="message-text markdown-body"
                 v-html="renderMarkdown(segment.text)"
               ></div>
-
-              <pre
-                v-else-if="segment.type === 'markdown'"
-                class="message-stream-preview"
-              >{{ getStreamingPreviewText(segment) }}</pre>
 
               <MermaidDiagram
                 v-else-if="!props.isStreamingBlock"
@@ -231,7 +217,7 @@ onBeforeUnmount(() => {
               <pre
                 v-else
                 class="message-stream-preview"
-              >{{ getStreamingPreviewText(segment) }}</pre>
+              >{{ getMermaidPreviewText(segment.text) }}</pre>
             </template>
           </div>
 
