@@ -34,7 +34,8 @@ interface CostSettings {
 
 type PricingField = keyof ModelPricingEntry
 
-const DEFAULT_CONTEXT_WINDOW = 32000
+const CONTEXT_WINDOW_UNIT = 1000
+const DEFAULT_CONTEXT_WINDOW = 100000
 const FEEDBACK_DISPLAY_DURATION_MS = 2200
 
 const providers = ref<AIProvider[]>([])
@@ -235,11 +236,17 @@ function getCtx (provider: AIProvider, model: string): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : DEFAULT_CONTEXT_WINDOW
 }
 
+function getCtxInK (provider: AIProvider, model: string): number {
+  return getCtx(provider, model) / CONTEXT_WINDOW_UNIT
+}
+
 function handleCtxInput (model: string, event: Event) {
   if (!editDraft.value) return
-  const parsed = Number.parseInt((event.target as HTMLInputElement).value, 10)
+  const parsed = Number.parseFloat((event.target as HTMLInputElement).value)
   if (!editDraft.value.modelContextWindows) editDraft.value.modelContextWindows = {}
-  editDraft.value.modelContextWindows[model] = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CONTEXT_WINDOW
+  editDraft.value.modelContextWindows[model] = Number.isFinite(parsed) && parsed > 0
+    ? Math.round(parsed * CONTEXT_WINDOW_UNIT)
+    : DEFAULT_CONTEXT_WINDOW
 }
 
 function getPricing (provider: AIProvider, model: string): ModelPricingEntry {
@@ -447,6 +454,14 @@ function formatPricing (value: number): string {
   const digits = value >= 1 ? 2 : 4
   return `$${value.toFixed(digits).replace(/\.?0+$/, '')}/M`
 }
+
+function formatContextWindow (value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return `${DEFAULT_CONTEXT_WINDOW / CONTEXT_WINDOW_UNIT}k tokens`
+  if (value % CONTEXT_WINDOW_UNIT === 0) {
+    return `${value / CONTEXT_WINDOW_UNIT}k tokens`
+  }
+  return `${value.toLocaleString()} tokens`
+}
 </script>
 
 <template>
@@ -544,12 +559,12 @@ function formatPricing (value: number): string {
 
                 <div class="pp-model-fields">
                   <label class="pp-inline-field">
-                    <span>上下文窗口</span>
+                    <span>上下文窗口 (k)</span>
                     <input
-                      :value="getCtx(editDraft, model)"
+                      :value="getCtxInK(editDraft, model)"
                       type="number"
-                      min="1000"
-                      step="1000"
+                      min="1"
+                      step="1"
                       class="pp-inline-input"
                       @input="handleCtxInput(model, $event)"
                     >
@@ -665,7 +680,7 @@ function formatPricing (value: number): string {
             <div class="pp-model-view-main">
               <span class="pp-model-view-name">{{ model }}</span>
               <div class="pp-model-view-meta">
-                <span>{{ getCtx(selectedProvider, model).toLocaleString() }} tokens</span>
+                <span>{{ formatContextWindow(getCtx(selectedProvider, model)) }}</span>
                 <span>输入 {{ formatPricing(getPricing(selectedProvider, model).inputPerMillion) }}</span>
                 <span>输出 {{ formatPricing(getPricing(selectedProvider, model).outputPerMillion) }}</span>
                 <span>缓存 {{ formatPricing(getPricing(selectedProvider, model).cacheReadPerMillion) }}</span>

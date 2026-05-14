@@ -103,7 +103,7 @@ export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
   enableAiLogging: false
 }
 
-export const DEFAULT_MODEL_CONTEXT_WINDOW = 32000
+export const DEFAULT_MODEL_CONTEXT_WINDOW = 100000
 export const DEFAULT_MCP_SERVER_TIMEOUT_MS = 15000
 type RawModelItem = string | { name?: string; contextWindow?: number }
 
