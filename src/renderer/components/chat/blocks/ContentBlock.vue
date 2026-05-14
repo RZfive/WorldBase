@@ -77,8 +77,8 @@ function getTextSegments (text?: string) {
   return splitMarkdownWithMermaid(text || '')
 }
 
-function getStreamingPreviewText (segment: MarkdownSegment): string {
-  return `\`\`\`mermaid\n${segment.text}\n\`\`\``
+function getMermaidPreviewText (code: string): string {
+  return `\`\`\`mermaid\n${code}\n\`\`\``
 }
 
 function getExportState (kind: ExportKind): ExportState {
@@ -217,7 +217,7 @@ onBeforeUnmount(() => {
               <pre
                 v-else
                 class="message-stream-preview"
-              >{{ getStreamingPreviewText(segment) }}</pre>
+              >{{ getMermaidPreviewText(segment.text) }}</pre>
             </template>
           </div>
 
