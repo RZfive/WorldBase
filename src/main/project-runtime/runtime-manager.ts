@@ -481,6 +481,24 @@ export class RuntimeManager {
     return info.logs.slice(-lines)
   }
 
+  appendExternalLog (projectId: string, type: LogEntry['type'], text: string): boolean {
+    const info = this.runningProjects.get(projectId)
+    if (!info || !text.trim()) {
+      return false
+    }
+    this._appendLog(info, type, text)
+    return true
+  }
+
+  findProjectIdByPort (port: number): string | null {
+    for (const [projectId, info] of this.runningProjects.entries()) {
+      if (info.port === port && (info.status === 'starting' || info.status === 'running')) {
+        return projectId
+      }
+    }
+    return null
+  }
+
   private _appendLog (projectInfo: ProjectRunInfo, type: LogEntry['type'], text: string): void {
     projectInfo.logs.push({ type, text, time: Date.now() })
     if (projectInfo.logs.length > MAX_LOG_ENTRIES) {

@@ -12,6 +12,7 @@ import { ProjectPackageService, PROJECT_PACKAGE_EXTENSION } from '../src/main/pr
 import { RuntimeManager } from '../src/main/project-runtime/runtime-manager.js'
 import { BuilderService } from '../src/main/project-runtime/builder-service.js'
 import { AppGateway } from '../src/main/project-runtime/app-gateway.js'
+import { UpdateService } from '../src/main/app-update/update-service.js'
 import { ProcessManagerService } from '../src/main/project-runtime/process-manager-service.js'
 import { ProjectApiClient } from '../src/main/project-api-bridge/api-client.js'
 import { ProjectDataAccess } from '../src/main/project-data-access/data-access.js'
@@ -44,6 +45,7 @@ import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_
 import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.js'
 import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
 import { ScheduledTaskService } from '../src/main/scheduler/scheduled-task-service.js'
+import type { AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupParticipant, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { ActivePageAutomationContext, BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot, PageAutomationRendererRequest, PageAutomationRendererResult, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 
@@ -83,6 +85,7 @@ let runtimeManager: RuntimeManager | null = null
 let builderService: BuilderService | null = null
 let appGateway: AppGateway | null = null
 let processManagerService: ProcessManagerService | null = null
+let updateService: UpdateService | null = null
 let systemService: SystemService | null = null
 let apiClient: ProjectApiClient | null = null
 let dataAccess: ProjectDataAccess | null = null
@@ -380,6 +383,53 @@ function attachMainWindowWebviewHandlers (win: BrowserWindow): void {
       openWebviewPopupInDock(url)
       return { action: 'deny' }
     })
+  })
+}
+
+function resolveProjectIdFromRuntimeUrl (value: string): string | null {
+  if (!runtimeManager || !value) return null
+
+  try {
+    const parsedUrl = new URL(value)
+    if (!LOCAL_APP_HOSTS.has(parsedUrl.hostname)) return null
+
+    const port = Number(parsedUrl.port)
+    if (!Number.isInteger(port) || port <= 0) return null
+
+    return runtimeManager.findProjectIdByPort(port)
+  } catch {
+    return null
+  }
+}
+
+function forwardProjectRendererConsoleMessage (level: number, message: string, line: number, sourceId: string): void {
+  const projectId = resolveProjectIdFromRuntimeUrl(sourceId)
+  if (!projectId || !runtimeManager) return
+
+  const levelLabel = ['debug', 'info', 'warn', 'error'][level] || String(level)
+  const type = level >= 3 ? 'stderr' : 'stdout'
+  const location = sourceId ? ` (${sourceId}:${line})` : ''
+  runtimeManager.appendExternalLog(projectId, type, `[app:${levelLabel}] ${message}${location}`)
+}
+
+function forwardProjectLoadFailure (errorCode: number, errorDescription: string, validatedURL: string): void {
+  const projectId = resolveProjectIdFromRuntimeUrl(validatedURL)
+  if (!projectId || !runtimeManager) return
+
+  runtimeManager.appendExternalLog(
+    projectId,
+    'stderr',
+    `[app:load-failed] ${errorDescription} (${errorCode}) (${validatedURL})`
+  )
+}
+
+function attachProjectRuntimeLogForwarding (win: BrowserWindow): void {
+  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    forwardProjectRendererConsoleMessage(level, message, line, sourceId)
+  })
+
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    forwardProjectLoadFailure(errorCode, errorDescription, validatedURL)
   })
 }
 
@@ -2276,6 +2326,10 @@ async function initializeServices (): Promise<void> {
   const userDataPath = app.getPath('userData')
 
   settingsStore = new SettingsStore(userDataPath)
+  updateService = new UpdateService(settingsStore)
+  updateService.on('stateChanged', (state: AppUpdateState) => {
+    broadcastToAppWindows('appUpdate:stateChanged', state)
+  })
   chatHistory = new ChatHistoryStore(userDataPath)
   aiLogStore = new AILogStore(userDataPath)
   skillStore = new SkillStore(userDataPath)
@@ -2430,6 +2484,7 @@ function createWindow (): void {
   })
 
   attachMainWindowWebviewHandlers(mainWindow)
+  attachProjectRuntimeLogForwarding(mainWindow)
 
   mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
     if (!/(\[web-apps\]|\[launchpad\]|\[browser-webview\])/.test(message)) return
@@ -3659,6 +3714,39 @@ function setupIPC (): void {
     return settingsStore!.getThemePreference()
   })
 
+  ipcMain.handle('app:getAboutInfo', async () => {
+    return updateService!.getAboutInfo()
+  })
+
+  ipcMain.handle('appUpdate:getState', async () => {
+    return updateService!.getState()
+  })
+
+  ipcMain.handle('appUpdate:getConfig', async () => {
+    return updateService!.getConfig()
+  })
+
+  ipcMain.handle('appUpdate:check', async (_event: IpcMainInvokeEvent, options?: { channel?: AppUpdateChannel }) => {
+    return updateService!.checkForUpdates(options?.channel)
+  })
+
+  ipcMain.handle('appUpdate:saveConfig', async (_event: IpcMainInvokeEvent, config: AppUpdateConfig) => {
+    const saved = updateService!.saveConfig(config)
+    return { success: true, config: saved }
+  })
+
+  ipcMain.handle('appUpdate:download', async () => {
+    return updateService!.downloadUpdate()
+  })
+
+  ipcMain.handle('appUpdate:install', async () => {
+    return updateService!.installDownloadedUpdate()
+  })
+
+  ipcMain.handle('appUpdate:openWebsite', async (_event: IpcMainInvokeEvent, kind: AppUpdateWebsiteKind) => {
+    return updateService!.openWebsitePage(kind)
+  })
+
   ipcMain.handle('settings:saveThemePreference', async (_event: IpcMainInvokeEvent, preference: 'system' | 'light' | 'dark') => {
     settingsStore!.saveThemePreference(preference)
     return { success: true }
@@ -3994,6 +4082,8 @@ function setupIPC (): void {
       win.loadFile(target.filePath, { query: target.query })
     }
 
+    attachProjectRuntimeLogForwarding(win)
+
     projectWindows.set(projectId, win)
 
     win.on('closed', () => {
@@ -4077,6 +4167,9 @@ app.on('before-quit', (event) => {
       }
       if (mcpService) {
         await mcpService.dispose()
+      }
+      if (updateService) {
+        updateService.dispose()
       }
       if (scheduledTaskService) {
         scheduledTaskService.dispose()
