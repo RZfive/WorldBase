@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import type { AppUpdateAssetInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateNotes, AppUpdateProgress, AppUpdateState, AppUpdateStatus, AppUpdateWebsiteLinks } from '../../shared/app-update-types.js'
 
 export interface AISettings {
   apiKey: string
@@ -437,6 +438,122 @@ function normalizeProjectLaunchModes (value: unknown): Record<string, 'embed' | 
   return normalized
 }
 
+function normalizeAppUpdateConfig (value: unknown): AppUpdateConfig {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+
+  return {
+    websiteBaseUrl: normalizeBaseUrl(input.websiteBaseUrl),
+    updateApiUrl: normalizeBaseUrl(input.updateApiUrl),
+    downloadsPageUrl: normalizeBaseUrl(input.downloadsPageUrl),
+    updatesPageUrl: normalizeBaseUrl(input.updatesPageUrl)
+  }
+}
+
+function normalizeAppUpdateChannel (value: unknown): AppUpdateChannel {
+  return value === 'beta' ? 'beta' : 'stable'
+}
+
+function normalizeAppUpdateStatus (value: unknown): AppUpdateStatus {
+  switch (value) {
+    case 'checking':
+    case 'up_to_date':
+    case 'unsupported_platform':
+    case 'update_available':
+    case 'downloading':
+    case 'downloaded':
+    case 'installing':
+    case 'install_triggered':
+    case 'failed':
+      return value
+    default:
+      return 'idle'
+  }
+}
+
+function normalizeAppUpdateNotes (value: unknown): AppUpdateNotes | null {
+  if (!value || typeof value !== 'object') return null
+
+  const input = value as Record<string, unknown>
+  const zh = Array.isArray(input.zh)
+    ? input.zh.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim())
+    : []
+  const en = Array.isArray(input.en)
+    ? input.en.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim())
+    : []
+
+  if (zh.length === 0 && en.length === 0) return null
+  return { zh, en }
+}
+
+function normalizeAppUpdateAssetInfo (value: unknown): AppUpdateAssetInfo | null {
+  if (!value || typeof value !== 'object') return null
+
+  const input = value as Record<string, unknown>
+  const fileName = typeof input.fileName === 'string' ? input.fileName.trim() : ''
+  const downloadUrl = typeof input.downloadUrl === 'string' ? input.downloadUrl.trim() : ''
+  if (!fileName || !downloadUrl) return null
+
+  const size = Number(input.size)
+  return {
+    fileName,
+    downloadUrl,
+    sha512: typeof input.sha512 === 'string' && input.sha512.trim() ? input.sha512.trim() : undefined,
+    sha256: typeof input.sha256 === 'string' && input.sha256.trim() ? input.sha256.trim().toLowerCase() : undefined,
+    size: Number.isFinite(size) && size >= 0 ? size : null
+  }
+}
+
+function normalizeAppUpdateProgress (value: unknown): AppUpdateProgress | null {
+  if (!value || typeof value !== 'object') return null
+
+  const input = value as Record<string, unknown>
+  const bytesDownloaded = Number(input.bytesDownloaded)
+  const totalBytes = Number(input.totalBytes)
+  const percent = Number(input.percent)
+
+  return {
+    bytesDownloaded: Number.isFinite(bytesDownloaded) && bytesDownloaded >= 0 ? bytesDownloaded : 0,
+    totalBytes: Number.isFinite(totalBytes) && totalBytes >= 0 ? totalBytes : null,
+    percent: Number.isFinite(percent) && percent >= 0 ? percent : null
+  }
+}
+
+function normalizeAppUpdateWebsiteLinks (value: unknown): AppUpdateWebsiteLinks {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+  const baseUrl = typeof input.baseUrl === 'string' ? input.baseUrl.trim() : ''
+  const downloadsUrl = typeof input.downloadsUrl === 'string' ? input.downloadsUrl.trim() : ''
+  const updatesUrl = typeof input.updatesUrl === 'string' ? input.updatesUrl.trim() : ''
+
+  return {
+    baseUrl,
+    downloadsUrl,
+    updatesUrl,
+    configured: Boolean(input.configured) && Boolean(baseUrl) && Boolean(downloadsUrl) && Boolean(updatesUrl)
+  }
+}
+
+function normalizeAppUpdateState (value: unknown): AppUpdateState | null {
+  if (!value || typeof value !== 'object') return null
+
+  const input = value as Record<string, unknown>
+  return {
+    status: normalizeAppUpdateStatus(input.status),
+    currentVersion: typeof input.currentVersion === 'string' ? input.currentVersion.trim() : '',
+    latestVersion: typeof input.latestVersion === 'string' && input.latestVersion.trim() ? input.latestVersion.trim() : null,
+    channel: normalizeAppUpdateChannel(input.channel),
+    platform: typeof input.platform === 'string' ? input.platform.trim() : '',
+    arch: typeof input.arch === 'string' ? input.arch.trim() : '',
+    lastCheckedAt: typeof input.lastCheckedAt === 'string' && input.lastCheckedAt.trim() ? input.lastCheckedAt.trim() : null,
+    publishedAt: typeof input.publishedAt === 'string' && input.publishedAt.trim() ? input.publishedAt.trim() : null,
+    downloadedFilePath: typeof input.downloadedFilePath === 'string' && input.downloadedFilePath.trim() ? input.downloadedFilePath.trim() : null,
+    progress: normalizeAppUpdateProgress(input.progress),
+    error: typeof input.error === 'string' && input.error.trim() ? input.error.trim() : null,
+    notes: normalizeAppUpdateNotes(input.notes),
+    asset: normalizeAppUpdateAssetInfo(input.asset),
+    website: normalizeAppUpdateWebsiteLinks(input.website)
+  }
+}
+
 function normalizeEnabledProviderIds (
   value: unknown,
   providers: AIProvider[],
@@ -692,6 +809,28 @@ export class SettingsStore {
   /** Save AI execution preferences. */
   saveAIExecutionPreferences (preferences: AIExecutionPreferences): void {
     this.write({ aiExecutionPreferences: normalizeAIExecutionPreferences(preferences) })
+  }
+
+  /** Get the persisted update source configuration. */
+  getAppUpdateConfig (): AppUpdateConfig {
+    const settings = this.read()
+    return normalizeAppUpdateConfig(settings.appUpdateConfig)
+  }
+
+  /** Save the update source configuration for future app starts. */
+  saveAppUpdateConfig (config: AppUpdateConfig): void {
+    this.write({ appUpdateConfig: normalizeAppUpdateConfig(config) })
+  }
+
+  /** Get the last app update snapshot persisted by the main process. */
+  getAppUpdateState (): AppUpdateState | null {
+    const settings = this.read()
+    return normalizeAppUpdateState(settings.appUpdateState)
+  }
+
+  /** Save the app update snapshot for About/Updates restoration. */
+  saveAppUpdateState (state: AppUpdateState): void {
+    this.write({ appUpdateState: normalizeAppUpdateState(state) })
   }
 
   /** Get cost tracking settings. */

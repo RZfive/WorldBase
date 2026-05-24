@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 
 interface ChatMessage {
@@ -445,6 +446,15 @@ export interface ElectronAPI {
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
+  getAboutInfo: () => Promise<AppAboutInfo>
+  getAppUpdateState: () => Promise<AppUpdateState>
+  getAppUpdateConfig: () => Promise<AppUpdateConfig>
+  checkAppUpdate: (options?: { channel?: AppUpdateChannel }) => Promise<AppUpdateState>
+  saveAppUpdateConfig: (config: AppUpdateConfig) => Promise<{ success: boolean; config: AppUpdateConfig }>
+  downloadAppUpdate: () => Promise<AppUpdateState>
+  installAppUpdate: () => Promise<{ success: boolean; state: AppUpdateState; error?: string }>
+  openAppUpdateWebsite: (kind: AppUpdateWebsiteKind) => Promise<{ success: boolean; error?: string }>
+  onAppUpdateStateChanged: (callback: (state: AppUpdateState) => void) => () => void
 
   // Conversations
   listConversations: () => Promise<ConversationSummary[]>
@@ -624,6 +634,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => {
     ipcRenderer.send('pageAutomation:response', payload)
+  },
+  getAboutInfo: () => ipcRenderer.invoke('app:getAboutInfo'),
+  getAppUpdateState: () => ipcRenderer.invoke('appUpdate:getState'),
+  getAppUpdateConfig: () => ipcRenderer.invoke('appUpdate:getConfig'),
+  checkAppUpdate: (options?: { channel?: AppUpdateChannel }) => ipcRenderer.invoke('appUpdate:check', options),
+  saveAppUpdateConfig: (config: AppUpdateConfig) => ipcRenderer.invoke('appUpdate:saveConfig', config),
+  downloadAppUpdate: () => ipcRenderer.invoke('appUpdate:download'),
+  installAppUpdate: () => ipcRenderer.invoke('appUpdate:install'),
+  openAppUpdateWebsite: (kind: AppUpdateWebsiteKind) => ipcRenderer.invoke('appUpdate:openWebsite', kind),
+  onAppUpdateStateChanged: (callback: (state: AppUpdateState) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, state: AppUpdateState) => callback(state)
+    ipcRenderer.on('appUpdate:stateChanged', handler)
+    return () => { ipcRenderer.removeListener('appUpdate:stateChanged', handler) }
   },
 
   // Conversations

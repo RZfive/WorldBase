@@ -1,6 +1,11 @@
 /// <reference types="vite/client" />
 
 type ActivePageAutomationContext = import('./shared/page-automation-types.js').ActivePageAutomationContext
+type AppAboutInfo = import('./shared/app-update-types.js').AppAboutInfo
+type AppUpdateChannel = import('./shared/app-update-types.js').AppUpdateChannel
+type AppUpdateConfig = import('./shared/app-update-types.js').AppUpdateConfig
+type AppUpdateState = import('./shared/app-update-types.js').AppUpdateState
+type AppUpdateWebsiteKind = import('./shared/app-update-types.js').AppUpdateWebsiteKind
 type PageAutomationRequestEnvelope = import('./shared/page-automation-types.js').PageAutomationRequestEnvelope
 type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js').PageAutomationResponseEnvelope
 
@@ -769,6 +774,15 @@ interface ElectronAPI {
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
+  getAboutInfo: () => Promise<AppAboutInfo>
+  getAppUpdateState: () => Promise<AppUpdateState>
+  getAppUpdateConfig: () => Promise<AppUpdateConfig>
+  checkAppUpdate: (options?: { channel?: AppUpdateChannel }) => Promise<AppUpdateState>
+  saveAppUpdateConfig: (config: AppUpdateConfig) => Promise<{ success: boolean; config: AppUpdateConfig }>
+  downloadAppUpdate: () => Promise<AppUpdateState>
+  installAppUpdate: () => Promise<{ success: boolean; state: AppUpdateState; error?: string }>
+  openAppUpdateWebsite: (kind: AppUpdateWebsiteKind) => Promise<{ success: boolean; error?: string }>
+  onAppUpdateStateChanged: (callback: (state: AppUpdateState) => void) => () => void
   setPlanMode: (active: boolean) => Promise<{ success: boolean }>
 
   // Conversations

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import AboutUpdatesPanel from './AboutUpdatesPanel.vue'
 import SkillManager from './SkillManager.vue'
 import AgentWorkspacePanel from './AgentWorkspacePanel.vue'
 import ProviderPanel from './ProviderPanel.vue'
@@ -10,7 +11,7 @@ import MCPSettingsPanel from './MCPSettingsPanel.vue'
 import ProcessManagerPanel from './ProcessManagerPanel.vue'
 import ScheduledTasksPanel from './ScheduledTasksPanel.vue'
 
-type CategoryId = 'general' | 'providers' | 'mcp' | 'skills' | 'agent-workspace' | 'scheduler' | 'logs' | 'database' | 'processes'
+type CategoryId = 'general' | 'about' | 'providers' | 'mcp' | 'skills' | 'agent-workspace' | 'scheduler' | 'logs' | 'database' | 'processes'
 
 interface Category {
   id: CategoryId
@@ -20,6 +21,7 @@ interface Category {
 
 const categories: Category[] = [
   { id: 'general', icon: '⚙️', label: '通用设置' },
+  { id: 'about', icon: 'ℹ️', label: '关于与更新' },
   { id: 'providers', icon: '🤖', label: '模型服务' },
   { id: 'mcp', icon: '🔌', label: 'MCP 管理' },
   { id: 'skills', icon: '✦', label: 'Skill 管理' },
@@ -51,6 +53,7 @@ const activeCategoryId = ref<CategoryId>('general')
     <!-- Right content -->
     <div class="cat-content">
       <GeneralSettingsPanel v-if="activeCategoryId === 'general'" />
+      <AboutUpdatesPanel v-else-if="activeCategoryId === 'about'" :active="activeCategoryId === 'about'" />
       <ProviderPanel v-else-if="activeCategoryId === 'providers'" />
       <MCPSettingsPanel v-else-if="activeCategoryId === 'mcp'" />
       <SkillManager v-else-if="activeCategoryId === 'skills'" />
