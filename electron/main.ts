@@ -960,6 +960,8 @@ function applyActiveProviderToAiEngine (): AIProvidersConfig {
     apiKey: active?.apiKey ?? '',
     baseUrl: active?.baseUrl ?? '',
     model: active?.activeModel ?? '',
+    imageGeneration: active?.activeModel ? active.modelCapabilities?.[active.activeModel]?.imageGeneration === true : false,
+    imageEditing: active?.activeModel ? active.modelCapabilities?.[active.activeModel]?.imageEditing === true : false,
     enableThinking: active?.enableThinking ?? false,
     reasoningEffort: 'medium',
     contextWindow: active?.activeModel ? active.modelContextWindows?.[active.activeModel] : undefined
@@ -991,6 +993,8 @@ function resolveProviderConfig (requestedProviderId?: string, requestedModelId?:
     apiKey: provider.apiKey,
     baseUrl: provider.baseUrl,
     model: resolvedModel,
+    imageGeneration: provider.modelCapabilities?.[resolvedModel]?.imageGeneration === true,
+    imageEditing: provider.modelCapabilities?.[resolvedModel]?.imageEditing === true,
     enableThinking: provider.enableThinking ?? false,
     reasoningEffort,
     contextWindow: provider.modelContextWindows?.[resolvedModel]

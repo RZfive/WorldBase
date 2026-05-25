@@ -47,6 +47,8 @@ export interface AIConfigInput {
   apiKey?: string
   baseUrl?: string
   model?: string
+  imageGeneration?: boolean
+  imageEditing?: boolean
   enableThinking?: boolean
   reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
   contextWindow?: number
@@ -177,6 +179,12 @@ export class AIEngine {
     }
     if (config.model !== undefined) {
       provider.setModel(config.model)
+    }
+    if (config.imageGeneration !== undefined) {
+      provider.setImageGeneration(config.imageGeneration)
+    }
+    if (config.imageEditing !== undefined) {
+      provider.setImageEditing(config.imageEditing)
     }
     if (config.enableThinking !== undefined) {
       provider.setEnableThinking(config.enableThinking)
