@@ -17,6 +17,7 @@ interface AIProvider {
   models: string[]
   modelContextWindows?: Record<string, number>
   modelPricing?: Record<string, ModelPricingEntry>
+  modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
   activeModel: string
   enableThinking?: boolean
 }
@@ -97,14 +98,20 @@ function buildPricingMap (settings: CostSettings): Record<string, ModelPricingEn
 
 function hydrateProvider (provider: AIProvider, pricingMap: Record<string, ModelPricingEntry>): AIProvider {
   const modelPricing: Record<string, ModelPricingEntry> = {}
+  const modelCapabilities: NonNullable<AIProvider['modelCapabilities']> = {}
   for (const model of provider.models) {
     modelPricing[model] = clonePricing(pricingMap[model] || provider.modelPricing?.[model] || getDefaultPricing(model))
+    modelCapabilities[model] = {
+      imageGeneration: provider.modelCapabilities?.[model]?.imageGeneration === true,
+      imageEditing: provider.modelCapabilities?.[model]?.imageEditing === true
+    }
   }
 
   return {
     ...provider,
     models: [...provider.models],
     modelContextWindows: { ...(provider.modelContextWindows || {}) },
+    modelCapabilities,
     modelPricing
   }
 }
@@ -163,6 +170,7 @@ function startAdd () {
     models: [],
     modelContextWindows: {},
     modelPricing: {},
+    modelCapabilities: {},
     activeModel: '',
     enableThinking: false
   }
@@ -176,14 +184,20 @@ function startEdit () {
   if (!provider) return
 
   const modelPricing: Record<string, ModelPricingEntry> = {}
+  const modelCapabilities: NonNullable<AIProvider['modelCapabilities']> = {}
   for (const model of provider.models) {
     modelPricing[model] = clonePricing(provider.modelPricing?.[model] || getDefaultPricing(model))
+    modelCapabilities[model] = {
+      imageGeneration: provider.modelCapabilities?.[model]?.imageGeneration === true,
+      imageEditing: provider.modelCapabilities?.[model]?.imageEditing === true
+    }
   }
 
   editDraft.value = {
     ...provider,
     models: [...provider.models],
     modelContextWindows: { ...(provider.modelContextWindows || {}) },
+    modelCapabilities,
     modelPricing
   }
   editing.value = true
@@ -213,8 +227,10 @@ function addModel () {
   editDraft.value.models.push(model)
   if (!editDraft.value.modelContextWindows) editDraft.value.modelContextWindows = {}
   if (!editDraft.value.modelPricing) editDraft.value.modelPricing = {}
+  if (!editDraft.value.modelCapabilities) editDraft.value.modelCapabilities = {}
   editDraft.value.modelContextWindows[model] = DEFAULT_CONTEXT_WINDOW
   editDraft.value.modelPricing[model] = getDefaultPricing(model)
+  editDraft.value.modelCapabilities[model] = { imageGeneration: false, imageEditing: false }
   if (!editDraft.value.activeModel) editDraft.value.activeModel = model
   newModelInput.value = ''
   statusMsg.value = ''
@@ -226,6 +242,7 @@ function removeModel (index: number) {
   const removed = editDraft.value.models.splice(index, 1)[0]
   if (editDraft.value.modelContextWindows) delete editDraft.value.modelContextWindows[removed]
   if (editDraft.value.modelPricing) delete editDraft.value.modelPricing[removed]
+  if (editDraft.value.modelCapabilities) delete editDraft.value.modelCapabilities[removed]
   if (editDraft.value.activeModel === removed) {
     editDraft.value.activeModel = editDraft.value.models[0] || ''
   }
@@ -251,6 +268,25 @@ function handleCtxInput (model: string, event: Event) {
 
 function getPricing (provider: AIProvider, model: string): ModelPricingEntry {
   return clonePricing(provider.modelPricing?.[model] || getDefaultPricing(model))
+}
+
+function getModelCapabilities (provider: AIProvider, model: string): { imageGeneration: boolean; imageEditing: boolean } {
+  return {
+    imageGeneration: provider.modelCapabilities?.[model]?.imageGeneration === true,
+    imageEditing: provider.modelCapabilities?.[model]?.imageEditing === true
+  }
+}
+
+function toggleModelCapability (model: string, field: 'imageGeneration' | 'imageEditing') {
+  if (!editDraft.value) return
+  if (!editDraft.value.modelCapabilities) editDraft.value.modelCapabilities = {}
+  const current = getModelCapabilities(editDraft.value, model)
+  const next = !current[field]
+  editDraft.value.modelCapabilities[model] = {
+    ...current,
+    [field]: next,
+    ...(field === 'imageGeneration' && !next ? { imageEditing: false } : {})
+  }
 }
 
 function parsePricingNumber (value: string): number {
@@ -360,16 +396,19 @@ async function saveEdit () {
   }
   if (!nextProvider.modelContextWindows) nextProvider.modelContextWindows = {}
   if (!nextProvider.modelPricing) nextProvider.modelPricing = {}
+  if (!nextProvider.modelCapabilities) nextProvider.modelCapabilities = {}
 
   for (const model of nextProvider.models) {
     nextProvider.modelContextWindows[model] = getCtx(nextProvider, model)
     nextProvider.modelPricing[model] = getPricing(nextProvider, model)
+    nextProvider.modelCapabilities[model] = getModelCapabilities(nextProvider, model)
   }
 
   const normalizedProvider: AIProvider = {
     ...nextProvider,
     models: [...nextProvider.models],
     modelContextWindows: { ...(nextProvider.modelContextWindows || {}) },
+    modelCapabilities: Object.fromEntries(nextProvider.models.map(model => [model, getModelCapabilities(nextProvider, model)])),
     modelPricing: Object.fromEntries(nextProvider.models.map(model => [model, getPricing(nextProvider, model)]))
   }
 
@@ -603,6 +642,21 @@ function formatContextWindow (value: number): string {
                     >
                   </label>
                 </div>
+
+                <div class="pp-model-capability-row">
+                  <button class="pp-capability-chip" type="button" :class="{ on: getModelCapabilities(editDraft, model).imageGeneration }" @click="toggleModelCapability(model, 'imageGeneration')">
+                    <span>图片生成</span>
+                  </button>
+                  <button
+                    class="pp-capability-chip"
+                    type="button"
+                    :class="{ on: getModelCapabilities(editDraft, model).imageEditing }"
+                    :disabled="!getModelCapabilities(editDraft, model).imageGeneration"
+                    @click="toggleModelCapability(model, 'imageEditing')"
+                  >
+                    <span>图片编辑</span>
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -684,6 +738,8 @@ function formatContextWindow (value: number): string {
                 <span>输入 {{ formatPricing(getPricing(selectedProvider, model).inputPerMillion) }}</span>
                 <span>输出 {{ formatPricing(getPricing(selectedProvider, model).outputPerMillion) }}</span>
                 <span>缓存 {{ formatPricing(getPricing(selectedProvider, model).cacheReadPerMillion) }}</span>
+                <span v-if="getModelCapabilities(selectedProvider, model).imageGeneration">图片生成</span>
+                <span v-if="getModelCapabilities(selectedProvider, model).imageEditing">图片编辑</span>
               </div>
             </div>
             <span v-if="model === selectedProvider.activeModel" class="pp-default-badge">默认</span>
@@ -751,6 +807,35 @@ function formatContextWindow (value: number): string {
 .pp-budget-input:focus,
 .pp-inline-input:focus {
   border-color: var(--app-accent);
+}
+
+.pp-model-capability-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.pp-capability-chip {
+  border: 1px solid var(--app-input-border);
+  background: var(--app-panel);
+  color: var(--app-text-muted);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.78em;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.pp-capability-chip.on {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+  color: var(--app-text);
+}
+
+.pp-capability-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .pp-providers {

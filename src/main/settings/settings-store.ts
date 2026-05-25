@@ -23,6 +23,8 @@ export interface AIProvider {
   models: string[]
   /** Context window per model name */
   modelContextWindows?: Record<string, number>
+  /** Capability flags per model name. */
+  modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
   /** Currently selected model for this provider */
   activeModel: string
   /** Whether to enable thinking/reasoning mode for compatible models */
@@ -128,6 +130,26 @@ function normalizeBaseUrl (value: unknown): string {
   return trimmed.replace(/\/+$/, '')
 }
 
+function normalizeModelCapabilities (
+  value: unknown,
+  models: string[]
+): Record<string, { imageGeneration?: boolean; imageEditing?: boolean }> {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+  const normalized: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }> = {}
+
+  for (const model of models) {
+    const raw = (input[model] && typeof input[model] === 'object')
+      ? input[model] as Record<string, unknown>
+      : {}
+    normalized[model] = {
+      imageGeneration: raw.imageGeneration === true,
+      imageEditing: raw.imageEditing === true
+    }
+  }
+
+  return normalized
+}
+
 function normalizeProvider (input: AIProvider): AIProvider {
   const rawModels = Array.isArray(input.models) ? input.models : []
   const models: string[] = []
@@ -154,6 +176,8 @@ function normalizeProvider (input: AIProvider): AIProvider {
     modelContextWindows[modelName] = normalizeContextWindow(modelContextWindows[modelName])
   }
 
+  const modelCapabilities = normalizeModelCapabilities(input.modelCapabilities, models)
+
   const activeModel = models.includes(input.activeModel) ? input.activeModel : (models[0] || '')
 
   return {
@@ -163,6 +187,7 @@ function normalizeProvider (input: AIProvider): AIProvider {
     apiKey: input.apiKey,
     models,
     modelContextWindows,
+    modelCapabilities,
     activeModel,
     enableThinking: input.enableThinking ?? false
   }

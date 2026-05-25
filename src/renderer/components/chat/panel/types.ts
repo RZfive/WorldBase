@@ -128,6 +128,7 @@ export interface ProviderOption {
   apiKey: string
   models: string[]
   modelContextWindows?: Record<string, number>
+  modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
   activeModel: string
   enableThinking?: boolean
 }
