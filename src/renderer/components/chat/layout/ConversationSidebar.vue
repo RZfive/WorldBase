@@ -1,43 +1,14 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-
-interface AgentSidebarItem {
-  id: string
-  conversationId: string | null
-  title: string
-  subtitle: string
-  searchText: string
-  icon: string
-  modelId: string
-  providerName: string
-  modelOptions: string[]
-  isStreaming: boolean
-  pendingAuthCount: number
-  isActive: boolean
-}
-
-interface GroupSidebarItem {
-  id: string
-  conversationId: string | null
-  title: string
-  subtitle: string
-  searchText: string
-  icon: string
-  isStreaming: boolean
-  pendingAuthCount: number
-  isActive: boolean
-}
-
-interface ConversationSidebarItem {
-  id: string
-  title: string
-  subtitle: string
-  searchText: string
-  icon: string
-  isStreaming: boolean
-  pendingAuthCount: number
-  isActive: boolean
-}
+import ConversationSidebarFolder from './ConversationSidebarFolder.vue'
+import ConversationSidebarItemCard from './ConversationSidebarItemCard.vue'
+import {
+  type AgentSidebarItem,
+  type ConversationSidebarSectionKey,
+  type ConversationSidebarItem,
+  type GroupSidebarItem
+} from './ConversationSidebar.types'
+import { useConversationSidebarFolders } from './useConversationSidebarFolders'
 
 const props = defineProps<{
   agentItems: AgentSidebarItem[]
@@ -54,7 +25,7 @@ const emit = defineEmits<{
 }>()
 
 const searchQuery = ref('')
-const collapsedSections = reactive({
+const collapsedSections = reactive<Record<ConversationSidebarSectionKey, boolean>>({
   agents: false,
   groups: false,
   conversations: false
@@ -79,28 +50,53 @@ function filterItems<T extends { title: string; subtitle: string; searchText: st
   })
 }
 
-const isSearching = computed(() => normalizeSearchValue(searchQuery.value).length > 0)
 const filteredAgentItems = computed(() => filterItems(props.agentItems))
 const filteredGroupItems = computed(() => filterItems(props.groupItems))
-const filteredConversationItems = computed(() => filterItems(props.conversationItems))
+
+const {
+  conversationEntries,
+  filteredConversationCount,
+  isSearching,
+  renamingFolderId,
+  renameInput,
+  dragItem,
+  createEmptyFolder,
+  startRenameFolder,
+  commitRenameFolder,
+  cancelRenameFolder,
+  toggleFolderCollapsed,
+  isFolderExpanded,
+  onConversationDragStart,
+  onFolderDragStart,
+  onTopLevelDragOver,
+  onFolderConversationDragOver,
+  onConversationSectionDragOver,
+  onFolderBodyDragOver,
+  onDragLeave,
+  onTopLevelDrop,
+  onFolderConversationDrop,
+  onConversationSectionDrop,
+  onFolderBodyDrop,
+  topLevelDropClass,
+  folderBodyDropClass,
+  conversationSectionDropClass,
+  resetDragState
+} = useConversationSidebarFolders(computed(() => props.conversationItems), searchQuery, normalizeSearchValue)
+
 const hasVisibleItems = computed(() => {
-  return filteredAgentItems.value.length > 0 || filteredGroupItems.value.length > 0 || filteredConversationItems.value.length > 0
+  return filteredAgentItems.value.length > 0 || filteredGroupItems.value.length > 0 || conversationEntries.value.length > 0
 })
 
-function toggleSection (key: 'agents' | 'groups' | 'conversations') {
+function toggleSection (key: ConversationSidebarSectionKey) {
   collapsedSections[key] = !collapsedSections[key]
 }
 
-function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCount: number): boolean {
+function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: number): boolean {
   if (isSearching.value) {
     return itemsCount > 0
   }
   return !collapsedSections[key]
 }
-
-// ── Collapse/expand ──────────────────────────────────────────────────────────
-// Uses CSS grid-template-rows transition (0fr ↔ 1fr) to avoid layout thrashing
-// that occurs when animating height on every frame.
 </script>
 
 <template>
@@ -113,7 +109,7 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
           v-model="searchQuery"
           class="conv-search-input"
           type="search"
-          placeholder="搜索 Agent、群聊或对话内容"
+          placeholder="搜索 Agent、群聊、文件夹或对话内容"
         >
         <button
           v-if="searchQuery"
@@ -148,42 +144,16 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
           :class="{ collapsed: !isSectionExpanded('agents', filteredAgentItems.length) }"
         >
           <div class="conv-section-body-inner">
-            <div
+            <ConversationSidebarItemCard
               v-for="item in filteredAgentItems"
               :key="`agent-${item.id}`"
-              :class="['conv-item', 'agent-item', { active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }]"
+              :item="item"
+              variant="agent"
+              :show-delete="Boolean(item.conversationId)"
+              delete-title="删除该 Agent 会话"
               @click="emit('openAgent', item.id)"
-            >
-              <div class="conv-main">
-                <span class="conv-avatar-shell agent">
-                  <span class="conv-icon">{{ item.icon }}</span>
-                </span>
-                <div class="conv-copy">
-                  <div class="conv-title-row">
-                    <div class="conv-title-stack">
-                      <span class="conv-title">{{ item.title }}</span>
-                    </div>
-                    <span v-if="item.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`">
-                      <span class="conv-status-dot"></span>
-                      待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
-                    </span>
-                    <span v-else-if="item.isStreaming" class="conv-status streaming" title="生成中">
-                      <span class="conv-status-dot"></span>
-                      运行中
-                    </span>
-                  </div>
-                  <span class="conv-subtitle">{{ item.subtitle }}</span>
-                </div>
-              </div>
-
-              <button
-                v-if="item.conversationId"
-                class="conv-delete"
-                type="button"
-                title="删除该 Agent 会话"
-                @click.stop="emit('deleteConversation', item.conversationId)"
-              >×</button>
-            </div>
+              @delete="item.conversationId && emit('deleteConversation', item.conversationId)"
+            />
           </div>
         </div>
       </section>
@@ -211,97 +181,100 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
           :class="{ collapsed: !isSectionExpanded('groups', filteredGroupItems.length) }"
         >
           <div class="conv-section-body-inner">
-            <div
+            <ConversationSidebarItemCard
               v-for="item in filteredGroupItems"
               :key="`group-${item.id}`"
-              :class="['conv-item', 'group-item', { active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }]"
+              :item="item"
+              variant="group"
+              :show-delete="Boolean(item.conversationId)"
+              delete-title="删除该群组会话"
               @click="emit('openGroup', item.id)"
-            >
-              <div class="conv-main">
-                <span class="conv-avatar-shell group">
-                  <span class="conv-icon group">{{ item.icon }}</span>
-                </span>
-                <div class="conv-copy">
-                  <div class="conv-title-row">
-                    <div class="conv-title-stack">
-                      <span class="conv-title">{{ item.title }}</span>
-                    </div>
-                    <span v-if="item.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`">
-                      <span class="conv-status-dot"></span>
-                      待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
-                    </span>
-                    <span v-else-if="item.isStreaming" class="conv-status streaming" title="生成中">
-                      <span class="conv-status-dot"></span>
-                      运行中
-                    </span>
-                  </div>
-                  <span class="conv-subtitle">{{ item.subtitle }}</span>
-                </div>
-              </div>
-              <button
-                v-if="item.conversationId"
-                class="conv-delete"
-                type="button"
-                title="删除该群组会话"
-                @click.stop="emit('deleteConversation', item.conversationId)"
-              >×</button>
-            </div>
+              @delete="item.conversationId && emit('deleteConversation', item.conversationId)"
+            />
           </div>
         </div>
       </section>
 
-      <section v-if="props.conversationItems.length > 0" class="conv-section">
-        <button
-          class="conv-section-toggle"
-          :class="{ collapsed: !isSectionExpanded('conversations', filteredConversationItems.length) }"
-          type="button"
-          @click="toggleSection('conversations')"
-        >
-          <span class="conv-section-toggle-copy">
-            <span class="conv-section-title">对话</span>
-            <span class="conv-section-hint">自由聊天记录</span>
-          </span>
-          <span class="conv-section-meta">{{ filteredConversationItems.length }}/{{ props.conversationItems.length }}</span>
-          <span class="conv-section-caret-shell" aria-hidden="true">
-            <svg class="conv-section-caret" viewBox="0 0 16 16" fill="none">
-              <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </span>
-        </button>
+      <section v-if="props.conversationItems.length > 0 || conversationEntries.length > 0" class="conv-section">
+        <div class="conv-section-header-row">
+          <button
+            class="conv-section-toggle"
+            :class="{ collapsed: !isSectionExpanded('conversations', conversationEntries.length) }"
+            type="button"
+            @click="toggleSection('conversations')"
+          >
+            <span class="conv-section-toggle-copy">
+              <span class="conv-section-title">对话</span>
+              <span class="conv-section-hint">自由聊天记录</span>
+            </span>
+            <span class="conv-section-meta">{{ filteredConversationCount }}/{{ props.conversationItems.length }}</span>
+            <span class="conv-section-caret-shell" aria-hidden="true">
+              <svg class="conv-section-caret" viewBox="0 0 16 16" fill="none">
+                <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
+          </button>
+          <button class="conv-folder-add-btn" type="button" title="新建空文件夹" @click="createEmptyFolder">+ 文件夹</button>
+        </div>
         <div
           class="conv-section-body"
-          :class="{ collapsed: !isSectionExpanded('conversations', filteredConversationItems.length) }"
+          :class="{ collapsed: !isSectionExpanded('conversations', conversationEntries.length) }"
         >
-          <div class="conv-section-body-inner">
-            <div
-              v-for="conv in filteredConversationItems"
-              :key="conv.id"
-              :class="['conv-item', 'conversation-item', { active: conv.isActive, streaming: conv.isStreaming, waitingAuth: conv.pendingAuthCount > 0 }]"
-              @click="emit('selectConversation', conv.id)"
-            >
-              <div class="conv-main">
-                <span class="conv-avatar-shell conversation">
-                  <span class="conv-icon conversation">{{ conv.icon }}</span>
-                </span>
-                <div class="conv-copy">
-                  <div class="conv-title-row">
-                    <div class="conv-title-stack">
-                      <span class="conv-title">{{ conv.title }}</span>
-                    </div>
-                    <span v-if="conv.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${conv.pendingAuthCount > 1 ? ` ${conv.pendingAuthCount} 项` : ''}`">
-                      <span class="conv-status-dot"></span>
-                      待授权<span v-if="conv.pendingAuthCount > 1" class="conv-status-count">{{ conv.pendingAuthCount }}</span>
-                    </span>
-                    <span v-else-if="conv.isStreaming" class="conv-status streaming" title="生成中">
-                      <span class="conv-status-dot"></span>
-                      运行中
-                    </span>
-                  </div>
-                  <span class="conv-subtitle">{{ conv.subtitle }}</span>
-                </div>
-              </div>
-              <button class="conv-delete" type="button" @click.stop="emit('deleteConversation', conv.id)" title="删除">×</button>
-            </div>
+          <div
+            :class="['conv-section-body-inner', 'conv-section-body-conversations', conversationSectionDropClass()]"
+            @dragover="onConversationSectionDragOver"
+            @dragleave="onDragLeave"
+            @drop="onConversationSectionDrop"
+          >
+            <template v-for="entry in conversationEntries" :key="entry.kind === 'folder' ? `folder-${entry.folder.id}` : entry.item.id">
+              <ConversationSidebarItemCard
+                v-if="entry.kind === 'conversation'"
+                :item="entry.item"
+                variant="conversation"
+                :draggable="!isSearching"
+                :is-dragging="dragItem?.type === 'conversation' && dragItem.id === entry.item.id"
+                :drop-class="topLevelDropClass(entry.item.id, 'conversation')"
+                show-delete
+                delete-title="删除"
+                @click="emit('selectConversation', entry.item.id)"
+                @delete="emit('deleteConversation', entry.item.id)"
+                @dragstart="onConversationDragStart($event, entry.item.id)"
+                @dragover="onTopLevelDragOver($event, entry.item.id, 'conversation')"
+                @dragleave="onDragLeave"
+                @drop="onTopLevelDrop($event, entry.item.id, 'conversation')"
+                @dragend="resetDragState"
+              />
+
+              <ConversationSidebarFolder
+                v-else
+                :entry="entry"
+                :is-expanded="isFolderExpanded(entry.folder, entry.visibleItems.length)"
+                :is-searching="isSearching"
+                :renaming-folder-id="renamingFolderId"
+                :rename-input="renameInput"
+                :folder-drop-class="topLevelDropClass(entry.folder.id, 'folder')"
+                :folder-body-drop-class="folderBodyDropClass(entry.folder.id)"
+                :drag-item="dragItem"
+                :conversation-drop-class="(conversationId) => topLevelDropClass(conversationId, 'conversation')"
+                @update:rename-input="renameInput = $event"
+                @toggle="toggleFolderCollapsed(entry.folder.id)"
+                @start-rename="startRenameFolder(entry.folder)"
+                @commit-rename="commitRenameFolder(entry.folder.id)"
+                @cancel-rename="cancelRenameFolder"
+                @dragstart-folder="onFolderDragStart($event, entry.folder.id)"
+                @dragover-folder="onTopLevelDragOver($event, entry.folder.id, 'folder')"
+                @dragleave="onDragLeave"
+                @drop-folder="onTopLevelDrop($event, entry.folder.id, 'folder')"
+                @dragend="resetDragState"
+                @dragover-body="onFolderBodyDragOver($event, entry.folder.id)"
+                @drop-body="onFolderBodyDrop(entry.folder.id)"
+                @select-conversation="emit('selectConversation', $event)"
+                @delete-conversation="emit('deleteConversation', $event)"
+                @dragstart-conversation="onConversationDragStart($event.event, $event.conversationId, 'folder', entry.folder.id)"
+                @dragover-conversation="onFolderConversationDragOver($event.event, $event.conversationId, entry.folder.id)"
+                @drop-conversation="onFolderConversationDrop($event.event, $event.conversationId, entry.folder.id)"
+              />
+            </template>
           </div>
         </div>
       </section>
@@ -409,6 +382,12 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
   margin-bottom: 12px;
 }
 
+.conv-section-header-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
 .conv-section-toggle {
   display: flex;
   align-items: center;
@@ -429,6 +408,26 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
 
 .conv-section-toggle.collapsed {
   background: transparent;
+}
+
+.conv-folder-add-btn {
+  flex-shrink: 0;
+  min-width: 70px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+  background: color-mix(in srgb, var(--app-panel-muted) 54%, transparent);
+  color: var(--app-text-soft);
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+}
+
+.conv-folder-add-btn:hover {
+  border-color: color-mix(in srgb, var(--app-accent) 30%, var(--app-border));
+  background: color-mix(in srgb, var(--app-panel-muted) 76%, transparent);
+  color: var(--app-text);
 }
 
 .conv-section-toggle-copy {
@@ -485,8 +484,6 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
   transform: rotate(-90deg);
 }
 
-/* ── Grid-based collapse (no layout thrashing) ──────────────────────────── */
-
 .conv-section-body {
   display: grid;
   grid-template-rows: 1fr;
@@ -507,259 +504,15 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
   width: 229px;
 }
 
+.conv-section-body-conversations.drop-append {
+  border: 1px dashed color-mix(in srgb, var(--app-accent) 44%, var(--app-border));
+  border-radius: 12px;
+  padding: 6px;
+  background: color-mix(in srgb, var(--app-accent-soft) 24%, transparent);
+}
+
 .conv-section-body.collapsed .conv-section-body-inner {
   opacity: 0;
-}
-
-/* ────────────────────────────────────────────────────────────────────────── */
-
-.conv-item {
-  position: relative;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 8px 9px;
-  border-radius: 10px;
-  cursor: pointer;
-  color: var(--app-text-soft);
-  font-size: 0.8em;
-  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
-  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
-  overflow: hidden;
-}
-
-.conv-item::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 2px;
-  border-radius: 999px;
-  background: transparent;
-  transition: background 0.18s ease;
-}
-
-.conv-item:hover {
-  background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
-  border-color: color-mix(in srgb, var(--app-accent) 12%, var(--app-border));
-  color: var(--app-text);
-  width: 229px;
-}
-
-.conv-item.active {
-  background: color-mix(in srgb, var(--app-accent-soft) 42%, transparent);
-  border-color: color-mix(in srgb, var(--app-accent-glow) 60%, transparent);
-  color: var(--app-text-strong);
-}
-
-.conv-item.active::before {
-  background: var(--app-accent-strong);
-}
-
-.conv-item.streaming {
-  border-color: color-mix(in srgb, var(--app-accent-glow) 60%, transparent);
-}
-
-.conv-item.waitingAuth {
-  border-color: rgba(245, 158, 11, 0.38);
-}
-
-.agent-item {
-  background: color-mix(in srgb, var(--app-panel) 94%, var(--app-accent-soft) 6%);
-}
-
-.group-item {
-  background: color-mix(in srgb, var(--app-panel) 94%, #14b8a6 5%);
-}
-
-.conversation-item {
-  background: var(--app-panel);
-}
-
-.conv-main {
-  display: flex;
-  gap: 9px;
-  min-width: 0;
-  flex: 1;
-}
-
-.conv-avatar-shell {
-  position: relative;
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-  display: inline-flex;
-  flex-shrink: 0;
-  border: 1px solid color-mix(in srgb, var(--app-border) 80%, transparent);
-  background: color-mix(in srgb, var(--app-panel-muted) 70%, transparent);
-}
-
-.conv-avatar-shell.agent {
-  background: color-mix(in srgb, var(--app-accent-soft) 32%, var(--app-panel));
-}
-
-.conv-avatar-shell.group {
-  background: rgba(20, 184, 166, 0.12);
-}
-
-.conv-avatar-shell.conversation {
-  background: color-mix(in srgb, var(--app-panel-muted) 78%, var(--app-panel));
-}
-
-.conv-copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.conv-title-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.conv-title-stack {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-
-.conv-type-chip {
-  width: fit-content;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--app-text-faint);
-  background: color-mix(in srgb, var(--app-panel-muted) 76%, transparent);
-}
-
-.conv-type-chip.agent {
-  color: color-mix(in srgb, var(--app-accent-strong) 88%, black 12%);
-  background: color-mix(in srgb, var(--app-accent-soft) 82%, white 18%);
-}
-
-.conv-type-chip.group {
-  color: #0f766e;
-  background: rgba(20, 184, 166, 0.18);
-}
-
-.conv-type-chip.conversation {
-  color: var(--app-text-muted);
-  background: color-mix(in srgb, var(--app-panel-muted) 80%, white 20%);
-}
-
-.conv-icon {
-  width: 100%;
-  height: 100%;
-  border-radius: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  flex-shrink: 0;
-  font-size: 0.92rem;
-}
-
-.conv-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.8rem;
-  font-weight: 700;
-  color: var(--app-text-strong);
-}
-
-.conv-subtitle {
-  color: var(--app-text-muted);
-  font-size: 0.7rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  line-clamp: 2;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  line-height: 1.3;
-}
-
-.conv-delete {
-  width: 22px;
-  height: 22px;
-  border-radius: 999px;
-  border: none;
-  background: transparent;
-  color: var(--app-text-faint);
-  font-size: 0.92rem;
-  cursor: pointer;
-  padding: 0;
-  line-height: 1;
-  flex-shrink: 0;
-  opacity: 0;
-  transform: translateY(2px) scale(0.94);
-  transition: opacity 0.18s ease, transform 0.18s ease, color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
-}
-
-.conv-item:hover .conv-delete,
-.conv-item.active .conv-delete {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-}
-
-.conv-delete:hover {
-  background: rgba(239, 68, 68, 0.08);
-  color: var(--app-danger);
-}
-
-.conv-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border-radius: 999px;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  flex-shrink: 0;
-}
-
-.conv-status.streaming {
-  color: var(--app-accent-strong);
-  background: color-mix(in srgb, var(--app-accent-soft) 82%, transparent);
-}
-
-.conv-status.auth {
-  color: #b45309;
-  background: rgba(245, 158, 11, 0.16);
-}
-
-.conv-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: currentColor;
-}
-
-.conv-status.streaming .conv-status-dot {
-  animation: pulse-dot 1.15s ease-in-out infinite;
-}
-
-.conv-status.auth .conv-status-dot {
-  animation: pulse-dot 1.45s ease-in-out infinite;
-}
-
-.conv-status-count {
-  font-size: 0.64rem;
-  opacity: 0.86;
-}
-
-@keyframes pulse-dot {
-  0%, 100% { transform: scale(0.85); opacity: 0.72; }
-  50% { transform: scale(1.15); opacity: 1; }
 }
 
 .conv-empty {
@@ -777,13 +530,12 @@ function isSectionExpanded (key: 'agents' | 'groups' | 'conversations', itemsCou
     width: 100%;
   }
 
-  .conv-item {
+  .conv-section-header-row {
     flex-direction: column;
   }
 
-  .conv-delete {
-    opacity: 1;
-    transform: none;
+  .conv-folder-add-btn {
+    min-height: 38px;
   }
 }
 </style>
