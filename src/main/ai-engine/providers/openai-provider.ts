@@ -55,6 +55,53 @@ interface ChatCompletionBody {
   tool_choice?: string
 }
 
+interface ResponsesContentTextPart {
+  type: 'input_text'
+  text: string
+}
+
+interface ResponsesContentImagePart {
+  type: 'input_image'
+  image_url: string
+}
+
+interface ResponsesInputMessage {
+  role: string
+  content: Array<ResponsesContentTextPart | ResponsesContentImagePart>
+}
+
+interface ResponsesBody {
+  model: string
+  input: ResponsesInputMessage[]
+  stream?: boolean
+  tools?: Array<{ type: 'image_generation' }>
+}
+
+interface ResponsesOutputTextPart {
+  type?: string
+  text?: string
+}
+
+interface ResponsesOutputImagePart {
+  type?: string
+  image_url?: string | { url?: string }
+  b64_json?: string
+  result?: string
+  mime_type?: string
+}
+
+interface ResponsesOutputMessage {
+  type?: string
+  role?: string
+  content?: Array<ResponsesOutputTextPart | ResponsesOutputImagePart>
+}
+
+interface ResponsesApiResponse {
+  output?: Array<ResponsesOutputMessage | ResponsesOutputImagePart | ResponsesOutputTextPart>
+  output_text?: string
+  usage?: Record<string, unknown>
+}
+
 interface MultiModalContentPart {
   text?: string
   inline_data?: {
@@ -99,6 +146,8 @@ export class OpenAIProvider {
   private apiKey: string
   private baseUrl: string
   private model: string
+  private imageGeneration = false
+  private imageEditing = false
   private enableThinking: boolean
   private reasoningEffort: 'low' | 'medium' | 'high' | 'max'
   private contextWindow: number
@@ -149,12 +198,17 @@ export class OpenAIProvider {
 
   private isImageOutputModel (): boolean {
     const normalized = this.model.toLowerCase()
-    return normalized.includes('image-preview') ||
+    return this.imageGeneration ||
+      normalized.includes('image-preview') ||
       normalized.includes('gpt-image') ||
       normalized.includes('imagen') ||
       normalized.includes('-image') ||
       normalized.includes('image-') ||
       normalized.includes('flux')
+  }
+
+  private supportsImageEditing (): boolean {
+    return this.imageEditing
   }
 
   private buildRequestBody (messages: ChatMessage[], tools: ToolDefinition[], stream: boolean): ChatCompletionBody {
@@ -381,6 +435,17 @@ export class OpenAIProvider {
     return `${normalized}/chat/completions`
   }
 
+  private getResponsesUrl (): string {
+    const normalized = this.normalizeBaseUrl(this.baseUrl)
+    if (normalized.endsWith('/responses')) {
+      return normalized
+    }
+    if (normalized.endsWith('/chat/completions')) {
+      return `${normalized.slice(0, -'/chat/completions'.length)}/responses`
+    }
+    return `${normalized}/responses`
+  }
+
   private validateConfig (): void {
     if (!this.apiKey.trim()) {
       throw new Error('当前供应商未配置 API Key')
@@ -403,6 +468,14 @@ export class OpenAIProvider {
 
   setModel (model: string): void {
     this.model = model
+  }
+
+  setImageGeneration (enabled: boolean): void {
+    this.imageGeneration = enabled
+  }
+
+  setImageEditing (enabled: boolean): void {
+    this.imageEditing = enabled
   }
 
   getModel (): string {
@@ -444,6 +517,10 @@ export class OpenAIProvider {
     abortSignal?: AbortSignal,
     options?: RequestOptions
   ): Promise<ChatMessage> {
+    if (this.isImageOutputModel()) {
+      return await this.imageResponseCompletion(messages, abortSignal, options)
+    }
+
     const body = this.buildRequestBody(messages, tools, false)
     const callId = this.logger?.logProviderCallStart({
       stream: false,
@@ -454,7 +531,7 @@ export class OpenAIProvider {
     })
 
     try {
-      const response = await this.fetchWithRetry(body, false, abortSignal, options)
+      const response = await this.fetchWithRetry(this.getChatCompletionUrl(), body, false, abortSignal, options)
       const data = await response.json() as { choices: Array<{ message: ApiChatMessage }>; usage?: Record<string, unknown> }
       const message = this.normalizeAssistantMessage(data.choices[0].message)
       if (data.usage && this.onUsage) {
@@ -488,6 +565,12 @@ export class OpenAIProvider {
     | { type: 'tool_calls'; message: ChatMessage }
     | { type: 'done'; message: ChatMessage }
   > {
+    if (this.isImageOutputModel()) {
+      const message = await this.imageResponseCompletion(messages, abortSignal)
+      yield { type: 'done', message }
+      return
+    }
+
     const body = this.buildRequestBody(messages, tools, true)
     const callId = this.logger?.logProviderCallStart({
       stream: !this.isImageOutputModel(),
@@ -497,26 +580,8 @@ export class OpenAIProvider {
       tools
     })
 
-    if (this.isImageOutputModel()) {
-      try {
-        const response = await this.fetchWithRetry(body, false, abortSignal)
-        const data = await response.json() as { choices: Array<{ message: ApiChatMessage }> }
-        const message = this.normalizeAssistantMessage(data.choices[0].message)
-        if (callId) {
-          this.logger?.logProviderCallSuccess(callId, { message, raw: data })
-        }
-        yield { type: 'done', message }
-        return
-      } catch (error) {
-        if (callId) {
-          this.logger?.logProviderCallFailure(callId, this.normalizeRequestError(error), { stream: false, model: this.model })
-        }
-        throw error
-      }
-    }
-
     try {
-      const response = await this.fetchWithRetry(body, true, abortSignal)
+      const response = await this.fetchWithRetry(this.getChatCompletionUrl(), body, true, abortSignal)
 
       const reader = response.body?.getReader()
       if (!reader) throw new Error('No response body')
@@ -622,8 +687,197 @@ export class OpenAIProvider {
     }
   }
 
+  private buildResponsesInput (messages: ChatMessage[]): ResponsesInputMessage[] {
+    const normalizedMessages = this.normalizeOutgoingMessages(messages)
+    if (!this.supportsImageEditing()) {
+      const hasImageInput = normalizedMessages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url' && Boolean(part.image_url?.url)))
+      if (hasImageInput) {
+        throw new Error('当前模型未开启图片编辑支持，请先在设置中为该模型开启“图片编辑”')
+      }
+    }
+
+    const responseMessages = normalizedMessages.map((message) => {
+      const parts: Array<ResponsesContentTextPart | ResponsesContentImagePart> = []
+
+      if (typeof message.content === 'string') {
+        if (message.content) {
+          parts.push({ type: 'input_text', text: message.content })
+        }
+      } else {
+        for (const part of message.content) {
+          if (part.type === 'text' && part.text) {
+            parts.push({ type: 'input_text', text: part.text })
+          } else if (part.type === 'image_url' && part.image_url?.url && this.supportsImageEditing()) {
+            parts.push({ type: 'input_image', image_url: part.image_url.url })
+          }
+        }
+      }
+
+      return {
+        role: message.role === 'assistant' || message.role === 'system' ? message.role : 'user',
+        content: parts
+      }
+    }).filter(message => message.content.length > 0)
+
+    if (responseMessages.length > 0) {
+      return responseMessages
+    }
+
+    return [{
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Continue the current task from the existing context. Do not repeat completed steps.' }]
+    }]
+  }
+
+  private buildResponsesBody (messages: ChatMessage[]): ResponsesBody {
+    const body: ResponsesBody = {
+      model: this.model,
+      input: this.buildResponsesInput(messages),
+      stream: false
+    }
+
+    body.tools = [{ type: 'image_generation' }]
+    return body
+  }
+
+  private resolveResponseImageUrl (part: ResponsesOutputImagePart): string | null {
+    if (typeof part.image_url === 'string' && part.image_url) {
+      return part.image_url
+    }
+
+    if (part.image_url && typeof part.image_url === 'object' && typeof part.image_url.url === 'string' && part.image_url.url) {
+      return part.image_url.url
+    }
+
+    const base64 = typeof part.result === 'string' && part.result
+      ? part.result
+      : (typeof part.b64_json === 'string' ? part.b64_json : '')
+    if (!base64) {
+      return null
+    }
+
+    const mimeType = part.mime_type?.trim() || 'image/png'
+    return `data:${mimeType};base64,${base64}`
+  }
+
+  private normalizeResponsesMessage (data: ResponsesApiResponse): ChatMessage {
+    const contentParts: ChatContentPart[] = []
+
+    const pushText = (text?: string) => {
+      if (typeof text !== 'string' || text.length === 0) return
+      contentParts.push({ type: 'text', text })
+    }
+
+    const pushImage = (part: ResponsesOutputImagePart) => {
+      const url = this.resolveResponseImageUrl(part)
+      if (!url) return
+      contentParts.push({
+        type: 'image_url',
+        image_url: { url }
+      })
+    }
+
+    for (const outputItem of data.output || []) {
+      if (outputItem && typeof outputItem === 'object' && Array.isArray((outputItem as ResponsesOutputMessage).content)) {
+        for (const part of (outputItem as ResponsesOutputMessage).content || []) {
+          if (part && typeof part === 'object' && 'text' in part) {
+            pushText((part as ResponsesOutputTextPart).text)
+          } else if (part && typeof part === 'object') {
+            pushImage(part as ResponsesOutputImagePart)
+          }
+        }
+        continue
+      }
+
+      if (outputItem && typeof outputItem === 'object' && 'text' in outputItem) {
+        pushText((outputItem as ResponsesOutputTextPart).text)
+      } else if (outputItem && typeof outputItem === 'object') {
+        pushImage(outputItem as ResponsesOutputImagePart)
+      }
+    }
+
+    if (contentParts.length === 0 && data.output_text) {
+      return {
+        role: 'assistant',
+        content: data.output_text
+      }
+    }
+
+    if (contentParts.length === 0) {
+      return {
+        role: 'assistant',
+        content: ''
+      }
+    }
+
+    if (contentParts.every(part => part.type === 'text')) {
+      return {
+        role: 'assistant',
+        content: contentParts.map(part => part.type === 'text' ? part.text : '').join('')
+      }
+    }
+
+    return {
+      role: 'assistant',
+      content: contentParts
+    }
+  }
+
+  private shouldRetryImageRequestWithoutTool (error: Error): boolean {
+    const message = error.message.toLowerCase()
+    return message.includes('image_generation') ||
+      message.includes('unknown tool') ||
+      message.includes('invalid tool') ||
+      message.includes('unsupported tool')
+  }
+
+  private async imageResponseCompletion (
+    messages: ChatMessage[],
+    abortSignal?: AbortSignal,
+    options?: RequestOptions
+  ): Promise<ChatMessage> {
+    const body = this.buildResponsesBody(messages)
+    const callId = this.logger?.logProviderCallStart({
+      stream: false,
+      model: this.model,
+      baseUrl: this.getResponsesUrl(),
+      messages: this.normalizeOutgoingMessages(messages),
+      tools: []
+    })
+
+    try {
+      let response: Response
+      try {
+        response = await this.fetchWithRetry(this.getResponsesUrl(), body, false, abortSignal, options)
+      } catch (error) {
+        const normalized = this.normalizeRequestError(error)
+        if (!body.tools || !this.shouldRetryImageRequestWithoutTool(normalized)) {
+          throw normalized
+        }
+
+        response = await this.fetchWithRetry(this.getResponsesUrl(), { ...body, tools: undefined }, false, abortSignal, options)
+      }
+
+      const data = await response.json() as ResponsesApiResponse
+      const message = this.normalizeResponsesMessage(data)
+      if (data.usage && this.onUsage) {
+        this.onUsage(data.usage as Parameters<UsageCallback>[0])
+      }
+      if (callId) {
+        this.logger?.logProviderCallSuccess(callId, { message, raw: data })
+      }
+      return message
+    } catch (error) {
+      if (callId) {
+        this.logger?.logProviderCallFailure(callId, this.normalizeRequestError(error), { stream: false, model: this.model })
+      }
+      throw error
+    }
+  }
+
   private async fetchWithRetry (
-    body: ChatCompletionBody,
+    url: string,
+    body: ChatCompletionBody | ResponsesBody,
     stream: boolean,
     abortSignal?: AbortSignal,
     options?: RequestOptions
@@ -651,7 +905,7 @@ export class OpenAIProvider {
         : null
 
       try {
-        const response = await fetch(this.getChatCompletionUrl(), {
+        const response = await fetch(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
