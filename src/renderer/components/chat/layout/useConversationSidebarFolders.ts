@@ -12,6 +12,19 @@ const CONVERSATION_LAYOUT_STORAGE_KEY = 'conversation-sidebar-layout'
 const DEFAULT_FOLDER_NAME = '新文件夹'
 const TOP_LEVEL_EDGE_RATIO = 0.24
 const FOLDER_ID_PREFIX = 'folder_'
+let transparentDragImage: HTMLCanvasElement | null = null
+
+function applyTransparentDragImage (event: DragEvent) {
+  if (typeof document === 'undefined' || !event.dataTransfer) return
+
+  if (!transparentDragImage) {
+    transparentDragImage = document.createElement('canvas')
+    transparentDragImage.width = 1
+    transparentDragImage.height = 1
+  }
+
+  event.dataTransfer.setDragImage(transparentDragImage, 0, 0)
+}
 
 function filterConversationIds (value: unknown): string[] {
   const seenConversationIds = new Set<string>()
@@ -472,6 +485,7 @@ export function useConversationSidebarFolders (
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = 'move'
       event.dataTransfer.setData('text/plain', conversationId)
+      applyTransparentDragImage(event)
     }
   }
 
@@ -486,6 +500,7 @@ export function useConversationSidebarFolders (
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = 'move'
       event.dataTransfer.setData('text/plain', folderId)
+      applyTransparentDragImage(event)
     }
   }
 

@@ -103,9 +103,9 @@ const emit = defineEmits<{
     <div
       v-if="isExpanded"
       :class="['conv-folder-children', folderBodyDropClass]"
-      @dragover="emit('dragoverBody', $event)"
-      @dragleave="emit('dragleave', $event)"
-      @drop="emit('dropBody')"
+      @dragover.self="emit('dragoverBody', $event)"
+      @dragleave.self="emit('dragleave', $event)"
+      @drop.self="emit('dropBody')"
     >
       <div
         v-if="entry.visibleItems.length === 0"
@@ -168,8 +168,7 @@ const emit = defineEmits<{
 }
 
 .conv-folder.drop-into-folder .conv-folder-shell,
-.conv-folder.drop-append .conv-folder-shell,
-.conv-folder-children.drop-append {
+.conv-folder.drop-append .conv-folder-shell {
   border-color: color-mix(in srgb, var(--app-accent-glow) 66%, transparent);
   background: color-mix(in srgb, var(--app-accent-soft) 30%, transparent);
 }
@@ -339,20 +338,42 @@ const emit = defineEmits<{
 }
 
 .conv-folder-children {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 4px;
   margin-top: 6px;
-  padding: 6px 6px 6px 0;
+  margin-left: 14px;
+  padding: 8px;
   border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 74%, transparent);
+  background: color-mix(in srgb, var(--app-panel-muted) 50%, transparent);
+}
+
+.conv-folder-children::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 6px;
+  height: 2px;
+  border-radius: 999px;
+  background: transparent;
+  pointer-events: none;
+  transition: background 0.18s ease, opacity 0.18s ease;
+  opacity: 0;
+}
+
+.conv-folder-children.drop-append::after {
+  opacity: 1;
+  background: var(--app-accent-strong);
 }
 
 .conv-folder-empty {
-  margin-left: 14px;
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px dashed color-mix(in srgb, var(--app-border) 74%, transparent);
-  background: color-mix(in srgb, var(--app-panel-muted) 48%, transparent);
+  background: color-mix(in srgb, var(--app-panel) 78%, transparent);
   color: var(--app-text-faint);
   font-size: 0.7rem;
 }
