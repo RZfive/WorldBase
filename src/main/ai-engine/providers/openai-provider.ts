@@ -140,6 +140,8 @@ type StreamReadResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Arra
 export class OpenAIProvider {
   /** Standard requests should fail fast to surface provider issues promptly. */
   private static readonly STANDARD_REQUEST_TIMEOUT_MS = 60000
+  /** Image generation can take significantly longer; use a generous timeout. */
+  private static readonly IMAGE_REQUEST_TIMEOUT_MS = 300000
   /** Streaming responses should only time out when no bytes arrive for too long. */
   private static readonly STREAM_IDLE_TIMEOUT_MS = 90000
   private static readonly STREAM_IDLE_TIMEOUT_MESSAGE = 'AI stream idle timed out'
@@ -878,6 +880,7 @@ export class OpenAIProvider {
     abortSignal?: AbortSignal,
     options?: RequestOptions
   ): Promise<ChatMessage> {
+    const imageOptions: RequestOptions = { timeoutMs: OpenAIProvider.IMAGE_REQUEST_TIMEOUT_MS, ...options }
     const body = this.buildResponsesBody(messages)
     const callId = this.logger?.logProviderCallStart({
       stream: false,
@@ -890,7 +893,7 @@ export class OpenAIProvider {
     try {
       let response: Response
       try {
-        response = await this.fetchWithRetry(this.getResponsesUrl(), body, false, abortSignal, options)
+        response = await this.fetchWithRetry(this.getResponsesUrl(), body, false, abortSignal, imageOptions)
       } catch (error) {
         const normalized = this.normalizeRequestError(error)
 
@@ -900,14 +903,14 @@ export class OpenAIProvider {
           if (callId) {
             this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
           }
-          return await this.imageChatCompletion(messages, abortSignal, options)
+          return await this.imageChatCompletion(messages, abortSignal, imageOptions)
         }
 
         if (!body.tools || !this.shouldRetryImageRequestWithoutTool(normalized)) {
           throw normalized
         }
 
-        response = await this.fetchWithRetry(this.getResponsesUrl(), { ...body, tools: undefined }, false, abortSignal, options)
+        response = await this.fetchWithRetry(this.getResponsesUrl(), { ...body, tools: undefined }, false, abortSignal, imageOptions)
       }
 
       const data = await response.json() as ResponsesApiResponse
@@ -927,7 +930,7 @@ export class OpenAIProvider {
         if (callId) {
           this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
         }
-        return await this.imageChatCompletion(messages, abortSignal, options)
+        return await this.imageChatCompletion(messages, abortSignal, imageOptions)
       }
 
       if (callId) {
