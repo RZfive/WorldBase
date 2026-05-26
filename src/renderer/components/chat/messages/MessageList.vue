@@ -214,9 +214,26 @@ const bottomSpacerHeight = computed(() => {
 
 function updateMeasuredHeight (index: number, height: number): void {
   const nextHeight = Math.max(Math.ceil(height), 1)
-  if (measuredMessageHeights[index] === nextHeight) return
+  const prevHeight = measuredMessageHeights[index]
+  if (prevHeight === nextHeight) return
+
+  const heightDelta = nextHeight - (prevHeight ?? ESTIMATED_MESSAGE_HEIGHT)
   measuredMessageHeights[index] = nextHeight
-  if (autoStickEnabled.value) scrollToBottom()
+
+  if (autoStickEnabled.value) {
+    scrollToBottom()
+    return
+  }
+
+  // Scroll anchoring: if the resized message is above or at the current scroll
+  // position, adjust scrollTop so that visible content doesn't jump.
+  if (messagesContainer.value && index < visibleRange.value.start + OVERSCAN_COUNT) {
+    const offsetEnd = getOffsetBefore(index) + nextHeight
+    if (offsetEnd <= scrollTop.value + heightDelta) {
+      messagesContainer.value.scrollTop += heightDelta
+      scrollTop.value = messagesContainer.value.scrollTop
+    }
+  }
 }
 
 function cleanupMessageObserver (index: number): void {
@@ -246,9 +263,16 @@ function setMessageItemRef (index: number, element: unknown): void {
 
   const observer = new ResizeObserver(entries => {
     const entry = entries[0]
-    if (entry) {
-      updateMeasuredHeight(index, entry.contentRect.height)
+    if (!entry) return
+    // Use borderBoxSize when available for consistency with offsetHeight;
+    // fall back to offsetHeight (contentRect excludes padding/border).
+    let height: number
+    if (entry.borderBoxSize?.length) {
+      height = entry.borderBoxSize[0].blockSize
+    } else {
+      height = (entry.target as HTMLElement).offsetHeight
     }
+    updateMeasuredHeight(index, height)
   })
   observer.observe(item)
   messageObservers.set(index, observer)
@@ -260,6 +284,18 @@ function resetVirtualMeasurements (): void {
   }
   messageObservers.forEach(observer => observer.disconnect())
   messageObservers.clear()
+}
+
+function trimVirtualMeasurements (): void {
+  // Only remove entries whose index is now beyond the message list bounds.
+  const count = props.messages.length
+  for (const key in measuredMessageHeights) {
+    const idx = Number(key)
+    if (idx >= count) {
+      delete measuredMessageHeights[idx]
+      cleanupMessageObserver(idx)
+    }
+  }
 }
 
 function getMessageSignature (msg?: ChatMessage): string {
@@ -311,7 +347,7 @@ watch(
 watch(
   () => props.messages,
   () => {
-    resetVirtualMeasurements()
+    trimVirtualMeasurements()
     nextTick(syncViewportMetrics)
   }
 )
