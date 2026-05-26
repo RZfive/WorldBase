@@ -831,6 +831,48 @@ export class OpenAIProvider {
       message.includes('unsupported tool')
   }
 
+  private shouldFallbackToChatCompletions (error: Error): boolean {
+    const message = error.message.toLowerCase()
+    return message.includes('missing_required_parameter') ||
+      (message.includes('"input"') && message.includes('must be provided')) ||
+      message.includes('previous_response_id') ||
+      message.includes('conversation_id') ||
+      message.includes('not found') && message.includes('/responses')
+  }
+
+  private async imageChatCompletion (
+    messages: ChatMessage[],
+    abortSignal?: AbortSignal,
+    options?: RequestOptions
+  ): Promise<ChatMessage> {
+    const body = this.buildRequestBody(messages, [], false)
+    const callId = this.logger?.logProviderCallStart({
+      stream: false,
+      model: this.model,
+      baseUrl: this.getChatCompletionUrl(),
+      messages: body.messages,
+      tools: []
+    })
+
+    try {
+      const response = await this.fetchWithRetry(this.getChatCompletionUrl(), body, false, abortSignal, options)
+      const data = await response.json() as { choices: Array<{ message: ApiChatMessage }>; usage?: Record<string, unknown> }
+      const message = this.normalizeAssistantMessage(data.choices[0].message)
+      if (data.usage && this.onUsage) {
+        this.onUsage(data.usage as Parameters<UsageCallback>[0])
+      }
+      if (callId) {
+        this.logger?.logProviderCallSuccess(callId, { message, raw: data })
+      }
+      return message
+    } catch (error) {
+      if (callId) {
+        this.logger?.logProviderCallFailure(callId, this.normalizeRequestError(error), { stream: false, model: this.model })
+      }
+      throw error
+    }
+  }
+
   private async imageResponseCompletion (
     messages: ChatMessage[],
     abortSignal?: AbortSignal,
@@ -851,6 +893,16 @@ export class OpenAIProvider {
         response = await this.fetchWithRetry(this.getResponsesUrl(), body, false, abortSignal, options)
       } catch (error) {
         const normalized = this.normalizeRequestError(error)
+
+        // If the Responses API is not supported by this provider, fall back
+        // to the Chat Completions API with modalities: ['text', 'image'].
+        if (this.shouldFallbackToChatCompletions(normalized)) {
+          if (callId) {
+            this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
+          }
+          return await this.imageChatCompletion(messages, abortSignal, options)
+        }
+
         if (!body.tools || !this.shouldRetryImageRequestWithoutTool(normalized)) {
           throw normalized
         }
@@ -868,8 +920,18 @@ export class OpenAIProvider {
       }
       return message
     } catch (error) {
+      const normalized = this.normalizeRequestError(error)
+
+      // Also catch cases where the error surfaces after the retry-without-tool
+      if (this.shouldFallbackToChatCompletions(normalized)) {
+        if (callId) {
+          this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
+        }
+        return await this.imageChatCompletion(messages, abortSignal, options)
+      }
+
       if (callId) {
-        this.logger?.logProviderCallFailure(callId, this.normalizeRequestError(error), { stream: false, model: this.model })
+        this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
       }
       throw error
     }
