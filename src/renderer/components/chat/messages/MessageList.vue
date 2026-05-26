@@ -221,6 +221,21 @@ function updateMeasuredHeight (index: number, height: number): void {
   measuredMessageHeights[index] = nextHeight
 
   if (autoStickEnabled.value) {
+    if (messagesContainer.value) {
+      // Synchronous scroll anchoring: if the resized message is above or at the
+      // current scroll position, adjust immediately to prevent visual jumps during
+      // generation (e.g. tool calls completing, thinking blocks changing height).
+      const offsetEnd = getOffsetBefore(index) + nextHeight
+      if (offsetEnd <= scrollTop.value + heightDelta) {
+        messagesContainer.value.scrollTop += heightDelta
+        scrollTop.value = messagesContainer.value.scrollTop
+      }
+      // Immediate scroll-to-bottom: ResizeObserver fires after layout so
+      // scrollHeight already reflects the current DOM state.
+      messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
+      scrollTop.value = messagesContainer.value.scrollTop
+    }
+    // Deferred correction after Vue reactive DOM updates (spacer heights etc.)
     scrollToBottom()
     return
   }
