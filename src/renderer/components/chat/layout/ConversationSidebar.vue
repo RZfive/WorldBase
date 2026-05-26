@@ -196,9 +196,9 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
       </section>
 
       <section v-if="props.conversationItems.length > 0 || conversationEntries.length > 0" class="conv-section">
-        <div class="conv-section-header-row">
+        <div class="conv-section-toggle-shell">
           <button
-            class="conv-section-toggle"
+            class="conv-section-toggle conv-section-toggle-embedded"
             :class="{ collapsed: !isSectionExpanded('conversations', conversationEntries.length) }"
             type="button"
             @click="toggleSection('conversations')"
@@ -214,7 +214,12 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
               </svg>
             </span>
           </button>
-          <button class="conv-folder-add-btn" type="button" title="新建空文件夹" @click="createEmptyFolder">+ 文件夹</button>
+          <button class="conv-folder-add-btn" type="button" title="新建空文件夹" @click.stop="createEmptyFolder">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M2.25 4.75A1.5 1.5 0 0 1 3.75 3.25H6.2a1 1 0 0 1 .77.36l.57.7a1 1 0 0 0 .77.36h3.94a1.5 1.5 0 0 1 1.5 1.5v4.08a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+              <path d="M8 6.15v3.7M6.15 8h3.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+            </svg>
+          </button>
         </div>
         <div
           class="conv-section-body"
@@ -222,9 +227,9 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
         >
           <div
             :class="['conv-section-body-inner', 'conv-section-body-conversations', conversationSectionDropClass()]"
-            @dragover="onConversationSectionDragOver"
-            @dragleave="onDragLeave"
-            @drop="onConversationSectionDrop"
+            @dragover.self="onConversationSectionDragOver"
+            @dragleave.self="onDragLeave"
+            @drop.self="onConversationSectionDrop"
           >
             <template v-for="entry in conversationEntries" :key="entry.kind === 'folder' ? `folder-${entry.folder.id}` : entry.item.id">
               <ConversationSidebarItemCard
@@ -382,12 +387,6 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
   margin-bottom: 12px;
 }
 
-.conv-section-header-row {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-}
-
 .conv-section-toggle {
   display: flex;
   align-items: center;
@@ -401,9 +400,36 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
   transition: border-color 0.18s ease, background 0.18s ease;
 }
 
+.conv-section-toggle-shell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+  background: color-mix(in srgb, var(--app-panel-muted) 54%, transparent);
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.conv-section-toggle-shell:hover {
+  border-color: color-mix(in srgb, var(--app-accent) 22%, var(--app-border));
+  background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
+}
+
+.conv-section-toggle-embedded {
+  padding-right: 4px;
+  border: none;
+  background: transparent;
+}
+
 .conv-section-toggle:hover {
   border-color: color-mix(in srgb, var(--app-accent) 22%, var(--app-border));
   background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
+}
+
+.conv-section-toggle-embedded:hover {
+  border-color: transparent;
+  background: transparent;
 }
 
 .conv-section-toggle.collapsed {
@@ -412,21 +438,26 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
 
 .conv-folder-add-btn {
   flex-shrink: 0;
-  min-width: 70px;
-  padding: 0 10px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
-  background: color-mix(in srgb, var(--app-panel-muted) 54%, transparent);
+  width: 28px;
+  height: 28px;
+  margin-right: 4px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--app-text-soft);
-  font-size: 0.72rem;
-  font-weight: 700;
   cursor: pointer;
   transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
 }
 
+.conv-folder-add-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
 .conv-folder-add-btn:hover {
   border-color: color-mix(in srgb, var(--app-accent) 30%, var(--app-border));
-  background: color-mix(in srgb, var(--app-panel-muted) 76%, transparent);
+  background: color-mix(in srgb, var(--app-accent-soft) 36%, transparent);
   color: var(--app-text);
 }
 
@@ -504,11 +535,28 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
   width: 229px;
 }
 
-.conv-section-body-conversations.drop-append {
-  border: 1px dashed color-mix(in srgb, var(--app-accent) 44%, var(--app-border));
-  border-radius: 12px;
-  padding: 6px;
-  background: color-mix(in srgb, var(--app-accent-soft) 24%, transparent);
+.conv-section-body-conversations {
+  position: relative;
+  padding-bottom: 6px;
+}
+
+.conv-section-body-conversations::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: transparent;
+  pointer-events: none;
+  transition: background 0.18s ease, opacity 0.18s ease;
+  opacity: 0;
+}
+
+.conv-section-body-conversations.drop-append::after {
+  opacity: 1;
+  background: var(--app-accent-strong);
 }
 
 .conv-section-body.collapsed .conv-section-body-inner {
@@ -530,12 +578,13 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
     width: 100%;
   }
 
-  .conv-section-header-row {
-    flex-direction: column;
+  .conv-section-toggle-shell {
+    width: 100%;
   }
 
   .conv-folder-add-btn {
-    min-height: 38px;
+    width: 30px;
+    height: 30px;
   }
 }
 </style>
