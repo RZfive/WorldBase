@@ -65,6 +65,8 @@ const {
   commitRenameFolder,
   cancelRenameFolder,
   toggleFolderCollapsed,
+  ungroupFolder,
+  deleteFolder,
   isFolderExpanded,
   onConversationDragStart,
   onFolderDragStart,
@@ -208,17 +210,25 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
               <span class="conv-section-hint">自由聊天记录</span>
             </span>
             <span class="conv-section-meta">{{ filteredConversationCount }}/{{ props.conversationItems.length }}</span>
-            <span class="conv-section-caret-shell" aria-hidden="true">
-              <svg class="conv-section-caret" viewBox="0 0 16 16" fill="none">
-                <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            </span>
           </button>
           <button class="conv-folder-add-btn" type="button" title="新建空文件夹" @click.stop="createEmptyFolder">
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M2.25 4.75A1.5 1.5 0 0 1 3.75 3.25H6.2a1 1 0 0 1 .77.36l.57.7a1 1 0 0 0 .77.36h3.94a1.5 1.5 0 0 1 1.5 1.5v4.08a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
               <path d="M8 6.15v3.7M6.15 8h3.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
             </svg>
+          </button>
+          <button
+            class="conv-section-caret-btn"
+            :class="{ collapsed: !isSectionExpanded('conversations', conversationEntries.length) }"
+            type="button"
+            aria-hidden="true"
+            @click="toggleSection('conversations')"
+          >
+            <span class="conv-section-caret-shell">
+              <svg class="conv-section-caret" viewBox="0 0 16 16" fill="none">
+                <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
           </button>
         </div>
         <div
@@ -275,6 +285,8 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
                 @drop-body="onFolderBodyDrop(entry.folder.id)"
                 @select-conversation="emit('selectConversation', $event)"
                 @delete-conversation="emit('deleteConversation', $event)"
+                @ungroup="ungroupFolder(entry.folder.id)"
+                @delete-folder="deleteFolder(entry.folder.id)"
                 @dragstart-conversation="onConversationDragStart($event.event, $event.conversationId, 'folder', entry.folder.id)"
                 @dragover-conversation="onFolderConversationDragOver($event.event, $event.conversationId, entry.folder.id)"
                 @drop-conversation="onFolderConversationDrop($event.event, $event.conversationId, entry.folder.id)"
@@ -440,7 +452,7 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
   flex-shrink: 0;
   width: 28px;
   height: 28px;
-  margin-right: 4px;
+  margin-right: 0;
   padding: 0;
   border-radius: 8px;
   border: 1px solid transparent;
@@ -459,6 +471,29 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
   border-color: color-mix(in srgb, var(--app-accent) 30%, var(--app-border));
   background: color-mix(in srgb, var(--app-accent-soft) 36%, transparent);
   color: var(--app-text);
+}
+
+.conv-section-caret-btn {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin-right: 4px;
+  padding: 0;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.conv-section-caret-btn .conv-section-caret {
+  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.conv-section-caret-btn.collapsed .conv-section-caret {
+  transform: rotate(-90deg);
 }
 
 .conv-section-toggle-copy {

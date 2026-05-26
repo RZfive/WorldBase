@@ -97,7 +97,7 @@ const emit = defineEmits<{
   font-size: 0.8em;
   border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
   transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .conv-item::before,

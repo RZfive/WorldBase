@@ -23,6 +23,8 @@ const emit = defineEmits<{
   (e: 'startRename'): void
   (e: 'commitRename'): void
   (e: 'cancelRename'): void
+  (e: 'ungroup'): void
+  (e: 'deleteFolder'): void
   (e: 'dragstartFolder', event: DragEvent): void
   (e: 'dragoverFolder', event: DragEvent): void
   (e: 'dragleave', event: DragEvent): void
@@ -89,15 +91,16 @@ const emit = defineEmits<{
                 </svg>
               </span>
             </div>
-            <div class="conv-folder-preview" :class="{ empty: entry.previewItems.length === 0 }">
-              <span v-if="entry.previewItems.length === 0" class="conv-folder-pill empty">空文件夹，拖拽对话到这里</span>
-              <span v-for="item in entry.previewItems" :key="`${entry.folder.id}-${item.id}`" class="conv-folder-pill">
-                {{ item.title }}
-              </span>
-            </div>
           </div>
         </div>
       </button>
+      <div class="conv-folder-actions">
+        <button class="conv-folder-action-btn" type="button" title="解散文件夹（对话保留）" @click.stop="emit('ungroup')">
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3 4h10M5 4V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1M6.5 7v4M9.5 7v4M4 4l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L12 4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </div>
     </div>
 
     <div
@@ -179,6 +182,7 @@ const emit = defineEmits<{
 
 .conv-folder-shell {
   display: flex;
+  align-items: center;
   background: var(--app-panel);
   border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
   border-radius: 12px;
@@ -192,10 +196,11 @@ const emit = defineEmits<{
 }
 
 .conv-folder-toggle {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
-  padding: 8px 9px;
+  padding: 6px 9px;
   cursor: pointer;
   text-align: left;
 }
@@ -301,28 +306,42 @@ const emit = defineEmits<{
   transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.conv-folder-preview {
+.conv-folder-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  align-items: center;
+  gap: 2px;
+  margin-right: 6px;
+  opacity: 0;
+  transition: opacity 0.18s ease;
 }
 
-.conv-folder-pill {
-  max-width: 100%;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--app-panel-muted) 82%, transparent);
-  color: var(--app-text-muted);
-  font-size: 0.64rem;
-  line-height: 1.35;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.conv-folder-shell:hover .conv-folder-actions {
+  opacity: 1;
 }
 
-.conv-folder-pill.empty {
-  border: 1px dashed color-mix(in srgb, var(--app-border) 76%, transparent);
+.conv-folder-action-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  border: none;
   background: transparent;
+  color: var(--app-text-faint);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.conv-folder-action-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.conv-folder-action-btn:hover {
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--app-danger);
 }
 
 .conv-folder-rename-input {
@@ -381,6 +400,10 @@ const emit = defineEmits<{
 @media (max-width: 880px) {
   .conv-folder-shell {
     flex-direction: column;
+  }
+
+  .conv-folder-actions {
+    opacity: 1;
   }
 }
 </style>
