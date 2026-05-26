@@ -334,6 +334,35 @@ export function useConversationSidebarFolders (
     finalizeConversationLayout()
   }
 
+  function ungroupFolder (folderId: string) {
+    const folder = getFolderById(folderId)
+    if (!folder) return
+
+    const fKey = folderKey(folderId)
+    const folderIndex = conversationTopLevelOrder.value.indexOf(fKey)
+
+    // Insert conversation keys at folder position
+    const conversationKeys = folder.conversationIds.map(id => conversationKey(id))
+    const nextOrder = conversationTopLevelOrder.value.filter(key => key !== fKey)
+    const insertAt = folderIndex >= 0 ? Math.min(folderIndex, nextOrder.length) : nextOrder.length
+    nextOrder.splice(insertAt, 0, ...conversationKeys)
+    conversationTopLevelOrder.value = nextOrder
+
+    // Remove folder
+    conversationFolders.value = conversationFolders.value.filter(f => f.id !== folderId)
+    finalizeConversationLayout()
+  }
+
+  function deleteFolder (folderId: string) {
+    const folder = getFolderById(folderId)
+    if (!folder) return
+
+    const fKey = folderKey(folderId)
+    conversationTopLevelOrder.value = conversationTopLevelOrder.value.filter(key => key !== fKey)
+    conversationFolders.value = conversationFolders.value.filter(f => f.id !== folderId)
+    finalizeConversationLayout()
+  }
+
   function detachConversationFromCurrentLocation (conversationId: string) {
     const sourceFolder = getFolderByConversationId(conversationId)
     if (sourceFolder) {
@@ -660,6 +689,8 @@ export function useConversationSidebarFolders (
     commitRenameFolder,
     cancelRenameFolder,
     toggleFolderCollapsed,
+    ungroupFolder,
+    deleteFolder,
     isFolderExpanded,
     onConversationDragStart,
     onFolderDragStart,
