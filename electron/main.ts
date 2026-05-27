@@ -3918,14 +3918,25 @@ function setupIPC (): void {
 
   // --- Skill management ---
   ipcMain.handle('skills:list', async () => {
-    return skillStore!.list()
+    const skills = skillStore!.list()
+    return skills.map(s => ({
+      id: s.id,
+      name: s.name,
+      description: s.description,
+      fileCount: s.files.length,
+      files: s.files,
+      scripts: s.scripts,
+      tools: s.tools,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt
+    }))
   })
 
   ipcMain.handle('skills:import', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
-      title: '导入 Skill 文件',
+      title: '导入 Skill 文件或文件夹',
       filters: [{ name: 'Skill 文件', extensions: ['md', 'txt', 'zip'] }],
-      properties: ['openFile', 'multiSelections']
+      properties: ['openFile', 'openDirectory', 'multiSelections']
     })
     if (result.canceled || result.filePaths.length === 0) return []
     const imported: Skill[] = []
