@@ -625,7 +625,17 @@ function notifyAiTaskStatus (
     ? `任务：${taskLabel}\n状态：${statusLabel}\n详情：${detail}`
     : `任务：${taskLabel}\n状态：${statusLabel}`
 
-  new Notification({ title, body }).show()
+  const notification = new Notification({ title, body })
+  notification.once('click', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore()
+      }
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+  notification.show()
 }
 
 function getUrlHostname (value?: string): string | null {
