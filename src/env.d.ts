@@ -634,7 +634,14 @@ interface SkillInfo {
   id: string
   name: string
   description: string
-  content: string
+  /** Number of files in the skill package */
+  fileCount: number
+  /** File type breakdown */
+  files: Array<{ relativePath: string; type: string; size: number }>
+  /** Executable scripts detected */
+  scripts: Array<{ relativePath: string; language: string }>
+  /** Tools/capabilities provided by this skill */
+  tools: string[]
   createdAt: string
   updatedAt: string
 }
