@@ -29,6 +29,7 @@ const nearBottom = ref(true)
 const measuredMessageHeights = reactive<Record<number, number>>({})
 const messageObservers = new Map<number, ResizeObserver>()
 let containerObserver: ResizeObserver | null = null
+let isAnchorScrolling = false
 
 const OVERSCAN_COUNT = 4
 const MESSAGE_GAP = 20
@@ -128,6 +129,7 @@ function syncViewportMetrics (): void {
 
 function handleScroll (): void {
   if (!messagesContainer.value) return
+  if (isAnchorScrolling) return
   const movingUp = messagesContainer.value.scrollTop < scrollTop.value
   syncViewportMetrics()
 
@@ -218,18 +220,16 @@ function updateMeasuredHeight (index: number, height: number): void {
   if (prevHeight === nextHeight) return
 
   const heightDelta = nextHeight - (prevHeight ?? ESTIMATED_MESSAGE_HEIGHT)
+
+  // Compute the top offset of this message BEFORE updating the height map.
+  // getOffsetBefore(index) sums heights of messages 0..index-1, so it is
+  // unaffected by message[index]'s own height — safe to read before or after.
+  const messageTop = getOffsetBefore(index)
+
   measuredMessageHeights[index] = nextHeight
 
   if (autoStickEnabled.value) {
     if (messagesContainer.value) {
-      // Synchronous scroll anchoring: if the resized message is above or at the
-      // current scroll position, adjust immediately to prevent visual jumps during
-      // generation (e.g. tool calls completing, thinking blocks changing height).
-      const offsetEnd = getOffsetBefore(index) + nextHeight
-      if (offsetEnd <= scrollTop.value + heightDelta) {
-        messagesContainer.value.scrollTop += heightDelta
-        scrollTop.value = messagesContainer.value.scrollTop
-      }
       // Immediate scroll-to-bottom: ResizeObserver fires after layout so
       // scrollHeight already reflects the current DOM state.
       messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
@@ -240,13 +240,17 @@ function updateMeasuredHeight (index: number, height: number): void {
     return
   }
 
-  // Scroll anchoring: if the resized message is above or at the current scroll
-  // position, adjust scrollTop so that visible content doesn't jump.
-  if (messagesContainer.value && index < visibleRange.value.start + OVERSCAN_COUNT) {
-    const offsetEnd = getOffsetBefore(index) + nextHeight
-    if (offsetEnd <= scrollTop.value + heightDelta) {
+  // Scroll anchoring when user has scrolled away from bottom:
+  // If the resized message starts above (or at) the current scroll position,
+  // its height change shifts all content below it.  Compensate scrollTop so
+  // that the content the user is looking at stays visually stable.
+  if (messagesContainer.value && messageTop <= scrollTop.value) {
+    isAnchorScrolling = true
+    try {
       messagesContainer.value.scrollTop += heightDelta
       scrollTop.value = messagesContainer.value.scrollTop
+    } finally {
+      isAnchorScrolling = false
     }
   }
 }
