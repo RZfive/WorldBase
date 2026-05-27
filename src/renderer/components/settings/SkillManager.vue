@@ -99,14 +99,18 @@ onMounted(loadSkills)
         <div class="sm-item-row" @click="toggleExpand(skill.id)">
           <div class="sm-item-info">
             <span class="sm-item-name">{{ skill.name }}</span>
-            <span class="sm-item-date">{{ formatDate(skill.createdAt) }}</span>
+            <span v-if="skill.description && expandedSkillId !== skill.id" class="sm-item-brief">{{ skill.description }}</span>
+            <span class="sm-item-meta">
+              {{ formatDate(skill.createdAt) }}
+              <template v-if="skill.fileCount > 0"> · {{ skill.fileCount }} 个文件</template>
+              <template v-if="skill.tools.length > 0"> · {{ skill.tools.length }} 个工具</template>
+            </span>
           </div>
           <div class="sm-item-actions">
             <button class="sm-del" @click.stop="deleteSkill(skill.id)" title="删除">×</button>
             <span class="sm-arrow">{{ expandedSkillId === skill.id ? '▾' : '▸' }}</span>
           </div>
         </div>
-        <div v-if="skill.description && expandedSkillId !== skill.id" class="sm-item-desc">{{ skill.description }}</div>
         <div v-if="expandedSkillId === skill.id" class="sm-item-detail">
           <div v-if="skill.description" class="sm-item-desc-inner">{{ skill.description }}</div>
 
@@ -141,9 +145,11 @@ onMounted(loadSkills)
           <!-- File list -->
           <div v-if="skill.fileCount > 0" class="sm-files">
             <div class="sm-files-title">文件列表</div>
-            <div v-for="file in skill.files" :key="file.relativePath" class="sm-file-item">
-              <span class="sm-file-path">{{ file.relativePath }}</span>
-              <span class="sm-file-size">{{ formatFileSize(file.size) }}</span>
+            <div class="sm-files-scroll">
+              <div v-for="file in skill.files" :key="file.relativePath" class="sm-file-item">
+                <span class="sm-file-path">{{ file.relativePath }}</span>
+                <span class="sm-file-size">{{ formatFileSize(file.size) }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -234,6 +240,7 @@ onMounted(loadSkills)
   display: flex;
   flex-direction: column;
   gap: 2px;
+  overflow: hidden;
 }
 
 .sm-item-name {
@@ -242,7 +249,16 @@ onMounted(loadSkills)
   color: var(--app-text);
 }
 
-.sm-item-date {
+.sm-item-brief {
+  font-size: 0.8em;
+  color: var(--app-text-soft);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sm-item-meta {
   font-size: 0.75em;
   color: var(--app-text-faint);
 }
@@ -266,13 +282,6 @@ onMounted(loadSkills)
 .sm-arrow {
   color: var(--app-text-faint);
   font-size: 0.8em;
-}
-
-.sm-item-desc {
-  padding: 0 0 10px;
-  font-size: 0.82em;
-  color: var(--app-text-soft);
-  line-height: 1.4;
 }
 
 .sm-item-detail {
@@ -346,6 +355,11 @@ onMounted(loadSkills)
   font-size: 0.8em;
   color: var(--app-text-muted);
   margin-bottom: 6px;
+}
+
+.sm-files-scroll {
+  max-height: 200px;
+  overflow-y: auto;
 }
 
 .sm-file-item {
