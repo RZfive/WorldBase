@@ -41,6 +41,33 @@ function formatDate (ts: string | number) {
   })
 }
 
+function formatFileSize (bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function getTotalSize (skill: SkillInfo): number {
+  return skill.files.reduce((sum, f) => sum + f.size, 0)
+}
+
+function getFileTypeSummary (skill: SkillInfo): string {
+  const types: Record<string, number> = {}
+  for (const f of skill.files) {
+    types[f.type] = (types[f.type] || 0) + 1
+  }
+  const labels: Record<string, string> = {
+    markdown: '文档',
+    script: '脚本',
+    config: '配置',
+    code: '代码',
+    other: '其它'
+  }
+  return Object.entries(types)
+    .map(([type, count]) => `${labels[type] || type} ${count}`)
+    .join('、')
+}
+
 onMounted(loadSkills)
 </script>
 
@@ -49,7 +76,7 @@ onMounted(loadSkills)
     <div class="sm-header">
       <div>
         <h3 class="sm-title">Skill 管理</h3>
-        <p class="sm-desc">导入 Skill 文件或 zip 技能包让 AI 掌握专业技能，在聊天中选择激活</p>
+        <p class="sm-desc">导入 Skill 文件、zip 技能包或文件夹让 AI 掌握专业技能，在聊天中选择激活</p>
       </div>
       <button class="sm-import" @click="importSkill">📥 导入 Skill</button>
     </div>
@@ -60,7 +87,7 @@ onMounted(loadSkills)
 
     <div v-else-if="skills.length === 0" class="sm-empty">
       <p>还没有导入任何 Skill</p>
-      <p class="sm-empty-hint">点击「导入 Skill」添加 .md、.txt 或 .zip 格式的技能文件</p>
+      <p class="sm-empty-hint">点击「导入 Skill」添加 .md、.txt、.zip 格式的技能文件或整个文件夹</p>
     </div>
 
     <div v-else class="sm-list">
@@ -80,9 +107,45 @@ onMounted(loadSkills)
           </div>
         </div>
         <div v-if="skill.description && expandedSkillId !== skill.id" class="sm-item-desc">{{ skill.description }}</div>
-        <div v-if="expandedSkillId === skill.id" class="sm-item-content">
+        <div v-if="expandedSkillId === skill.id" class="sm-item-detail">
           <div v-if="skill.description" class="sm-item-desc-inner">{{ skill.description }}</div>
-          <pre>{{ skill.content }}</pre>
+
+          <!-- Stats overview -->
+          <div class="sm-stats">
+            <div class="sm-stat-row">
+              <span class="sm-stat-label">📁 文件</span>
+              <span class="sm-stat-value">{{ skill.fileCount }} 个 ({{ formatFileSize(getTotalSize(skill)) }})</span>
+            </div>
+            <div v-if="skill.fileCount > 0" class="sm-stat-row">
+              <span class="sm-stat-label">📄 组成</span>
+              <span class="sm-stat-value">{{ getFileTypeSummary(skill) }}</span>
+            </div>
+            <div v-if="skill.tools.length > 0" class="sm-stat-row">
+              <span class="sm-stat-label">🔧 提供工具</span>
+              <span class="sm-stat-value">{{ skill.tools.join('、') }}</span>
+            </div>
+            <div v-if="skill.scripts.length > 0" class="sm-stat-row">
+              <span class="sm-stat-label">⚡ 可执行脚本</span>
+              <span class="sm-stat-value">{{ skill.scripts.length }} 个</span>
+            </div>
+          </div>
+
+          <!-- Scripts list -->
+          <div v-if="skill.scripts.length > 0" class="sm-scripts">
+            <div v-for="script in skill.scripts" :key="script.relativePath" class="sm-script-item">
+              <span class="sm-script-lang">{{ script.language }}</span>
+              <span class="sm-script-path">{{ script.relativePath }}</span>
+            </div>
+          </div>
+
+          <!-- File list -->
+          <div v-if="skill.fileCount > 0" class="sm-files">
+            <div class="sm-files-title">文件列表</div>
+            <div v-for="file in skill.files" :key="file.relativePath" class="sm-file-item">
+              <span class="sm-file-path">{{ file.relativePath }}</span>
+              <span class="sm-file-size">{{ formatFileSize(file.size) }}</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -212,7 +275,7 @@ onMounted(loadSkills)
   line-height: 1.4;
 }
 
-.sm-item-content {
+.sm-item-detail {
   padding: 0 0 12px;
 }
 
@@ -223,18 +286,87 @@ onMounted(loadSkills)
   margin-bottom: 8px;
 }
 
-.sm-item-content pre {
-  margin: 0;
-  padding: 12px;
+.sm-stats {
   background: var(--app-panel-muted);
   border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+}
+
+.sm-stat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
   font-size: 0.82em;
+}
+
+.sm-stat-label {
+  color: var(--app-text-muted);
+  min-width: 90px;
+  flex-shrink: 0;
+}
+
+.sm-stat-value {
+  color: var(--app-text);
+}
+
+.sm-scripts {
+  margin-bottom: 10px;
+}
+
+.sm-script-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 0.8em;
+}
+
+.sm-script-lang {
+  background: var(--app-accent);
+  color: #fff;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 0.85em;
+  font-weight: 500;
+}
+
+.sm-script-path {
   color: var(--app-text-soft);
-  white-space: pre-wrap;
-  word-break: break-word;
   font-family: 'SF Mono', 'Menlo', monospace;
-  line-height: 1.5;
-  max-height: 400px;
-  overflow-y: auto;
+}
+
+.sm-files {
+  border-top: 1px solid var(--app-border);
+  padding-top: 8px;
+}
+
+.sm-files-title {
+  font-size: 0.8em;
+  color: var(--app-text-muted);
+  margin-bottom: 6px;
+}
+
+.sm-file-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+  font-size: 0.78em;
+}
+
+.sm-file-path {
+  color: var(--app-text-soft);
+  font-family: 'SF Mono', 'Menlo', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sm-file-size {
+  color: var(--app-text-faint);
+  flex-shrink: 0;
+  margin-left: 8px;
 }
 </style>
