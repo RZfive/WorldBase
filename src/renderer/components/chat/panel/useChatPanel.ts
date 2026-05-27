@@ -1510,10 +1510,18 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       }
     }
 
+    let hadToolSinceLastThinking = false
+
     const flushPendingStreamText = () => {
       clearPendingStreamFlush()
 
       if (pendingThinkingText) {
+        // When thinking arrives after tool calls, start a new thinking block
+        // for the current iteration instead of appending to the previous one.
+        if (hadToolSinceLastThinking) {
+          thinkingAccum = ''
+          hadToolSinceLastThinking = false
+        }
         thinkingAccum += pendingThinkingText
         assistantMessage.thinking = thinkingAccum
         const thinkingBlock = ensureThinkingBlock(assistantMessage)
@@ -1649,6 +1657,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
               upsertGroupTranscriptBlock(assistantMessage, event.transcript)
             } else if (event.type === 'tool_start' && event.name) {
               flushPendingStreamText()
+              hadToolSinceLastThinking = true
               const toolRun = createToolRun(event.name)
               toolRuns.push(toolRun)
               ensureBlocks(assistantMessage).push(createToolBlock(toolRun))
