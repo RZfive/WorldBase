@@ -10,7 +10,8 @@ interface ToolServices {
 
 interface InstallSkillArgs {
   name?: string
-  content: string
+  content?: string
+  file_path?: string
   description?: string
   activate_now?: boolean
 }
@@ -28,7 +29,7 @@ export function toolInstallSkill (services: ToolServices, getSkillEngine: () => 
   return {
     definition: {
       name: 'install_skill',
-      description: 'Install a Skill into the app from raw markdown or text content. After user approval, the skill is saved locally and can be activated immediately for the current conversation.',
+      description: 'Install a Skill into the app from raw markdown/text content or from a local file path (md, txt, zip, or directory). After user approval, the skill is saved locally and can be activated immediately for the current conversation.',
       parameters: {
         type: 'object',
         properties: {
@@ -38,7 +39,11 @@ export function toolInstallSkill (services: ToolServices, getSkillEngine: () => 
           },
           content: {
             type: 'string',
-            description: 'Full skill markdown/text content to install.'
+            description: 'Full skill markdown/text content to install. Either content or file_path must be provided.'
+          },
+          file_path: {
+            type: 'string',
+            description: 'Absolute path to a local skill file (.md, .txt, .zip) or directory to import. Either content or file_path must be provided.'
           },
           description: {
             type: 'string',
@@ -48,8 +53,7 @@ export function toolInstallSkill (services: ToolServices, getSkillEngine: () => 
             type: 'boolean',
             description: 'Whether to register the installed skill into the current conversation immediately. Defaults to true.'
           }
-        },
-        required: ['content']
+        }
       }
     },
     handler: async (args, onProgress) => {
@@ -58,16 +62,37 @@ export function toolInstallSkill (services: ToolServices, getSkillEngine: () => 
       }
 
       const content = typeof args.content === 'string' ? args.content.trim() : ''
-      if (!content) {
-        return { error: 'content is required to install a skill.' }
+      const filePath = typeof args.file_path === 'string' ? args.file_path.trim() : ''
+
+      if (!content && !filePath) {
+        return { error: 'Either content or file_path is required to install a skill.' }
       }
 
       const fallbackName = normalizeSkillName(args.name) || 'Imported Skill'
       const description = typeof args.description === 'string' ? args.description.trim() : undefined
       const activateNow = args.activate_now !== false
 
-      onProgress?.('🧩 Installing skill...', fallbackName)
-      const skill = services.skillStore.importFromContent(fallbackName, content, description)
+      let skill
+
+      if (filePath) {
+        // Import from file path
+        onProgress?.('🧩 Importing skill from file...', filePath)
+        try {
+          skill = await services.skillStore.importFromFile(filePath)
+          // Override description if provided
+          if (description && skill.description !== description) {
+            skill.description = description
+          }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          return { error: `Failed to import skill from file: ${message}` }
+        }
+      } else {
+        // Import from raw content
+        onProgress?.('🧩 Installing skill...', fallbackName)
+        skill = services.skillStore.importFromContent(fallbackName, content, description)
+      }
+
       services.notifySkillsChanged?.({ action: 'imported', count: 1 })
 
       let activation: {
