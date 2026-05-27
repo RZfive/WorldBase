@@ -575,7 +575,7 @@ export interface ElectronAPI {
   onScheduledTaskReportRequested: (callback: (report: ScheduledTaskRunReport) => void) => () => void
 
   // Skills
-  listSkills: () => Promise<Array<{ id: string; name: string; description: string; content: string; createdAt: string; updatedAt: string }>>
+  listSkills: () => Promise<Array<{ id: string; name: string; description: string; fileCount: number; files: Array<{ relativePath: string; type: string; size: number }>; scripts: Array<{ relativePath: string; language: string }>; tools: string[]; createdAt: string; updatedAt: string }>>
   importSkills: () => Promise<Array<{ id: string; name: string; description: string }>>
   importSkillContent: (name: string, content: string, description?: string) => Promise<{ id: string; name: string }>
   deleteSkill: (id: string) => Promise<boolean>
