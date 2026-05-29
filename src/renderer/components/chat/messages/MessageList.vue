@@ -31,9 +31,17 @@ const messageObservers = new Map<number, ResizeObserver>()
 let containerObserver: ResizeObserver | null = null
 let isAnchorScrolling = false
 
+// Batched scroll anchoring state: accumulate deltas and apply once per frame
+let pendingAnchorDelta = 0
+let anchorFlushScheduled = false
+
+// Height compensation: prevents content from shrinking below the scroll position
+// during measurement, which would cause the browser to clamp scrollTop.
+const heightCompensation = ref(0)
+
 const OVERSCAN_COUNT = 4
 const MESSAGE_GAP = 20
-const ESTIMATED_MESSAGE_HEIGHT = 220
+const FALLBACK_ESTIMATED_HEIGHT = 220
 const AUTO_SCROLL_THRESHOLD = 96
 const RESTORE_AUTO_SCROLL_THRESHOLD = 4
 
@@ -104,6 +112,7 @@ function handleMessageLinkClick (event: MouseEvent): void {
 function scrollToBottom () {
   nextTick(() => {
     if (messagesContainer.value) {
+      heightCompensation.value = 0
       messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
       scrollTop.value = messagesContainer.value.scrollTop
       nearBottom.value = true
@@ -133,6 +142,15 @@ function handleScroll (): void {
   const movingUp = messagesContainer.value.scrollTop < scrollTop.value
   syncViewportMetrics()
 
+  // Reduce height compensation when the user scrolls naturally.
+  // Once they've scrolled past the compensated region or reached the bottom,
+  // the compensation is no longer needed.
+  if (heightCompensation.value > 0) {
+    if (isNearBottom(messagesContainer.value)) {
+      heightCompensation.value = 0
+    }
+  }
+
   if (movingUp) {
     autoStickEnabled.value = false
     return
@@ -140,6 +158,7 @@ function handleScroll (): void {
 
   if (isAtBottom(messagesContainer.value)) {
     autoStickEnabled.value = true
+    heightCompensation.value = 0
   }
 }
 
@@ -150,8 +169,26 @@ function handleWheel (event: WheelEvent): void {
   }
 }
 
+// Cached average height — recomputed lazily when measuredMessageHeights changes.
+let cachedEstimatedHeight = FALLBACK_ESTIMATED_HEIGHT
+let cachedMeasuredCount = 0
+
+function getEstimatedHeight (): number {
+  const keys = Object.keys(measuredMessageHeights)
+  const count = keys.length
+  if (count === 0) return FALLBACK_ESTIMATED_HEIGHT
+  // Only recompute when the number of measured entries changes.
+  if (count !== cachedMeasuredCount) {
+    let sum = 0
+    for (const k of keys) sum += measuredMessageHeights[Number(k)]
+    cachedEstimatedHeight = Math.max(Math.ceil(sum / count), 1)
+    cachedMeasuredCount = count
+  }
+  return cachedEstimatedHeight
+}
+
 function getMessageHeight (index: number): number {
-  return measuredMessageHeights[index] ?? ESTIMATED_MESSAGE_HEIGHT
+  return measuredMessageHeights[index] ?? getEstimatedHeight()
 }
 
 function getMessageExtent (index: number): number {
@@ -211,47 +248,87 @@ const virtualRows = computed(() => {
 const topSpacerHeight = computed(() => getOffsetBefore(visibleRange.value.start))
 const bottomSpacerHeight = computed(() => {
   if (visibleRange.value.end < visibleRange.value.start) return 0
-  return Math.max(0, totalContentHeight.value - getOffsetBefore(visibleRange.value.end + 1))
+  return Math.max(0, totalContentHeight.value - getOffsetBefore(visibleRange.value.end + 1)) + heightCompensation.value
 })
+
+function flushAnchorDelta (): void {
+  anchorFlushScheduled = false
+  if (!messagesContainer.value || autoStickEnabled.value) {
+    pendingAnchorDelta = 0
+    return
+  }
+  if (pendingAnchorDelta === 0) return
+
+  const delta = pendingAnchorDelta
+  pendingAnchorDelta = 0
+
+  isAnchorScrolling = true
+  try {
+    const maxScroll = messagesContainer.value.scrollHeight - messagesContainer.value.clientHeight
+    const desired = messagesContainer.value.scrollTop + delta
+
+    if (desired > maxScroll && maxScroll >= 0) {
+      // Content is too short to support desired scrollTop — add compensation
+      // to the bottom spacer so the next render provides enough height.
+      // Apply compensation immediately, then set scrollTop in nextTick
+      // after Vue re-renders the spacer.
+      heightCompensation.value += desired - maxScroll
+      const savedDesired = desired
+      nextTick(() => {
+        if (!messagesContainer.value) return
+        isAnchorScrolling = true
+        try {
+          messagesContainer.value.scrollTop = savedDesired
+          scrollTop.value = messagesContainer.value.scrollTop
+        } finally {
+          isAnchorScrolling = false
+        }
+      })
+      return
+    }
+
+    messagesContainer.value.scrollTop = desired
+    scrollTop.value = messagesContainer.value.scrollTop
+  } finally {
+    isAnchorScrolling = false
+  }
+}
+
+function scheduleAnchorFlush (): void {
+  if (anchorFlushScheduled) return
+  anchorFlushScheduled = true
+  queueMicrotask(flushAnchorDelta)
+}
 
 function updateMeasuredHeight (index: number, height: number): void {
   const nextHeight = Math.max(Math.ceil(height), 1)
   const prevHeight = measuredMessageHeights[index]
   if (prevHeight === nextHeight) return
 
-  const heightDelta = nextHeight - (prevHeight ?? ESTIMATED_MESSAGE_HEIGHT)
+  const heightDelta = nextHeight - (prevHeight ?? getEstimatedHeight())
 
   // Compute the top offset of this message BEFORE updating the height map.
-  // getOffsetBefore(index) sums heights of messages 0..index-1, so it is
-  // unaffected by message[index]'s own height — safe to read before or after.
   const messageTop = getOffsetBefore(index)
 
   measuredMessageHeights[index] = nextHeight
 
   if (autoStickEnabled.value) {
     if (messagesContainer.value) {
-      // Immediate scroll-to-bottom: ResizeObserver fires after layout so
-      // scrollHeight already reflects the current DOM state.
       messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
       scrollTop.value = messagesContainer.value.scrollTop
     }
-    // Deferred correction after Vue reactive DOM updates (spacer heights etc.)
     scrollToBottom()
     return
   }
 
-  // Scroll anchoring when user has scrolled away from bottom:
-  // If the resized message starts above (or at) the current scroll position,
-  // its height change shifts all content below it.  Compensate scrollTop so
-  // that the content the user is looking at stays visually stable.
-  if (messagesContainer.value && messageTop <= scrollTop.value) {
-    isAnchorScrolling = true
-    try {
-      messagesContainer.value.scrollTop += heightDelta
-      scrollTop.value = messagesContainer.value.scrollTop
-    } finally {
-      isAnchorScrolling = false
-    }
+  // Accumulate scroll anchoring delta for messages above the viewport.
+  // Instead of adjusting scrollTop per-message (which causes cascading reactive
+  // updates and potential clamping), we batch all deltas and apply once.
+  // The check accounts for pending delta: a message is "above" the viewport if
+  // its virtual top is at or before the adjusted scroll position.
+  if (messageTop <= scrollTop.value + pendingAnchorDelta) {
+    pendingAnchorDelta += heightDelta
+    scheduleAnchorFlush()
   }
 }
 
@@ -303,6 +380,11 @@ function resetVirtualMeasurements (): void {
   }
   messageObservers.forEach(observer => observer.disconnect())
   messageObservers.clear()
+  heightCompensation.value = 0
+  pendingAnchorDelta = 0
+  anchorFlushScheduled = false
+  cachedEstimatedHeight = FALLBACK_ESTIMATED_HEIGHT
+  cachedMeasuredCount = 0
 }
 
 function trimVirtualMeasurements (): void {
