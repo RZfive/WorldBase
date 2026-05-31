@@ -21,7 +21,6 @@ interface Category {
 
 const categories: Category[] = [
   { id: 'general', icon: '⚙️', label: '通用设置' },
-  { id: 'about', icon: 'ℹ️', label: '关于与更新' },
   { id: 'providers', icon: '🤖', label: '模型服务' },
   { id: 'mcp', icon: '🔌', label: 'MCP 管理' },
   { id: 'skills', icon: '✦', label: 'Skill 管理' },
@@ -29,7 +28,8 @@ const categories: Category[] = [
   { id: 'scheduler', icon: '⏱', label: '定时任务' },
   { id: 'logs', icon: '🧾', label: '日志中心' },
   { id: 'database', icon: '🗄', label: '数据设置' },
-  { id: 'processes', icon: '📊', label: '进程管理' }
+  { id: 'processes', icon: '📊', label: '进程管理' },
+  { id: 'about', icon: 'ℹ️', label: '关于与更新' }
 ]
 
 const activeCategoryId = ref<CategoryId>('general')

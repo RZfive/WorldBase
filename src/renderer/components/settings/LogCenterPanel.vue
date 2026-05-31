@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import VirtualJsonTree from './VirtualJsonTree.vue'
 import { loadAIExecutionPreferences, persistAIExecutionPreferences } from '../../utils/ai-execution-preferences'
 
 const FEEDBACK_DISPLAY_DURATION_MS = 1800
@@ -27,10 +28,6 @@ function formatTime (value?: string): string {
   } catch {
     return value
   }
-}
-
-function formatJson (value: unknown): string {
-  return JSON.stringify(value, null, 2)
 }
 
 function setFeedback (message: string) {
@@ -215,27 +212,37 @@ onMounted(async () => {
 
             <details open class="lc-section">
               <summary>上传给 AI 的消息 ({{ session.uploadedMessages.length }})</summary>
-              <pre>{{ formatJson(session.uploadedMessages) }}</pre>
+              <div class="lc-section-body">
+                <VirtualJsonTree :value="session.uploadedMessages" :max-height="360" />
+              </div>
             </details>
 
             <details class="lc-section">
               <summary>模型请求 / 响应 ({{ session.providerCalls.length }})</summary>
-              <pre>{{ formatJson(session.providerCalls) }}</pre>
+              <div class="lc-section-body">
+                <VirtualJsonTree :value="session.providerCalls" :max-height="360" />
+              </div>
             </details>
 
             <details class="lc-section">
               <summary>工具调用 ({{ session.toolExecutions.length }})</summary>
-              <pre>{{ formatJson(session.toolExecutions) }}</pre>
+              <div class="lc-section-body">
+                <VirtualJsonTree :value="session.toolExecutions" :max-height="360" />
+              </div>
             </details>
 
             <details class="lc-section" :open="session.errors.length > 0">
               <summary>错误记录 ({{ session.errors.length }})</summary>
-              <pre>{{ formatJson(session.errors) }}</pre>
+              <div class="lc-section-body">
+                <VirtualJsonTree :value="session.errors" :max-height="300" />
+              </div>
             </details>
 
             <details v-if="session.finalAssistantMessage" class="lc-section">
               <summary>最终回复</summary>
-              <pre>{{ formatJson(session.finalAssistantMessage) }}</pre>
+              <div class="lc-section-body">
+                <VirtualJsonTree :value="session.finalAssistantMessage" :max-height="280" />
+              </div>
             </details>
           </article>
         </div>
@@ -456,14 +463,7 @@ onMounted(async () => {
   color: var(--app-text-soft);
 }
 
-.lc-section pre {
-  margin: 0;
-  padding: 12px;
-  max-height: 320px;
-  overflow: auto;
-  font-size: 0.75em;
-  line-height: 1.55;
-  color: var(--app-text);
-  background: rgba(0, 0, 0, 0.08);
+.lc-section-body {
+  padding: 0 12px 12px;
 }
 </style>
