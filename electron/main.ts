@@ -23,6 +23,8 @@ import { SystemService } from '../src/main/system-capabilities/system-service.js
 import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout, type PortableSettingsConfig, type WebAppShortcut } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { AILogStore } from '../src/main/settings/ai-log-store.js'
+import { ImageLibraryStore, type ImageLibraryEntry, type ImageStudioMode } from '../src/main/settings/image-library-store.js'
+import { OpenAIProvider } from '../src/main/ai-engine/providers/openai-provider.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import { AgentStore } from '../src/main/settings/agent-store.js'
 import { AgentGroupStore } from '../src/main/settings/agent-group-store.js'
@@ -104,6 +106,7 @@ let memoryEngine: MemoryEngine | null = null
 let scheduledTaskStore: ScheduledTaskStore | null = null
 let scheduledTaskService: ScheduledTaskService | null = null
 let documentStore: DocumentStore | null = null
+let imageLibraryStore: ImageLibraryStore | null = null
 let mcpService: MCPService | null = null
 let isClosingMainWindow = false
 let isQuitCleanupRunning = false
@@ -2353,6 +2356,7 @@ async function initializeServices (): Promise<void> {
   memoryStore = new MemoryStore(userDataPath)
   memoryEngine = new MemoryEngine(memoryStore)
   scheduledTaskStore = new ScheduledTaskStore(userDataPath)
+  imageLibraryStore = new ImageLibraryStore(userDataPath)
   mcpService = new MCPService()
   mcpService.on('stateChanged', (state: MCPStateSnapshot) => {
     broadcastToAppWindows('settings:mcpStateChanged', state)
@@ -3248,6 +3252,87 @@ function setupIPC (): void {
 
     await fs.writeFile(result.filePath, buffer)
     return { success: true, filePath: result.filePath }
+  })
+
+  // --- Drawing studio (image generation / editing) ---
+  ipcMain.handle('image:generate', async (_event: IpcMainInvokeEvent, req: {
+    providerId: string
+    model: string
+    mode: ImageStudioMode
+    prompt: string
+    negativePrompt?: string
+    aspectRatio?: string
+    size: string
+    n?: number
+    inputImages?: string[]
+  }): Promise<{ ok: true; entries: ImageLibraryEntry[] } | { ok: false; error: string }> => {
+    try {
+      if (!imageLibraryStore) throw new Error('图片库未初始化')
+
+      const providersConfig = settingsStore!.getProviders()
+      const provider = providersConfig.providers.find(p => p.id === req.providerId)
+      if (!provider) {
+        throw new Error('未找到所选供应商')
+      }
+      const model = provider.models.includes(req.model) ? req.model : provider.activeModel
+      if (!model) {
+        throw new Error('该供应商未配置可用模型')
+      }
+
+      const aiProvider = new OpenAIProvider()
+      aiProvider.setApiKey(provider.apiKey)
+      aiProvider.setBaseUrl(provider.baseUrl)
+      aiProvider.setModel(model)
+
+      const n = req.n && req.n > 0 ? Math.min(req.n, 4) : 1
+
+      const result = req.mode === 'edit'
+        ? await aiProvider.editImages({
+            prompt: req.prompt,
+            images: req.inputImages ?? [],
+            size: req.size,
+            n
+          })
+        : await aiProvider.generateImages({
+            prompt: req.prompt,
+            negativePrompt: req.negativePrompt,
+            size: req.size,
+            n
+          })
+
+      if (!result.images.length) {
+        throw new Error('模型未返回任何图片')
+      }
+
+      const createdAt = new Date().toISOString()
+      const entries: ImageLibraryEntry[] = result.images.map(imageUrl => imageLibraryStore!.save(
+        {
+          id: randomUUID(),
+          createdAt,
+          mode: req.mode,
+          providerId: req.providerId,
+          model,
+          prompt: req.prompt,
+          negativePrompt: req.negativePrompt || undefined,
+          aspectRatio: req.aspectRatio || undefined,
+          size: req.size
+        },
+        imageUrl,
+        req.mode === 'edit' ? req.inputImages : undefined
+      ))
+
+      return { ok: true, entries }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : '图片生成失败' }
+    }
+  })
+
+  ipcMain.handle('image:library:list', async (): Promise<ImageLibraryEntry[]> => {
+    return imageLibraryStore?.list() ?? []
+  })
+
+  ipcMain.handle('image:library:delete', async (_event: IpcMainInvokeEvent, ids: string[]): Promise<{ removed: number }> => {
+    return { removed: imageLibraryStore?.deleteMany(ids ?? []) ?? 0 }
   })
 
   ipcMain.handle('media:saveMarkdown', async (event: IpcMainInvokeEvent, markdown: string, defaultName?: string) => {

@@ -15,7 +15,7 @@ interface RunningApp {
 }
 
 const props = defineProps<{
-  currentView: 'chat' | 'app' | 'source' | 'settings'
+  currentView: 'chat' | 'app' | 'source' | 'settings' | 'studio'
   showLaunchpad: boolean
   runningApps: Map<string, RunningApp>
   embeddedProjectId: string | null
@@ -23,6 +23,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'openChat'): void
+  (e: 'openStudio'): void
   (e: 'toggleLaunchpad'): void
   (e: 'openSettings'): void
   (e: 'switchToApp', app: RunningApp): void
@@ -52,6 +53,18 @@ function resolveIcon (app: RunningApp) {
           <span class="dock-item-icon">💬</span>
         </span>
         <span class="dock-tooltip">对话</span>
+      </div>
+
+      <div
+        :class="['dock-item', { 'dock-active': props.currentView === 'studio' && !props.showLaunchpad }]"
+        title="绘制工作台"
+        data-tip="绘制"
+        @click="emit('openStudio')"
+      >
+        <span class="dock-item-surface">
+          <span class="dock-item-icon">🎨</span>
+        </span>
+        <span class="dock-tooltip">绘制</span>
       </div>
     </div>
 
@@ -155,6 +168,7 @@ function resolveIcon (app: RunningApp) {
 .dock-apps::-webkit-scrollbar { width: 0; }
 
 .dock-bottom { gap: 8px; }
+.dock-top { gap: 8px; }
 
 .dock-item {
   position: relative;

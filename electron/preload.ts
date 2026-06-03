@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
+import type { ImageLibraryEntry, ImageStudioGenerateRequest, ImageStudioGenerateResponse } from '../src/shared/image-studio-types.js'
 
 interface ChatMessage {
   role: string
@@ -679,6 +680,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteMemory: (id: string) => ipcRenderer.invoke('memory:delete', id),
   saveImageToFile: (imageUrl: string, defaultName?: string) => ipcRenderer.invoke('media:saveImage', imageUrl, defaultName),
   saveMarkdownToFile: (markdown: string, defaultName?: string) => ipcRenderer.invoke('media:saveMarkdown', markdown, defaultName),
+  generateStudioImage: (req: ImageStudioGenerateRequest): Promise<ImageStudioGenerateResponse> => ipcRenderer.invoke('image:generate', req),
+  listImageLibrary: (): Promise<ImageLibraryEntry[]> => ipcRenderer.invoke('image:library:list'),
+  deleteImageLibrary: (ids: string[]): Promise<{ removed: number }> => ipcRenderer.invoke('image:library:delete', ids),
   readUploadedAttachmentFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedAttachmentFile', filePath),
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => ipcRenderer.invoke('chat:readUploadedAttachmentBuffer', payload),
   readUploadedOfficeFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedOfficeFile', filePath),

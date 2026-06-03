@@ -108,6 +108,36 @@ interface ImagesGenerationsBody {
   n?: number
   size?: string
   response_format?: 'url' | 'b64_json'
+  negative_prompt?: string
+}
+
+/** Result of a parameterized image generation / edit request. */
+export interface ImageGenerationResult {
+  /** Generated images as data URLs or remote URLs. */
+  images: string[]
+  /** Provider-revised prompt, when returned. */
+  revisedPrompt?: string
+}
+
+/** Options for the parameterized text-to-image generation entrypoint. */
+export interface GenerateImagesOptions {
+  prompt: string
+  negativePrompt?: string
+  size?: string
+  n?: number
+  abortSignal?: AbortSignal
+}
+
+/** Options for the parameterized image-edit entrypoint (/images/edits). */
+export interface EditImagesOptions {
+  prompt: string
+  /** Source images as data URLs. */
+  images: string[]
+  /** Optional mask as a data URL. */
+  mask?: string
+  size?: string
+  n?: number
+  abortSignal?: AbortSignal
 }
 
 interface ImagesGenerationsResponse {
@@ -485,6 +515,11 @@ export class OpenAIProvider {
       return `${normalized.slice(0, -'/responses'.length)}/images/generations`
     }
     return `${normalized}/images/generations`
+  }
+
+  private getImagesEditsUrl (): string {
+    const generationsUrl = this.getImagesGenerationsUrl()
+    return generationsUrl.replace(/\/images\/generations$/, '/images/edits')
   }
 
   private validateConfig (): void {
@@ -1092,6 +1127,245 @@ export class OpenAIProvider {
         throw normalized
       }
     }
+  }
+
+  /** Extract image URLs (and an optional revised prompt) from an /images/* response. */
+  private extractImagesResult (data: ImagesGenerationsResponse): ImageGenerationResult {
+    const images: string[] = []
+    let revisedPrompt: string | undefined
+
+    for (const item of data.data ?? []) {
+      if (item.revised_prompt && !revisedPrompt) {
+        revisedPrompt = item.revised_prompt
+      }
+      if (item.b64_json) {
+        images.push(`data:image/png;base64,${item.b64_json}`)
+      } else if (item.url) {
+        images.push(item.url)
+      }
+    }
+
+    return { images, revisedPrompt }
+  }
+
+  /**
+   * Parameterized text-to-image generation for the drawing studio.
+   * Uses the /images/generations endpoint with explicit size / count and an
+   * optional negative prompt. Falls back to dropping the negative prompt when
+   * the provider rejects it (OpenAI does not support the field).
+   */
+  async generateImages (opts: GenerateImagesOptions): Promise<ImageGenerationResult> {
+    this.validateConfig()
+
+    const prompt = opts.prompt.trim() || 'Generate an image'
+    const negativePrompt = opts.negativePrompt?.trim()
+    const requestOptions: RequestOptions = { timeoutMs: OpenAIProvider.IMAGE_REQUEST_TIMEOUT_MS }
+
+    const sendRequest = async (includeNegative: boolean): Promise<ImageGenerationResult> => {
+      const body: ImagesGenerationsBody = {
+        model: this.model,
+        prompt,
+        n: opts.n && opts.n > 0 ? opts.n : 1,
+        size: opts.size || '1024x1024',
+        response_format: 'b64_json'
+      }
+      if (includeNegative && negativePrompt) {
+        body.negative_prompt = negativePrompt
+      }
+
+      const callId = this.logger?.logProviderCallStart({
+        stream: false,
+        model: this.model,
+        baseUrl: this.getImagesGenerationsUrl(),
+        messages: [{ role: 'user', content: prompt }],
+        tools: []
+      })
+
+      try {
+        const response = await this.fetchWithRetry(this.getImagesGenerationsUrl(), body, false, opts.abortSignal, requestOptions)
+        const data = await response.json() as ImagesGenerationsResponse
+        if (data.usage && this.onUsage) {
+          this.onUsage(data.usage as Parameters<UsageCallback>[0])
+        }
+        const result = this.extractImagesResult(data)
+        if (callId) {
+          this.logger?.logProviderCallSuccess(callId, { message: { role: 'assistant', content: result.images.join('\n') }, raw: data })
+        }
+        return result
+      } catch (error) {
+        const normalized = this.normalizeRequestError(error)
+        if (callId) {
+          this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
+        }
+        throw normalized
+      }
+    }
+
+    try {
+      return await sendRequest(true)
+    } catch (error) {
+      // Retry once without the negative prompt if the provider rejected it.
+      const message = error instanceof Error ? error.message.toLowerCase() : ''
+      if (negativePrompt && (message.includes('negative_prompt') || message.includes('(400)') || message.includes('unknown') || message.includes('unsupported'))) {
+        return await sendRequest(false)
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Parameterized image editing for the drawing studio via the multipart
+   * /images/edits endpoint (gpt-image-1 / dall-e-2 style).
+   */
+  async editImages (opts: EditImagesOptions): Promise<ImageGenerationResult> {
+    this.validateConfig()
+
+    if (!opts.images.length) {
+      throw new Error('图片编辑模式需要至少一张输入图片')
+    }
+
+    const prompt = opts.prompt.trim() || 'Edit the image'
+    const form = new FormData()
+    form.append('model', this.model)
+    form.append('prompt', prompt)
+    form.append('n', String(opts.n && opts.n > 0 ? opts.n : 1))
+    if (opts.size) {
+      form.append('size', opts.size)
+    }
+
+    const multiple = opts.images.length > 1
+    opts.images.forEach((dataUrl, index) => {
+      const { blob, ext } = this.dataUrlToBlob(dataUrl)
+      form.append(multiple ? 'image[]' : 'image', blob, `image-${index}.${ext}`)
+    })
+
+    if (opts.mask) {
+      const { blob, ext } = this.dataUrlToBlob(opts.mask)
+      form.append('mask', blob, `mask.${ext}`)
+    }
+
+    const callId = this.logger?.logProviderCallStart({
+      stream: false,
+      model: this.model,
+      baseUrl: this.getImagesEditsUrl(),
+      messages: [{ role: 'user', content: prompt }],
+      tools: []
+    })
+
+    try {
+      const response = await this.fetchMultipartWithRetry(
+        this.getImagesEditsUrl(),
+        form,
+        opts.abortSignal,
+        { timeoutMs: OpenAIProvider.IMAGE_REQUEST_TIMEOUT_MS }
+      )
+      const data = await response.json() as ImagesGenerationsResponse
+      if (data.usage && this.onUsage) {
+        this.onUsage(data.usage as Parameters<UsageCallback>[0])
+      }
+      const result = this.extractImagesResult(data)
+      if (callId) {
+        this.logger?.logProviderCallSuccess(callId, { message: { role: 'assistant', content: result.images.join('\n') }, raw: data })
+      }
+      return result
+    } catch (error) {
+      const normalized = this.normalizeRequestError(error)
+      if (callId) {
+        this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
+      }
+      throw normalized
+    }
+  }
+
+  /** Decode a `data:<mime>;base64,<data>` URL into a Blob for multipart upload. */
+  private dataUrlToBlob (dataUrl: string): { blob: Blob; ext: string } {
+    const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
+    if (!match) {
+      throw new Error('不支持的图片数据格式，请使用 base64 data URL')
+    }
+    const mimeType = match[1]
+    const bytes = Buffer.from(match[2], 'base64')
+    const ext = mimeType.includes('jpeg') || mimeType.includes('jpg')
+      ? 'jpg'
+      : mimeType.includes('webp')
+        ? 'webp'
+        : 'png'
+    return { blob: new Blob([bytes], { type: mimeType }), ext }
+  }
+
+  /**
+   * Multipart sibling of fetchWithRetry — reuses the same timeout / abort /
+   * retry skeleton but sends FormData and lets fetch set the boundary header.
+   */
+  private async fetchMultipartWithRetry (
+    url: string,
+    form: FormData,
+    abortSignal?: AbortSignal,
+    options?: RequestOptions
+  ): Promise<Response> {
+    const maxAttempts = 3
+    let lastError: Error | null = null
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController()
+      const onAbort = () => {
+        if (!abortSignal) return
+        controller.abort(normalizeAbortReason(abortSignal.reason))
+      }
+      if (abortSignal) {
+        if (abortSignal.aborted) {
+          throw normalizeAbortReason(abortSignal.reason)
+        }
+        abortSignal.addEventListener('abort', onAbort, { once: true })
+      }
+      const timeoutMs = options?.timeoutMs ?? OpenAIProvider.STANDARD_REQUEST_TIMEOUT_MS
+      const timeout = setTimeout(() => controller.abort(new Error('AI request timed out')), timeoutMs)
+
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`
+          },
+          body: form,
+          signal: controller.signal
+        })
+
+        if (response.ok) {
+          clearTimeout(timeout)
+          if (abortSignal) abortSignal.removeEventListener('abort', onAbort)
+          return response
+        }
+
+        const errorText = await response.text()
+        const error = new Error(`OpenAI API error (${response.status}): ${errorText}`)
+        clearTimeout(timeout)
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort)
+
+        if (!this.isRetryableStatus(response.status) || attempt === maxAttempts) {
+          throw error
+        }
+        lastError = error
+      } catch (err) {
+        clearTimeout(timeout)
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort)
+        if (abortSignal?.aborted) {
+          throw normalizeAbortReason(abortSignal.reason)
+        }
+        if (controller.signal.aborted) {
+          throw normalizeAbortReason(controller.signal.reason)
+        }
+        const normalized = this.normalizeRequestError(err)
+        if (!this.isRetryableError(normalized) || attempt === maxAttempts) {
+          throw normalized
+        }
+        lastError = normalized
+      }
+
+      await this.delay(Math.min(1000 * (2 ** (attempt - 1)), 5000))
+    }
+
+    throw lastError || new Error('AI request failed')
   }
 
   private async fetchWithRetry (
