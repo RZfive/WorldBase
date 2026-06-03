@@ -22,6 +22,7 @@ const emit = defineEmits<{
   (e: 'openAgent', agentId: string): void
   (e: 'openGroup', groupId: string): void
   (e: 'deleteConversation', id: string): void
+  (e: 'pinConversation', id: string): void
 }>()
 
 const searchQuery = ref('')
@@ -68,6 +69,7 @@ const {
   ungroupFolder,
   deleteFolder,
   isFolderExpanded,
+  togglePinConversation,
   onConversationDragStart,
   onFolderDragStart,
   onTopLevelDragOver,
@@ -250,9 +252,11 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
                 :is-dragging="dragItem?.type === 'conversation' && dragItem.id === entry.item.id"
                 :drop-class="topLevelDropClass(entry.item.id, 'conversation')"
                 show-delete
+                show-pin
                 delete-title="删除"
                 @click="emit('selectConversation', entry.item.id)"
                 @delete="emit('deleteConversation', entry.item.id)"
+                @pin="togglePinConversation(entry.item.id)"
                 @dragstart="onConversationDragStart($event, entry.item.id)"
                 @dragover="onTopLevelDragOver($event, entry.item.id, 'conversation')"
                 @dragleave="onDragLeave"
