@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type {
   AgentSidebarItem,
   ConversationSidebarItem,
@@ -37,6 +38,8 @@ const emit = defineEmits<{
   (e: 'drop', event: DragEvent): void
   (e: 'dragend'): void
 }>()
+
+const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item && Boolean(props.item.isPinned))
 </script>
 
 <template>
@@ -50,7 +53,7 @@ const emit = defineEmits<{
         streaming: item.isStreaming,
         waitingAuth: item.pendingAuthCount > 0,
         dragging: isDragging,
-        pinned: showPin && 'isPinned' in item && item.isPinned,
+        pinned: itemIsPinned,
         'conversation-item-nested': nested
       }
     ]"
@@ -86,9 +89,10 @@ const emit = defineEmits<{
     <button
       v-if="showPin"
       class="conv-pin"
-      :class="{ active: 'isPinned' in item && item.isPinned }"
+      :class="{ active: itemIsPinned }"
       type="button"
-      :title="'isPinned' in item && item.isPinned ? '取消置顶' : '置顶'"
+      :title="itemIsPinned ? '取消置顶' : '置顶'"
+      :aria-label="itemIsPinned ? '取消置顶' : '置顶'"
       @click.stop="emit('pin')"
     >
       <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
