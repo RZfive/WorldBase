@@ -80,21 +80,22 @@ function normalizeTopLevelOrder (value: unknown): string[] {
 
 function loadConversationLayout (): ConversationSidebarLayout {
   if (typeof window === 'undefined') {
-    return { folders: [], topLevelOrder: [] }
+    return { folders: [], topLevelOrder: [], pinnedIds: [] }
   }
 
   try {
     const raw = window.localStorage.getItem(CONVERSATION_LAYOUT_STORAGE_KEY)
     if (!raw) {
-      return { folders: [], topLevelOrder: [] }
+      return { folders: [], topLevelOrder: [], pinnedIds: [] }
     }
-    const parsed = JSON.parse(raw) as { folders?: unknown; topLevelOrder?: unknown }
+    const parsed = JSON.parse(raw) as { folders?: unknown; topLevelOrder?: unknown; pinnedIds?: unknown }
     return {
       folders: normalizeConversationFolders(parsed.folders),
-      topLevelOrder: normalizeTopLevelOrder(parsed.topLevelOrder)
+      topLevelOrder: normalizeTopLevelOrder(parsed.topLevelOrder),
+      pinnedIds: filterConversationIds(parsed.pinnedIds)
     }
   } catch {
-    return { folders: [], topLevelOrder: [] }
+    return { folders: [], topLevelOrder: [], pinnedIds: [] }
   }
 }
 
@@ -124,6 +125,7 @@ export function useConversationSidebarFolders (
   const initialConversationLayout = loadConversationLayout()
   const conversationFolders = ref<ConversationFolderLayout[]>(initialConversationLayout.folders)
   const conversationTopLevelOrder = ref<string[]>(initialConversationLayout.topLevelOrder)
+  const pinnedIds = ref<string[]>(initialConversationLayout.pinnedIds)
   const renamingFolderId = ref<string | null>(null)
   const renameInput = ref('')
   const dragItem = ref<ConversationDragItem | null>(null)
@@ -140,7 +142,8 @@ export function useConversationSidebarFolders (
           conversationIds: [...folder.conversationIds],
           collapsed: folder.collapsed
         })),
-        topLevelOrder: [...conversationTopLevelOrder.value]
+        topLevelOrder: [...conversationTopLevelOrder.value],
+        pinnedIds: [...pinnedIds.value]
       }))
     } catch {
       // Ignore local persistence failures.
@@ -185,26 +188,48 @@ export function useConversationSidebarFolders (
       }
     })
 
+    // New conversations are inserted after pinned items (at the top) instead of appended to end
+    const newConversationKeys: string[] = []
     conversationItems.value.forEach((item) => {
       if (seenConversationIds.has(item.id)) return
       const key = conversationKey(item.id)
       if (!nextTopLevelOrder.includes(key)) {
-        nextTopLevelOrder.push(key)
+        newConversationKeys.push(key)
       }
     })
 
+    if (newConversationKeys.length > 0) {
+      // Find first non-pinned position to insert new conversations
+      const pinnedSet = new Set(pinnedIds.value.map(id => conversationKey(id)))
+      let insertIndex = 0
+      for (let i = 0; i < nextTopLevelOrder.length; i++) {
+        if (pinnedSet.has(nextTopLevelOrder[i])) {
+          insertIndex = i + 1
+        } else {
+          break
+        }
+      }
+      nextTopLevelOrder.splice(insertIndex, 0, ...newConversationKeys)
+    }
+
+    // Clean up pinnedIds to only include valid conversation ids
+    const nextPinnedIds = pinnedIds.value.filter(id => validConversationIds.has(id))
+
     const previousLayout = JSON.stringify({
       folders: conversationFolders.value,
-      topLevelOrder: conversationTopLevelOrder.value
+      topLevelOrder: conversationTopLevelOrder.value,
+      pinnedIds: pinnedIds.value
     })
     const nextLayout = JSON.stringify({
       folders: normalizedFolders,
-      topLevelOrder: nextTopLevelOrder
+      topLevelOrder: nextTopLevelOrder,
+      pinnedIds: nextPinnedIds
     })
 
     if (previousLayout !== nextLayout) {
       conversationFolders.value = normalizedFolders
       conversationTopLevelOrder.value = nextTopLevelOrder
+      pinnedIds.value = nextPinnedIds
       persistConversationLayout()
     }
   }
@@ -249,7 +274,11 @@ export function useConversationSidebarFolders (
       }
     })
 
+    const pinnedSet = new Set(pinnedIds.value)
     const entries: ConversationSidebarEntry[] = []
+    const pinnedEntries: ConversationSidebarEntry[] = []
+    const unpinnedEntries: ConversationSidebarEntry[] = []
+
     conversationTopLevelOrder.value.forEach((key) => {
       const parsedKey = parseConversationKey(key)
       if (!parsedKey) return
@@ -257,15 +286,29 @@ export function useConversationSidebarFolders (
       if (parsedKey.type === 'conversation') {
         const item = conversationItemsById.value.get(parsedKey.id)
         if (!item || !matchesConversationQuery(item, query)) return
-        entries.push({ kind: 'conversation', item })
+        const entryItem = pinnedSet.has(item.id) ? { ...item, isPinned: true } : item
+        const entry: ConversationSidebarEntry = { kind: 'conversation', item: entryItem }
+        if (pinnedSet.has(item.id)) {
+          pinnedEntries.push(entry)
+        } else {
+          unpinnedEntries.push(entry)
+        }
         return
       }
 
       const folderEntry = folderEntries.get(parsedKey.id)
       if (folderEntry) {
-        entries.push(folderEntry)
+        unpinnedEntries.push(folderEntry)
       }
     })
+
+    // Pinned items first (in their pinned order), then unpinned items
+    const pinnedOrder = pinnedIds.value
+    pinnedEntries.sort((a, b) => {
+      if (a.kind !== 'conversation' || b.kind !== 'conversation') return 0
+      return pinnedOrder.indexOf(a.item.id) - pinnedOrder.indexOf(b.item.id)
+    })
+    entries.push(...pinnedEntries, ...unpinnedEntries)
 
     return entries
   })
@@ -292,6 +335,26 @@ export function useConversationSidebarFolders (
       return visibleCount > 0
     }
     return !folder.collapsed
+  }
+
+  function pinConversation (conversationId: string) {
+    if (pinnedIds.value.includes(conversationId)) return
+    pinnedIds.value = [...pinnedIds.value, conversationId]
+    finalizeConversationLayout()
+  }
+
+  function unpinConversation (conversationId: string) {
+    if (!pinnedIds.value.includes(conversationId)) return
+    pinnedIds.value = pinnedIds.value.filter(id => id !== conversationId)
+    finalizeConversationLayout()
+  }
+
+  function togglePinConversation (conversationId: string) {
+    if (pinnedIds.value.includes(conversationId)) {
+      unpinConversation(conversationId)
+    } else {
+      pinConversation(conversationId)
+    }
   }
 
   function createEmptyFolder () {
@@ -692,6 +755,9 @@ export function useConversationSidebarFolders (
     ungroupFolder,
     deleteFolder,
     isFolderExpanded,
+    pinConversation,
+    unpinConversation,
+    togglePinConversation,
     onConversationDragStart,
     onFolderDragStart,
     onTopLevelDragOver,

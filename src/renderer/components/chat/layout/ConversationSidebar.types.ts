@@ -34,6 +34,7 @@ export interface ConversationSidebarItem {
   isStreaming: boolean
   pendingAuthCount: number
   isActive: boolean
+  isPinned?: boolean
 }
 
 export interface ConversationFolderLayout {
@@ -46,6 +47,7 @@ export interface ConversationFolderLayout {
 export interface ConversationSidebarLayout {
   folders: ConversationFolderLayout[]
   topLevelOrder: string[]
+  pinnedIds: string[]
 }
 
 export interface ConversationDragItem {
