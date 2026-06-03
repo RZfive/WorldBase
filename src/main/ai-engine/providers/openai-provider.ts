@@ -1017,7 +1017,8 @@ export class OpenAIProvider {
       try {
         return await this.imageGenerationsCompletion(messages, abortSignal, imageOptions)
       } catch {
-        // Fall through to try other approaches
+        // /images/generations failed for dedicated model; fall through to try Responses API.
+        // The error is already logged inside imageGenerationsCompletion.
       }
     }
 
