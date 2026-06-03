@@ -102,6 +102,20 @@ interface ResponsesApiResponse {
   usage?: Record<string, unknown>
 }
 
+interface ImagesGenerationsBody {
+  model: string
+  prompt: string
+  n?: number
+  size?: string
+  response_format?: 'url' | 'b64_json'
+}
+
+interface ImagesGenerationsResponse {
+  created?: number
+  data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>
+  usage?: Record<string, unknown>
+}
+
 interface MultiModalContentPart {
   text?: string
   inline_data?: {
@@ -141,7 +155,7 @@ export class OpenAIProvider {
   /** Standard requests should fail fast to surface provider issues promptly. */
   private static readonly STANDARD_REQUEST_TIMEOUT_MS = 60000
   /** Image generation can take significantly longer; use a generous timeout. */
-  private static readonly IMAGE_REQUEST_TIMEOUT_MS = 300000
+  private static readonly IMAGE_REQUEST_TIMEOUT_MS = 600000
   /** Streaming responses should only time out when no bytes arrive for too long. */
   private static readonly STREAM_IDLE_TIMEOUT_MS = 90000
   private static readonly STREAM_IDLE_TIMEOUT_MESSAGE = 'AI stream idle timed out'
@@ -207,6 +221,17 @@ export class OpenAIProvider {
       normalized.includes('-image') ||
       normalized.includes('image-') ||
       normalized.includes('flux')
+  }
+
+  /**
+   * Returns true when the model is a dedicated image generation model
+   * that should use the /images/generations endpoint (DALL-E, gpt-image, etc.).
+   */
+  private isDedicatedImageModel (): boolean {
+    const normalized = this.model.toLowerCase()
+    return normalized.includes('dall-e') ||
+      normalized.includes('dalle') ||
+      normalized.includes('gpt-image')
   }
 
   private supportsImageEditing (): boolean {
@@ -446,6 +471,20 @@ export class OpenAIProvider {
       return `${normalized.slice(0, -'/chat/completions'.length)}/responses`
     }
     return `${normalized}/responses`
+  }
+
+  private getImagesGenerationsUrl (): string {
+    const normalized = this.normalizeBaseUrl(this.baseUrl)
+    if (normalized.endsWith('/images/generations')) {
+      return normalized
+    }
+    if (normalized.endsWith('/chat/completions')) {
+      return `${normalized.slice(0, -'/chat/completions'.length)}/images/generations`
+    }
+    if (normalized.endsWith('/responses')) {
+      return `${normalized.slice(0, -'/responses'.length)}/images/generations`
+    }
+    return `${normalized}/images/generations`
   }
 
   private validateConfig (): void {
@@ -875,12 +914,113 @@ export class OpenAIProvider {
     }
   }
 
+  /**
+   * Use the standard /images/generations endpoint for image generation.
+   * This is the most widely supported endpoint for models like dall-e-3 and gpt-image-1.
+   */
+  private async imageGenerationsCompletion (
+    messages: ChatMessage[],
+    abortSignal?: AbortSignal,
+    options?: RequestOptions
+  ): Promise<ChatMessage> {
+    // Extract the last user message as the prompt
+    const normalizedMessages = this.normalizeOutgoingMessages(messages)
+    let prompt = ''
+    for (let i = normalizedMessages.length - 1; i >= 0; i--) {
+      const msg = normalizedMessages[i]
+      if (msg.role === 'user') {
+        if (typeof msg.content === 'string') {
+          prompt = msg.content
+        } else if (Array.isArray(msg.content)) {
+          prompt = msg.content
+            .filter(part => part.type === 'text')
+            .map(part => (part as ChatContentTextPart).text)
+            .join('\n')
+        }
+        break
+      }
+    }
+
+    if (!prompt) {
+      prompt = 'Generate an image'
+    }
+
+    const body: ImagesGenerationsBody = {
+      model: this.model,
+      prompt,
+      n: 1,
+      size: '1024x1024',
+      response_format: 'b64_json'
+    }
+
+    const callId = this.logger?.logProviderCallStart({
+      stream: false,
+      model: this.model,
+      baseUrl: this.getImagesGenerationsUrl(),
+      messages: normalizedMessages,
+      tools: []
+    })
+
+    try {
+      const response = await this.fetchWithRetry(this.getImagesGenerationsUrl(), body, false, abortSignal, options)
+      const data = await response.json() as ImagesGenerationsResponse
+      if (data.usage && this.onUsage) {
+        this.onUsage(data.usage as Parameters<UsageCallback>[0])
+      }
+
+      const contentParts: ChatContentPart[] = []
+
+      if (data.data && data.data.length > 0) {
+        for (const item of data.data) {
+          if (item.revised_prompt) {
+            contentParts.push({ type: 'text', text: item.revised_prompt })
+          }
+          if (item.b64_json) {
+            contentParts.push({
+              type: 'image_url',
+              image_url: { url: `data:image/png;base64,${item.b64_json}` }
+            })
+          } else if (item.url) {
+            contentParts.push({
+              type: 'image_url',
+              image_url: { url: item.url }
+            })
+          }
+        }
+      }
+
+      const message: ChatMessage = contentParts.length > 0
+        ? { role: 'assistant', content: contentParts }
+        : { role: 'assistant', content: '' }
+
+      if (callId) {
+        this.logger?.logProviderCallSuccess(callId, { message, raw: data })
+      }
+      return message
+    } catch (error) {
+      if (callId) {
+        this.logger?.logProviderCallFailure(callId, this.normalizeRequestError(error), { stream: false, model: this.model })
+      }
+      throw error
+    }
+  }
+
   private async imageResponseCompletion (
     messages: ChatMessage[],
     abortSignal?: AbortSignal,
     options?: RequestOptions
   ): Promise<ChatMessage> {
     const imageOptions: RequestOptions = { timeoutMs: OpenAIProvider.IMAGE_REQUEST_TIMEOUT_MS, ...options }
+
+    // For dedicated image models (dall-e, gpt-image), prefer the /images/generations endpoint directly
+    if (this.isDedicatedImageModel()) {
+      try {
+        return await this.imageGenerationsCompletion(messages, abortSignal, imageOptions)
+      } catch {
+        // Fall through to try other approaches
+      }
+    }
+
     const body = this.buildResponsesBody(messages)
     const callId = this.logger?.logProviderCallStart({
       stream: false,
@@ -898,12 +1038,16 @@ export class OpenAIProvider {
         const normalized = this.normalizeRequestError(error)
 
         // If the Responses API is not supported by this provider, fall back
-        // to the Chat Completions API with modalities: ['text', 'image'].
+        // to the /images/generations endpoint first, then Chat Completions API.
         if (this.shouldFallbackToChatCompletions(normalized)) {
           if (callId) {
             this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
           }
-          return await this.imageChatCompletion(messages, abortSignal, imageOptions)
+          try {
+            return await this.imageGenerationsCompletion(messages, abortSignal, imageOptions)
+          } catch {
+            return await this.imageChatCompletion(messages, abortSignal, imageOptions)
+          }
         }
 
         if (!body.tools || !this.shouldRetryImageRequestWithoutTool(normalized)) {
@@ -930,19 +1074,28 @@ export class OpenAIProvider {
         if (callId) {
           this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
         }
-        return await this.imageChatCompletion(messages, abortSignal, imageOptions)
+        try {
+          return await this.imageGenerationsCompletion(messages, abortSignal, imageOptions)
+        } catch {
+          return await this.imageChatCompletion(messages, abortSignal, imageOptions)
+        }
       }
 
+      // Final fallback: try /images/generations before giving up
       if (callId) {
         this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
       }
-      throw error
+      try {
+        return await this.imageGenerationsCompletion(messages, abortSignal, imageOptions)
+      } catch {
+        throw normalized
+      }
     }
   }
 
   private async fetchWithRetry (
     url: string,
-    body: ChatCompletionBody | ResponsesBody,
+    body: ChatCompletionBody | ResponsesBody | ImagesGenerationsBody,
     stream: boolean,
     abortSignal?: AbortSignal,
     options?: RequestOptions
