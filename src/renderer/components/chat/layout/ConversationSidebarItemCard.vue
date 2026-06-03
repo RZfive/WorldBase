@@ -16,18 +16,21 @@ const props = withDefaults(defineProps<{
   nested?: boolean
   deleteTitle?: string
   showDelete?: boolean
+  showPin?: boolean
 }>(), {
   draggable: false,
   isDragging: false,
   dropClass: null,
   nested: false,
   deleteTitle: '删除',
-  showDelete: false
+  showDelete: false,
+  showPin: false
 })
 
 const emit = defineEmits<{
   (e: 'click'): void
   (e: 'delete'): void
+  (e: 'pin'): void
   (e: 'dragstart', event: DragEvent): void
   (e: 'dragover', event: DragEvent): void
   (e: 'dragleave', event: DragEvent): void
@@ -47,6 +50,7 @@ const emit = defineEmits<{
         streaming: item.isStreaming,
         waitingAuth: item.pendingAuthCount > 0,
         dragging: isDragging,
+        pinned: showPin && 'isPinned' in item && item.isPinned,
         'conversation-item-nested': nested
       }
     ]"
@@ -79,6 +83,18 @@ const emit = defineEmits<{
         <span class="conv-subtitle">{{ item.subtitle }}</span>
       </div>
     </div>
+    <button
+      v-if="showPin"
+      class="conv-pin"
+      :class="{ active: 'isPinned' in item && item.isPinned }"
+      type="button"
+      :title="'isPinned' in item && item.isPinned ? '取消置顶' : '置顶'"
+      @click.stop="emit('pin')"
+    >
+      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M9.5 2.5L13.5 6.5L10.5 7.5L8.5 11.5L7 10L4.5 12.5L6 8.5L4.5 7L8.5 5L9.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+      </svg>
+    </button>
     <button v-if="showDelete" class="conv-delete" type="button" :title="deleteTitle" @click.stop="emit('delete')">×</button>
   </div>
 </template>
@@ -263,6 +279,54 @@ const emit = defineEmits<{
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   line-height: 1.3;
+}
+
+.conv-pin {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--app-text-faint);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  opacity: 0;
+  transform: translateY(2px) scale(0.94);
+  transition: opacity 0.18s ease, transform 0.18s ease, color 0.18s ease, background 0.18s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.conv-pin svg {
+  width: 13px;
+  height: 13px;
+}
+
+.conv-pin.active {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  color: var(--app-accent);
+}
+
+.conv-pin.active svg path {
+  fill: var(--app-accent);
+}
+
+.conv-item:hover .conv-pin,
+.conv-item.active .conv-pin {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.conv-pin:hover {
+  background: color-mix(in srgb, var(--app-accent-soft) 36%, transparent);
+  color: var(--app-accent);
+}
+
+.conv-item.pinned {
+  border-color: color-mix(in srgb, var(--app-accent) 18%, var(--app-border));
 }
 
 .conv-delete {
