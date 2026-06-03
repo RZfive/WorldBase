@@ -4,6 +4,7 @@ import QRCode from 'qrcode'
 import ChatPanel from './renderer/components/chat/ChatPanel.vue'
 import Launchpad from './renderer/components/launchpad/Launchpad.vue'
 import AISettings from './renderer/components/settings/AISettings.vue'
+import ImageStudio from './renderer/components/studio/ImageStudio.vue'
 import SourceViewer from './renderer/components/viewer/SourceViewer.vue'
 import TitleBar from './renderer/components/app/TitleBar.vue'
 import DockBar from './renderer/components/app/DockBar.vue'
@@ -60,7 +61,7 @@ interface ProjectListItem {
 const standaloneProjectId = new URLSearchParams(window.location.search).get('projectWindow')
 const isStandaloneProjectWindow = Boolean(standaloneProjectId)
 
-type MainView = 'chat' | 'app' | 'source' | 'settings'
+type MainView = 'chat' | 'app' | 'source' | 'settings' | 'studio'
 type AppChatPresentation = 'full' | 'bubble' | 'overlay'
 type ChatShellMode = 'full' | 'overlay' | 'hidden'
 
@@ -424,6 +425,13 @@ function openChat () {
 function openSettings () {
   appChatPresentation.value = 'full'
   currentView.value = 'settings'
+  showLaunchpad.value = false
+  hideDockCtx()
+}
+
+function openStudio () {
+  appChatPresentation.value = 'full'
+  currentView.value = 'studio'
   showLaunchpad.value = false
   hideDockCtx()
 }
@@ -1091,6 +1099,7 @@ onUnmounted(() => {
           :running-apps="dockApps"
           :embedded-project-id="activeEmbeddedProjectId"
           @open-chat="openChat"
+          @open-studio="openStudio"
           @toggle-launchpad="toggleLaunchpad"
           @open-settings="openSettings"
           @switch-to-app="switchToApp"
@@ -1174,6 +1183,8 @@ onUnmounted(() => {
           />
 
           <AISettings v-if="currentView === 'settings'" />
+
+          <ImageStudio v-if="currentView === 'studio'" />
 
           <Launchpad
             v-if="showLaunchpad"

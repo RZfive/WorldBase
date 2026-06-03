@@ -8,6 +8,9 @@ type AppUpdateState = import('./shared/app-update-types.js').AppUpdateState
 type AppUpdateWebsiteKind = import('./shared/app-update-types.js').AppUpdateWebsiteKind
 type PageAutomationRequestEnvelope = import('./shared/page-automation-types.js').PageAutomationRequestEnvelope
 type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js').PageAutomationResponseEnvelope
+type ImageStudioGenerateRequest = import('./shared/image-studio-types.js').ImageStudioGenerateRequest
+type ImageStudioGenerateResponse = import('./shared/image-studio-types.js').ImageStudioGenerateResponse
+type ImageLibraryEntry = import('./shared/image-studio-types.js').ImageLibraryEntry
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -818,6 +821,9 @@ interface ElectronAPI {
   deleteMemory: (id: string) => Promise<boolean>
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   saveMarkdownToFile: (markdown: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
+  generateStudioImage: (req: ImageStudioGenerateRequest) => Promise<ImageStudioGenerateResponse>
+  listImageLibrary: () => Promise<ImageLibraryEntry[]>
+  deleteImageLibrary: (ids: string[]) => Promise<{ removed: number }>
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
