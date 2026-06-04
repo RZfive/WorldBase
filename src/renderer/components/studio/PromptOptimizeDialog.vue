@@ -82,6 +82,10 @@ function onOpen () {
   editablePrompt.value = ''
   errorMsg.value = ''
   selectedValue.value = props.defaultModelValue || props.modelOptions[0]?.value || ''
+  if (!selectedValue.value) {
+    errorMsg.value = '未找到可用的文本模型'
+    return
+  }
   doOptimize()
 }
 
@@ -102,7 +106,7 @@ defineExpose({ onOpen })
         <div class="opt-body">
           <div class="opt-section">
             <span class="opt-label">优化模型</span>
-            <select v-model="selectedValue" class="opt-select" :disabled="optimizing || props.modelOptions.length === 0" @change="doOptimize">
+            <select v-model="selectedValue" class="opt-select" :disabled="optimizing || props.modelOptions.length === 0">
               <option v-for="option in props.modelOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
             <span class="opt-hint">默认使用当前默认供应商的默认模型，也可切换其他文本模型对比效果</span>
@@ -137,7 +141,7 @@ defineExpose({ onOpen })
         <footer class="opt-footer">
           <button class="opt-btn" type="button" @click="emit('close')">取消</button>
           <button class="opt-btn opt-btn-retry" type="button" :disabled="optimizing || !props.originalPrompt.trim()" @click="doOptimize">
-            ↻ 重新优化
+            ↻ 使用所选模型优化
           </button>
           <button
             class="opt-btn opt-btn-primary"
