@@ -50,12 +50,40 @@ function guessExtensionFromMime (mimeType: string): string {
  */
 export class ImageLibraryStore {
   private dir: string
+  /** Registry of folder names, including empty folders that hold no images yet. */
+  private foldersFile: string
 
   constructor (userDataPath: string) {
     this.dir = path.join(userDataPath, 'image-library')
+    this.foldersFile = path.join(this.dir, 'folders.json')
     if (!fs.existsSync(this.dir)) {
       fs.mkdirSync(this.dir, { recursive: true })
     }
+  }
+
+  private readFolderRegistry (): string[] {
+    if (!fs.existsSync(this.foldersFile)) return []
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.foldersFile, 'utf-8'))
+      return Array.isArray(parsed) ? parsed.filter((name): name is string => typeof name === 'string') : []
+    } catch {
+      return []
+    }
+  }
+
+  private writeFolderRegistry (names: string[]): void {
+    const unique = Array.from(new Set(names.map(n => n.trim()).filter(Boolean)))
+    try {
+      fs.writeFileSync(this.foldersFile, JSON.stringify(unique, null, 2), 'utf-8')
+    } catch {
+      // ignore write failures — registry is best-effort
+    }
+  }
+
+  /** Metadata json files only (excludes the folders.json registry). */
+  private metaFiles (): string[] {
+    if (!fs.existsSync(this.dir)) return []
+    return fs.readdirSync(this.dir).filter(f => f.endsWith('.json') && f !== 'folders.json')
   }
 
   private sanitizeId (id: string): string {
@@ -94,6 +122,26 @@ export class ImageLibraryStore {
   /** Absolute path to a stored image file (for save-to-file flows). */
   resolveFilePath (fileName: string): string {
     return path.join(this.dir, path.basename(fileName))
+  }
+
+  /**
+   * Absolute paths of the generated images in a folder, for packaging/export.
+   * `folderName === ''` selects unfiled images. Returns existing files only.
+   */
+  folderImagePaths (folderName: string): string[] {
+    const paths: string[] = []
+    for (const file of this.metaFiles()) {
+      try {
+        const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
+        const matches = folderName === '' ? !record.folder : record.folder === folderName
+        if (!matches) continue
+        const fp = this.resolveFilePath(record.fileName)
+        if (fs.existsSync(fp)) paths.push(fp)
+      } catch {
+        // skip
+      }
+    }
+    return paths
   }
 
   /**
@@ -137,8 +185,7 @@ export class ImageLibraryStore {
 
   /** List all library entries (newest first), each enriched with data URLs. */
   list (): ImageLibraryEntry[] {
-    if (!fs.existsSync(this.dir)) return []
-    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
+    const files = this.metaFiles()
     const entries: ImageLibraryEntry[] = []
 
     for (const file of files) {
@@ -226,13 +273,26 @@ export class ImageLibraryStore {
     }
   }
 
-  /** Get all unique folder names with counts. */
-  listFolders (): ImageLibraryFolder[] {
-    if (!fs.existsSync(this.dir)) return []
-    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
-    const folderMap = new Map<string, number>()
+  /** Create an empty folder (persisted in the registry). Returns updated folder list. */
+  createFolder (name: string): ImageLibraryFolder[] {
+    const trimmed = name.trim()
+    if (trimmed) {
+      this.writeFolderRegistry([...this.readFolderRegistry(), trimmed])
+    }
+    return this.listFolders()
+  }
 
-    for (const file of files) {
+  /**
+   * Get all folder names with image counts. Merges the persisted registry
+   * (so empty folders still appear, with count 0) with folders derived from images.
+   */
+  listFolders (): ImageLibraryFolder[] {
+    const folderMap = new Map<string, number>()
+    for (const name of this.readFolderRegistry()) {
+      folderMap.set(name, 0)
+    }
+
+    for (const file of this.metaFiles()) {
       try {
         const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
         if (record.folder) {
@@ -250,11 +310,9 @@ export class ImageLibraryStore {
 
   /** Get all unique tags across all images. */
   listAllTags (): string[] {
-    if (!fs.existsSync(this.dir)) return []
-    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
     const tagSet = new Set<string>()
 
-    for (const file of files) {
+    for (const file of this.metaFiles()) {
       try {
         const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
         if (record.tags) {
@@ -268,13 +326,11 @@ export class ImageLibraryStore {
     return Array.from(tagSet).sort()
   }
 
-  /** Rename a folder across all images. */
+  /** Rename a folder across all images and in the registry. */
   renameFolder (oldName: string, newName: string): number {
-    if (!fs.existsSync(this.dir)) return 0
-    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
     let updated = 0
 
-    for (const file of files) {
+    for (const file of this.metaFiles()) {
       try {
         const fp = path.join(this.dir, file)
         const record = JSON.parse(fs.readFileSync(fp, 'utf-8')) as ImageLibraryRecord
@@ -288,16 +344,19 @@ export class ImageLibraryStore {
       }
     }
 
+    const registry = this.readFolderRegistry()
+    if (registry.includes(oldName)) {
+      this.writeFolderRegistry(registry.map(n => (n === oldName ? newName : n)))
+    }
+
     return updated
   }
 
-  /** Delete a folder (unassign from all images in that folder). */
+  /** Delete a folder (unassign from all images and drop it from the registry). */
   deleteFolder (folderName: string): number {
-    if (!fs.existsSync(this.dir)) return 0
-    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
     let updated = 0
 
-    for (const file of files) {
+    for (const file of this.metaFiles()) {
       try {
         const fp = path.join(this.dir, file)
         const record = JSON.parse(fs.readFileSync(fp, 'utf-8')) as ImageLibraryRecord
@@ -310,6 +369,8 @@ export class ImageLibraryStore {
         // skip
       }
     }
+
+    this.writeFolderRegistry(this.readFolderRegistry().filter(n => n !== folderName))
 
     return updated
   }
