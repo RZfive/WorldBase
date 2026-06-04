@@ -120,19 +120,25 @@ function selectOnly (id: string) {
   selectedIds.value = new Set([id])
 }
 
+function toggleSelection (id: string) {
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = next
+}
+
+/** Plain click opens the preview; ⌘/Ctrl-click toggles selection (multi-select). */
 function onImageClick (entry: ImageLibraryEntry, event: MouseEvent) {
   if (event.metaKey || event.ctrlKey) {
-    const next = new Set(selectedIds.value)
-    if (next.has(entry.id)) next.delete(entry.id)
-    else next.add(entry.id)
-    selectedIds.value = next
+    toggleSelection(entry.id)
   } else {
-    selectOnly(entry.id)
+    openLightbox(entry)
   }
 }
 
-function onImageDblClick (entry: ImageLibraryEntry) {
-  openLightbox(entry)
+/** The always-visible corner checkbox toggles selection without opening the preview. */
+function onCheckClick (entry: ImageLibraryEntry) {
+  toggleSelection(entry.id)
 }
 
 function clearSelection () {
@@ -193,18 +199,51 @@ function uniqueFolderName (base = '新建文件夹'): string {
   return `${base} (${i})`
 }
 
-function createFolder () {
-  emit('createFolder', uniqueFolderName())
-  closeContextMenu()
+/** Inline folder-name editing. `original === null` ⇒ creating a new folder. */
+const editingFolder = ref<{ original: string | null } | null>(null)
+/** Text bound to the inline rename/create input (kept separate so v-model is never null). */
+const editingFolderName = ref('')
+
+/** Autofocus + select the inline input when it mounts. */
+const vFocus = {
+  mounted: (el: HTMLInputElement) => { el.focus(); el.select() }
 }
 
-function renameFolder (name: string) {
-  const next = window.prompt('重命名文件夹', name)?.trim()
-  if (next && next !== name) {
-    emit('renameFolder', name, next)
-    if (currentFolder.value === name) currentFolder.value = next
-  }
+function isEditingFolder (name: string): boolean {
+  return editingFolder.value?.original === name
+}
+
+function startCreateFolder () {
   closeContextMenu()
+  // New folders live at the root; leave any folder/search view so the editing card shows.
+  currentFolder.value = null
+  searchQuery.value = ''
+  editingFolderName.value = uniqueFolderName()
+  editingFolder.value = { original: null }
+}
+
+function startRenameFolder (name: string) {
+  closeContextMenu()
+  editingFolderName.value = name
+  editingFolder.value = { original: name }
+}
+
+function commitFolderEdit () {
+  const edit = editingFolder.value
+  if (!edit) return // already committed/cancelled (e.g. blur after Enter/Esc)
+  editingFolder.value = null
+  const next = editingFolderName.value.trim()
+  if (!next) return
+  if (edit.original === null) {
+    if (!allFolderNames.value.includes(next)) emit('createFolder', next)
+  } else if (next !== edit.original) {
+    emit('renameFolder', edit.original, next)
+    if (currentFolder.value === edit.original) currentFolder.value = next
+  }
+}
+
+function cancelFolderEdit () {
+  editingFolder.value = null
 }
 
 function deleteFolder (name: string) {
@@ -353,7 +392,7 @@ onUnmounted(() => {
       </div>
       <div class="lib-actions">
         <input v-model="searchQuery" class="lib-search" type="text" placeholder="搜索提示词 / 标签…" />
-        <button class="lib-btn" type="button" @click="createFolder">＋ 新建文件夹</button>
+        <button class="lib-btn" type="button" @click="startCreateFolder">＋ 新建文件夹</button>
         <button class="lib-btn" type="button" :disabled="props.loading" @click="emit('refresh')">↻ 刷新</button>
       </div>
     </header>
@@ -388,12 +427,36 @@ onUnmounted(() => {
     >
       <!-- Folder cards (root, non-search) -->
       <template v-if="showFolders">
+        <!-- New folder being created (inline name input) -->
+        <div
+          v-if="editingFolder && editingFolder.original === null"
+          class="lib-folder-card editing"
+        >
+          <div class="lib-folder-cover">
+            <div class="lib-folder-cover-empty">📁</div>
+            <div class="lib-folder-meta">
+              <input
+                v-model="editingFolderName"
+                v-focus
+                class="lib-folder-name-input"
+                type="text"
+                maxlength="40"
+                placeholder="文件夹名称"
+                @click.stop
+                @keydown.enter.stop.prevent="commitFolderEdit"
+                @keydown.esc.stop.prevent="cancelFolderEdit"
+                @blur="commitFolderEdit"
+              />
+            </div>
+          </div>
+        </div>
+
         <div
           v-for="folder in folderCards"
           :key="`folder-${folder.name}`"
           class="lib-folder-card"
-          :class="{ 'drag-over': dragOverKey === folder.name }"
-          @click="openFolder(folder.name)"
+          :class="{ 'drag-over': dragOverKey === folder.name, editing: isEditingFolder(folder.name) }"
+          @click="isEditingFolder(folder.name) ? null : openFolder(folder.name)"
           @contextmenu.prevent.stop="openFolderMenu(folder.name, $event)"
           @dragover.prevent="onFolderDragOver(folder.name)"
           @dragleave="onFolderDragLeave(folder.name)"
@@ -405,7 +468,20 @@ onUnmounted(() => {
             </template>
             <div v-else class="lib-folder-cover-empty">📁</div>
             <div class="lib-folder-meta">
-              <span class="lib-folder-name" :title="folder.name">📁 {{ folder.name }}</span>
+              <input
+                v-if="isEditingFolder(folder.name)"
+                v-model="editingFolderName"
+                v-focus
+                class="lib-folder-name-input"
+                type="text"
+                maxlength="40"
+                placeholder="文件夹名称"
+                @click.stop
+                @keydown.enter.stop.prevent="commitFolderEdit"
+                @keydown.esc.stop.prevent="cancelFolderEdit"
+                @blur="commitFolderEdit"
+              />
+              <span v-else class="lib-folder-name" :title="folder.name">📁 {{ folder.name }}</span>
               <span class="lib-folder-num">{{ folder.count }}</span>
             </div>
           </div>
@@ -420,7 +496,6 @@ onUnmounted(() => {
         :class="{ selected: selectedIds.has(entry.id), dragging: draggingIds.includes(entry.id) }"
         draggable="true"
         @click.stop="onImageClick(entry, $event)"
-        @dblclick.stop="onImageDblClick(entry)"
         @contextmenu.prevent.stop="openImageMenu(entry, $event)"
         @dragstart="onImageDragStart(entry, $event)"
         @dragend="onImageDragEnd"
@@ -428,7 +503,14 @@ onUnmounted(() => {
         <img :src="entry.dataUrl" :alt="entry.prompt" class="lib-thumb" loading="lazy" draggable="false" />
         <span class="lib-badge">{{ entry.mode === 'edit' ? '编辑' : '生成' }}</span>
         <span v-if="entry.folder && isSearching" class="lib-folder-badge">📁 {{ entry.folder }}</span>
-        <span class="lib-check" :class="{ on: selectedIds.has(entry.id) }">✓</span>
+        <button
+          class="lib-check"
+          :class="{ on: selectedIds.has(entry.id) }"
+          type="button"
+          :title="selectedIds.has(entry.id) ? '取消选择' : '选择'"
+          @click.stop="onCheckClick(entry)"
+          @dblclick.stop
+        >✓</button>
         <div class="lib-card-caption">
           <span v-if="entry.tags?.length" class="lib-card-tags">{{ entry.tags.join(' · ') }}</span>
           <span v-else>{{ entry.prompt || '（无提示词）' }}</span>
@@ -436,7 +518,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Empty state -->
-      <div v-if="visibleEntries.length === 0 && (!showFolders || folderCards.length === 0)" class="lib-empty">
+      <div v-if="visibleEntries.length === 0 && !editingFolder && (!showFolders || folderCards.length === 0)" class="lib-empty">
         <template v-if="props.entries.length === 0">
           <p>还没有生成任何图片</p>
           <span>在工作台输入提示词并生成，结果会自动保存到这里</span>
@@ -482,7 +564,7 @@ onUnmounted(() => {
         <!-- Folder menu -->
         <template v-else-if="contextMenu.kind === 'folder'">
           <button class="lib-menu-item" type="button" @click="openFolder(contextMenu.folderName!)">📂 打开</button>
-          <button class="lib-menu-item" type="button" @click="renameFolder(contextMenu.folderName!)">✎ 重命名</button>
+          <button class="lib-menu-item" type="button" @click="startRenameFolder(contextMenu.folderName!)">✎ 重命名</button>
           <button class="lib-menu-item" type="button" @click="exportFolder(contextMenu.folderName!)">⤓ 导出为 ZIP</button>
           <div class="lib-menu-divider"></div>
           <button class="lib-menu-item danger" type="button" @click="deleteFolder(contextMenu.folderName!)">🗑 删除文件夹</button>
@@ -490,7 +572,7 @@ onUnmounted(() => {
 
         <!-- Blank menu -->
         <template v-else>
-          <button class="lib-menu-item" type="button" @click="createFolder">📁 新建文件夹</button>
+          <button class="lib-menu-item" type="button" @click="startCreateFolder">📁 新建文件夹</button>
           <button class="lib-menu-item" type="button" :disabled="!canPaste" @click="paste">📋 粘贴{{ canPaste ? `（${clipboard.length}）` : '' }}</button>
           <button class="lib-menu-item" type="button" @click="emit('refresh'); closeContextMenu()">↻ 刷新</button>
         </template>
@@ -762,6 +844,25 @@ onUnmounted(() => {
   color: #e2e8f0;
 }
 
+.lib-folder-card.editing { cursor: default; }
+.lib-folder-card.editing:hover { transform: none; box-shadow: none; border-color: var(--app-accent); }
+
+.lib-folder-name-input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--app-accent);
+  background: rgba(15, 23, 42, 0.86);
+  color: #f1f5f9;
+  font-size: 0.72em;
+  font-family: inherit;
+}
+.lib-folder-name-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--app-accent-glow);
+}
+
 /* Image cards */
 .lib-card {
   position: relative;
@@ -816,6 +917,7 @@ onUnmounted(() => {
   right: 6px;
   width: 20px;
   height: 20px;
+  padding: 0;
   border-radius: 999px;
   border: 2px solid #fff;
   background: rgba(15, 23, 42, 0.5);
@@ -825,10 +927,14 @@ onUnmounted(() => {
   justify-content: center;
   font-size: 0.7em;
   font-weight: 700;
-  opacity: 0;
-  transition: opacity 0.12s ease;
+  cursor: pointer;
+  /* Always visible so images can be multi-selected without a modifier key. */
+  opacity: 0.85;
+  transition: opacity 0.12s ease, background 0.12s ease, border-color 0.12s ease;
 }
-.lib-check.on { background: var(--app-accent); color: #fff; opacity: 1; }
+.lib-check:hover { opacity: 1; border-color: var(--app-accent); }
+.lib-check.on { background: var(--app-accent); border-color: var(--app-accent); color: #fff; opacity: 1; }
+.lib-card:hover .lib-check { opacity: 1; }
 
 .lib-card-caption {
   position: absolute;
