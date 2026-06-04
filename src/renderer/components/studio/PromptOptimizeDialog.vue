@@ -81,7 +81,7 @@ function onOpen () {
   optimizedPrompt.value = ''
   editablePrompt.value = ''
   errorMsg.value = ''
-  selectedValue.value = props.defaultModelValue || props.modelOptions[0]?.value || ''
+  selectedValue.value = props.defaultModelValue
   if (!selectedValue.value) {
     errorMsg.value = '未找到可用的文本模型'
     return
