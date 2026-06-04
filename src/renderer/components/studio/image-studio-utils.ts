@@ -10,18 +10,56 @@ export interface RatioPreset {
   defaultSize: string
 }
 
-export const RATIO_PRESETS: RatioPreset[] = [
-  { label: '1:1', sizes: ['512x512', '768x768', '1024x1024', '1536x1536'], defaultSize: '1024x1024' },
-  { label: '3:2', sizes: ['768x512', '1152x768', '1536x1024'], defaultSize: '1152x768' },
-  { label: '2:3', sizes: ['512x768', '768x1152', '1024x1536'], defaultSize: '768x1152' },
-  { label: '16:9', sizes: ['1024x576', '1280x720', '1792x1024'], defaultSize: '1792x1024' },
-  { label: '9:16', sizes: ['576x1024', '720x1280', '1024x1792'], defaultSize: '1024x1792' },
-  { label: '4:3', sizes: ['1024x768', '1280x960'], defaultSize: '1024x768' },
-  { label: '3:4', sizes: ['768x1024', '960x1280'], defaultSize: '768x1024' }
-]
+export const MIN_DIMENSION = 560
+export const MAX_DIMENSION = 8192
 
-export const MIN_DIMENSION = 256
-export const MAX_DIMENSION = 2048
+const PRESET_REFERENCE_DIMENSIONS = [560, 720, 1080, 1440, 2160, 4320]
+const DEFAULT_REFERENCE_DIMENSION = 1080
+
+const RATIO_DEFINITIONS = [
+  { label: '1:1', width: 1, height: 1 },
+  { label: '3:2', width: 3, height: 2 },
+  { label: '2:3', width: 2, height: 3 },
+  { label: '16:9', width: 16, height: 9 },
+  { label: '9:16', width: 9, height: 16 },
+  { label: '4:3', width: 4, height: 3 },
+  { label: '3:4', width: 3, height: 4 }
+] as const
+
+function roundToEven (value: number): number {
+  return Math.round(value / 2) * 2
+}
+
+function buildPresetSize (widthRatio: number, heightRatio: number, referenceDimension: number): string | null {
+  const shortSide = Math.min(widthRatio, heightRatio)
+  const scale = referenceDimension / shortSide
+  const width = roundToEven(widthRatio * scale)
+  const height = roundToEven(heightRatio * scale)
+
+  if (width < MIN_DIMENSION || width > MAX_DIMENSION || height < MIN_DIMENSION || height > MAX_DIMENSION) {
+    return null
+  }
+
+  return `${width}x${height}`
+}
+
+export const RATIO_PRESETS: RatioPreset[] = RATIO_DEFINITIONS.map((ratio) => {
+  const sizes = Array.from(
+    new Set(
+      PRESET_REFERENCE_DIMENSIONS
+        .map(referenceDimension => buildPresetSize(ratio.width, ratio.height, referenceDimension))
+        .filter((size): size is string => Boolean(size))
+    )
+  )
+
+  const defaultSize = buildPresetSize(ratio.width, ratio.height, DEFAULT_REFERENCE_DIMENSION) ?? sizes[0]
+
+  return {
+    label: ratio.label,
+    sizes,
+    defaultSize
+  }
+})
 
 /** A flattened provider+model option usable in a single dropdown. */
 export interface StudioModelOption {

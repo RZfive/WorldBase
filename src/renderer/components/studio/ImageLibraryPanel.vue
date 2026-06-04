@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { ImageLibraryEntry } from '../../../shared/image-studio-types'
 
 const props = defineProps<{
@@ -34,6 +34,13 @@ const searchQuery = ref('')
 const zoomLevel = ref(1)
 const MIN_ZOOM = 0.5
 const MAX_ZOOM = 4
+const ZOOM_STEP = 0.25
+
+const lightboxBodyRef = ref<HTMLElement | null>(null)
+const lightboxNaturalSize = ref({ width: 0, height: 0 })
+const lightboxViewport = ref({ width: 0, height: 0 })
+const draggingPan = ref(false)
+const dragState = ref({ pointerId: -1, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 })
 
 // Tag editing in lightbox
 const editingTags = ref(false)
@@ -96,6 +103,47 @@ const filteredEntries = computed(() => {
 
 // Unfiled count
 const unfiledCount = computed(() => props.entries.filter(e => !e.folder).length)
+const zoomPercent = computed(() => `${Math.round(zoomLevel.value * 100)}%`)
+
+const lightboxMetrics = computed(() => {
+  const { width: naturalWidth, height: naturalHeight } = lightboxNaturalSize.value
+  const { width: viewportWidth, height: viewportHeight } = lightboxViewport.value
+
+  if (!lightbox.value || !naturalWidth || !naturalHeight || !viewportWidth || !viewportHeight) return null
+
+  const fitScale = Math.min(viewportWidth / naturalWidth, viewportHeight / naturalHeight, 1)
+  const fittedWidth = naturalWidth * fitScale
+  const fittedHeight = naturalHeight * fitScale
+  const renderedWidth = fittedWidth * zoomLevel.value
+  const renderedHeight = fittedHeight * zoomLevel.value
+
+  return {
+    fittedWidth,
+    fittedHeight,
+    renderedWidth,
+    renderedHeight,
+    stageWidth: Math.max(viewportWidth, renderedWidth),
+    stageHeight: Math.max(viewportHeight, renderedHeight)
+  }
+})
+
+const lightboxStageStyle = computed(() => {
+  const metrics = lightboxMetrics.value
+  if (!metrics) return {}
+  return {
+    width: `${metrics.stageWidth}px`,
+    height: `${metrics.stageHeight}px`
+  }
+})
+
+const lightboxImageStyle = computed(() => {
+  const metrics = lightboxMetrics.value
+  if (!metrics) return {}
+  return {
+    width: `${metrics.renderedWidth}px`,
+    height: `${metrics.renderedHeight}px`
+  }
+})
 
 function toggleSelectMode () {
   selectMode.value = !selectMode.value
@@ -154,26 +202,128 @@ function onCardClick (entry: ImageLibraryEntry) {
   }
 }
 
+function closeLightbox () {
+  lightbox.value = null
+}
+
+function updateLightboxViewport () {
+  nextTick(() => {
+    if (!lightboxBodyRef.value) return
+    lightboxViewport.value = {
+      width: lightboxBodyRef.value.clientWidth,
+      height: lightboxBodyRef.value.clientHeight
+    }
+  })
+}
+
+function centerLightboxScroll () {
+  nextTick(() => {
+    if (!lightboxBodyRef.value) return
+    lightboxBodyRef.value.scrollLeft = Math.max(0, (lightboxBodyRef.value.scrollWidth - lightboxBodyRef.value.clientWidth) / 2)
+    lightboxBodyRef.value.scrollTop = Math.max(0, (lightboxBodyRef.value.scrollHeight - lightboxBodyRef.value.clientHeight) / 2)
+  })
+}
+
+function syncLightboxScroll (previousZoom: number, nextZoom: number) {
+  nextTick(() => {
+    if (!lightboxBodyRef.value) return
+    const metrics = lightboxMetrics.value
+    if (!metrics || previousZoom === nextZoom) return
+
+    const { clientWidth, clientHeight, scrollLeft, scrollTop } = lightboxBodyRef.value
+    const previousRenderedWidth = metrics.fittedWidth * previousZoom
+    const previousRenderedHeight = metrics.fittedHeight * previousZoom
+    const nextRenderedWidth = metrics.fittedWidth * nextZoom
+    const nextRenderedHeight = metrics.fittedHeight * nextZoom
+    const scaleRatioX = previousRenderedWidth > 0 ? nextRenderedWidth / previousRenderedWidth : 1
+    const scaleRatioY = previousRenderedHeight > 0 ? nextRenderedHeight / previousRenderedHeight : 1
+    const stageCenterX = metrics.stageWidth / 2
+    const stageCenterY = metrics.stageHeight / 2
+    const viewportCenterX = scrollLeft + clientWidth / 2
+    const viewportCenterY = scrollTop + clientHeight / 2
+    const offsetFromCenterX = viewportCenterX - stageCenterX
+    const offsetFromCenterY = viewportCenterY - stageCenterY
+    const targetScrollLeft = stageCenterX + offsetFromCenterX * scaleRatioX - clientWidth / 2
+    const targetScrollTop = stageCenterY + offsetFromCenterY * scaleRatioY - clientHeight / 2
+    const maxScrollLeft = Math.max(metrics.stageWidth - clientWidth, 0)
+    const maxScrollTop = Math.max(metrics.stageHeight - clientHeight, 0)
+
+    lightboxBodyRef.value.scrollLeft = Math.max(0, Math.min(targetScrollLeft, maxScrollLeft))
+    lightboxBodyRef.value.scrollTop = Math.max(0, Math.min(targetScrollTop, maxScrollTop))
+  })
+}
+
+function setZoom (zoom: number) {
+  const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(zoom.toFixed(2))))
+  const previousZoom = zoomLevel.value
+  if (nextZoom === previousZoom) return
+  zoomLevel.value = nextZoom
+  syncLightboxScroll(previousZoom, nextZoom)
+}
+
 // Zoom controls
 function zoomIn () {
-  zoomLevel.value = Math.min(MAX_ZOOM, zoomLevel.value + 0.25)
+  setZoom(zoomLevel.value + ZOOM_STEP)
 }
 
 function zoomOut () {
-  zoomLevel.value = Math.max(MIN_ZOOM, zoomLevel.value - 0.25)
+  setZoom(zoomLevel.value - ZOOM_STEP)
 }
 
 function zoomReset () {
   zoomLevel.value = 1
+  centerLightboxScroll()
 }
 
 function onWheel (event: WheelEvent) {
   event.preventDefault()
-  if (event.deltaY < 0) {
-    zoomIn()
-  } else {
-    zoomOut()
+  setZoom(zoomLevel.value * Math.exp(-event.deltaY * 0.003))
+}
+
+function handleLightboxImageLoad (event: Event) {
+  const target = event.target as HTMLImageElement | null
+  if (!target) return
+  lightboxNaturalSize.value = { width: target.naturalWidth, height: target.naturalHeight }
+  updateLightboxViewport()
+  centerLightboxScroll()
+}
+
+function startPan (event: PointerEvent) {
+  if (zoomLevel.value <= 1 || !lightboxBodyRef.value || event.button !== 0) return
+  draggingPan.value = true
+  dragState.value = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    scrollLeft: lightboxBodyRef.value.scrollLeft,
+    scrollTop: lightboxBodyRef.value.scrollTop
   }
+  ;(event.currentTarget as HTMLElement | null)?.setPointerCapture(event.pointerId)
+}
+
+function onPointerMove (event: PointerEvent) {
+  if (!draggingPan.value || !lightboxBodyRef.value || dragState.value.pointerId !== event.pointerId) return
+  const deltaX = event.clientX - dragState.value.startX
+  const deltaY = event.clientY - dragState.value.startY
+  lightboxBodyRef.value.scrollLeft = dragState.value.scrollLeft - deltaX
+  lightboxBodyRef.value.scrollTop = dragState.value.scrollTop - deltaY
+}
+
+function endPan (event?: PointerEvent) {
+  if (event && dragState.value.pointerId !== -1 && dragState.value.pointerId !== event.pointerId) return
+  if (event) {
+    ;(event.currentTarget as HTMLElement | null)?.releasePointerCapture?.(event.pointerId)
+  }
+  draggingPan.value = false
+  dragState.value.pointerId = -1
+}
+
+function onWindowKeydown (event: KeyboardEvent) {
+  if (!lightbox.value) return
+  if (event.key === 'Escape') { closeLightbox(); return }
+  if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomIn(); return }
+  if (event.key === '-' || event.key === '_') { event.preventDefault(); zoomOut(); return }
+  if (event.key === '0') { event.preventDefault(); zoomReset() }
 }
 
 // Tag editing
@@ -209,8 +359,23 @@ function formatTime (iso: string): string {
 }
 
 // Reset zoom when lightbox changes
-watch(lightbox, () => {
+watch(lightbox, (entry) => {
   zoomLevel.value = 1
+  draggingPan.value = false
+  lightboxNaturalSize.value = { width: 0, height: 0 }
+  if (entry) {
+    updateLightboxViewport()
+  }
+})
+
+onMounted(() => {
+  window.addEventListener('resize', updateLightboxViewport)
+  window.addEventListener('keydown', onWindowKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateLightboxViewport)
+  window.removeEventListener('keydown', onWindowKeydown)
 })
 </script>
 
@@ -330,21 +495,41 @@ watch(lightbox, () => {
 
     <!-- Lightbox with Zoom -->
     <Teleport to="body">
-      <div v-if="lightbox" class="lib-lightbox-overlay" @click.self="lightbox = null">
-        <div class="lib-lightbox">
-          <button class="lib-lightbox-close" type="button" @click="lightbox = null">✕</button>
-          <div class="lib-lightbox-body">
-            <div class="lib-lightbox-img-wrapper" @wheel="onWheel">
-              <img
-                :src="lightbox.dataUrl"
-                :alt="lightbox.prompt"
-                class="lib-lightbox-img"
-                :style="{ transform: `scale(${zoomLevel})` }"
-              />
+      <div v-if="lightbox" class="lib-lightbox-overlay" @click.self="closeLightbox">
+        <div class="lib-lightbox" @click.stop>
+          <header class="lib-lightbox-header">
+            <div class="lib-lightbox-heading">
+              <span class="lib-lightbox-title">图片详情</span>
+              <span class="lib-lightbox-subtitle">{{ lightbox.size }}<template v-if="lightbox.aspectRatio"> · {{ lightbox.aspectRatio }}</template></span>
+            </div>
+            <div class="lib-lightbox-toolbar">
               <div class="lib-zoom-controls">
                 <button class="lib-zoom-btn" type="button" @click="zoomOut" :disabled="zoomLevel <= MIN_ZOOM">−</button>
-                <span class="lib-zoom-label" @click="zoomReset">{{ Math.round(zoomLevel * 100) }}%</span>
+                <span class="lib-zoom-label" @click="zoomReset">{{ zoomPercent }}</span>
                 <button class="lib-zoom-btn" type="button" @click="zoomIn" :disabled="zoomLevel >= MAX_ZOOM">+</button>
+              </div>
+              <button class="lib-lightbox-close" type="button" @click="closeLightbox">关闭</button>
+            </div>
+          </header>
+          <div class="lib-lightbox-body">
+            <div
+              ref="lightboxBodyRef"
+              class="lib-lightbox-img-wrapper"
+              :class="{ 'can-pan': zoomLevel > 1, dragging: draggingPan }"
+              @wheel="onWheel"
+              @pointerdown="startPan"
+              @pointermove="onPointerMove"
+              @pointerup="endPan"
+              @pointercancel="endPan"
+            >
+              <div class="lib-lightbox-stage" :style="lightboxStageStyle">
+                <img
+                  :src="lightbox.dataUrl"
+                  :alt="lightbox.prompt"
+                  class="lib-lightbox-img"
+                  :style="lightboxImageStyle"
+                  @load="handleLightboxImageLoad"
+                />
               </div>
             </div>
             <div class="lib-meta">
@@ -388,9 +573,9 @@ watch(lightbox, () => {
                 </div>
               </div>
               <div class="lib-lightbox-actions">
-                <button class="lib-btn" type="button" @click="emit('regenerate', lightbox!); lightbox = null">↻ 重新生成</button>
-                <button class="lib-btn" type="button" @click="emit('load', lightbox!); lightbox = null">✎ 载入参数</button>
-                <button class="lib-btn" type="button" @click="emit('useAsInput', lightbox!); lightbox = null">⇲ 作为编辑输入</button>
+                <button class="lib-btn" type="button" @click="emit('regenerate', lightbox!); closeLightbox()">↻ 重新生成</button>
+                <button class="lib-btn" type="button" @click="emit('load', lightbox!); closeLightbox()">✎ 载入参数</button>
+                <button class="lib-btn" type="button" @click="emit('useAsInput', lightbox!); closeLightbox()">⇲ 作为编辑输入</button>
                 <button class="lib-btn" type="button" @click="emit('saveToFile', lightbox!)">⤓ 保存到文件</button>
               </div>
             </div>
@@ -687,76 +872,129 @@ watch(lightbox, () => {
 
 /* Lightbox */
 .lib-lightbox-overlay {
+  --lib-lightbox-top-offset: 52px;
   position: fixed;
-  inset: 0;
+  inset: var(--lib-lightbox-top-offset) 0 0 0;
   z-index: 10200;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
+  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.58) 10%);
+  padding: 16px 24px 24px;
+}
+
+.lib-lightbox-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(6px);
-  padding: 24px;
+  pointer-events: none;
 }
 
 .lib-lightbox {
   position: relative;
-  width: min(960px, 96vw);
-  max-height: 90vh;
+  width: min(1320px, calc(100vw - 48px));
+  height: min(820px, calc(100vh - var(--lib-lightbox-top-offset) - 40px));
   overflow: hidden;
-  border-radius: 18px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 22px;
   border: 1px solid var(--app-border);
   background: var(--app-panel-strong);
   box-shadow: var(--app-shadow);
+  isolation: isolate;
+}
+
+.lib-lightbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.lib-lightbox-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.lib-lightbox-title {
+  font-size: 0.96rem;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.lib-lightbox-subtitle {
+  font-size: 0.78rem;
+  color: var(--app-text-muted);
+}
+
+.lib-lightbox-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .lib-lightbox-close {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 2;
-  width: 30px;
-  height: 30px;
-  border: none;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--app-border-strong);
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.7);
-  color: #fff;
+  background: var(--app-panel-subtle);
+  color: var(--app-text-strong);
   cursor: pointer;
 }
 
 .lib-lightbox-body {
-  display: flex;
-  gap: 18px;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 20px;
   padding: 20px;
-  max-height: 90vh;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .lib-lightbox-img-wrapper {
-  flex: 1;
   min-width: 0;
-  max-width: 560px;
-  align-self: flex-start;
-  position: relative;
-  overflow: hidden;
-  border-radius: 12px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable both-edges;
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-border-strong) transparent;
+  border-radius: 16px;
   background: var(--app-panel-subtle);
   display: flex;
-  align-items: center;
-  justify-content: center;
+  user-select: none;
+  touch-action: none;
 }
 
-.lib-lightbox-img {
-  width: 100%;
-  object-fit: contain;
-  transition: transform 0.15s ease;
-  transform-origin: center center;
+.lib-lightbox-img-wrapper.can-pan { cursor: grab; }
+.lib-lightbox-img-wrapper.dragging { cursor: grabbing; }
+
+.lib-lightbox-img-wrapper::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.lib-lightbox-img-wrapper::-webkit-scrollbar-thumb {
+  background: var(--app-border-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.lib-lightbox-img-wrapper::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .lib-zoom-controls {
-  position: absolute;
-  bottom: 10px;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -794,9 +1032,25 @@ watch(lightbox, () => {
 
 .lib-zoom-label:hover { color: #fff; text-decoration: underline; }
 
+.lib-lightbox-stage {
+  min-width: 100%;
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lib-lightbox-img {
+  display: block;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
+}
+
 .lib-meta {
-  width: 300px;
-  flex-shrink: 0;
+  min-width: 0;
+  overflow: auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -861,9 +1115,29 @@ watch(lightbox, () => {
 
 .lib-lightbox-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 
+@media (max-width: 980px) {
+  .lib-lightbox-body {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: auto;
+  }
+
+  .lib-meta {
+    overflow: visible;
+  }
+}
+
 @media (max-width: 720px) {
-  .lib-lightbox-body { flex-direction: column; }
-  .lib-meta { width: 100%; }
-  .lib-lightbox-img-wrapper { max-width: 100%; }
+  .lib-lightbox-overlay {
+    padding: 12px;
+  }
+
+  .lib-lightbox {
+    width: min(100vw - 24px, 1320px);
+    height: calc(100vh - var(--lib-lightbox-top-offset) - 24px);
+  }
+
+  .lib-lightbox-header {
+    align-items: flex-start;
+  }
 }
 </style>
