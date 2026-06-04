@@ -291,8 +291,26 @@ export class ImageLibraryStore {
     return updated
   }
 
-  /** Delete a folder (unassign from all images). */
+  /** Delete a folder (unassign from all images in that folder). */
   deleteFolder (folderName: string): number {
-    return this.renameFolder(folderName, '')
+    if (!fs.existsSync(this.dir)) return 0
+    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
+    let updated = 0
+
+    for (const file of files) {
+      try {
+        const fp = path.join(this.dir, file)
+        const record = JSON.parse(fs.readFileSync(fp, 'utf-8')) as ImageLibraryRecord
+        if (record.folder === folderName) {
+          record.folder = undefined
+          fs.writeFileSync(fp, JSON.stringify(record, null, 2), 'utf-8')
+          updated += 1
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    return updated
   }
 }

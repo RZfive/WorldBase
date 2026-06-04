@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type {
   ImageLibraryEntry,
   ImageStudioGenerateRequest,
@@ -304,10 +304,9 @@ async function handleUpdateTags (id: string, tags: string[]) {
 function openOptimizeDialog (isNegative: boolean) {
   optimizeIsNegative.value = isNegative
   showOptimizeDialog.value = true
-  // Trigger optimize on next tick
-  setTimeout(() => {
+  nextTick(() => {
     optimizeDialogRef.value?.onOpen()
-  }, 50)
+  })
 }
 
 function applyOptimizedPrompt (optimized: string) {
