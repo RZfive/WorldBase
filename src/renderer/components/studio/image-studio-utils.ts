@@ -33,9 +33,20 @@ export interface StudioModelOption {
   label: string
 }
 
+export function isTextModel (provider: ProviderOption, model: string): boolean {
+  const caps = provider.modelCapabilities?.[model]
+  return caps?.imageGeneration !== true && caps?.imageEditing !== true
+}
+
 const MODE_CAPABILITY: Record<ImageStudioMode, 'imageGeneration' | 'imageEditing'> = {
   generate: 'imageGeneration',
   edit: 'imageEditing'
+}
+
+function prioritizeProviders (config: ProvidersConfig): ProviderOption[] {
+  const activeProvider = config.providers.find(provider => provider.id === config.activeProviderId)
+  if (!activeProvider) return config.providers
+  return [activeProvider, ...config.providers.filter(provider => provider.id !== activeProvider.id)]
 }
 
 /**
@@ -66,6 +77,30 @@ export function buildModelOptions (config: ProvidersConfig | null, mode: ImageSt
       }
     }
   }
+  return options
+}
+
+export function buildTextModelOptions (config: ProvidersConfig | null): StudioModelOption[] {
+  if (!config) return []
+
+  const options: StudioModelOption[] = []
+  for (const provider of prioritizeProviders(config)) {
+    const orderedModels = provider.activeModel && provider.models.includes(provider.activeModel)
+      ? [provider.activeModel, ...provider.models.filter(model => model !== provider.activeModel)]
+      : provider.models
+
+    for (const model of orderedModels) {
+      if (!isTextModel(provider, model)) continue
+      options.push({
+        providerId: provider.id,
+        providerName: provider.name,
+        model,
+        value: `${provider.id}::${model}`,
+        label: `${provider.name} · ${model}`
+      })
+    }
+  }
+
   return options
 }
 
