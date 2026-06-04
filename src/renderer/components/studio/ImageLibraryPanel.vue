@@ -35,6 +35,9 @@ const zoomLevel = ref(1)
 const MIN_ZOOM = 0.5
 const MAX_ZOOM = 4
 const ZOOM_STEP = 0.25
+const ZOOM_DECIMAL_PRECISION = 2
+const WHEEL_ZOOM_SENSITIVITY = 0.003
+const PRIMARY_MOUSE_BUTTON = 0
 
 const lightboxBodyRef = ref<HTMLElement | null>(null)
 const lightboxNaturalSize = ref({ width: 0, height: 0 })
@@ -254,7 +257,7 @@ function syncLightboxScroll (previousZoom: number, nextZoom: number) {
 }
 
 function setZoom (zoom: number) {
-  const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(zoom.toFixed(2))))
+  const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(zoom.toFixed(ZOOM_DECIMAL_PRECISION))))
   const previousZoom = zoomLevel.value
   if (nextZoom === previousZoom) return
   zoomLevel.value = nextZoom
@@ -277,7 +280,7 @@ function zoomReset () {
 
 function onWheel (event: WheelEvent) {
   event.preventDefault()
-  setZoom(zoomLevel.value * Math.exp(-event.deltaY * 0.003))
+  setZoom(zoomLevel.value * Math.exp(-event.deltaY * WHEEL_ZOOM_SENSITIVITY))
 }
 
 function handleLightboxImageLoad (event: Event) {
@@ -289,7 +292,7 @@ function handleLightboxImageLoad (event: Event) {
 }
 
 function startPan (event: PointerEvent) {
-  if (zoomLevel.value <= 1 || !lightboxBodyRef.value || event.button !== 0) return
+  if (zoomLevel.value <= 1 || !lightboxBodyRef.value || event.button !== PRIMARY_MOUSE_BUTTON) return
   draggingPan.value = true
   dragState.value = {
     pointerId: event.pointerId,
