@@ -23,7 +23,7 @@ import { SystemService } from '../src/main/system-capabilities/system-service.js
 import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout, type PortableSettingsConfig, type WebAppShortcut } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { AILogStore } from '../src/main/settings/ai-log-store.js'
-import { ImageLibraryStore, type ImageLibraryEntry, type ImageStudioMode } from '../src/main/settings/image-library-store.js'
+import { ImageLibraryStore, type ImageLibraryEntry, type ImageLibraryFolder, type ImageStudioMode } from '../src/main/settings/image-library-store.js'
 import { OpenAIProvider } from '../src/main/ai-engine/providers/openai-provider.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import { AgentStore } from '../src/main/settings/agent-store.js'
@@ -3333,6 +3333,62 @@ function setupIPC (): void {
 
   ipcMain.handle('image:library:delete', async (_event: IpcMainInvokeEvent, ids: string[]): Promise<{ removed: number }> => {
     return { removed: imageLibraryStore?.deleteMany(ids ?? []) ?? 0 }
+  })
+
+  ipcMain.handle('image:library:setFolder', async (_event: IpcMainInvokeEvent, ids: string[], folder: string | undefined): Promise<{ updated: number }> => {
+    return { updated: imageLibraryStore?.setFolder(ids ?? [], folder) ?? 0 }
+  })
+
+  ipcMain.handle('image:library:setTags', async (_event: IpcMainInvokeEvent, id: string, tags: string[]): Promise<{ ok: boolean }> => {
+    return { ok: imageLibraryStore?.setTags(id, tags ?? []) ?? false }
+  })
+
+  ipcMain.handle('image:library:listFolders', async (): Promise<ImageLibraryFolder[]> => {
+    return imageLibraryStore?.listFolders() ?? []
+  })
+
+  ipcMain.handle('image:library:listTags', async (): Promise<string[]> => {
+    return imageLibraryStore?.listAllTags() ?? []
+  })
+
+  ipcMain.handle('image:library:renameFolder', async (_event: IpcMainInvokeEvent, oldName: string, newName: string): Promise<{ updated: number }> => {
+    return { updated: imageLibraryStore?.renameFolder(oldName, newName) ?? 0 }
+  })
+
+  ipcMain.handle('image:library:deleteFolder', async (_event: IpcMainInvokeEvent, folderName: string): Promise<{ updated: number }> => {
+    return { updated: imageLibraryStore?.deleteFolder(folderName) ?? 0 }
+  })
+
+  ipcMain.handle('image:prompt:optimize', async (_event: IpcMainInvokeEvent, req: { providerId: string; model: string; prompt: string; isNegative?: boolean }): Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }> => {
+    try {
+      const providersConfig = settingsStore!.getProviders()
+      const provider = providersConfig.providers.find(p => p.id === req.providerId)
+      if (!provider) throw new Error('未找到所选供应商')
+      const model = provider.models.includes(req.model) ? req.model : provider.activeModel
+      if (!model) throw new Error('该供应商未配置可用模型')
+
+      const aiProvider = new OpenAIProvider()
+      aiProvider.setApiKey(provider.apiKey)
+      aiProvider.setBaseUrl(provider.baseUrl)
+      aiProvider.setModel(model)
+
+      const systemPrompt = req.isNegative
+        ? '你是一个专业的AI绘画提示词优化专家。用户会给你一段负向提示词（negative prompt），请优化它使其更加专业、精确、有效。负向提示词用于描述不希望在图片中出现的元素。请直接返回优化后的负向提示词文本，不要添加任何解释或前缀。保持与用户输入相同的语言。'
+        : '你是一个专业的AI绘画提示词优化专家。用户会给你一段图片生成提示词（prompt），请优化它使其更加专业、详细、生动，能够帮助AI模型生成更高质量的图片。请直接返回优化后的提示词文本，不要添加任何解释或前缀。保持与用户输入相同的语言。'
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: req.prompt }
+      ]
+
+      const result = await aiProvider.chatCompletion(messages)
+      const optimized = typeof result.content === 'string' ? result.content.trim() : ''
+      if (!optimized) throw new Error('AI未返回有效结果')
+
+      return { ok: true, optimizedPrompt: optimized }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : '提示词优化失败' }
+    }
   })
 
   ipcMain.handle('media:saveMarkdown', async (event: IpcMainInvokeEvent, markdown: string, defaultName?: string) => {

@@ -824,6 +824,13 @@ interface ElectronAPI {
   generateStudioImage: (req: ImageStudioGenerateRequest) => Promise<ImageStudioGenerateResponse>
   listImageLibrary: () => Promise<ImageLibraryEntry[]>
   deleteImageLibrary: (ids: string[]) => Promise<{ removed: number }>
+  setImageLibraryFolder: (ids: string[], folder: string | undefined) => Promise<{ updated: number }>
+  setImageLibraryTags: (id: string, tags: string[]) => Promise<{ ok: boolean }>
+  listImageLibraryFolders: () => Promise<import('./shared/image-studio-types').ImageLibraryFolder[]>
+  listImageLibraryTags: () => Promise<string[]>
+  renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
+  deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
+  optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
