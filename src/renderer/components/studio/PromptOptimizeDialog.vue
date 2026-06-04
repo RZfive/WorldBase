@@ -1,12 +1,20 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+
+interface TextModelOption {
+  providerId: string
+  providerName: string
+  model: string
+  value: string
+  label: string
+}
 
 const props = defineProps<{
   visible: boolean
   originalPrompt: string
   isNegative: boolean
-  providerId: string
-  model: string
+  modelOptions: TextModelOption[]
+  defaultModelValue: string
 }>()
 
 const emit = defineEmits<{
@@ -18,6 +26,11 @@ const optimizing = ref(false)
 const errorMsg = ref('')
 const optimizedPrompt = ref('')
 const editablePrompt = ref('')
+const selectedValue = ref('')
+
+const selectedOption = computed(() => {
+  return props.modelOptions.find(option => option.value === selectedValue.value) ?? null
+})
 
 async function doOptimize () {
   if (!window.electronAPI?.optimizeImagePrompt) {
@@ -28,6 +41,10 @@ async function doOptimize () {
     errorMsg.value = '请先输入提示词'
     return
   }
+  if (!selectedOption.value) {
+    errorMsg.value = '未找到可用的文本模型'
+    return
+  }
 
   optimizing.value = true
   errorMsg.value = ''
@@ -36,8 +53,8 @@ async function doOptimize () {
 
   try {
     const result = await window.electronAPI.optimizeImagePrompt({
-      providerId: props.providerId,
-      model: props.model,
+      providerId: selectedOption.value.providerId,
+      model: selectedOption.value.model,
       prompt: props.originalPrompt.trim(),
       isNegative: props.isNegative
     })
@@ -64,6 +81,7 @@ function onOpen () {
   optimizedPrompt.value = ''
   editablePrompt.value = ''
   errorMsg.value = ''
+  selectedValue.value = props.defaultModelValue || props.modelOptions[0]?.value || ''
   doOptimize()
 }
 
@@ -82,6 +100,14 @@ defineExpose({ onOpen })
         </header>
 
         <div class="opt-body">
+          <div class="opt-section">
+            <span class="opt-label">优化模型</span>
+            <select v-model="selectedValue" class="opt-select" :disabled="optimizing || props.modelOptions.length === 0" @change="doOptimize">
+              <option v-for="option in props.modelOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+            <span class="opt-hint">默认使用当前默认供应商的默认模型，也可切换其他文本模型对比效果</span>
+          </div>
+
           <div class="opt-section">
             <span class="opt-label">原始提示词</span>
             <p class="opt-original">{{ props.originalPrompt || '（空）' }}</p>
@@ -225,6 +251,23 @@ defineExpose({ onOpen })
 }
 
 .opt-textarea:focus {
+  outline: none;
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-glow);
+}
+
+.opt-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-subtle);
+  color: var(--app-text);
+  font-size: 0.86em;
+}
+
+.opt-select:focus {
   outline: none;
   border-color: var(--app-accent);
   box-shadow: 0 0 0 2px var(--app-accent-glow);
