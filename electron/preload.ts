@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
-import type { ImageLibraryEntry, ImageStudioGenerateRequest, ImageStudioGenerateResponse } from '../src/shared/image-studio-types.js'
+import type { ImageLibraryEntry, ImageLibraryFolder, ImageStudioGenerateRequest, ImageStudioGenerateResponse } from '../src/shared/image-studio-types.js'
 
 interface ChatMessage {
   role: string
@@ -486,6 +486,13 @@ export interface ElectronAPI {
   generateStudioImage: (req: ImageStudioGenerateRequest) => Promise<ImageStudioGenerateResponse>
   listImageLibrary: () => Promise<ImageLibraryEntry[]>
   deleteImageLibrary: (ids: string[]) => Promise<{ removed: number }>
+  setImageLibraryFolder: (ids: string[], folder: string | undefined) => Promise<{ updated: number }>
+  setImageLibraryTags: (id: string, tags: string[]) => Promise<{ ok: boolean }>
+  listImageLibraryFolders: () => Promise<ImageLibraryFolder[]>
+  listImageLibraryTags: () => Promise<string[]>
+  renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
+  deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
+  optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
@@ -686,6 +693,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   generateStudioImage: (req: ImageStudioGenerateRequest): Promise<ImageStudioGenerateResponse> => ipcRenderer.invoke('image:generate', req),
   listImageLibrary: (): Promise<ImageLibraryEntry[]> => ipcRenderer.invoke('image:library:list'),
   deleteImageLibrary: (ids: string[]): Promise<{ removed: number }> => ipcRenderer.invoke('image:library:delete', ids),
+  setImageLibraryFolder: (ids: string[], folder: string | undefined): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:setFolder', ids, folder),
+  setImageLibraryTags: (id: string, tags: string[]): Promise<{ ok: boolean }> => ipcRenderer.invoke('image:library:setTags', id, tags),
+  listImageLibraryFolders: (): Promise<ImageLibraryFolder[]> => ipcRenderer.invoke('image:library:listFolders'),
+  listImageLibraryTags: (): Promise<string[]> => ipcRenderer.invoke('image:library:listTags'),
+  renameImageLibraryFolder: (oldName: string, newName: string): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:renameFolder', oldName, newName),
+  deleteImageLibraryFolder: (folderName: string): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:deleteFolder', folderName),
+  optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }): Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }> => ipcRenderer.invoke('image:prompt:optimize', req),
   readUploadedAttachmentFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedAttachmentFile', filePath),
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => ipcRenderer.invoke('chat:readUploadedAttachmentBuffer', payload),
   readUploadedOfficeFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedOfficeFile', filePath),

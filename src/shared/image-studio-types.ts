@@ -36,6 +36,33 @@ export interface ImageLibraryEntry {
   dataUrl: string
   /** Source images (edit mode) as data URLs. */
   sourceDataUrls?: string[]
+  /** Folder/group name for organizing images. */
+  folder?: string
+  /** Tags for searching/filtering images. */
+  tags?: string[]
+}
+
+/** Folder definition for the image library. */
+export interface ImageLibraryFolder {
+  name: string
+  /** Number of images in this folder. */
+  count: number
+}
+
+/** Request to optimize a prompt using AI. */
+export interface PromptOptimizeRequest {
+  providerId: string
+  model: string
+  prompt: string
+  /** Whether this is a negative prompt. */
+  isNegative?: boolean
+}
+
+/** Response from AI prompt optimization. */
+export interface PromptOptimizeResponse {
+  ok: boolean
+  optimizedPrompt?: string
+  error?: string
 }
 
 export type ImageStudioGenerateResponse =
