@@ -3364,6 +3364,7 @@ function setupIPC (): void {
       const providersConfig = settingsStore!.getProviders()
       const provider = providersConfig.providers.find(p => p.id === req.providerId)
       if (!provider) throw new Error('未找到所选供应商')
+      if (!provider.apiKey) throw new Error('所选供应商未配置 API Key')
       const model = provider.models.includes(req.model) ? req.model : provider.activeModel
       if (!model) throw new Error('该供应商未配置可用模型')
 

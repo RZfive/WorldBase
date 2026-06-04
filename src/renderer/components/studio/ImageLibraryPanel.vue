@@ -375,7 +375,9 @@ watch(lightbox, () => {
                   </div>
                 </div>
                 <div v-else class="lib-tags-display">
-                  <span v-if="lightbox.tags?.length" v-for="tag in lightbox.tags" :key="tag" class="lib-tag-chip">{{ tag }}</span>
+                  <template v-if="lightbox.tags?.length">
+                    <span v-for="tag in lightbox.tags" :key="tag" class="lib-tag-chip">{{ tag }}</span>
+                  </template>
                   <span v-else class="lib-tag-empty">无标签，点击 ✎ 添加</span>
                 </div>
               </div>
