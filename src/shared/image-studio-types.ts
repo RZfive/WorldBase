@@ -68,3 +68,23 @@ export interface PromptOptimizeResponse {
 export type ImageStudioGenerateResponse =
   | { ok: true; entries: ImageLibraryEntry[] }
   | { ok: false; error: string }
+
+/** Lifecycle status of a queued generation/edit task. */
+export type ImageStudioTaskStatus = 'queued' | 'running' | 'success' | 'error'
+
+/** A single generation/edit job tracked by the studio task queue. */
+export interface ImageStudioTask {
+  id: string
+  status: ImageStudioTaskStatus
+  /** Monotonic creation timestamp (ms) used for ordering. */
+  createdAt: number
+  request: ImageStudioGenerateRequest
+  /** Short label derived from the request prompt for display. */
+  label: string
+  /** First input image (edit mode) used as a thumbnail. */
+  inputPreview?: string
+  /** Generated results once the task succeeds. */
+  entries: ImageLibraryEntry[]
+  /** Error message when the task fails. */
+  error?: string
+}

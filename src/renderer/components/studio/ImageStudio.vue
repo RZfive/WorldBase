@@ -1,13 +1,18 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type {
   ImageLibraryEntry,
+  ImageLibraryFolder,
   ImageStudioGenerateRequest,
-  ImageStudioMode
+  ImageStudioMode,
+  ImageStudioTask
 } from '../../../shared/image-studio-types'
 import type { ProvidersConfig } from '../chat/panel/types'
 import ImageLibraryPanel from './ImageLibraryPanel.vue'
 import PromptOptimizeDialog from './PromptOptimizeDialog.vue'
+import StudioTaskQueue from './StudioTaskQueue.vue'
+import StudioTaskDetail from './StudioTaskDetail.vue'
+import ImagePreview from './ImagePreview.vue'
 import {
   RATIO_PRESETS,
   MIN_DIMENSION,
@@ -20,9 +25,15 @@ import {
 
 const MAX_INPUT_IMAGES = 4
 const MAX_COUNT = 4
+// How many generation/edit jobs may run at the same time. Multiple tasks can be
+// queued while others are still in flight, so editing several images is concurrent.
+const MAX_CONCURRENT_TASKS = 2
+
+type StudioTab = 'workbench' | 'library'
 
 const providersConfig = ref<ProvidersConfig | null>(null)
 const mode = ref<ImageStudioMode>('generate')
+const studioTab = ref<StudioTab>('workbench')
 const selectedValue = ref('')
 const prompt = ref('')
 const negativePrompt = ref('')
@@ -34,12 +45,16 @@ const customHeight = ref(1080)
 const count = ref(1)
 const inputImages = ref<string[]>([])
 
-const generating = ref(false)
 const errorMsg = ref('')
-const results = ref<ImageLibraryEntry[]>([])
+const tasks = ref<ImageStudioTask[]>([])
+
+// Task-queue dropdown + open task detail
+const showTaskDropdown = ref(false)
+const activeTaskId = ref<string | null>(null)
 
 const libraryEntries = ref<ImageLibraryEntry[]>([])
 const libraryLoading = ref(false)
+const folders = ref<ImageLibraryFolder[]>([])
 
 const fileInput = ref<HTMLInputElement | null>(null)
 
@@ -54,6 +69,14 @@ const currentRatio = computed(() => RATIO_PRESETS.find(r => r.label === aspectRa
 const textModelOptions = computed(() => buildTextModelOptions(providersConfig.value))
 const defaultTextModelValue = computed(() => textModelOptions.value[0]?.value ?? '')
 
+const activeTaskCount = computed(() => tasks.value.filter(t => t.status === 'queued' || t.status === 'running').length)
+const folderNames = computed(() => folders.value.map(f => f.name))
+const activeTaskDetail = computed(() => tasks.value.find(t => t.id === activeTaskId.value) ?? null)
+const latestSuccessEntry = computed<ImageLibraryEntry | null>(() => {
+  const done = tasks.value.find(t => t.status === 'success' && t.entries.length > 0)
+  return done?.entries[0] ?? null
+})
+
 const finalSize = computed<string | null>(() => {
   if (sizeMode.value === 'custom') {
     return normalizeCustomSize(customWidth.value, customHeight.value)
@@ -64,7 +87,6 @@ const finalSize = computed<string | null>(() => {
 const needsInput = computed(() => mode.value === 'edit')
 
 const canGenerate = computed(() => {
-  if (generating.value) return false
   if (!selectedValue.value) return false
   if (!prompt.value.trim()) return false
   if (!finalSize.value) return false
@@ -111,26 +133,93 @@ async function loadLibrary () {
   }
 }
 
-async function runGeneration (req: ImageStudioGenerateRequest) {
+async function loadFolders () {
+  if (!window.electronAPI?.listImageLibraryFolders) return
+  try {
+    folders.value = await window.electronAPI.listImageLibraryFolders()
+  } catch {
+    // ignore
+  }
+}
+
+/* ---- Task queue ---- */
+
+function findNextQueuedTask (): ImageStudioTask | null {
+  // Schedule oldest-first (FIFO) even though the list renders newest-first.
+  for (let i = tasks.value.length - 1; i >= 0; i--) {
+    if (tasks.value[i].status === 'queued') return tasks.value[i]
+  }
+  return null
+}
+
+function runScheduler () {
+  let running = tasks.value.filter(t => t.status === 'running').length
+  while (running < MAX_CONCURRENT_TASKS) {
+    const next = findNextQueuedTask()
+    if (!next) break
+    running += 1
+    void executeTask(next)
+  }
+}
+
+async function executeTask (task: ImageStudioTask) {
+  task.status = 'running'
+  try {
+    // task.request is a Vue reactive proxy (it lives inside the reactive tasks array);
+    // proxies can't be structured-cloned across IPC, so send a plain deep copy.
+    const payload = JSON.parse(JSON.stringify(task.request)) as ImageStudioGenerateRequest
+    const response = await window.electronAPI!.generateStudioImage(payload)
+    if (response.ok) {
+      task.status = 'success'
+      task.entries = response.entries
+      await loadLibrary()
+    } else {
+      task.status = 'error'
+      task.error = response.error
+    }
+  } catch (error) {
+    task.status = 'error'
+    task.error = error instanceof Error ? error.message : '图片生成失败'
+  } finally {
+    runScheduler()
+  }
+}
+
+function enqueueTask (req: ImageStudioGenerateRequest) {
   if (!window.electronAPI?.generateStudioImage) {
     errorMsg.value = '当前环境不支持图片生成'
     return
   }
-  generating.value = true
   errorMsg.value = ''
-  try {
-    const response = await window.electronAPI.generateStudioImage(req)
-    if (response.ok) {
-      results.value = response.entries
-      await loadLibrary()
-    } else {
-      errorMsg.value = response.error
-    }
-  } catch (error) {
-    errorMsg.value = error instanceof Error ? error.message : '图片生成失败'
-  } finally {
-    generating.value = false
+  const task: ImageStudioTask = {
+    id: crypto.randomUUID(),
+    status: 'queued',
+    createdAt: Date.now(),
+    request: req,
+    label: req.prompt,
+    inputPreview: req.mode === 'edit' ? req.inputImages?.[0] : undefined,
+    entries: []
   }
+  // Newest task on top of the queue panel.
+  tasks.value = [task, ...tasks.value]
+  runScheduler()
+}
+
+function removeTask (id: string) {
+  tasks.value = tasks.value.filter(t => t.id !== id || t.status === 'running')
+}
+
+function retryTask (id: string) {
+  const task = tasks.value.find(t => t.id === id)
+  if (!task || task.status === 'running') return
+  task.status = 'queued'
+  task.error = undefined
+  task.entries = []
+  runScheduler()
+}
+
+function clearFinishedTasks () {
+  tasks.value = tasks.value.filter(t => t.status === 'queued' || t.status === 'running')
 }
 
 function buildRequestFromForm (): ImageStudioGenerateRequest | null {
@@ -154,7 +243,7 @@ async function onGenerate () {
   if (!canGenerate.value) return
   const req = buildRequestFromForm()
   if (!req) return
-  await runGeneration(req)
+  enqueueTask(req)
 }
 
 function triggerFilePicker () {
@@ -194,7 +283,7 @@ function clampCustomDimensions () {
 /* ---- Library actions ---- */
 
 async function handleRegenerate (entry: ImageLibraryEntry) {
-  await runGeneration({
+  enqueueTask({
     providerId: entry.providerId,
     model: entry.model,
     mode: entry.mode,
@@ -208,6 +297,7 @@ async function handleRegenerate (entry: ImageLibraryEntry) {
 }
 
 function handleLoadParams (entry: ImageLibraryEntry) {
+  studioTab.value = 'workbench'
   mode.value = entry.mode
   // selection set after mode so the mode watcher keeps a valid value
   const candidate = `${entry.providerId}::${entry.model}`
@@ -243,6 +333,7 @@ function handleLoadParams (entry: ImageLibraryEntry) {
 
 function handleUseAsInput (entry: ImageLibraryEntry) {
   mode.value = 'edit'
+  studioTab.value = 'workbench'
   ensureValidSelection()
   if (inputImages.value.length < MAX_INPUT_IMAGES) {
     inputImages.value = [...inputImages.value, entry.dataUrl]
@@ -258,7 +349,13 @@ async function handleSaveToFile (entry: ImageLibraryEntry) {
 async function handleDelete (ids: string[]) {
   if (!window.electronAPI?.deleteImageLibrary || ids.length === 0) return
   await window.electronAPI.deleteImageLibrary(ids)
-  results.value = results.value.filter(entry => !ids.includes(entry.id))
+  // Drop any deleted entries that are still shown inside completed task results.
+  const removed = new Set(ids)
+  for (const task of tasks.value) {
+    if (task.entries.length) {
+      task.entries = task.entries.filter(entry => !removed.has(entry.id))
+    }
+  }
   await loadLibrary()
 }
 
@@ -268,12 +365,60 @@ async function handleUpdateFolder (ids: string[], folder: string | undefined) {
   if (!window.electronAPI?.setImageLibraryFolder) return
   await window.electronAPI.setImageLibraryFolder(ids, folder)
   await loadLibrary()
+  await loadFolders()
 }
 
 async function handleUpdateTags (id: string, tags: string[]) {
   if (!window.electronAPI?.setImageLibraryTags) return
   await window.electronAPI.setImageLibraryTags(id, tags)
   await loadLibrary()
+}
+
+async function handleCreateFolder (name: string) {
+  if (!window.electronAPI?.createImageLibraryFolder) return
+  folders.value = await window.electronAPI.createImageLibraryFolder(name)
+}
+
+async function handleExportFolder (name: string) {
+  if (!window.electronAPI?.exportImageLibraryFolder) return
+  const result = await window.electronAPI.exportImageLibraryFolder(name)
+  if (result?.error) {
+    errorMsg.value = result.error
+  }
+}
+
+async function handleRenameFolder (oldName: string, newName: string) {
+  if (!window.electronAPI?.renameImageLibraryFolder) return
+  await window.electronAPI.renameImageLibraryFolder(oldName, newName)
+  await loadLibrary()
+  await loadFolders()
+}
+
+async function handleDeleteFolder (name: string) {
+  if (!window.electronAPI?.deleteImageLibraryFolder) return
+  await window.electronAPI.deleteImageLibraryFolder(name)
+  await loadLibrary()
+  await loadFolders()
+}
+
+async function handleLibraryRefresh () {
+  await loadLibrary()
+  await loadFolders()
+}
+
+/* ---- Task dropdown & detail ---- */
+
+function toggleTaskDropdown () {
+  showTaskDropdown.value = !showTaskDropdown.value
+}
+
+function openTaskDetail (task: ImageStudioTask) {
+  activeTaskId.value = task.id
+  showTaskDropdown.value = false
+}
+
+function closeTaskDetail () {
+  activeTaskId.value = null
 }
 
 /* ---- Prompt optimization ---- */
@@ -294,35 +439,77 @@ function applyOptimizedPrompt (optimized: string) {
   }
 }
 
+function onDocumentClick () {
+  showTaskDropdown.value = false
+}
+
 onMounted(() => {
   void loadProviders()
   void loadLibrary()
+  void loadFolders()
+  document.addEventListener('click', onDocumentClick)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', onDocumentClick)
 })
 </script>
 
 <template>
   <div class="studio">
     <header class="studio-header">
-      <div class="studio-title">
-        <span class="studio-emoji">🎨</span>
-        <div>
-          <h2>绘制工作台</h2>
-          <p>使用图片生成 / 编辑模型创作并管理图片</p>
+      <div class="studio-header-left">
+        <!-- Task queue dropdown -->
+        <div class="task-dropdown" @click.stop>
+          <button
+            type="button"
+            class="task-trigger"
+            :class="{ active: showTaskDropdown }"
+            @click="toggleTaskDropdown"
+          >
+            📋 任务队列
+            <span v-if="activeTaskCount > 0" class="task-trigger-badge">{{ activeTaskCount }}</span>
+          </button>
+          <div v-if="showTaskDropdown" class="task-panel">
+            <StudioTaskQueue
+              :tasks="tasks"
+              @open="openTaskDetail"
+              @remove="removeTask"
+              @retry="retryTask"
+              @clear-finished="clearFinishedTasks"
+            />
+          </div>
+        </div>
+
+        <div class="studio-title">
+          <span class="studio-emoji">🎨</span>
+          <div>
+            <h2>绘制工作台</h2>
+            <p>使用图片生成 / 编辑模型创作并管理图片</p>
+          </div>
         </div>
       </div>
-      <div class="studio-mode-toggle">
-        <button :class="['mode-btn', { active: mode === 'generate' }]" type="button" @click="mode = 'generate'">文生图</button>
-        <button :class="['mode-btn', { active: mode === 'edit' }]" type="button" @click="mode = 'edit'">图片编辑</button>
+
+      <div class="studio-tabs">
+        <button :class="['tab-btn', { active: studioTab === 'workbench' }]" type="button" @click="studioTab = 'workbench'">工作台</button>
+        <button :class="['tab-btn', { active: studioTab === 'library' }]" type="button" @click="studioTab = 'library'">图片库</button>
       </div>
     </header>
 
     <div class="studio-body">
-      <!-- Parameter panel -->
-      <aside class="studio-params">
-        <div v-if="modelOptions.length === 0" class="param-empty">
-          <p>未找到{{ mode === 'edit' ? '图片编辑' : '图片生成' }}类模型</p>
-          <span>请到「设置 → 供应商」为模型勾选对应能力</span>
-        </div>
+      <!-- Workbench tab: parameters + latest result -->
+      <template v-if="studioTab === 'workbench'">
+        <!-- Parameter panel -->
+        <aside class="studio-params">
+          <div class="studio-mode-toggle">
+            <button :class="['mode-btn', { active: mode === 'generate' }]" type="button" @click="mode = 'generate'">文生图</button>
+            <button :class="['mode-btn', { active: mode === 'edit' }]" type="button" @click="mode = 'edit'">图片编辑</button>
+          </div>
+
+          <div v-if="modelOptions.length === 0" class="param-empty">
+            <p>未找到{{ mode === 'edit' ? '图片编辑' : '图片生成' }}类模型</p>
+            <span>请到「设置 → 供应商」为模型勾选对应能力</span>
+          </div>
 
         <template v-else>
           <label class="param-field">
@@ -412,38 +599,41 @@ onMounted(() => {
           </label>
 
           <button class="generate-btn" type="button" :disabled="!canGenerate" @click="onGenerate">
-            <span v-if="generating" class="generate-spinner">⏳</span>
-            {{ generating ? '生成中…' : (mode === 'edit' ? '编辑图片' : '生成图片') }}
+            ＋ 加入队列{{ mode === 'edit' ? '（编辑）' : '（生成）' }}
           </button>
 
           <p v-if="errorMsg" class="param-error param-error-box">{{ errorMsg }}</p>
-        </template>
-      </aside>
+          </template>
+        </aside>
 
-      <!-- Results + library -->
-      <main class="studio-main">
-        <section v-if="generating || results.length > 0" class="results">
-          <h3 class="results-title">本次生成</h3>
-          <div v-if="generating" class="results-loading">
-            <span class="generate-spinner">⏳</span>
-            <p>正在生成图片，请稍候…</p>
-          </div>
-          <div v-else class="results-grid">
-            <div v-for="entry in results" :key="entry.id" class="result-card">
-              <img :src="entry.dataUrl" :alt="entry.prompt" />
-              <div class="result-actions">
-                <button type="button" @click="handleSaveToFile(entry)">⤓ 保存</button>
-                <button type="button" @click="handleUseAsInput(entry)">⇲ 作为输入</button>
+        <!-- Latest result preview -->
+        <main class="studio-main studio-main-workbench">
+          <div v-if="latestSuccessEntry" class="workbench-result">
+            <div class="workbench-result-head">
+              <h3>最近完成</h3>
+              <div class="workbench-result-actions">
+                <button class="lib-like-btn" type="button" @click="handleSaveToFile(latestSuccessEntry!)">⤓ 保存到文件</button>
+                <button class="lib-like-btn" type="button" @click="handleUseAsInput(latestSuccessEntry!)">⇲ 作为编辑输入</button>
               </div>
             </div>
+            <ImagePreview class="workbench-preview" :src="latestSuccessEntry.dataUrl" :alt="latestSuccessEntry.prompt" />
           </div>
-        </section>
+          <div v-else class="workbench-empty">
+            <span class="workbench-empty-emoji">🖼️</span>
+            <p>{{ activeTaskCount > 0 ? '任务进行中，完成后会在这里预览…' : '在左侧填写参数并加入队列，结果会显示在这里' }}</p>
+            <span class="workbench-empty-hint">点击左上角「📋 任务队列」查看全部生成 / 编辑任务</span>
+          </div>
+        </main>
+      </template>
 
+      <!-- Library tab: full-width image library -->
+      <main v-else class="studio-main studio-main-library">
         <ImageLibraryPanel
           class="studio-library"
           :entries="libraryEntries"
           :loading="libraryLoading"
-          @refresh="loadLibrary"
+          :folder-names="folderNames"
+          @refresh="handleLibraryRefresh"
           @delete="handleDelete"
           @regenerate="handleRegenerate"
           @load="handleLoadParams"
@@ -451,9 +641,22 @@ onMounted(() => {
           @save-to-file="handleSaveToFile"
           @update-folder="handleUpdateFolder"
           @update-tags="handleUpdateTags"
+          @create-folder="handleCreateFolder"
+          @export-folder="handleExportFolder"
+          @rename-folder="handleRenameFolder"
+          @delete-folder="handleDeleteFolder"
         />
       </main>
     </div>
+
+    <!-- Task detail modal -->
+    <StudioTaskDetail
+      :task="activeTaskDetail"
+      @close="closeTaskDetail"
+      @save-to-file="handleSaveToFile"
+      @use-as-input="(entry) => { handleUseAsInput(entry); closeTaskDetail() }"
+      @retry="retryTask"
+    />
 
     <!-- Prompt Optimization Dialog -->
     <PromptOptimizeDialog
@@ -486,6 +689,80 @@ onMounted(() => {
   padding: 18px 24px;
   border-bottom: 1px solid var(--app-border);
   background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
+}
+
+.studio-header-left { display: flex; align-items: center; gap: 18px; min-width: 0; }
+
+/* Task queue dropdown */
+.task-dropdown { position: relative; }
+
+.task-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-muted);
+  color: var(--app-text-soft);
+  font-size: 0.84em;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.task-trigger:hover,
+.task-trigger.active { background: var(--app-accent-soft); border-color: var(--app-accent-glow); color: var(--app-text-strong); }
+
+.task-trigger-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--app-accent);
+  color: #fff;
+  font-size: 0.72em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.task-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 10250;
+  width: 360px;
+  max-width: calc(100vw - 48px);
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-strong);
+  box-shadow: var(--app-shadow);
+}
+
+.studio-tabs {
+  display: flex;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--app-panel-muted);
+  border: 1px solid var(--app-border);
+}
+
+.tab-btn {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--app-text-soft);
+  font-size: 0.85em;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.tab-btn.active {
+  background: var(--app-accent);
+  color: #fff;
+  box-shadow: 0 4px 12px var(--app-accent-glow);
 }
 
 .studio-title { display: flex; align-items: center; gap: 14px; }
@@ -689,9 +966,6 @@ onMounted(() => {
 .generate-btn:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
 .generate-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.generate-spinner { display: inline-block; animation: studio-spin 1.2s linear infinite; }
-@keyframes studio-spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
-
 .studio-main {
   flex: 1;
   min-width: 0;
@@ -702,66 +976,58 @@ onMounted(() => {
   gap: 22px;
 }
 
-.results { display: flex; flex-direction: column; gap: 12px; }
-.results-title { margin: 0; font-size: 0.92rem; color: var(--app-text-strong); }
+.studio-main-workbench { overflow: hidden; }
 
-.results-loading {
+.studio-library { flex: 1; min-height: 0; }
+
+/* Workbench latest-result preview */
+.workbench-result {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.workbench-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workbench-result-head h3 { margin: 0; font-size: 0.92rem; color: var(--app-text-strong); }
+.workbench-result-actions { display: flex; gap: 8px; }
+
+.lib-like-btn {
+  padding: 6px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-muted);
+  color: var(--app-text-soft);
+  font-size: 0.8em;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.lib-like-btn:hover { background: var(--app-accent-soft); color: var(--app-text-strong); }
+
+.workbench-preview { flex: 1; min-height: 0; }
+
+.workbench-empty {
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 10px;
-  padding: 40px;
   color: var(--app-text-muted);
+  text-align: center;
 }
 
-.results-loading p { margin: 0; font-size: 0.86em; }
-
-.results-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 14px;
-}
-
-.result-card {
-  position: relative;
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid var(--app-border);
-  background: var(--app-panel);
-}
-
-.result-card img { width: 100%; display: block; }
-
-.result-actions {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  display: flex;
-  gap: 8px;
-  padding: 10px;
-  background: linear-gradient(180deg, transparent, rgba(15, 23, 42, 0.82));
-  opacity: 0;
-  transition: opacity 0.14s ease;
-}
-
-.result-card:hover .result-actions { opacity: 1; }
-
-.result-actions button {
-  flex: 1;
-  padding: 6px;
-  border: none;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.16);
-  color: #fff;
-  font-size: 0.76em;
-  cursor: pointer;
-  backdrop-filter: blur(4px);
-}
-
-.result-actions button:hover { background: var(--app-accent); }
-
-.studio-library { flex: 1; min-height: 0; }
+.workbench-empty-emoji { font-size: 2.4em; opacity: 0.6; }
+.workbench-empty p { margin: 0; font-size: 0.9em; }
+.workbench-empty-hint { font-size: 0.78em; color: var(--app-text-faint); }
 
 @media (max-width: 860px) {
   .studio-body { flex-direction: column; }

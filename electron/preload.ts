@@ -489,6 +489,8 @@ export interface ElectronAPI {
   setImageLibraryFolder: (ids: string[], folder: string | undefined) => Promise<{ updated: number }>
   setImageLibraryTags: (id: string, tags: string[]) => Promise<{ ok: boolean }>
   listImageLibraryFolders: () => Promise<ImageLibraryFolder[]>
+  createImageLibraryFolder: (name: string) => Promise<ImageLibraryFolder[]>
+  exportImageLibraryFolder: (folderName: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; error?: string }>
   listImageLibraryTags: () => Promise<string[]>
   renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
@@ -696,6 +698,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setImageLibraryFolder: (ids: string[], folder: string | undefined): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:setFolder', ids, folder),
   setImageLibraryTags: (id: string, tags: string[]): Promise<{ ok: boolean }> => ipcRenderer.invoke('image:library:setTags', id, tags),
   listImageLibraryFolders: (): Promise<ImageLibraryFolder[]> => ipcRenderer.invoke('image:library:listFolders'),
+  createImageLibraryFolder: (name: string): Promise<ImageLibraryFolder[]> => ipcRenderer.invoke('image:library:createFolder', name),
+  exportImageLibraryFolder: (folderName: string): Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; error?: string }> => ipcRenderer.invoke('image:library:exportFolder', folderName),
   listImageLibraryTags: (): Promise<string[]> => ipcRenderer.invoke('image:library:listTags'),
   renameImageLibraryFolder: (oldName: string, newName: string): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:renameFolder', oldName, newName),
   deleteImageLibraryFolder: (folderName: string): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:deleteFolder', folderName),

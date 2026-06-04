@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { ImageLibraryEntry } from '../../../shared/image-studio-types'
+import ImagePreview from './ImagePreview.vue'
 
 const props = defineProps<{
   entries: ImageLibraryEntry[]
   loading: boolean
+  /** Persisted folder names (includes empty folders). */
+  folderNames?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -16,320 +19,278 @@ const emit = defineEmits<{
   (e: 'saveToFile', entry: ImageLibraryEntry): void
   (e: 'updateFolder', ids: string[], folder: string | undefined): void
   (e: 'updateTags', id: string, tags: string[]): void
+  (e: 'createFolder', name: string): void
+  (e: 'exportFolder', name: string): void
+  (e: 'renameFolder', oldName: string, newName: string): void
+  (e: 'deleteFolder', name: string): void
 }>()
 
-const selectMode = ref(false)
-const selectedIds = ref<Set<string>>(new Set())
-const lightbox = ref<ImageLibraryEntry | null>(null)
-
-// Folder filtering
-const activeFolder = ref<string | null>(null) // null = all images
-const showFolderPanel = ref(false)
-const newFolderName = ref('')
-
-// Tag/search filtering
+/** Current folder being browsed; null = root (folders + unfiled images). */
+const currentFolder = ref<string | null>(null)
 const searchQuery = ref('')
 
-// Image zoom state
-const zoomLevel = ref(1)
-const MIN_ZOOM = 0.5
-const MAX_ZOOM = 4
-const ZOOM_STEP = 0.25
-const ZOOM_DECIMAL_PRECISION = 2
-const WHEEL_ZOOM_SENSITIVITY = 0.003
-const PRIMARY_MOUSE_BUTTON = 0
+/** Image selection (ids). Cleared when navigating. */
+const selectedIds = ref<Set<string>>(new Set())
+/** Cut clipboard — paste moves these into the current folder. */
+const clipboard = ref<string[]>([])
 
-const lightboxBodyRef = ref<HTMLElement | null>(null)
-const lightboxNaturalSize = ref({ width: 0, height: 0 })
-const lightboxViewport = ref({ width: 0, height: 0 })
-const draggingPan = ref(false)
-const dragState = ref({ pointerId: -1, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 })
+/** Drag state: ids being dragged, and the folder key currently hovered as drop target. */
+const draggingIds = ref<string[]>([])
+const dragOverKey = ref<string | null>(null) // folder name, '' for root/unfiled
 
-// Tag editing in lightbox
+/** Right-click context menu. */
+type MenuKind = 'image' | 'folder' | 'blank'
+const contextMenu = ref<{ kind: MenuKind; x: number; y: number; folderName?: string } | null>(null)
+
+const lightbox = ref<ImageLibraryEntry | null>(null)
 const editingTags = ref(false)
 const tagInput = ref('')
 
 const selectedCount = computed(() => selectedIds.value.size)
 
-// Compute unique folders from entries
-const folders = computed(() => {
-  const map = new Map<string, number>()
+/** Map of folder name → entries inside it. */
+const entriesByFolder = computed(() => {
+  const map = new Map<string, ImageLibraryEntry[]>()
+  for (const name of props.folderNames ?? []) map.set(name, [])
   for (const entry of props.entries) {
-    if (entry.folder) {
-      map.set(entry.folder, (map.get(entry.folder) ?? 0) + 1)
-    }
+    if (!entry.folder) continue
+    const list = map.get(entry.folder) ?? []
+    list.push(entry)
+    map.set(entry.folder, list)
   }
-  return Array.from(map.entries())
-    .map(([name, count]) => ({ name, count }))
+  return map
+})
+
+/** Folder cards (root view): name, count, up-to-4 cover thumbnails. */
+const folderCards = computed(() => {
+  return Array.from(entriesByFolder.value.entries())
+    .map(([name, list]) => ({
+      name,
+      count: list.length,
+      covers: list.slice(0, 4).map(e => e.dataUrl)
+    }))
     .sort((a, b) => a.name.localeCompare(b.name))
 })
 
-// Compute unique tags from entries
-const allTags = computed(() => {
-  const tagSet = new Set<string>()
-  for (const entry of props.entries) {
-    if (entry.tags) {
-      entry.tags.forEach(t => tagSet.add(t))
-    }
-  }
-  return Array.from(tagSet).sort()
-})
+const allFolderNames = computed(() => folderCards.value.map(f => f.name))
 
-// Filtered entries based on folder + search/tag query
-const filteredEntries = computed(() => {
-  let list = props.entries
+const unfiledEntries = computed(() => props.entries.filter(e => !e.folder))
 
-  // Filter by active folder
-  if (activeFolder.value !== null) {
-    if (activeFolder.value === '') {
-      // Show unfiled entries (no folder assigned)
-      list = list.filter(entry => !entry.folder)
-    } else {
-      list = list.filter(entry => entry.folder === activeFolder.value)
-    }
-  }
+function matchesQuery (entry: ImageLibraryEntry, q: string): boolean {
+  if (entry.prompt.toLowerCase().includes(q)) return true
+  if (entry.negativePrompt?.toLowerCase().includes(q)) return true
+  if (entry.tags?.some(t => t.toLowerCase().includes(q))) return true
+  if (entry.folder?.toLowerCase().includes(q)) return true
+  return false
+}
 
-  // Filter by search query (matches prompt, tags, negativePrompt)
+const isSearching = computed(() => searchQuery.value.trim().length > 0)
+
+/** Images shown in the current view. */
+const visibleEntries = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
-  if (q) {
-    list = list.filter(entry => {
-      if (entry.prompt.toLowerCase().includes(q)) return true
-      if (entry.negativePrompt?.toLowerCase().includes(q)) return true
-      if (entry.tags?.some(t => t.toLowerCase().includes(q))) return true
-      if (entry.folder?.toLowerCase().includes(q)) return true
-      return false
-    })
-  }
-
-  return list
+  if (q) return props.entries.filter(e => matchesQuery(e, q)) // flat search across everything
+  if (currentFolder.value === null) return unfiledEntries.value
+  return entriesByFolder.value.get(currentFolder.value) ?? []
 })
 
-// Unfiled count
-const unfiledCount = computed(() => props.entries.filter(e => !e.folder).length)
-const zoomPercent = computed(() => `${Math.round(zoomLevel.value * 100)}%`)
+/** Folder grid is only shown at the root and when not searching. */
+const showFolders = computed(() => currentFolder.value === null && !isSearching.value)
 
-const lightboxMetrics = computed(() => {
-  const { width: naturalWidth, height: naturalHeight } = lightboxNaturalSize.value
-  const { width: viewportWidth, height: viewportHeight } = lightboxViewport.value
+const currentFolderCount = computed(() =>
+  currentFolder.value === null ? 0 : (entriesByFolder.value.get(currentFolder.value)?.length ?? 0)
+)
 
-  if (!lightbox.value || !naturalWidth || !naturalHeight || !viewportWidth || !viewportHeight) return null
+/* ---- Navigation ---- */
 
-  const fitScale = Math.min(viewportWidth / naturalWidth, viewportHeight / naturalHeight, 1)
-  const fittedWidth = naturalWidth * fitScale
-  const fittedHeight = naturalHeight * fitScale
-  const renderedWidth = fittedWidth * zoomLevel.value
-  const renderedHeight = fittedHeight * zoomLevel.value
-
-  return {
-    fittedWidth,
-    fittedHeight,
-    renderedWidth,
-    renderedHeight,
-    stageWidth: Math.max(viewportWidth, renderedWidth),
-    stageHeight: Math.max(viewportHeight, renderedHeight)
-  }
-})
-
-const lightboxStageStyle = computed(() => {
-  const metrics = lightboxMetrics.value
-  if (!metrics) return {}
-  return {
-    width: `${metrics.stageWidth}px`,
-    height: `${metrics.stageHeight}px`
-  }
-})
-
-const lightboxImageStyle = computed(() => {
-  const metrics = lightboxMetrics.value
-  if (!metrics) return {}
-  return {
-    width: `${metrics.renderedWidth}px`,
-    height: `${metrics.renderedHeight}px`
-  }
-})
-
-function toggleSelectMode () {
-  selectMode.value = !selectMode.value
-  if (!selectMode.value) selectedIds.value = new Set()
+function openFolder (name: string) {
+  currentFolder.value = name
+  selectedIds.value = new Set()
+  closeContextMenu()
 }
 
-function toggleSelect (id: string) {
-  const next = new Set(selectedIds.value)
-  if (next.has(id)) {
-    next.delete(id)
+function goRoot () {
+  currentFolder.value = null
+  selectedIds.value = new Set()
+}
+
+/* ---- Selection ---- */
+
+function selectOnly (id: string) {
+  selectedIds.value = new Set([id])
+}
+
+function onImageClick (entry: ImageLibraryEntry, event: MouseEvent) {
+  if (event.metaKey || event.ctrlKey) {
+    const next = new Set(selectedIds.value)
+    if (next.has(entry.id)) next.delete(entry.id)
+    else next.add(entry.id)
+    selectedIds.value = next
   } else {
-    next.add(id)
+    selectOnly(entry.id)
   }
-  selectedIds.value = next
 }
 
-function selectAll () {
-  selectedIds.value = new Set(filteredEntries.value.map(entry => entry.id))
+function onImageDblClick (entry: ImageLibraryEntry) {
+  openLightbox(entry)
 }
 
 function clearSelection () {
   selectedIds.value = new Set()
 }
 
-function deleteSelected () {
-  if (selectedIds.value.size === 0) return
-  emit('delete', [...selectedIds.value])
-  selectedIds.value = new Set()
-  selectMode.value = false
+function onBlankClick () {
+  clearSelection()
+  closeContextMenu()
 }
 
-function moveSelectedToFolder (folder: string | undefined) {
-  if (selectedIds.value.size === 0) return
-  emit('updateFolder', [...selectedIds.value], folder)
-  selectedIds.value = new Set()
-  selectMode.value = false
+/* ---- Drag images into folders ---- */
+
+function effectiveIds (entryId: string): string[] {
+  return selectedIds.value.has(entryId) ? [...selectedIds.value] : [entryId]
+}
+
+function onImageDragStart (entry: ImageLibraryEntry, event: DragEvent) {
+  const ids = effectiveIds(entry.id)
+  if (!selectedIds.value.has(entry.id)) selectOnly(entry.id)
+  draggingIds.value = ids
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', ids.join(','))
+  }
+}
+
+function onImageDragEnd () {
+  draggingIds.value = []
+  dragOverKey.value = null
+}
+
+function onFolderDragOver (key: string) {
+  if (draggingIds.value.length === 0) return
+  dragOverKey.value = key
+}
+
+function onFolderDragLeave (key: string) {
+  if (dragOverKey.value === key) dragOverKey.value = null
+}
+
+function dropOnFolder (folder: string | undefined) {
+  if (draggingIds.value.length > 0) {
+    emit('updateFolder', [...draggingIds.value], folder)
+    selectedIds.value = new Set()
+  }
+  draggingIds.value = []
+  dragOverKey.value = null
+}
+
+/* ---- Folder operations ---- */
+
+function uniqueFolderName (base = '新建文件夹'): string {
+  const names = new Set(allFolderNames.value)
+  if (!names.has(base)) return base
+  let i = 2
+  while (names.has(`${base} (${i})`)) i += 1
+  return `${base} (${i})`
 }
 
 function createFolder () {
-  const name = newFolderName.value.trim()
-  if (!name || selectedIds.value.size === 0) return
-  emit('updateFolder', [...selectedIds.value], name)
-  newFolderName.value = ''
-  selectedIds.value = new Set()
-  selectMode.value = false
+  emit('createFolder', uniqueFolderName())
+  closeContextMenu()
 }
 
-function onCardClick (entry: ImageLibraryEntry) {
-  if (selectMode.value) {
-    toggleSelect(entry.id)
-  } else {
-    lightbox.value = entry
-    zoomLevel.value = 1
-    editingTags.value = false
-    tagInput.value = entry.tags?.join(', ') ?? ''
+function renameFolder (name: string) {
+  const next = window.prompt('重命名文件夹', name)?.trim()
+  if (next && next !== name) {
+    emit('renameFolder', name, next)
+    if (currentFolder.value === name) currentFolder.value = next
   }
+  closeContextMenu()
+}
+
+function deleteFolder (name: string) {
+  if (window.confirm(`删除文件夹「${name}」？组内图片会移到未分组，不会被删除。`)) {
+    emit('deleteFolder', name)
+    if (currentFolder.value === name) currentFolder.value = null
+  }
+  closeContextMenu()
+}
+
+function exportFolder (name: string) {
+  emit('exportFolder', name)
+  closeContextMenu()
+}
+
+/* ---- Cut / paste (move) ---- */
+
+function cutSelection (ids: string[]) {
+  clipboard.value = [...ids]
+  closeContextMenu()
+}
+
+const canPaste = computed(() => clipboard.value.length > 0)
+
+function paste () {
+  if (clipboard.value.length === 0) return
+  emit('updateFolder', [...clipboard.value], currentFolder.value ?? undefined)
+  clipboard.value = []
+  selectedIds.value = new Set()
+  closeContextMenu()
+}
+
+function moveTo (ids: string[], folder: string | undefined) {
+  emit('updateFolder', ids, folder)
+  selectedIds.value = new Set()
+  closeContextMenu()
+}
+
+function deleteImages (ids: string[]) {
+  if (ids.length === 0) return
+  emit('delete', ids)
+  selectedIds.value = new Set()
+  closeContextMenu()
+}
+
+/* ---- Context menu ---- */
+
+function openImageMenu (entry: ImageLibraryEntry, event: MouseEvent) {
+  if (!selectedIds.value.has(entry.id)) selectOnly(entry.id)
+  contextMenu.value = { kind: 'image', x: event.clientX, y: event.clientY }
+}
+
+function openFolderMenu (name: string, event: MouseEvent) {
+  contextMenu.value = { kind: 'folder', x: event.clientX, y: event.clientY, folderName: name }
+}
+
+function openBlankMenu (event: MouseEvent) {
+  contextMenu.value = { kind: 'blank', x: event.clientX, y: event.clientY }
+}
+
+function closeContextMenu () {
+  contextMenu.value = null
+}
+
+/** Menu helpers operating on the current selection. */
+const menuIds = computed(() => [...selectedIds.value])
+const menuSingleEntry = computed<ImageLibraryEntry | null>(() => {
+  if (selectedIds.value.size !== 1) return null
+  const id = [...selectedIds.value][0]
+  return props.entries.find(e => e.id === id) ?? null
+})
+/** Folders an image can be moved to (exclude the current one). */
+const moveTargets = computed(() => allFolderNames.value.filter(n => n !== currentFolder.value))
+
+/* ---- Lightbox ---- */
+
+function openLightbox (entry: ImageLibraryEntry) {
+  lightbox.value = entry
+  editingTags.value = false
+  tagInput.value = entry.tags?.join(', ') ?? ''
 }
 
 function closeLightbox () {
   lightbox.value = null
 }
 
-function updateLightboxViewport () {
-  nextTick(() => {
-    if (!lightboxBodyRef.value) return
-    lightboxViewport.value = {
-      width: lightboxBodyRef.value.clientWidth,
-      height: lightboxBodyRef.value.clientHeight
-    }
-  })
-}
-
-function centerLightboxScroll () {
-  nextTick(() => {
-    if (!lightboxBodyRef.value) return
-    lightboxBodyRef.value.scrollLeft = Math.max(0, (lightboxBodyRef.value.scrollWidth - lightboxBodyRef.value.clientWidth) / 2)
-    lightboxBodyRef.value.scrollTop = Math.max(0, (lightboxBodyRef.value.scrollHeight - lightboxBodyRef.value.clientHeight) / 2)
-  })
-}
-
-function syncLightboxScroll (previousZoom: number, nextZoom: number) {
-  nextTick(() => {
-    if (!lightboxBodyRef.value) return
-    const metrics = lightboxMetrics.value
-    if (!metrics || previousZoom === nextZoom) return
-
-    const { clientWidth, clientHeight, scrollLeft, scrollTop } = lightboxBodyRef.value
-    const previousRenderedWidth = metrics.fittedWidth * previousZoom
-    const previousRenderedHeight = metrics.fittedHeight * previousZoom
-    const nextRenderedWidth = metrics.fittedWidth * nextZoom
-    const nextRenderedHeight = metrics.fittedHeight * nextZoom
-    const scaleRatioX = previousRenderedWidth > 0 ? nextRenderedWidth / previousRenderedWidth : 1
-    const scaleRatioY = previousRenderedHeight > 0 ? nextRenderedHeight / previousRenderedHeight : 1
-    const stageCenterX = metrics.stageWidth / 2
-    const stageCenterY = metrics.stageHeight / 2
-    const viewportCenterX = scrollLeft + clientWidth / 2
-    const viewportCenterY = scrollTop + clientHeight / 2
-    const offsetFromCenterX = viewportCenterX - stageCenterX
-    const offsetFromCenterY = viewportCenterY - stageCenterY
-    const targetScrollLeft = stageCenterX + offsetFromCenterX * scaleRatioX - clientWidth / 2
-    const targetScrollTop = stageCenterY + offsetFromCenterY * scaleRatioY - clientHeight / 2
-    const maxScrollLeft = Math.max(metrics.stageWidth - clientWidth, 0)
-    const maxScrollTop = Math.max(metrics.stageHeight - clientHeight, 0)
-
-    lightboxBodyRef.value.scrollLeft = Math.max(0, Math.min(targetScrollLeft, maxScrollLeft))
-    lightboxBodyRef.value.scrollTop = Math.max(0, Math.min(targetScrollTop, maxScrollTop))
-  })
-}
-
-function setZoom (zoom: number) {
-  const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(zoom.toFixed(ZOOM_DECIMAL_PRECISION))))
-  const previousZoom = zoomLevel.value
-  if (nextZoom === previousZoom) return
-  zoomLevel.value = nextZoom
-  syncLightboxScroll(previousZoom, nextZoom)
-}
-
-// Zoom controls
-function zoomIn () {
-  setZoom(zoomLevel.value + ZOOM_STEP)
-}
-
-function zoomOut () {
-  setZoom(zoomLevel.value - ZOOM_STEP)
-}
-
-function zoomReset () {
-  zoomLevel.value = 1
-  centerLightboxScroll()
-}
-
-function onWheel (event: WheelEvent) {
-  event.preventDefault()
-  setZoom(zoomLevel.value * Math.exp(-event.deltaY * WHEEL_ZOOM_SENSITIVITY))
-}
-
-function handleLightboxImageLoad (event: Event) {
-  const target = event.target as HTMLImageElement | null
-  if (!target) return
-  lightboxNaturalSize.value = { width: target.naturalWidth, height: target.naturalHeight }
-  updateLightboxViewport()
-  centerLightboxScroll()
-}
-
-function startPan (event: PointerEvent) {
-  if (zoomLevel.value <= 1 || !lightboxBodyRef.value || event.button !== PRIMARY_MOUSE_BUTTON) return
-  draggingPan.value = true
-  dragState.value = {
-    pointerId: event.pointerId,
-    startX: event.clientX,
-    startY: event.clientY,
-    scrollLeft: lightboxBodyRef.value.scrollLeft,
-    scrollTop: lightboxBodyRef.value.scrollTop
-  }
-  ;(event.currentTarget as HTMLElement | null)?.setPointerCapture(event.pointerId)
-}
-
-function onPointerMove (event: PointerEvent) {
-  if (!draggingPan.value || !lightboxBodyRef.value || dragState.value.pointerId !== event.pointerId) return
-  const deltaX = event.clientX - dragState.value.startX
-  const deltaY = event.clientY - dragState.value.startY
-  lightboxBodyRef.value.scrollLeft = dragState.value.scrollLeft - deltaX
-  lightboxBodyRef.value.scrollTop = dragState.value.scrollTop - deltaY
-}
-
-function endPan (event?: PointerEvent) {
-  if (event && dragState.value.pointerId !== -1 && dragState.value.pointerId !== event.pointerId) return
-  if (event) {
-    ;(event.currentTarget as HTMLElement | null)?.releasePointerCapture?.(event.pointerId)
-  }
-  draggingPan.value = false
-  dragState.value.pointerId = -1
-}
-
-function onWindowKeydown (event: KeyboardEvent) {
-  if (!lightbox.value) return
-  if (event.key === 'Escape') { closeLightbox(); return }
-  if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomIn(); return }
-  if (event.key === '-' || event.key === '_') { event.preventDefault(); zoomOut(); return }
-  if (event.key === '0') { event.preventDefault(); zoomReset() }
-}
-
-// Tag editing
 function startEditTags () {
   editingTags.value = true
   tagInput.value = lightbox.value?.tags?.join(', ') ?? ''
@@ -337,10 +298,7 @@ function startEditTags () {
 
 function saveTags () {
   if (!lightbox.value) return
-  const tags = tagInput.value
-    .split(/[,，]/)
-    .map(t => t.trim())
-    .filter(t => t.length > 0)
+  const tags = tagInput.value.split(/[,，]/).map(t => t.trim()).filter(t => t.length > 0)
   emit('updateTags', lightbox.value.id, tags)
   lightbox.value = { ...lightbox.value, tags: tags.length ? tags : undefined }
   editingTags.value = false
@@ -353,32 +311,35 @@ function cancelEditTags () {
 
 function formatTime (iso: string): string {
   try {
-    return new Date(iso).toLocaleString('zh-CN', {
-      month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'
-    })
+    return new Date(iso).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   } catch {
     return iso
   }
 }
 
-// Reset zoom when lightbox changes
-watch(lightbox, (entry) => {
-  zoomLevel.value = 1
-  draggingPan.value = false
-  lightboxNaturalSize.value = { width: 0, height: 0 }
-  if (entry) {
-    updateLightboxViewport()
+function onWindowKeydown (event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    if (contextMenu.value) { closeContextMenu(); return }
+    if (lightbox.value) { closeLightbox(); return }
+    if (selectedIds.value.size) clearSelection()
+  }
+}
+
+// If the browsed folder disappears (renamed/deleted upstream), fall back to root.
+watch(() => props.folderNames, (names) => {
+  if (currentFolder.value !== null && names && !names.includes(currentFolder.value)) {
+    currentFolder.value = null
   }
 })
 
 onMounted(() => {
-  window.addEventListener('resize', updateLightboxViewport)
   window.addEventListener('keydown', onWindowKeydown)
+  window.addEventListener('click', closeContextMenu)
 })
 
 onUnmounted(() => {
-  window.removeEventListener('resize', updateLightboxViewport)
   window.removeEventListener('keydown', onWindowKeydown)
+  window.removeEventListener('click', closeContextMenu)
 })
 </script>
 
@@ -386,117 +347,157 @@ onUnmounted(() => {
   <section class="lib">
     <header class="lib-header">
       <div class="lib-title">
+        <button v-if="currentFolder !== null" class="lib-back" type="button" title="返回" @click="goRoot">←</button>
         <span>🖼️ 图片库</span>
-        <span class="lib-count">{{ filteredEntries.length }}<template v-if="filteredEntries.length !== props.entries.length"> / {{ props.entries.length }}</template></span>
+        <span class="lib-count">{{ visibleEntries.length }}</span>
       </div>
       <div class="lib-actions">
-        <input
-          v-model="searchQuery"
-          class="lib-search"
-          type="text"
-          placeholder="搜索提示词 / 标签…"
-        />
-        <button class="lib-btn" type="button" :class="{ active: showFolderPanel }" @click="showFolderPanel = !showFolderPanel">📁 分组</button>
+        <input v-model="searchQuery" class="lib-search" type="text" placeholder="搜索提示词 / 标签…" />
+        <button class="lib-btn" type="button" @click="createFolder">＋ 新建文件夹</button>
         <button class="lib-btn" type="button" :disabled="props.loading" @click="emit('refresh')">↻ 刷新</button>
-        <button
-          class="lib-btn"
-          type="button"
-          :class="{ active: selectMode }"
-          :disabled="props.entries.length === 0"
-          @click="toggleSelectMode"
-        >{{ selectMode ? '取消多选' : '多选' }}</button>
       </div>
     </header>
 
-    <!-- Folder panel -->
-    <div v-if="showFolderPanel" class="lib-folder-panel">
-      <div class="lib-folder-list">
-        <button
-          class="lib-folder-item"
-          :class="{ active: activeFolder === null }"
-          type="button"
-          @click="activeFolder = null"
-        >
-          <span>📂 全部</span>
-          <span class="lib-folder-count">{{ props.entries.length }}</span>
-        </button>
-        <button
-          class="lib-folder-item"
-          :class="{ active: activeFolder === '' }"
-          type="button"
-          @click="activeFolder = ''"
-        >
-          <span>📄 未分组</span>
-          <span class="lib-folder-count">{{ unfiledCount }}</span>
-        </button>
-        <button
-          v-for="folder in folders"
-          :key="folder.name"
-          class="lib-folder-item"
-          :class="{ active: activeFolder === folder.name }"
-          type="button"
-          @click="activeFolder = folder.name"
-        >
-          <span>📁 {{ folder.name }}</span>
-          <span class="lib-folder-count">{{ folder.count }}</span>
-        </button>
-      </div>
-      <div v-if="selectMode && selectedCount > 0" class="lib-folder-assign">
-        <input v-model="newFolderName" class="lib-folder-input" type="text" placeholder="输入新文件夹名…" @keydown.enter="createFolder" />
-        <button class="lib-btn" type="button" :disabled="!newFolderName.trim()" @click="createFolder">移入</button>
-        <button v-if="folders.length > 0" class="lib-btn" type="button" @click="moveSelectedToFolder(undefined)">移出分组</button>
-      </div>
-    </div>
-
-    <div v-if="selectMode" class="lib-select-bar">
-      <span>已选 {{ selectedCount }} 项</span>
-      <div class="lib-select-actions">
-        <button class="lib-btn" type="button" @click="selectAll">全选</button>
-        <button class="lib-btn" type="button" :disabled="selectedCount === 0" @click="clearSelection">清空</button>
-        <button class="lib-btn lib-btn-danger" type="button" :disabled="selectedCount === 0" @click="deleteSelected">删除所选</button>
-      </div>
-    </div>
-
-    <div v-if="filteredEntries.length === 0" class="lib-empty">
-      <template v-if="props.entries.length === 0">
-        <p>还没有生成任何图片</p>
-        <span>在上方输入提示词并生成，结果会自动保存到这里</span>
+    <!-- Breadcrumb -->
+    <nav class="lib-breadcrumb">
+      <button
+        class="lib-crumb"
+        :class="{ active: currentFolder === null && !isSearching, 'drag-over': dragOverKey === '' }"
+        type="button"
+        @click="goRoot"
+        @dragover.prevent="onFolderDragOver('')"
+        @dragleave="onFolderDragLeave('')"
+        @drop.prevent="dropOnFolder(undefined)"
+      >📂 全部图片</button>
+      <template v-if="isSearching">
+        <span class="lib-crumb-sep">/</span>
+        <span class="lib-crumb-current">搜索结果</span>
       </template>
-      <template v-else>
-        <p>没有匹配的图片</p>
-        <span>尝试修改搜索条件或选择其他分组</span>
+      <template v-else-if="currentFolder !== null">
+        <span class="lib-crumb-sep">/</span>
+        <span class="lib-crumb-current">📁 {{ currentFolder }} <span class="lib-crumb-count">{{ currentFolderCount }}</span></span>
       </template>
-    </div>
+    </nav>
 
-    <div v-else class="lib-grid">
+    <div
+      class="lib-grid"
+      @click.self="onBlankClick"
+      @contextmenu.self.prevent="openBlankMenu($event)"
+      @dragover.prevent
+      @drop.prevent="dropOnFolder(currentFolder ?? undefined)"
+    >
+      <!-- Folder cards (root, non-search) -->
+      <template v-if="showFolders">
+        <div
+          v-for="folder in folderCards"
+          :key="`folder-${folder.name}`"
+          class="lib-folder-card"
+          :class="{ 'drag-over': dragOverKey === folder.name }"
+          @click="openFolder(folder.name)"
+          @contextmenu.prevent.stop="openFolderMenu(folder.name, $event)"
+          @dragover.prevent="onFolderDragOver(folder.name)"
+          @dragleave="onFolderDragLeave(folder.name)"
+          @drop.prevent.stop="dropOnFolder(folder.name)"
+        >
+          <div class="lib-folder-cover">
+            <template v-if="folder.covers.length">
+              <img v-for="(src, i) in folder.covers" :key="i" :src="src" alt="" draggable="false" />
+            </template>
+            <div v-else class="lib-folder-cover-empty">📁</div>
+            <div class="lib-folder-meta">
+              <span class="lib-folder-name" :title="folder.name">📁 {{ folder.name }}</span>
+              <span class="lib-folder-num">{{ folder.count }}</span>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Image cards -->
       <div
-        v-for="entry in filteredEntries"
+        v-for="entry in visibleEntries"
         :key="entry.id"
         class="lib-card"
-        :class="{ selected: selectedIds.has(entry.id) }"
-        @click="onCardClick(entry)"
+        :class="{ selected: selectedIds.has(entry.id), dragging: draggingIds.includes(entry.id) }"
+        draggable="true"
+        @click.stop="onImageClick(entry, $event)"
+        @dblclick.stop="onImageDblClick(entry)"
+        @contextmenu.prevent.stop="openImageMenu(entry, $event)"
+        @dragstart="onImageDragStart(entry, $event)"
+        @dragend="onImageDragEnd"
       >
-        <img :src="entry.dataUrl" :alt="entry.prompt" class="lib-thumb" loading="lazy" />
+        <img :src="entry.dataUrl" :alt="entry.prompt" class="lib-thumb" loading="lazy" draggable="false" />
         <span class="lib-badge">{{ entry.mode === 'edit' ? '编辑' : '生成' }}</span>
-        <span v-if="entry.folder" class="lib-folder-badge">📁 {{ entry.folder }}</span>
-        <span v-if="selectMode" class="lib-check" :class="{ on: selectedIds.has(entry.id) }">✓</span>
-
-        <div v-if="!selectMode" class="lib-card-actions" @click.stop>
-          <button class="lib-mini" title="重新生成" @click="emit('regenerate', entry)">↻</button>
-          <button class="lib-mini" title="载入参数修改" @click="emit('load', entry)">✎</button>
-          <button class="lib-mini" title="作为编辑输入" @click="emit('useAsInput', entry)">⇲</button>
-          <button class="lib-mini" title="保存到文件" @click="emit('saveToFile', entry)">⤓</button>
-          <button class="lib-mini lib-mini-danger" title="删除" @click="emit('delete', [entry.id])">🗑</button>
-        </div>
-
+        <span v-if="entry.folder && isSearching" class="lib-folder-badge">📁 {{ entry.folder }}</span>
+        <span class="lib-check" :class="{ on: selectedIds.has(entry.id) }">✓</span>
         <div class="lib-card-caption">
           <span v-if="entry.tags?.length" class="lib-card-tags">{{ entry.tags.join(' · ') }}</span>
           <span v-else>{{ entry.prompt || '（无提示词）' }}</span>
         </div>
       </div>
+
+      <!-- Empty state -->
+      <div v-if="visibleEntries.length === 0 && (!showFolders || folderCards.length === 0)" class="lib-empty">
+        <template v-if="props.entries.length === 0">
+          <p>还没有生成任何图片</p>
+          <span>在工作台输入提示词并生成，结果会自动保存到这里</span>
+        </template>
+        <template v-else-if="isSearching">
+          <p>没有匹配的图片</p>
+          <span>尝试修改搜索条件</span>
+        </template>
+        <template v-else>
+          <p>这里还没有图片</p>
+          <span>把图片拖进来，或右键粘贴已剪切的图片</span>
+        </template>
+      </div>
     </div>
 
-    <!-- Lightbox with Zoom -->
+    <!-- Context menu -->
+    <Teleport to="body">
+      <div
+        v-if="contextMenu"
+        class="lib-menu"
+        :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }"
+        @click.stop
+        @contextmenu.prevent
+      >
+        <!-- Image menu -->
+        <template v-if="contextMenu.kind === 'image'">
+          <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="openLightbox(menuSingleEntry!); closeContextMenu()">🔍 查看</button>
+          <button class="lib-menu-item" type="button" @click="cutSelection(menuIds)">✂ 剪切</button>
+          <div class="lib-menu-sub">
+            <button class="lib-menu-item" type="button">➦ 移动到 ▸</button>
+            <div class="lib-menu-flyout">
+              <button v-if="currentFolder !== null" class="lib-menu-item" type="button" @click="moveTo(menuIds, undefined)">📂 全部图片（移出）</button>
+              <button v-for="name in moveTargets" :key="name" class="lib-menu-item" type="button" @click="moveTo(menuIds, name)">📁 {{ name }}</button>
+              <span v-if="moveTargets.length === 0 && currentFolder === null" class="lib-menu-hint">暂无其他文件夹</span>
+            </div>
+          </div>
+          <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="emit('useAsInput', menuSingleEntry!); closeContextMenu()">⇲ 作为编辑输入</button>
+          <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="emit('saveToFile', menuSingleEntry!); closeContextMenu()">⤓ 保存到文件</button>
+          <div class="lib-menu-divider"></div>
+          <button class="lib-menu-item danger" type="button" @click="deleteImages(menuIds)">🗑 删除{{ selectedCount > 1 ? `（${selectedCount}）` : '' }}</button>
+        </template>
+
+        <!-- Folder menu -->
+        <template v-else-if="contextMenu.kind === 'folder'">
+          <button class="lib-menu-item" type="button" @click="openFolder(contextMenu.folderName!)">📂 打开</button>
+          <button class="lib-menu-item" type="button" @click="renameFolder(contextMenu.folderName!)">✎ 重命名</button>
+          <button class="lib-menu-item" type="button" @click="exportFolder(contextMenu.folderName!)">⤓ 导出为 ZIP</button>
+          <div class="lib-menu-divider"></div>
+          <button class="lib-menu-item danger" type="button" @click="deleteFolder(contextMenu.folderName!)">🗑 删除文件夹</button>
+        </template>
+
+        <!-- Blank menu -->
+        <template v-else>
+          <button class="lib-menu-item" type="button" @click="createFolder">📁 新建文件夹</button>
+          <button class="lib-menu-item" type="button" :disabled="!canPaste" @click="paste">📋 粘贴{{ canPaste ? `（${clipboard.length}）` : '' }}</button>
+          <button class="lib-menu-item" type="button" @click="emit('refresh'); closeContextMenu()">↻ 刷新</button>
+        </template>
+      </div>
+    </Teleport>
+
+    <!-- Lightbox -->
     <Teleport to="body">
       <div v-if="lightbox" class="lib-lightbox-overlay" @click.self="closeLightbox">
         <div class="lib-lightbox" @click.stop>
@@ -506,35 +507,11 @@ onUnmounted(() => {
               <span class="lib-lightbox-subtitle">{{ lightbox.size }}<template v-if="lightbox.aspectRatio"> · {{ lightbox.aspectRatio }}</template></span>
             </div>
             <div class="lib-lightbox-toolbar">
-              <div class="lib-zoom-controls">
-                <button class="lib-zoom-btn" type="button" @click="zoomOut" :disabled="zoomLevel <= MIN_ZOOM">−</button>
-                <span class="lib-zoom-label" @click="zoomReset">{{ zoomPercent }}</span>
-                <button class="lib-zoom-btn" type="button" @click="zoomIn" :disabled="zoomLevel >= MAX_ZOOM">+</button>
-              </div>
               <button class="lib-lightbox-close" type="button" @click="closeLightbox">关闭</button>
             </div>
           </header>
           <div class="lib-lightbox-body">
-            <div
-              ref="lightboxBodyRef"
-              class="lib-lightbox-img-wrapper"
-              :class="{ 'can-pan': zoomLevel > 1, dragging: draggingPan }"
-              @wheel="onWheel"
-              @pointerdown="startPan"
-              @pointermove="onPointerMove"
-              @pointerup="endPan"
-              @pointercancel="endPan"
-            >
-              <div class="lib-lightbox-stage" :style="lightboxStageStyle">
-                <img
-                  :src="lightbox.dataUrl"
-                  :alt="lightbox.prompt"
-                  class="lib-lightbox-img"
-                  :style="lightboxImageStyle"
-                  @load="handleLightboxImageLoad"
-                />
-              </div>
-            </div>
+            <ImagePreview class="lib-lightbox-preview" :src="lightbox.dataUrl" :alt="lightbox.prompt" />
             <div class="lib-meta">
               <div class="lib-meta-row"><span class="lib-meta-key">模式</span><span>{{ lightbox.mode === 'edit' ? '图片编辑' : '文生图' }}</span></div>
               <div class="lib-meta-row"><span class="lib-meta-key">模型</span><span>{{ lightbox.model }}</span></div>
@@ -549,7 +526,6 @@ onUnmounted(() => {
                 <span class="lib-meta-key">负向提示词</span>
                 <p class="lib-meta-text">{{ lightbox.negativePrompt }}</p>
               </div>
-              <!-- Tags section -->
               <div class="lib-meta-block">
                 <span class="lib-meta-key">
                   标签
@@ -613,6 +589,17 @@ onUnmounted(() => {
   color: var(--app-text-strong);
 }
 
+.lib-back {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 8px;
+  background: var(--app-panel-muted);
+  color: var(--app-text-soft);
+  cursor: pointer;
+}
+.lib-back:hover { background: var(--app-accent-soft); color: var(--app-text-strong); }
+
 .lib-count {
   font-size: 0.72em;
   padding: 1px 8px;
@@ -650,92 +637,31 @@ onUnmounted(() => {
   transition: all 0.12s ease;
 }
 
-.lib-btn:hover:not(:disabled) {
-  background: var(--app-accent-soft);
-  color: var(--app-text-strong);
-}
-
+.lib-btn:hover:not(:disabled) { background: var(--app-accent-soft); color: var(--app-text-strong); }
 .lib-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.lib-btn.active { background: var(--app-accent-soft); border-color: var(--app-accent-glow); color: var(--app-text-strong); }
 .lib-btn-danger { color: var(--app-danger); }
 .lib-btn-danger:hover:not(:disabled) { background: rgba(220, 38, 38, 0.9); color: #fff; }
 
-/* Folder panel */
-.lib-folder-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: 10px;
+/* Breadcrumb */
+.lib-breadcrumb { display: flex; align-items: center; gap: 8px; font-size: 0.82em; }
+.lib-crumb {
+  border: 1px solid transparent;
   background: var(--app-panel-muted);
-  border: 1px solid var(--app-border);
-}
-
-.lib-folder-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.lib-folder-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--app-border);
-  background: var(--app-panel-subtle);
   color: var(--app-text-soft);
-  font-size: 0.78em;
+  padding: 4px 10px;
+  border-radius: 8px;
   cursor: pointer;
   transition: all 0.12s ease;
 }
-
-.lib-folder-item:hover { border-color: var(--app-accent); color: var(--app-text-strong); }
-.lib-folder-item.active { background: var(--app-accent-soft); border-color: var(--app-accent-glow); color: var(--app-text-strong); }
-
-.lib-folder-count {
-  font-size: 0.85em;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--app-panel-muted);
-  color: var(--app-text-faint);
-}
-
-.lib-folder-assign {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  padding-top: 6px;
-  border-top: 1px solid var(--app-border);
-}
-
-.lib-folder-input {
-  flex: 1;
-  padding: 5px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--app-border-strong);
-  background: var(--app-panel-subtle);
-  color: var(--app-text);
-  font-size: 0.8em;
-}
-
-.lib-folder-input:focus { outline: none; border-color: var(--app-accent); }
-
-.lib-select-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: var(--app-panel-muted);
-  font-size: 0.82em;
-  color: var(--app-text-soft);
-}
-
-.lib-select-actions { display: flex; gap: 8px; }
+.lib-crumb:hover { color: var(--app-text-strong); }
+.lib-crumb.active { color: var(--app-text-strong); }
+.lib-crumb.drag-over { border-color: var(--app-accent); background: var(--app-accent-soft); color: var(--app-text-strong); }
+.lib-crumb-sep { color: var(--app-text-faint); }
+.lib-crumb-current { color: var(--app-text-strong); display: flex; align-items: center; gap: 6px; }
+.lib-crumb-count { font-size: 0.85em; color: var(--app-text-faint); }
 
 .lib-empty {
+  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -744,7 +670,6 @@ onUnmounted(() => {
   color: var(--app-text-faint);
   text-align: center;
 }
-
 .lib-empty p { margin: 0; font-size: 0.95em; color: var(--app-text-muted); }
 .lib-empty span { font-size: 0.8em; }
 
@@ -755,8 +680,89 @@ onUnmounted(() => {
   overflow-y: auto;
   min-height: 0;
   padding-bottom: 4px;
+  align-content: start;
 }
 
+/* Folder cards — same size / shape as image cards */
+.lib-folder-card {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  background: var(--app-panel);
+  cursor: pointer;
+  transition: transform 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+}
+.lib-folder-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--app-border-strong);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.22);
+}
+.lib-folder-card.drag-over {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-glow);
+}
+
+.lib-folder-cover {
+  aspect-ratio: 1 / 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 6px;
+  padding: 16px;
+  background: var(--app-panel-subtle);
+}
+.lib-folder-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.lib-folder-cover img:only-child {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+}
+.lib-folder-cover-empty {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.4em;
+  opacity: 0.5;
+}
+
+.lib-folder-meta {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 14px 8px 6px;
+  background: linear-gradient(180deg, transparent, rgba(15, 23, 42, 0.82));
+}
+.lib-folder-name {
+  font-size: 0.72em;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.lib-folder-num {
+  flex-shrink: 0;
+  font-size: 0.66em;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #e2e8f0;
+}
+
+/* Image cards */
 .lib-card {
   position: relative;
   border-radius: 12px;
@@ -766,17 +772,13 @@ onUnmounted(() => {
   cursor: pointer;
   transition: transform 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
 }
-
 .lib-card:hover {
   transform: translateY(-2px);
   border-color: var(--app-border-strong);
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.22);
 }
-
-.lib-card.selected {
-  border-color: var(--app-accent);
-  box-shadow: 0 0 0 2px var(--app-accent-glow);
-}
+.lib-card.selected { border-color: var(--app-accent); box-shadow: 0 0 0 2px var(--app-accent-glow); }
+.lib-card.dragging { opacity: 0.5; }
 
 .lib-thumb {
   width: 100%;
@@ -823,39 +825,10 @@ onUnmounted(() => {
   justify-content: center;
   font-size: 0.7em;
   font-weight: 700;
-}
-
-.lib-check.on { background: var(--app-accent); color: #fff; }
-
-.lib-card-actions {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  display: flex;
-  gap: 4px;
   opacity: 0;
-  transition: opacity 0.14s ease;
+  transition: opacity 0.12s ease;
 }
-
-.lib-card:hover .lib-card-actions { opacity: 1; }
-
-.lib-mini {
-  width: 26px;
-  height: 26px;
-  border: none;
-  border-radius: 8px;
-  background: rgba(15, 23, 42, 0.8);
-  color: #fff;
-  font-size: 0.82em;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.12s ease;
-}
-
-.lib-mini:hover { background: var(--app-accent); }
-.lib-mini-danger:hover { background: var(--app-danger); }
+.lib-check.on { background: var(--app-accent); color: #fff; opacity: 1; }
 
 .lib-card-caption {
   position: absolute;
@@ -870,19 +843,71 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
 .lib-card-tags { color: #93c5fd; }
+
+/* Context menu */
+.lib-menu {
+  position: fixed;
+  z-index: 10300;
+  min-width: 170px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-strong);
+  box-shadow: var(--app-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lib-menu-item {
+  position: relative;
+  text-align: left;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-soft);
+  font-size: 0.82em;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.lib-menu-item:hover:not(:disabled) { background: var(--app-accent-soft); color: var(--app-text-strong); }
+.lib-menu-item:disabled { opacity: 0.4; cursor: not-allowed; }
+.lib-menu-item.danger { color: var(--app-danger); }
+.lib-menu-item.danger:hover { background: rgba(220, 38, 38, 0.16); }
+.lib-menu-divider { height: 1px; margin: 4px 6px; background: var(--app-border); }
+
+.lib-menu-sub { position: relative; }
+.lib-menu-flyout {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 100%;
+  min-width: 170px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin-left: 4px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-strong);
+  box-shadow: var(--app-shadow);
+  flex-direction: column;
+  gap: 2px;
+}
+.lib-menu-sub:hover .lib-menu-flyout { display: flex; }
+.lib-menu-hint { padding: 6px 10px; font-size: 0.76em; color: var(--app-text-faint); }
 
 /* Lightbox */
 .lib-lightbox-overlay {
-  --lib-lightbox-top-offset: 52px;
+  --lib-lightbox-top-offset: var(--app-titlebar-height, 46px);
   position: fixed;
   inset: var(--lib-lightbox-top-offset) 0 0 0;
   z-index: 10200;
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.58) 10%);
   padding: 16px 24px 24px;
 }
 
@@ -890,8 +915,8 @@ onUnmounted(() => {
   content: '';
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(6px);
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(4px);
   pointer-events: none;
 }
 
@@ -917,32 +942,10 @@ onUnmounted(() => {
   padding: 18px 20px;
   border-bottom: 1px solid var(--app-border);
 }
-
-.lib-lightbox-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.lib-lightbox-title {
-  font-size: 0.96rem;
-  font-weight: 600;
-  color: var(--app-text-strong);
-}
-
-.lib-lightbox-subtitle {
-  font-size: 0.78rem;
-  color: var(--app-text-muted);
-}
-
-.lib-lightbox-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
+.lib-lightbox-heading { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.lib-lightbox-title { font-size: 0.96rem; font-weight: 600; color: var(--app-text-strong); }
+.lib-lightbox-subtitle { font-size: 0.78rem; color: var(--app-text-muted); }
+.lib-lightbox-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .lib-lightbox-close {
   height: 32px;
   padding: 0 14px;
@@ -963,93 +966,7 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.lib-lightbox-img-wrapper {
-  min-width: 0;
-  min-height: 0;
-  overflow: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable both-edges;
-  scrollbar-width: thin;
-  scrollbar-color: var(--app-border-strong) transparent;
-  border-radius: 16px;
-  background: var(--app-panel-subtle);
-  display: flex;
-  user-select: none;
-  touch-action: none;
-}
-
-.lib-lightbox-img-wrapper.can-pan { cursor: grab; }
-.lib-lightbox-img-wrapper.dragging { cursor: grabbing; }
-
-.lib-lightbox-img-wrapper::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-
-.lib-lightbox-img-wrapper::-webkit-scrollbar-thumb {
-  background: var(--app-border-strong);
-  border-radius: 999px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
-}
-
-.lib-lightbox-img-wrapper::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.lib-zoom-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.8);
-  backdrop-filter: blur(6px);
-}
-
-.lib-zoom-btn {
-  width: 26px;
-  height: 26px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: #fff;
-  font-size: 1.1em;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.12s ease;
-}
-
-.lib-zoom-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.15); }
-.lib-zoom-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-.lib-zoom-label {
-  font-size: 0.72em;
-  color: #e2e8f0;
-  min-width: 40px;
-  text-align: center;
-  cursor: pointer;
-}
-
-.lib-zoom-label:hover { color: #fff; text-decoration: underline; }
-
-.lib-lightbox-stage {
-  min-width: 100%;
-  min-height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.lib-lightbox-img {
-  display: block;
-  max-width: none;
-  max-height: none;
-  object-fit: contain;
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
-}
+.lib-lightbox-preview { min-width: 0; min-height: 0; }
 
 .lib-meta {
   min-width: 0;
@@ -1059,14 +976,7 @@ onUnmounted(() => {
   gap: 10px;
   font-size: 0.84em;
 }
-
-.lib-meta-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--app-text-soft);
-}
-
+.lib-meta-row { display: flex; justify-content: space-between; gap: 12px; color: var(--app-text-soft); }
 .lib-meta-key { color: var(--app-text-muted); font-size: 0.9em; display: flex; align-items: center; gap: 6px; }
 .lib-meta-block { display: flex; flex-direction: column; gap: 4px; }
 .lib-meta-text {
@@ -1079,7 +989,6 @@ onUnmounted(() => {
   word-break: break-word;
 }
 
-/* Tags */
 .lib-tag-edit-btn {
   border: none;
   background: transparent;
@@ -1090,7 +999,6 @@ onUnmounted(() => {
   border-radius: 4px;
 }
 .lib-tag-edit-btn:hover { color: var(--app-accent); background: var(--app-accent-soft); }
-
 .lib-tag-editor { display: flex; flex-direction: column; gap: 6px; }
 .lib-tag-input {
   padding: 6px 10px;
@@ -1102,7 +1010,6 @@ onUnmounted(() => {
 }
 .lib-tag-input:focus { outline: none; border-color: var(--app-accent); }
 .lib-tag-editor-actions { display: flex; gap: 6px; }
-
 .lib-tags-display { display: flex; flex-wrap: wrap; gap: 4px; }
 .lib-tag-chip {
   padding: 2px 8px;
@@ -1119,28 +1026,16 @@ onUnmounted(() => {
 .lib-lightbox-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 
 @media (max-width: 980px) {
-  .lib-lightbox-body {
-    grid-template-columns: minmax(0, 1fr);
-    overflow: auto;
-  }
-
-  .lib-meta {
-    overflow: visible;
-  }
+  .lib-lightbox-body { grid-template-columns: minmax(0, 1fr); overflow: auto; }
+  .lib-meta { overflow: visible; }
 }
 
 @media (max-width: 720px) {
-  .lib-lightbox-overlay {
-    padding: 12px;
-  }
-
+  .lib-lightbox-overlay { padding: 12px; }
   .lib-lightbox {
     width: min(100vw - 24px, 1320px);
     height: calc(100vh - var(--lib-lightbox-top-offset) - 24px);
   }
-
-  .lib-lightbox-header {
-    align-items: flex-start;
-  }
+  .lib-lightbox-header { align-items: flex-start; }
 }
 </style>

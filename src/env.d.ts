@@ -827,6 +827,8 @@ interface ElectronAPI {
   setImageLibraryFolder: (ids: string[], folder: string | undefined) => Promise<{ updated: number }>
   setImageLibraryTags: (id: string, tags: string[]) => Promise<{ ok: boolean }>
   listImageLibraryFolders: () => Promise<import('./shared/image-studio-types').ImageLibraryFolder[]>
+  createImageLibraryFolder: (name: string) => Promise<import('./shared/image-studio-types').ImageLibraryFolder[]>
+  exportImageLibraryFolder: (folderName: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; error?: string }>
   listImageLibraryTags: () => Promise<string[]>
   renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>

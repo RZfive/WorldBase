@@ -3347,6 +3347,53 @@ function setupIPC (): void {
     return imageLibraryStore?.listFolders() ?? []
   })
 
+  ipcMain.handle('image:library:createFolder', async (_event: IpcMainInvokeEvent, name: string): Promise<ImageLibraryFolder[]> => {
+    return imageLibraryStore?.createFolder(name ?? '') ?? []
+  })
+
+  ipcMain.handle('image:library:exportFolder', async (event: IpcMainInvokeEvent, folderName: string): Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; error?: string }> => {
+    try {
+      if (!imageLibraryStore) throw new Error('图片库未初始化')
+      const senderWindow = getSenderWindow(event) || mainWindow
+      const filePaths = imageLibraryStore.folderImagePaths(folderName ?? '')
+      if (filePaths.length === 0) {
+        return { error: '该分组下没有可导出的图片' }
+      }
+
+      const safeFolderLabel = (folderName?.trim() || '未分组').replace(/[\\/:*?"<>|]/g, '_')
+      const dialogOptions = {
+        title: '导出分组为 ZIP',
+        defaultPath: `the-world-${safeFolderLabel}.zip`,
+        filters: [{ name: 'ZIP', extensions: ['zip'] }]
+      }
+      const result = senderWindow
+        ? await dialog.showSaveDialog(senderWindow, dialogOptions)
+        : await dialog.showSaveDialog(dialogOptions)
+      if (result.canceled || !result.filePath) {
+        return { canceled: true }
+      }
+
+      const JSZip = (await import('jszip')).default
+      const archive = new JSZip()
+      const usedNames = new Set<string>()
+      for (const fp of filePaths) {
+        let entryName = path.basename(fp)
+        // Guard against duplicate basenames inside the archive.
+        if (usedNames.has(entryName)) {
+          const ext = path.extname(entryName)
+          entryName = `${path.basename(entryName, ext)}-${usedNames.size}${ext}`
+        }
+        usedNames.add(entryName)
+        archive.file(entryName, await fs.readFile(fp))
+      }
+      const buffer = await archive.generateAsync({ type: 'nodebuffer' })
+      await fs.writeFile(result.filePath, buffer)
+      return { success: true, filePath: result.filePath, count: filePaths.length }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : '导出失败' }
+    }
+  })
+
   ipcMain.handle('image:library:listTags', async (): Promise<string[]> => {
     return imageLibraryStore?.listAllTags() ?? []
   })

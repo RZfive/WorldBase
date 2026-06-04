@@ -998,6 +998,13 @@ function closeWindow () { window.electronAPI?.closeWindow() }
 function onDocClickGlobal () { hideDockCtx() }
 
 onMounted(async () => {
+  // Keep the global titlebar-height token in sync with the platform-specific TitleBar height
+  // (46px on macOS, 40px on Windows). Overlays anchored below the titlebar read this token.
+  const platform = (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform || navigator.platform || navigator.userAgent
+  if (/win/i.test(platform)) {
+    document.documentElement.style.setProperty('--app-titlebar-height', '40px')
+  }
+
   const savedThemePreference = await window.electronAPI?.getThemePreference?.().catch(() => 'system' as const)
   applyThemePreference(savedThemePreference || 'system')
   stopThemeWatcher = watchSystemThemeChange(() => {
