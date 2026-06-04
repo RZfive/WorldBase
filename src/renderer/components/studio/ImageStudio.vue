@@ -7,6 +7,7 @@ import type {
 } from '../../../shared/image-studio-types'
 import type { ProvidersConfig } from '../chat/panel/types'
 import ImageLibraryPanel from './ImageLibraryPanel.vue'
+import PromptOptimizeDialog from './PromptOptimizeDialog.vue'
 import {
   RATIO_PRESETS,
   MIN_DIMENSION,
@@ -41,8 +42,40 @@ const libraryLoading = ref(false)
 
 const fileInput = ref<HTMLInputElement | null>(null)
 
+// Prompt optimization dialog state
+const showOptimizeDialog = ref(false)
+const optimizeIsNegative = ref(false)
+const optimizeDialogRef = ref<InstanceType<typeof PromptOptimizeDialog> | null>(null)
+
 const modelOptions = computed(() => buildModelOptions(providersConfig.value, mode.value))
 const currentRatio = computed(() => RATIO_PRESETS.find(r => r.label === aspectRatio.value) ?? RATIO_PRESETS[0])
+
+// Get a text-capable model for prompt optimization
+const textModelInfo = computed(() => {
+  if (!providersConfig.value) return null
+  const enabledIds = new Set(
+    (providersConfig.value.enabledProviderIds.length > 0
+      ? providersConfig.value.enabledProviderIds
+      : [providersConfig.value.activeProviderId]).filter(Boolean)
+  )
+  const enabledProviders = providersConfig.value.providers.filter(p => enabledIds.has(p.id))
+  const providers = enabledProviders.length > 0 ? enabledProviders : providersConfig.value.providers
+
+  for (const provider of providers) {
+    for (const model of provider.models) {
+      const caps = provider.modelCapabilities?.[model]
+      // Prefer a model with chat capability (not image-only)
+      if (caps && !caps.imageGeneration && !caps.imageEditing) {
+        return { providerId: provider.id, model }
+      }
+    }
+  }
+  // Fallback: use the first available provider + model
+  if (providers.length > 0 && providers[0].models.length > 0) {
+    return { providerId: providers[0].id, model: providers[0].activeModel || providers[0].models[0] }
+  }
+  return null
+})
 
 const finalSize = computed<string | null>(() => {
   if (sizeMode.value === 'custom') {
@@ -252,6 +285,39 @@ async function handleDelete (ids: string[]) {
   await loadLibrary()
 }
 
+/* ---- Folder & Tag actions ---- */
+
+async function handleUpdateFolder (ids: string[], folder: string | undefined) {
+  if (!window.electronAPI?.setImageLibraryFolder) return
+  await window.electronAPI.setImageLibraryFolder(ids, folder)
+  await loadLibrary()
+}
+
+async function handleUpdateTags (id: string, tags: string[]) {
+  if (!window.electronAPI?.setImageLibraryTags) return
+  await window.electronAPI.setImageLibraryTags(id, tags)
+  await loadLibrary()
+}
+
+/* ---- Prompt optimization ---- */
+
+function openOptimizeDialog (isNegative: boolean) {
+  optimizeIsNegative.value = isNegative
+  showOptimizeDialog.value = true
+  // Trigger optimize on next tick
+  setTimeout(() => {
+    optimizeDialogRef.value?.onOpen()
+  }, 50)
+}
+
+function applyOptimizedPrompt (optimized: string) {
+  if (optimizeIsNegative.value) {
+    negativePrompt.value = optimized
+  } else {
+    prompt.value = optimized
+  }
+}
+
 onMounted(() => {
   void loadProviders()
   void loadLibrary()
@@ -293,11 +359,25 @@ onMounted(() => {
           <label class="param-field">
             <span class="param-label">提示词</span>
             <textarea v-model="prompt" class="param-textarea" rows="4" placeholder="描述你想要的画面…"></textarea>
+            <button
+              v-if="textModelInfo"
+              class="optimize-btn"
+              type="button"
+              :disabled="!prompt.trim()"
+              @click="openOptimizeDialog(false)"
+            >✨ AI 优化</button>
           </label>
 
           <label v-if="mode === 'generate'" class="param-field">
             <span class="param-label">负向提示词 <span class="param-hint">（部分供应商支持）</span></span>
             <textarea v-model="negativePrompt" class="param-textarea" rows="2" placeholder="不希望出现的内容…"></textarea>
+            <button
+              v-if="textModelInfo"
+              class="optimize-btn"
+              type="button"
+              :disabled="!negativePrompt.trim()"
+              @click="openOptimizeDialog(true)"
+            >✨ AI 优化</button>
           </label>
 
           <!-- Edit mode inputs -->
@@ -393,9 +473,23 @@ onMounted(() => {
           @load="handleLoadParams"
           @use-as-input="handleUseAsInput"
           @save-to-file="handleSaveToFile"
+          @update-folder="handleUpdateFolder"
+          @update-tags="handleUpdateTags"
         />
       </main>
     </div>
+
+    <!-- Prompt Optimization Dialog -->
+    <PromptOptimizeDialog
+      ref="optimizeDialogRef"
+      :visible="showOptimizeDialog"
+      :original-prompt="optimizeIsNegative ? negativePrompt : prompt"
+      :is-negative="optimizeIsNegative"
+      :provider-id="textModelInfo?.providerId ?? ''"
+      :model="textModelInfo?.model ?? ''"
+      @close="showOptimizeDialog = false"
+      @apply="applyOptimizedPrompt"
+    />
   </div>
 </template>
 
@@ -503,6 +597,25 @@ onMounted(() => {
   border-color: var(--app-accent);
   box-shadow: 0 0 0 2px var(--app-accent-glow);
 }
+
+.optimize-btn {
+  align-self: flex-end;
+  padding: 4px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--app-accent-glow);
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
+  font-size: 0.76em;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.optimize-btn:hover:not(:disabled) {
+  background: var(--app-accent);
+  color: #fff;
+}
+
+.optimize-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .ratio-grid { display: flex; flex-wrap: wrap; gap: 6px; }
 

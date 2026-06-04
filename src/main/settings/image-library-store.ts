@@ -1,8 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { ImageLibraryEntry, ImageStudioMode } from '../../shared/image-studio-types.js'
+import type { ImageLibraryEntry, ImageLibraryFolder, ImageStudioMode } from '../../shared/image-studio-types.js'
 
-export type { ImageLibraryEntry, ImageStudioMode } from '../../shared/image-studio-types.js'
+export type { ImageLibraryEntry, ImageLibraryFolder, ImageStudioMode } from '../../shared/image-studio-types.js'
 
 /** Persisted metadata for a single generated/edited image (without inline data URLs). */
 export interface ImageLibraryRecord {
@@ -21,6 +21,10 @@ export interface ImageLibraryRecord {
   fileName: string
   /** Stored source image file names (edit mode inputs). */
   sourceImageFileNames?: string[]
+  /** Folder/group name for organizing images. */
+  folder?: string
+  /** Tags for searching/filtering images. */
+  tags?: string[]
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -186,5 +190,109 @@ export class ImageLibraryStore {
       if (this.delete(id)) removed += 1
     }
     return removed
+  }
+
+  /** Update folder assignment for given image IDs. */
+  setFolder (ids: string[], folder: string | undefined): number {
+    let updated = 0
+    for (const id of ids) {
+      const safe = this.sanitizeId(id)
+      const metaPath = this.metaPath(safe)
+      if (!fs.existsSync(metaPath)) continue
+      try {
+        const record = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as ImageLibraryRecord
+        record.folder = folder || undefined
+        fs.writeFileSync(metaPath, JSON.stringify(record, null, 2), 'utf-8')
+        updated += 1
+      } catch {
+        // skip
+      }
+    }
+    return updated
+  }
+
+  /** Update tags for a single image. */
+  setTags (id: string, tags: string[]): boolean {
+    const safe = this.sanitizeId(id)
+    const metaPath = this.metaPath(safe)
+    if (!fs.existsSync(metaPath)) return false
+    try {
+      const record = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as ImageLibraryRecord
+      record.tags = tags.length ? tags : undefined
+      fs.writeFileSync(metaPath, JSON.stringify(record, null, 2), 'utf-8')
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Get all unique folder names with counts. */
+  listFolders (): ImageLibraryFolder[] {
+    if (!fs.existsSync(this.dir)) return []
+    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
+    const folderMap = new Map<string, number>()
+
+    for (const file of files) {
+      try {
+        const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
+        if (record.folder) {
+          folderMap.set(record.folder, (folderMap.get(record.folder) ?? 0) + 1)
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    return Array.from(folderMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+  /** Get all unique tags across all images. */
+  listAllTags (): string[] {
+    if (!fs.existsSync(this.dir)) return []
+    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
+    const tagSet = new Set<string>()
+
+    for (const file of files) {
+      try {
+        const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
+        if (record.tags) {
+          record.tags.forEach(t => tagSet.add(t))
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    return Array.from(tagSet).sort()
+  }
+
+  /** Rename a folder across all images. */
+  renameFolder (oldName: string, newName: string): number {
+    if (!fs.existsSync(this.dir)) return 0
+    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
+    let updated = 0
+
+    for (const file of files) {
+      try {
+        const fp = path.join(this.dir, file)
+        const record = JSON.parse(fs.readFileSync(fp, 'utf-8')) as ImageLibraryRecord
+        if (record.folder === oldName) {
+          record.folder = newName
+          fs.writeFileSync(fp, JSON.stringify(record, null, 2), 'utf-8')
+          updated += 1
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    return updated
+  }
+
+  /** Delete a folder (unassign from all images). */
+  deleteFolder (folderName: string): number {
+    return this.renameFolder(folderName, '')
   }
 }
