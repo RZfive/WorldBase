@@ -13,6 +13,7 @@ import {
   MIN_DIMENSION,
   MAX_DIMENSION,
   buildModelOptions,
+  buildTextModelOptions,
   normalizeCustomSize,
   fileToDataUrl
 } from './image-studio-utils'
@@ -50,32 +51,8 @@ const optimizeDialogRef = ref<InstanceType<typeof PromptOptimizeDialog> | null>(
 const modelOptions = computed(() => buildModelOptions(providersConfig.value, mode.value))
 const currentRatio = computed(() => RATIO_PRESETS.find(r => r.label === aspectRatio.value) ?? RATIO_PRESETS[0])
 
-// Get a text-capable model for prompt optimization
-const textModelInfo = computed(() => {
-  if (!providersConfig.value) return null
-  const enabledIds = new Set(
-    (providersConfig.value.enabledProviderIds.length > 0
-      ? providersConfig.value.enabledProviderIds
-      : [providersConfig.value.activeProviderId]).filter(Boolean)
-  )
-  const enabledProviders = providersConfig.value.providers.filter(p => enabledIds.has(p.id))
-  const providers = enabledProviders.length > 0 ? enabledProviders : providersConfig.value.providers
-
-  for (const provider of providers) {
-    for (const model of provider.models) {
-      const caps = provider.modelCapabilities?.[model]
-      // Prefer a model with chat capability (not image-only)
-      if (caps && !caps.imageGeneration && !caps.imageEditing) {
-        return { providerId: provider.id, model }
-      }
-    }
-  }
-  // Fallback: use the first available provider + model
-  if (providers.length > 0 && providers[0].models.length > 0) {
-    return { providerId: providers[0].id, model: providers[0].activeModel || providers[0].models[0] }
-  }
-  return null
-})
+const textModelOptions = computed(() => buildTextModelOptions(providersConfig.value))
+const defaultTextModelValue = computed(() => textModelOptions.value[0]?.value ?? '')
 
 const finalSize = computed<string | null>(() => {
   if (sizeMode.value === 'custom') {
@@ -359,7 +336,7 @@ onMounted(() => {
             <span class="param-label">提示词</span>
             <textarea v-model="prompt" class="param-textarea" rows="4" placeholder="描述你想要的画面…"></textarea>
             <button
-              v-if="textModelInfo"
+              v-if="textModelOptions.length > 0"
               class="optimize-btn"
               type="button"
               :disabled="!prompt.trim()"
@@ -371,7 +348,7 @@ onMounted(() => {
             <span class="param-label">负向提示词 <span class="param-hint">（部分供应商支持）</span></span>
             <textarea v-model="negativePrompt" class="param-textarea" rows="2" placeholder="不希望出现的内容…"></textarea>
             <button
-              v-if="textModelInfo"
+              v-if="textModelOptions.length > 0"
               class="optimize-btn"
               type="button"
               :disabled="!negativePrompt.trim()"
@@ -484,8 +461,8 @@ onMounted(() => {
       :visible="showOptimizeDialog"
       :original-prompt="optimizeIsNegative ? negativePrompt : prompt"
       :is-negative="optimizeIsNegative"
-      :provider-id="textModelInfo?.providerId ?? ''"
-      :model="textModelInfo?.model ?? ''"
+      :model-options="textModelOptions"
+      :default-model-value="defaultTextModelValue"
       @close="showOptimizeDialog = false"
       @apply="applyOptimizedPrompt"
     />
