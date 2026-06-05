@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import type {
   ImageLibraryEntry,
   ImageLibraryFolder,
@@ -443,10 +443,18 @@ function onDocumentClick () {
   showTaskDropdown.value = false
 }
 
-onMounted(() => {
+// This component is cached by <KeepAlive> in App.vue, so its in-memory state — the
+// task queue, in-flight generations, and the form — survives switching to a chat or
+// another view and is only discarded when the app closes. onActivated fires on the
+// initial mount *and* every time the studio is reopened, so external data (providers,
+// library, folders) stays fresh while the cached task queue is preserved.
+onActivated(() => {
   void loadProviders()
   void loadLibrary()
   void loadFolders()
+})
+
+onMounted(() => {
   document.addEventListener('click', onDocumentClick)
 })
 

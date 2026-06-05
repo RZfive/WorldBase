@@ -1191,7 +1191,11 @@ onUnmounted(() => {
 
           <AISettings v-if="currentView === 'settings'" />
 
-          <ImageStudio v-if="currentView === 'studio'" />
+          <!-- Cached so the studio's in-memory task queue and form survive leaving
+               the view (e.g. switching to a conversation); discarded only on app close. -->
+          <KeepAlive>
+            <ImageStudio v-if="currentView === 'studio'" />
+          </KeepAlive>
 
           <Launchpad
             v-if="showLaunchpad"
