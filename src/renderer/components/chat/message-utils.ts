@@ -74,8 +74,9 @@ export function buildMessageBlocks (
       id: `legacy-preview-${index}`,
       kind: 'file_preview',
       filePath: filePreview.filePath,
-      previewContent: filePreview.content,
-      truncated: filePreview.truncated,
+      lineCount: filePreview.lineCount,
+      added: filePreview.added,
+      removed: filePreview.removed,
       active: filePreview.active
     })
   }

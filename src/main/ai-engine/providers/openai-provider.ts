@@ -4,6 +4,12 @@ import type { AILogSessionLogger } from '../../settings/ai-log-store.js'
 export interface ChatContentTextPart {
   type: 'text'
   text: string
+  /**
+   * Anthropic prompt-caching breakpoint. Honored by Anthropic and
+   * Anthropic-compatible gateways (e.g. OpenRouter) to cache everything up to
+   * and including this block; ignored by providers that don't support it.
+   */
+  cache_control?: { type: 'ephemeral' }
 }
 
 export interface ChatContentImagePart {
@@ -223,6 +229,36 @@ export class OpenAIProvider {
     return normalizedBaseUrl.includes('deepseek') || normalizedModel.includes('deepseek')
   }
 
+  private isAnthropicProvider (): boolean {
+    const normalizedBaseUrl = this.baseUrl.toLowerCase()
+    const normalizedModel = this.model.toLowerCase()
+    return normalizedBaseUrl.includes('anthropic') || normalizedModel.includes('claude')
+  }
+
+  /**
+   * Attach an Anthropic prompt-caching breakpoint to the (large, stable) system
+   * prompt so long conversations reuse it instead of re-billing it every turn.
+   *
+   * Only applied for Anthropic / Claude routing — other providers leave the
+   * messages untouched and rely on automatic prefix caching, which the
+   * static-first system prompt layout already keeps byte-stable across turns.
+   */
+  private applyPromptCaching (messages: ChatMessage[]): ChatMessage[] {
+    if (!this.isAnthropicProvider()) return messages
+
+    let cached = false
+    return messages.map((message): ChatMessage => {
+      if (cached || message.role !== 'system' || typeof message.content !== 'string' || message.content === '') {
+        return message
+      }
+      cached = true
+      const content: ChatContentPart[] = [
+        { type: 'text', text: message.content, cache_control: { type: 'ephemeral' } }
+      ]
+      return { ...message, content }
+    })
+  }
+
   private resolveReasoningEffort (): ChatCompletionBody['reasoning_effort'] | undefined {
     if (!this.enableThinking) return undefined
 
@@ -271,7 +307,7 @@ export class OpenAIProvider {
   private buildRequestBody (messages: ChatMessage[], tools: ToolDefinition[], stream: boolean): ChatCompletionBody {
     const body: ChatCompletionBody = {
       model: this.model,
-      messages: this.normalizeOutgoingMessages(messages),
+      messages: this.applyPromptCaching(this.normalizeOutgoingMessages(messages)),
       temperature: 0.7,
       stream
     }

@@ -1,6 +1,7 @@
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
+import type { ReadFileTracker } from './read-tracker.js'
 import { streamFilePreview } from './file-preview-progress.js'
 
 interface ToolServices {
@@ -21,7 +22,7 @@ export interface Tool {
 /**
  * Tool: write_project_file — 修改指定项目的文件
  */
-export function toolWriteFile (services: ToolServices): Tool {
+export function toolWriteFile (services: ToolServices, readTracker?: ReadFileTracker): Tool {
   return {
     definition: {
       name: 'write_project_file',
@@ -47,9 +48,18 @@ export function toolWriteFile (services: ToolServices): Tool {
     },
     handler: async (args, onProgress) => {
       const { project_id, file_path, content } = args as unknown as WriteFileArgs
-      await streamFilePreview(file_path, content, onProgress)
+      // Read the prior version (if any) so the UI can show a real +/- change amount.
+      let previousContent: string | undefined
+      try {
+        previousContent = await services.projectFS.readFile(project_id, file_path)
+      } catch {
+        previousContent = undefined
+      }
+      await streamFilePreview(file_path, content, onProgress, previousContent)
       onProgress?.('📝 正在写入文件...', file_path)
       await services.projectFS.writeFile(project_id, file_path, content)
+      // The file's content is now known to the agent, so exact-string edits are allowed.
+      readTracker?.markRead(project_id, file_path)
       onProgress?.('✅ 文件已保存', file_path)
       return { success: true, file_path, message: `File ${file_path} written successfully` }
     }

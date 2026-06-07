@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type {
   AgentSidebarItem,
   ConversationSidebarItem,
@@ -18,6 +18,9 @@ const props = withDefaults(defineProps<{
   deleteTitle?: string
   showDelete?: boolean
   showPin?: boolean
+  compact?: boolean
+  renaming?: boolean
+  renameInput?: string
 }>(), {
   draggable: false,
   isDragging: false,
@@ -25,13 +28,20 @@ const props = withDefaults(defineProps<{
   nested: false,
   deleteTitle: '删除',
   showDelete: false,
-  showPin: false
+  showPin: false,
+  compact: false,
+  renaming: false,
+  renameInput: ''
 })
 
 const emit = defineEmits<{
   (e: 'click'): void
+  (e: 'contextmenu', event: MouseEvent): void
   (e: 'delete'): void
   (e: 'pin'): void
+  (e: 'update:renameInput', value: string): void
+  (e: 'commitRename'): void
+  (e: 'cancelRename'): void
   (e: 'dragstart', event: DragEvent): void
   (e: 'dragover', event: DragEvent): void
   (e: 'dragleave', event: DragEvent): void
@@ -40,6 +50,18 @@ const emit = defineEmits<{
 }>()
 
 const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item && Boolean(props.item.isPinned))
+const isCompactConversation = computed(() => props.compact && props.variant === 'conversation')
+const renameInputEl = ref<HTMLInputElement | null>(null)
+
+watch(
+  () => props.renaming,
+  async (renaming) => {
+    if (!renaming) return
+    await nextTick()
+    renameInputEl.value?.focus()
+    renameInputEl.value?.select()
+  }
+)
 </script>
 
 <template>
@@ -54,11 +76,13 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
         waitingAuth: item.pendingAuthCount > 0,
         dragging: isDragging,
         pinned: itemIsPinned,
-        'conversation-item-nested': nested
+        'conversation-item-nested': nested,
+        'conversation-item-compact': isCompactConversation
       }
     ]"
-    :draggable="draggable"
+    :draggable="draggable && !renaming"
     @click="emit('click')"
+    @contextmenu="emit('contextmenu', $event)"
     @dragstart="emit('dragstart', $event)"
     @dragover="emit('dragover', $event)"
     @dragleave="emit('dragleave', $event)"
@@ -66,24 +90,50 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
     @dragend="emit('dragend')"
   >
     <div class="conv-main">
-      <span :class="['conv-avatar-shell', variant]">
+      <span v-if="!isCompactConversation" :class="['conv-avatar-shell', variant]">
         <span :class="['conv-icon', variant]">{{ item.icon }}</span>
       </span>
       <div class="conv-copy">
-        <div class="conv-title-row">
+        <div :class="['conv-title-row', { 'conv-title-row-compact': isCompactConversation }]">
           <div class="conv-title-stack">
-            <span class="conv-title">{{ item.title }}</span>
+            <input
+              v-if="renaming && isCompactConversation"
+              ref="renameInputEl"
+              :value="renameInput"
+              class="conv-title-rename-input"
+              type="text"
+              autofocus
+              @input="emit('update:renameInput', ($event.target as HTMLInputElement).value)"
+              @keydown.enter.prevent="emit('commitRename')"
+              @keydown.escape.stop="emit('cancelRename')"
+              @blur="emit('commitRename')"
+              @click.stop
+              @mousedown.stop
+              @dragstart.stop.prevent
+            >
+            <span v-else class="conv-title">{{ item.title }}</span>
           </div>
-          <span v-if="item.pendingAuthCount > 0" class="conv-status auth" :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`">
+          <span
+            v-if="item.pendingAuthCount > 0"
+            :class="['conv-status', 'auth', { compact: isCompactConversation }]"
+            :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`"
+          >
             <span class="conv-status-dot"></span>
-            待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
+            <template v-if="!isCompactConversation">
+              待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
+            </template>
+            <span v-else-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
           </span>
-          <span v-else-if="item.isStreaming" class="conv-status streaming" title="生成中">
+          <span
+            v-else-if="item.isStreaming"
+            :class="['conv-status', 'streaming', { compact: isCompactConversation }]"
+            title="生成中"
+          >
             <span class="conv-status-dot"></span>
-            运行中
+            <template v-if="!isCompactConversation">运行中</template>
           </span>
         </div>
-        <span class="conv-subtitle">{{ item.subtitle }}</span>
+        <span v-if="!isCompactConversation" class="conv-subtitle">{{ item.subtitle }}</span>
       </div>
     </div>
     <button
@@ -164,7 +214,8 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
 }
 
 .conv-item.drop-before::after,
-.conv-item.drop-after::after {
+.conv-item.drop-after::after,
+.conv-item.drop-merge::after {
   left: 0;
   right: 0;
   height: 2px;
@@ -177,6 +228,12 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
 }
 
 .conv-item.drop-after::after {
+  bottom: -3px;
+}
+
+.conv-item.drop-merge::after {
+  left: 10px;
+  right: 10px;
   bottom: -3px;
 }
 
@@ -197,8 +254,47 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
   background: var(--app-panel);
 }
 
+.conversation-item-compact {
+  align-items: center;
+  min-height: 30px;
+  padding: 3px 5px 3px 10px;
+  border-color: transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-soft);
+  overflow: visible;
+}
+
+.conversation-item-compact:hover {
+  background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
+  border-color: transparent;
+}
+
+.conversation-item-compact.active {
+  background: color-mix(in srgb, var(--app-accent-soft) 34%, transparent);
+  border-color: transparent;
+}
+
+.conversation-item-compact.waitingAuth {
+  border-color: transparent;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.conversation-item-compact.streaming {
+  border-color: transparent;
+}
+
+.conversation-item-compact.drop-merge {
+  background: color-mix(in srgb, var(--app-accent-soft) 34%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent-glow) 58%, transparent);
+}
+
 .conversation-item-nested {
   margin-left: 14px;
+}
+
+.conversation-item-compact.conversation-item-nested {
+  margin-left: 0;
 }
 
 .conv-main {
@@ -206,6 +302,11 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
   gap: 9px;
   min-width: 0;
   flex: 1;
+}
+
+.conversation-item-compact .conv-main {
+  align-items: center;
+  gap: 0;
 }
 
 .conv-avatar-shell {
@@ -238,10 +339,20 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
   gap: 3px;
 }
 
+.conversation-item-compact .conv-copy {
+  flex: 1;
+  gap: 0;
+}
+
 .conv-title-row {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.conv-title-row-compact {
+  min-width: 0;
+  width: 100%;
 }
 
 .conv-title-stack {
@@ -249,6 +360,10 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
   display: flex;
   flex-direction: column;
   gap: 0;
+}
+
+.conv-title-row-compact .conv-title-stack {
+  flex: 1;
 }
 
 .conv-icon {
@@ -271,6 +386,32 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
   font-size: 0.8rem;
   font-weight: 700;
   color: var(--app-text-strong);
+}
+
+.conversation-item-compact .conv-title {
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--app-text-soft);
+}
+
+.conversation-item-compact.active .conv-title {
+  font-weight: 650;
+  color: var(--app-text-strong);
+}
+
+.conv-title-rename-input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 36%, var(--app-border));
+  border-radius: 6px;
+  background: var(--app-input-bg);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 0.76rem;
+  outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--app-accent-soft) 34%, transparent);
 }
 
 .conv-subtitle {
@@ -303,9 +444,20 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
   justify-content: center;
 }
 
+.conversation-item-compact .conv-pin {
+  width: 20px;
+  height: 20px;
+  transform: translateY(0) scale(0.94);
+}
+
 .conv-pin svg {
   width: 13px;
   height: 13px;
+}
+
+.conversation-item-compact .conv-pin svg {
+  width: 12px;
+  height: 12px;
 }
 
 .conv-pin.active {
@@ -350,6 +502,12 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
   transition: opacity 0.18s ease, transform 0.18s ease, color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
 }
 
+.conversation-item-compact .conv-delete {
+  width: 20px;
+  height: 20px;
+  transform: translateY(0) scale(0.94);
+}
+
 .conv-item:hover .conv-delete,
 .conv-item.active .conv-delete {
   opacity: 1;
@@ -373,6 +531,13 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
   flex-shrink: 0;
 }
 
+.conv-status.compact {
+  gap: 0;
+  padding: 0;
+  min-width: 7px;
+  background: transparent;
+}
+
 .conv-status.streaming {
   color: var(--app-accent-strong);
   background: color-mix(in srgb, var(--app-accent-soft) 82%, transparent);
@@ -389,6 +554,15 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
   border-radius: 50%;
   flex-shrink: 0;
   background: currentColor;
+}
+
+.conv-status.compact .conv-status-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.conv-status.compact .conv-status-count {
+  margin-left: 4px;
 }
 
 .conv-status.streaming .conv-status-dot {
@@ -412,6 +586,10 @@ const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item &&
 @media (max-width: 880px) {
   .conv-item {
     flex-direction: column;
+  }
+
+  .conv-item.conversation-item-compact {
+    flex-direction: row;
   }
 
   .conv-delete {

@@ -45,6 +45,7 @@ export interface ConversationSummary {
   title: string
   createdAt: string
   updatedAt: string
+  manualTitle?: boolean
   previewText?: string
   searchText?: string
   authMode?: AIExecutionAuthMode

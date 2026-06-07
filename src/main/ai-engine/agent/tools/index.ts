@@ -2,6 +2,8 @@ import { toolReadFile } from './tool-read-file.js'
 import { toolDeleteFile } from './tool-delete-file.js'
 import { toolWriteFile } from './tool-write-file.js'
 import { toolPatchFile } from './tool-patch-file.js'
+import { toolEditFile } from './tool-edit-file.js'
+import { ReadFileTracker } from './read-tracker.js'
 import { toolCallApi } from './tool-call-api.js'
 import { toolQueryDb } from './tool-query-db.js'
 import { toolGetProjectCommandStatus, toolRunCommand } from './tool-run-command.js'
@@ -85,11 +87,15 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
   })
   const getAbortSignal = (): AbortSignal | undefined => agent.getAbortSignal()
   const todoState: { items: TodoItem[] } = { items: [] }
+  // Shared across read/write/edit so exact-string edits can require the file to
+  // have been read (or written) earlier in this agent's lifetime.
+  const readTracker = new ReadFileTracker()
   const tools = [
-    toolReadFile(services),
+    toolReadFile(services, readTracker),
     toolDeleteFile(services),
-    toolWriteFile(services),
+    toolWriteFile(services, readTracker),
     toolPatchFile(services),
+    toolEditFile(services, readTracker),
     toolCallApi(services),
     toolQueryDb(services),
     toolRunCommand(services),

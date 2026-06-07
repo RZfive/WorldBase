@@ -30,6 +30,7 @@ const {
   agentSidebarItems,
   availableChannelBindings,
   availableSkills,
+  conversationsLoaded,
   conversationSidebarItems,
   currentAuthMode,
   currentContextDetail,
@@ -66,6 +67,7 @@ const {
   planModeActive,
   providers,
   reasoningStrength,
+  renameConversation,
   removeFile,
   removeImage,
   respondToAuthRequest,
@@ -243,11 +245,13 @@ watch(
       :agent-items="agentSidebarItems"
       :group-items="groupSidebarItems"
       :conversation-items="conversationSidebarItems"
+      :conversation-list-loaded="conversationsLoaded"
       @new-conversation="newConversation"
       @select-conversation="loadConversation"
       @open-agent="openAgentWorkspaceConversation"
       @open-group="openGroupWorkspaceConversation"
       @delete-conversation="deleteConversation"
+      @rename-conversation="renameConversation"
     />
 
     <div

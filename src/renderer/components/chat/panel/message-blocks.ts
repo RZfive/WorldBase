@@ -91,13 +91,14 @@ export function createTodoBlock (items: TodoItem[]): ChatMessageBlock {
   }
 }
 
-export function createFilePreviewBlock (filePath: string, truncated = false): ChatMessageBlock {
+export function createFilePreviewBlock (filePath: string): ChatMessageBlock {
   return {
     id: createBlockId('preview'),
     kind: 'file_preview',
     filePath,
-    previewContent: '',
-    truncated,
+    lineCount: 0,
+    added: 0,
+    removed: 0,
     active: true
   }
 }

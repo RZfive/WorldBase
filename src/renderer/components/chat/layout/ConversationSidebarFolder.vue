@@ -2,7 +2,8 @@
 import ConversationSidebarItemCard from './ConversationSidebarItemCard.vue'
 import type {
   ConversationDragItem,
-  ConversationSidebarEntry
+  ConversationSidebarEntry,
+  ConversationSidebarItem
 } from './ConversationSidebar.types'
 
 const props = defineProps<{
@@ -11,6 +12,8 @@ const props = defineProps<{
   isSearching: boolean
   renamingFolderId: string | null
   renameInput: string
+  renamingConversationId: string | null
+  conversationRenameInput: string
   folderDropClass: string | null
   folderBodyDropClass: string | null
   dragItem: ConversationDragItem | null
@@ -19,10 +22,14 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:renameInput', value: string): void
+  (e: 'update:conversationRenameInput', value: string): void
   (e: 'toggle'): void
   (e: 'startRename'): void
+  (e: 'startRenameConversation', item: ConversationSidebarItem): void
   (e: 'commitRename'): void
+  (e: 'commitConversationRename', id: string): void
   (e: 'cancelRename'): void
+  (e: 'cancelConversationRename'): void
   (e: 'ungroup'): void
   (e: 'deleteFolder'): void
   (e: 'dragstartFolder', event: DragEvent): void
@@ -85,11 +92,6 @@ const emit = defineEmits<{
                 >{{ entry.folder.name }}</span>
                 <span class="conv-folder-meta">{{ entry.items.length }} 个对话</span>
               </div>
-              <span class="conv-folder-caret-shell" aria-hidden="true">
-                <svg class="conv-folder-caret" viewBox="0 0 16 16" fill="none">
-                  <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-                </svg>
-              </span>
             </div>
           </div>
         </div>
@@ -101,6 +103,13 @@ const emit = defineEmits<{
           </svg>
         </button>
       </div>
+      <button class="conv-folder-caret-btn" type="button" title="展开/收起" @click.stop="emit('toggle')">
+        <span class="conv-folder-caret-shell" aria-hidden="true">
+          <svg class="conv-folder-caret" viewBox="0 0 16 16" fill="none">
+            <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </span>
+      </button>
     </div>
 
     <div
@@ -119,13 +128,20 @@ const emit = defineEmits<{
         :key="`${entry.folder.id}-${item.id}`"
         :item="item"
         variant="conversation"
+        compact
         :draggable="!isSearching"
         :is-dragging="dragItem?.type === 'conversation' && dragItem.id === item.id"
         :drop-class="conversationDropClass(item.id)"
+        :renaming="renamingConversationId === item.id"
+        :rename-input="conversationRenameInput"
         nested
         show-delete
         delete-title="删除"
         @click="emit('selectConversation', item.id)"
+        @contextmenu.prevent="emit('startRenameConversation', item)"
+        @update:rename-input="emit('update:conversationRenameInput', $event)"
+        @commit-rename="emit('commitConversationRename', item.id)"
+        @cancel-rename="emit('cancelConversationRename')"
         @delete="emit('deleteConversation', item.id)"
         @dragstart="emit('dragstartConversation', { event: $event, conversationId: item.id })"
         @dragover="emit('dragoverConversation', { event: $event, conversationId: item.id })"
@@ -170,29 +186,49 @@ const emit = defineEmits<{
   bottom: -3px;
 }
 
-.conv-folder.drop-into-folder .conv-folder-shell,
-.conv-folder.drop-append .conv-folder-shell {
-  border-color: color-mix(in srgb, var(--app-accent-glow) 66%, transparent);
-  background: color-mix(in srgb, var(--app-accent-soft) 30%, transparent);
-}
-
 .conv-folder.expanded .conv-folder-caret {
-  transform: rotate(180deg);
+  transform: rotate(0deg);
 }
 
 .conv-folder-shell {
+  position: relative;
   display: flex;
   align-items: center;
-  background: var(--app-panel);
-  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
-  border-radius: 12px;
+  min-height: 30px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
   transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+
+.conv-folder-shell::after {
+  content: '';
+  position: absolute;
+  left: 34px;
+  right: 10px;
+  bottom: -2px;
+  height: 2px;
+  border-radius: 999px;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  transition: background 0.18s ease, opacity 0.18s ease;
 }
 
 .conv-folder-shell:hover {
   background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
-  border-color: color-mix(in srgb, var(--app-accent) 12%, var(--app-border));
+  border-color: transparent;
   color: var(--app-text);
+}
+
+.conv-folder.drop-into-folder .conv-folder-shell {
+  background: color-mix(in srgb, var(--app-accent-soft) 20%, transparent);
+}
+
+.conv-folder.drop-into-folder .conv-folder-shell::after {
+  opacity: 1;
+  bottom: 4px;
+  background: var(--app-accent-strong);
 }
 
 .conv-folder-toggle {
@@ -200,7 +236,7 @@ const emit = defineEmits<{
   min-width: 0;
   border: none;
   background: transparent;
-  padding: 6px 9px;
+  padding: 3px 4px 3px 8px;
   cursor: pointer;
   text-align: left;
 }
@@ -213,18 +249,19 @@ const emit = defineEmits<{
 }
 
 .conv-folder-main {
-  align-items: flex-start;
+  align-items: center;
+  gap: 7px;
 }
 
 .conv-avatar-shell {
   position: relative;
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
   display: inline-flex;
   flex-shrink: 0;
-  border: 1px solid color-mix(in srgb, var(--app-border) 80%, transparent);
-  background: color-mix(in srgb, var(--app-panel-muted) 78%, var(--app-panel));
+  border: none;
+  background: transparent;
 }
 
 .conv-folder-avatar-shell {
@@ -235,20 +272,20 @@ const emit = defineEmits<{
 .conv-icon {
   width: 100%;
   height: 100%;
-  border-radius: 8px;
+  border-radius: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   flex-shrink: 0;
-  font-size: 0.92rem;
+  font-size: 0.84rem;
 }
 
 .conv-copy {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 0;
 }
 
 .conv-title-row {
@@ -259,13 +296,15 @@ const emit = defineEmits<{
 
 .conv-folder-title-row {
   justify-content: space-between;
+  width: 100%;
 }
 
 .conv-title-stack {
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
 }
 
 .conv-title {
@@ -279,12 +318,13 @@ const emit = defineEmits<{
 }
 
 .conv-folder-title {
-  max-width: 132px;
+  max-width: 112px;
 }
 
 .conv-folder-meta {
   color: var(--app-text-faint);
   font-size: 0.64rem;
+  flex-shrink: 0;
 }
 
 .conv-folder-caret-shell {
@@ -303,6 +343,7 @@ const emit = defineEmits<{
 .conv-folder-caret {
   width: 14px;
   height: 14px;
+  transform: rotate(-90deg);
   transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -310,7 +351,7 @@ const emit = defineEmits<{
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-right: 6px;
+  margin-right: 2px;
   opacity: 0;
   transition: opacity 0.18s ease;
 }
@@ -320,8 +361,8 @@ const emit = defineEmits<{
 }
 
 .conv-folder-action-btn {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   padding: 0;
   border-radius: 6px;
   border: none;
@@ -344,6 +385,27 @@ const emit = defineEmits<{
   color: var(--app-danger);
 }
 
+.conv-folder-caret-btn {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin-right: 2px;
+  padding: 0;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.conv-folder-caret-btn:hover .conv-folder-caret-shell {
+  border-color: color-mix(in srgb, var(--app-accent) 24%, var(--app-border));
+  color: var(--app-text);
+}
+
 .conv-folder-rename-input {
   width: 100%;
   min-width: 0;
@@ -360,13 +422,13 @@ const emit = defineEmits<{
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 6px;
-  margin-left: 14px;
-  padding: 8px;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 74%, transparent);
-  background: color-mix(in srgb, var(--app-panel-muted) 50%, transparent);
+  gap: 2px;
+  margin-top: 2px;
+  margin-left: 13px;
+  padding: 2px 0 2px 8px;
+  border-left: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
+  border-radius: 0;
+  background: transparent;
 }
 
 .conv-folder-children::after {
@@ -389,8 +451,8 @@ const emit = defineEmits<{
 }
 
 .conv-folder-empty {
-  padding: 10px 12px;
-  border-radius: 10px;
+  padding: 6px 8px;
+  border-radius: 7px;
   border: 1px dashed color-mix(in srgb, var(--app-border) 74%, transparent);
   background: color-mix(in srgb, var(--app-panel) 78%, transparent);
   color: var(--app-text-faint);
@@ -398,10 +460,6 @@ const emit = defineEmits<{
 }
 
 @media (max-width: 880px) {
-  .conv-folder-shell {
-    flex-direction: column;
-  }
-
   .conv-folder-actions {
     opacity: 1;
   }
