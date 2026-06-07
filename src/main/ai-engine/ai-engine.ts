@@ -52,6 +52,8 @@ export interface AIConfigInput {
   enableThinking?: boolean
   reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
   contextWindow?: number
+  /** Sampling temperature. Omit to use the coding-tuned default (low). */
+  temperature?: number
 }
 
 export interface AIRequestOptions {
@@ -191,6 +193,9 @@ export class AIEngine {
     }
     if (config.reasoningEffort !== undefined) {
       provider.setReasoningEffort(config.reasoningEffort)
+    }
+    if (config.temperature !== undefined) {
+      provider.setTemperature(config.temperature)
     }
     if (config.contextWindow !== undefined) {
       provider.setContextWindow(config.contextWindow)

@@ -1,5 +1,5 @@
 import { getSystemPrompt } from './prompts/system-prompt.js'
-import type { OpenAIProvider, ToolDefinition, ChatMessage } from '../providers/openai-provider.js'
+import type { OpenAIProvider, ToolDefinition, ChatMessage, ToolCall } from '../providers/openai-provider.js'
 import { normalizeAbortReason, USER_ABORT_MESSAGE } from '../abort-utils.js'
 import type { AIExecutionAuthMode } from '../../settings/settings-store.js'
 import type { AILogSessionLogger } from '../../settings/ai-log-store.js'
@@ -98,6 +98,32 @@ export class AgentCore {
   private static readonly FINGERPRINT_MAX_ARRAY_ITEMS = 8
   private static readonly FINGERPRINT_MAX_OBJECT_KEYS = 12
   private static readonly FINGERPRINT_MAX_STRING_CHARS = 240
+  /**
+   * Tools that only read state and have no side effects, so several of them can
+   * safely run concurrently within a single assistant turn. Mirrors Claude
+   * Code's "concurrency-safe" partition: read/search/list/status tools fan out
+   * in parallel while any write/run/build tool stays serial. MCP tools and
+   * anything not listed here are treated as serial (the safe default).
+   */
+  private static readonly CONCURRENCY_SAFE_TOOLS: ReadonlySet<string> = new Set([
+    'read_project_file',
+    'list_project_files',
+    'list_projects',
+    'get_project_status',
+    'get_project_logs',
+    'get_project_command_status',
+    'grep_search',
+    'glob_search',
+    'read_document',
+    'list_documents',
+    'local_read_file',
+    'read_current_page',
+    'list_skills',
+    'list_scheduled_tasks',
+    'list_agent_workspace_catalog',
+    'web_search',
+    'fetch_webpage'
+  ])
   private provider: OpenAIProvider
   private services: Record<string, unknown>
   private tools = new Map<string, RegisteredTool>()
@@ -702,35 +728,15 @@ export class AgentCore {
         messages.push(response)
         const executions: ToolExecutionRecord[] = []
 
-        for (const toolCall of response.tool_calls) {
-          const toolName = toolCall.function.name
-
-          let result: unknown
-          let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
-          try {
-            toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
-            result = await this._executeTool(toolName, toolArgs)
-          } catch (err) {
-            result = { error: (err as Error).message }
+        // Read-only tools within a group run concurrently; writes stay serial.
+        for (const group of this._groupToolCalls(response.tool_calls)) {
+          const groupResults = group.length === 1
+            ? [await this._executeToolCall(group[0])]
+            : await Promise.all(group.map(call => this._executeToolCall(call)))
+          for (const { execution, message } of groupResults) {
+            executions.push(execution)
+            messages.push(message)
           }
-
-          executions.push({ name: toolName, args: toolArgs, result })
-          this.logger?.logToolExecution({
-            name: toolName,
-            rawArguments: toolCall.function.arguments,
-            parsedArguments: toolArgs,
-            result,
-            status: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? 'failed' : 'completed',
-            error: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? String((result as Record<string, unknown>).error) : undefined
-          })
-
-          // Process result through ToolResultStorage (handles large outputs)
-          const resultContent = await this._processToolResult(result, toolName, toolCall.id)
-          messages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: resultContent
-          })
         }
 
         this._recordIterationActivity(loopGuard, executions)
@@ -861,48 +867,30 @@ export class AgentCore {
         return
       }
 
-      // Execute tool calls
+      // Execute tool calls — read-only tools within a group run concurrently,
+      // writes and other side-effecting tools stay serial.
       messages.push(assistantMessage)
       const executions: ToolExecutionRecord[] = []
 
-        for (const toolCall of assistantMessage.tool_calls) {
-          const toolName = toolCall.function.name
+        for (const group of this._groupToolCalls(assistantMessage.tool_calls)) {
           this._throwIfAborted(abortSignal)
 
-          yield { type: 'tool_start', name: toolName }
-
-          let result: unknown
-          let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
-          try {
-            toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
-            result = await this._executeTool(toolName, toolArgs, onProgress)
-            this._throwIfAborted(abortSignal)
-          } catch (err) {
-            if (abortSignal?.aborted || (err as Error).message === USER_ABORT_MESSAGE) {
-              throw normalizeAbortReason(abortSignal?.reason ?? err, USER_ABORT_MESSAGE)
-            }
-            result = { error: (err as Error).message }
+          for (const toolCall of group) {
+            yield { type: 'tool_start', name: toolCall.function.name }
           }
 
-          executions.push({ name: toolName, args: toolArgs, result })
-          this.logger?.logToolExecution({
-            name: toolName,
-            rawArguments: toolCall.function.arguments,
-            parsedArguments: toolArgs,
-            result,
-            status: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? 'failed' : 'completed',
-            error: result && typeof result === 'object' && 'error' in (result as Record<string, unknown>) ? String((result as Record<string, unknown>).error) : undefined
-          })
+          const groupResults = group.length === 1
+            ? [await this._executeToolCall(group[0], onProgress, abortSignal)]
+            : await Promise.all(group.map(call => this._executeToolCall(call, onProgress, abortSignal)))
 
-          yield { type: 'tool_end', name: toolName }
+          for (const toolCall of group) {
+            yield { type: 'tool_end', name: toolCall.function.name }
+          }
 
-          // Process result through ToolResultStorage (handles large outputs)
-          const resultContent = await this._processToolResult(result, toolName, toolCall.id)
-          messages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: resultContent
-          })
+          for (const { execution, message } of groupResults) {
+            executions.push(execution)
+            messages.push(message)
+          }
         }
 
         this._recordIterationActivity(loopGuard, executions)
@@ -933,6 +921,81 @@ export class AgentCore {
     } finally {
       this.currentAbortSignal = undefined
     }
+  }
+
+  /** Whether a tool only reads state and can run concurrently with its peers. */
+  private _isConcurrencySafeTool (name: string): boolean {
+    return AgentCore.CONCURRENCY_SAFE_TOOLS.has(name)
+  }
+
+  /**
+   * Partition an assistant turn's tool calls into ordered execution groups.
+   * Consecutive concurrency-safe (read-only) calls are batched so they can run
+   * in parallel; every other call becomes its own single-element group so writes
+   * and side-effecting tools stay strictly serial. Relative order is preserved,
+   * so a read that precedes an edit still runs (and updates shared state such as
+   * the read tracker) before that edit does.
+   */
+  private _groupToolCalls (toolCalls: ToolCall[]): ToolCall[][] {
+    const groups: ToolCall[][] = []
+    for (const toolCall of toolCalls) {
+      const lastGroup = groups[groups.length - 1]
+      const canBatch = this._isConcurrencySafeTool(toolCall.function.name) &&
+        lastGroup !== undefined &&
+        this._isConcurrencySafeTool(lastGroup[0].function.name)
+      if (canBatch) {
+        lastGroup.push(toolCall)
+      } else {
+        groups.push([toolCall])
+      }
+    }
+    return groups
+  }
+
+  /**
+   * Execute a single tool call end-to-end: parse arguments, run the tool, log
+   * the execution, and serialize the result into a tool message. Shared by the
+   * blocking and streaming loops. When an abortSignal is supplied, an abort is
+   * re-thrown (normalized) instead of being captured as a tool error.
+   */
+  private async _executeToolCall (
+    toolCall: ToolCall,
+    onProgress?: ProgressCallback,
+    abortSignal?: AbortSignal
+  ): Promise<{ execution: ToolExecutionRecord; message: ChatMessage }> {
+    const toolName = toolCall.function.name
+
+    let result: unknown
+    let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
+    try {
+      toolArgs = this._parseToolArguments(toolName, toolCall.function.arguments)
+      result = await this._executeTool(toolName, toolArgs, onProgress)
+      this._throwIfAborted(abortSignal)
+    } catch (err) {
+      if (abortSignal?.aborted || (err as Error).message === USER_ABORT_MESSAGE) {
+        throw normalizeAbortReason(abortSignal?.reason ?? err, USER_ABORT_MESSAGE)
+      }
+      result = { error: (err as Error).message }
+    }
+
+    const isError = result !== null && typeof result === 'object' && 'error' in (result as Record<string, unknown>)
+    const execution: ToolExecutionRecord = { name: toolName, args: toolArgs, result }
+    this.logger?.logToolExecution({
+      name: toolName,
+      rawArguments: toolCall.function.arguments,
+      parsedArguments: toolArgs,
+      result,
+      status: isError ? 'failed' : 'completed',
+      error: isError ? String((result as Record<string, unknown>).error) : undefined
+    })
+
+    const resultContent = await this._processToolResult(result, toolName, toolCall.id)
+    const message: ChatMessage = {
+      role: 'tool',
+      tool_call_id: toolCall.id,
+      content: resultContent
+    }
+    return { execution, message }
   }
 
   /**

@@ -139,6 +139,7 @@ When the user asks to modify or optimize an existing project:
 - Read large files in chunks of about 200 lines and continue only when more context is needed.
 - Prefer edit_project_file (exact string replacement) for targeted edits to existing files: read the file first, then copy an exact, unique snippet as old_string and supply its replacement. It is far less error-prone than counting line numbers. patch_project_file (line-range patches) remains available as an alternative; use write_project_file only when creating a new file or making sweeping changes.
 - For runtime failures, check get_project_status and get_project_logs before guessing.
+- To verify your changes, run the project's type-check, linter, or tests with run_project_command (for example \`npx tsc --noEmit\`, \`npm test\`, \`npx vitest run\`, \`npx eslint .\`). Read the failures, fix them, and re-run before declaring success.
 - Use call_project_api to verify behavior when useful.
 - If get_project_status recommends install_dependencies or rebuild_project, follow that guidance. Always use rebuild_project directly for rebuilds; do not use start_async_task or get_task_status for build execution.
 - If get_project_status still reports needs_rebuild after a successful manual build, call clear_project_build_flag to re-sync the platform state before rebuilding again.

@@ -195,6 +195,8 @@ export class OpenAIProvider {
   /** Streaming responses should only time out when no bytes arrive for too long. */
   private static readonly STREAM_IDLE_TIMEOUT_MS = 90000
   private static readonly STREAM_IDLE_TIMEOUT_MESSAGE = 'AI stream idle timed out'
+  /** Default sampling temperature, tuned low for deterministic coding / editing. */
+  private static readonly CODING_TEMPERATURE = 0.3
   private apiKey: string
   private baseUrl: string
   private model: string
@@ -202,6 +204,8 @@ export class OpenAIProvider {
   private imageEditing = false
   private enableThinking: boolean
   private reasoningEffort: 'low' | 'medium' | 'high' | 'max'
+  /** Configured sampling temperature; when undefined the coding default is used. */
+  private temperature?: number
   private contextWindow: number
   private logger?: AILogSessionLogger
   private onUsage?: UsageCallback
@@ -278,6 +282,28 @@ export class OpenAIProvider {
     return this.reasoningEffort
   }
 
+  /**
+   * Some OpenAI reasoning models (the o-series and gpt-5) only accept the
+   * default sampling temperature and error on any custom value. Detect them so
+   * the request omits temperature entirely for those models.
+   */
+  private modelRejectsCustomTemperature (): boolean {
+    if (!this.isOpenAIProvider()) return false
+    const model = this.model.toLowerCase()
+    return model.startsWith('gpt-5') || /^o[1-9]/.test(model)
+  }
+
+  /**
+   * Resolve the temperature to send. Coding/editing benefits from determinism,
+   * so the default is low; callers can override via AIConfigInput.temperature
+   * for creative work. Returns undefined for models that reject a custom value
+   * (the o-series and gpt-5), so the request omits temperature for them.
+   */
+  private resolveTemperature (): number | undefined {
+    if (this.modelRejectsCustomTemperature()) return undefined
+    return this.temperature ?? OpenAIProvider.CODING_TEMPERATURE
+  }
+
   private isImageOutputModel (): boolean {
     const normalized = this.model.toLowerCase()
     return this.imageGeneration ||
@@ -308,8 +334,12 @@ export class OpenAIProvider {
     const body: ChatCompletionBody = {
       model: this.model,
       messages: this.applyPromptCaching(this.normalizeOutgoingMessages(messages)),
-      temperature: 0.7,
       stream
+    }
+
+    const temperature = this.resolveTemperature()
+    if (temperature !== undefined) {
+      body.temperature = temperature
     }
 
     // Request usage data in stream responses
@@ -610,6 +640,18 @@ export class OpenAIProvider {
 
   setReasoningEffort (effort: 'low' | 'medium' | 'high' | 'max'): void {
     this.reasoningEffort = effort
+  }
+
+  /**
+   * Override the sampling temperature. Pass undefined to fall back to the
+   * coding-tuned default. Values are clamped to the valid [0, 2] range.
+   */
+  setTemperature (temperature?: number): void {
+    if (temperature === undefined || !Number.isFinite(temperature)) {
+      this.temperature = undefined
+      return
+    }
+    this.temperature = Math.min(Math.max(temperature, 0), 2)
   }
 
   setLogger (logger?: AILogSessionLogger): void {
