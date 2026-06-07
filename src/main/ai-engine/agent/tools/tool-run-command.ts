@@ -4,7 +4,7 @@ import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { BuilderService } from '../../../project-runtime/builder-service.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
-import { PROJECT_COMMAND_WHITELIST } from './command-capabilities.js'
+import { PROJECT_COMMAND_WHITELIST, DANGEROUS_COMMAND_PATTERNS, isDeveloperCommandModeEnabled } from './command-capabilities.js'
 import { createBundledRuntimeEnv } from '../../../project-runtime/bundled-runtime.js'
 
 interface ToolServices {
@@ -95,7 +95,7 @@ export function toolRunCommand (services: ToolServices): Tool {
   return {
     definition: {
       name: 'run_project_command',
-      description: 'Run a safe project command. If the foreground wait times out, the command keeps running in the background and returns a command_id for status checks.',
+      description: 'Run a short-lived command inside the project directory: install dependencies, build, run tests / linters / type-checks, or quick diagnostics. Allowed commands include npm / npx / pnpm / yarn / bun / node / tsx, the tsc / eslint / prettier / vitest / jest / playwright runners, read-only git (status, diff, log, show, branch), and read-only shell utilities. Prefer dedicated tools (read_project_file, grep_search, list_project_files) over cat / grep / ls. Run ONE command per call; chaining with && | ; or redirects requires developer command mode (THE_WORLD_DEV_COMMANDS=1). Do NOT start long-lived dev servers here — use start_project_server. If the foreground wait times out the command keeps running in the background and returns a command_id; poll it with get_project_command_status instead of retrying.',
       parameters: {
         type: 'object',
         properties: {
@@ -105,7 +105,7 @@ export function toolRunCommand (services: ToolServices): Tool {
           },
           command: {
             type: 'string',
-            description: 'Shell command'
+            description: 'The command to run, e.g. "npm install", "npm test", "npx tsc --noEmit". A single command unless developer command mode is enabled.'
           },
           cwd: {
             type: 'string',
@@ -418,11 +418,56 @@ function validateProjectCommand (rawCommand: string): ParsedCommand {
     throw new Error('Command must not be empty')
   }
 
-  if (/[\r\n;&|<>`]/.test(command)) {
-    throw new Error('Command contains shell control operators. Run a single non-interactive command only.')
+  if (/[\r\n]/.test(command)) {
+    throw new Error('Run a single logical command without newlines.')
   }
 
-  const tokens = tokenizeCommand(command)
+  // Command substitution would run nested commands whose base we cannot
+  // validate, so reject it regardless of mode.
+  if (/`|\$\(/.test(command)) {
+    throw new Error('Command substitution (backticks or $()) is not allowed.')
+  }
+
+  // Defense-in-depth: reject obviously destructive / escalating commands even
+  // when developer command mode is on.
+  for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
+    if (pattern.test(command)) {
+      throw new Error('Command was blocked as potentially destructive (recursive deletes of system paths, privilege escalation, disk writes, or piping a download into a shell are not allowed).')
+    }
+  }
+
+  const developerMode = isDeveloperCommandModeEnabled()
+  const hasShellOperators = /[;&|<>]/.test(command)
+
+  if (hasShellOperators && !developerMode) {
+    throw new Error('Command contains shell operators (; & | < >). Run a single command per call. To chain commands (e.g. "npm install && npm test"), enable developer command mode by setting THE_WORLD_DEV_COMMANDS=1.')
+  }
+
+  // In developer mode, validate every command segment of the pipeline/chain;
+  // otherwise validate the single command as-is. The first segment's parse is
+  // returned for downstream behavior (e.g. manual-build detection).
+  const segments = developerMode ? splitCommandSegments(command) : [command]
+  if (segments.length === 0) {
+    throw new Error('Command must not be empty')
+  }
+
+  let firstParsed: ParsedCommand | null = null
+  for (const segment of segments) {
+    const parsed = validateSingleCommand(segment)
+    if (!firstParsed) {
+      firstParsed = parsed
+    }
+  }
+
+  if (!firstParsed) {
+    throw new Error('Command must not be empty')
+  }
+  return firstParsed
+}
+
+/** Validate one command segment (no shell operators) against the whitelist. */
+function validateSingleCommand (segment: string): ParsedCommand {
+  const tokens = tokenizeCommand(segment)
   if (tokens.length === 0) {
     throw new Error('Command must not be empty')
   }
@@ -439,6 +484,27 @@ function validateProjectCommand (rawCommand: string): ParsedCommand {
   }
 
   return { baseCommand, tokens }
+}
+
+/**
+ * Split a developer-mode command into its individual command segments. Strips
+ * redirection clauses first (so "2>&1" / "> file" are not mistaken for new
+ * commands), then splits on command separators and pipes.
+ */
+function splitCommandSegments (command: string): string[] {
+  return stripRedirections(command)
+    .split(/\s*(?:&&|\|\||;|\||&)\s*/)
+    .map(segment => segment.trim())
+    .filter(Boolean)
+}
+
+/** Remove redirection clauses so only command + args remain for validation. */
+function stripRedirections (text: string): string {
+  return text
+    .replace(/\d*>>?\s*&\s*\d+/g, ' ') // 2>&1, >&2
+    .replace(/\d*>>?\s*\S+/g, ' ') // > file, >> file, 2> file
+    .replace(/<\s*\S+/g, ' ') // < file
+    .trim()
 }
 
 function isSuccessfulManualBuild (parsed: ParsedCommand, payload: { exitCode?: number | null }): boolean {
