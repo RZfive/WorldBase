@@ -120,7 +120,8 @@ function parseConversationKey (key: string): { type: 'conversation' | 'folder'; 
 export function useConversationSidebarFolders (
   conversationItems: ComputedRef<ConversationSidebarItem[]>,
   searchQuery: Ref<string>,
-  normalizeSearchValue: (value: string) => string
+  normalizeSearchValue: (value: string) => string,
+  conversationListLoaded: Ref<boolean>
 ) {
   const initialConversationLayout = loadConversationLayout()
   const conversationFolders = ref<ConversationFolderLayout[]>(initialConversationLayout.folders)
@@ -235,8 +236,9 @@ export function useConversationSidebarFolders (
   }
 
   watch(
-    conversationItems,
+    [conversationItems, conversationListLoaded],
     () => {
+      if (!conversationListLoaded.value) return
       applyNormalizedConversationLayout()
     },
     { immediate: true, deep: true }
@@ -326,7 +328,9 @@ export function useConversationSidebarFolders (
   }
 
   function finalizeConversationLayout () {
-    applyNormalizedConversationLayout()
+    if (conversationListLoaded.value) {
+      applyNormalizedConversationLayout()
+    }
     persistConversationLayout()
   }
 

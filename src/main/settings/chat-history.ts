@@ -59,7 +59,7 @@ export type ChatMessageBlock =
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
-  | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'file_preview'; filePath: string; lineCount: number; added: number; removed: number; active: boolean }
   | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
@@ -96,6 +96,8 @@ export interface Conversation {
   messages: ChatMessage[]
   createdAt: string
   updatedAt: string
+  /** User-edited title that should not be replaced by automatic title generation. */
+  manualTitle?: boolean
   /** Authorization mode used by this conversation. */
   authMode?: AIExecutionAuthMode
   /** Provider ID used for this conversation */
@@ -209,6 +211,7 @@ export class ChatHistoryStore {
           updatedAt: data.updatedAt,
           previewText: conversationIndex.previewText,
           searchText: conversationIndex.searchText,
+          manualTitle: data.manualTitle,
           authMode: data.authMode,
           providerId: data.providerId,
           selectedModel: data.selectedModel,
@@ -245,6 +248,27 @@ export class ChatHistoryStore {
   save (conversation: Conversation): void {
     conversation.updatedAt = new Date().toISOString()
     fs.writeFileSync(this.filePath(conversation.id), JSON.stringify(conversation, null, 2), 'utf-8')
+  }
+
+  /**
+   * Rename a conversation without changing its updatedAt ordering.
+   */
+  rename (id: string, title: string): boolean {
+    const fp = this.filePath(id)
+    if (!fs.existsSync(fp)) return false
+
+    const nextTitle = title.trim()
+    if (!nextTitle) return false
+
+    try {
+      const conversation = JSON.parse(fs.readFileSync(fp, 'utf-8')) as Conversation
+      conversation.title = nextTitle
+      conversation.manualTitle = true
+      fs.writeFileSync(fp, JSON.stringify(conversation, null, 2), 'utf-8')
+      return true
+    } catch {
+      return false
+    }
   }
 
   /**

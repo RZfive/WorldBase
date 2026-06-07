@@ -2861,6 +2861,9 @@ function setupIPC (): void {
           }
           if ('filePath' in event) safe.filePath = String(event.filePath || '')
           if ('truncated' in event) safe.truncated = Boolean(event.truncated)
+          if ('lineCount' in event) safe.lineCount = Number(event.lineCount || 0)
+          if ('added' in event) safe.added = Number(event.added || 0)
+          if ('removed' in event) safe.removed = Number(event.removed || 0)
           if ('query' in event) safe.query = String(event.query || '')
           if ('engine' in event) safe.engine = String(event.engine || '')
           if ('results' in event) {
@@ -3118,6 +3121,10 @@ function setupIPC (): void {
   ipcMain.handle('conversations:save', async (_event: IpcMainInvokeEvent, conversation: Conversation) => {
     chatHistory!.save(conversation)
     return { success: true }
+  })
+
+  ipcMain.handle('conversations:rename', async (_event: IpcMainInvokeEvent, id: string, title: string) => {
+    return { success: chatHistory!.rename(id, title) }
   })
 
   ipcMain.handle('conversations:delete', async (_event: IpcMainInvokeEvent, id: string) => {

@@ -19,7 +19,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_collaboration_plan' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: { role: string; content: MessageContent }
@@ -30,6 +30,9 @@ interface StreamEvent {
   items?: TodoItem[]
   filePath?: string
   truncated?: boolean
+  lineCount?: number
+  added?: number
+  removed?: number
   plan?: AgentGroupCollaborationPlan
   groupProgress?: AgentGroupProgressSnapshot
   transcript?: AgentGroupTranscript
@@ -45,6 +48,7 @@ interface ConversationSummary {
   title: string
   createdAt: string
   updatedAt: string
+  manualTitle?: boolean
   previewText?: string
   searchText?: string
   authMode?: AIExecutionAuthMode
@@ -318,7 +322,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
-  | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'file_preview'; filePath: string; lineCount: number; added: number; removed: number; active: boolean }
   | { id: string; kind: 'group_collaboration_plan'; plan: AgentGroupCollaborationPlan }
   | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
@@ -800,6 +804,7 @@ interface ElectronAPI {
   listConversations: () => Promise<ConversationSummary[]>
   getConversation: (id: string) => Promise<ConversationData | null>
   saveConversation: (conversation: ConversationData) => Promise<{ success: boolean }>
+  renameConversation: (id: string, title: string) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
   listAgents: () => Promise<AgentDefinition[]>
   listAgentToolDefinitions: () => Promise<Array<{ name: string; description: string }>>

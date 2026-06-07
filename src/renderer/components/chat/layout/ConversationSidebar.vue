@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, toRef, watch } from 'vue'
 import ConversationSidebarFolder from './ConversationSidebarFolder.vue'
 import ConversationSidebarItemCard from './ConversationSidebarItemCard.vue'
 import {
@@ -14,6 +14,7 @@ const props = defineProps<{
   agentItems: AgentSidebarItem[]
   groupItems: GroupSidebarItem[]
   conversationItems: ConversationSidebarItem[]
+  conversationListLoaded: boolean
 }>()
 
 const emit = defineEmits<{
@@ -22,14 +23,52 @@ const emit = defineEmits<{
   (e: 'openAgent', agentId: string): void
   (e: 'openGroup', groupId: string): void
   (e: 'deleteConversation', id: string): void
+  (e: 'renameConversation', id: string, title: string): void
   (e: 'pinConversation', id: string): void
 }>()
 
 const searchQuery = ref('')
-const collapsedSections = reactive<Record<ConversationSidebarSectionKey, boolean>>({
-  agents: false,
-  groups: false,
-  conversations: false
+const renamingConversationId = ref<string | null>(null)
+const conversationRenameInput = ref('')
+
+const SECTION_COLLAPSE_STORAGE_KEY = 'conversation-sidebar-sections'
+
+function loadCollapsedSections (): Record<ConversationSidebarSectionKey, boolean> {
+  const fallback: Record<ConversationSidebarSectionKey, boolean> = {
+    agents: false,
+    groups: false,
+    conversations: false
+  }
+  if (typeof window === 'undefined') return fallback
+
+  try {
+    const raw = window.localStorage.getItem(SECTION_COLLAPSE_STORAGE_KEY)
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw) as Partial<Record<ConversationSidebarSectionKey, unknown>>
+    return {
+      agents: parsed.agents === true,
+      groups: parsed.groups === true,
+      conversations: parsed.conversations === true
+    }
+  } catch {
+    return fallback
+  }
+}
+
+// Restore the last expand/collapse state so the list opens as the user left it.
+const collapsedSections = reactive<Record<ConversationSidebarSectionKey, boolean>>(loadCollapsedSections())
+
+watch(collapsedSections, () => {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(SECTION_COLLAPSE_STORAGE_KEY, JSON.stringify({
+      agents: collapsedSections.agents,
+      groups: collapsedSections.groups,
+      conversations: collapsedSections.conversations
+    }))
+  } catch {
+    // Ignore local persistence failures.
+  }
 })
 
 function normalizeSearchValue (value: string): string {
@@ -85,7 +124,12 @@ const {
   folderBodyDropClass,
   conversationSectionDropClass,
   resetDragState
-} = useConversationSidebarFolders(computed(() => props.conversationItems), searchQuery, normalizeSearchValue)
+} = useConversationSidebarFolders(
+  computed(() => props.conversationItems),
+  searchQuery,
+  normalizeSearchValue,
+  toRef(props, 'conversationListLoaded')
+)
 
 const hasVisibleItems = computed(() => {
   return filteredAgentItems.value.length > 0 || filteredGroupItems.value.length > 0 || conversationEntries.value.length > 0
@@ -100,6 +144,29 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
     return itemsCount > 0
   }
   return !collapsedSections[key]
+}
+
+function startRenameConversation (item: ConversationSidebarItem) {
+  renamingConversationId.value = item.id
+  conversationRenameInput.value = item.title
+}
+
+function commitRenameConversation (id: string) {
+  if (renamingConversationId.value !== id) return
+
+  const nextTitle = conversationRenameInput.value.trim()
+  const currentTitle = props.conversationItems.find(item => item.id === id)?.title || ''
+
+  renamingConversationId.value = null
+  conversationRenameInput.value = ''
+
+  if (!nextTitle || nextTitle === currentTitle) return
+  emit('renameConversation', id, nextTitle)
+}
+
+function cancelRenameConversation () {
+  renamingConversationId.value = null
+  conversationRenameInput.value = ''
 }
 </script>
 
@@ -248,13 +315,20 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
                 v-if="entry.kind === 'conversation'"
                 :item="entry.item"
                 variant="conversation"
+                compact
                 :draggable="!isSearching"
                 :is-dragging="dragItem?.type === 'conversation' && dragItem.id === entry.item.id"
                 :drop-class="topLevelDropClass(entry.item.id, 'conversation')"
+                :renaming="renamingConversationId === entry.item.id"
+                :rename-input="conversationRenameInput"
                 show-delete
                 show-pin
                 delete-title="删除"
                 @click="emit('selectConversation', entry.item.id)"
+                @contextmenu.prevent="startRenameConversation(entry.item)"
+                @update:rename-input="conversationRenameInput = $event"
+                @commit-rename="commitRenameConversation(entry.item.id)"
+                @cancel-rename="cancelRenameConversation"
                 @delete="emit('deleteConversation', entry.item.id)"
                 @pin="togglePinConversation(entry.item.id)"
                 @dragstart="onConversationDragStart($event, entry.item.id)"
@@ -275,11 +349,17 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
                 :folder-body-drop-class="folderBodyDropClass(entry.folder.id)"
                 :drag-item="dragItem"
                 :conversation-drop-class="(conversationId) => topLevelDropClass(conversationId, 'conversation')"
+                :renaming-conversation-id="renamingConversationId"
+                :conversation-rename-input="conversationRenameInput"
                 @update:rename-input="renameInput = $event"
+                @update:conversation-rename-input="conversationRenameInput = $event"
                 @toggle="toggleFolderCollapsed(entry.folder.id)"
                 @start-rename="startRenameFolder(entry.folder)"
+                @start-rename-conversation="startRenameConversation"
                 @commit-rename="commitRenameFolder(entry.folder.id)"
+                @commit-conversation-rename="commitRenameConversation"
                 @cancel-rename="cancelRenameFolder"
+                @cancel-conversation-rename="cancelRenameConversation"
                 @dragstart-folder="onFolderDragStart($event, entry.folder.id)"
                 @dragover-folder="onTopLevelDragOver($event, entry.folder.id, 'folder')"
                 @dragleave="onDragLeave"
@@ -576,6 +656,7 @@ function isSectionExpanded (key: ConversationSidebarSectionKey, itemsCount: numb
 
 .conv-section-body-conversations {
   position: relative;
+  gap: 2px;
   padding-bottom: 6px;
 }
 

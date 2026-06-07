@@ -483,7 +483,7 @@ function getMessageSignature (msg?: ChatMessage): string {
     }
     if (block.kind === 'error') return `error:${block.message}`
     if (block.kind === 'thinking') return `thinking:${block.text}`
-    if (block.kind === 'file_preview') return `preview:${block.filePath}:${block.previewContent}:${block.truncated}:${block.active}`
+    if (block.kind === 'file_preview') return `preview:${block.filePath}:${block.lineCount}:${block.added}:${block.removed}:${block.active}`
     if (block.kind === 'group_collaboration_plan') return `groupplan:${block.plan.groupId}:${block.plan.phase}:${block.plan.mode}:${block.plan.planner.agentId}:${block.plan.reportToName}:${block.plan.originalRequest}:${block.plan.normalizedRequest}:${block.plan.reason}:${block.plan.round || 0}:${block.plan.mentionedParticipants.map(item => `${item.agentId}:${item.agentName}`).join('|')}:${block.plan.candidateParticipants.map(item => `${item.agentId}:${item.agentName}`).join('|')}:${block.plan.invitedParticipants.map(item => `${item.agentId}:${item.agentName}`).join('|')}`
     if (block.kind === 'agent_sidechat') return `sidechat:${block.session.id}:${block.session.status}:${block.session.round}:${block.session.agentId}:${block.session.request}:${block.session.response}:${block.session.error || ''}:${block.session.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`
     if (block.kind === 'group_progress') return `groupprogress:${block.snapshot.groupId}:${block.snapshot.status}:${block.snapshot.activeRound}:${block.snapshot.items.map((item: typeof block.snapshot.items[number]) => `${item.agentId}:${item.status}:${item.currentRound}:${item.completedRounds}:${item.stage}:${item.detail || ''}:${item.summary || ''}:${item.progress.map(step => `${step.stage}:${step.detail || ''}`).join('>')}`).join('|')}`
@@ -547,7 +547,7 @@ watch(
 )
 
 watch(
-  () => [props.filePreview.active, props.filePreview.content],
+  () => [props.filePreview.active, props.filePreview.filePath],
   () => {
     if (autoStickEnabled.value) {
       scrollToBottom()

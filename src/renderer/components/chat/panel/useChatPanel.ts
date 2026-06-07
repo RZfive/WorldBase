@@ -92,6 +92,7 @@ interface UseChatPanelBindings {
 const sharedMessages = ref<ChatMessage[]>([])
 const sharedInputText = ref('')
 const sharedConversations = ref<ConversationSummary[]>([])
+const sharedConversationsLoaded = ref(false)
 const sharedCurrentConversationId = ref<string | null>(null)
 const sharedTargetProjectId = ref<string | null>(null)
 const sharedProviders = ref<ProviderOption[]>([])
@@ -111,8 +112,9 @@ const sharedUploadFeedback = ref('')
 const sharedFilePreview = ref<FilePreviewState>({
   active: false,
   filePath: '',
-  content: '',
-  truncated: false
+  lineCount: 0,
+  added: 0,
+  removed: 0
 })
 const sharedAvailableSkills = ref<SkillItem[]>([])
 const sharedActiveSkillIds = ref<Set<string>>(new Set())
@@ -174,6 +176,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const messages = sharedMessages
   const inputText = sharedInputText
   const conversations = sharedConversations
+  const conversationsLoaded = sharedConversationsLoaded
   const currentConversationId = sharedCurrentConversationId
   const targetProjectId = sharedTargetProjectId
   const providers = sharedProviders
@@ -603,8 +606,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     filePreview.value = {
       active: false,
       filePath: '',
-      content: '',
-      truncated: false
+      lineCount: 0,
+      added: 0,
+      removed: 0
     }
   }
 
@@ -1110,10 +1114,17 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   }
 
   async function loadConversations () {
-    if (!window.electronAPI) return
+    if (!window.electronAPI) {
+      conversationsLoaded.value = true
+      return
+    }
     try {
       conversations.value = await window.electronAPI.listConversations()
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    } finally {
+      conversationsLoaded.value = true
+    }
   }
 
   async function loadProviders (preferredProviderId?: string | null, preferredModelId?: string | null) {
@@ -1203,9 +1214,11 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
     const firstUserMsg = msgs.find(message => message.role === 'user')
     const titleText = getConversationTitleText(firstUserMsg)
-    const resolvedTitle = options?.titleOverride || getPinnedContextTitle() || (titleText
+    const shouldKeepManualTitle = Boolean(existingConversation?.manualTitle && !options?.titleOverride)
+    const resolvedTitle = options?.titleOverride || (shouldKeepManualTitle ? existingConversation?.title : '') || getPinnedContextTitle() || (titleText
       ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
       : (existingConversation?.title || '新对话'))
+    const resolvedManualTitle = shouldKeepManualTitle || undefined
     const resolvedTargetProjectId = options && Object.prototype.hasOwnProperty.call(options, 'targetProjectId')
       ? (options.targetProjectId ?? null)
       : getConversationTarget(convId)
@@ -1218,6 +1231,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       messages: msgs,
       createdAt: getConversationCreatedAt(convId),
       updatedAt: new Date().toISOString(),
+      manualTitle: resolvedManualTitle,
       authMode: currentAuthMode.value,
       providerId: shouldUseConversationProviderOverride.value ? (activeProviderId.value || undefined) : undefined,
       selectedModel: shouldUseConversationProviderOverride.value ? (selectedModel.value || undefined) : undefined,
@@ -1230,6 +1244,21 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     })))
 
     await loadConversations()
+  }
+
+  async function renameConversation (id: string, title: string): Promise<boolean> {
+    const nextTitle = title.trim()
+    if (!window.electronAPI || !nextTitle) return false
+
+    const result = await window.electronAPI.renameConversation(id, nextTitle)
+    if (!result.success) return false
+
+    conversations.value = conversations.value.map(conversation => (
+      conversation.id === id
+        ? { ...conversation, title: nextTitle, manualTitle: true }
+        : conversation
+    ))
+    return true
   }
 
   async function deleteConversation (id: string) {
@@ -1604,37 +1633,34 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
                 activeToolRun.progress.push({ stage: '文件预览', detail: event.filePath })
                 syncAssistantToolRuns()
               }
-              ensureBlocks(assistantMessage).push(createFilePreviewBlock(event.filePath, Boolean(event.truncated)))
+              ensureBlocks(assistantMessage).push(createFilePreviewBlock(event.filePath))
               if (isForeground) {
                 filePreview.value = {
                   active: true,
                   filePath: event.filePath,
-                  content: '',
-                  truncated: Boolean(event.truncated)
+                  lineCount: 0,
+                  added: 0,
+                  removed: 0
                 }
               }
-            } else if (event.type === 'file_preview_chunk' && event.content) {
+            } else if (event.type === 'file_preview_end') {
+              const lineCount = Number(event.lineCount ?? 0)
+              const added = Number(event.added ?? 0)
+              const removed = Number(event.removed ?? 0)
               const previewBlock = getLastActivePreviewBlock(assistantMessage, event.filePath)
               if (previewBlock) {
-                previewBlock.previewContent += event.content
+                previewBlock.active = false
+                previewBlock.lineCount = lineCount
+                previewBlock.added = added
+                previewBlock.removed = removed
               }
               if (isForeground && filePreview.value.filePath === event.filePath) {
                 filePreview.value = {
                   ...filePreview.value,
-                  content: filePreview.value.content + event.content
-                }
-              }
-            } else if (event.type === 'file_preview_end') {
-              const previewBlock = getLastActivePreviewBlock(assistantMessage, event.filePath)
-              if (previewBlock) {
-                previewBlock.active = false
-                previewBlock.truncated = Boolean(event.truncated ?? previewBlock.truncated)
-              }
-              if (isForeground) {
-                filePreview.value = {
-                  ...filePreview.value,
                   active: false,
-                  truncated: Boolean(event.truncated ?? filePreview.value.truncated)
+                  lineCount,
+                  added,
+                  removed
                 }
               }
             } else if (event.type === 'web_search_result' && event.query) {
@@ -1883,6 +1909,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     availableAgents,
     availableChannelBindings,
     availableSkills,
+    conversationsLoaded,
     conversationSidebarItems,
     currentAuthMode,
     currentContextDetail,
@@ -1919,6 +1946,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     planModeActive,
     providers,
     reasoningStrength,
+    renameConversation,
     removeFile,
     removeImage,
     respondToAuthRequest,

@@ -120,7 +120,10 @@ export class ProjectFS {
     const metaPath = this._resolveProjectPath(projectId, '.world-meta.json')
     try {
       const content = await fs.readFile(metaPath, 'utf-8')
-      return normalizeProjectMeta(JSON.parse(content)) as ProjectMeta
+      const meta = normalizeProjectMeta(JSON.parse(content)) as ProjectMeta
+      // Ensure id is always set; fall back to the directory name (mirrors listProjects)
+      if (!meta.id) meta.id = projectId
+      return meta
     } catch {
       const recoveredMeta = await this._recoverStandaloneProjectMeta(projectId)
       if (recoveredMeta) {

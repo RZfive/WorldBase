@@ -61,7 +61,7 @@ export type ChatMessageBlock =
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
-  | { id: string; kind: 'file_preview'; filePath: string; previewContent: string; truncated: boolean; active: boolean }
+  | { id: string; kind: 'file_preview'; filePath: string; lineCount: number; added: number; removed: number; active: boolean }
   | { id: string; kind: 'group_collaboration_plan'; plan: AgentGroupCollaborationPlan }
   | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
@@ -92,6 +92,7 @@ export interface GalleryImage {
 export interface FilePreviewState {
   active: boolean
   filePath: string
-  content: string
-  truncated: boolean
+  lineCount: number
+  added: number
+  removed: number
 }

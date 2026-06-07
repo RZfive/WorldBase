@@ -12,6 +12,8 @@ const ZOOM_STEP = 0.25
 const ZOOM_DECIMAL_PRECISION = 2
 const WHEEL_ZOOM_SENSITIVITY = 0.003
 const PRIMARY_MOUSE_BUTTON = 0
+const WHEEL_DELTA_LINE = 1
+const WHEEL_DELTA_PAGE = 2
 
 const wrapperRef = ref<HTMLElement | null>(null)
 const naturalSize = ref({ width: 0, height: 0 })
@@ -22,6 +24,7 @@ const panX = ref(0)
 const panY = ref(0)
 const draggingPan = ref(false)
 const dragState = ref({ pointerId: -1, startX: 0, startY: 0, panX: 0, panY: 0 })
+let gestureBaseZoom = 1
 
 const zoomPercent = computed(() => `${Math.round(zoomLevel.value * 100)}%`)
 
@@ -69,6 +72,30 @@ function clampPan () {
   panY.value = Math.max(-m.maxPanY, Math.min(m.maxPanY, panY.value))
 }
 
+function normalizeWheelDelta (value: number, mode: number, viewportSize: number): number {
+  if (mode === WHEEL_DELTA_LINE) return value * 16
+  if (mode === WHEEL_DELTA_PAGE) return value * Math.max(1, viewportSize)
+  return value
+}
+
+function panBy (deltaX: number, deltaY: number): boolean {
+  const m = metrics.value
+  if (!m || !canPan.value) return false
+
+  const previousX = panX.value
+  const previousY = panY.value
+
+  if (m.maxPanX > 0) {
+    panX.value -= deltaX
+  }
+  if (m.maxPanY > 0) {
+    panY.value -= deltaY
+  }
+
+  clampPan()
+  return previousX !== panX.value || previousY !== panY.value
+}
+
 function updateViewport () {
   nextTick(() => {
     if (!wrapperRef.value) return
@@ -104,8 +131,40 @@ function zoomReset () {
 }
 
 function onWheel (event: WheelEvent) {
+  const m = metrics.value
+  const deltaX = normalizeWheelDelta(event.deltaX, event.deltaMode, m?.viewportWidth ?? 1)
+  const deltaY = normalizeWheelDelta(event.deltaY, event.deltaMode, m?.viewportHeight ?? 1)
+  const horizontalDelta = event.shiftKey && Math.abs(deltaX) < Math.abs(deltaY) ? deltaY : deltaX
+  const hasHorizontalIntent = Math.abs(horizontalDelta) > Math.max(1, Math.abs(deltaY) * 0.6)
+
+  if (!event.ctrlKey && !event.metaKey && hasHorizontalIntent && panBy(horizontalDelta, 0)) {
+    event.preventDefault()
+    return
+  }
+
   event.preventDefault()
-  setZoom(zoomLevel.value * Math.exp(-event.deltaY * WHEEL_ZOOM_SENSITIVITY), { x: event.clientX, y: event.clientY })
+  setZoom(zoomLevel.value * Math.exp(-deltaY * WHEEL_ZOOM_SENSITIVITY), { x: event.clientX, y: event.clientY })
+}
+
+function onGestureStart (event: Event) {
+  event.preventDefault()
+  gestureBaseZoom = zoomLevel.value
+}
+
+function onGestureChange (event: Event) {
+  event.preventDefault()
+  const gestureEvent = event as Event & { scale?: number; clientX?: number; clientY?: number }
+  const scale = Number.isFinite(gestureEvent.scale) ? gestureEvent.scale || 1 : 1
+  const rect = wrapperRef.value?.getBoundingClientRect()
+  setZoom(gestureBaseZoom * scale, {
+    x: gestureEvent.clientX ?? (rect ? rect.left + rect.width / 2 : 0),
+    y: gestureEvent.clientY ?? (rect ? rect.top + rect.height / 2 : 0)
+  })
+}
+
+function onGestureEnd (event: Event) {
+  event.preventDefault()
+  gestureBaseZoom = zoomLevel.value
 }
 
 function onImageLoad (event: Event) {
@@ -171,6 +230,9 @@ onUnmounted(() => {
       class="preview-wrapper"
       :class="{ 'can-pan': canPan, dragging: draggingPan }"
       @wheel="onWheel"
+      @gesturestart="onGestureStart"
+      @gesturechange="onGestureChange"
+      @gestureend="onGestureEnd"
       @pointerdown="startPan"
       @pointermove="onPointerMove"
       @pointerup="endPan"

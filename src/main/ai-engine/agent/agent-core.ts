@@ -13,9 +13,8 @@ import { CostTracker, type ApiUsage } from '../cost-tracker.js'
 export type ProgressEvent =
   | { type: 'progress'; stage: string; detail?: string }
   | { type: 'todo_update'; items: Array<{ id: number; title: string; status: 'not-started' | 'in-progress' | 'completed' }> }
-  | { type: 'file_preview_start'; filePath: string; truncated?: boolean }
-  | { type: 'file_preview_chunk'; filePath: string; content: string }
-  | { type: 'file_preview_end'; filePath: string; truncated?: boolean }
+  | { type: 'file_preview_start'; filePath: string }
+  | { type: 'file_preview_end'; filePath: string; lineCount?: number; added?: number; removed?: number }
   | { type: 'web_search_result'; query: string; engine: string; results: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }> }
   | { type: 'web_fetch_result'; query?: string; result: { url: string; final_url?: string; ok: boolean; status?: number; status_text?: string; content_type?: string; title?: string; description?: string; content: string; excerpt_strategy?: 'query_snippets' | 'leading_text'; query_snippets?: string[]; query_match_count?: number; truncated: boolean; fetched_at: string; error?: string } }
 
@@ -31,9 +30,8 @@ export type StreamEvent =
   | { type: 'tool_end'; name: string }
   | { type: 'progress'; stage: string; detail?: string }
   | { type: 'todo_update'; items: Array<{ id: number; title: string; status: 'not-started' | 'in-progress' | 'completed' }> }
-  | { type: 'file_preview_start'; filePath: string; truncated?: boolean }
-  | { type: 'file_preview_chunk'; filePath: string; content: string }
-  | { type: 'file_preview_end'; filePath: string; truncated?: boolean }
+  | { type: 'file_preview_start'; filePath: string }
+  | { type: 'file_preview_end'; filePath: string; lineCount?: number; added?: number; removed?: number }
   | { type: 'web_search_result'; query: string; engine: string; results: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }> }
   | { type: 'web_fetch_result'; query?: string; result: { url: string; final_url?: string; ok: boolean; status?: number; status_text?: string; content_type?: string; title?: string; description?: string; content: string; excerpt_strategy?: 'query_snippets' | 'leading_text'; query_snippets?: string[]; query_match_count?: number; truncated: boolean; fetched_at: string; error?: string } }
   | { type: 'reset' }
@@ -665,6 +663,7 @@ export class AgentCore {
       content: getSystemPrompt({
         skillContents: this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined,
         targetProjectId: this.sessionState.targetProjectId,
+        planModeActive: this.planEngine.active,
         systemPromptSections: this.systemPromptSections
       })
     }
@@ -759,6 +758,7 @@ export class AgentCore {
       content: getSystemPrompt({
         skillContents: this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined,
         targetProjectId: this.sessionState.targetProjectId,
+        planModeActive: this.planEngine.active,
         systemPromptSections: this.systemPromptSections
       })
     }

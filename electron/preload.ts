@@ -16,7 +16,7 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_chunk' | 'file_preview_end' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: ChatMessage
@@ -27,6 +27,9 @@ interface StreamEvent {
   items?: TodoItem[]
   filePath?: string
   truncated?: boolean
+  lineCount?: number
+  added?: number
+  removed?: number
   groupProgress?: AgentGroupProgressSnapshot
   transcript?: AgentGroupTranscript
   sidechat?: AgentSidechatSession
@@ -49,6 +52,7 @@ interface ConversationSummary {
   title: string
   createdAt: string
   updatedAt: string
+  manualTitle?: boolean
   previewText?: string
   searchText?: string
   authMode?: AIExecutionAuthMode
@@ -462,6 +466,7 @@ export interface ElectronAPI {
   listConversations: () => Promise<ConversationSummary[]>
   getConversation: (id: string) => Promise<Conversation | null>
   saveConversation: (conversation: Conversation) => Promise<{ success: boolean }>
+  renameConversation: (id: string, title: string) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
   listAgents: () => Promise<AgentDefinition[]>
   listAgentToolDefinitions: () => Promise<Array<{ name: string; description: string }>>
@@ -667,6 +672,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listConversations: () => ipcRenderer.invoke('conversations:list'),
   getConversation: (id: string) => ipcRenderer.invoke('conversations:get', id),
   saveConversation: (conversation: Conversation) => ipcRenderer.invoke('conversations:save', conversation),
+  renameConversation: (id: string, title: string): Promise<{ success: boolean }> => ipcRenderer.invoke('conversations:rename', id, title),
   deleteConversation: (id: string) => ipcRenderer.invoke('conversations:delete', id),
   listAgents: () => ipcRenderer.invoke('agents:list'),
   listAgentToolDefinitions: () => ipcRenderer.invoke('agentWorkspace:listToolDefinitions'),

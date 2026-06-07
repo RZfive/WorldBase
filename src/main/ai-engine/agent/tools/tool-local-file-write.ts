@@ -6,9 +6,6 @@ import type { BrowserWindow } from 'electron'
 import { requestUserAuth } from './user-auth.js'
 import { writeExcelFile, writeWordFile, writePptxFile } from './office-utils.js'
 
-/** Maximum characters for office file preview content. */
-const MAX_PREVIEW_LENGTH = 8000
-
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
 }
@@ -236,11 +233,11 @@ async function writeOfficeDocument (
 }
 
 function emitFilePreview (onProgress: ProgressCallback, filePath: string, content: string): void {
-  const truncated = content.length > MAX_PREVIEW_LENGTH
-  onProgress({ type: 'file_preview_start', filePath, truncated })
-  // Send in a single chunk for simplicity
-  onProgress({ type: 'file_preview_chunk', filePath, content: truncated ? content.substring(0, MAX_PREVIEW_LENGTH) : content })
-  onProgress({ type: 'file_preview_end', filePath, truncated })
+  // Report office-file generation as a compact status row (path + size) rather
+  // than streaming the formatted preview body.
+  const lineCount = content === '' ? 0 : content.replace(/\r\n/g, '\n').split('\n').length
+  onProgress({ type: 'file_preview_start', filePath })
+  onProgress({ type: 'file_preview_end', filePath, lineCount, added: lineCount, removed: 0 })
 }
 
 function formatExcelPreview (sheets: Array<{ name: string; headers: string[]; rows: unknown[][] }>): string {

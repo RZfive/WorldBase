@@ -10,12 +10,16 @@ interface ToolServices {
   projectFS: ProjectFS
 }
 
+type GrepOutputMode = 'content' | 'files_with_matches' | 'count'
+
 interface GrepSearchArgs {
   project_id: string
   pattern: string
   dir_path?: string
   include_pattern?: string
   is_regexp?: boolean
+  case_sensitive?: boolean
+  output_mode?: GrepOutputMode
   max_results?: number
   context_lines?: number
 }
@@ -28,10 +32,22 @@ interface GrepMatch {
   context_after: string[]
 }
 
+interface GrepFileCount {
+  file: string
+  count: number
+}
+
 interface GrepSearchResult {
   pattern: string
   dir_path: string
-  matches: GrepMatch[]
+  output_mode: GrepOutputMode
+  case_sensitive: boolean
+  /** Matching lines with context (output_mode = 'content'). */
+  matches?: GrepMatch[]
+  /** Files that contain at least one match (output_mode = 'files_with_matches'). */
+  files?: string[]
+  /** Per-file match counts (output_mode = 'count'). */
+  counts?: GrepFileCount[]
   total_matches: number
   files_searched: number
   files_matched: number
@@ -113,27 +129,40 @@ async function collectFiles (
   }
 }
 
+interface FileScanResult {
+  /** Whether the file contains at least one match. */
+  matched: boolean
+  /** Total matching lines in the file. */
+  count: number
+  /** Matching lines with context (only collected in 'content' mode). */
+  matches: GrepMatch[]
+}
+
 /**
- * Search a single file line-by-line for pattern matches with context.
+ * Scan a single file line-by-line for pattern matches.
+ *
+ * In 'files_with_matches' mode it short-circuits on the first match. In
+ * 'content' mode it collects matches with context up to contentMatchLimit. In
+ * 'count' mode it counts every matching line. Returns null when the file is
+ * skipped (too large or unreadable).
  */
-async function searchFile (
+async function scanFile (
   filePath: string,
   relativePath: string,
   searchRegex: RegExp,
+  mode: GrepOutputMode,
   contextLines: number,
-  matches: GrepMatch[],
-  limit: number
-): Promise<boolean> {
+  contentMatchLimit: number
+): Promise<FileScanResult | null> {
   // Check file size first
   try {
     const stat = await fs.stat(filePath)
-    if (stat.size > MAX_FILE_SIZE_BYTES) return false
+    if (stat.size > MAX_FILE_SIZE_BYTES) return null
   } catch {
-    return false
+    return null
   }
 
   const allLines: string[] = []
-  let hasMatch = false
 
   try {
     const rl = createInterface({
@@ -145,17 +174,25 @@ async function searchFile (
       allLines.push(line)
     }
   } catch {
-    return false
+    return null
   }
 
-  for (let i = 0; i < allLines.length; i++) {
-    if (matches.length >= limit) return hasMatch
+  let count = 0
+  const matches: GrepMatch[] = []
 
-    if (searchRegex.test(allLines[i])) {
-      hasMatch = true
+  for (let i = 0; i < allLines.length; i++) {
+    if (!searchRegex.test(allLines[i])) continue
+
+    count++
+
+    if (mode === 'files_with_matches') {
+      // One match is enough to flag the file.
+      return { matched: true, count: 1, matches: [] }
+    }
+
+    if (mode === 'content' && matches.length < contentMatchLimit) {
       const beforeStart = Math.max(0, i - contextLines)
       const afterEnd = Math.min(allLines.length - 1, i + contextLines)
-
       matches.push({
         file: relativePath,
         line: i + 1,
@@ -166,7 +203,7 @@ async function searchFile (
     }
   }
 
-  return hasMatch
+  return { matched: count > 0, count, matches }
 }
 
 /**
@@ -183,7 +220,7 @@ export function toolGrepSearch (services: ToolServices): Tool {
   return {
     definition: {
       name: 'grep_search',
-      description: 'Search for text or regex pattern in project source code. Returns matching lines with context. Use this to find function definitions, variable usages, imports, or any text pattern across the project.',
+      description: 'Search for text or a regex pattern in project source code. Use this to find function definitions, variable usages, imports, or any text pattern across the project. Search is case-insensitive by default (set case_sensitive: true to change). output_mode selects the result shape: "content" (default) returns matching lines with context, "files_with_matches" returns only the list of files that match (cheapest — good for a first pass before reading), and "count" returns per-file match counts.',
       parameters: {
         type: 'object',
         properties: {
@@ -207,13 +244,22 @@ export function toolGrepSearch (services: ToolServices): Tool {
             type: 'boolean',
             description: 'Whether the pattern is a regular expression. Default: false (plain text search).'
           },
+          case_sensitive: {
+            type: 'boolean',
+            description: 'Whether the search is case-sensitive. Default: false (case-insensitive).'
+          },
+          output_mode: {
+            type: 'string',
+            enum: ['content', 'files_with_matches', 'count'],
+            description: 'Result shape. "content" (default) = matching lines with context; "files_with_matches" = list of matching files only; "count" = per-file match counts.'
+          },
           max_results: {
             type: 'integer',
-            description: `Maximum number of matching lines to return. Default ${DEFAULT_MAX_RESULTS}, maximum ${ABSOLUTE_MAX_RESULTS}.`
+            description: `Maximum items to return. In "content" mode this caps matching lines; in "files_with_matches"/"count" it caps files. Default ${DEFAULT_MAX_RESULTS}, maximum ${ABSOLUTE_MAX_RESULTS}.`
           },
           context_lines: {
             type: 'integer',
-            description: `Number of context lines before and after each match. Default ${DEFAULT_CONTEXT_LINES}, maximum ${MAX_CONTEXT_LINES}.`
+            description: `Number of context lines before and after each match (content mode only). Default ${DEFAULT_CONTEXT_LINES}, maximum ${MAX_CONTEXT_LINES}.`
           }
         },
         required: ['project_id', 'pattern']
@@ -226,13 +272,19 @@ export function toolGrepSearch (services: ToolServices): Tool {
         dir_path,
         include_pattern,
         is_regexp,
+        case_sensitive,
+        output_mode,
         max_results,
         context_lines
       } = args as unknown as GrepSearchArgs
 
+      const mode: GrepOutputMode =
+        output_mode === 'files_with_matches' || output_mode === 'count' ? output_mode : 'content'
+      const caseSensitive = case_sensitive === true
       const limit = Math.min(Math.max(1, max_results || DEFAULT_MAX_RESULTS), ABSOLUTE_MAX_RESULTS)
       const ctxLines = Math.min(Math.max(0, context_lines ?? DEFAULT_CONTEXT_LINES), MAX_CONTEXT_LINES)
       const searchDir = (dir_path || '').trim()
+      const flags = caseSensitive ? '' : 'i'
 
       onProgress?.('🔍 正在搜索代码...', `pattern: ${pattern}`)
 
@@ -240,13 +292,17 @@ export function toolGrepSearch (services: ToolServices): Tool {
       let searchRegex: RegExp
       try {
         searchRegex = is_regexp
-          ? new RegExp(pattern, 'i')
-          : new RegExp(escapeRegex(pattern), 'i')
+          ? new RegExp(pattern, flags)
+          : new RegExp(escapeRegex(pattern), flags)
       } catch (err) {
         return {
           pattern,
           dir_path: searchDir || '.',
-          matches: [],
+          output_mode: mode,
+          case_sensitive: caseSensitive,
+          matches: mode === 'content' ? [] : undefined,
+          files: mode === 'files_with_matches' ? [] : undefined,
+          counts: mode === 'count' ? [] : undefined,
           total_matches: 0,
           files_searched: 0,
           files_matched: 0,
@@ -265,34 +321,63 @@ export function toolGrepSearch (services: ToolServices): Tool {
       onProgress?.('🔍 搜索中...', `${filePaths.length} 个文件`)
 
       // Search files
-      const matches: GrepMatch[] = []
+      const contentMatches: GrepMatch[] = []
+      const matchedFiles: string[] = []
+      const fileCounts: GrepFileCount[] = []
       let filesMatched = 0
+      let totalMatches = 0
+      let stoppedEarly = false
 
       for (const relativePath of filePaths) {
-        if (matches.length >= limit) break
+        // Stop once the cap for the active mode is reached (lines for content,
+        // files for the file-oriented modes).
+        const reachedCap = mode === 'content'
+          ? contentMatches.length >= limit
+          : filesMatched >= limit
+        if (reachedCap) {
+          stoppedEarly = true
+          break
+        }
 
         const fullPath = path.join(baseDir, relativePath)
-        const matched = await searchFile(
+        const result = await scanFile(
           fullPath,
           relativePath,
           searchRegex,
+          mode,
           ctxLines,
-          matches,
-          limit + 1
+          limit - contentMatches.length
         )
-        if (matched) filesMatched++
+        if (!result || !result.matched) continue
+
+        filesMatched++
+        totalMatches += result.count
+
+        if (mode === 'content') {
+          for (const m of result.matches) {
+            if (contentMatches.length >= limit) break
+            contentMatches.push(m)
+          }
+        } else if (mode === 'files_with_matches') {
+          matchedFiles.push(relativePath)
+        } else {
+          fileCounts.push({ file: relativePath, count: result.count })
+        }
       }
 
-      const truncated = matches.length > limit
-      const limitedMatches = matches.slice(0, limit)
+      const truncated = stoppedEarly || (mode === 'content' && totalMatches > contentMatches.length)
 
-      onProgress?.('✅ 搜索完成', `${limitedMatches.length} 处匹配 (${filesMatched} 个文件)`)
+      onProgress?.('✅ 搜索完成', `${filesMatched} 个文件命中`)
 
       return {
         pattern,
         dir_path: searchDir || '.',
-        matches: limitedMatches,
-        total_matches: truncated ? limit + 1 : matches.length,
+        output_mode: mode,
+        case_sensitive: caseSensitive,
+        matches: mode === 'content' ? contentMatches : undefined,
+        files: mode === 'files_with_matches' ? matchedFiles : undefined,
+        counts: mode === 'count' ? fileCounts : undefined,
+        total_matches: totalMatches,
         files_searched: filePaths.length,
         files_matched: filesMatched,
         truncated
