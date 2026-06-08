@@ -379,7 +379,7 @@ export function appendFinalContentBlock (message: ChatMessage, finalContent: Mes
     }
 
     const renderedText = textBlocks
-      .map(block => typeof block.content === 'string' ? block.content : '')
+      .map(block => block.content)
       .join('')
 
     if (renderedText === finalContent) {
