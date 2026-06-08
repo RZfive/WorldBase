@@ -977,13 +977,14 @@ function applyActiveProviderToAiEngine (): AIProvidersConfig {
     imageEditing: active?.activeModel ? active.modelCapabilities?.[active.activeModel]?.imageEditing === true : false,
     enableThinking: active?.enableThinking ?? false,
     reasoningEffort: 'medium',
+    temperature: active?.temperature,
     contextWindow: active?.activeModel ? active.modelContextWindows?.[active.activeModel] : undefined
   })
 
   return normalizedConfig
 }
 
-function resolveProviderConfig (requestedProviderId?: string, requestedModelId?: string, reasoningEffort: 'low' | 'medium' | 'high' | 'max' = 'medium') {
+function resolveProviderConfig (requestedProviderId?: string, requestedModelId?: string, reasoningEffort: 'low' | 'medium' | 'high' | 'max' = 'medium', requestedTemperature?: number) {
   const providersConfig = settingsStore!.getProviders()
   const enabledProviderIds = new Set(providersConfig.enabledProviderIds)
   const enabledProviders = providersConfig.providers.filter(provider => enabledProviderIds.has(provider.id))
@@ -1010,6 +1011,7 @@ function resolveProviderConfig (requestedProviderId?: string, requestedModelId?:
     imageEditing: provider.modelCapabilities?.[resolvedModel]?.imageEditing === true,
     enableThinking: provider.enableThinking ?? false,
     reasoningEffort,
+    temperature: requestedTemperature ?? provider.temperature,
     contextWindow: provider.modelContextWindows?.[resolvedModel]
   }
 }
@@ -1023,6 +1025,7 @@ function resolveAgentRuntimeContext (input: {
   requestedModelId?: string
   requestedTargetProjectId?: string
   requestedReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
+  requestedTemperature?: number
 }): ResolvedAgentRuntimeContext {
   const group = input.groupId ? agentGroupStore?.get(input.groupId) || null : null
   const channelBinding = input.channelBindingId ? channelBindingStore?.get(input.channelBindingId) || null : null
@@ -1034,7 +1037,8 @@ function resolveAgentRuntimeContext (input: {
   const providerConfig = resolveProviderConfig(
     input.requestedProviderId || agent?.providerId,
     input.requestedModelId || agent?.modelId,
-    effectiveReasoningStrength
+    effectiveReasoningStrength,
+    input.requestedTemperature
   )
   const memoryContext = memoryEngine?.buildPromptContext({
     agent,
@@ -2767,7 +2771,7 @@ function setupIPC (): void {
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number) => {
     const sender = event.sender
     const senderWindow = getSenderWindow(event) || mainWindow
     const channel = `ai:stream-event:${sessionId}`
@@ -2782,7 +2786,8 @@ function setupIPC (): void {
       requestedProviderId: providerId,
       requestedModelId: modelId,
       requestedTargetProjectId: targetProjectId,
-      requestedReasoningStrength: reasoningStrength
+      requestedReasoningStrength: reasoningStrength,
+      requestedTemperature: temperature
     })
     const groupRouting = baseRuntimeContext.group
       ? parseGroupRouting(baseRuntimeContext.group, getLastUserMessageText(messages))
@@ -2800,7 +2805,8 @@ function setupIPC (): void {
           requestedProviderId: providerId,
           requestedModelId: modelId,
           requestedTargetProjectId: targetProjectId,
-          requestedReasoningStrength: reasoningStrength
+          requestedReasoningStrength: reasoningStrength,
+          requestedTemperature: temperature
         })
       : baseRuntimeContext
     const directGroupReplyPromptSection = directGroupReply

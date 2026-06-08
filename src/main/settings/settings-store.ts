@@ -29,6 +29,8 @@ export interface AIProvider {
   activeModel: string
   /** Whether to enable thinking/reasoning mode for compatible models */
   enableThinking?: boolean
+  /** Default sampling temperature for this provider. Unset → engine default (0.3). */
+  temperature?: number
 }
 
 export interface AIProvidersConfig {
@@ -189,8 +191,16 @@ function normalizeProvider (input: AIProvider): AIProvider {
     modelContextWindows,
     modelCapabilities,
     activeModel,
-    enableThinking: input.enableThinking ?? false
+    enableThinking: input.enableThinking ?? false,
+    temperature: normalizeTemperature(input.temperature)
   }
+}
+
+/** Clamp a saved provider temperature to the valid range, or drop it if unset/invalid. */
+function normalizeTemperature (value: unknown): number | undefined {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(parsed)) return undefined
+  return Math.min(Math.max(parsed, 0), 2)
 }
 
 function normalizeLaunchpadLayout (value: unknown): LaunchpadLayout {

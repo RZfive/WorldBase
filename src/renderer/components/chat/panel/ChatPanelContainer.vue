@@ -51,6 +51,7 @@ const {
   handleModelSelectionChange,
   handleProviderSelectionChange,
   handleReasoningStrengthChange,
+  handleTemperatureChange,
   inputText,
   insertDocumentTag,
   isGroupConversation,
@@ -66,6 +67,8 @@ const {
   pendingImages,
   planModeActive,
   providers,
+  providerDefaultTemperature,
+  conversationTemperature,
   reasoningStrength,
   renameConversation,
   removeFile,
@@ -300,6 +303,8 @@ watch(
           :upload-feedback="uploadFeedback"
           :document-dock-visible="documentDockVisible"
           :reasoning-strength="reasoningStrength"
+          :temperature="conversationTemperature"
+          :provider-default-temperature="providerDefaultTemperature"
           :auth-mode="currentAuthMode"
           :plan-mode-active="planModeActive"
           :providers="providers"
@@ -317,6 +322,7 @@ watch(
           @remove-image="removeImage"
           @remove-file="removeFile"
           @update:reasoning-strength="handleReasoningStrengthChange"
+          @update:temperature="handleTemperatureChange"
           @toggle-document-dock="toggleDocumentWorkspace"
           @update:auth-mode="handleAuthModeChange"
           @toggle-plan-mode="togglePlanMode"
