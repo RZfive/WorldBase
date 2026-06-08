@@ -362,16 +362,36 @@ export function appendFinalContentBlock (message: ChatMessage, finalContent: Mes
   const blocks = ensureBlocks(message)
 
   if (typeof finalContent === 'string') {
-    for (let index = blocks.length - 1; index >= 0; index--) {
-      const block = blocks[index]
-      if (block.kind === 'content' && typeof block.content === 'string') {
-        block.content = finalContent
-        return
+    const textBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'content' }> => {
+      return block.kind === 'content' && typeof block.content === 'string'
+    })
+
+    if (textBlocks.length === 0) {
+      if (finalContent.trim().length > 0) {
+        blocks.push(createContentBlock(finalContent))
       }
+      return
     }
 
-    if (finalContent.trim().length > 0) {
-      blocks.push(createContentBlock(finalContent))
+    if (textBlocks.length === 1) {
+      textBlocks[0].content = finalContent
+      return
+    }
+
+    const renderedText = textBlocks
+      .map(block => typeof block.content === 'string' ? block.content : '')
+      .join('')
+
+    if (renderedText === finalContent) {
+      return
+    }
+
+    if (finalContent.startsWith(renderedText)) {
+      const trailingText = finalContent.slice(renderedText.length)
+      if (trailingText.length > 0) {
+        const lastTextBlock = textBlocks[textBlocks.length - 1]
+        lastTextBlock.content += trailingText
+      }
     }
     return
   }
