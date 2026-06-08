@@ -42,6 +42,7 @@ await build({
   external: [
     'electron',
     'better-sqlite3',
+    'sharp',
     'pnpm'
   ],
   target: ['node22'],

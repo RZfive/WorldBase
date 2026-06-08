@@ -17,6 +17,10 @@ export interface ImageStudioGenerateRequest {
   n?: number
   /** Source images as base64 data URLs (edit mode). */
   inputImages?: string[]
+  /** Optional library folder to file the generated images under. */
+  folder?: string
+  /** Optional tags applied to the generated images. */
+  tags?: string[]
 }
 
 /** A persisted library record enriched with inline data URLs for rendering. */
@@ -40,6 +44,72 @@ export interface ImageLibraryEntry {
   folder?: string
   /** Tags for searching/filtering images. */
   tags?: string[]
+  /** studio-img:// URL for the cached thumbnail (gallery rendering). */
+  thumbUrl?: string
+  /** studio-img:// URL for the full-resolution image. */
+  fullUrl?: string
+}
+
+/**
+ * Lightweight library item for the gallery: metadata + studio-img:// URLs, with
+ * NO inline base64. The renderer holds thousands of these cheaply and lets the
+ * custom protocol stream thumbnails/originals on demand.
+ */
+export interface ImageLibraryItem {
+  id: string
+  createdAt: string
+  mode: ImageStudioMode
+  providerId: string
+  model: string
+  prompt: string
+  negativePrompt?: string
+  aspectRatio?: string
+  size: string
+  folder?: string
+  tags?: string[]
+  width?: number
+  height?: number
+  /** studio-img:// URL for the cached thumbnail. */
+  thumbUrl: string
+  /** studio-img:// URL for the full-resolution image. */
+  fullUrl: string
+}
+
+/** Filters for a paginated library query. */
+export interface ImageLibraryQuery {
+  /**
+   * Scope. Omitted/undefined → unfiled images only (root view).
+   * A folder name → that folder. '*' → all images (used during search).
+   */
+  folder?: string
+  /** Free-text search across prompt / negative prompt / tags / folder. */
+  search?: string
+  /** Only items carrying all of these tags. */
+  tags?: string[]
+  limit?: number
+  offset?: number
+}
+
+/** A page of library items plus paging metadata. */
+export interface ImageLibraryPage {
+  items: ImageLibraryItem[]
+  /** Total matching the query (ignoring paging). */
+  total: number
+  /** Offset to request next, or null when exhausted. */
+  nextOffset: number | null
+}
+
+/** Full image bytes fetched on demand for edit-input / save-to-file / regenerate. */
+export interface ImageLibraryData {
+  dataUrl: string
+  sourceDataUrls?: string[]
+}
+
+/** Folder card for the root view: name, count, and up-to-4 cover thumbnail URLs. */
+export interface ImageLibraryFolderCard {
+  name: string
+  count: number
+  coverThumbUrls: string[]
 }
 
 /** Folder definition for the image library. */

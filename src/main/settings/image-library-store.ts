@@ -1,10 +1,33 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { ImageLibraryEntry, ImageLibraryFolder, ImageStudioMode } from '../../shared/image-studio-types.js'
+import type {
+  ImageLibraryData,
+  ImageLibraryEntry,
+  ImageLibraryFolderCard,
+  ImageLibraryItem,
+  ImageLibraryPage,
+  ImageLibraryQuery,
+  ImageStudioMode
+} from '../../shared/image-studio-types.js'
+import { ImageIndex, type ImageIndexRow } from './image-index.js'
+import { generateThumbnail, readImageDimensions } from './image-thumbnailer.js'
 
-export type { ImageLibraryEntry, ImageLibraryFolder, ImageStudioMode } from '../../shared/image-studio-types.js'
+export type {
+  ImageLibraryEntry,
+  ImageLibraryItem,
+  ImageLibraryPage,
+  ImageLibraryQuery,
+  ImageLibraryData,
+  ImageLibraryFolderCard,
+  ImageLibraryFolder,
+  ImageStudioMode
+} from '../../shared/image-studio-types.js'
 
-/** Persisted metadata for a single generated/edited image (without inline data URLs). */
+/** URL scheme used by the custom protocol that streams library images. */
+export const STUDIO_IMAGE_SCHEME = 'studio-img'
+export type ImageVariant = 'thumb' | 'full'
+
+/** Persisted metadata for a single generated/edited image (durable .json mirror). */
 export interface ImageLibraryRecord {
   id: string
   createdAt: string
@@ -13,18 +36,16 @@ export interface ImageLibraryRecord {
   model: string
   prompt: string
   negativePrompt?: string
-  /** Aspect ratio preset label, e.g. '1:1'. */
   aspectRatio?: string
-  /** Final pixel size sent to the provider, e.g. '1024x1024'. */
   size: string
-  /** Stored image file name (<id>.<ext>). */
   fileName: string
-  /** Stored source image file names (edit mode inputs). */
   sourceImageFileNames?: string[]
-  /** Folder/group name for organizing images. */
+  /** Cached thumbnail file name (<id>.thumb.webp). */
+  thumbName?: string
   folder?: string
-  /** Tags for searching/filtering images. */
   tags?: string[]
+  width?: number
+  height?: number
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -32,7 +53,8 @@ const MIME_BY_EXT: Record<string, string> = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   webp: 'image/webp',
-  gif: 'image/gif'
+  gif: 'image/gif',
+  svg: 'image/svg+xml'
 }
 
 function guessExtensionFromMime (mimeType: string): string {
@@ -44,47 +66,32 @@ function guessExtensionFromMime (mimeType: string): string {
   return 'png'
 }
 
+/** Build a studio-img:// URL addressing an image by id + variant. */
+export function buildStudioImageUrl (id: string, variant: ImageVariant): string {
+  return `${STUDIO_IMAGE_SCHEME}://i/${id}/${variant}`
+}
+
 /**
  * ImageLibraryStore — 绘制工作台图片库持久化。
- * 每张图片落盘为 userData/image-library/<id>.<ext>，元数据为 <id>.json。
+ *
+ * 磁盘：每张图片 userData/image-library/<id>.<ext>（原图）、<id>.thumb.webp（缩略图）、
+ * <id>.json（耐久元数据）。查询走 SQLite 索引（index.db），索引是从 .json 派生的缓存，
+ * 缺失/不一致时从 .json 重建。图片字节经自定义协议按 URL 流式提供，渲染层不再持有 base64。
  */
 export class ImageLibraryStore {
   private dir: string
-  /** Registry of folder names, including empty folders that hold no images yet. */
-  private foldersFile: string
+  private index: ImageIndex
 
   constructor (userDataPath: string) {
     this.dir = path.join(userDataPath, 'image-library')
-    this.foldersFile = path.join(this.dir, 'folders.json')
     if (!fs.existsSync(this.dir)) {
       fs.mkdirSync(this.dir, { recursive: true })
     }
+    this.index = new ImageIndex(path.join(this.dir, 'index.db'))
+    this.migrateFromDisk()
   }
 
-  private readFolderRegistry (): string[] {
-    if (!fs.existsSync(this.foldersFile)) return []
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.foldersFile, 'utf-8'))
-      return Array.isArray(parsed) ? parsed.filter((name): name is string => typeof name === 'string') : []
-    } catch {
-      return []
-    }
-  }
-
-  private writeFolderRegistry (names: string[]): void {
-    const unique = Array.from(new Set(names.map(n => n.trim()).filter(Boolean)))
-    try {
-      fs.writeFileSync(this.foldersFile, JSON.stringify(unique, null, 2), 'utf-8')
-    } catch {
-      // ignore write failures — registry is best-effort
-    }
-  }
-
-  /** Metadata json files only (excludes the folders.json registry). */
-  private metaFiles (): string[] {
-    if (!fs.existsSync(this.dir)) return []
-    return fs.readdirSync(this.dir).filter(f => f.endsWith('.json') && f !== 'folders.json')
-  }
+  /* ---- Disk helpers ---- */
 
   private sanitizeId (id: string): string {
     return id.replace(/[^a-zA-Z0-9_-]/g, '')
@@ -94,7 +101,16 @@ export class ImageLibraryStore {
     return path.join(this.dir, `${this.sanitizeId(id)}.json`)
   }
 
-  /** Decode a data URL and write it to disk under <id>(-<suffix>).<ext>. Returns the file name. */
+  private metaFiles (): string[] {
+    if (!fs.existsSync(this.dir)) return []
+    return fs.readdirSync(this.dir).filter(f => f.endsWith('.json') && f !== 'folders.json')
+  }
+
+  /** Absolute path to a stored file (for save-to-file / export / protocol). */
+  resolveFilePath (fileName: string): string {
+    return path.join(this.dir, path.basename(fileName))
+  }
+
   private writeImage (id: string, dataUrl: string, suffix = ''): string {
     const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
     if (!match) {
@@ -106,9 +122,8 @@ export class ImageLibraryStore {
     return fileName
   }
 
-  /** Read a stored image file back as a data URL, or null if missing. */
   private readImageDataUrl (fileName: string): string | null {
-    const fp = path.join(this.dir, path.basename(fileName))
+    const fp = this.resolveFilePath(fileName)
     if (!fs.existsSync(fp)) return null
     try {
       const ext = path.extname(fp).slice(1).toLowerCase()
@@ -119,40 +134,115 @@ export class ImageLibraryStore {
     }
   }
 
-  /** Absolute path to a stored image file (for save-to-file flows). */
-  resolveFilePath (fileName: string): string {
-    return path.join(this.dir, path.basename(fileName))
+  /** Generate + persist the thumbnail for an original file. Returns name + original dims, or null. */
+  private async writeThumbnail (id: string, originalFileName: string): Promise<{ name: string; width?: number; height?: number } | null> {
+    const originalPath = this.resolveFilePath(originalFileName)
+    if (!fs.existsSync(originalPath)) return null
+    try {
+      const result = await generateThumbnail(fs.readFileSync(originalPath))
+      if (!result) return null
+      const name = `${this.sanitizeId(id)}.thumb.webp`
+      fs.writeFileSync(this.resolveFilePath(name), result.buffer)
+      return { name, width: result.width, height: result.height }
+    } catch {
+      return null
+    }
   }
 
-  /**
-   * Absolute paths of the generated images in a folder, for packaging/export.
-   * `folderName === ''` selects unfiled images. Returns existing files only.
-   */
-  folderImagePaths (folderName: string): string[] {
-    const paths: string[] = []
-    for (const file of this.metaFiles()) {
+  /* ---- Record <-> index row mapping ---- */
+
+  private recordToRow (record: ImageLibraryRecord): ImageIndexRow {
+    return {
+      id: record.id,
+      created_at: record.createdAt,
+      mode: record.mode,
+      provider_id: record.providerId ?? null,
+      model: record.model ?? null,
+      prompt: record.prompt ?? null,
+      negative_prompt: record.negativePrompt ?? null,
+      aspect_ratio: record.aspectRatio ?? null,
+      size: record.size ?? null,
+      file_name: record.fileName,
+      thumb_name: record.thumbName ?? null,
+      source_file_names: record.sourceImageFileNames?.length ? JSON.stringify(record.sourceImageFileNames) : null,
+      folder: record.folder ?? null,
+      tags: record.tags?.length ? JSON.stringify(record.tags) : null,
+      width: record.width ?? null,
+      height: record.height ?? null
+    }
+  }
+
+  private rowToItem (row: ImageIndexRow): ImageLibraryItem {
+    return {
+      id: row.id,
+      createdAt: row.created_at,
+      mode: (row.mode as ImageStudioMode) || 'generate',
+      providerId: row.provider_id ?? '',
+      model: row.model ?? '',
+      prompt: row.prompt ?? '',
+      negativePrompt: row.negative_prompt ?? undefined,
+      aspectRatio: row.aspect_ratio ?? undefined,
+      size: row.size ?? '',
+      folder: row.folder ?? undefined,
+      tags: parseJsonStringArray(row.tags),
+      width: row.width ?? undefined,
+      height: row.height ?? undefined,
+      thumbUrl: buildStudioImageUrl(row.id, 'thumb'),
+      fullUrl: buildStudioImageUrl(row.id, 'full')
+    }
+  }
+
+  private readRecord (id: string): ImageLibraryRecord | null {
+    const fp = this.metaPath(id)
+    if (!fs.existsSync(fp)) return null
+    try {
+      return JSON.parse(fs.readFileSync(fp, 'utf-8')) as ImageLibraryRecord
+    } catch {
+      return null
+    }
+  }
+
+  private writeRecord (record: ImageLibraryRecord): void {
+    fs.writeFileSync(this.metaPath(record.id), JSON.stringify(record, null, 2), 'utf-8')
+    this.index.upsert(this.recordToRow(record))
+  }
+
+  /* ---- Migration: rebuild index from durable json when out of sync ---- */
+
+  private migrateFromDisk (): void {
+    // Import any legacy folders.json registry once.
+    const legacyFolders = path.join(this.dir, 'folders.json')
+    if (fs.existsSync(legacyFolders)) {
       try {
-        const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
-        const matches = folderName === '' ? !record.folder : record.folder === folderName
-        if (!matches) continue
-        const fp = this.resolveFilePath(record.fileName)
-        if (fs.existsSync(fp)) paths.push(fp)
+        const names = JSON.parse(fs.readFileSync(legacyFolders, 'utf-8'))
+        if (Array.isArray(names)) names.forEach(n => typeof n === 'string' && this.index.addRegistryFolder(n))
       } catch {
-        // skip
+        // ignore malformed legacy registry
       }
     }
-    return paths
+
+    const files = this.metaFiles()
+    if (files.length === this.index.count()) return // already in sync
+
+    const rows: ImageIndexRow[] = []
+    for (const file of files) {
+      try {
+        const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
+        if (record?.id && record.fileName) rows.push(this.recordToRow(record))
+      } catch {
+        // skip corrupted records
+      }
+    }
+    if (rows.length) this.index.upsertMany(rows)
   }
 
-  /**
-   * Persist a newly generated/edited image plus its metadata.
-   * `imageDataUrl` is the generated image; `sourceDataUrls` are edit-mode inputs.
-   */
-  save (
-    record: Omit<ImageLibraryRecord, 'fileName' | 'sourceImageFileNames'>,
+  /* ---- Save ---- */
+
+  async save (
+    record: Omit<ImageLibraryRecord, 'fileName' | 'sourceImageFileNames' | 'thumbName' | 'width' | 'height'>,
     imageDataUrl: string,
     sourceDataUrls?: string[]
-  ): ImageLibraryEntry {
+  ): Promise<ImageLibraryEntry> {
     const id = this.sanitizeId(record.id)
     const fileName = this.writeImage(id, imageDataUrl)
 
@@ -167,70 +257,156 @@ export class ImageLibraryStore {
       })
     }
 
+    const thumb = await this.writeThumbnail(id, fileName)
+    let width = thumb?.width
+    let height = thumb?.height
+    if (width === undefined || height === undefined) {
+      const dims = await this.readDimsFromOriginal(fileName)
+      width = width ?? dims?.width
+      height = height ?? dims?.height
+    }
+
     const fullRecord: ImageLibraryRecord = {
       ...record,
       id,
       fileName,
-      sourceImageFileNames: sourceImageFileNames.length ? sourceImageFileNames : undefined
+      sourceImageFileNames: sourceImageFileNames.length ? sourceImageFileNames : undefined,
+      thumbName: thumb?.name,
+      width,
+      height
     }
-
-    fs.writeFileSync(this.metaPath(id), JSON.stringify(fullRecord, null, 2), 'utf-8')
+    this.writeRecord(fullRecord)
 
     return {
       ...fullRecord,
       dataUrl: imageDataUrl,
-      sourceDataUrls: sourceDataUrls?.length ? sourceDataUrls : undefined
+      sourceDataUrls: sourceDataUrls?.length ? sourceDataUrls : undefined,
+      thumbUrl: buildStudioImageUrl(id, 'thumb'),
+      fullUrl: buildStudioImageUrl(id, 'full')
     }
   }
 
-  /** List all library entries (newest first), each enriched with data URLs. */
-  list (): ImageLibraryEntry[] {
-    const files = this.metaFiles()
-    const entries: ImageLibraryEntry[] = []
+  private safeReadFile (fileName: string): Buffer {
+    try {
+      return fs.readFileSync(this.resolveFilePath(fileName))
+    } catch {
+      return Buffer.alloc(0)
+    }
+  }
 
-    for (const file of files) {
-      try {
-        const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
-        const dataUrl = this.readImageDataUrl(record.fileName)
-        if (!dataUrl) continue
-        const sourceDataUrls = record.sourceImageFileNames
-          ?.map(name => this.readImageDataUrl(name))
-          .filter((value): value is string => Boolean(value))
-        entries.push({
-          ...record,
-          dataUrl,
-          sourceDataUrls: sourceDataUrls?.length ? sourceDataUrls : undefined
-        })
-      } catch {
-        // skip corrupted records
+  private async readDimsFromOriginal (fileName: string): Promise<{ width?: number; height?: number } | undefined> {
+    const buf = this.safeReadFile(fileName)
+    if (buf.length === 0) return undefined
+    return readImageDimensions(buf)
+  }
+
+  /* ---- Query (paginated, metadata-only) ---- */
+
+  query (opts: ImageLibraryQuery): ImageLibraryPage {
+    const limit = Math.max(1, Math.min(opts.limit ?? 60, 200))
+    const offset = Math.max(0, opts.offset ?? 0)
+    const { rows, total } = this.index.query({ ...opts, limit, offset })
+    const items = rows.map(row => this.rowToItem(row))
+    const consumed = offset + items.length
+    return { items, total, nextOffset: consumed < total ? consumed : null }
+  }
+
+  /** On-demand full bytes for edit-input / save-to-file / regenerate flows. */
+  getImageData (id: string): ImageLibraryData | null {
+    const record = this.readRecord(id)
+    if (!record) return null
+    const dataUrl = this.readImageDataUrl(record.fileName)
+    if (!dataUrl) return null
+    const sourceDataUrls = record.sourceImageFileNames
+      ?.map(name => this.readImageDataUrl(name))
+      .filter((value): value is string => Boolean(value))
+    return { dataUrl, sourceDataUrls: sourceDataUrls?.length ? sourceDataUrls : undefined }
+  }
+
+  /* ---- Custom-protocol resolution (with lazy thumbnail generation) ---- */
+
+  /**
+   * Resolve a studio-img:// URL to an absolute file path to stream. Generates and
+   * caches the thumbnail on first request when missing. Returns null if unknown.
+   */
+  async resolveImageRequest (rawUrl: string): Promise<string | null> {
+    let id = ''
+    let variant: ImageVariant = 'full'
+    try {
+      const url = new URL(rawUrl)
+      const parts = url.pathname.split('/').filter(Boolean) // ['<id>', '<variant>']
+      id = this.sanitizeId(decodeURIComponent(parts[0] ?? ''))
+      variant = parts[1] === 'thumb' ? 'thumb' : 'full'
+    } catch {
+      return null
+    }
+    if (!id) return null
+
+    const row = this.index.getById(id)
+    if (!row) return null
+
+    if (variant === 'full') {
+      const fullPath = this.resolveFilePath(row.file_name)
+      return fs.existsSync(fullPath) ? fullPath : null
+    }
+
+    // thumb
+    if (row.thumb_name) {
+      const thumbPath = this.resolveFilePath(row.thumb_name)
+      if (fs.existsSync(thumbPath)) return thumbPath
+    }
+    // Lazy generation (covers migrated images that never had a thumbnail).
+    const thumb = await this.writeThumbnail(id, row.file_name)
+    if (thumb) {
+      this.index.setThumbName(id, thumb.name)
+      const record = this.readRecord(id)
+      if (record) {
+        record.thumbName = thumb.name
+        if (record.width === undefined) record.width = thumb.width
+        if (record.height === undefined) record.height = thumb.height
+        try { fs.writeFileSync(this.metaPath(id), JSON.stringify(record, null, 2), 'utf-8') } catch { /* best effort */ }
       }
+      return this.resolveFilePath(thumb.name)
     }
-
-    return entries.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    // Thumbnailer unavailable — fall back to the original so the grid still renders.
+    const fullPath = this.resolveFilePath(row.file_name)
+    return fs.existsSync(fullPath) ? fullPath : null
   }
 
-  /** Delete a single record (metadata + image + source images). */
+  /* ---- Mutations (json mirror + index in lock-step) ---- */
+
   delete (id: string): boolean {
     const safe = this.sanitizeId(id)
-    const metaPath = this.metaPath(safe)
-    if (!fs.existsSync(metaPath)) return false
+    const record = this.readRecord(safe)
+    const row = this.index.getById(safe)
+    if (!record && !row) return false
 
-    try {
-      const record = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as ImageLibraryRecord
-      const fileNames = [record.fileName, ...(record.sourceImageFileNames || [])]
-      for (const name of fileNames) {
-        const fp = this.resolveFilePath(name)
-        if (fs.existsSync(fp)) fs.unlinkSync(fp)
+    const fileNames = new Set<string>()
+    if (record) {
+      fileNames.add(record.fileName)
+      if (record.thumbName) fileNames.add(record.thumbName)
+      record.sourceImageFileNames?.forEach(n => fileNames.add(n))
+    }
+    if (row) {
+      fileNames.add(row.file_name)
+      if (row.thumb_name) fileNames.add(row.thumb_name)
+      parseJsonStringArray(row.source_file_names)?.forEach(n => fileNames.add(n))
+    }
+    for (const name of fileNames) {
+      const fp = this.resolveFilePath(name)
+      if (fs.existsSync(fp)) {
+        try { fs.unlinkSync(fp) } catch { /* best effort */ }
       }
-    } catch {
-      // best-effort cleanup of image files
     }
 
-    fs.unlinkSync(metaPath)
+    const metaPath = this.metaPath(safe)
+    if (fs.existsSync(metaPath)) {
+      try { fs.unlinkSync(metaPath) } catch { /* best effort */ }
+    }
+    this.index.deleteById(safe)
     return true
   }
 
-  /** Delete many records; returns the number successfully removed. */
   deleteMany (ids: string[]): number {
     let removed = 0
     for (const id of ids) {
@@ -239,139 +415,88 @@ export class ImageLibraryStore {
     return removed
   }
 
-  /** Update folder assignment for given image IDs. */
   setFolder (ids: string[], folder: string | undefined): number {
     let updated = 0
     for (const id of ids) {
-      const safe = this.sanitizeId(id)
-      const metaPath = this.metaPath(safe)
-      if (!fs.existsSync(metaPath)) continue
-      try {
-        const record = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as ImageLibraryRecord
-        record.folder = folder || undefined
-        fs.writeFileSync(metaPath, JSON.stringify(record, null, 2), 'utf-8')
-        updated += 1
-      } catch {
-        // skip
-      }
+      const record = this.readRecord(id)
+      if (!record) continue
+      record.folder = folder || undefined
+      this.writeRecord(record)
+      updated += 1
     }
     return updated
   }
 
-  /** Update tags for a single image. */
   setTags (id: string, tags: string[]): boolean {
-    const safe = this.sanitizeId(id)
-    const metaPath = this.metaPath(safe)
-    if (!fs.existsSync(metaPath)) return false
-    try {
-      const record = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as ImageLibraryRecord
-      record.tags = tags.length ? tags : undefined
-      fs.writeFileSync(metaPath, JSON.stringify(record, null, 2), 'utf-8')
-      return true
-    } catch {
-      return false
-    }
+    const record = this.readRecord(id)
+    if (!record) return false
+    record.tags = tags.length ? tags : undefined
+    this.writeRecord(record)
+    return true
   }
 
-  /** Create an empty folder (persisted in the registry). Returns updated folder list. */
-  createFolder (name: string): ImageLibraryFolder[] {
+  /* ---- Folders ---- */
+
+  createFolder (name: string): ImageLibraryFolderCard[] {
     const trimmed = name.trim()
-    if (trimmed) {
-      this.writeFolderRegistry([...this.readFolderRegistry(), trimmed])
-    }
+    if (trimmed) this.index.addRegistryFolder(trimmed)
     return this.listFolders()
   }
 
-  /**
-   * Get all folder names with image counts. Merges the persisted registry
-   * (so empty folders still appear, with count 0) with folders derived from images.
-   */
-  listFolders (): ImageLibraryFolder[] {
-    const folderMap = new Map<string, number>()
-    for (const name of this.readFolderRegistry()) {
-      folderMap.set(name, 0)
-    }
-
-    for (const file of this.metaFiles()) {
-      try {
-        const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
-        if (record.folder) {
-          folderMap.set(record.folder, (folderMap.get(record.folder) ?? 0) + 1)
-        }
-      } catch {
-        // skip
-      }
-    }
-
-    return Array.from(folderMap.entries())
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => a.name.localeCompare(b.name))
+  listFolders (): ImageLibraryFolderCard[] {
+    return this.index.listFolders().map(({ name, count }) => ({
+      name,
+      count,
+      coverThumbUrls: this.index.folderCoverIds(name, 4).map(coverId => buildStudioImageUrl(coverId, 'thumb'))
+    }))
   }
 
-  /** Get all unique tags across all images. */
-  listAllTags (): string[] {
-    const tagSet = new Set<string>()
-
-    for (const file of this.metaFiles()) {
-      try {
-        const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
-        if (record.tags) {
-          record.tags.forEach(t => tagSet.add(t))
-        }
-      } catch {
-        // skip
-      }
-    }
-
-    return Array.from(tagSet).sort()
-  }
-
-  /** Rename a folder across all images and in the registry. */
   renameFolder (oldName: string, newName: string): number {
-    let updated = 0
-
-    for (const file of this.metaFiles()) {
-      try {
-        const fp = path.join(this.dir, file)
-        const record = JSON.parse(fs.readFileSync(fp, 'utf-8')) as ImageLibraryRecord
-        if (record.folder === oldName) {
-          record.folder = newName
-          fs.writeFileSync(fp, JSON.stringify(record, null, 2), 'utf-8')
-          updated += 1
-        }
-      } catch {
-        // skip
-      }
+    const next = newName.trim()
+    if (!next || next === oldName) return 0
+    const ids = this.index.idsByFolder(oldName)
+    for (const id of ids) {
+      const record = this.readRecord(id)
+      if (!record) continue
+      record.folder = next
+      try { fs.writeFileSync(this.metaPath(id), JSON.stringify(record, null, 2), 'utf-8') } catch { /* best effort */ }
     }
-
-    const registry = this.readFolderRegistry()
-    if (registry.includes(oldName)) {
-      this.writeFolderRegistry(registry.map(n => (n === oldName ? newName : n)))
-    }
-
-    return updated
+    return this.index.renameFolderEverywhere(oldName, next)
   }
 
-  /** Delete a folder (unassign from all images and drop it from the registry). */
   deleteFolder (folderName: string): number {
-    let updated = 0
-
-    for (const file of this.metaFiles()) {
-      try {
-        const fp = path.join(this.dir, file)
-        const record = JSON.parse(fs.readFileSync(fp, 'utf-8')) as ImageLibraryRecord
-        if (record.folder === folderName) {
-          record.folder = undefined
-          fs.writeFileSync(fp, JSON.stringify(record, null, 2), 'utf-8')
-          updated += 1
-        }
-      } catch {
-        // skip
-      }
+    const ids = this.index.idsByFolder(folderName)
+    for (const id of ids) {
+      const record = this.readRecord(id)
+      if (!record) continue
+      record.folder = undefined
+      try { fs.writeFileSync(this.metaPath(id), JSON.stringify(record, null, 2), 'utf-8') } catch { /* best effort */ }
     }
-
-    this.writeFolderRegistry(this.readFolderRegistry().filter(n => n !== folderName))
-
-    return updated
+    return this.index.clearFolderEverywhere(folderName)
   }
+
+  listAllTags (): string[] {
+    return this.index.listTags()
+  }
+
+  /** Absolute paths of generated images in a folder ('' = unfiled), for export. */
+  folderImagePaths (folderName: string): string[] {
+    return this.index.folderFileNames(folderName)
+      .map(name => this.resolveFilePath(name))
+      .filter(fp => fs.existsSync(fp))
+  }
+}
+
+function parseJsonStringArray (value: string | null | undefined): string[] | undefined {
+  if (!value) return undefined
+  try {
+    const parsed = JSON.parse(value)
+    if (Array.isArray(parsed)) {
+      const list = parsed.filter((item): item is string => typeof item === 'string')
+      return list.length ? list : undefined
+    }
+  } catch {
+    // ignore
+  }
+  return undefined
 }

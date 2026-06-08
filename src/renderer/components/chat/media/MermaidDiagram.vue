@@ -1,6 +1,17 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { renderMermaidSvg } from "../mermaid";
+import { getCachedMermaid, renderMermaid, type MermaidRender } from "../mermaid";
+
+// Each rendered SVG carries internal ids (markers, gradients, scoped <style>) derived
+// from its root diagram id. When the same cached diagram is injected into more than one
+// place at once (e.g. an inline copy plus the preview dialog), duplicate ids in the DOM
+// collide. Rewrite the baked id to a fresh per-instance value on every injection.
+let mermaidInstanceSeq = 0;
+
+function namespaceMermaid(render: MermaidRender): string {
+  const unique = `${render.id}-i${mermaidInstanceSeq++}`;
+  return render.svg.split(render.id).join(unique);
+}
 
 const props = withDefaults(
   defineProps<{
@@ -24,22 +35,36 @@ const isRendering = ref(false);
 
 async function renderDiagram() {
   const code = props.code.trim();
-  svgMarkup.value = "";
   renderError.value = "";
 
   if (!code) {
+    svgMarkup.value = "";
+    isRendering.value = false;
     renderError.value = "Mermaid 内容为空";
     return;
   }
 
+  // Cache hit: paint at the final height synchronously so a recycled row never
+  // resizes after the virtual list has measured it.
+  const cached = getCachedMermaid(code);
+  if (cached) {
+    svgMarkup.value = namespaceMermaid(cached);
+    isRendering.value = false;
+    return;
+  }
+
+  svgMarkup.value = "";
   isRendering.value = true;
   try {
-    svgMarkup.value = await renderMermaidSvg(code);
+    const render = await renderMermaid(code);
+    if (props.code.trim() !== code) return;
+    svgMarkup.value = namespaceMermaid(render);
   } catch (error) {
+    if (props.code.trim() !== code) return;
     renderError.value =
       error instanceof Error ? error.message : "Mermaid 图表渲染失败";
   } finally {
-    isRendering.value = false;
+    if (props.code.trim() === code) isRendering.value = false;
   }
 }
 

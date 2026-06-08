@@ -11,6 +11,11 @@ type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js'
 type ImageStudioGenerateRequest = import('./shared/image-studio-types.js').ImageStudioGenerateRequest
 type ImageStudioGenerateResponse = import('./shared/image-studio-types.js').ImageStudioGenerateResponse
 type ImageLibraryEntry = import('./shared/image-studio-types.js').ImageLibraryEntry
+type ImageLibraryItem = import('./shared/image-studio-types.js').ImageLibraryItem
+type ImageLibraryPage = import('./shared/image-studio-types.js').ImageLibraryPage
+type ImageLibraryQuery = import('./shared/image-studio-types.js').ImageLibraryQuery
+type ImageLibraryData = import('./shared/image-studio-types.js').ImageLibraryData
+type ImageLibraryFolderCard = import('./shared/image-studio-types.js').ImageLibraryFolderCard
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -828,12 +833,13 @@ interface ElectronAPI {
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   saveMarkdownToFile: (markdown: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   generateStudioImage: (req: ImageStudioGenerateRequest) => Promise<ImageStudioGenerateResponse>
-  listImageLibrary: () => Promise<ImageLibraryEntry[]>
+  queryImageLibrary: (opts: ImageLibraryQuery) => Promise<ImageLibraryPage>
+  getImageLibraryData: (id: string) => Promise<ImageLibraryData | null>
   deleteImageLibrary: (ids: string[]) => Promise<{ removed: number }>
   setImageLibraryFolder: (ids: string[], folder: string | undefined) => Promise<{ updated: number }>
   setImageLibraryTags: (id: string, tags: string[]) => Promise<{ ok: boolean }>
-  listImageLibraryFolders: () => Promise<import('./shared/image-studio-types').ImageLibraryFolder[]>
-  createImageLibraryFolder: (name: string) => Promise<import('./shared/image-studio-types').ImageLibraryFolder[]>
+  listImageLibraryFolders: () => Promise<ImageLibraryFolderCard[]>
+  createImageLibraryFolder: (name: string) => Promise<ImageLibraryFolderCard[]>
   exportImageLibraryFolder: (folderName: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; error?: string }>
   listImageLibraryTags: () => Promise<string[]>
   renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>

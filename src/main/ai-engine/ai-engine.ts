@@ -18,6 +18,7 @@ import type { SkillStore } from '../settings/skill-store.js'
 import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.js'
 import type { AgentStore } from '../settings/agent-store.js'
 import type { AgentGroupStore } from '../settings/agent-group-store.js'
+import type { ImageLibraryStore } from '../settings/image-library-store.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../shared/page-automation-types.js'
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
@@ -34,6 +35,7 @@ export interface AIEngineServices {
   agentStore?: AgentStore
   agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
+  imageLibraryStore?: ImageLibraryStore
   getMainWindow?: () => BrowserWindow | null
   readActivePage?: () => Promise<BrowserAutomationSnapshot>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>

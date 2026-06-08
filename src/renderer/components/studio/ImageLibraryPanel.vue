@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import type { ImageLibraryEntry } from '../../../shared/image-studio-types'
+import type { ImageLibraryItem } from '../../../shared/image-studio-types'
 import ImagePreview from './ImagePreview.vue'
 
 const props = defineProps<{
-  entries: ImageLibraryEntry[]
+  entries: ImageLibraryItem[]
   loading: boolean
   /** Persisted folder names (includes empty folders). */
   folderNames?: string[]
@@ -13,10 +13,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'refresh'): void
   (e: 'delete', ids: string[]): void
-  (e: 'regenerate', entry: ImageLibraryEntry): void
-  (e: 'load', entry: ImageLibraryEntry): void
-  (e: 'useAsInput', entry: ImageLibraryEntry): void
-  (e: 'saveToFile', entry: ImageLibraryEntry): void
+  (e: 'regenerate', entry: ImageLibraryItem): void
+  (e: 'load', entry: ImageLibraryItem): void
+  (e: 'useAsInput', entry: ImageLibraryItem): void
+  (e: 'saveToFile', entry: ImageLibraryItem): void
   (e: 'updateFolder', ids: string[], folder: string | undefined): void
   (e: 'updateTags', id: string, tags: string[]): void
   (e: 'createFolder', name: string): void
@@ -42,7 +42,9 @@ const dragOverKey = ref<string | null>(null) // folder name, '' for root/unfiled
 type MenuKind = 'image' | 'folder' | 'blank'
 const contextMenu = ref<{ kind: MenuKind; x: number; y: number; folderName?: string } | null>(null)
 
-const lightbox = ref<ImageLibraryEntry | null>(null)
+const lightbox = ref<ImageLibraryItem | null>(null)
+/** Source/input images (edit mode) for the open lightbox, fetched on demand. */
+const lightboxSources = ref<string[]>([])
 const editingTags = ref(false)
 const tagInput = ref('')
 
@@ -50,7 +52,7 @@ const selectedCount = computed(() => selectedIds.value.size)
 
 /** Map of folder name → entries inside it. */
 const entriesByFolder = computed(() => {
-  const map = new Map<string, ImageLibraryEntry[]>()
+  const map = new Map<string, ImageLibraryItem[]>()
   for (const name of props.folderNames ?? []) map.set(name, [])
   for (const entry of props.entries) {
     if (!entry.folder) continue
@@ -67,7 +69,7 @@ const folderCards = computed(() => {
     .map(([name, list]) => ({
       name,
       count: list.length,
-      covers: list.slice(0, 4).map(e => e.dataUrl)
+      covers: list.slice(0, 4).map(e => e.thumbUrl)
     }))
     .sort((a, b) => a.name.localeCompare(b.name))
 })
@@ -76,7 +78,7 @@ const allFolderNames = computed(() => folderCards.value.map(f => f.name))
 
 const unfiledEntries = computed(() => props.entries.filter(e => !e.folder))
 
-function matchesQuery (entry: ImageLibraryEntry, q: string): boolean {
+function matchesQuery (entry: ImageLibraryItem, q: string): boolean {
   if (entry.prompt.toLowerCase().includes(q)) return true
   if (entry.negativePrompt?.toLowerCase().includes(q)) return true
   if (entry.tags?.some(t => t.toLowerCase().includes(q))) return true
@@ -128,7 +130,7 @@ function toggleSelection (id: string) {
 }
 
 /** Plain click opens the preview; ⌘/Ctrl-click toggles selection (multi-select). */
-function onImageClick (entry: ImageLibraryEntry, event: MouseEvent) {
+function onImageClick (entry: ImageLibraryItem, event: MouseEvent) {
   if (event.metaKey || event.ctrlKey) {
     toggleSelection(entry.id)
   } else {
@@ -137,7 +139,7 @@ function onImageClick (entry: ImageLibraryEntry, event: MouseEvent) {
 }
 
 /** The always-visible corner checkbox toggles selection without opening the preview. */
-function onCheckClick (entry: ImageLibraryEntry) {
+function onCheckClick (entry: ImageLibraryItem) {
   toggleSelection(entry.id)
 }
 
@@ -156,7 +158,7 @@ function effectiveIds (entryId: string): string[] {
   return selectedIds.value.has(entryId) ? [...selectedIds.value] : [entryId]
 }
 
-function onImageDragStart (entry: ImageLibraryEntry, event: DragEvent) {
+function onImageDragStart (entry: ImageLibraryItem, event: DragEvent) {
   const ids = effectiveIds(entry.id)
   if (!selectedIds.value.has(entry.id)) selectOnly(entry.id)
   draggingIds.value = ids
@@ -291,7 +293,7 @@ function deleteImages (ids: string[]) {
 
 /* ---- Context menu ---- */
 
-function openImageMenu (entry: ImageLibraryEntry, event: MouseEvent) {
+function openImageMenu (entry: ImageLibraryItem, event: MouseEvent) {
   if (!selectedIds.value.has(entry.id)) selectOnly(entry.id)
   contextMenu.value = { kind: 'image', x: event.clientX, y: event.clientY }
 }
@@ -310,7 +312,7 @@ function closeContextMenu () {
 
 /** Menu helpers operating on the current selection. */
 const menuIds = computed(() => [...selectedIds.value])
-const menuSingleEntry = computed<ImageLibraryEntry | null>(() => {
+const menuSingleEntry = computed<ImageLibraryItem | null>(() => {
   if (selectedIds.value.size !== 1) return null
   const id = [...selectedIds.value][0]
   return props.entries.find(e => e.id === id) ?? null
@@ -320,10 +322,20 @@ const moveTargets = computed(() => allFolderNames.value.filter(n => n !== curren
 
 /* ---- Lightbox ---- */
 
-function openLightbox (entry: ImageLibraryEntry) {
+function openLightbox (entry: ImageLibraryItem) {
   lightbox.value = entry
   editingTags.value = false
   tagInput.value = entry.tags?.join(', ') ?? ''
+  // Edit-mode source images are not part of the lightweight item; fetch on demand.
+  lightboxSources.value = []
+  if (entry.mode === 'edit' && window.electronAPI?.getImageLibraryData) {
+    const targetId = entry.id
+    void window.electronAPI.getImageLibraryData(targetId).then((data) => {
+      if (lightbox.value?.id === targetId) {
+        lightboxSources.value = data?.sourceDataUrls ?? []
+      }
+    }).catch(() => { /* ignore */ })
+  }
 }
 
 function closeLightbox () {
@@ -500,7 +512,7 @@ onUnmounted(() => {
         @dragstart="onImageDragStart(entry, $event)"
         @dragend="onImageDragEnd"
       >
-        <img :src="entry.dataUrl" :alt="entry.prompt" class="lib-thumb" loading="lazy" draggable="false" />
+        <img :src="entry.thumbUrl" :alt="entry.prompt" class="lib-thumb" loading="lazy" decoding="async" draggable="false" />
         <span class="lib-badge">{{ entry.mode === 'edit' ? '编辑' : '生成' }}</span>
         <span v-if="entry.folder && isSearching" class="lib-folder-badge">📁 {{ entry.folder }}</span>
         <button
@@ -593,7 +605,7 @@ onUnmounted(() => {
             </div>
           </header>
           <div class="lib-lightbox-body">
-            <ImagePreview class="lib-lightbox-preview" :src="lightbox.dataUrl" :alt="lightbox.prompt" />
+            <ImagePreview class="lib-lightbox-preview" :src="lightbox.fullUrl" :alt="lightbox.prompt" />
             <div class="lib-meta">
               <div class="lib-meta-row"><span class="lib-meta-key">模式</span><span>{{ lightbox.mode === 'edit' ? '图片编辑' : '文生图' }}</span></div>
               <div class="lib-meta-row"><span class="lib-meta-key">模型</span><span>{{ lightbox.model }}</span></div>
@@ -627,10 +639,10 @@ onUnmounted(() => {
                   <span v-else class="lib-tag-empty">无标签，点击 ✎ 添加</span>
                 </div>
               </div>
-              <div v-if="lightbox.sourceDataUrls?.length" class="lib-meta-block">
+              <div v-if="lightboxSources.length" class="lib-meta-block">
                 <span class="lib-meta-key">编辑输入图</span>
                 <div class="lib-source-row">
-                  <img v-for="(src, i) in lightbox.sourceDataUrls" :key="i" :src="src" class="lib-source-thumb" alt="" />
+                  <img v-for="(src, i) in lightboxSources" :key="i" :src="src" class="lib-source-thumb" alt="" />
                 </div>
               </div>
               <div class="lib-lightbox-actions">
@@ -763,6 +775,17 @@ onUnmounted(() => {
   min-height: 0;
   padding-bottom: 4px;
   align-content: start;
+}
+
+/*
+ * Render virtualization: off-screen cards skip layout/paint/image decode, so the
+ * grid stays cheap even with thousands of images. `auto` remembers each card's
+ * real size once measured; the fallback height is just the placeholder estimate.
+ */
+.lib-card,
+.lib-folder-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 184px;
 }
 
 /* Folder cards — same size / shape as image cards */

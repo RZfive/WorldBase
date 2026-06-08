@@ -9,6 +9,10 @@
   "directories": {
     "output": "release"
   },
+  "asarUnpack": [
+    "**/node_modules/sharp/**",
+    "**/node_modules/@img/**"
+  ],
   "files": [
     "package.json",
     {
