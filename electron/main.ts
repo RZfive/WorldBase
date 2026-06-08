@@ -1,9 +1,9 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, session, Notification, screen, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, session, Notification, screen, protocol, net, type IpcMainInvokeEvent } from 'electron'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { networkInterfaces } from 'node:os'
 import { AIEngine, type ProgressCallback, type ProgressEvent } from '../src/main/ai-engine/ai-engine.js'
 import { USER_ABORT_MESSAGE } from '../src/main/ai-engine/abort-utils.js'
@@ -23,7 +23,8 @@ import { SystemService } from '../src/main/system-capabilities/system-service.js
 import { SettingsStore, type AIExecutionAuthMode, type AIExecutionPreferences, type AIProvidersConfig, type LaunchpadLayout, type PortableSettingsConfig, type WebAppShortcut } from '../src/main/settings/settings-store.js'
 import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-history.js'
 import { AILogStore } from '../src/main/settings/ai-log-store.js'
-import { ImageLibraryStore, type ImageLibraryEntry, type ImageLibraryFolder, type ImageStudioMode } from '../src/main/settings/image-library-store.js'
+import { ImageLibraryStore, STUDIO_IMAGE_SCHEME, type ImageLibraryEntry, type ImageLibraryFolderCard, type ImageLibraryPage, type ImageLibraryQuery, type ImageLibraryData, type ImageStudioMode } from '../src/main/settings/image-library-store.js'
+import { runImageStudioRequest } from '../src/main/settings/image-generation-service.js'
 import { OpenAIProvider } from '../src/main/ai-engine/providers/openai-provider.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import { AgentStore } from '../src/main/settings/agent-store.js'
@@ -63,6 +64,16 @@ const DEFAULT_WINDOW_EXPAND_ANIMATION_DURATION_MS = 240
 app.setName(APP_DISPLAY_NAME)
 app.setAppUserModelId('com.theworld.app')
 app.setPath('userData', path.join(app.getPath('appData'), APP_DISPLAY_NAME))
+
+// The image-library studio serves thumbnails/originals over a privileged custom
+// protocol so the renderer references images by URL (browser-managed decode/cache)
+// instead of holding multi-MB base64 in memory. Must be registered before ready.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: STUDIO_IMAGE_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true }
+  }
+])
 
 // Ensure only one instance of the app is running.
 // This prevents file lock conflicts when the installer tries to
@@ -2403,6 +2414,7 @@ async function initializeServices (): Promise<void> {
     agentStore,
     agentGroupStore,
     settingsStore,
+    imageLibraryStore: imageLibraryStore ?? undefined,
     getMainWindow: () => getActiveAiRequestWindow(),
     readActivePage: async () => {
       return await requestPageAutomationFromRenderer<BrowserAutomationSnapshot>({ type: 'snapshot' })
@@ -3279,69 +3291,20 @@ function setupIPC (): void {
     n?: number
     inputImages?: string[]
   }): Promise<{ ok: true; entries: ImageLibraryEntry[] } | { ok: false; error: string }> => {
-    try {
-      if (!imageLibraryStore) throw new Error('图片库未初始化')
-
-      const providersConfig = settingsStore!.getProviders()
-      const provider = providersConfig.providers.find(p => p.id === req.providerId)
-      if (!provider) {
-        throw new Error('未找到所选供应商')
-      }
-      const model = provider.models.includes(req.model) ? req.model : provider.activeModel
-      if (!model) {
-        throw new Error('该供应商未配置可用模型')
-      }
-
-      const aiProvider = new OpenAIProvider()
-      aiProvider.setApiKey(provider.apiKey)
-      aiProvider.setBaseUrl(provider.baseUrl)
-      aiProvider.setModel(model)
-
-      const n = req.n && req.n > 0 ? Math.min(req.n, 4) : 1
-
-      const result = req.mode === 'edit'
-        ? await aiProvider.editImages({
-            prompt: req.prompt,
-            images: req.inputImages ?? [],
-            size: req.size,
-            n
-          })
-        : await aiProvider.generateImages({
-            prompt: req.prompt,
-            negativePrompt: req.negativePrompt,
-            size: req.size,
-            n
-          })
-
-      if (!result.images.length) {
-        throw new Error('模型未返回任何图片')
-      }
-
-      const createdAt = new Date().toISOString()
-      const entries: ImageLibraryEntry[] = result.images.map(imageUrl => imageLibraryStore!.save(
-        {
-          id: randomUUID(),
-          createdAt,
-          mode: req.mode,
-          providerId: req.providerId,
-          model,
-          prompt: req.prompt,
-          negativePrompt: req.negativePrompt || undefined,
-          aspectRatio: req.aspectRatio || undefined,
-          size: req.size
-        },
-        imageUrl,
-        req.mode === 'edit' ? req.inputImages : undefined
-      ))
-
-      return { ok: true, entries }
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : '图片生成失败' }
-    }
+    if (!imageLibraryStore) return { ok: false, error: '图片库未初始化' }
+    if (!settingsStore) return { ok: false, error: '设置未初始化' }
+    return runImageStudioRequest(req, {
+      getProvidersConfig: () => settingsStore!.getProviders(),
+      imageLibraryStore
+    })
   })
 
-  ipcMain.handle('image:library:list', async (): Promise<ImageLibraryEntry[]> => {
-    return imageLibraryStore?.list() ?? []
+  ipcMain.handle('image:library:query', async (_event: IpcMainInvokeEvent, opts: ImageLibraryQuery): Promise<ImageLibraryPage> => {
+    return imageLibraryStore?.query(opts ?? {}) ?? { items: [], total: 0, nextOffset: null }
+  })
+
+  ipcMain.handle('image:library:getData', async (_event: IpcMainInvokeEvent, id: string): Promise<ImageLibraryData | null> => {
+    return imageLibraryStore?.getImageData(id) ?? null
   })
 
   ipcMain.handle('image:library:delete', async (_event: IpcMainInvokeEvent, ids: string[]): Promise<{ removed: number }> => {
@@ -3356,11 +3319,11 @@ function setupIPC (): void {
     return { ok: imageLibraryStore?.setTags(id, tags ?? []) ?? false }
   })
 
-  ipcMain.handle('image:library:listFolders', async (): Promise<ImageLibraryFolder[]> => {
+  ipcMain.handle('image:library:listFolders', async (): Promise<ImageLibraryFolderCard[]> => {
     return imageLibraryStore?.listFolders() ?? []
   })
 
-  ipcMain.handle('image:library:createFolder', async (_event: IpcMainInvokeEvent, name: string): Promise<ImageLibraryFolder[]> => {
+  ipcMain.handle('image:library:createFolder', async (_event: IpcMainInvokeEvent, name: string): Promise<ImageLibraryFolderCard[]> => {
     return imageLibraryStore?.createFolder(name ?? '') ?? []
   })
 
@@ -4361,6 +4324,19 @@ app.whenReady().then(async () => {
   await initializeServices()
   setupEmbeddedAppCorsWorkaround()
   setupIPC()
+
+  // Stream image-library thumbnails/originals from disk; generates thumbnails
+  // lazily on first request (see ImageLibraryStore.resolveImageRequest).
+  protocol.handle(STUDIO_IMAGE_SCHEME, async (request) => {
+    try {
+      const filePath = await imageLibraryStore?.resolveImageRequest(request.url)
+      if (!filePath) return new Response(null, { status: 404 })
+      return await net.fetch(pathToFileURL(filePath).toString())
+    } catch {
+      return new Response(null, { status: 500 })
+    }
+  })
+
   createWindow()
 
   app.on('activate', () => {

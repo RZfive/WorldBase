@@ -35,6 +35,7 @@ import { toolInstallMcpServer } from './tool-install-mcp-server.js'
 import { toolCreateScheduledTask, toolListScheduledTasks } from './tool-scheduled-task.js'
 import { toolCreateAgent, toolCreateAgentGroup, toolListAgentWorkspaceCatalog } from './tool-agent-workspace.js'
 import { toolManageTodoList, type TodoItem } from './tool-manage-todo-list.js'
+import { toolGenerateImage, toolEditImage } from './tool-generate-image.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
 import type { AgentCore, SessionState } from '../agent-core.js'
@@ -47,6 +48,7 @@ import type { AgentStore } from '../../../settings/agent-store.js'
 import type { AgentGroupStore } from '../../../settings/agent-group-store.js'
 import type { SkillStore } from '../../../settings/skill-store.js'
 import type { SettingsStore } from '../../../settings/settings-store.js'
+import type { ImageLibraryStore } from '../../../settings/image-library-store.js'
 import type { MCPService } from '../../../mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-service.js'
 import type { BrowserWindow } from 'electron'
@@ -66,6 +68,7 @@ export interface ToolServices {
   agentStore?: AgentStore
   agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
+  imageLibraryStore?: ImageLibraryStore
   getMainWindow?: () => BrowserWindow | null
   readActivePage?: () => Promise<BrowserAutomationSnapshot>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
@@ -135,6 +138,17 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
 
   if (services.readActivePage) {
     tools.push(toolReadCurrentPage(services))
+  }
+
+  // Image generation / editing tools need both the settings store (to resolve a
+  // capable provider) and the image library (to persist results).
+  if (services.settingsStore && services.imageLibraryStore) {
+    const settingsStore = services.settingsStore
+    const imageLibraryStore = services.imageLibraryStore
+    tools.push(
+      toolGenerateImage(settingsStore, imageLibraryStore, getAbortSignal),
+      toolEditImage(settingsStore, imageLibraryStore, getAbortSignal)
+    )
   }
 
   if (services.readActivePage && services.interactWithActivePage) {

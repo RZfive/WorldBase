@@ -2,7 +2,9 @@
 import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import type {
   ImageLibraryEntry,
-  ImageLibraryFolder,
+  ImageLibraryItem,
+  ImageLibraryFolderCard,
+  ImageLibraryData,
   ImageStudioGenerateRequest,
   ImageStudioMode,
   ImageStudioTask
@@ -52,9 +54,9 @@ const tasks = ref<ImageStudioTask[]>([])
 const showTaskDropdown = ref(false)
 const activeTaskId = ref<string | null>(null)
 
-const libraryEntries = ref<ImageLibraryEntry[]>([])
+const libraryEntries = ref<ImageLibraryItem[]>([])
 const libraryLoading = ref(false)
-const folders = ref<ImageLibraryFolder[]>([])
+const folders = ref<ImageLibraryFolderCard[]>([])
 
 const fileInput = ref<HTMLInputElement | null>(null)
 
@@ -122,10 +124,20 @@ async function loadProviders () {
 }
 
 async function loadLibrary () {
-  if (!window.electronAPI?.listImageLibrary) return
+  if (!window.electronAPI?.queryImageLibrary) return
   libraryLoading.value = true
   try {
-    libraryEntries.value = await window.electronAPI.listImageLibrary()
+    // Fetch all library metadata (lightweight: no base64). Images themselves
+    // stream from disk via the studio-img:// protocol only when rendered.
+    const collected: ImageLibraryItem[] = []
+    let offset = 0
+    for (;;) {
+      const page = await window.electronAPI.queryImageLibrary({ folder: '*', limit: 200, offset })
+      collected.push(...page.items)
+      if (page.nextOffset === null) break
+      offset = page.nextOffset
+    }
+    libraryEntries.value = collected
   } catch {
     // ignore
   } finally {
@@ -282,43 +294,60 @@ function clampCustomDimensions () {
 
 /* ---- Library actions ---- */
 
-async function handleRegenerate (entry: ImageLibraryEntry) {
+/**
+ * Resolve full image bytes. Task entries already carry the data URL (just
+ * generated); library items are metadata-only, so fetch bytes on demand.
+ */
+async function resolveImageData (source: ImageLibraryItem | ImageLibraryEntry): Promise<ImageLibraryData | null> {
+  if ('dataUrl' in source && source.dataUrl) {
+    return { dataUrl: source.dataUrl, sourceDataUrls: 'sourceDataUrls' in source ? source.sourceDataUrls : undefined }
+  }
+  if (!window.electronAPI?.getImageLibraryData) return null
+  return window.electronAPI.getImageLibraryData(source.id)
+}
+
+async function handleRegenerate (item: ImageLibraryItem) {
+  let inputImages: string[] | undefined
+  if (item.mode === 'edit') {
+    const data = window.electronAPI?.getImageLibraryData ? await window.electronAPI.getImageLibraryData(item.id) : null
+    inputImages = data?.sourceDataUrls
+  }
   enqueueTask({
-    providerId: entry.providerId,
-    model: entry.model,
-    mode: entry.mode,
-    prompt: entry.prompt,
-    negativePrompt: entry.mode === 'generate' ? entry.negativePrompt : undefined,
-    aspectRatio: entry.aspectRatio,
-    size: entry.size,
+    providerId: item.providerId,
+    model: item.model,
+    mode: item.mode,
+    prompt: item.prompt,
+    negativePrompt: item.mode === 'generate' ? item.negativePrompt : undefined,
+    aspectRatio: item.aspectRatio,
+    size: item.size,
     n: 1,
-    inputImages: entry.mode === 'edit' ? entry.sourceDataUrls : undefined
+    inputImages
   })
 }
 
-function handleLoadParams (entry: ImageLibraryEntry) {
+async function handleLoadParams (item: ImageLibraryItem) {
   studioTab.value = 'workbench'
-  mode.value = entry.mode
+  mode.value = item.mode
   // selection set after mode so the mode watcher keeps a valid value
-  const candidate = `${entry.providerId}::${entry.model}`
+  const candidate = `${item.providerId}::${item.model}`
   selectedValue.value = modelOptions.value.some(o => o.value === candidate)
     ? candidate
     : (modelOptions.value[0]?.value ?? '')
 
-  prompt.value = entry.prompt
-  negativePrompt.value = entry.negativePrompt ?? ''
+  prompt.value = item.prompt
+  negativePrompt.value = item.negativePrompt ?? ''
 
-  const matchedRatio = entry.aspectRatio && RATIO_PRESETS.some(r => r.label === entry.aspectRatio)
-  if (matchedRatio && entry.aspectRatio) {
-    aspectRatio.value = entry.aspectRatio
+  const matchedRatio = item.aspectRatio && RATIO_PRESETS.some(r => r.label === item.aspectRatio)
+  if (matchedRatio && item.aspectRatio) {
+    aspectRatio.value = item.aspectRatio
   }
 
   const ratioForSize = RATIO_PRESETS.find(r => r.label === aspectRatio.value) ?? RATIO_PRESETS[0]
-  if (ratioForSize.sizes.includes(entry.size)) {
+  if (ratioForSize.sizes.includes(item.size)) {
     sizeMode.value = 'preset'
-    selectedSize.value = entry.size
+    selectedSize.value = item.size
   } else {
-    const [w, h] = entry.size.split('x').map(Number)
+    const [w, h] = item.size.split('x').map(Number)
     if (Number.isFinite(w) && Number.isFinite(h)) {
       sizeMode.value = 'custom'
       customWidth.value = w
@@ -326,24 +355,31 @@ function handleLoadParams (entry: ImageLibraryEntry) {
     }
   }
 
-  if (entry.mode === 'edit' && entry.sourceDataUrls?.length) {
-    inputImages.value = [...entry.sourceDataUrls].slice(0, MAX_INPUT_IMAGES)
+  if (item.mode === 'edit') {
+    const data = window.electronAPI?.getImageLibraryData ? await window.electronAPI.getImageLibraryData(item.id) : null
+    if (data?.sourceDataUrls?.length) {
+      inputImages.value = [...data.sourceDataUrls].slice(0, MAX_INPUT_IMAGES)
+    }
   }
 }
 
-function handleUseAsInput (entry: ImageLibraryEntry) {
+async function handleUseAsInput (source: ImageLibraryItem | ImageLibraryEntry) {
   mode.value = 'edit'
   studioTab.value = 'workbench'
   ensureValidSelection()
-  if (inputImages.value.length < MAX_INPUT_IMAGES) {
-    inputImages.value = [...inputImages.value, entry.dataUrl]
+  if (inputImages.value.length >= MAX_INPUT_IMAGES) return
+  const data = await resolveImageData(source)
+  if (data?.dataUrl) {
+    inputImages.value = [...inputImages.value, data.dataUrl]
   }
 }
 
-async function handleSaveToFile (entry: ImageLibraryEntry) {
+async function handleSaveToFile (source: ImageLibraryItem | ImageLibraryEntry) {
   if (!window.electronAPI?.saveImageToFile) return
-  const stamp = entry.createdAt.replace(/[:.]/g, '-')
-  await window.electronAPI.saveImageToFile(entry.dataUrl, `the-world-${stamp}`)
+  const data = await resolveImageData(source)
+  if (!data?.dataUrl) return
+  const stamp = source.createdAt.replace(/[:.]/g, '-')
+  await window.electronAPI.saveImageToFile(data.dataUrl, `the-world-${stamp}`)
 }
 
 async function handleDelete (ids: string[]) {

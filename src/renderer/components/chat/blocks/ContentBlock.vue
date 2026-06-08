@@ -13,6 +13,7 @@ import {
 } from '../export-utils'
 import type { ChatMessageBlock } from '../types'
 import MermaidDiagram from '../media/MermaidDiagram.vue'
+import { vStableImages, vStableImage } from '../media/image-stability'
 
 type ExportKind = 'md' | 'image' | 'copy'
 type ExportState = 'idle' | 'pending' | 'done' | 'error'
@@ -204,6 +205,7 @@ onBeforeUnmount(() => {
                 v-if="segment.type === 'markdown'"
                 class="message-text markdown-body"
                 v-html="renderMarkdown(segment.text)"
+                v-stable-images
               ></div>
 
               <MermaidDiagram
@@ -227,7 +229,7 @@ onBeforeUnmount(() => {
             type="button"
             @click="emit('openLightbox', props.messageIndex, props.blockIndex, partIndex)"
           >
-            <img :src="part.image_url.url" class="message-image" />
+            <img :src="part.image_url.url" class="message-image" v-stable-image />
             <span class="message-image-action">点击查看大图</span>
           </button>
         </template>
@@ -510,6 +512,12 @@ onBeforeUnmount(() => {
   border: none;
   border-top: 1px solid var(--app-border-strong);
   margin: 0.9em 0;
+}
+
+.message-bubble :deep(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 12px;
 }
 
 @media (max-width: 860px) {

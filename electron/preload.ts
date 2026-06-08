@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
-import type { ImageLibraryEntry, ImageLibraryFolder, ImageStudioGenerateRequest, ImageStudioGenerateResponse } from '../src/shared/image-studio-types.js'
+import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse } from '../src/shared/image-studio-types.js'
 
 interface ChatMessage {
   role: string
@@ -491,12 +491,13 @@ export interface ElectronAPI {
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   saveMarkdownToFile: (markdown: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   generateStudioImage: (req: ImageStudioGenerateRequest) => Promise<ImageStudioGenerateResponse>
-  listImageLibrary: () => Promise<ImageLibraryEntry[]>
+  queryImageLibrary: (opts: ImageLibraryQuery) => Promise<ImageLibraryPage>
+  getImageLibraryData: (id: string) => Promise<ImageLibraryData | null>
   deleteImageLibrary: (ids: string[]) => Promise<{ removed: number }>
   setImageLibraryFolder: (ids: string[], folder: string | undefined) => Promise<{ updated: number }>
   setImageLibraryTags: (id: string, tags: string[]) => Promise<{ ok: boolean }>
-  listImageLibraryFolders: () => Promise<ImageLibraryFolder[]>
-  createImageLibraryFolder: (name: string) => Promise<ImageLibraryFolder[]>
+  listImageLibraryFolders: () => Promise<ImageLibraryFolderCard[]>
+  createImageLibraryFolder: (name: string) => Promise<ImageLibraryFolderCard[]>
   exportImageLibraryFolder: (folderName: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; error?: string }>
   listImageLibraryTags: () => Promise<string[]>
   renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
@@ -701,12 +702,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveImageToFile: (imageUrl: string, defaultName?: string) => ipcRenderer.invoke('media:saveImage', imageUrl, defaultName),
   saveMarkdownToFile: (markdown: string, defaultName?: string) => ipcRenderer.invoke('media:saveMarkdown', markdown, defaultName),
   generateStudioImage: (req: ImageStudioGenerateRequest): Promise<ImageStudioGenerateResponse> => ipcRenderer.invoke('image:generate', req),
-  listImageLibrary: (): Promise<ImageLibraryEntry[]> => ipcRenderer.invoke('image:library:list'),
+  queryImageLibrary: (opts: ImageLibraryQuery): Promise<ImageLibraryPage> => ipcRenderer.invoke('image:library:query', opts),
+  getImageLibraryData: (id: string): Promise<ImageLibraryData | null> => ipcRenderer.invoke('image:library:getData', id),
   deleteImageLibrary: (ids: string[]): Promise<{ removed: number }> => ipcRenderer.invoke('image:library:delete', ids),
   setImageLibraryFolder: (ids: string[], folder: string | undefined): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:setFolder', ids, folder),
   setImageLibraryTags: (id: string, tags: string[]): Promise<{ ok: boolean }> => ipcRenderer.invoke('image:library:setTags', id, tags),
-  listImageLibraryFolders: (): Promise<ImageLibraryFolder[]> => ipcRenderer.invoke('image:library:listFolders'),
-  createImageLibraryFolder: (name: string): Promise<ImageLibraryFolder[]> => ipcRenderer.invoke('image:library:createFolder', name),
+  listImageLibraryFolders: (): Promise<ImageLibraryFolderCard[]> => ipcRenderer.invoke('image:library:listFolders'),
+  createImageLibraryFolder: (name: string): Promise<ImageLibraryFolderCard[]> => ipcRenderer.invoke('image:library:createFolder', name),
   exportImageLibraryFolder: (folderName: string): Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; error?: string }> => ipcRenderer.invoke('image:library:exportFolder', folderName),
   listImageLibraryTags: (): Promise<string[]> => ipcRenderer.invoke('image:library:listTags'),
   renameImageLibraryFolder: (oldName: string, newName: string): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:renameFolder', oldName, newName),
