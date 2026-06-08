@@ -52,6 +52,7 @@ export interface ConversationSummary {
   providerId?: string
   selectedModel?: string
   reasoningStrength?: ReasoningStrength
+  temperature?: number
   targetProjectId?: string
   agentId?: string
   groupId?: string
@@ -132,6 +133,7 @@ export interface ProviderOption {
   modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
   activeModel: string
   enableThinking?: boolean
+  temperature?: number
 }
 
 export interface ProvidersConfig {
@@ -163,6 +165,7 @@ export interface BackgroundStreamState {
   providerId: string | null
   selectedModel: string | null
   reasoningStrength: ReasoningStrength
+  temperature?: number | null
   agentId: string | null
   groupId: string | null
   channelBindingId: string | null

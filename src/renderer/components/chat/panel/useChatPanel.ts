@@ -104,6 +104,8 @@ const sharedProvidersConfig = ref<ProvidersConfig>({
 const sharedActiveProviderId = ref('')
 const sharedSelectedModel = ref('')
 const sharedReasoningStrength = ref<ReasoningStrength>('medium')
+// Per-conversation temperature override. null = follow the provider default.
+const sharedConversationTemperature = ref<number | null>(null)
 const sharedCurrentAuthMode = ref<AIExecutionAuthMode>('strict')
 const sharedPendingImages = ref<PendingImage[]>([])
 const sharedPendingFiles = ref<PendingAttachment[]>([])
@@ -184,6 +186,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const activeProviderId = sharedActiveProviderId
   const selectedModel = sharedSelectedModel
   const reasoningStrength = sharedReasoningStrength
+  const conversationTemperature = sharedConversationTemperature
   const currentAuthMode = sharedCurrentAuthMode
   const pendingImages = sharedPendingImages
   const pendingFiles = sharedPendingFiles
@@ -682,6 +685,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     targetProjectId.value = null
     currentAuthMode.value = 'strict'
     reasoningStrength.value = 'medium'
+    conversationTemperature.value = null
     inputText.value = ''
     resetTransientStreamState()
     pendingImages.value = []
@@ -924,6 +928,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         providerId: shouldUseConversationProviderOverride.value ? (activeProviderId.value || null) : null,
         selectedModel: shouldUseConversationProviderOverride.value ? (selectedModel.value || null) : null,
         reasoningStrength: reasoningStrength.value,
+        temperature: conversationTemperature.value,
         agentId: selectedAgentId.value || null,
         groupId: selectedGroupId.value || null,
         channelBindingId: selectedChannelBindingId.value || null,
@@ -946,6 +951,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     targetProjectId.value = projectId
     currentAuthMode.value = 'strict'
     reasoningStrength.value = 'medium'
+    conversationTemperature.value = null
     selectedAgentId.value = getDefaultAgentId()
     selectedGroupId.value = ''
     selectedChannelBindingId.value = ''
@@ -1053,6 +1059,27 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   async function handleReasoningStrengthChange (value: ReasoningStrength) {
     reasoningStrength.value = value
+    if (syncingProviderOptions.value || !currentConversationId.value) return
+    await doSaveConversation(currentConversationId.value, messages.value, {
+      targetProjectId: targetProjectId.value,
+      allowEmpty: true
+    })
+  }
+
+  // Effective provider default temperature for the active/selected provider,
+  // falling back to the engine's coding default (0.3) when unset.
+  const providerDefaultTemperature = computed<number>(() => {
+    const config = providersConfig.value
+    const id = activeProviderId.value || config.activeProviderId
+    const provider = config.providers.find(item => item.id === id)
+    const value = provider?.temperature
+    return typeof value === 'number' && Number.isFinite(value) ? value : 0.3
+  })
+
+  async function handleTemperatureChange (value: number | null) {
+    conversationTemperature.value = value === null || !Number.isFinite(value)
+      ? null
+      : Math.min(Math.max(value, 0), 2)
     if (syncingProviderOptions.value || !currentConversationId.value) return
     await doSaveConversation(currentConversationId.value, messages.value, {
       targetProjectId: targetProjectId.value,
@@ -1168,6 +1195,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       targetProjectId.value = bg.targetProjectId
       currentAuthMode.value = bg.authMode
       reasoningStrength.value = bg.reasoningStrength
+      conversationTemperature.value = bg.temperature ?? null
       selectedAgentId.value = resolveConversationAgentSelection(bg)
       selectedGroupId.value = bg.groupId || ''
       selectedChannelBindingId.value = bg.channelBindingId || ''
@@ -1190,6 +1218,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       targetProjectId.value = conv.targetProjectId || null
       currentAuthMode.value = conv.authMode === 'auto' ? 'auto' : 'strict'
       reasoningStrength.value = conv.reasoningStrength || 'medium'
+      conversationTemperature.value = typeof conv.temperature === 'number' ? conv.temperature : null
       selectedAgentId.value = resolveConversationAgentSelection(conv)
       selectedGroupId.value = conv.groupId || ''
       selectedChannelBindingId.value = conv.channelBindingId || ''
@@ -1236,6 +1265,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       providerId: shouldUseConversationProviderOverride.value ? (activeProviderId.value || undefined) : undefined,
       selectedModel: shouldUseConversationProviderOverride.value ? (selectedModel.value || undefined) : undefined,
       reasoningStrength: reasoningStrength.value,
+      temperature: conversationTemperature.value ?? undefined,
       targetProjectId: resolvedTargetProjectId || undefined,
       agentId: selectedAgentId.value || undefined,
       groupId: selectedGroupId.value || undefined,
@@ -1788,7 +1818,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
           selectedAgentId.value || undefined,
           selectedGroupId.value || undefined,
           selectedChannelBindingId.value || undefined,
-          props.activePageContext ?? undefined
+          props.activePageContext ?? undefined,
+          conversationTemperature.value ?? undefined
         )
 
         if (streamingConvIds.has(convId)) {
@@ -1930,6 +1961,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     handleModelSelectionChange,
     handleProviderSelectionChange,
     handleReasoningStrengthChange,
+    handleTemperatureChange,
     inputText,
     insertDocumentTag,
     isGroupConversation,
@@ -1945,6 +1977,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     pendingImages,
     planModeActive,
     providers,
+    providerDefaultTemperature,
+    conversationTemperature,
     reasoningStrength,
     renameConversation,
     removeFile,

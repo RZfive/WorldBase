@@ -62,6 +62,8 @@ const props = defineProps<{
   uploadFeedback: string
   documentDockVisible: boolean
   reasoningStrength: ReasoningStrength
+  temperature?: number | null
+  providerDefaultTemperature?: number
   authMode: AIExecutionAuthMode
   planModeActive: boolean
   providers?: ProviderItem[]
@@ -83,6 +85,7 @@ const emit = defineEmits<{
   (e: 'removeImage', index: number): void
   (e: 'removeFile', id: string): void
   (e: 'update:reasoning-strength', value: ReasoningStrength): void
+  (e: 'update:temperature', value: number | null): void
   (e: 'toggleDocumentDock'): void
   (e: 'update:auth-mode', value: AIExecutionAuthMode): void
   (e: 'togglePlanMode'): void
@@ -119,6 +122,28 @@ const currentReasoningLabel = computed(() => {
 const groupReasoningTitle = computed(() => {
   return `群聊中此处不单独调节思考强度，当前会沿用群内各 Agent 自身的思考强度配置（当前界面值：${currentReasoningLabel.value}）。`
 })
+const TEMPERATURE_MIN = 0
+const TEMPERATURE_MAX = 2
+const showAdvancedPanel = ref(false)
+const isTemperatureOverridden = computed(() => typeof props.temperature === 'number' && Number.isFinite(props.temperature))
+const fallbackTemperature = computed(() => {
+  const value = props.providerDefaultTemperature
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0.3
+})
+const effectiveTemperature = computed(() => {
+  return isTemperatureOverridden.value ? (props.temperature as number) : fallbackTemperature.value
+})
+function toggleAdvancedPanel () {
+  showAdvancedPanel.value = !showAdvancedPanel.value
+}
+function onTemperatureInput (e: Event) {
+  const value = Number.parseFloat((e.target as HTMLInputElement).value)
+  if (!Number.isFinite(value)) return
+  emit('update:temperature', Math.min(Math.max(value, TEMPERATURE_MIN), TEMPERATURE_MAX))
+}
+function resetTemperature () {
+  emit('update:temperature', null)
+}
 const projectTags = computed<ProjectTagChip[]>(() => {
   const seenIds = new Set<string>()
   const tags: ProjectTagChip[] = []
@@ -661,6 +686,54 @@ function handleTextareaBlur () {
       </div>
       <div class="input-actions">
         <div class="input-actions-left">
+          <!-- Advanced settings: gear opens a popover (temperature now, more later) -->
+          <div class="advanced-settings-anchor">
+            <div class="tooltip-container">
+              <button
+                class="action-btn advanced-btn"
+                :class="{ active: showAdvancedPanel }"
+                type="button"
+                aria-label="高级设置"
+                @click="toggleAdvancedPanel"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="3"/>
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+              </button>
+              <span class="tooltip-text">高级设置</span>
+            </div>
+            <div v-if="showAdvancedPanel" class="advanced-backdrop" @click="showAdvancedPanel = false"></div>
+            <div v-if="showAdvancedPanel" class="advanced-panel">
+              <div class="advanced-panel-title">高级设置</div>
+              <div class="advanced-setting">
+                <div class="advanced-setting-head">
+                  <span class="advanced-setting-name">模型温度</span>
+                  <span class="advanced-setting-value">{{ effectiveTemperature.toFixed(2) }}</span>
+                </div>
+                <input
+                  class="advanced-slider"
+                  type="range"
+                  :min="TEMPERATURE_MIN"
+                  :max="TEMPERATURE_MAX"
+                  step="0.1"
+                  :value="effectiveTemperature"
+                  @input="onTemperatureInput"
+                />
+                <div class="advanced-slider-scale">
+                  <span>精确 0</span>
+                  <span>2 发散</span>
+                </div>
+                <div class="advanced-setting-foot">
+                  <span v-if="!isTemperatureOverridden" class="advanced-setting-hint">跟随供应商默认（{{ fallbackTemperature.toFixed(2) }}）</span>
+                  <template v-else>
+                    <span class="advanced-setting-hint accent">仅当前会话</span>
+                    <button class="advanced-reset" type="button" @click="resetTemperature">跟随供应商默认</button>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </div>
           <ProviderDropdown
             v-if="props.isNewConversation && props.availableAgents && props.availableAgents.length > 0"
             :model-value="props.selectedAgentId || ''"
@@ -1155,6 +1228,121 @@ function handleTextareaBlur () {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.advanced-settings-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.action-btn.advanced-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.action-btn.advanced-btn.active {
+  color: var(--app-accent);
+  background: var(--app-accent-soft);
+}
+
+.advanced-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.advanced-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 50;
+  width: 248px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-strong);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.advanced-panel-title {
+  font-size: 0.74em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--app-text-muted);
+}
+
+.advanced-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.advanced-setting-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.advanced-setting-name {
+  font-size: 0.82em;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.advanced-setting-value {
+  font-size: 0.82em;
+  font-weight: 700;
+  color: var(--app-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.advanced-slider {
+  width: 100%;
+  accent-color: var(--app-accent);
+  cursor: pointer;
+}
+
+.advanced-slider-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68em;
+  color: var(--app-text-faint);
+}
+
+.advanced-setting-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.advanced-setting-hint {
+  font-size: 0.72em;
+  color: var(--app-text-muted);
+}
+
+.advanced-setting-hint.accent {
+  color: var(--app-accent);
+}
+
+.advanced-reset {
+  border: none;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 0.72em;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 6px;
+  text-decoration: underline;
+}
+
+.advanced-reset:hover {
+  color: var(--app-accent);
 }
 
 .input-actions-right {

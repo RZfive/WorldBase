@@ -59,6 +59,7 @@ interface ConversationSummary {
   providerId?: string
   selectedModel?: string
   reasoningStrength?: 'low' | 'medium' | 'high' | 'max'
+  temperature?: number
   targetProjectId?: string
   agentId?: string
   groupId?: string
@@ -103,6 +104,7 @@ interface AIProvider {
   modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
   activeModel: string
   enableThinking?: boolean
+  temperature?: number
 }
 
 interface AIProvidersConfig {
@@ -446,7 +448,7 @@ interface SystemStatusSnapshot {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
@@ -636,7 +638,7 @@ export interface ElectronAPI {
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext),
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext),
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {

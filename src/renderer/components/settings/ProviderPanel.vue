@@ -20,6 +20,7 @@ interface AIProvider {
   modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
   activeModel: string
   enableThinking?: boolean
+  temperature?: number
 }
 
 interface AIProvidersConfig {
@@ -292,6 +293,35 @@ function toggleModelCapability (model: string, field: 'imageGeneration' | 'image
 function parsePricingNumber (value: string): number {
   const parsed = Number.parseFloat(value)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+}
+
+function clampTemperature (value: number): number {
+  return Math.min(Math.max(value, 0), 2)
+}
+
+function handleTemperatureSlider (event: Event) {
+  if (!editDraft.value) return
+  const value = Number.parseFloat((event.target as HTMLInputElement).value)
+  editDraft.value.temperature = Number.isFinite(value) ? clampTemperature(value) : undefined
+}
+
+function handleTemperatureNumber (event: Event) {
+  if (!editDraft.value) return
+  const raw = (event.target as HTMLInputElement).value.trim()
+  if (raw === '') {
+    editDraft.value.temperature = undefined
+    return
+  }
+  const value = Number.parseFloat(raw)
+  editDraft.value.temperature = Number.isFinite(value) ? clampTemperature(value) : undefined
+}
+
+function clearTemperature () {
+  if (editDraft.value) editDraft.value.temperature = undefined
+}
+
+function formatTemperature (value: number | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '默认 (0.3)'
 }
 
 function handlePricingInput (model: string, field: PricingField, event: Event) {
@@ -683,6 +713,35 @@ function formatContextWindow (value: number): string {
           </div>
           <span class="pp-hint">开启后，支持的模型将展示思考过程。</span>
 
+          <div class="pp-separator" />
+
+          <div class="pp-field">
+            <label>模型温度</label>
+            <div class="pp-temp-row">
+              <input
+                class="pp-temp-slider"
+                type="range"
+                min="0"
+                max="2"
+                step="0.1"
+                :value="editDraft.temperature ?? 0.3"
+                @input="handleTemperatureSlider"
+              >
+              <input
+                class="pp-temp-number"
+                type="number"
+                min="0"
+                max="2"
+                step="0.1"
+                placeholder="0.3"
+                :value="editDraft.temperature ?? ''"
+                @input="handleTemperatureNumber"
+              >
+              <button v-if="editDraft.temperature !== undefined" class="pp-temp-reset" type="button" @click="clearTemperature">重置</button>
+            </div>
+            <span class="pp-hint">控制输出的随机性：低更确定（适合编码 / 精确任务），高更发散。未设置时默认 0.3，新会话以此为初始值，可在对话框 ⚙ 里临时调整。</span>
+          </div>
+
           <div class="pp-actions">
             <button class="pp-btn-primary" @click="saveEdit">保存</button>
             <button class="pp-btn-ghost" @click="cancelEdit">取消</button>
@@ -750,6 +809,13 @@ function formatContextWindow (value: number): string {
           <div class="pp-row">
             <span class="pp-row-label">思考模式</span>
             <span class="pp-row-value">{{ selectedProvider.enableThinking ? '已启用' : '未启用' }}</span>
+          </div>
+
+          <div class="pp-separator" />
+
+          <div class="pp-row">
+            <span class="pp-row-label">模型温度</span>
+            <span class="pp-row-value">{{ formatTemperature(selectedProvider.temperature) }}</span>
           </div>
 
           <div class="pp-actions">
@@ -836,6 +902,49 @@ function formatContextWindow (value: number): string {
 .pp-capability-chip:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.pp-temp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pp-temp-slider {
+  flex: 1;
+  accent-color: var(--app-accent);
+  cursor: pointer;
+}
+
+.pp-temp-number {
+  width: 76px;
+  flex-shrink: 0;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-input-border);
+  border-radius: 8px;
+  color: var(--app-text);
+  padding: 8px 10px;
+  font-size: 0.86em;
+  outline: none;
+}
+
+.pp-temp-number:focus {
+  border-color: var(--app-accent);
+}
+
+.pp-temp-reset {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 0.78em;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 4px 6px;
+}
+
+.pp-temp-reset:hover {
+  color: var(--app-accent);
 }
 
 .pp-providers {

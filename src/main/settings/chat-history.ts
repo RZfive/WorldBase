@@ -106,6 +106,8 @@ export interface Conversation {
   selectedModel?: string
   /** Reasoning strength selected for this conversation */
   reasoningStrength?: ReasoningStrength
+  /** Per-conversation temperature override. Unset → provider/engine default. */
+  temperature?: number
   /** Existing project locked to this conversation for optimization/editing. */
   targetProjectId?: string
   /** Active custom agent bound to this conversation. */
@@ -216,6 +218,7 @@ export class ChatHistoryStore {
           providerId: data.providerId,
           selectedModel: data.selectedModel,
           reasoningStrength: data.reasoningStrength,
+          temperature: data.temperature,
           targetProjectId: data.targetProjectId,
           agentId: data.agentId,
           groupId: data.groupId,
