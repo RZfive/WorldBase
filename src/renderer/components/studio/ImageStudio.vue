@@ -27,9 +27,13 @@ import {
 
 const MAX_INPUT_IMAGES = 4
 const MAX_COUNT = 4
-// How many generation/edit jobs may run at the same time. Multiple tasks can be
-// queued while others are still in flight, so editing several images is concurrent.
-const MAX_CONCURRENT_TASKS = 2
+// How many generation/edit jobs may run at the same time. Adjustable from the studio
+// header (beside the task queue) and persisted; multiple tasks can be queued while
+// others are still in flight, so editing several images runs concurrently.
+const MIN_CONCURRENT_TASKS = 1
+const MAX_CONCURRENT_TASKS_LIMIT = 8
+const DEFAULT_CONCURRENT_TASKS = 2
+const CONCURRENCY_STORAGE_KEY = 'studio:maxConcurrentTasks'
 
 type StudioTab = 'workbench' | 'library'
 
@@ -49,6 +53,34 @@ const inputImages = ref<string[]>([])
 
 const errorMsg = ref('')
 const tasks = ref<ImageStudioTask[]>([])
+
+/** User-adjustable cap on concurrent generation/edit jobs (persisted to localStorage). */
+function loadInitialConcurrency (): number {
+  try {
+    const raw = Number(window.localStorage.getItem(CONCURRENCY_STORAGE_KEY))
+    if (Number.isFinite(raw) && raw >= MIN_CONCURRENT_TASKS && raw <= MAX_CONCURRENT_TASKS_LIMIT) {
+      return Math.round(raw)
+    }
+  } catch {
+    // storage unavailable — fall back to default
+  }
+  return DEFAULT_CONCURRENT_TASKS
+}
+
+const maxConcurrentTasks = ref(loadInitialConcurrency())
+
+function setConcurrency (next: number) {
+  const clamped = Math.min(MAX_CONCURRENT_TASKS_LIMIT, Math.max(MIN_CONCURRENT_TASKS, Math.round(next)))
+  if (clamped === maxConcurrentTasks.value) return
+  maxConcurrentTasks.value = clamped
+  try {
+    window.localStorage.setItem(CONCURRENCY_STORAGE_KEY, String(clamped))
+  } catch {
+    // storage unavailable — keep the in-memory value
+  }
+  // Raising the limit should immediately start more queued tasks.
+  runScheduler()
+}
 
 // Task-queue dropdown + open task detail
 const showTaskDropdown = ref(false)
@@ -166,7 +198,7 @@ function findNextQueuedTask (): ImageStudioTask | null {
 
 function runScheduler () {
   let running = tasks.value.filter(t => t.status === 'running').length
-  while (running < MAX_CONCURRENT_TASKS) {
+  while (running < maxConcurrentTasks.value) {
     const next = findNextQueuedTask()
     if (!next) break
     running += 1
@@ -525,6 +557,28 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <!-- Concurrency control: how many queue jobs run at once -->
+        <div class="task-concurrency" title="同时进行的生成 / 编辑任务数（并发）">
+          <span class="task-concurrency-label">并发</span>
+          <div class="task-concurrency-stepper">
+            <button
+              type="button"
+              class="task-concurrency-btn"
+              :disabled="maxConcurrentTasks <= MIN_CONCURRENT_TASKS"
+              title="减少并发数"
+              @click="setConcurrency(maxConcurrentTasks - 1)"
+            >−</button>
+            <span class="task-concurrency-value">{{ maxConcurrentTasks }}</span>
+            <button
+              type="button"
+              class="task-concurrency-btn"
+              :disabled="maxConcurrentTasks >= MAX_CONCURRENT_TASKS_LIMIT"
+              title="增加并发数"
+              @click="setConcurrency(maxConcurrentTasks + 1)"
+            >＋</button>
+          </div>
+        </div>
+
         <div class="studio-title">
           <span class="studio-emoji">🎨</span>
           <div>
@@ -782,6 +836,46 @@ onUnmounted(() => {
   border: 1px solid var(--app-border-strong);
   background: var(--app-panel-strong);
   box-shadow: var(--app-shadow);
+}
+
+/* Concurrency stepper (beside the task queue) */
+.task-concurrency { display: flex; align-items: center; gap: 6px; }
+
+.task-concurrency-label { font-size: 0.78em; color: var(--app-text-muted); white-space: nowrap; }
+
+.task-concurrency-stepper {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 9px;
+  background: var(--app-panel-muted);
+  overflow: hidden;
+}
+
+.task-concurrency-btn {
+  width: 26px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--app-text-soft);
+  font-size: 0.95em;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.12s ease;
+}
+
+.task-concurrency-btn:hover:not(:disabled) { background: var(--app-accent-soft); color: var(--app-text-strong); }
+.task-concurrency-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.task-concurrency-value {
+  min-width: 20px;
+  text-align: center;
+  font-size: 0.84em;
+  font-weight: 600;
+  color: var(--app-text-strong);
 }
 
 .studio-tabs {
