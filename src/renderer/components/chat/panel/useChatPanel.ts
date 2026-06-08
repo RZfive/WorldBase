@@ -1592,7 +1592,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         contentAccum += pendingContentText
         assistantMessage.content = contentAccum
         const contentBlock = ensureStreamingContentBlock(assistantMessage)
-        contentBlock.content = contentAccum
+        const existingBlockContent = typeof contentBlock.content === 'string' ? contentBlock.content : ''
+        contentBlock.content = `${existingBlockContent}${pendingContentText}`
         pendingContentText = ''
       }
     }
