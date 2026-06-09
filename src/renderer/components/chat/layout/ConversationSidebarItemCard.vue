@@ -136,20 +136,22 @@ watch(
         <span v-if="!isCompactConversation" class="conv-subtitle">{{ item.subtitle }}</span>
       </div>
     </div>
-    <button
-      v-if="showPin"
-      class="conv-pin"
-      :class="{ active: itemIsPinned }"
-      type="button"
-      :title="itemIsPinned ? '取消置顶' : '置顶'"
-      :aria-label="itemIsPinned ? '取消置顶' : '置顶'"
-      @click.stop="emit('pin')"
-    >
-      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        <path d="M9.5 2.5L13.5 6.5L10.5 7.5L8.5 11.5L7 10L4.5 12.5L6 8.5L4.5 7L8.5 5L9.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
-      </svg>
-    </button>
-    <button v-if="showDelete" class="conv-delete" type="button" :title="deleteTitle" @click.stop="emit('delete')">×</button>
+    <div v-if="showPin || showDelete" class="conv-actions">
+      <button
+        v-if="showPin"
+        class="conv-pin"
+        :class="{ active: itemIsPinned }"
+        type="button"
+        :title="itemIsPinned ? '取消置顶' : '置顶'"
+        :aria-label="itemIsPinned ? '取消置顶' : '置顶'"
+        @click.stop="emit('pin')"
+      >
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M9.5 2.5L13.5 6.5L10.5 7.5L8.5 11.5L7 10L4.5 12.5L6 8.5L4.5 7L8.5 5L9.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <button v-if="showDelete" class="conv-delete" type="button" :title="deleteTitle" @click.stop="emit('delete')">×</button>
+    </div>
   </div>
 </template>
 
@@ -426,6 +428,11 @@ watch(
   line-height: 1.3;
 }
 
+.conv-actions {
+  /* Non-compact (agent/group) cards keep the buttons as inline flex children. */
+  display: contents;
+}
+
 .conv-pin {
   width: 22px;
   height: 22px;
@@ -445,9 +452,14 @@ watch(
 }
 
 .conversation-item-compact .conv-pin {
+  position: relative;
+  z-index: 1;
   width: 20px;
   height: 20px;
-  transform: translateY(0) scale(0.94);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(7px);
+  transition: opacity 0.2s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), color 0.16s ease, background 0.16s ease;
 }
 
 .conv-pin svg {
@@ -470,8 +482,7 @@ watch(
   fill: var(--app-accent);
 }
 
-.conv-item:hover .conv-pin,
-.conv-item.active .conv-pin {
+.conv-item:hover .conv-pin {
   opacity: 1;
   transform: translateY(0) scale(1);
 }
@@ -503,13 +514,21 @@ watch(
 }
 
 .conversation-item-compact .conv-delete {
+  position: relative;
+  z-index: 1;
   width: 20px;
   height: 20px;
-  transform: translateY(0) scale(0.94);
+  max-width: 0;
+  padding: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(7px);
+  transition: max-width 0.24s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), color 0.16s ease, background 0.16s ease;
 }
 
 .conv-item:hover .conv-delete,
-.conv-item.active .conv-delete {
+.conv-item.active:not(.conversation-item-compact) .conv-delete {
   opacity: 1;
   transform: translateY(0) scale(1);
 }
@@ -517,6 +536,69 @@ watch(
 .conv-delete:hover {
   background: rgba(239, 68, 68, 0.08);
   color: var(--app-danger);
+}
+
+/*
+ * Compact conversation rows let the title use the full width. The pin/delete
+ * actions are lifted out of the layout into a frosted overlay that fades in
+ * over the end of the text on hover, so the list reads longer and cleaner.
+ */
+.conversation-item-compact .conv-actions {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding-left: 26px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.conversation-item-compact .conv-actions::before {
+  content: '';
+  position: absolute;
+  inset: -3px -4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-panel) 38%, transparent);
+  -webkit-backdrop-filter: blur(8px) saturate(118%);
+  backdrop-filter: blur(8px) saturate(118%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px);
+  mask-image: linear-gradient(to right, transparent 0, #000 24px);
+  opacity: 0;
+  transform: scale(0.9);
+  transform-origin: right center;
+  transition: opacity 0.22s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+.conversation-item-compact:hover .conv-actions::before {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.conversation-item-compact:hover .conv-pin,
+.conversation-item-compact:hover .conv-delete {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.conversation-item-compact:hover .conv-delete {
+  max-width: 20px;
+  transition-delay: 0.04s;
+}
+
+/* Pinned rows keep the pin visible as a standalone frosted chip when idle. */
+.conversation-item-compact .conv-pin.active {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+  color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-panel) 34%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
 }
 
 .conv-status {

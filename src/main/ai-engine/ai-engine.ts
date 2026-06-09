@@ -19,6 +19,7 @@ import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.j
 import type { AgentStore } from '../settings/agent-store.js'
 import type { AgentGroupStore } from '../settings/agent-group-store.js'
 import type { ImageLibraryStore } from '../settings/image-library-store.js'
+import type { ImageStudioGenerateRequest } from '../../shared/image-studio-types.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../shared/page-automation-types.js'
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
@@ -36,6 +37,8 @@ export interface AIEngineServices {
   agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
   imageLibraryStore?: ImageLibraryStore
+  /** Hand image generation/edit requests to the drawing studio's task queue. */
+  enqueueStudioImageTasks?: (requests: ImageStudioGenerateRequest[]) => void
   getMainWindow?: () => BrowserWindow | null
   readActivePage?: () => Promise<BrowserAutomationSnapshot>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>

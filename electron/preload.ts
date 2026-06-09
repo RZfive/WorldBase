@@ -503,6 +503,8 @@ export interface ElectronAPI {
   renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
+  drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
+  onStudioImageTasksAdded: (callback: (payload: { count: number }) => void) => () => void
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
@@ -714,6 +716,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   renameImageLibraryFolder: (oldName: string, newName: string): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:renameFolder', oldName, newName),
   deleteImageLibraryFolder: (folderName: string): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:deleteFolder', folderName),
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }): Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }> => ipcRenderer.invoke('image:prompt:optimize', req),
+  drainPendingStudioImageTasks: (): Promise<ImageStudioGenerateRequest[]> => ipcRenderer.invoke('image:studio:drainPendingTasks'),
+  onStudioImageTasksAdded: (callback: (payload: { count: number }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { count: number }) => callback(payload)
+    ipcRenderer.on('image:studio:tasksAdded', handler)
+    return () => { ipcRenderer.removeListener('image:studio:tasksAdded', handler) }
+  },
   readUploadedAttachmentFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedAttachmentFile', filePath),
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => ipcRenderer.invoke('chat:readUploadedAttachmentBuffer', payload),
   readUploadedOfficeFile: (filePath: string) => ipcRenderer.invoke('chat:readUploadedOfficeFile', filePath),

@@ -229,7 +229,7 @@ async function executeTask (task: ImageStudioTask) {
   }
 }
 
-function enqueueTask (req: ImageStudioGenerateRequest) {
+function enqueueTask (req: ImageStudioGenerateRequest, opts?: { createdByAgent?: boolean }) {
   if (!window.electronAPI?.generateStudioImage) {
     errorMsg.value = '当前环境不支持图片生成'
     return
@@ -241,12 +241,31 @@ function enqueueTask (req: ImageStudioGenerateRequest) {
     createdAt: Date.now(),
     request: req,
     label: req.prompt,
+    createdByAgent: opts?.createdByAgent || undefined,
     inputPreview: req.mode === 'edit' ? req.inputImages?.[0] : undefined,
     entries: []
   }
   // Newest task on top of the queue panel.
   tasks.value = [task, ...tasks.value]
   runScheduler()
+}
+
+/**
+ * Pull any image tasks the AI agent handed to the studio and add them to the queue.
+ * Idempotent across callers: the main process clears its buffer atomically on drain,
+ * so invoking this from both the activation hook and the live "tasks added" event
+ * never double-enqueues.
+ */
+async function drainAgentTasks () {
+  if (!window.electronAPI?.drainPendingStudioImageTasks) return
+  try {
+    const pending = await window.electronAPI.drainPendingStudioImageTasks()
+    for (const req of pending) {
+      enqueueTask(req, { createdByAgent: true })
+    }
+  } catch {
+    // ignore — tasks stay buffered in main for the next drain
+  }
 }
 
 function removeTask (id: string) {
@@ -520,14 +539,22 @@ onActivated(() => {
   void loadProviders()
   void loadLibrary()
   void loadFolders()
+  // Catch any agent-queued tasks buffered while the studio was closed/unmounted.
+  void drainAgentTasks()
 })
+
+let unsubscribeAgentTasks: (() => void) | null = null
 
 onMounted(() => {
   document.addEventListener('click', onDocumentClick)
+  // Live drain when the agent queues tasks while the studio is already open.
+  unsubscribeAgentTasks = window.electronAPI?.onStudioImageTasksAdded?.(() => { void drainAgentTasks() }) ?? null
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', onDocumentClick)
+  unsubscribeAgentTasks?.()
+  unsubscribeAgentTasks = null
 })
 </script>
 

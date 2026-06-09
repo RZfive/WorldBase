@@ -49,6 +49,7 @@ import type { AgentGroupStore } from '../../../settings/agent-group-store.js'
 import type { SkillStore } from '../../../settings/skill-store.js'
 import type { SettingsStore } from '../../../settings/settings-store.js'
 import type { ImageLibraryStore } from '../../../settings/image-library-store.js'
+import type { ImageStudioGenerateRequest } from '../../../../shared/image-studio-types.js'
 import type { MCPService } from '../../../mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-service.js'
 import type { BrowserWindow } from 'electron'
@@ -69,6 +70,8 @@ export interface ToolServices {
   agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
   imageLibraryStore?: ImageLibraryStore
+  /** Hand image generation/edit requests to the drawing studio's task queue. */
+  enqueueStudioImageTasks?: (requests: ImageStudioGenerateRequest[]) => void
   getMainWindow?: () => BrowserWindow | null
   readActivePage?: () => Promise<BrowserAutomationSnapshot>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
@@ -140,14 +143,16 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     tools.push(toolReadCurrentPage(services))
   }
 
-  // Image generation / editing tools need both the settings store (to resolve a
-  // capable provider) and the image library (to persist results).
-  if (services.settingsStore && services.imageLibraryStore) {
+  // Image generation / editing tools resolve a capable provider (settings store) and
+  // resolve edit inputs (image library), then hand tasks to the studio's queue rather
+  // than running them here — so the workbench owns scheduling, concurrency, and display.
+  if (services.settingsStore && services.imageLibraryStore && services.enqueueStudioImageTasks) {
     const settingsStore = services.settingsStore
     const imageLibraryStore = services.imageLibraryStore
+    const enqueueStudioImageTasks = services.enqueueStudioImageTasks
     tools.push(
-      toolGenerateImage(settingsStore, imageLibraryStore, getAbortSignal),
-      toolEditImage(settingsStore, imageLibraryStore, getAbortSignal)
+      toolGenerateImage(settingsStore, imageLibraryStore, enqueueStudioImageTasks),
+      toolEditImage(settingsStore, imageLibraryStore, enqueueStudioImageTasks)
     )
   }
 
