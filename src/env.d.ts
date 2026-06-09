@@ -845,6 +845,8 @@ interface ElectronAPI {
   renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
+  drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
+  onStudioImageTasksAdded: (callback: (payload: { count: number }) => void) => () => void
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedOfficeFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>

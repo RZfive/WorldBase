@@ -151,6 +151,8 @@ export interface ImageStudioTask {
   request: ImageStudioGenerateRequest
   /** Short label derived from the request prompt for display. */
   label: string
+  /** True when the task was queued by the AI agent (vs. the workbench form). */
+  createdByAgent?: boolean
   /** First input image (edit mode) used as a thumbnail. */
   inputPreview?: string
   /** Generated results once the task succeeds. */

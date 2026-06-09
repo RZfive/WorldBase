@@ -47,6 +47,7 @@ const STATUS_LABELS: Record<ImageStudioTask['status'], string> = {
         <div class="queue-body">
           <span class="queue-label" :title="task.label">{{ task.label || '（无提示词）' }}</span>
           <span class="queue-status" :class="`status-${task.status}`">
+            <span v-if="task.createdByAgent" class="queue-agent-tag" title="由 AI 发起">AI</span>
             <span v-if="task.status === 'running'" class="queue-spinner">⏳</span>
             {{ task.request.mode === 'edit' ? '编辑' : '生成' }} · {{ STATUS_LABELS[task.status] }}
           </span>
@@ -169,6 +170,17 @@ const STATUS_LABELS: Record<ImageStudioTask['status'], string> = {
 .queue-status.status-success { color: var(--app-success); }
 .queue-status.status-error { color: var(--app-danger); }
 .queue-status.status-running { color: var(--app-accent); }
+
+.queue-agent-tag {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
+  font-size: 0.92em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
 
 .queue-icon-btn {
   flex-shrink: 0;

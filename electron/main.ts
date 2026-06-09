@@ -25,6 +25,7 @@ import { ChatHistoryStore, type Conversation } from '../src/main/settings/chat-h
 import { AILogStore } from '../src/main/settings/ai-log-store.js'
 import { ImageLibraryStore, STUDIO_IMAGE_SCHEME, type ImageLibraryEntry, type ImageLibraryFolderCard, type ImageLibraryPage, type ImageLibraryQuery, type ImageLibraryData, type ImageStudioMode } from '../src/main/settings/image-library-store.js'
 import { runImageStudioRequest } from '../src/main/settings/image-generation-service.js'
+import type { ImageStudioGenerateRequest } from '../src/shared/image-studio-types.js'
 import { OpenAIProvider } from '../src/main/ai-engine/providers/openai-provider.js'
 import { SkillStore, type Skill } from '../src/main/settings/skill-store.js'
 import { AgentStore } from '../src/main/settings/agent-store.js'
@@ -118,6 +119,18 @@ let scheduledTaskStore: ScheduledTaskStore | null = null
 let scheduledTaskService: ScheduledTaskService | null = null
 let documentStore: DocumentStore | null = null
 let imageLibraryStore: ImageLibraryStore | null = null
+// Image-generation/edit tasks the AI agent has handed off to the drawing studio's
+// task queue. Buffered here so they survive until the studio (lazily mounted) drains
+// them; the studio is then the single owner of scheduling, concurrency, and display.
+let pendingStudioImageTasks: ImageStudioGenerateRequest[] = []
+
+function enqueueStudioImageTasks (requests: ImageStudioGenerateRequest[]): void {
+  if (!requests.length) return
+  pendingStudioImageTasks.push(...requests)
+  // Poke any live window so an already-open studio drains immediately; a studio that
+  // hasn't mounted yet drains on activation instead.
+  broadcastToAppWindows('image:studio:tasksAdded', { count: requests.length })
+}
 let mcpService: MCPService | null = null
 let isClosingMainWindow = false
 let isQuitCleanupRunning = false
@@ -2415,6 +2428,7 @@ async function initializeServices (): Promise<void> {
     agentGroupStore,
     settingsStore,
     imageLibraryStore: imageLibraryStore ?? undefined,
+    enqueueStudioImageTasks,
     getMainWindow: () => getActiveAiRequestWindow(),
     readActivePage: async () => {
       return await requestPageAutomationFromRenderer<BrowserAutomationSnapshot>({ type: 'snapshot' })
@@ -3301,6 +3315,14 @@ function setupIPC (): void {
 
   ipcMain.handle('image:library:query', async (_event: IpcMainInvokeEvent, opts: ImageLibraryQuery): Promise<ImageLibraryPage> => {
     return imageLibraryStore?.query(opts ?? {}) ?? { items: [], total: 0, nextOffset: null }
+  })
+
+  // Hand off any AI-agent-queued generation/edit tasks to the studio and clear the
+  // buffer atomically, so two concurrent drains never double-enqueue.
+  ipcMain.handle('image:studio:drainPendingTasks', async (): Promise<ImageStudioGenerateRequest[]> => {
+    const drained = pendingStudioImageTasks
+    pendingStudioImageTasks = []
+    return drained
   })
 
   ipcMain.handle('image:library:getData', async (_event: IpcMainInvokeEvent, id: string): Promise<ImageLibraryData | null> => {
