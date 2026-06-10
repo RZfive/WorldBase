@@ -4347,13 +4347,19 @@ app.whenReady().then(async () => {
   setupEmbeddedAppCorsWorkaround()
   setupIPC()
 
-  // Stream image-library thumbnails/originals from disk; generates thumbnails
-  // lazily on first request (see ImageLibraryStore.resolveImageRequest).
+  // Stream image-library thumbnails/originals from disk. Thumbnails are generated
+  // eagerly at save time (see ImageLibraryStore.resolveImageRequest), so this never
+  // blocks on image processing. Images are content-addressed by id+variant and never
+  // change, so we mark responses immutable — the renderer serves repeat views from
+  // its own cache instead of re-hitting the protocol and re-decoding on every scroll.
   protocol.handle(STUDIO_IMAGE_SCHEME, async (request) => {
     try {
       const filePath = await imageLibraryStore?.resolveImageRequest(request.url)
       if (!filePath) return new Response(null, { status: 404 })
-      return await net.fetch(pathToFileURL(filePath).toString())
+      const res = await net.fetch(pathToFileURL(filePath).toString())
+      const headers = new Headers(res.headers)
+      headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
     } catch {
       return new Response(null, { status: 500 })
     }

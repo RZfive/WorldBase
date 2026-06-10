@@ -326,8 +326,10 @@ export class ImageLibraryStore {
   /* ---- Custom-protocol resolution (with lazy thumbnail generation) ---- */
 
   /**
-   * Resolve a studio-img:// URL to an absolute file path to stream. Generates and
-   * caches the thumbnail on first request when missing. Returns null if unknown.
+   * Resolve a studio-img:// URL to an absolute file path to stream. Thumbnails are
+   * generated eagerly at save time, so this is a pure metadata + disk lookup — it
+   * never runs sharp on the protocol thread. A missing thumbnail simply falls back
+   * to the original. Returns null if the id is unknown or the file is gone.
    */
   async resolveImageRequest (rawUrl: string): Promise<string | null> {
     let id = ''
@@ -345,30 +347,11 @@ export class ImageLibraryStore {
     const row = this.index.getById(id)
     if (!row) return null
 
-    if (variant === 'full') {
-      const fullPath = this.resolveFilePath(row.file_name)
-      return fs.existsSync(fullPath) ? fullPath : null
-    }
-
-    // thumb
-    if (row.thumb_name) {
+    if (variant === 'thumb' && row.thumb_name) {
       const thumbPath = this.resolveFilePath(row.thumb_name)
       if (fs.existsSync(thumbPath)) return thumbPath
     }
-    // Lazy generation (covers migrated images that never had a thumbnail).
-    const thumb = await this.writeThumbnail(id, row.file_name)
-    if (thumb) {
-      this.index.setThumbName(id, thumb.name)
-      const record = this.readRecord(id)
-      if (record) {
-        record.thumbName = thumb.name
-        if (record.width === undefined) record.width = thumb.width
-        if (record.height === undefined) record.height = thumb.height
-        try { fs.writeFileSync(this.metaPath(id), JSON.stringify(record, null, 2), 'utf-8') } catch { /* best effort */ }
-      }
-      return this.resolveFilePath(thumb.name)
-    }
-    // Thumbnailer unavailable — fall back to the original so the grid still renders.
+    // thumb missing (thumbnailer unavailable at save) or a full request → original.
     const fullPath = this.resolveFilePath(row.file_name)
     return fs.existsSync(fullPath) ? fullPath : null
   }

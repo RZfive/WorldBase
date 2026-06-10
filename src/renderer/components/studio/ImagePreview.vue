@@ -7,7 +7,9 @@ const props = defineProps<{
 }>()
 
 const MIN_ZOOM = 0.5
-const MAX_ZOOM = 4
+// Baseline upper bound. The effective max is raised per-image so large pictures can
+// always be zoomed up to their full native pixel size (1:1) — see `maxZoom` below.
+const BASE_MAX_ZOOM = 4
 const ZOOM_STEP = 0.25
 const ZOOM_DECIMAL_PRECISION = 2
 const WHEEL_ZOOM_SENSITIVITY = 0.003
@@ -37,6 +39,7 @@ const metrics = computed(() => {
   const renderedWidth = naturalWidth * fitScale * zoomLevel.value
   const renderedHeight = naturalHeight * fitScale * zoomLevel.value
   return {
+    fitScale,
     viewportWidth,
     viewportHeight,
     renderedWidth,
@@ -44,6 +47,15 @@ const metrics = computed(() => {
     maxPanX: Math.max(0, (renderedWidth - viewportWidth) / 2),
     maxPanY: Math.max(0, (renderedHeight - viewportHeight) / 2)
   }
+})
+
+// Effective zoom ceiling. At zoomLevel 1 the image is fitted to the viewport, so a
+// large picture is scaled *down*; allow zooming all the way back up to its true 1:1
+// pixel size (1 / fitScale) so it can always be inspected fully.
+const maxZoom = computed(() => {
+  const m = metrics.value
+  if (!m || m.fitScale <= 0) return BASE_MAX_ZOOM
+  return Math.max(BASE_MAX_ZOOM, Number((1 / m.fitScale).toFixed(ZOOM_DECIMAL_PRECISION)))
 })
 
 const canPan = computed(() => {
@@ -105,7 +117,7 @@ function updateViewport () {
 }
 
 function setZoom (zoom: number, anchor?: { x: number; y: number }) {
-  const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(zoom.toFixed(ZOOM_DECIMAL_PRECISION))))
+  const nextZoom = Math.min(maxZoom.value, Math.max(MIN_ZOOM, Number(zoom.toFixed(ZOOM_DECIMAL_PRECISION))))
   const previousZoom = zoomLevel.value
   if (nextZoom === previousZoom) return
 
@@ -128,6 +140,16 @@ function zoomReset () {
   zoomLevel.value = 1
   panX.value = 0
   panY.value = 0
+}
+
+// Double-click toggles between fitted view and full native (1:1) resolution, anchored
+// at the cursor so the clicked point stays put.
+function toggleNativeZoom (event: MouseEvent) {
+  if (zoomLevel.value > 1.001) {
+    zoomReset()
+  } else {
+    setZoom(maxZoom.value, { x: event.clientX, y: event.clientY })
+  }
 }
 
 function onWheel (event: WheelEvent) {
@@ -237,6 +259,7 @@ onUnmounted(() => {
       @pointermove="onPointerMove"
       @pointerup="endPan"
       @pointercancel="endPan"
+      @dblclick="toggleNativeZoom"
     >
       <img
         :src="src"
@@ -250,7 +273,7 @@ onUnmounted(() => {
     <div class="preview-zoom">
       <button class="preview-zoom-btn" type="button" @click="zoomOut" :disabled="zoomLevel <= MIN_ZOOM">−</button>
       <span class="preview-zoom-label" title="点击复位" @click="zoomReset">{{ zoomPercent }}</span>
-      <button class="preview-zoom-btn" type="button" @click="zoomIn" :disabled="zoomLevel >= MAX_ZOOM">+</button>
+      <button class="preview-zoom-btn" type="button" @click="zoomIn" :disabled="zoomLevel >= maxZoom">+</button>
     </div>
   </div>
 </template>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue'
+import { renderMarkdown } from '../chat/markdown'
 
 const props = defineProps<{
   report: ScheduledTaskRunReport | null
@@ -97,7 +98,7 @@ onUnmounted(() => {
 
         <section class="task-report-section">
           <h4>摘要</h4>
-          <p class="task-report-summary">{{ report.summary }}</p>
+          <div class="task-report-summary markdown-body" v-html="renderMarkdown(report.summary || '')"></div>
           <p v-if="report.error" class="task-report-error">{{ report.error }}</p>
         </section>
 
@@ -108,7 +109,7 @@ onUnmounted(() => {
 
         <section v-if="report.resultText" class="task-report-section">
           <h4>执行结果</h4>
-          <pre class="task-report-pre result">{{ report.resultText }}</pre>
+          <div class="task-report-result markdown-body" v-html="renderMarkdown(report.resultText || '')"></div>
         </section>
 
         <section class="task-report-section">
@@ -316,8 +317,16 @@ onUnmounted(() => {
   word-break: break-word;
 }
 
-.task-report-pre.result {
+.task-report-result {
+  margin: 10px 0 0;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--app-border);
   background: rgba(34, 197, 94, 0.06);
+  color: var(--app-text);
+  font-size: 0.84rem;
+  line-height: 1.65;
+  overflow-x: auto;
 }
 
 .task-report-progress-list {

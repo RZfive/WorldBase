@@ -25,6 +25,7 @@ const emit = defineEmits<{
   (e: 'update:conversationRenameInput', value: string): void
   (e: 'toggle'): void
   (e: 'startRename'): void
+  (e: 'togglePin'): void
   (e: 'startRenameConversation', item: ConversationSidebarItem): void
   (e: 'commitRename'): void
   (e: 'commitConversationRename', id: string): void
@@ -53,7 +54,7 @@ const emit = defineEmits<{
       'conv-folder',
       folderDropClass,
       folderBodyDropClass,
-      { expanded: isExpanded, dragging: dragItem?.type === 'folder' && dragItem.id === entry.folder.id }
+      { expanded: isExpanded, pinned: entry.isPinned, dragging: dragItem?.type === 'folder' && dragItem.id === entry.folder.id }
     ]"
   >
     <div
@@ -95,6 +96,18 @@ const emit = defineEmits<{
             </div>
           </div>
         </div>
+      </button>
+      <button
+        class="conv-folder-pin-btn"
+        :class="{ active: entry.isPinned }"
+        type="button"
+        :title="entry.isPinned ? '取消置顶' : '置顶文件夹'"
+        :aria-label="entry.isPinned ? '取消置顶' : '置顶文件夹'"
+        @click.stop="emit('togglePin')"
+      >
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M9.5 2.5L13.5 6.5L10.5 7.5L8.5 11.5L7 10L4.5 12.5L6 8.5L4.5 7L8.5 5L9.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+        </svg>
       </button>
       <div class="conv-folder-actions">
         <button class="conv-folder-action-btn" type="button" title="解散文件夹（对话保留）" @click.stop="emit('ungroup')">
@@ -385,6 +398,55 @@ const emit = defineEmits<{
   color: var(--app-danger);
 }
 
+/* Pin toggle: hidden until hover, but stays visible (accented) while pinned. */
+.conv-folder-pin-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin-right: 2px;
+  padding: 0;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--app-text-faint);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: translateY(1px) scale(0.94);
+  transition: opacity 0.18s ease, transform 0.18s ease, color 0.16s ease, background 0.16s ease;
+}
+
+.conv-folder-pin-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.conv-folder-shell:hover .conv-folder-pin-btn {
+  opacity: 1;
+  transform: none;
+}
+
+.conv-folder-pin-btn:hover {
+  background: color-mix(in srgb, var(--app-accent-soft) 36%, transparent);
+  color: var(--app-accent);
+}
+
+.conv-folder-pin-btn.active {
+  opacity: 1;
+  transform: none;
+  color: var(--app-accent);
+}
+
+.conv-folder-pin-btn.active svg path {
+  fill: var(--app-accent);
+}
+
+.conv-folder.pinned .conv-folder-shell {
+  border-color: color-mix(in srgb, var(--app-accent) 18%, var(--app-border));
+}
+
 .conv-folder-caret-btn {
   flex-shrink: 0;
   width: 28px;
@@ -462,6 +524,11 @@ const emit = defineEmits<{
 @media (max-width: 880px) {
   .conv-folder-actions {
     opacity: 1;
+  }
+
+  .conv-folder-pin-btn {
+    opacity: 1;
+    transform: none;
   }
 }
 </style>
