@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type { ImageLibraryItem } from '../../../shared/image-studio-types'
 import ImagePreview from './ImagePreview.vue'
 
@@ -109,11 +109,13 @@ function openFolder (name: string) {
   currentFolder.value = name
   selectedIds.value = new Set()
   closeContextMenu()
+  resetScroll()
 }
 
 function goRoot () {
   currentFolder.value = null
   selectedIds.value = new Set()
+  resetScroll()
 }
 
 /* ---- Selection ---- */
@@ -131,6 +133,7 @@ function toggleSelection (id: string) {
 
 /** Plain click opens the preview; ⌘/Ctrl-click toggles selection (multi-select). */
 function onImageClick (entry: ImageLibraryItem, event: MouseEvent) {
+  if (suppressClick) return // a marquee just ended; ignore its trailing click
   if (event.metaKey || event.ctrlKey) {
     toggleSelection(entry.id)
   } else {
@@ -147,9 +150,259 @@ function clearSelection () {
   selectedIds.value = new Set()
 }
 
-function onBlankClick () {
-  clearSelection()
-  closeContextMenu()
+/** Click on empty grid space (viewport or sizer background) clears the selection. */
+function onViewportClick (event: MouseEvent) {
+  if (suppressClick) return
+  if (isGridBackground(event.target)) {
+    clearSelection()
+    closeContextMenu()
+  }
+}
+
+function onViewportContextMenu (event: MouseEvent) {
+  if (!isGridBackground(event.target)) return // cards handle their own menus
+  event.preventDefault()
+  openBlankMenu(event)
+}
+
+/* ---- Select all (button + ⌘/Ctrl-A) ---- */
+
+/** True when every image in the current view is already selected. */
+const allVisibleSelected = computed(() =>
+  visibleEntries.value.length > 0 && visibleEntries.value.every(e => selectedIds.value.has(e.id))
+)
+
+function selectAllVisible () {
+  selectedIds.value = new Set(visibleEntries.value.map(e => e.id))
+}
+
+function toggleSelectAll () {
+  if (allVisibleSelected.value) clearSelection()
+  else selectAllVisible()
+}
+
+/* ---- Virtualized grid ---- */
+
+/** Layout constants — must match the card sizing in CSS. */
+const GAP = 12
+const MIN_COL_W = 150
+const OVERSCAN_ROWS = 2
+
+const viewportRef = ref<HTMLElement | null>(null)
+const scrollTop = ref(0)
+const viewportWidth = ref(0)
+const viewportHeight = ref(0)
+let resizeObserver: ResizeObserver | null = null
+
+function clamp (value: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, value))
+}
+
+/** A single grid cell: the new-folder editor, a folder card, or an image card. */
+interface GridCell {
+  kind: 'new-folder' | 'folder' | 'image'
+  key: string
+  folder?: { name: string; count: number; covers: string[] }
+  entry?: ImageLibraryItem
+}
+
+/** Folders (root view only) followed by the current view's images, as one flat list. */
+const gridCells = computed<GridCell[]>(() => {
+  const cells: GridCell[] = []
+  if (showFolders.value) {
+    if (editingFolder.value && editingFolder.value.original === null) {
+      cells.push({ kind: 'new-folder', key: '__new_folder__' })
+    }
+    for (const folder of folderCards.value) {
+      cells.push({ kind: 'folder', key: `folder-${folder.name}`, folder })
+    }
+  }
+  for (const entry of visibleEntries.value) {
+    cells.push({ kind: 'image', key: entry.id, entry })
+  }
+  return cells
+})
+
+const cols = computed(() => {
+  const w = viewportWidth.value
+  if (w <= 0) return 1
+  return Math.max(1, Math.floor((w + GAP) / (MIN_COL_W + GAP)))
+})
+/** Actual square side of each card given the column count. */
+const colW = computed(() => {
+  const w = viewportWidth.value
+  if (w <= 0) return MIN_COL_W
+  return Math.max(1, (w - (cols.value - 1) * GAP) / cols.value)
+})
+/** Distance from one cell's edge to the next (square side + gap), used for both axes. */
+const pitch = computed(() => colW.value + GAP)
+const totalRows = computed(() => Math.ceil(gridCells.value.length / cols.value))
+const totalHeight = computed(() => Math.max(0, totalRows.value * pitch.value - GAP))
+
+const startRow = computed(() => Math.max(0, Math.floor(scrollTop.value / pitch.value) - OVERSCAN_ROWS))
+const endRow = computed(() => {
+  const rowsInView = Math.ceil(viewportHeight.value / pitch.value) + OVERSCAN_ROWS * 2 + 1
+  return Math.min(totalRows.value, startRow.value + rowsInView)
+})
+
+interface PositionedCell { cell: GridCell; top: number; left: number }
+
+/** Only the cells inside the window [startRow, endRow), each with its absolute offset. */
+const visibleCells = computed<PositionedCell[]>(() => {
+  const c = cols.value
+  const p = pitch.value
+  const cells = gridCells.value
+  const out: PositionedCell[] = []
+  const from = startRow.value * c
+  const to = Math.min(cells.length, endRow.value * c)
+  for (let i = from; i < to; i++) {
+    out.push({ cell: cells[i], top: Math.floor(i / c) * p, left: (i % c) * p })
+  }
+  return out
+})
+
+function cellStyle (pc: PositionedCell): Record<string, string> {
+  const side = `${colW.value}px`
+  return { top: `${pc.top}px`, left: `${pc.left}px`, width: side, height: side }
+}
+
+function onScroll (event: Event) {
+  scrollTop.value = (event.target as HTMLElement).scrollTop
+}
+
+function measureViewport () {
+  const el = viewportRef.value
+  if (!el) return
+  viewportWidth.value = el.clientWidth
+  viewportHeight.value = el.clientHeight
+}
+
+function resetScroll () {
+  scrollTop.value = 0
+  if (viewportRef.value) viewportRef.value.scrollTop = 0
+}
+
+/* ---- Marquee (box) selection ---- */
+
+const marquee = reactive({ active: false, x0: 0, y0: 0, x1: 0, y1: 0 })
+let marqueePending = false
+let marqueeStartClientX = 0
+let marqueeStartClientY = 0
+let marqueePointerX = 0
+let marqueePointerY = 0
+let marqueeBase = new Set<string>()
+let marqueeRaf = 0
+/** Set briefly when a marquee ends so the trailing click doesn't open/clear. */
+let suppressClick = false
+
+/** Rectangle in content (scrolled) coordinates. */
+const marqueeRect = computed(() => ({
+  left: Math.min(marquee.x0, marquee.x1),
+  top: Math.min(marquee.y0, marquee.y1),
+  width: Math.abs(marquee.x1 - marquee.x0),
+  height: Math.abs(marquee.y1 - marquee.y0)
+}))
+
+/** True only for the scroll container itself or the sizer backdrop (not a card). */
+function isGridBackground (target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el) return false
+  return el === viewportRef.value || el.classList.contains('lib-grid-sizer')
+}
+
+function onGridMouseDown (event: MouseEvent) {
+  if (event.button !== 0 || !isGridBackground(event.target)) return
+  const el = viewportRef.value
+  if (!el) return
+  event.preventDefault() // suppress native text/selection drag
+  const rect = el.getBoundingClientRect()
+  const x = clamp(event.clientX - rect.left, 0, el.clientWidth)
+  const y = clamp(event.clientY - rect.top + el.scrollTop, 0, totalHeight.value)
+  marquee.x0 = marquee.x1 = x
+  marquee.y0 = marquee.y1 = y
+  marquee.active = false
+  marqueePending = true
+  marqueeStartClientX = event.clientX
+  marqueeStartClientY = event.clientY
+  marqueePointerX = event.clientX
+  marqueePointerY = event.clientY
+  // Shift / ⌘ / Ctrl add to the existing selection; a plain drag replaces it.
+  marqueeBase = (event.shiftKey || event.metaKey || event.ctrlKey) ? new Set(selectedIds.value) : new Set()
+  window.addEventListener('mousemove', onMarqueeMouseMove)
+  window.addEventListener('mouseup', onMarqueeMouseUp)
+  marqueeRaf = requestAnimationFrame(marqueeTick)
+}
+
+function onMarqueeMouseMove (event: MouseEvent) {
+  marqueePointerX = event.clientX
+  marqueePointerY = event.clientY
+  if (marqueePending && !marquee.active &&
+    (Math.abs(event.clientX - marqueeStartClientX) > 4 || Math.abs(event.clientY - marqueeStartClientY) > 4)) {
+    marquee.active = true
+  }
+}
+
+/** Per-frame: edge auto-scroll + recompute the rectangle and its hit set. */
+function marqueeTick () {
+  const el = viewportRef.value
+  if (!el || (!marquee.active && !marqueePending)) { marqueeRaf = 0; return }
+  if (marquee.active) {
+    const rect = el.getBoundingClientRect()
+    const EDGE = 48
+    const MAX_SPEED = 24
+    if (marqueePointerY < rect.top + EDGE) {
+      el.scrollTop -= MAX_SPEED * Math.min(1, (rect.top + EDGE - marqueePointerY) / EDGE)
+    } else if (marqueePointerY > rect.bottom - EDGE) {
+      el.scrollTop += MAX_SPEED * Math.min(1, (marqueePointerY - (rect.bottom - EDGE)) / EDGE)
+    }
+    scrollTop.value = el.scrollTop
+    marquee.x1 = clamp(marqueePointerX - rect.left, 0, el.clientWidth)
+    marquee.y1 = clamp(marqueePointerY - rect.top + el.scrollTop, 0, totalHeight.value)
+    applyMarqueeSelection()
+  }
+  marqueeRaf = requestAnimationFrame(marqueeTick)
+}
+
+/** Select every image card whose box intersects the marquee rectangle. */
+function applyMarqueeSelection () {
+  const r = marqueeRect.value
+  const minX = r.left, maxX = r.left + r.width
+  const minY = r.top, maxY = r.top + r.height
+  const c = cols.value
+  const p = pitch.value
+  const side = colW.value
+  const cells = gridCells.value
+  const next = new Set(marqueeBase)
+  const colA = clamp(Math.floor(minX / p), 0, c - 1)
+  const colB = clamp(Math.floor(maxX / p), 0, c - 1)
+  const rowA = Math.max(0, Math.floor(minY / p))
+  const rowB = Math.floor(maxY / p)
+  for (let row = rowA; row <= rowB; row++) {
+    const top = row * p
+    if (top > maxY || top + side < minY) continue
+    for (let col = colA; col <= colB; col++) {
+      const left = col * p
+      if (left > maxX || left + side < minX) continue
+      const idx = row * c + col
+      if (idx >= cells.length) continue
+      const cell = cells[idx]
+      if (cell.kind === 'image' && cell.entry) next.add(cell.entry.id)
+    }
+  }
+  selectedIds.value = next
+}
+
+function onMarqueeMouseUp () {
+  window.removeEventListener('mousemove', onMarqueeMouseMove)
+  window.removeEventListener('mouseup', onMarqueeMouseUp)
+  if (marqueeRaf) { cancelAnimationFrame(marqueeRaf); marqueeRaf = 0 }
+  const wasActive = marquee.active
+  marquee.active = false
+  marqueePending = false
+  if (wasActive) {
+    suppressClick = true
+    setTimeout(() => { suppressClick = false }, 0)
+  }
 }
 
 /* ---- Drag images into folders ---- */
@@ -222,6 +475,7 @@ function startCreateFolder () {
   searchQuery.value = ''
   editingFolderName.value = uniqueFolderName()
   editingFolder.value = { original: null }
+  resetScroll() // the editor card sits at the top of the grid
 }
 
 function startRenameFolder (name: string) {
@@ -322,7 +576,8 @@ const moveTargets = computed(() => allFolderNames.value.filter(n => n !== curren
 
 /* ---- Lightbox ---- */
 
-function openLightbox (entry: ImageLibraryItem) {
+/** Show an image in the lightbox, (re)fetching its edit-mode source images on demand. */
+function setLightbox (entry: ImageLibraryItem) {
   lightbox.value = entry
   editingTags.value = false
   tagInput.value = entry.tags?.join(', ') ?? ''
@@ -338,8 +593,30 @@ function openLightbox (entry: ImageLibraryItem) {
   }
 }
 
+function openLightbox (entry: ImageLibraryItem) {
+  setLightbox(entry)
+}
+
 function closeLightbox () {
   lightbox.value = null
+}
+
+/* ---- Lightbox prev/next within the current view (same folder / search / unfiled) ---- */
+
+const lightboxIndex = computed(() =>
+  lightbox.value ? visibleEntries.value.findIndex(e => e.id === lightbox.value!.id) : -1
+)
+const hasPrevImage = computed(() => lightboxIndex.value > 0)
+const hasNextImage = computed(() =>
+  lightboxIndex.value >= 0 && lightboxIndex.value < visibleEntries.value.length - 1
+)
+
+function showPrevImage () {
+  if (hasPrevImage.value) setLightbox(visibleEntries.value[lightboxIndex.value - 1])
+}
+
+function showNextImage () {
+  if (hasNextImage.value) setLightbox(visibleEntries.value[lightboxIndex.value + 1])
 }
 
 function startEditTags () {
@@ -368,13 +645,38 @@ function formatTime (iso: string): string {
   }
 }
 
+/** The panel is detached (clientWidth 0) while cached by <KeepAlive>; ignore global keys then. */
+function isPanelVisible (): boolean {
+  return !!viewportRef.value && viewportRef.value.clientWidth > 0
+}
+
 function onWindowKeydown (event: KeyboardEvent) {
   if (event.key === 'Escape') {
     if (contextMenu.value) { closeContextMenu(); return }
     if (lightbox.value) { closeLightbox(); return }
     if (selectedIds.value.size) clearSelection()
+    return
+  }
+  // Arrow keys page through images while the lightbox is open.
+  if (lightbox.value) {
+    if (event.key === 'ArrowRight') { event.preventDefault(); showNextImage() }
+    else if (event.key === 'ArrowLeft') { event.preventDefault(); showPrevImage() }
+    return
+  }
+  // ⌘/Ctrl-A selects every image in the current view (only when the panel is visible
+  // and the user isn't typing in a field).
+  if ((event.metaKey || event.ctrlKey) && (event.key === 'a' || event.key === 'A')) {
+    if (!isPanelVisible() || visibleEntries.value.length === 0) return
+    const target = event.target as HTMLElement | null
+    const tag = target?.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return
+    event.preventDefault()
+    selectAllVisible()
   }
 }
+
+// Reset scroll when the search query changes the result set.
+watch(() => searchQuery.value, () => { resetScroll() })
 
 // If the browsed folder disappears (renamed/deleted upstream), fall back to root.
 watch(() => props.folderNames, (names) => {
@@ -386,11 +688,21 @@ watch(() => props.folderNames, (names) => {
 onMounted(() => {
   window.addEventListener('keydown', onWindowKeydown)
   window.addEventListener('click', closeContextMenu)
+  measureViewport()
+  if (viewportRef.value && typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => measureViewport())
+    resizeObserver.observe(viewportRef.value)
+  }
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onWindowKeydown)
   window.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('mousemove', onMarqueeMouseMove)
+  window.removeEventListener('mouseup', onMarqueeMouseUp)
+  if (marqueeRaf) cancelAnimationFrame(marqueeRaf)
+  resizeObserver?.disconnect()
+  resizeObserver = null
 })
 </script>
 
@@ -404,6 +716,16 @@ onUnmounted(() => {
       </div>
       <div class="lib-actions">
         <input v-model="searchQuery" class="lib-search" type="text" placeholder="搜索提示词 / 标签…" />
+        <button
+          class="lib-btn"
+          type="button"
+          :disabled="visibleEntries.length === 0"
+          :title="allVisibleSelected ? '取消全选' : '全选当前视图（⌘/Ctrl+A）'"
+          @click="toggleSelectAll"
+        >
+          {{ allVisibleSelected ? '✕ 取消全选' : '☑ 全选' }}
+          <span v-if="selectedCount" class="lib-sel-count">{{ selectedCount }}</span>
+        </button>
         <button class="lib-btn" type="button" @click="startCreateFolder">＋ 新建文件夹</button>
         <button class="lib-btn" type="button" :disabled="props.loading" @click="emit('refresh')">↻ 刷新</button>
       </div>
@@ -431,106 +753,119 @@ onUnmounted(() => {
     </nav>
 
     <div
-      class="lib-grid"
-      @click.self="onBlankClick"
-      @contextmenu.self.prevent="openBlankMenu($event)"
+      ref="viewportRef"
+      class="lib-grid-viewport"
+      @scroll="onScroll"
+      @mousedown="onGridMouseDown"
+      @click="onViewportClick"
+      @contextmenu="onViewportContextMenu"
       @dragover.prevent
       @drop.prevent="dropOnFolder(currentFolder ?? undefined)"
     >
-      <!-- Folder cards (root, non-search) -->
-      <template v-if="showFolders">
-        <!-- New folder being created (inline name input) -->
-        <div
-          v-if="editingFolder && editingFolder.original === null"
-          class="lib-folder-card editing"
-        >
-          <div class="lib-folder-cover">
-            <div class="lib-folder-cover-empty">📁</div>
-            <div class="lib-folder-meta">
-              <input
-                v-model="editingFolderName"
-                v-focus
-                class="lib-folder-name-input"
-                type="text"
-                maxlength="40"
-                placeholder="文件夹名称"
-                @click.stop
-                @keydown.enter.stop.prevent="commitFolderEdit"
-                @keydown.esc.stop.prevent="cancelFolderEdit"
-                @blur="commitFolderEdit"
-              />
+      <div class="lib-grid-sizer" :style="{ height: `${totalHeight}px` }">
+        <template v-for="pc in visibleCells" :key="pc.cell.key">
+          <!-- New folder being created (inline name input) -->
+          <div
+            v-if="pc.cell.kind === 'new-folder'"
+            class="lib-cell lib-folder-card editing"
+            :style="cellStyle(pc)"
+          >
+            <div class="lib-folder-cover">
+              <div class="lib-folder-cover-empty">📁</div>
+              <div class="lib-folder-meta">
+                <input
+                  v-model="editingFolderName"
+                  v-focus
+                  class="lib-folder-name-input"
+                  type="text"
+                  maxlength="40"
+                  placeholder="文件夹名称"
+                  @click.stop
+                  @keydown.enter.stop.prevent="commitFolderEdit"
+                  @keydown.esc.stop.prevent="cancelFolderEdit"
+                  @blur="commitFolderEdit"
+                />
+              </div>
             </div>
           </div>
-        </div>
 
-        <div
-          v-for="folder in folderCards"
-          :key="`folder-${folder.name}`"
-          class="lib-folder-card"
-          :class="{ 'drag-over': dragOverKey === folder.name, editing: isEditingFolder(folder.name) }"
-          @click="isEditingFolder(folder.name) ? null : openFolder(folder.name)"
-          @contextmenu.prevent.stop="openFolderMenu(folder.name, $event)"
-          @dragover.prevent="onFolderDragOver(folder.name)"
-          @dragleave="onFolderDragLeave(folder.name)"
-          @drop.prevent.stop="dropOnFolder(folder.name)"
-        >
-          <div class="lib-folder-cover">
-            <template v-if="folder.covers.length">
-              <img v-for="(src, i) in folder.covers" :key="i" :src="src" alt="" draggable="false" />
-            </template>
-            <div v-else class="lib-folder-cover-empty">📁</div>
-            <div class="lib-folder-meta">
-              <input
-                v-if="isEditingFolder(folder.name)"
-                v-model="editingFolderName"
-                v-focus
-                class="lib-folder-name-input"
-                type="text"
-                maxlength="40"
-                placeholder="文件夹名称"
-                @click.stop
-                @keydown.enter.stop.prevent="commitFolderEdit"
-                @keydown.esc.stop.prevent="cancelFolderEdit"
-                @blur="commitFolderEdit"
-              />
-              <span v-else class="lib-folder-name" :title="folder.name">📁 {{ folder.name }}</span>
-              <span class="lib-folder-num">{{ folder.count }}</span>
+          <!-- Folder card -->
+          <div
+            v-else-if="pc.cell.kind === 'folder'"
+            class="lib-cell lib-folder-card"
+            :class="{ 'drag-over': dragOverKey === pc.cell.folder!.name, editing: isEditingFolder(pc.cell.folder!.name) }"
+            :style="cellStyle(pc)"
+            @click="isEditingFolder(pc.cell.folder!.name) ? null : openFolder(pc.cell.folder!.name)"
+            @contextmenu.prevent.stop="openFolderMenu(pc.cell.folder!.name, $event)"
+            @dragover.prevent="onFolderDragOver(pc.cell.folder!.name)"
+            @dragleave="onFolderDragLeave(pc.cell.folder!.name)"
+            @drop.prevent.stop="dropOnFolder(pc.cell.folder!.name)"
+          >
+            <div class="lib-folder-cover">
+              <template v-if="pc.cell.folder!.covers.length">
+                <img v-for="(src, i) in pc.cell.folder!.covers" :key="i" :src="src" alt="" draggable="false" />
+              </template>
+              <div v-else class="lib-folder-cover-empty">📁</div>
+              <div class="lib-folder-meta">
+                <input
+                  v-if="isEditingFolder(pc.cell.folder!.name)"
+                  v-model="editingFolderName"
+                  v-focus
+                  class="lib-folder-name-input"
+                  type="text"
+                  maxlength="40"
+                  placeholder="文件夹名称"
+                  @click.stop
+                  @keydown.enter.stop.prevent="commitFolderEdit"
+                  @keydown.esc.stop.prevent="cancelFolderEdit"
+                  @blur="commitFolderEdit"
+                />
+                <span v-else class="lib-folder-name" :title="pc.cell.folder!.name">📁 {{ pc.cell.folder!.name }}</span>
+                <span class="lib-folder-num">{{ pc.cell.folder!.count }}</span>
+              </div>
             </div>
           </div>
-        </div>
-      </template>
 
-      <!-- Image cards -->
-      <div
-        v-for="entry in visibleEntries"
-        :key="entry.id"
-        class="lib-card"
-        :class="{ selected: selectedIds.has(entry.id), dragging: draggingIds.includes(entry.id) }"
-        draggable="true"
-        @click.stop="onImageClick(entry, $event)"
-        @contextmenu.prevent.stop="openImageMenu(entry, $event)"
-        @dragstart="onImageDragStart(entry, $event)"
-        @dragend="onImageDragEnd"
-      >
-        <img :src="entry.thumbUrl" :alt="entry.prompt" class="lib-thumb" loading="lazy" decoding="async" draggable="false" />
-        <span class="lib-badge">{{ entry.mode === 'edit' ? '编辑' : '生成' }}</span>
-        <span v-if="entry.folder && isSearching" class="lib-folder-badge">📁 {{ entry.folder }}</span>
-        <button
-          class="lib-check"
-          :class="{ on: selectedIds.has(entry.id) }"
-          type="button"
-          :title="selectedIds.has(entry.id) ? '取消选择' : '选择'"
-          @click.stop="onCheckClick(entry)"
-          @dblclick.stop
-        >✓</button>
-        <div class="lib-card-caption">
-          <span v-if="entry.tags?.length" class="lib-card-tags">{{ entry.tags.join(' · ') }}</span>
-          <span v-else>{{ entry.prompt || '（无提示词）' }}</span>
-        </div>
+          <!-- Image card -->
+          <div
+            v-else
+            class="lib-cell lib-card"
+            :class="{ selected: selectedIds.has(pc.cell.entry!.id), dragging: draggingIds.includes(pc.cell.entry!.id) }"
+            :style="cellStyle(pc)"
+            draggable="true"
+            @click.stop="onImageClick(pc.cell.entry!, $event)"
+            @contextmenu.prevent.stop="openImageMenu(pc.cell.entry!, $event)"
+            @dragstart="onImageDragStart(pc.cell.entry!, $event)"
+            @dragend="onImageDragEnd"
+          >
+            <img :src="pc.cell.entry!.thumbUrl" :alt="pc.cell.entry!.prompt" class="lib-thumb" decoding="async" draggable="false" />
+            <span class="lib-badge">{{ pc.cell.entry!.mode === 'edit' ? '编辑' : '生成' }}</span>
+            <span v-if="pc.cell.entry!.folder && isSearching" class="lib-folder-badge">📁 {{ pc.cell.entry!.folder }}</span>
+            <button
+              class="lib-check"
+              :class="{ on: selectedIds.has(pc.cell.entry!.id) }"
+              type="button"
+              :title="selectedIds.has(pc.cell.entry!.id) ? '取消选择' : '选择'"
+              @click.stop="onCheckClick(pc.cell.entry!)"
+              @dblclick.stop
+            >✓</button>
+            <div class="lib-card-caption">
+              <span v-if="pc.cell.entry!.tags?.length" class="lib-card-tags">{{ pc.cell.entry!.tags!.join(' · ') }}</span>
+              <span v-else>{{ pc.cell.entry!.prompt || '（无提示词）' }}</span>
+            </div>
+          </div>
+        </template>
+
+        <!-- Marquee (box) selection rectangle -->
+        <div
+          v-if="marquee.active"
+          class="lib-marquee"
+          :style="{ left: `${marqueeRect.left}px`, top: `${marqueeRect.top}px`, width: `${marqueeRect.width}px`, height: `${marqueeRect.height}px` }"
+        ></div>
       </div>
 
       <!-- Empty state -->
-      <div v-if="visibleEntries.length === 0 && !editingFolder && (!showFolders || folderCards.length === 0)" class="lib-empty">
+      <div v-if="gridCells.length === 0" class="lib-empty">
         <template v-if="props.entries.length === 0">
           <p>还没有生成任何图片</p>
           <span>在工作台输入提示词并生成，结果会自动保存到这里</span>
@@ -598,14 +933,33 @@ onUnmounted(() => {
           <header class="lib-lightbox-header">
             <div class="lib-lightbox-heading">
               <span class="lib-lightbox-title">图片详情</span>
-              <span class="lib-lightbox-subtitle">{{ lightbox.size }}<template v-if="lightbox.aspectRatio"> · {{ lightbox.aspectRatio }}</template></span>
+              <span class="lib-lightbox-subtitle">
+                <span v-if="lightboxIndex >= 0" class="lib-lightbox-pos">{{ lightboxIndex + 1 }} / {{ visibleEntries.length }}</span>
+                {{ lightbox.size }}<template v-if="lightbox.aspectRatio"> · {{ lightbox.aspectRatio }}</template>
+              </span>
             </div>
             <div class="lib-lightbox-toolbar">
               <button class="lib-lightbox-close" type="button" @click="closeLightbox">关闭</button>
             </div>
           </header>
           <div class="lib-lightbox-body">
-            <ImagePreview class="lib-lightbox-preview" :src="lightbox.fullUrl" :alt="lightbox.prompt" />
+            <div class="lib-lightbox-stage">
+              <ImagePreview class="lib-lightbox-preview" :src="lightbox.fullUrl" :alt="lightbox.prompt" />
+              <button
+                v-if="hasPrevImage"
+                class="lib-lightbox-nav prev"
+                type="button"
+                title="上一张 (←)"
+                @click.stop="showPrevImage"
+              >‹</button>
+              <button
+                v-if="hasNextImage"
+                class="lib-lightbox-nav next"
+                type="button"
+                title="下一张 (→)"
+                @click.stop="showNextImage"
+              >›</button>
+            </div>
             <div class="lib-meta">
               <div class="lib-meta-row"><span class="lib-meta-key">模式</span><span>{{ lightbox.mode === 'edit' ? '图片编辑' : '文生图' }}</span></div>
               <div class="lib-meta-row"><span class="lib-meta-key">模型</span><span>{{ lightbox.model }}</span></div>
@@ -736,6 +1090,15 @@ onUnmounted(() => {
 .lib-btn-danger { color: var(--app-danger); }
 .lib-btn-danger:hover:not(:disabled) { background: rgba(220, 38, 38, 0.9); color: #fff; }
 
+.lib-sel-count {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--app-accent);
+  color: #fff;
+  font-size: 0.86em;
+}
+
 /* Breadcrumb */
 .lib-breadcrumb { display: flex; align-items: center; gap: 8px; font-size: 0.82em; }
 .lib-crumb {
@@ -767,36 +1130,50 @@ onUnmounted(() => {
 .lib-empty p { margin: 0; font-size: 0.95em; color: var(--app-text-muted); }
 .lib-empty span { font-size: 0.8em; }
 
-.lib-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 12px;
-  overflow-y: auto;
+/*
+ * Virtualized grid. The viewport scrolls; the sizer is a full-height spacer whose
+ * children are absolutely positioned, so only the windowed cells (≈ a screenful +
+ * overscan) ever exist in the DOM regardless of library size. Each cell is an exact
+ * square laid out by JS — no CSS grid, so positions never drift across rows.
+ */
+.lib-grid-viewport {
+  position: relative;
+  flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding-bottom: 4px;
-  align-content: start;
 }
 
-/*
- * Render virtualization: off-screen cards skip layout/paint/image decode, so the
- * grid stays cheap even with thousands of images. `auto` remembers each card's
- * real size once measured; the fallback height is just the placeholder estimate.
- */
-.lib-card,
-.lib-folder-card {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 184px;
+.lib-grid-sizer {
+  position: relative;
+  width: 100%;
+}
+
+.lib-cell {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+/* Marquee (box) selection rectangle, drawn in content coordinates. */
+.lib-marquee {
+  position: absolute;
+  z-index: 6;
+  border: 1px solid var(--app-accent);
+  background: var(--app-accent-soft);
+  opacity: 0.55;
+  border-radius: 4px;
+  pointer-events: none;
 }
 
 /* Folder cards — same size / shape as image cards */
 .lib-folder-card {
-  position: relative;
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid var(--app-border);
   background: var(--app-panel);
   cursor: pointer;
-  transition: transform 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+  transition: transform 0.14s ease, border-color 0.14s ease;
 }
 .lib-folder-card:hover {
   transform: translateY(-2px);
@@ -809,7 +1186,7 @@ onUnmounted(() => {
 }
 
 .lib-folder-cover {
-  aspect-ratio: 1 / 1;
+  height: 100%;
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
@@ -888,13 +1265,12 @@ onUnmounted(() => {
 
 /* Image cards */
 .lib-card {
-  position: relative;
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid var(--app-border);
   background: var(--app-panel);
   cursor: pointer;
-  transition: transform 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+  transition: transform 0.14s ease, border-color 0.14s ease;
 }
 .lib-card:hover {
   transform: translateY(-2px);
@@ -906,7 +1282,7 @@ onUnmounted(() => {
 
 .lib-thumb {
   width: 100%;
-  aspect-ratio: 1 / 1;
+  height: 100%;
   object-fit: cover;
   display: block;
   background: var(--app-panel-subtle);
@@ -1049,6 +1425,49 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
+/* Prev/next image navigation, flanking the image inside the preview stage. */
+.lib-lightbox-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.lib-lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  /* Resting state: bare translucent glyph, no chrome, to stay out of the way. */
+  background: transparent;
+  color: #fff;
+  font-size: 1.9em;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.5;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+  transition: opacity 0.16s ease, background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+/* Hover: reveal a semi-transparent frosted-glass button. */
+.lib-lightbox-nav:hover {
+  opacity: 1;
+  background: rgba(15, 23, 42, 0.42);
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  text-shadow: none;
+}
+.lib-lightbox-nav.prev { left: 10px; }
+.lib-lightbox-nav.next { right: 10px; }
+
 .lib-lightbox {
   position: relative;
   width: min(1320px, calc(100vw - 48px));
@@ -1074,6 +1493,13 @@ onUnmounted(() => {
 .lib-lightbox-heading { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .lib-lightbox-title { font-size: 0.96rem; font-weight: 600; color: var(--app-text-strong); }
 .lib-lightbox-subtitle { font-size: 0.78rem; color: var(--app-text-muted); }
+.lib-lightbox-pos {
+  margin-right: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--app-panel-muted);
+  color: var(--app-text-soft);
+}
 .lib-lightbox-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .lib-lightbox-close {
   height: 32px;

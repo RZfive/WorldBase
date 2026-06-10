@@ -109,6 +109,7 @@ const {
   deleteFolder,
   isFolderExpanded,
   togglePinConversation,
+  togglePinFolder,
   onConversationDragStart,
   onFolderDragStart,
   onTopLevelDragOver,
@@ -355,6 +356,7 @@ function cancelRenameConversation () {
                 @update:conversation-rename-input="conversationRenameInput = $event"
                 @toggle="toggleFolderCollapsed(entry.folder.id)"
                 @start-rename="startRenameFolder(entry.folder)"
+                @toggle-pin="togglePinFolder(entry.folder.id)"
                 @start-rename-conversation="startRenameConversation"
                 @commit-rename="commitRenameFolder(entry.folder.id)"
                 @commit-conversation-rename="commitRenameConversation"

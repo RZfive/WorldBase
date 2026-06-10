@@ -69,6 +69,7 @@ export type ConversationSidebarEntry =
   | {
     kind: 'folder'
     folder: ConversationFolderLayout
+    isPinned: boolean
     items: ConversationSidebarItem[]
     visibleItems: ConversationSidebarItem[]
     previewItems: ConversationSidebarItem[]

@@ -200,11 +200,13 @@ export function useConversationSidebarFolders (
     })
 
     if (newConversationKeys.length > 0) {
-      // Find first non-pinned position to insert new conversations
-      const pinnedSet = new Set(pinnedIds.value.map(id => conversationKey(id)))
+      // Find first non-pinned position to insert new conversations. Pinned entries
+      // (conversations *or* folders) stay at the very top.
+      const pinnedRawSet = new Set(pinnedIds.value)
       let insertIndex = 0
       for (let i = 0; i < nextTopLevelOrder.length; i++) {
-        if (pinnedSet.has(nextTopLevelOrder[i])) {
+        const parsed = parseConversationKey(nextTopLevelOrder[i])
+        if (parsed && pinnedRawSet.has(parsed.id)) {
           insertIndex = i + 1
         } else {
           break
@@ -213,8 +215,9 @@ export function useConversationSidebarFolders (
       nextTopLevelOrder.splice(insertIndex, 0, ...newConversationKeys)
     }
 
-    // Clean up pinnedIds to only include valid conversation ids
-    const nextPinnedIds = pinnedIds.value.filter(id => validConversationIds.has(id))
+    // Keep pinned ids that still reference a live conversation or folder.
+    const validFolderIds = new Set(normalizedFolders.map(folder => folder.id))
+    const nextPinnedIds = pinnedIds.value.filter(id => validConversationIds.has(id) || validFolderIds.has(id))
 
     const previousLayout = JSON.stringify({
       folders: conversationFolders.value,
@@ -255,6 +258,7 @@ export function useConversationSidebarFolders (
 
   const conversationEntries = computed<ConversationSidebarEntry[]>(() => {
     const query = normalizeSearchValue(searchQuery.value)
+    const pinnedSet = new Set(pinnedIds.value)
     const folderEntries = new Map<string, ConversationSidebarEntry>()
 
     conversationFolders.value.forEach((folder) => {
@@ -269,6 +273,7 @@ export function useConversationSidebarFolders (
         folderEntries.set(folder.id, {
           kind: 'folder',
           folder,
+          isPinned: pinnedSet.has(folder.id),
           items,
           visibleItems,
           previewItems: items.slice(0, 3)
@@ -276,7 +281,6 @@ export function useConversationSidebarFolders (
       }
     })
 
-    const pinnedSet = new Set(pinnedIds.value)
     const entries: ConversationSidebarEntry[] = []
     const pinnedEntries: ConversationSidebarEntry[] = []
     const unpinnedEntries: ConversationSidebarEntry[] = []
@@ -288,28 +292,28 @@ export function useConversationSidebarFolders (
       if (parsedKey.type === 'conversation') {
         const item = conversationItemsById.value.get(parsedKey.id)
         if (!item || !matchesConversationQuery(item, query)) return
-        const entryItem = pinnedSet.has(item.id) ? { ...item, isPinned: true } : item
-        const entry: ConversationSidebarEntry = { kind: 'conversation', item: entryItem }
-        if (pinnedSet.has(item.id)) {
-          pinnedEntries.push(entry)
-        } else {
-          unpinnedEntries.push(entry)
+        const isPinned = pinnedSet.has(item.id)
+        const entry: ConversationSidebarEntry = {
+          kind: 'conversation',
+          item: isPinned ? { ...item, isPinned: true } : item
         }
+        if (isPinned) pinnedEntries.push(entry)
+        else unpinnedEntries.push(entry)
         return
       }
 
       const folderEntry = folderEntries.get(parsedKey.id)
-      if (folderEntry) {
-        unpinnedEntries.push(folderEntry)
-      }
+      if (!folderEntry) return
+      if (pinnedSet.has(parsedKey.id)) pinnedEntries.push(folderEntry)
+      else unpinnedEntries.push(folderEntry)
     })
 
-    // Pinned items first (in their pinned order), then unpinned items
+    // Pinned items first (in their pinned order), then unpinned items in layout order.
+    // Both conversations and folders can be pinned and are ordered by pinnedIds.
     const pinnedOrder = pinnedIds.value
-    pinnedEntries.sort((a, b) => {
-      if (a.kind !== 'conversation' || b.kind !== 'conversation') return 0
-      return pinnedOrder.indexOf(a.item.id) - pinnedOrder.indexOf(b.item.id)
-    })
+    const entryPinId = (entry: ConversationSidebarEntry) =>
+      entry.kind === 'conversation' ? entry.item.id : entry.folder.id
+    pinnedEntries.sort((a, b) => pinnedOrder.indexOf(entryPinId(a)) - pinnedOrder.indexOf(entryPinId(b)))
     entries.push(...pinnedEntries, ...unpinnedEntries)
 
     return entries
@@ -359,6 +363,25 @@ export function useConversationSidebarFolders (
     } else {
       pinConversation(conversationId)
     }
+  }
+
+  // Folders share the pinnedIds list (their ids are prefixed `folder_`, so they never
+  // collide with conversation ids). Pinning a folder floats the whole folder to the top.
+  function pinFolder (folderId: string) {
+    if (pinnedIds.value.includes(folderId)) return
+    pinnedIds.value = [...pinnedIds.value, folderId]
+    finalizeConversationLayout()
+  }
+
+  function unpinFolder (folderId: string) {
+    if (!pinnedIds.value.includes(folderId)) return
+    pinnedIds.value = pinnedIds.value.filter(id => id !== folderId)
+    finalizeConversationLayout()
+  }
+
+  function togglePinFolder (folderId: string) {
+    if (pinnedIds.value.includes(folderId)) unpinFolder(folderId)
+    else pinFolder(folderId)
   }
 
   function createEmptyFolder () {
@@ -762,6 +785,7 @@ export function useConversationSidebarFolders (
     pinConversation,
     unpinConversation,
     togglePinConversation,
+    togglePinFolder,
     onConversationDragStart,
     onFolderDragStart,
     onTopLevelDragOver,

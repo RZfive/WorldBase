@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import type {
   ImageLibraryEntry,
   ImageLibraryItem,
@@ -86,7 +86,9 @@ function setConcurrency (next: number) {
 const showTaskDropdown = ref(false)
 const activeTaskId = ref<string | null>(null)
 
-const libraryEntries = ref<ImageLibraryItem[]>([])
+// Library items are immutable display data replaced wholesale on each load, so a
+// shallowRef avoids Vue deep-converting thousands of objects into reactive proxies.
+const libraryEntries = shallowRef<ImageLibraryItem[]>([])
 const libraryLoading = ref(false)
 const folders = ref<ImageLibraryFolderCard[]>([])
 
@@ -106,9 +108,29 @@ const defaultTextModelValue = computed(() => textModelOptions.value[0]?.value ??
 const activeTaskCount = computed(() => tasks.value.filter(t => t.status === 'queued' || t.status === 'running').length)
 const folderNames = computed(() => folders.value.map(f => f.name))
 const activeTaskDetail = computed(() => tasks.value.find(t => t.id === activeTaskId.value) ?? null)
+
+// Most recent successful task that produced at least one image. Tasks are stored
+// newest-first, so find() returns the latest. We keep the whole task (not just its
+// first entry) so the workbench can switch between all generated images.
+const latestSuccessTask = computed<ImageStudioTask | null>(() => {
+  return tasks.value.find(t => t.status === 'success' && t.entries.length > 0) ?? null
+})
+const latestSuccessEntries = computed<ImageLibraryEntry[]>(() => latestSuccessTask.value?.entries ?? [])
+
+// Which of the latest task's images is shown in the large preview.
+const workbenchResultIndex = ref(0)
 const latestSuccessEntry = computed<ImageLibraryEntry | null>(() => {
-  const done = tasks.value.find(t => t.status === 'success' && t.entries.length > 0)
-  return done?.entries[0] ?? null
+  const entries = latestSuccessEntries.value
+  return entries[workbenchResultIndex.value] ?? entries[0] ?? null
+})
+
+// Reset the selection when a different task becomes the latest result, or when the
+// current selection falls out of range (e.g. an image was deleted).
+watch(() => latestSuccessTask.value?.id, () => {
+  workbenchResultIndex.value = 0
+})
+watch(() => latestSuccessEntries.value.length, (len) => {
+  if (workbenchResultIndex.value >= len) workbenchResultIndex.value = 0
 })
 
 const finalSize = computed<string | null>(() => {
@@ -735,13 +757,27 @@ onUnmounted(() => {
         <main class="studio-main studio-main-workbench">
           <div v-if="latestSuccessEntry" class="workbench-result">
             <div class="workbench-result-head">
-              <h3>最近完成</h3>
+              <h3>最近完成<span v-if="latestSuccessEntries.length > 1" class="workbench-result-count">{{ workbenchResultIndex + 1 }} / {{ latestSuccessEntries.length }}</span></h3>
               <div class="workbench-result-actions">
                 <button class="lib-like-btn" type="button" @click="handleSaveToFile(latestSuccessEntry!)">⤓ 保存到文件</button>
                 <button class="lib-like-btn" type="button" @click="handleUseAsInput(latestSuccessEntry!)">⇲ 作为编辑输入</button>
               </div>
             </div>
             <ImagePreview class="workbench-preview" :src="latestSuccessEntry.dataUrl" :alt="latestSuccessEntry.prompt" />
+            <!-- Thumbnail strip to switch between multiple generated images -->
+            <div v-if="latestSuccessEntries.length > 1" class="workbench-thumbs">
+              <button
+                v-for="(entry, i) in latestSuccessEntries"
+                :key="entry.id"
+                type="button"
+                class="workbench-thumb"
+                :class="{ active: i === workbenchResultIndex }"
+                :title="`第 ${i + 1} 张`"
+                @click="workbenchResultIndex = i"
+              >
+                <img :src="entry.dataUrl" alt="" />
+              </button>
+            </div>
           </div>
           <div v-else class="workbench-empty">
             <span class="workbench-empty-emoji">🖼️</span>
@@ -1162,6 +1198,12 @@ onUnmounted(() => {
 }
 
 .workbench-result-head h3 { margin: 0; font-size: 0.92rem; color: var(--app-text-strong); }
+.workbench-result-count {
+  margin-left: 8px;
+  font-size: 0.8em;
+  font-weight: 500;
+  color: var(--app-text-muted);
+}
 .workbench-result-actions { display: flex; gap: 8px; }
 
 .lib-like-btn {
@@ -1178,6 +1220,31 @@ onUnmounted(() => {
 .lib-like-btn:hover { background: var(--app-accent-soft); color: var(--app-text-strong); }
 
 .workbench-preview { flex: 1; min-height: 0; }
+
+/* Thumbnail strip below the preview for switching between multiple generated images */
+.workbench-thumbs {
+  flex-shrink: 0;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.workbench-thumb {
+  width: 60px;
+  height: 60px;
+  padding: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  background: var(--app-panel-subtle);
+  cursor: pointer;
+  transition: border-color 0.12s ease;
+}
+
+.workbench-thumb:hover { border-color: var(--app-accent-glow); }
+.workbench-thumb.active { border-color: var(--app-accent); }
+.workbench-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 .workbench-empty {
   flex: 1;
