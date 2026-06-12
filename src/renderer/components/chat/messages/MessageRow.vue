@@ -63,10 +63,6 @@ function getMessageAuthor (): string {
   return props.msg.role === 'assistant' ? (props.msg.speakerName || 'The World AI') : '你'
 }
 
-function getAvatarLabel (): string {
-  return props.msg.role === 'assistant' ? (props.msg.speakerName || 'AI') : '你'
-}
-
 function getModelLabel (): string {
   return props.msg.modelLabel || 'The World AI'
 }
@@ -82,13 +78,13 @@ const messageText = computed(() => getMessageText())
 </script>
 
 <template>
-  <div class="message-row" :class="[props.msg.role, { 'named-assistant': props.msg.role === 'assistant' && Boolean(props.msg.speakerName) }]">
-    <div v-if="props.msg.role === 'assistant'" class="message-avatar assistant-avatar" :class="{ named: Boolean(props.msg.speakerName) }">{{ getAvatarLabel() }}</div>
-
+  <article class="message-row" :class="props.msg.role">
     <div class="message-column" :class="props.msg.role">
       <div class="message-meta" :class="props.msg.role">
+        <span class="message-role-label" :class="props.msg.role">{{ props.msg.role === 'assistant' ? 'Agent' : '用户' }}</span>
         <span class="message-author">{{ getMessageAuthor() }}</span>
         <span v-if="props.msg.role === 'assistant'" class="message-model-chip">{{ getModelLabel() }}</span>
+        <span v-else class="message-user-avatar" aria-hidden="true">你</span>
       </div>
 
       <div class="message-flow" :class="props.msg.role">
@@ -177,159 +173,115 @@ const messageText = computed(() => getMessageText())
         </template>
       </div>
     </div>
-
-    <div v-if="props.msg.role === 'user'" class="message-avatar user-avatar">{{ getAvatarLabel() }}</div>
-  </div>
+  </article>
 </template>
 
 <style scoped>
 .message-row {
-  --message-dual-avatar-footprint: var(--chat-dual-avatar-footprint, 108px);
-  display: flex;
-  align-items: flex-end;
-  gap: var(--chat-avatar-gap, 14px);
-  width: min(100%, var(--chat-message-track-max, 1480px));
+  box-sizing: border-box;
+  width: min(100%, var(--chat-message-track-max, 1180px));
   margin: 0 auto;
-}
-
-.message-row.named-assistant {
-  --assistant-name-avatar-width: 72px;
-  --assistant-name-avatar-footprint: calc(var(--assistant-name-avatar-width) + var(--chat-avatar-gap, 14px));
-  --message-dual-avatar-footprint: calc(var(--assistant-name-avatar-footprint) + var(--chat-avatar-footprint, 54px));
+  padding: 0 0 24px;
 }
 
 .message-row.user {
+  display: flex;
   justify-content: flex-end;
 }
 
-.message-row.assistant {
-  justify-content: flex-start;
-}
-
-.message-avatar {
-  width: var(--chat-avatar-size, 40px);
-  height: var(--chat-avatar-size, 40px);
-  border-radius: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  font-size: 0.82rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.12);
-}
-
-.message-avatar.named {
-  width: var(--assistant-name-avatar-width, 72px);
-  min-height: var(--chat-avatar-size, 40px);
-  height: auto;
-  padding: 6px 8px;
-  border-radius: 14px;
-  font-size: 0.62rem;
-  line-height: 1.15;
-  letter-spacing: 0;
-  text-align: center;
-  white-space: normal;
-  word-break: break-word;
-}
-
-.assistant-avatar {
-  background: linear-gradient(135deg, var(--app-accent), #7aa7ff);
-  color: #ffffff;
-}
-
-.user-avatar {
-  background: linear-gradient(135deg, #22c55e, #16a34a);
-  color: #ffffff;
-}
-
 .message-column {
-  width: min(var(--chat-message-column-max, 1120px), calc(100% - var(--message-dual-avatar-footprint)));
-  max-width: calc(100% - var(--message-dual-avatar-footprint));
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
 .message-column.user {
-  align-items: flex-end;
-}
-
-.message-column.assistant {
-  align-items: flex-start;
+  width: min(78%, var(--chat-user-message-max, 820px));
+  margin-left: auto;
 }
 
 .message-flow {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  align-items: stretch;
+  gap: 12px;
 }
 
 .message-flow.user {
   align-items: flex-end;
 }
 
-.message-flow.assistant {
-  align-items: flex-start;
-}
-
 .message-meta {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 20px;
+  min-height: 24px;
+  color: var(--app-text-muted);
 }
 
 .message-meta.user {
   justify-content: flex-end;
 }
 
+.message-role-label {
+  display: inline-flex;
+  align-items: center;
+  min-width: 44px;
+  color: var(--app-accent-strong);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.message-role-label.user {
+  color: var(--app-text-muted);
+}
+
 .message-author {
-  font-size: 0.84rem;
-  font-weight: 600;
+  font-size: 0.82rem;
+  font-weight: 700;
   color: var(--app-text-strong);
 }
 
 .message-model-chip {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
+  padding: 2px 8px;
   border-radius: 999px;
-  border: 1px solid var(--app-border-strong);
-  background: var(--app-panel-strong);
+  border: 1px solid var(--app-border);
+  background: transparent;
   color: var(--app-text-muted);
+  font-size: 0.72rem;
+}
+
+.message-user-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  background: color-mix(in srgb, #10b981 86%, var(--app-accent));
+  color: #ffffff;
   font-size: 0.76rem;
+  font-weight: 800;
+  line-height: 1;
 }
 
 @media (max-width: 860px) {
   .message-row {
     width: 100%;
-    gap: 10px;
+    padding-bottom: 22px;
   }
 
-  .message-row.named-assistant {
-    --assistant-name-avatar-width: 60px;
-    --message-dual-avatar-footprint: 106px;
-  }
-
-  .message-avatar {
-    width: 36px;
-    height: 36px;
-  }
-
-  .message-avatar.named {
-    width: var(--assistant-name-avatar-width, 60px);
-    min-height: 36px;
-    padding: 5px 6px;
-    font-size: 0.58rem;
-  }
-
-  .message-column {
-    width: min(100%, calc(100% - var(--message-dual-avatar-footprint, 46px)));
-    max-width: calc(100% - var(--message-dual-avatar-footprint, 46px));
+  .message-column.user {
+    width: min(100%, var(--chat-user-message-max, 820px));
   }
 }
 </style>

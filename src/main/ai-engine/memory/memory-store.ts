@@ -335,6 +335,17 @@ export class MemoryStore {
     return this.search({ scopes: [{ scopeType, scopeId }], limit })
   }
 
+  listAll (limit = 5000): MemoryEntry[] {
+    const cappedLimit = Math.max(1, Math.min(50000, limit))
+    const rows = this.db.prepare(`
+      SELECT *
+      FROM memory_entries
+      ORDER BY pinned DESC, importance DESC, confidence DESC, COALESCE(last_used_at, updated_at) DESC
+      LIMIT ?
+    `).all(cappedLimit)
+    return rows.map(mapRowToMemoryEntry)
+  }
+
   touch (id: string, usedAt = new Date().toISOString()): boolean {
     const result = this.db.prepare('UPDATE memory_entries SET last_used_at = ?, updated_at = ? WHERE id = ?').run(usedAt, usedAt, id)
     return result.changes > 0

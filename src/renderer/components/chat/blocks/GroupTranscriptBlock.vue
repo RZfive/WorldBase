@@ -33,12 +33,6 @@ const rounds = computed(() => {
     .map(([round, entries]) => ({ round, entries }))
 })
 
-function getAgentAvatar (name: string): string {
-  const trimmed = name.trim()
-  if (!trimmed) return 'AI'
-  return trimmed.length <= 2 ? trimmed : trimmed.slice(0, 2)
-}
-
 function toggleExpanded (): void {
   if (!canExpand.value) return
   expanded.value = !expanded.value
@@ -46,7 +40,7 @@ function toggleExpanded (): void {
 </script>
 
 <template>
-  <div class="message-event-card group-transcript-card">
+  <section class="group-transcript-card">
     <div class="group-transcript-header">
       <div class="group-transcript-header-main">
         <span class="group-transcript-label">Agent 协作摘要</span>
@@ -87,33 +81,22 @@ function toggleExpanded (): void {
           :key="entry.id"
           class="group-transcript-entry"
         >
-          <div class="group-transcript-entry-avatar">{{ getAgentAvatar(entry.agentName) }}</div>
-          <div class="group-transcript-entry-bubble">
-            <div class="group-transcript-entry-head">
-              <div class="group-transcript-entry-agent">{{ entry.agentName }}</div>
-              <span class="group-transcript-entry-round">第 {{ round.round }} 轮</span>
-            </div>
-            <div class="group-transcript-entry-body markdown-body" v-html="entry.html" />
+          <div class="group-transcript-entry-head">
+            <div class="group-transcript-entry-agent">{{ entry.agentName }}</div>
+            <span class="group-transcript-entry-round">第 {{ round.round }} 轮</span>
           </div>
+          <div class="group-transcript-entry-body markdown-body" v-html="entry.html" />
         </article>
       </section>
     </div>
-  </div>
+  </section>
 </template>
 
 <style scoped>
-.message-event-card {
-  width: min(100%, var(--chat-event-card-max, 1080px));
-  border: 1px solid var(--app-border-strong);
-  border-radius: 18px;
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
-  overflow: hidden;
-}
-
 .group-transcript-card {
-  padding: 14px 16px 16px;
-  border-color: color-mix(in srgb, var(--app-accent) 18%, var(--app-border-strong));
+  width: 100%;
+  padding: 2px 0 0;
+  color: var(--app-text);
 }
 
 .group-transcript-header {
@@ -130,17 +113,16 @@ function toggleExpanded (): void {
 .group-transcript-label {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--app-accent-soft);
   color: var(--app-accent-strong);
-  font-size: 0.74rem;
-  font-weight: 700;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .group-transcript-title {
-  margin: 10px 0 0;
-  font-size: 0.94rem;
+  margin: 6px 0 0;
+  font-size: 0.98rem;
   color: var(--app-text-strong);
 }
 
@@ -155,39 +137,35 @@ function toggleExpanded (): void {
 
 .group-transcript-toggle {
   flex-shrink: 0;
-  border: 1px solid var(--app-border-strong);
-  background: var(--app-panel-strong);
+  border: 1px solid var(--app-border);
+  background: transparent;
   color: var(--app-text);
   border-radius: 999px;
-  padding: 7px 12px;
+  padding: 5px 11px;
   cursor: pointer;
   font-size: 0.78rem;
 }
 
 .group-transcript-summary {
   margin-top: 12px;
-  padding: 12px 13px;
-  border-radius: 14px;
-  background: var(--app-panel-strong);
+  padding: 12px 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--app-accent) 20%, var(--app-border));
 }
 
 .group-transcript-request {
   margin-top: 12px;
-  padding: 12px 13px;
-  border-radius: 14px;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-panel-strong) 88%, white 12%);
+  padding: 12px 0 0;
+  border-top: 1px solid var(--app-border);
 }
 
 .group-transcript-request-label {
   display: inline-flex;
   align-items: center;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--app-accent) 12%, var(--app-panel));
   color: var(--app-accent-strong);
   font-size: 0.72rem;
-  font-weight: 700;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .group-transcript-request p {
@@ -218,36 +196,14 @@ function toggleExpanded (): void {
 }
 
 .group-transcript-entry {
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
-  gap: 10px;
-  align-items: flex-start;
-}
-
-.group-transcript-entry-avatar {
-  width: 40px;
-  height: 40px;
-  border-radius: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: color-mix(in srgb, var(--app-accent) 18%, var(--app-panel-strong));
-  color: var(--app-accent-strong);
-  font-size: 0.76rem;
-  font-weight: 800;
-}
-
-.group-transcript-entry-bubble {
-  padding: 12px 13px;
-  border-radius: 16px;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-panel) 68%, white 32%);
+  padding: 12px 0 0;
+  border-top: 1px solid var(--app-border);
 }
 
 .group-transcript-entry-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 10px;
   margin-bottom: 8px;
 }
@@ -260,9 +216,6 @@ function toggleExpanded (): void {
 
 .group-transcript-entry-round {
   flex-shrink: 0;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: var(--app-panel-strong);
   color: var(--app-text-muted);
   font-size: 0.7rem;
   font-weight: 700;
@@ -295,10 +248,6 @@ function toggleExpanded (): void {
 
   .group-transcript-toggle {
     width: 100%;
-  }
-
-  .group-transcript-entry {
-    grid-template-columns: 1fr;
   }
 }
 </style>

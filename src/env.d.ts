@@ -16,6 +16,7 @@ type ImageLibraryPage = import('./shared/image-studio-types.js').ImageLibraryPag
 type ImageLibraryQuery = import('./shared/image-studio-types.js').ImageLibraryQuery
 type ImageLibraryData = import('./shared/image-studio-types.js').ImageLibraryData
 type ImageLibraryFolderCard = import('./shared/image-studio-types.js').ImageLibraryFolderCard
+type MemoryCompactionResult = import('./shared/agent-workspace-types.js').MemoryCompactionResult
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -830,6 +831,7 @@ interface ElectronAPI {
   listMemory: (options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => Promise<MemoryEntry[]>
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
+  compactMemory: () => Promise<MemoryCompactionResult>
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   saveMarkdownToFile: (markdown: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   generateStudioImage: (req: ImageStudioGenerateRequest) => Promise<ImageStudioGenerateResponse>

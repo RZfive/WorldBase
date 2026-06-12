@@ -37,8 +37,8 @@ import {
 } from '../src/main/settings/scheduled-task-store.js'
 import { ChannelBindingStore } from '../src/main/im/channel-binding-store.js'
 import { MemoryStore } from '../src/main/ai-engine/memory/memory-store.js'
-import { MemoryEngine } from '../src/main/ai-engine/memory/memory-engine.js'
-import type { MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
+import { MemoryEngine, type MemoryCompactionPlan } from '../src/main/ai-engine/memory/memory-engine.js'
+import type { ChatMessage, MessageContent } from '../src/main/ai-engine/providers/openai-provider.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../src/main/ai-engine/agent/tools/office-utils.js'
 import { AsyncTaskManager } from '../src/main/ai-engine/agent/tools/async-task-manager.js'
 import { DocumentStore } from '../src/main/ai-engine/agent/tools/document-store.js'
@@ -50,7 +50,7 @@ import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.j
 import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
 import { ScheduledTaskService } from '../src/main/scheduler/scheduled-task-service.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
-import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupParticipant, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupParticipant, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { ActivePageAutomationContext, BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot, PageAutomationRendererRequest, PageAutomationRendererResult, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -61,6 +61,8 @@ const CRITICAL_USER_DATA_FILE_NAMES = ['settings.json']
 const DEFAULT_MAIN_WINDOW_MIN_WIDTH = 800
 const DEFAULT_MAIN_WINDOW_MIN_HEIGHT = 500
 const DEFAULT_WINDOW_EXPAND_ANIMATION_DURATION_MS = 240
+const MEMORY_AI_COMPACTION_CHUNK_SIZE = 80
+const MEMORY_AI_COMPACTION_TIMEOUT_MS = 180000
 
 app.setName(APP_DISPLAY_NAME)
 app.setAppUserModelId('com.theworld.app')
@@ -1241,6 +1243,213 @@ function parseGroupRoundCoordinatorPlan (input: {
   } catch {
     return fallbackPlan
   }
+}
+
+function sanitizeMemoryPlanIdList (value: unknown, allowedIds: Set<string>): string[] {
+  if (!Array.isArray(value)) return []
+  const result: string[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    const id = typeof item === 'string' ? item.trim() : ''
+    if (!id || !allowedIds.has(id) || seen.has(id)) continue
+    seen.add(id)
+    result.push(id)
+  }
+  return result
+}
+
+function sanitizeMemoryPlanText (value: unknown, maxChars: number): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (!normalized) return undefined
+  return normalized.length > maxChars ? normalized.slice(0, maxChars) : normalized
+}
+
+function sanitizeMemoryPlanTags (value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const result: string[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    const tag = typeof item === 'string' ? item.trim() : ''
+    if (!tag || seen.has(tag)) continue
+    seen.add(tag)
+    result.push(tag.slice(0, 40))
+    if (result.length >= 12) break
+  }
+  return result
+}
+
+function sanitizeMemoryPlanNumber (value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return Math.min(1, Math.max(0, value))
+}
+
+function parseMemoryCompactionPlan (rawText: string, chunkEntries: MemoryEntry[]): MemoryCompactionPlan {
+  const allowedIds = new Set(chunkEntries.map(entry => entry.id))
+  const jsonCandidate = extractJsonObjectCandidate(rawText)
+  if (!jsonCandidate) {
+    throw new Error('AI 未返回有效 JSON 整理方案')
+  }
+
+  const parsed = JSON.parse(jsonCandidate) as Record<string, unknown>
+  const deleteIds = sanitizeMemoryPlanIdList(parsed.deleteIds, allowedIds)
+  const mergeGroups: NonNullable<MemoryCompactionPlan['mergeGroups']> = []
+  const updates: NonNullable<MemoryCompactionPlan['updates']> = []
+
+  if (Array.isArray(parsed.mergeGroups)) {
+    for (const rawGroup of parsed.mergeGroups) {
+      if (!rawGroup || typeof rawGroup !== 'object') continue
+      const group = rawGroup as Record<string, unknown>
+      const ids = sanitizeMemoryPlanIdList(group.ids, allowedIds)
+      if (ids.length < 2) continue
+      const targetId = typeof group.targetId === 'string' && allowedIds.has(group.targetId.trim())
+        ? group.targetId.trim()
+        : undefined
+      mergeGroups.push({
+        ids,
+        targetId,
+        title: sanitizeMemoryPlanText(group.title, 80),
+        summary: sanitizeMemoryPlanText(group.summary, 420),
+        details: sanitizeMemoryPlanText(group.details, 1200),
+        tags: sanitizeMemoryPlanTags(group.tags)
+      })
+    }
+  }
+
+  if (Array.isArray(parsed.updates)) {
+    for (const rawUpdate of parsed.updates) {
+      if (!rawUpdate || typeof rawUpdate !== 'object') continue
+      const update = rawUpdate as Record<string, unknown>
+      const id = typeof update.id === 'string' ? update.id.trim() : ''
+      if (!id || !allowedIds.has(id)) continue
+      updates.push({
+        id,
+        title: sanitizeMemoryPlanText(update.title, 80),
+        summary: sanitizeMemoryPlanText(update.summary, 420),
+        details: sanitizeMemoryPlanText(update.details, 1200),
+        tags: sanitizeMemoryPlanTags(update.tags),
+        importance: sanitizeMemoryPlanNumber(update.importance),
+        confidence: sanitizeMemoryPlanNumber(update.confidence)
+      })
+    }
+  }
+
+  return { deleteIds, mergeGroups, updates }
+}
+
+function mergeMemoryCompactionPlans (plans: MemoryCompactionPlan[]): MemoryCompactionPlan {
+  return {
+    deleteIds: Array.from(new Set(plans.flatMap(plan => plan.deleteIds || []))),
+    mergeGroups: plans.flatMap(plan => plan.mergeGroups || []),
+    updates: plans.flatMap(plan => plan.updates || [])
+  }
+}
+
+function serializeMemoryEntryForAi (entry: MemoryEntry): Record<string, unknown> {
+  return {
+    id: entry.id,
+    scope: `${entry.scopeType}/${entry.scopeId}`,
+    type: entry.memoryType,
+    pinned: entry.pinned,
+    title: truncateSectionText(entry.title, 90),
+    summary: truncateSectionText(entry.summary, 240),
+    details: entry.details ? truncateSectionText(entry.details, 320) : undefined,
+    tags: entry.tags.slice(0, 10),
+    importance: Number(entry.importance.toFixed(2)),
+    confidence: Number(entry.confidence.toFixed(2)),
+    lastUsedAt: entry.lastUsedAt,
+    updatedAt: entry.updatedAt
+  }
+}
+
+function sortMemoryEntriesForAiCompaction (entries: MemoryEntry[]): MemoryEntry[] {
+  return [...entries].sort((left, right) => {
+    const leftGroup = `${left.scopeType}/${left.scopeId}/${left.memoryType}`
+    const rightGroup = `${right.scopeType}/${right.scopeId}/${right.memoryType}`
+    if (leftGroup !== rightGroup) return leftGroup.localeCompare(rightGroup)
+    return `${left.title} ${left.summary}`.localeCompare(`${right.title} ${right.summary}`)
+  })
+}
+
+function chunkMemoryEntriesForAiCompaction (entries: MemoryEntry[]): MemoryEntry[][] {
+  const sorted = sortMemoryEntriesForAiCompaction(entries)
+  const chunks: MemoryEntry[][] = []
+  let current: MemoryEntry[] = []
+  let currentGroup = ''
+
+  for (const entry of sorted) {
+    const group = `${entry.scopeType}/${entry.scopeId}/${entry.memoryType}`
+    if (current.length > 0 && (current.length >= MEMORY_AI_COMPACTION_CHUNK_SIZE || group !== currentGroup)) {
+      chunks.push(current)
+      current = []
+    }
+    currentGroup = group
+    current.push(entry)
+  }
+
+  if (current.length > 0) chunks.push(current)
+  return chunks
+}
+
+function createMemoryCompactionProvider (): OpenAIProvider {
+  const providerConfig = resolveProviderConfig()
+  if (!providerConfig?.apiKey || !providerConfig.baseUrl || !providerConfig.model) {
+    throw new Error('当前 AI 供应商未配置完整，无法执行 AI 记忆整理')
+  }
+
+  const provider = new OpenAIProvider()
+  provider.setApiKey(providerConfig.apiKey)
+  provider.setBaseUrl(providerConfig.baseUrl)
+  provider.setModel(providerConfig.model)
+  provider.setEnableThinking(false)
+  provider.setTemperature(0.1)
+  if (providerConfig.contextWindow) {
+    provider.setContextWindow(providerConfig.contextWindow)
+  }
+  return provider
+}
+
+async function requestMemoryCompactionPlanChunk (provider: OpenAIProvider, entries: MemoryEntry[], index: number, total: number): Promise<MemoryCompactionPlan> {
+  const messages: ChatMessage[] = [
+    {
+      role: 'system',
+      content: [
+        '你是 The World 的长期记忆整理器。你的任务是压缩整理用户、Agent、项目和频道记忆。',
+        '只允许基于输入 JSON 中的记忆做判断，不得编造新事实，不得引用输入外的 ID。',
+        '删除标准：空壳内容、Markdown 标题/表格碎片、无复用价值碎片、明显过时或与软件工程/当前 Agent 工作无关的知识。',
+        '合并标准：同一 scope 且同一 type 下语义重复或高度近似的记忆。跨 scope 或跨 type 不要合并。',
+        '置顶 pinned=true 的记忆不得放入 deleteIds；如果参与合并，优先作为 targetId。',
+        'updates 用来改写仍有价值但表达松散的记忆，让 title/summary 更短、更准确。',
+        '输出严格 JSON，不要 Markdown，不要解释。格式：',
+        '{"deleteIds":["id"],"mergeGroups":[{"ids":["id1","id2"],"targetId":"id1","title":"短标题","summary":"合并后的完整事实","details":"可选详情","tags":["tag"]}],"updates":[{"id":"id","title":"短标题","summary":"整理后的事实","details":"可选详情","tags":["tag"],"importance":0.8,"confidence":0.8}]}'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        `这是第 ${index + 1}/${total} 批记忆。请整理这一批。`,
+        JSON.stringify(entries.map(serializeMemoryEntryForAi), null, 2)
+      ].join('\n\n')
+    }
+  ]
+
+  const response = await provider.chatCompletion(messages, [], undefined, { timeoutMs: MEMORY_AI_COMPACTION_TIMEOUT_MS })
+  const text = getMessageText(response.content)
+  return parseMemoryCompactionPlan(text, entries)
+}
+
+async function buildMemoryCompactionPlanWithAi (entries: MemoryEntry[]): Promise<MemoryCompactionPlan> {
+  if (entries.length === 0) return { deleteIds: [], mergeGroups: [], updates: [] }
+
+  const provider = createMemoryCompactionProvider()
+  const chunks = chunkMemoryEntriesForAiCompaction(entries)
+  const plans: MemoryCompactionPlan[] = []
+
+  for (let index = 0; index < chunks.length; index++) {
+    plans.push(await requestMemoryCompactionPlanChunk(provider, chunks[index], index, chunks.length))
+  }
+
+  return mergeMemoryCompactionPlans(plans)
 }
 
 function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: string): ParsedGroupRouting {
@@ -3261,6 +3470,12 @@ function setupIPC (): void {
 
   ipcMain.handle('memory:delete', async (_event: IpcMainInvokeEvent, id: string) => {
     return memoryEngine!.deleteMemory(id)
+  })
+
+  ipcMain.handle('memory:compact', async (): Promise<MemoryCompactionResult> => {
+    const entries = memoryStore!.listAll(50000)
+    const plan = await buildMemoryCompactionPlanWithAi(entries)
+    return memoryEngine!.compactMemory(plan)
   })
 
   ipcMain.handle('media:saveImage', async (event: IpcMainInvokeEvent, imageUrl: string, defaultName?: string) => {

@@ -31,7 +31,7 @@ function getParticipantKey (agentId: string, index: number): string {
 </script>
 
 <template>
-  <div class="message-event-card collaboration-plan-card">
+  <section class="collaboration-plan-card">
     <div class="collaboration-plan-header">
       <div class="collaboration-plan-header-main">
         <span class="collaboration-plan-label">协作计划</span>
@@ -91,22 +91,14 @@ function getParticipantKey (agentId: string, index: number): string {
         <p v-else class="collaboration-plan-empty">暂未扩群，先由 {{ plan.planner.agentName }} 判断是否需要其他成员加入。</p>
       </section>
     </div>
-  </div>
+  </section>
 </template>
 
 <style scoped>
-.message-event-card {
-  width: min(100%, var(--chat-event-card-max, 1080px));
-  border: 1px solid var(--app-border-strong);
-  border-radius: 18px;
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
-  overflow: hidden;
-}
-
 .collaboration-plan-card {
-  padding: 14px 16px 16px;
-  border-color: color-mix(in srgb, var(--app-accent) 24%, var(--app-border-strong));
+  width: 100%;
+  padding: 2px 0 0;
+  color: var(--app-text);
 }
 
 .collaboration-plan-header-main {
@@ -116,17 +108,16 @@ function getParticipantKey (agentId: string, index: number): string {
 .collaboration-plan-label {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--app-accent) 12%, var(--app-panel-strong));
   color: var(--app-accent-strong);
-  font-size: 0.74rem;
-  font-weight: 700;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .collaboration-plan-title {
-  margin: 10px 0 0;
-  font-size: 0.94rem;
+  margin: 6px 0 0;
+  font-size: 0.98rem;
   color: var(--app-text-strong);
 }
 
@@ -141,9 +132,8 @@ function getParticipantKey (agentId: string, index: number): string {
 
 .collaboration-plan-reason {
   margin-top: 12px;
-  padding: 12px 13px;
-  border-radius: 14px;
-  background: var(--app-panel-strong);
+  padding: 12px 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--app-accent) 20%, var(--app-border));
 }
 
 .collaboration-plan-requests {
@@ -154,14 +144,12 @@ function getParticipantKey (agentId: string, index: number): string {
 }
 
 .collaboration-plan-request-card {
-  padding: 12px 13px;
-  border-radius: 14px;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-panel) 70%, white 30%);
+  padding: 12px 0 0;
+  border-top: 1px solid var(--app-border);
 }
 
 .collaboration-plan-request-card.normalized {
-  border-color: color-mix(in srgb, #0ea5e9 20%, var(--app-border));
+  border-top-color: color-mix(in srgb, #0ea5e9 20%, var(--app-border));
 }
 
 .collaboration-plan-request-title,
@@ -179,10 +167,8 @@ function getParticipantKey (agentId: string, index: number): string {
 }
 
 .collaboration-plan-section {
-  padding: 12px 13px;
-  border-radius: 14px;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-panel-strong) 88%, white 12%);
+  padding: 12px 0 0;
+  border-top: 1px solid var(--app-border);
 }
 
 .collaboration-plan-chip-list {
@@ -195,12 +181,12 @@ function getParticipantKey (agentId: string, index: number): string {
 .collaboration-plan-chip {
   display: inline-flex;
   align-items: center;
-  padding: 6px 10px;
+  padding: 3px 9px;
   border-radius: 999px;
   font-size: 0.74rem;
   font-weight: 700;
   border: 1px solid var(--app-border);
-  background: var(--app-panel-strong);
+  background: transparent;
   color: var(--app-text);
 }
 

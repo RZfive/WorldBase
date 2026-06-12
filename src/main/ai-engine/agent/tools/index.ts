@@ -160,21 +160,15 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     tools.push(toolInteractCurrentPage(services))
   }
 
-  // Register spawn_subagents plus a compatibility alias only when a subagent
-  // service is available. Nested spawning depth is capped inside AIEngine.
+  // Register the canonical spawn_subagents tool only when a subagent service is
+  // available. Legacy tool-name aliases are resolved inside AgentCore so they
+  // remain compatible without being exposed to the model as real tools.
   if (services.subagentService) {
     const subagentService = services.subagentService
-    tools.push(
-      toolSpawnSubagents(
-        () => subagentService,
-        getAbortSignal
-      ),
-      toolSpawnSubagents(
-        () => subagentService,
-        getAbortSignal,
-        'spawn_subagentstasks'
-      )
-    )
+    tools.push(toolSpawnSubagents(
+      () => subagentService,
+      getAbortSignal
+    ))
   }
 
   // Register document tools if store is available

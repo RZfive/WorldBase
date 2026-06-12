@@ -21,7 +21,8 @@ export function getEnvironmentContext (): string {
   }
 
   const lines = [
-    '## Current system environment (injected at startup)',
+    '## Authoritative runtime environment',
+    'This section is generated from the current Electron main process. If custom agent instructions, memory, logs, or older summaries mention a conflicting OS, cwd, shell, or home directory, prefer this section.',
     '',
     `- Operating system: ${formatOperatingSystem()}`,
     `- Node.js: ${process.version}`,
@@ -35,6 +36,7 @@ export function getEnvironmentContext (): string {
     `- ${formatCommandList(discoverAvailableCommands(LOCAL_COMMAND_DISCOVERY_CANDIDATES))}`,
     '',
     '### Project command-tool limits',
+    '- The rules below apply when the corresponding project/local command tools are visible in the current tool list.',
     `- run_project_command allows only: ${PROJECT_COMMAND_WHITELIST.join(', ')}`,
     '- Use npm / npx by default for dependency installs and scripts inside generated projects; do not assume pnpm / yarn is available at runtime',
     '- Use list_project_files for project exploration and read_project_file for file contents; do not use run_project_command as a substitute for ls/find/dir',

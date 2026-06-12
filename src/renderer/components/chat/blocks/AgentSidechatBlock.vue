@@ -27,7 +27,7 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
 </script>
 
 <template>
-  <div class="message-event-card sidechat-card" :class="session.status">
+  <section class="sidechat-card" :class="session.status">
     <div class="sidechat-header">
       <div class="sidechat-copy">
         <span class="sidechat-label">Agent 单聊</span>
@@ -43,13 +43,13 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
     </div>
 
     <div class="sidechat-body">
-      <section class="sidechat-bubble initiator">
-        <div class="sidechat-bubble-title">{{ session.initiatedByName }}</div>
+      <section class="sidechat-entry initiator">
+        <div class="sidechat-entry-title">{{ session.initiatedByName }}</div>
         <div class="markdown-body" v-html="requestHtml" />
       </section>
 
-      <section class="sidechat-bubble agent">
-        <div class="sidechat-bubble-title">{{ session.agentName }}</div>
+      <section class="sidechat-entry agent">
+        <div class="sidechat-entry-title">{{ session.agentName }}</div>
         <div class="markdown-body" v-html="responseHtml" />
       </section>
     </div>
@@ -60,26 +60,18 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
       </div>
       <div v-if="session.error" class="sidechat-error">{{ session.error }}</div>
     </div>
-  </div>
+  </section>
 </template>
 
 <style scoped>
-.message-event-card {
-  width: min(100%, var(--chat-event-card-max, 1080px));
-  border: 1px solid var(--app-border-strong);
-  border-radius: 18px;
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
-  overflow: hidden;
-}
-
 .sidechat-card {
-  padding: 14px 16px 16px;
-  border-color: color-mix(in srgb, var(--app-accent) 20%, var(--app-border-strong));
+  width: 100%;
+  padding: 2px 0 0;
+  color: var(--app-text);
 }
 
 .sidechat-card.failed {
-  border-color: color-mix(in srgb, #ef4444 24%, var(--app-border-strong));
+  color: var(--app-text);
 }
 
 .sidechat-header {
@@ -96,17 +88,16 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
 .sidechat-label {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--app-accent) 12%, var(--app-panel-strong));
   color: var(--app-accent-strong);
-  font-size: 0.74rem;
-  font-weight: 700;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .sidechat-title {
-  margin: 10px 0 0;
-  font-size: 0.94rem;
+  margin: 6px 0 0;
+  font-size: 0.98rem;
   color: var(--app-text-strong);
 }
 
@@ -121,12 +112,12 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
 
 .sidechat-status {
   flex-shrink: 0;
-  padding: 6px 10px;
+  padding: 3px 9px;
   border-radius: 999px;
   border: 1px solid var(--app-border);
-  background: var(--app-panel-strong);
+  background: transparent;
   color: var(--app-text-muted);
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   font-weight: 700;
 }
 
@@ -145,21 +136,19 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
 .sidechat-body {
   margin-top: 12px;
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
-.sidechat-bubble {
-  padding: 12px 13px;
-  border-radius: 16px;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-panel) 70%, white 30%);
+.sidechat-entry {
+  padding: 12px 0 0;
+  border-top: 1px solid var(--app-border);
 }
 
-.sidechat-bubble.agent {
-  background: color-mix(in srgb, var(--app-accent-soft) 28%, var(--app-panel));
+.sidechat-entry.agent {
+  border-top-color: color-mix(in srgb, var(--app-accent) 20%, var(--app-border));
 }
 
-.sidechat-bubble-title {
+.sidechat-entry-title {
   margin-bottom: 8px;
   font-size: 0.78rem;
   font-weight: 700;
@@ -175,9 +164,9 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
 
 .sidechat-progress-chip,
 .sidechat-error {
-  padding: 6px 10px;
+  padding: 3px 9px;
   border-radius: 999px;
-  background: var(--app-panel-strong);
+  background: transparent;
   border: 1px solid var(--app-border);
   font-size: 0.74rem;
   color: var(--app-text-muted);
