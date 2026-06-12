@@ -48,7 +48,7 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
 </script>
 
 <template>
-  <div class="message-event-card group-progress-card">
+  <section class="group-progress-card">
     <div class="group-progress-header">
       <div class="group-progress-header-main">
         <span class="group-progress-label">子 Agent 进度</span>
@@ -103,22 +103,14 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
         <div v-if="item.progress.length > 0" class="group-progress-recent">{{ getRecentProgressText(item) }}</div>
       </article>
     </div>
-  </div>
+  </section>
 </template>
 
 <style scoped>
-.message-event-card {
-  width: min(100%, var(--chat-event-card-max, 1080px));
-  border: 1px solid var(--app-border-strong);
-  border-radius: 18px;
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
-  overflow: hidden;
-}
-
 .group-progress-card {
-  padding: 14px 16px 16px;
-  border-color: color-mix(in srgb, #0ea5e9 22%, var(--app-border-strong));
+  width: 100%;
+  padding: 2px 0 0;
+  color: var(--app-text);
 }
 
 .group-progress-header {
@@ -135,17 +127,16 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
 .group-progress-label {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, #0ea5e9 12%, var(--app-panel-strong));
   color: #0369a1;
-  font-size: 0.74rem;
-  font-weight: 700;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .group-progress-title {
-  margin: 10px 0 0;
-  font-size: 0.94rem;
+  margin: 6px 0 0;
+  font-size: 0.98rem;
   color: var(--app-text-strong);
 }
 
@@ -167,21 +158,18 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
 
 .group-progress-request {
   margin-top: 12px;
-  padding: 12px 13px;
-  border-radius: 14px;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-panel-strong) 88%, white 12%);
+  padding: 12px 0 0;
+  border-top: 1px solid var(--app-border);
 }
 
 .group-progress-request-label {
   display: inline-flex;
   align-items: center;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, #0ea5e9 10%, var(--app-panel));
   color: #0369a1;
   font-size: 0.72rem;
-  font-weight: 700;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .group-progress-request p {
@@ -193,11 +181,11 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
 }
 
 .group-progress-counter {
-  padding: 6px 10px;
+  padding: 3px 9px;
   border-radius: 999px;
   font-size: 0.74rem;
   font-weight: 700;
-  background: var(--app-panel-strong);
+  background: transparent;
   border: 1px solid var(--app-border);
 }
 
@@ -219,31 +207,29 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
 
 .group-progress-list {
   margin-top: 14px;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
 }
 
 .group-progress-item {
-  padding: 13px;
-  border-radius: 15px;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-panel) 72%, white 28%);
+  padding: 13px 0;
+  border-top: 1px solid var(--app-border);
   display: flex;
   flex-direction: column;
   gap: 9px;
 }
 
 .group-progress-item.running {
-  border-color: color-mix(in srgb, #0ea5e9 28%, var(--app-border));
+  border-top-color: color-mix(in srgb, #0ea5e9 28%, var(--app-border));
 }
 
 .group-progress-item.failed {
-  border-color: color-mix(in srgb, #ef4444 28%, var(--app-border));
+  border-top-color: color-mix(in srgb, #ef4444 28%, var(--app-border));
 }
 
 .group-progress-item.completed {
-  border-color: color-mix(in srgb, #10b981 26%, var(--app-border));
+  border-top-color: color-mix(in srgb, #10b981 26%, var(--app-border));
 }
 
 .group-progress-item-top {
@@ -271,11 +257,11 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
 
 .group-progress-item-status {
   flex-shrink: 0;
-  padding: 4px 9px;
+  padding: 3px 9px;
   border-radius: 999px;
   font-size: 0.72rem;
   font-weight: 700;
-  background: var(--app-panel-strong);
+  background: transparent;
   border: 1px solid var(--app-border);
 }
 
@@ -298,7 +284,7 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
 .group-progress-track {
   height: 7px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--app-panel-strong) 88%, white 12%);
+  background: color-mix(in srgb, var(--app-border) 64%, transparent);
   overflow: hidden;
 }
 
@@ -333,10 +319,6 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
 
   .group-progress-counters {
     justify-content: flex-start;
-  }
-
-  .group-progress-list {
-    grid-template-columns: 1fr;
   }
 }
 </style>

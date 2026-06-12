@@ -184,7 +184,7 @@ onBeforeUnmount(() => {
 <template>
   <div
     ref="exportCaptureRef"
-    class="message-bubble"
+    class="message-output"
     :class="[props.role, { streaming: props.isStreamingBlock }]"
   >
     <template v-if="hasRenderableContent(props.block.content)">
@@ -269,31 +269,39 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.message-bubble {
-  width: min(100%, var(--chat-bubble-max, 1120px));
+.message-output {
+  width: 100%;
   max-width: 100%;
-  padding: 16px 18px;
-  border-radius: 22px;
-  border: 1px solid var(--app-border-strong);
-  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.08);
-}
-
-.message-bubble.assistant {
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  padding: 0;
   color: var(--app-text);
-  border-top-left-radius: 10px;
 }
 
-.message-bubble.user {
-  background: linear-gradient(180deg, var(--app-accent-soft), rgba(91, 140, 255, 0.12));
+.message-output.user {
+  width: fit-content;
+  max-width: min(100%, var(--chat-user-bubble-max, 640px));
+  margin-left: auto;
+  padding: 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  border-radius: 18px 18px 8px 18px;
+  background: color-mix(in srgb, var(--app-panel-strong) 88%, black 12%);
   color: var(--app-text-strong);
-  border-color: var(--app-accent-glow);
-  border-top-right-radius: 10px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.08);
 }
 
-.message-bubble.streaming {
-  border-color: var(--app-accent-glow);
-  box-shadow: 0 18px 40px rgba(91, 140, 255, 0.12);
+.message-output.streaming {
+  position: relative;
+}
+
+.message-output.streaming::before {
+  content: '';
+  position: absolute;
+  left: -14px;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--app-accent);
+  opacity: 0.72;
 }
 
 .message-placeholder {
@@ -345,7 +353,7 @@ onBeforeUnmount(() => {
 }
 
 .message-mermaid-card {
-  width: min(100%, calc(var(--chat-bubble-max, 1120px) - 24px));
+  width: 100%;
 }
 
 .message-image-card {
@@ -393,7 +401,7 @@ onBeforeUnmount(() => {
   transition: opacity 0.18s ease;
 }
 
-.message-bubble:hover .message-export-bar,
+.message-output:hover .message-export-bar,
 .message-export-bar:focus-within {
   opacity: 0.92;
 }
@@ -426,11 +434,11 @@ onBeforeUnmount(() => {
 }
 
 /* Markdown deep styles */
-.message-bubble :deep(p) { margin: 0.45em 0; }
-.message-bubble :deep(p:first-child) { margin-top: 0; }
-.message-bubble :deep(p:last-child) { margin-bottom: 0; }
+.message-output :deep(p) { margin: 0.45em 0; }
+.message-output :deep(p:first-child) { margin-top: 0; }
+.message-output :deep(p:last-child) { margin-bottom: 0; }
 
-.message-bubble :deep(pre) {
+.message-output :deep(pre) {
   background: var(--app-panel-strong);
   border: 1px solid var(--app-border-strong);
   border-radius: 12px;
@@ -441,90 +449,86 @@ onBeforeUnmount(() => {
   margin: 10px 0;
 }
 
-.message-bubble :deep(code) {
+.message-output :deep(code) {
   font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   font-size: 0.9em;
 }
 
-.message-bubble :deep(:not(pre) > code) {
+.message-output :deep(:not(pre) > code) {
   background: var(--app-panel-muted);
   padding: 2px 6px;
   border-radius: 6px;
   color: var(--app-accent-strong);
 }
 
-.message-bubble :deep(ul),
-.message-bubble :deep(ol) {
+.message-output :deep(ul),
+.message-output :deep(ol) {
   padding-left: 1.45em;
   margin: 0.45em 0;
 }
 
-.message-bubble :deep(li) { margin: 0.24em 0; }
+.message-output :deep(li) { margin: 0.24em 0; }
 
-.message-bubble :deep(h1),
-.message-bubble :deep(h2),
-.message-bubble :deep(h3),
-.message-bubble :deep(h4) {
+.message-output :deep(h1),
+.message-output :deep(h2),
+.message-output :deep(h3),
+.message-output :deep(h4) {
   margin: 0.65em 0 0.32em;
   line-height: 1.35;
 }
 
-.message-bubble :deep(h1) { font-size: 1.22em; }
-.message-bubble :deep(h2) { font-size: 1.12em; }
-.message-bubble :deep(h3) { font-size: 1.02em; }
+.message-output :deep(h1) { font-size: 1.22em; }
+.message-output :deep(h2) { font-size: 1.12em; }
+.message-output :deep(h3) { font-size: 1.02em; }
 
-.message-bubble :deep(blockquote) {
+.message-output :deep(blockquote) {
   border-left: 3px solid var(--app-accent);
   padding-left: 12px;
   color: var(--app-text-muted);
   margin: 0.55em 0;
 }
 
-.message-bubble :deep(table) {
+.message-output :deep(table) {
   border-collapse: collapse;
   width: 100%;
   margin: 0.55em 0;
   font-size: 0.9em;
 }
 
-.message-bubble :deep(th),
-.message-bubble :deep(td) {
+.message-output :deep(th),
+.message-output :deep(td) {
   border: 1px solid var(--app-border-strong);
   padding: 6px 10px;
   text-align: left;
 }
 
-.message-bubble :deep(th) {
+.message-output :deep(th) {
   background: var(--app-panel-muted);
   font-weight: 600;
 }
 
-.message-bubble :deep(a) {
+.message-output :deep(a) {
   color: var(--app-accent-strong);
   text-decoration: none;
 }
 
-.message-bubble :deep(a:hover) {
+.message-output :deep(a:hover) {
   text-decoration: underline;
 }
 
-.message-bubble :deep(hr) {
+.message-output :deep(hr) {
   border: none;
   border-top: 1px solid var(--app-border-strong);
   margin: 0.9em 0;
 }
 
-.message-bubble :deep(img) {
+.message-output :deep(img) {
   max-width: 100%;
   height: auto;
   border-radius: 12px;
 }
 
 @media (max-width: 860px) {
-  .message-bubble {
-    width: 100%;
-  }
-
   .message-mermaid-card {
     width: 100%;
   }

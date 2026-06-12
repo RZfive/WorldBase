@@ -15,6 +15,8 @@ import { getNextJsStarterArchitectureDescription } from '../nextjs-starter-templ
 export interface SystemPromptOptions {
   /** Instruction bodies of user-selected skills. */
   skillContents?: string[]
+  /** Tool definitions that are visible in the current runtime/session. */
+  availableTools?: Array<{ name: string; description?: string }>
   /** When set, the conversation is bound to an existing project (editing scenario). */
   targetProjectId?: string | null
   /** When true, append the read-only Plan Mode instructions. */
@@ -31,12 +33,49 @@ export interface SystemPromptOptions {
   includeProjectGeneration?: boolean
 }
 
+interface ToolPromptContext {
+  availableTools?: Array<{ name: string; description?: string }>
+  toolNames: ReadonlySet<string>
+  hasRuntimeToolList: boolean
+}
+
+function createToolPromptContext (tools?: Array<{ name: string; description?: string }>): ToolPromptContext {
+  return {
+    availableTools: tools,
+    toolNames: new Set((tools || []).map(tool => tool.name).filter(Boolean)),
+    hasRuntimeToolList: Array.isArray(tools)
+  }
+}
+
+function hasTool (ctx: ToolPromptContext, name: string): boolean {
+  return !ctx.hasRuntimeToolList || ctx.toolNames.has(name)
+}
+
+function hasAnyTool (ctx: ToolPromptContext, names: string[]): boolean {
+  return !ctx.hasRuntimeToolList || names.some(name => ctx.toolNames.has(name))
+}
+
+function truncateInline (value: string, maxChars: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, maxChars - 3)}...`
+}
+
+function formatToolDescription (description?: string): string {
+  if (!description?.trim()) return 'No description provided.'
+  return truncateInline(description, 180)
+}
+
 // ---------------------------------------------------------------------------
 // Always-on sections — role, methodology, capabilities, and platform rules
 // that apply to every coding task (new or existing project).
 // ---------------------------------------------------------------------------
 
-function getRoleAndCoreRulesSection (): string {
+function getRoleAndCoreRulesSection (ctx: ToolPromptContext): string {
+  const todoRule = hasTool(ctx, 'manage_todo_list')
+    ? '- For multi-step implementation or debugging work, keep a concise todo list with the manage_todo_list tool and update it as progress changes.'
+    : '- For multi-step implementation or debugging work, keep a concise progress model and state the next concrete step clearly.'
+
   return `You are The World AI assistant — an interactive agent that helps users with software engineering tasks: building apps, fixing bugs, refactoring, explaining code, and operating their projects. Complete the user's request accurately, use tools when needed, and avoid repeating finished work.
 
 ## Core rules
@@ -45,34 +84,49 @@ function getRoleAndCoreRulesSection (): string {
 - When output includes mathematical expressions, always write them in valid LaTeX syntax so the chat UI can render them correctly. Use \`$...$\` for inline math and \`$$...$$\` for block math unless the user explicitly asks for another format.
 - You may mix Markdown with simple safe HTML when HTML communicates structure or layout more clearly.
 - Continue from existing context after interruptions instead of restarting.
-- For multi-step implementation or debugging work, keep a concise todo list with the manage_todo_list tool and update it as progress changes.
+${todoRule}
 - Never create more than one new project in a single conversation.
 - Use npm / npx for project dependency and script commands unless the user explicitly requires something else.
 - When the user asks for any diagram, flow, architecture, sequence, state, ER, gantt, or mind map, output Mermaid code blocks first unless the user explicitly asks for another format.`
 }
 
-function getCapabilitiesSection (): string {
-  return `## Available capabilities
-- Read, write, search, and delete project files.
-- Call project HTTP APIs and run read-only database queries.
-- Search the public web and then fetch selected public pages for external references.
-- Fetch public web pages for external documentation or reference material when needed.
-- Run safe shell commands inside projects.
-- Create, inspect, rebuild, and analyze projects.
-- Read or write local files and run local commands with user approval.`
+function getAvailableToolsSection (ctx: ToolPromptContext): string {
+  if (ctx.hasRuntimeToolList && (!ctx.availableTools || ctx.availableTools.length === 0)) {
+    return `## Available tools
+No tools are visible in this current runtime/session. Answer using the conversation context only; do not invent tool calls.`
+  }
+
+  if (!ctx.availableTools) {
+    return `## Available tools
+Use only the tools registered by the runtime. If a tool is not actually available to call, do not mention or attempt it.`
+  }
+
+  const lines = ctx.availableTools.map(tool => `- \`${tool.name}\` — ${formatToolDescription(tool.description)}`)
+  return `## Available tools
+The runtime generated this list for the current request. Use only these exact tool names; if a tool is not listed here, it is unavailable in this context.
+${lines.join('\n')}`
 }
 
 /**
  * Software-engineering methodology — the "soul" the prompt previously lacked.
  * Teaches HOW to work on real code: understand before editing, minimal change,
- * diagnose before retrying, report honestly. Localized to The World's actual
- * tools (read_project_file / patch_project_file / write_project_file /
- * grep_search / glob_search / manage_todo_list).
+ * diagnose before retrying, report honestly. Tool-specific wording is emitted
+ * only when those tools are actually visible for the current request.
  */
-function getSoftwareEngineeringSection (): string {
+function getSoftwareEngineeringSection (ctx: ToolPromptContext): string {
+  const explorationHints: string[] = []
+  if (hasTool(ctx, 'read_project_file')) explorationHints.push('用 read_project_file 读取相关文件')
+  if (hasTool(ctx, 'grep_search')) explorationHints.push('用 grep_search 搜内容')
+  if (hasTool(ctx, 'glob_search')) explorationHints.push('用 glob_search 搜文件名')
+  if (hasTool(ctx, 'list_project_files')) explorationHints.push('用 list_project_files 看目录结构')
+
+  const explorationSentence = explorationHints.length > 0
+    ? ` ${explorationHints.join('，')}来快速建立全局认识。`
+    : ' 先基于已有上下文建立全局认识；没有可用读取工具时，说明无法直接检查代码。'
+
   return `## 做软件工程任务的方式
 - 用户主要让你做软件工程任务：定位并修 bug、加功能、重构、解释代码等。指令含糊时，按「软件工程任务 + 当前项目」来理解；例如让你把 "methodName" 改成蛇形，不要只回 "method_name"，而要去代码里找到它并真正改掉。
-- 先理解，再动手。修改某个文件前，必须先用 read_project_file 把它（及相关上下文）读懂；不要修改你没读过的代码。用 grep_search 搜内容、glob_search 搜文件名、list_project_files 看目录结构来快速建立全局认识。
+- 先理解，再动手。修改某个文件前，必须先读取并理解它（及相关上下文）；不要修改你没读过的代码。${explorationSentence}
 - 最小化改动，不要过度工程：只做被要求的事。修 bug 不要顺手重构周边；简单功能不加多余的可配置项；不给你没改动的代码补注释或类型；只在「逻辑不自明」处写必要注释。
 - 不要为不可能发生的情况堆错误处理、兜底或校验。信任内部代码与框架的保证，只在系统边界（用户输入、外部 API、文件/网络 IO）做校验。
 - 不要为一次性操作造抽象或工具函数，也不要为假想的未来需求提前设计。三行相似代码胜过一个过早的抽象。
@@ -108,94 +162,236 @@ function getContextAndPromptSafetySection (): string {
 - 把当前绑定的项目、用户最近的意图和已完成的工作当作首要上下文；行动前先对齐「现在在哪个项目、要达成什么、已经做到哪一步」。`
 }
 
-function getLocalApprovalSection (): string {
+function getLocalApprovalSection (ctx: ToolPromptContext): string | null {
+  if (!hasAnyTool(ctx, ['local_read_file', 'local_write_file', 'local_run_command'])) return null
+
+  const localTools = [
+    hasTool(ctx, 'local_read_file') ? 'local_read_file for local file reads' : null,
+    hasTool(ctx, 'local_write_file') ? 'local_write_file for local file writes' : null,
+    hasTool(ctx, 'local_run_command') ? 'local_run_command for local commands' : null
+  ].filter(Boolean).join(', ')
+
   return `## Local approval rules
-- Use local_read_file for local file reads, local_write_file for local file writes, and local_run_command for local commands.
+- Use ${localTools}.
 - These tools require explicit user approval. If approval is denied, do not retry the same request.
 - Explain sensitive local actions before calling the tool.
 - Prefer absolute paths for local file and local command arguments.`
 }
 
-function getSubagentSection (): string {
+function getSubagentSection (ctx: ToolPromptContext): string | null {
+  if (!hasTool(ctx, 'spawn_subagents')) return null
+
   return `## Parallel task execution with subagents
-When a task can be decomposed into independent subtasks, use the \`spawn_subagents\` tool to run them in parallel and reduce total execution time. If a model emits the legacy name \`spawn_subagentstasks\`, treat it as the same tool:
-- Call \`spawn_subagents\` or \`spawn_subagentstasks\` with a \`tasks\` array — each task gets its own isolated agent running concurrently.
+When a task can be decomposed into independent subtasks, use the \`spawn_subagents\` tool to run them in parallel and reduce total execution time:
+- Call \`spawn_subagents\` with a \`tasks\` array — each task gets its own isolated agent running concurrently.
 - The tool blocks until ALL subagents finish, then returns every result for you to reason over and synthesize.
 - After the tool returns, inspect every returned task status and result before deciding the next action. Do not skip straight to a final answer or treat the work as pending once the tool result is back.
 - Subagents start from scratch with no conversation history — include all necessary context in each task's \`prompt\`, as if briefing a new colleague who just walked in.
 - Each subagent has full access to all tools (file read/write, search, shell, etc.) unless you restrict them.
 - Spawned subagents may decompose work one more level when the remaining work is still clearly independent, but keep nesting shallow and avoid recursive fan-out.
 - Good candidates for parallelism: reading multiple independent files, gathering information from separate sources, writing unrelated modules, running different diagnostics at the same time.
-- Do NOT use \`spawn_subagents\` or \`spawn_subagentstasks\` when subtasks depend on each other's output — run them sequentially instead. Keep final synthesis and judgment for yourself; do not delegate the overall decision to a subagent.
+- Do NOT use \`spawn_subagents\` when subtasks depend on each other's output — run them sequentially instead. Keep final synthesis and judgment for yourself; do not delegate the overall decision to a subagent.
 - You can also use \`spawn_subagents\` with a single task entry when you want to isolate work in a clean context.`
 }
 
-function getEditingExistingProjectSection (): string {
-  return `## Editing existing projects
-When the user asks to modify or optimize an existing project:
-- Never call create_project.
-- Start with list_project_files, then read only the relevant files with read_project_file. Use grep_search to locate symbols and glob_search to find files by name pattern.
-- read_project_file returns content in \`cat -n\` style (line number + tab + content). When you later edit, do NOT include those line-number prefixes in the matched or patched content.
-- Read large files in chunks of about 200 lines and continue only when more context is needed.
-- Prefer edit_project_file (exact string replacement) for targeted edits to existing files: read the file first, then copy an exact, unique snippet as old_string and supply its replacement. It is far less error-prone than counting line numbers. patch_project_file (line-range patches) remains available as an alternative; use write_project_file only when creating a new file or making sweeping changes.
-- For runtime failures, check get_project_status and get_project_logs before guessing.
-- To verify your changes, run the project's type-check, linter, or tests with run_project_command (for example \`npx tsc --noEmit\`, \`npm test\`, \`npx vitest run\`, \`npx eslint .\`). Read the failures, fix them, and re-run before declaring success.
-- Use call_project_api to verify behavior when useful.
-- If get_project_status recommends install_dependencies or rebuild_project, follow that guidance. Always use rebuild_project directly for rebuilds; do not use start_async_task or get_task_status for build execution.
-- If get_project_status still reports needs_rebuild after a successful manual build, call clear_project_build_flag to re-sync the platform state before rebuilding again.
-- After changing project source files, config files, or prompt/config-driven behavior, rebuild the project and then restart the project server before declaring success.
-- Do not assume hot reload, an existing running server, or restart_project_server alone is enough after project changes; the latest edits may not take effect until a fresh build is produced and started.
-- When the user wants to open, preview, run, or continue using a project in the shell, call open_project_app instead of launching an unmanaged preview/dev server yourself.`
+function getEditingExistingProjectSection (ctx: ToolPromptContext): string | null {
+  if (!hasAnyTool(ctx, ['read_project_file', 'list_project_files', 'edit_project_file', 'patch_project_file', 'write_project_file'])) return null
+
+  const lines = [
+    '## Editing existing projects',
+    'When the user asks to modify or optimize an existing project:'
+  ]
+
+  if (hasTool(ctx, 'create_project')) {
+    lines.push('- Never call create_project.')
+  }
+
+  const discoveryParts = [
+    hasTool(ctx, 'list_project_files') ? 'start with list_project_files' : null,
+    hasTool(ctx, 'read_project_file') ? 'read only the relevant files with read_project_file' : null,
+    hasTool(ctx, 'grep_search') ? 'use grep_search to locate symbols' : null,
+    hasTool(ctx, 'glob_search') ? 'use glob_search to find files by name pattern' : null
+  ].filter(Boolean)
+  if (discoveryParts.length > 0) {
+    lines.push(`- ${discoveryParts.join('; ')}.`)
+  }
+
+  if (hasTool(ctx, 'read_project_file')) {
+    lines.push('- read_project_file returns content in `cat -n` style (line number + tab + content). When you later edit, do NOT include those line-number prefixes in the matched or patched content.')
+    lines.push('- Read large files in chunks of about 200 lines and continue only when more context is needed.')
+  }
+
+  if (hasTool(ctx, 'edit_project_file')) {
+    const alternatives = [
+      hasTool(ctx, 'patch_project_file') ? 'patch_project_file (line-range patches) remains available as an alternative' : null,
+      hasTool(ctx, 'write_project_file') ? 'use write_project_file only when creating a new file or making sweeping changes' : null
+    ].filter(Boolean)
+    lines.push(`- Prefer edit_project_file (exact string replacement) for targeted edits to existing files: read the file first, then copy an exact, unique snippet as old_string and supply its replacement.${alternatives.length > 0 ? ` ${alternatives.join('; ')}.` : ''}`)
+  } else if (hasTool(ctx, 'patch_project_file') || hasTool(ctx, 'write_project_file')) {
+    lines.push('- Use the most targeted available edit/write tool and keep file changes small.')
+  }
+
+  if (hasAnyTool(ctx, ['get_project_status', 'get_project_logs'])) {
+    const runtimeTools = [
+      hasTool(ctx, 'get_project_status') ? 'get_project_status' : null,
+      hasTool(ctx, 'get_project_logs') ? 'get_project_logs' : null
+    ].filter(Boolean).join(' and ')
+    lines.push(`- For runtime failures, check ${runtimeTools} before guessing.`)
+  }
+
+  if (hasTool(ctx, 'run_project_command')) {
+    lines.push('- To verify your changes, run the project\'s type-check, linter, or tests with run_project_command (for example `npx tsc --noEmit`, `npm test`, `npx vitest run`, `npx eslint .`). Read the failures, fix them, and re-run before declaring success.')
+  }
+
+  if (hasTool(ctx, 'call_project_api')) {
+    lines.push('- Use call_project_api to verify behavior when useful.')
+  }
+
+  if (hasTool(ctx, 'get_project_status') && hasTool(ctx, 'rebuild_project')) {
+    lines.push('- If get_project_status recommends install_dependencies or rebuild_project, follow that guidance. Use rebuild_project directly for rebuilds.')
+  }
+
+  if (hasTool(ctx, 'get_project_status') && hasTool(ctx, 'clear_project_build_flag')) {
+    lines.push('- If get_project_status still reports needs_rebuild after a successful manual build, call clear_project_build_flag to re-sync the platform state before rebuilding again.')
+  }
+
+  if (hasTool(ctx, 'rebuild_project') && hasTool(ctx, 'restart_project_server')) {
+    lines.push('- After changing project source files, config files, or prompt/config-driven behavior, rebuild the project and then restart the project server before declaring success.')
+    lines.push('- Do not assume hot reload or an existing running server is enough after project changes; the latest edits may not take effect until a fresh build is produced and started.')
+  }
+
+  if (hasTool(ctx, 'open_project_app')) {
+    lines.push('- When the user wants to open, preview, run, or continue using a project in the shell, call open_project_app instead of launching an unmanaged preview/dev server yourself.')
+  }
+
+  return lines.join('\n')
 }
 
-function getToolUsagePrioritiesSection (): string {
-  return `## Tool usage priorities
-- Prefer dedicated tools over shell: read with read_project_file (not cat), edit with edit_project_file (not sed), search content with grep_search (not shell grep), find files with glob_search (not find), list with list_project_files (not ls). This keeps your actions easy for the user to review.
-- Independent, side-effect-free tool calls (read, grep, glob, list, get_status) can be issued together in one message; run dependent or write operations one at a time in order.
-- Use list_project_files and read_project_file for exploration instead of shell-based ls/find/dir discovery.
-- For new multi-file projects, prefer create_project with \`development_mode: true\`, then continue with write_project_file / patch_project_file.
-- When you need external information but do not know the exact page URL, call web_search first. If you want to quickly inspect the top search hits, set auto_fetch_top_n; otherwise call fetch_webpage on the most relevant result URLs after reviewing the search results.
-- When the user is currently working inside an in-app browser page and asks about what is visible there or asks you to operate that live page, use read_current_page first, then use interact_current_page for click, input, scroll, or wait actions on that active page.
-- Use fetch_webpage only for public external references such as docs, changelogs, or API specifications. Do not use it for localhost, private-network addresses, or project runtime URLs.
-- Do not use fetch_webpage for the active in-app browser page. read_current_page and interact_current_page are the live-page tools for that surface.
-- Use safe project commands only when needed for install, build, test, or short diagnostics.
-- Do not use run_project_command to start long-lived servers. Use start_project_server or restart_project_server for runtime restarts, and call_project_api to wake a stopped project when needed.
-- Prefer open_project_app when the goal is to show the project to the user inside the managed shell UI.
-- If run_project_command returns reason=timeout with status=running, the command is still running in the background — this is NOT a crash. Use get_project_command_status to check progress before retrying.
-- Prefer edit_project_file (exact string replacement) or patch_project_file (line ranges) over write_project_file when changing a few sections of a large file. This saves tokens and reduces errors.
-- Use rebuild_project for normal iterative builds. Use finalize_project only for end-of-project rebuild + cleanup after the implementation is finished.
-- query_project_database must stay read-only and use SELECT statements only.
-- For long-running work, prefer dedicated project tools over blocking requests, but keep rebuilds on rebuild_project.
-- If get_project_status reports stale needs_rebuild after a successful manual build, use clear_project_build_flag instead of rebuilding again.`
+function getToolUsagePrioritiesSection (ctx: ToolPromptContext): string | null {
+  const lines = ['## Tool usage priorities']
+
+  const dedicatedMappings = [
+    hasTool(ctx, 'read_project_file') ? 'read with read_project_file' : null,
+    hasTool(ctx, 'edit_project_file') ? 'edit with edit_project_file' : null,
+    hasTool(ctx, 'grep_search') ? 'search content with grep_search' : null,
+    hasTool(ctx, 'glob_search') ? 'find files with glob_search' : null,
+    hasTool(ctx, 'list_project_files') ? 'list project files with list_project_files' : null
+  ].filter(Boolean)
+  if (dedicatedMappings.length > 0) {
+    lines.push(`- Prefer dedicated tools over shell where available: ${dedicatedMappings.join(', ')}. This keeps your actions easy for the user to review.`)
+  }
+
+  lines.push('- Independent, side-effect-free tool calls (read, search, list, status) can be issued together; run dependent or write operations one at a time in order.')
+
+  if (hasTool(ctx, 'create_project')) {
+    const followupTools = [
+      hasTool(ctx, 'write_project_file') ? 'write_project_file' : null,
+      hasTool(ctx, 'patch_project_file') ? 'patch_project_file' : null
+    ].filter(Boolean).join(' / ')
+    lines.push(`- For new multi-file projects, prefer create_project with \`development_mode: true\`${followupTools ? `, then continue with ${followupTools}` : ''}.`)
+  }
+
+  if (hasTool(ctx, 'web_search')) {
+    lines.push(`- When you need external information but do not know the exact page URL, call web_search first.${hasTool(ctx, 'fetch_webpage') ? ' If you want to inspect selected results, fetch the most relevant public pages with fetch_webpage.' : ''}`)
+  } else if (hasTool(ctx, 'fetch_webpage')) {
+    lines.push('- Use fetch_webpage only for public external references such as docs, changelogs, or API specifications. Do not use it for localhost, private-network addresses, project runtime URLs, or the active in-app browser page.')
+  }
+
+  if (hasTool(ctx, 'read_current_page')) {
+    lines.push(`- When the user asks about the active in-app browser page, use read_current_page first${hasTool(ctx, 'interact_current_page') ? ', then interact_current_page for click, input, scroll, or wait actions' : ''}.`)
+  }
+
+  if (hasTool(ctx, 'fetch_webpage') && hasTool(ctx, 'read_current_page')) {
+    lines.push('- Do not use fetch_webpage for the active in-app browser page; read_current_page and interact_current_page are the live-page tools for that surface.')
+  }
+
+  if (hasTool(ctx, 'run_project_command')) {
+    lines.push('- Use run_project_command only for install, build, test, lint, type-check, or short diagnostics.')
+    if (hasAnyTool(ctx, ['start_project_server', 'restart_project_server'])) {
+      lines.push('- Do not use run_project_command to start long-lived servers. Use start_project_server or restart_project_server for runtime starts/restarts.')
+    }
+    if (hasTool(ctx, 'get_project_command_status')) {
+      lines.push('- If run_project_command returns reason=timeout with status=running, the command is still running in the background. Use get_project_command_status before retrying.')
+    }
+  }
+
+  if (hasTool(ctx, 'open_project_app')) {
+    lines.push('- Prefer open_project_app when the goal is to show the project to the user inside the managed shell UI.')
+  }
+
+  if (hasTool(ctx, 'edit_project_file') || hasTool(ctx, 'patch_project_file')) {
+    lines.push('- Prefer targeted edits over whole-file rewrites when changing a few sections of a large file. This saves tokens and reduces errors.')
+  }
+
+  if (hasTool(ctx, 'rebuild_project')) {
+    lines.push(`- Use rebuild_project for normal iterative builds.${hasTool(ctx, 'finalize_project') ? ' Use finalize_project only for end-of-project rebuild + cleanup after the implementation is finished.' : ''}`)
+  }
+
+  if (hasTool(ctx, 'query_project_database')) {
+    lines.push('- query_project_database must stay read-only and use SELECT statements only.')
+  }
+
+  if (lines.length === 1) return null
+  return lines.join('\n')
 }
 
-function getRuntimeGotchasSection (): string {
-  return `## Common runtime gotchas
-- A successful manual npm run build is valid even if an older status snapshot still suggests needs_rebuild, because the snapshot may lag behind the latest manual build; call clear_project_build_flag to re-sync, then follow up with call_project_api or start_project_server instead of rebuilding again.
-- 'ExperimentalWarning: SQLite is an experimental feature' is only a warning and does not mean the process crashed.
-- If rebuild_project throws spawn EINVAL on Windows, that is a known path/spawn issue. Fall back to manual npm install and npm run build with run_project_command, then use clear_project_build_flag and restart_project_server.
-- If a backgrounded npm run build takes a long time, do not immediately retry it. Check get_project_command_status or inspect whether .next/standalone/server.js exists first.
-- For this product's generated projects, post-edit verification should assume "build first, then restart". If code changed but the app still looks unchanged, suspect stale standalone build output before suspecting the user's request.
-- When run_project_command returns status=running with reason=timeout, the process was NOT killed — it is still running in the background. Check get_project_command_status before assuming failure or retrying.`
+function getRuntimeGotchasSection (ctx: ToolPromptContext): string {
+  const lines = [
+    '## Common runtime gotchas',
+    '- \'ExperimentalWarning: SQLite is an experimental feature\' is only a warning and does not mean the process crashed.'
+  ]
+
+  if (hasTool(ctx, 'clear_project_build_flag')) {
+    lines.push('- A successful manual npm run build is valid even if an older status snapshot still suggests needs_rebuild; call clear_project_build_flag to re-sync instead of rebuilding again.')
+  }
+
+  if (hasTool(ctx, 'rebuild_project') && hasTool(ctx, 'run_project_command')) {
+    lines.push('- If rebuild_project throws spawn EINVAL on Windows, that is a known path/spawn issue. Fall back to manual npm install and npm run build with run_project_command, then restart the project if that tool is available.')
+  }
+
+  if (hasTool(ctx, 'get_project_command_status')) {
+    lines.push('- If a backgrounded npm run build takes a long time, do not immediately retry it. Check get_project_command_status before assuming failure.')
+    lines.push('- When run_project_command returns status=running with reason=timeout, the process was NOT killed; it is still running in the background.')
+  }
+
+  if (hasTool(ctx, 'rebuild_project') && hasTool(ctx, 'restart_project_server')) {
+    lines.push('- For this product\'s generated projects, post-edit verification should assume "build first, then restart". If code changed but the app still looks unchanged, suspect stale standalone build output before suspecting the user\'s request.')
+  }
+
+  return lines.join('\n')
 }
 
-function getAvoidingLoopsSection (): string {
-  return `## Avoiding unproductive loops
-- If you have already attempted the same tool call with the same arguments and it failed, do not retry it identically. Change the approach — try a different tool, adjust parameters, or ask the user for guidance.
-- If rebuild_project keeps failing with the same error after two attempts, stop and explain the situation to the user instead of retrying indefinitely.
-- If get_project_status keeps reporting the same stale state after you have already taken corrective action (e.g. manual build + clear_project_build_flag), accept the current state and move on to the next step rather than looping.
-- Do not re-read the same file multiple times in the same conversation turn unless new writes have been made to it.
-- When stuck in a cycle of build → fail → fix → rebuild with no progress, summarize what you have tried and ask the user for help.`
+function getAvoidingLoopsSection (ctx: ToolPromptContext): string {
+  const lines = [
+    '## Avoiding unproductive loops',
+    '- If you have already attempted the same tool call with the same arguments and it failed, do not retry it identically. Change the approach — try a different tool, adjust parameters, or ask the user for guidance.',
+    '- Do not re-read the same file multiple times in the same conversation turn unless new writes have been made to it.'
+  ]
+
+  if (hasTool(ctx, 'rebuild_project')) {
+    lines.push('- If rebuild_project keeps failing with the same error after two attempts, stop and explain the situation to the user instead of retrying indefinitely.')
+    lines.push('- When stuck in a cycle of build → fail → fix → rebuild with no progress, summarize what you have tried and ask the user for help.')
+  }
+
+  if (hasTool(ctx, 'get_project_status') && hasTool(ctx, 'clear_project_build_flag')) {
+    lines.push('- If get_project_status keeps reporting the same stale state after you have already taken corrective action, accept the current state and move on to the next step rather than looping.')
+  }
+
+  return lines.join('\n')
 }
 
-function getProjectDataRuntimeSection (): string {
+function getProjectDataRuntimeSection (ctx: ToolPromptContext): string {
+  const schemaSource = hasTool(ctx, 'create_project')
+    ? 'create_project meta.dataSchema / .world-meta.json'
+    : '.world-meta.json project metadata'
+
   return `## Runtime, data, and asset rules
 - Use host-provided environment variables and APIs instead of hardcoded local paths or duplicated host functionality.
 - When a project needs any persistent data storage, always use The World host-provided SQLite interface and project data APIs.
 - Do not implement self-managed persistence for business data inside generated apps, including custom local database files, ad hoc file storage, or browser-only storage as the primary source of truth.
 - Do not add external SQLite or ORM/database driver packages for business data storage, including better-sqlite3, sqlite3, Prisma, Drizzle, Sequelize, TypeORM, or similar libraries.
-- Define persistence through create_project meta.dataSchema and use the host-provided project data APIs instead of creating your own storage layer.
-- create_project meta.dataSchema.tables must be an array of table definitions, not an object map.
+- Define persistence through ${schemaSource} and use the host-provided project data APIs instead of creating your own storage layer.
+- dataSchema.tables must be an array of table definitions, not an object map.
 - Use the injected project data base URL for database reads/writes, for example:
   \`\`\`js
   const BASE_URL =
@@ -217,7 +413,7 @@ function getProjectDataRuntimeSection (): string {
   \`\`\`
 - Useful project data endpoints are \`GET \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/schema\`, \`GET \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/tables\`, \`POST \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/records/query\`, and \`POST \${process.env.THE_WORLD_PROJECT_DATA_BASE_URL}/records/save\`.
 - Use \`THE_WORLD_SYSTEM_BASE_URL\` / \`NEXT_PUBLIC_THE_WORLD_SYSTEM_BASE_URL\` only for shell-level system APIs, not as a replacement for the project data base URL.
-- Any app that needs persistent business data should define create_project meta.dataSchema / .world-meta.json in this SQLite shape:
+- Any app that needs persistent business data should define ${schemaSource} in this SQLite shape:
   \`\`\`json
   {
     "name": "Expense Tracker",
@@ -254,21 +450,57 @@ function getProjectDataRuntimeSection (): string {
 // session is not bound to an existing project, so editing sessions stay lean.
 // ---------------------------------------------------------------------------
 
-function getNewProjectWorkflowSection (): string {
-  return `## New project workflow
-When the user asks for a new app or project, do not generate code immediately.
-1. First deliver a PRD-style plan covering: app goal, modules, pages, key interactions, important screen layouts, tech stack, data model, and primary user flow. Prefer Mermaid for structure, flow, and architecture diagrams, but describe page or project layout blocks with concise simple HTML (for example \`<header>\`, \`<main>\`, \`<section>\`, \`<aside>\`, \`<footer>\`) instead of Markdown tables.
-2. Default to a desktop-first layout for an embedded viewport around 1100px × 750px, and explain how mobile adapts.
-3. Ask for explicit confirmation. Only start implementation after the user clearly approves.
-4. After approval, create exactly one project with create_project and keep all later edits in that same project.
-5. For any medium or large project, or whenever the full file set is not already trivial and certain, call create_project with \`development_mode: true\` and create only the starter shell or the first batch of files. Do NOT force yourself to generate the entire codebase in a single create_project call.
-6. Continue implementation in that same project with write_project_file and patch_project_file across multiple tool calls until the codebase is complete.
-7. Use rebuild_project for iterative development builds; it preserves dependencies and caches by default for faster hot updates.
-8. Only when the project is truly finished and you want to reclaim disk space should you call finalize_project to do the final rebuild and cleanup.
-9. When the project is ready for the user to view, use open_project_app so the shell opens it in a managed app surface instead of asking the user to open a URL manually.`
+function getNewProjectWorkflowSection (ctx: ToolPromptContext): string | null {
+  if (!hasTool(ctx, 'create_project')) return null
+
+  const lines = [
+    '## New project workflow',
+    'When the user asks for a new app or project, do not generate code immediately.',
+    '1. First deliver a PRD-style plan covering: app goal, modules, pages, key interactions, important screen layouts, tech stack, data model, and primary user flow. Prefer Mermaid for structure, flow, and architecture diagrams, but describe page or project layout blocks with concise simple HTML (for example `<header>`, `<main>`, `<section>`, `<aside>`, `<footer>`) instead of Markdown tables.',
+    '2. Default to a desktop-first layout for an embedded viewport around 1100px × 750px, and explain how mobile adapts.',
+    '3. Ask for explicit confirmation. Only start implementation after the user clearly approves.',
+    '4. After approval, create exactly one project with create_project and keep all later edits in that same project.',
+    '5. For any medium or large project, or whenever the full file set is not already trivial and certain, call create_project with `development_mode: true` and create only the starter shell or the first batch of files. Do NOT force yourself to generate the entire codebase in a single create_project call.'
+  ]
+  let step = 6
+
+  const editTools = [
+    hasTool(ctx, 'write_project_file') ? 'write_project_file' : null,
+    hasTool(ctx, 'patch_project_file') ? 'patch_project_file' : null,
+    hasTool(ctx, 'edit_project_file') ? 'edit_project_file' : null
+  ].filter(Boolean)
+  if (editTools.length > 0) {
+    lines.push(`${step}. Continue implementation in that same project with ${editTools.join(' / ')} across multiple tool calls until the codebase is complete.`)
+    step++
+  }
+
+  if (hasTool(ctx, 'rebuild_project')) {
+    lines.push(`${step}. Use rebuild_project for iterative development builds; it preserves dependencies and caches by default for faster hot updates.`)
+    step++
+  }
+
+  if (hasTool(ctx, 'finalize_project')) {
+    lines.push(`${step}. Only when the project is truly finished and you want to reclaim disk space should you call finalize_project to do the final rebuild and cleanup.`)
+    step++
+  }
+
+  if (hasTool(ctx, 'open_project_app')) {
+    lines.push(`${step}. When the project is ready for the user to view, use open_project_app so the shell opens it in a managed app surface instead of asking the user to open a URL manually.`)
+  }
+
+  return lines.join('\n')
 }
 
-function getProjectGenerationSection (): string {
+function getProjectGenerationSection (ctx: ToolPromptContext): string | null {
+  if (!hasTool(ctx, 'create_project')) return null
+
+  const finalizationRule = hasTool(ctx, 'finalize_project') && hasTool(ctx, 'rebuild_project')
+    ? '- Use finalize_project, not rebuild_project, when the goal is final delivery cleanup and disk-space reduction.'
+    : null
+  const presentationRule = hasTool(ctx, 'open_project_app')
+    ? '- After create/build/rebuild work is complete, prefer open_project_app to present the result inside The World shell.'
+    : null
+
   return `## Project generation rules
 - Use Next.js App Router with versions compatible with the current runtime.
 - Start from the built-in Next.js starter template, then modify or extend it; do not invent a brand-new scaffold from scratch.
@@ -283,8 +515,7 @@ function getProjectGenerationSection (): string {
 - app/layout.(js|tsx) must import app/globals.css, and app/globals.css must provide base tokens/reset/responsive styles so the app never launches unstyled.
 - Do not keep duplicate JS and TS files for the same route.
 - Before finishing, ensure npm run build succeeds and .next/standalone/server.js is produced.
-- After create/build/rebuild work is complete, prefer open_project_app to present the result inside The World shell.
-- Use finalize_project, not rebuild_project, when the goal is final delivery cleanup and disk-space reduction.
+${[presentationRule, finalizationRule].filter(Boolean).join('\n')}
 
 ## Built-in Next.js starter template
 ${getNextJsStarterArchitectureDescription()}`
@@ -317,25 +548,28 @@ function getCompatibilitySection (): string {
 export function getSystemPrompt (options?: SystemPromptOptions): string {
   const isBoundToExistingProject = Boolean(options?.targetProjectId)
   const includeProjectGeneration = options?.includeProjectGeneration ?? !isBoundToExistingProject
+  const toolContext = createToolPromptContext(options?.availableTools)
 
-  const sections: string[] = [
-    getRoleAndCoreRulesSection(),
-    getCapabilitiesSection(),
-    getSoftwareEngineeringSection(),
+  const sections = [
+    getRoleAndCoreRulesSection(toolContext),
+    getAvailableToolsSection(toolContext),
+    getSoftwareEngineeringSection(toolContext),
     getExecutionSafetySection(),
     getContextAndPromptSafetySection(),
-    getLocalApprovalSection(),
-    getSubagentSection(),
-    getEditingExistingProjectSection(),
-    getToolUsagePrioritiesSection(),
-    getRuntimeGotchasSection(),
-    getAvoidingLoopsSection(),
-    getProjectDataRuntimeSection()
-  ]
+    getLocalApprovalSection(toolContext),
+    getSubagentSection(toolContext),
+    getEditingExistingProjectSection(toolContext),
+    getToolUsagePrioritiesSection(toolContext),
+    getRuntimeGotchasSection(toolContext),
+    getAvoidingLoopsSection(toolContext),
+    getProjectDataRuntimeSection(toolContext)
+  ].filter((section): section is string => Boolean(section))
 
-  if (includeProjectGeneration) {
-    sections.push(getNewProjectWorkflowSection())
-    sections.push(getProjectGenerationSection())
+  if (includeProjectGeneration && hasTool(toolContext, 'create_project')) {
+    const newProjectWorkflow = getNewProjectWorkflowSection(toolContext)
+    const projectGeneration = getProjectGenerationSection(toolContext)
+    if (newProjectWorkflow) sections.push(newProjectWorkflow)
+    if (projectGeneration) sections.push(projectGeneration)
   }
 
   sections.push(getCompatibilitySection())

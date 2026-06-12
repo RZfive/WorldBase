@@ -352,15 +352,11 @@ watch(
 }
 
 .chat-panel {
-  --chat-message-gutter: clamp(18px, 2.4vw, 40px);
-  --chat-message-track-max: 1480px;
-  --chat-message-column-max: 1120px;
-  --chat-event-card-max: 1080px;
-  --chat-bubble-max: 1120px;
-  --chat-avatar-size: 40px;
-  --chat-avatar-gap: 14px;
-  --chat-avatar-footprint: calc(var(--chat-avatar-size) + var(--chat-avatar-gap));
-  --chat-dual-avatar-footprint: calc(var(--chat-avatar-footprint) * 2);
+  --chat-message-gutter: clamp(22px, 4.8vw, 72px);
+  --chat-message-track-max: 1180px;
+  --chat-user-message-max: 820px;
+  --chat-user-bubble-max: 640px;
+  --chat-event-card-max: 100%;
   display: flex;
   flex-direction: row;
   flex: 1;

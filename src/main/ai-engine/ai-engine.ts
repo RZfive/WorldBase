@@ -140,7 +140,7 @@ function buildNestedSubagentPromptSection (nestingDepth: number, canSpawnMoreSub
   const lines = [
     '## Nested subagent execution',
     `- You are a spawned subagent at nesting depth ${nestingDepth}.`,
-    '- If you call `spawn_subagents` or the compatibility alias `spawn_subagentstasks`, those tools return only after every spawned task has finished or failed.',
+    '- If you call `spawn_subagents`, it returns only after every spawned task has finished or failed.',
     '- After the tool returns, read the returned task statuses and results before deciding whether to continue, retry, or answer. Do not skip directly to a final conclusion before the tool result arrives.'
   ]
 

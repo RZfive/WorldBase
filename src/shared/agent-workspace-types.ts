@@ -193,6 +193,20 @@ export interface MemorySearchScope {
   scopeId: string
 }
 
+export interface MemoryCompactionResult {
+  scanned: number
+  deleted: number
+  removedUseless: number
+  merged: number
+  updated: number
+  retained: number
+  groups: Array<{
+    targetId: string
+    mergedIds: string[]
+    title: string
+  }>
+}
+
 export interface MemoryPromptContext {
   sections: string[]
   entries: MemoryEntry[]

@@ -124,6 +124,9 @@ export class AgentCore {
     'web_search',
     'fetch_webpage'
   ])
+  private static readonly TOOL_ALIASES: ReadonlyMap<string, string> = new Map([
+    ['spawn_subagentstasks', 'spawn_subagents']
+  ])
   private provider: OpenAIProvider
   private services: Record<string, unknown>
   private tools = new Map<string, RegisteredTool>()
@@ -184,8 +187,8 @@ export class AgentCore {
   }
 
   setToolVisibilityFilters (allowedToolNames?: string[], deniedToolNames?: string[]): void {
-    this.allowedToolNames = new Set((allowedToolNames || []).map(name => name.trim()).filter(Boolean))
-    this.deniedToolNames = new Set((deniedToolNames || []).map(name => name.trim()).filter(Boolean))
+    this.allowedToolNames = new Set(this._normalizeToolNameCollection(allowedToolNames))
+    this.deniedToolNames = new Set(this._normalizeToolNameCollection(deniedToolNames))
   }
 
   /** Get the plan engine instance (used by plan mode tools). */
@@ -272,11 +275,28 @@ export class AgentCore {
   }
 
   private _isToolVisible (name: string): boolean {
-    if (this.allowedToolNames.size > 0 && !this.allowedToolNames.has(name)) {
+    const canonicalName = this._resolveToolName(name)
+    if (this.allowedToolNames.size > 0 && !this.allowedToolNames.has(canonicalName)) {
       return false
     }
 
-    return !this.deniedToolNames.has(name)
+    return !this.deniedToolNames.has(canonicalName)
+  }
+
+  private _resolveToolName (name: string): string {
+    return AgentCore.TOOL_ALIASES.get(name) || name
+  }
+
+  private _normalizeToolNameCollection (names?: string[]): string[] {
+    const seen = new Set<string>()
+    const result: string[] = []
+    for (const name of names || []) {
+      const normalized = this._resolveToolName(name.trim())
+      if (!normalized || seen.has(normalized)) continue
+      seen.add(normalized)
+      result.push(normalized)
+    }
+    return result
   }
 
   private _resolveFinalAssistantContent (assistantContent: ChatMessage['content'], renderedContent: string): ChatMessage['content'] {
@@ -684,10 +704,12 @@ export class AgentCore {
   async run (userMessages: ChatMessage[]): Promise<ChatMessage> {
     this._resetSessionState()
     this.currentAbortSignal = undefined
+    const toolDefs = this.getToolDefinitions()
     const systemMessage: ChatMessage = {
       role: 'system',
       content: getSystemPrompt({
         skillContents: this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined,
+        availableTools: toolDefs,
         targetProjectId: this.sessionState.targetProjectId,
         planModeActive: this.planEngine.active,
         systemPromptSections: this.systemPromptSections
@@ -696,7 +718,6 @@ export class AgentCore {
 
     try {
       let messages: ChatMessage[] = [systemMessage, ...userMessages]
-      const toolDefs = this.getToolDefinitions()
       const loopGuard = this._createLoopGuardState()
       let segmentIterations = 0
 
@@ -759,10 +780,12 @@ export class AgentCore {
   async * runStream (userMessages: ChatMessage[], onProgress?: ProgressCallback, abortSignal?: AbortSignal): AsyncGenerator<StreamEvent> {
     this._resetSessionState()
     this.currentAbortSignal = abortSignal
+    const toolDefs = this.getToolDefinitions()
     const systemMessage: ChatMessage = {
       role: 'system',
       content: getSystemPrompt({
         skillContents: this.activeSkillContents.length > 0 ? this.activeSkillContents : undefined,
+        availableTools: toolDefs,
         targetProjectId: this.sessionState.targetProjectId,
         planModeActive: this.planEngine.active,
         systemPromptSections: this.systemPromptSections
@@ -771,7 +794,6 @@ export class AgentCore {
 
     try {
       let messages: ChatMessage[] = [systemMessage, ...userMessages]
-      const toolDefs = this.getToolDefinitions()
       const loopGuard = this._createLoopGuardState()
       let segmentIterations = 0
       let renderedContent = ''
@@ -925,7 +947,7 @@ export class AgentCore {
 
   /** Whether a tool only reads state and can run concurrently with its peers. */
   private _isConcurrencySafeTool (name: string): boolean {
-    return AgentCore.CONCURRENCY_SAFE_TOOLS.has(name)
+    return AgentCore.CONCURRENCY_SAFE_TOOLS.has(this._resolveToolName(name))
   }
 
   /**
@@ -963,7 +985,7 @@ export class AgentCore {
     onProgress?: ProgressCallback,
     abortSignal?: AbortSignal
   ): Promise<{ execution: ToolExecutionRecord; message: ChatMessage }> {
-    const toolName = toolCall.function.name
+    const toolName = this._resolveToolName(toolCall.function.name)
 
     let result: unknown
     let toolArgs: Record<string, unknown> = { _raw: toolCall.function.arguments }
@@ -1003,28 +1025,30 @@ export class AgentCore {
    * Checks permissions first, then executes, then processes the result via ToolResultStorage.
    */
   async _executeTool (name: string, args: Record<string, unknown>, onProgress?: ProgressCallback): Promise<unknown> {
-    if (!this._isToolVisible(name)) {
+    const canonicalName = this._resolveToolName(name)
+
+    if (!this._isToolVisible(canonicalName)) {
       throw new Error(`Tool not available in current agent context: ${name}`)
     }
 
-    const tool = this.tools.get(name)
+    const tool = this.tools.get(canonicalName)
     if (!tool) {
       throw new Error(`Unknown tool: ${name}`)
     }
 
     // Plan mode check — block write tools
-    if (!this.planEngine.isToolAllowed(name)) {
-      return { error: `当前处于规划模式，不允许执行写入操作 (${name})。请先退出规划模式。` }
+    if (!this.planEngine.isToolAllowed(canonicalName)) {
+      return { error: `当前处于规划模式，不允许执行写入操作 (${canonicalName})。请先退出规划模式。` }
     }
 
     // Permission check
-    const permission = await this.permissionEngine.check(name, args)
+    const permission = await this.permissionEngine.check(canonicalName, args)
     if (!permission.allowed) {
-      console.log(`[Agent] Tool ${name} denied: ${permission.reason}`)
+      console.log(`[Agent] Tool ${canonicalName} denied: ${permission.reason}`)
       return { error: `Permission denied: ${permission.reason}` }
     }
 
-    console.log(`[Agent] Executing tool: ${name}`, args)
+    console.log(`[Agent] Executing tool: ${canonicalName}`, args)
     const result = await tool.handler(args, onProgress)
     console.log(`[Agent] Tool result:`, typeof result === 'string' ? result.substring(0, 200) : result)
 

@@ -25,6 +25,7 @@ const agentTools = ref<ToolCatalogEntry[]>([])
 const memoryQuery = ref('')
 const memoryScopeType = ref<AgentMemoryScope>('user')
 const memoryScopeId = ref('')
+const memoryCompacting = ref(false)
 const statusMessage = ref('')
 let providerChangeCleanup: (() => void) | null = null
 let skillsChangeCleanup: (() => void) | null = null
@@ -476,6 +477,23 @@ async function removeMemory (entry: MemoryEntry) {
   await loadMemory()
 }
 
+async function compactMemory () {
+  if (!window.electronAPI?.compactMemory || memoryCompacting.value) return
+  if (!window.confirm('AI 将读取当前所有记忆，生成删除、合并和改写方案；置顶记忆不会被自动删除。是否继续？')) return
+
+  memoryCompacting.value = true
+  setStatus('正在调用 AI 整理记忆...')
+  try {
+    const result = await window.electronAPI.compactMemory()
+    await loadMemory()
+    setStatus(`AI 记忆整理完成：扫描 ${result.scanned} 条，删除无用 ${result.removedUseless} 条，合并重复 ${result.merged} 条，更新 ${result.updated} 条，保留 ${result.retained} 条`)
+  } catch (err) {
+    setStatus(`AI 记忆整理失败：${(err as Error).message}`)
+  } finally {
+    memoryCompacting.value = false
+  }
+}
+
 onMounted(() => {
   void loadAll()
 
@@ -850,6 +868,9 @@ watch(activeTab, (nextTab, previousTab) => {
         </select>
         <input v-model="memoryScopeId" class="input" placeholder="留空查看全部，或输入 local-user / agent_xxx 等 scope id">
         <button class="primary-btn" @click="loadMemory">查询</button>
+        <button class="ghost-btn" :disabled="memoryCompacting" @click="compactMemory">
+          {{ memoryCompacting ? 'AI 整理中...' : 'AI 整理记忆' }}
+        </button>
       </div>
 
       <div class="memory-list">
@@ -930,6 +951,13 @@ watch(activeTab, (nextTab, previousTab) => {
   background: var(--app-accent-soft);
   border-color: var(--app-accent);
   color: var(--app-accent);
+}
+
+.tab-btn:disabled,
+.ghost-btn:disabled,
+.primary-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .ghost-btn.small {

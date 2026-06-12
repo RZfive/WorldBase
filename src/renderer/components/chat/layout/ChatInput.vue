@@ -846,9 +846,8 @@ function handleTextareaBlur () {
 
 <style scoped>
 .chat-input {
-  padding: 12px var(--chat-message-gutter, 24px) 16px;
-  border-top: 1px solid var(--app-border);
-  background: linear-gradient(180deg, transparent, var(--app-panel-subtle));
+  padding: 10px var(--chat-message-gutter, 24px) 18px;
+  background: transparent;
 }
 
 .chat-input > * {
@@ -860,10 +859,10 @@ function handleTextareaBlur () {
 .input-container {
   background: var(--app-input-bg);
   border: 1px solid var(--app-input-border);
-  border-radius: 12px;
+  border-radius: 24px;
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
   overflow: visible;
-  box-shadow: var(--app-shadow);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.12);
 }
 
 .input-container.focused {
