@@ -77,7 +77,9 @@ watch(
         dragging: isDragging,
         pinned: itemIsPinned,
         'conversation-item-nested': nested,
-        'conversation-item-compact': isCompactConversation
+        'conversation-item-compact': isCompactConversation,
+        'has-actions': showPin || showDelete,
+        'has-dual-actions': showPin && showDelete
       }
     ]"
     :draggable="draggable && !renaming"
@@ -160,6 +162,7 @@ watch(
   position: relative;
   box-sizing: border-box;
   width: 100%;
+  max-width: 100%;
   min-width: 0;
   display: flex;
   align-items: flex-start;
@@ -247,6 +250,15 @@ watch(
   background: color-mix(in srgb, var(--app-accent-soft) 30%, transparent);
 }
 
+.conversation-item-compact.drop-before::after {
+  top: 0;
+}
+
+.conversation-item-compact.drop-after::after,
+.conversation-item-compact.drop-merge::after {
+  bottom: 0;
+}
+
 .agent-item {
   background: color-mix(in srgb, var(--app-panel) 94%, var(--app-accent-soft) 6%);
 }
@@ -261,13 +273,15 @@ watch(
 
 .conversation-item-compact {
   align-items: center;
+  width: 100%;
+  max-width: 100%;
   min-height: 30px;
   padding: 3px 5px 3px 10px;
   border-color: transparent;
   border-radius: 7px;
   background: transparent;
   color: var(--app-text-soft);
-  overflow: visible;
+  overflow: hidden;
 }
 
 .conversation-item-compact:hover {
@@ -312,6 +326,9 @@ watch(
 .conversation-item-compact .conv-main {
   align-items: center;
   gap: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .conv-avatar-shell {
@@ -347,7 +364,10 @@ watch(
 
 .conversation-item-compact .conv-copy {
   flex: 1;
+  min-width: 0;
+  max-width: 100%;
   gap: 0;
+  overflow: hidden;
 }
 
 .conv-title-row {
@@ -358,18 +378,23 @@ watch(
 
 .conv-title-row-compact {
   min-width: 0;
+  max-width: 100%;
   width: 100%;
+  overflow: hidden;
 }
 
 .conv-title-stack {
   min-width: 0;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   gap: 0;
+  overflow: hidden;
 }
 
 .conv-title-row-compact .conv-title-stack {
   flex: 1;
+  min-width: 0;
 }
 
 .conv-icon {
@@ -385,6 +410,9 @@ watch(
 }
 
 .conv-title {
+  display: block;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -406,6 +434,7 @@ watch(
 }
 
 .conv-title-rename-input {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   height: 24px;
@@ -542,34 +571,35 @@ watch(
   color: var(--app-danger);
 }
 
-/*
- * Compact conversation rows let the title use the full width. The pin/delete
- * actions are lifted out of the layout into a frosted overlay that fades in
- * over the end of the text on hover, so the list reads longer and cleaner.
- */
 .conversation-item-compact .conv-actions {
-  position: absolute;
-  top: 50%;
-  right: 5px;
-  transform: translateY(-50%);
+  position: relative;
+  flex: 0 0 22px;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   gap: 1px;
-  padding-left: 26px;
+  margin-left: 4px;
   z-index: 2;
+  justify-content: flex-end;
   pointer-events: none;
+}
+
+.conversation-item-compact.has-dual-actions .conv-actions {
+  flex-basis: 42px;
+  width: 42px;
+  min-width: 42px;
 }
 
 .conversation-item-compact .conv-actions::before {
   content: '';
   position: absolute;
-  inset: -3px -4px;
+  inset: -3px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--app-panel) 38%, transparent);
   -webkit-backdrop-filter: blur(8px) saturate(118%);
   backdrop-filter: blur(8px) saturate(118%);
-  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px);
-  mask-image: linear-gradient(to right, transparent 0, #000 24px);
   opacity: 0;
   transform: scale(0.9);
   transform-origin: right center;
@@ -577,19 +607,27 @@ watch(
   pointer-events: none;
 }
 
-.conversation-item-compact:hover .conv-actions::before {
+.conversation-item-compact:hover .conv-actions::before,
+.conversation-item-compact.active .conv-actions::before,
+.conversation-item-compact:focus-within .conv-actions::before {
   opacity: 1;
   transform: scale(1);
 }
 
 .conversation-item-compact:hover .conv-pin,
-.conversation-item-compact:hover .conv-delete {
+.conversation-item-compact:hover .conv-delete,
+.conversation-item-compact.active .conv-pin,
+.conversation-item-compact.active .conv-delete,
+.conversation-item-compact:focus-within .conv-pin,
+.conversation-item-compact:focus-within .conv-delete {
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);
 }
 
-.conversation-item-compact:hover .conv-delete {
+.conversation-item-compact:hover .conv-delete,
+.conversation-item-compact.active .conv-delete,
+.conversation-item-compact:focus-within .conv-delete {
   max-width: 20px;
   transition-delay: 0.04s;
 }

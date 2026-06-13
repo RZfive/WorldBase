@@ -848,6 +848,7 @@ function handleTextareaBlur () {
 .chat-input {
   position: relative;
   z-index: 6;
+  margin-top: calc(-1 * var(--chat-input-overlap, 0px));
   padding: 10px var(--chat-message-gutter, 24px) 18px;
   background: transparent;
 }
@@ -861,13 +862,18 @@ function handleTextareaBlur () {
 }
 
 .input-container {
+  --chat-input-surface: #0a1018;
   position: relative;
-  background: var(--app-input-bg);
+  background: var(--chat-input-surface);
   border: 1px solid var(--app-input-border);
   border-radius: 24px;
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
   overflow: visible;
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.12);
+}
+
+:global(:root[data-theme='light']) .input-container {
+  --chat-input-surface: #ffffff;
 }
 
 .input-container.focused {
@@ -878,7 +884,7 @@ function handleTextareaBlur () {
 .input-container.dragging {
   border-color: var(--app-accent);
   box-shadow: 0 0 0 2px var(--app-accent-soft);
-  background: color-mix(in srgb, var(--app-accent-soft) 26%, var(--app-input-bg));
+  background: color-mix(in srgb, var(--app-accent) 8%, var(--chat-input-surface));
 }
 
 .input-container.busy {
@@ -889,7 +895,7 @@ function handleTextareaBlur () {
 .input-container.waitingAuth {
   border-color: rgba(245, 158, 11, 0.42);
   box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12), 0 18px 36px rgba(245, 158, 11, 0.12);
-  background: color-mix(in srgb, rgba(245, 158, 11, 0.08) 32%, var(--app-input-bg));
+  background: color-mix(in srgb, rgb(245, 158, 11) 6%, var(--chat-input-surface));
 }
 
 .image-preview-bar {

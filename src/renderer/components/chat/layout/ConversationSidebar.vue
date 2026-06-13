@@ -405,6 +405,7 @@ function cancelRenameConversation () {
 .conv-sidebar {
   box-sizing: border-box;
   width: 100%;
+  min-width: 0;
   background: var(--app-panel);
   border-right: 1px solid var(--app-border);
   display: flex;
@@ -523,6 +524,7 @@ function cancelRenameConversation () {
 
 .conv-list {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 8px 14px 12px 12px;
@@ -534,6 +536,8 @@ function cancelRenameConversation () {
   flex-direction: column;
   gap: 6px;
   margin-bottom: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .conv-section-toggle {
@@ -700,6 +704,8 @@ function cancelRenameConversation () {
   grid-template-rows: 1fr;
   transition: grid-template-rows 0.28s cubic-bezier(0.22, 1, 0.36, 1);
   overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .conv-section-body.collapsed {
@@ -708,7 +714,9 @@ function cancelRenameConversation () {
 
 .conv-section-body-inner {
   box-sizing: border-box;
+  min-width: 0;
   min-height: 0;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   gap: 4px;
