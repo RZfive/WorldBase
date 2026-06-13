@@ -50,7 +50,7 @@ import { MCPService, type MCPStateSnapshot } from '../src/main/mcp/mcp-service.j
 import type { MCPServerConfig } from '../src/main/settings/settings-store.js'
 import { ScheduledTaskService } from '../src/main/scheduler/scheduled-task-service.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
-import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupParticipant, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupParticipant, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { ActivePageAutomationContext, BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot, PageAutomationRendererRequest, PageAutomationRendererResult, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -117,6 +117,16 @@ let agentGroupStore: AgentGroupStore | null = null
 let channelBindingStore: ChannelBindingStore | null = null
 let memoryStore: MemoryStore | null = null
 let memoryEngine: MemoryEngine | null = null
+let activeMemoryCompactionPromise: Promise<MemoryCompactionResult> | null = null
+let memoryCompactionStatus: MemoryCompactionStatus = {
+  id: null,
+  status: 'idle',
+  stage: '空闲',
+  scanned: 0,
+  totalChunks: 0,
+  completedChunks: 0,
+  updatedAt: new Date().toISOString()
+}
 let scheduledTaskStore: ScheduledTaskStore | null = null
 let scheduledTaskService: ScheduledTaskService | null = null
 let documentStore: DocumentStore | null = null
@@ -535,6 +545,32 @@ function getAllUserMessageTexts (messages: Array<{ role: string; content: Messag
 
 function notifyAgentWorkspaceChanged (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }): void {
   broadcastToAppWindows('agentWorkspace:changed', event)
+}
+
+function cloneMemoryCompactionStatus (): MemoryCompactionStatus {
+  return {
+    ...memoryCompactionStatus,
+    result: memoryCompactionStatus.result
+      ? {
+          ...memoryCompactionStatus.result,
+          groups: memoryCompactionStatus.result.groups.map(group => ({
+            ...group,
+            mergedIds: [...group.mergedIds]
+          }))
+        }
+      : undefined
+  }
+}
+
+function updateMemoryCompactionStatus (patch: Partial<MemoryCompactionStatus>): MemoryCompactionStatus {
+  memoryCompactionStatus = {
+    ...memoryCompactionStatus,
+    ...patch,
+    updatedAt: new Date().toISOString()
+  }
+  const snapshot = cloneMemoryCompactionStatus()
+  broadcastToAppWindows('memory:compactionStatusChanged', snapshot)
+  return snapshot
 }
 
 function firstNonEmptyLine (value: string): string {
@@ -1438,18 +1474,118 @@ async function requestMemoryCompactionPlanChunk (provider: OpenAIProvider, entri
   return parseMemoryCompactionPlan(text, entries)
 }
 
-async function buildMemoryCompactionPlanWithAi (entries: MemoryEntry[]): Promise<MemoryCompactionPlan> {
+async function buildMemoryCompactionPlanWithAi (
+  entries: MemoryEntry[],
+  onProgress?: (progress: { stage: string; detail?: string; totalChunks: number; completedChunks: number }) => void
+): Promise<MemoryCompactionPlan> {
   if (entries.length === 0) return { deleteIds: [], mergeGroups: [], updates: [] }
 
   const provider = createMemoryCompactionProvider()
   const chunks = chunkMemoryEntriesForAiCompaction(entries)
   const plans: MemoryCompactionPlan[] = []
+  onProgress?.({
+    stage: '准备整理',
+    detail: `共 ${chunks.length} 批记忆`,
+    totalChunks: chunks.length,
+    completedChunks: 0
+  })
 
   for (let index = 0; index < chunks.length; index++) {
+    onProgress?.({
+      stage: 'AI 分析记忆',
+      detail: `正在整理第 ${index + 1}/${chunks.length} 批`,
+      totalChunks: chunks.length,
+      completedChunks: index
+    })
     plans.push(await requestMemoryCompactionPlanChunk(provider, chunks[index], index, chunks.length))
+    onProgress?.({
+      stage: 'AI 分析记忆',
+      detail: `已完成 ${index + 1}/${chunks.length} 批`,
+      totalChunks: chunks.length,
+      completedChunks: index + 1
+    })
   }
 
   return mergeMemoryCompactionPlans(plans)
+}
+
+async function runMemoryCompactionWithStatus (): Promise<MemoryCompactionResult> {
+  const taskId = randomUUID()
+  const startedAt = new Date().toISOString()
+  updateMemoryCompactionStatus({
+    id: taskId,
+    status: 'running',
+    stage: '扫描记忆',
+    detail: '正在读取当前所有记忆',
+    scanned: 0,
+    totalChunks: 0,
+    completedChunks: 0,
+    startedAt,
+    finishedAt: undefined,
+    result: undefined,
+    error: undefined
+  })
+
+  try {
+    const entries = memoryStore!.listAll(50000)
+    updateMemoryCompactionStatus({
+      id: taskId,
+      status: 'running',
+      stage: entries.length > 0 ? '准备整理' : '无需整理',
+      detail: entries.length > 0 ? `已扫描 ${entries.length} 条记忆` : '当前没有可整理的记忆',
+      scanned: entries.length,
+      totalChunks: entries.length > 0 ? memoryCompactionStatus.totalChunks : 0,
+      completedChunks: 0
+    })
+
+    const plan = await buildMemoryCompactionPlanWithAi(entries, (progress) => {
+      updateMemoryCompactionStatus({
+        id: taskId,
+        status: 'running',
+        stage: progress.stage,
+        detail: progress.detail,
+        scanned: entries.length,
+        totalChunks: progress.totalChunks,
+        completedChunks: progress.completedChunks
+      })
+    })
+
+    updateMemoryCompactionStatus({
+      id: taskId,
+      status: 'running',
+      stage: '应用整理结果',
+      detail: '正在删除、合并和更新记忆',
+      scanned: entries.length,
+      completedChunks: memoryCompactionStatus.totalChunks
+    })
+
+    const result = memoryEngine!.compactMemory(plan)
+    updateMemoryCompactionStatus({
+      id: taskId,
+      status: 'completed',
+      stage: '整理完成',
+      detail: `扫描 ${result.scanned} 条，删除 ${result.removedUseless} 条，合并 ${result.merged} 条，更新 ${result.updated} 条`,
+      scanned: result.scanned,
+      completedChunks: memoryCompactionStatus.totalChunks,
+      finishedAt: new Date().toISOString(),
+      result,
+      error: undefined
+    })
+    return result
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    updateMemoryCompactionStatus({
+      id: taskId,
+      status: 'failed',
+      stage: '整理失败',
+      detail: message,
+      finishedAt: new Date().toISOString(),
+      error: message
+    })
+    throw error
+  } finally {
+    activeMemoryCompactionPromise = null
+  }
 }
 
 function parseGroupRouting (group: AgentGroupDefinition, latestUserMessage: string): ParsedGroupRouting {
@@ -3473,9 +3609,13 @@ function setupIPC (): void {
   })
 
   ipcMain.handle('memory:compact', async (): Promise<MemoryCompactionResult> => {
-    const entries = memoryStore!.listAll(50000)
-    const plan = await buildMemoryCompactionPlanWithAi(entries)
-    return memoryEngine!.compactMemory(plan)
+    if (activeMemoryCompactionPromise) return activeMemoryCompactionPromise
+    activeMemoryCompactionPromise = runMemoryCompactionWithStatus()
+    return activeMemoryCompactionPromise
+  })
+
+  ipcMain.handle('memory:compactStatus', async (): Promise<MemoryCompactionStatus> => {
+    return cloneMemoryCompactionStatus()
   })
 
   ipcMain.handle('media:saveImage', async (event: IpcMainInvokeEvent, imageUrl: string, defaultName?: string) => {

@@ -25,6 +25,35 @@ function normalizeStringArray (value: unknown): string[] {
     .filter(Boolean)
 }
 
+function normalizeWeekdays (value: unknown): number[] {
+  if (!Array.isArray(value)) return []
+
+  const seen = new Set<number>()
+  const weekdays: number[] = []
+  for (const item of value) {
+    const weekday = Number(item)
+    if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7 || seen.has(weekday)) continue
+    seen.add(weekday)
+    weekdays.push(weekday)
+  }
+
+  return weekdays.sort((left, right) => left - right)
+}
+
+function normalizeTimeOfDay (value: unknown): string {
+  const raw = normalizeString(value)
+  const match = raw.match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) return ''
+
+  const hours = Number(match[1])
+  const minutes = Number(match[2])
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return ''
+  }
+
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`
+}
+
 function buildTitleFromPrompt (prompt: string): string {
   const flattened = prompt.replace(/\s+/g, ' ').trim()
   if (!flattened) return 'AI 定时任务'
@@ -47,6 +76,21 @@ function buildSchedule (args: Record<string, unknown>): ScheduledTaskSchedule {
     }
   }
 
+  if (kind === 'daily') {
+    return {
+      kind: 'daily',
+      timeOfDay: normalizeTimeOfDay(args.time_of_day)
+    }
+  }
+
+  if (kind === 'weekly') {
+    return {
+      kind: 'weekly',
+      weekdays: normalizeWeekdays(args.weekdays),
+      timeOfDay: normalizeTimeOfDay(args.time_of_day)
+    }
+  }
+
   return {
     kind: 'interval',
     everyMinutes: Number.isFinite(Number(args.every_minutes)) && Number(args.every_minutes) > 0
@@ -60,7 +104,7 @@ export function toolCreateScheduledTask (services: ToolServices): Tool {
   return {
     definition: {
       name: 'create_scheduled_task',
-      description: 'Create a persistent scheduled AI task. The task can run once, on a repeat interval, or on specific dates, and can be limited to selected MCP servers and Skills.',
+      description: 'Create a persistent scheduled AI task. The task can run once, repeat by minute interval, repeat daily or weekly at a local time, or run on specific dates. It can be limited to selected MCP servers and Skills.',
       parameters: {
         type: 'object',
         properties: {
@@ -78,8 +122,8 @@ export function toolCreateScheduledTask (services: ToolServices): Tool {
           },
           schedule_kind: {
             type: 'string',
-            enum: ['once', 'interval', 'dates'],
-            description: 'Scheduling mode: run once, repeat on interval, or run on specific dates.'
+            enum: ['once', 'interval', 'daily', 'weekly', 'dates'],
+            description: 'Scheduling mode: run once, repeat on minute interval, repeat every day, repeat every week, or run on specific dates.'
           },
           run_at: {
             type: 'string',
@@ -92,6 +136,18 @@ export function toolCreateScheduledTask (services: ToolServices): Tool {
           start_at: {
             type: 'string',
             description: 'Optional start time for interval tasks. If omitted, the first run starts immediately.'
+          },
+          time_of_day: {
+            type: 'string',
+            description: 'Required when schedule_kind=daily or weekly. Local time in HH:mm format, for example 09:30.'
+          },
+          weekdays: {
+            type: 'array',
+            description: 'Required when schedule_kind=weekly. ISO weekday numbers, where 1=Monday and 7=Sunday.',
+            items: {
+              type: 'integer',
+              enum: [1, 2, 3, 4, 5, 6, 7]
+            }
           },
           dates: {
             type: 'array',

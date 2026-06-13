@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import ProviderModelDropdown from './ProviderModelDropdown.vue'
 
 interface SkillItem {
   id: string
@@ -12,6 +13,12 @@ interface ChannelBindingOption {
   externalChannelId: string
 }
 
+interface ProviderItem {
+  id: string
+  name: string
+  models: string[]
+}
+
 const props = defineProps<{
   contextLabel: string
   contextDetail: string
@@ -20,10 +27,16 @@ const props = defineProps<{
   availableSkills: SkillItem[]
   activeSkillIds: Set<string>
   showSkillPicker: boolean
+  providers?: ProviderItem[]
+  activeProviderId?: string
+  selectedModel?: string
+  showProviderSelector?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'update:selected-channel-binding-id', channelBindingId: string): void
+  (e: 'update:active-provider-id', id: string): void
+  (e: 'update:selected-model', model: string): void
   (e: 'toggleSkillPicker'): void
   (e: 'selectAllSkills'): void
   (e: 'clearSkills'): void
@@ -43,7 +56,17 @@ const allSkillsSelected = computed(() => {
   <div class="chat-header">
     <div class="chat-header-copy">
       <h2>{{ contextLabel }}</h2>
-      <p>{{ contextDetail }}</p>
+      <div v-if="showProviderSelector && providers && providers.length > 0" class="header-model-picker">
+        <ProviderModelDropdown
+          :providers="providers"
+          :active-provider-id="activeProviderId"
+          :selected-model="selectedModel"
+          title="供应商 / 模型"
+          @update:active-provider-id="emit('update:active-provider-id', $event)"
+          @update:selected-model="emit('update:selected-model', $event)"
+        />
+      </div>
+      <p v-else>{{ contextDetail }}</p>
     </div>
     <div class="header-controls">
       <div v-if="availableChannelBindings.length > 0" class="channel-binding-selector">
@@ -110,6 +133,37 @@ const allSkillsSelected = computed(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.header-model-picker {
+  display: flex;
+  align-items: center;
+  margin-top: 3px;
+  min-width: 0;
+}
+
+.header-model-picker :deep(.provider-model-trigger) {
+  height: 24px;
+  max-width: min(420px, 48vw);
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--app-text-soft);
+  font-size: 0.82rem;
+  box-shadow: none;
+}
+
+.header-model-picker :deep(.provider-model-trigger:hover:not(:disabled)),
+.header-model-picker :deep(.provider-model-trigger.open),
+.header-model-picker :deep(.provider-model-trigger:focus) {
+  border: none;
+  background: transparent;
+  color: var(--app-text-strong);
+  box-shadow: none;
+}
+
+.header-model-picker :deep(.provider-model-value) {
+  max-width: 100%;
 }
 
 .header-controls {

@@ -85,6 +85,68 @@ function sortReports (reports: ScheduledTaskRunReport[]): ScheduledTaskRunReport
   return [...reports].sort((left, right) => right.startedAt.localeCompare(left.startedAt))
 }
 
+function parseTimeOfDay (value: string): { hours: number; minutes: number } | null {
+  const match = value.match(/^(\d{2}):(\d{2})$/)
+  if (!match) return null
+
+  const hours = Number(match[1])
+  const minutes = Number(match[2])
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return null
+  }
+
+  return { hours, minutes }
+}
+
+function toIsoWeekday (date: Date): number {
+  const weekday = date.getDay()
+  return weekday === 0 ? 7 : weekday
+}
+
+function buildLocalCandidateAtTime (reference: Date, dayOffset: number, time: { hours: number; minutes: number }): Date {
+  const candidate = new Date(reference)
+  candidate.setDate(reference.getDate() + dayOffset)
+  candidate.setHours(time.hours, time.minutes, 0, 0)
+  return candidate
+}
+
+function computeNextDailyRun (timeOfDay: string, referenceMs: number): string | null {
+  const time = parseTimeOfDay(timeOfDay)
+  if (!time || !Number.isFinite(referenceMs)) return null
+
+  const reference = new Date(referenceMs)
+  for (let dayOffset = 0; dayOffset <= 1; dayOffset += 1) {
+    const candidate = buildLocalCandidateAtTime(reference, dayOffset, time)
+    if (candidate.getTime() > referenceMs) return candidate.toISOString()
+  }
+
+  return null
+}
+
+function computeNextWeeklyRun (weekdays: number[], timeOfDay: string, referenceMs: number): string | null {
+  const time = parseTimeOfDay(timeOfDay)
+  if (!time || !Number.isFinite(referenceMs)) return null
+
+  const allowedWeekdays = new Set(weekdays)
+  const reference = new Date(referenceMs)
+  for (let dayOffset = 0; dayOffset <= 7; dayOffset += 1) {
+    const candidate = buildLocalCandidateAtTime(reference, dayOffset, time)
+    if (allowedWeekdays.has(toIsoWeekday(candidate)) && candidate.getTime() > referenceMs) {
+      return candidate.toISOString()
+    }
+  }
+
+  return null
+}
+
+function keepsEnabledAfterRun (kind: ScheduledTaskDefinition['schedule']['kind']): boolean {
+  return kind === 'interval' || kind === 'daily' || kind === 'weekly'
+}
+
+function isFixedLocalTimeSchedule (kind: ScheduledTaskDefinition['schedule']['kind']): boolean {
+  return kind === 'daily' || kind === 'weekly'
+}
+
 export class ScheduledTaskService {
   private tasks: ScheduledTaskDefinition[] = []
   private reports: ScheduledTaskRunReport[] = []
@@ -227,7 +289,10 @@ export class ScheduledTaskService {
 
   private resolvePersistedTask (task: ScheduledTaskDefinition): ScheduledTaskDefinition {
     if (this.runningTaskIds.has(task.id)) return task
-    const nextRunAt = task.nextRunAt || this.computeInitialNextRun(task)
+    let nextRunAt = task.nextRunAt || this.computeInitialNextRun(task)
+    if (nextRunAt && isFixedLocalTimeSchedule(task.schedule.kind) && Date.parse(nextRunAt) <= Date.now()) {
+      nextRunAt = this.computeInitialNextRun(task)
+    }
     return {
       ...task,
       nextRunAt,
@@ -276,6 +341,14 @@ export class ScheduledTaskService {
       return nextDate || null
     }
 
+    if (task.schedule.kind === 'daily') {
+      return computeNextDailyRun(task.schedule.timeOfDay, now)
+    }
+
+    if (task.schedule.kind === 'weekly') {
+      return computeNextWeeklyRun(task.schedule.weekdays, task.schedule.timeOfDay, now)
+    }
+
     const startAt = normalizeIsoDate(task.schedule.startAt)
     if (startAt && Date.parse(startAt) > now) {
       return startAt
@@ -291,6 +364,16 @@ export class ScheduledTaskService {
     if (task.schedule.kind === 'dates') {
       const referenceMs = Date.parse(referenceAt)
       return task.schedule.dates.find(date => Date.parse(date) > referenceMs) || null
+    }
+
+    if (task.schedule.kind === 'daily') {
+      const referenceMs = Date.parse(referenceAt)
+      return computeNextDailyRun(task.schedule.timeOfDay, Number.isFinite(referenceMs) ? Math.max(referenceMs, Date.now()) : Date.now())
+    }
+
+    if (task.schedule.kind === 'weekly') {
+      const referenceMs = Date.parse(referenceAt)
+      return computeNextWeeklyRun(task.schedule.weekdays, task.schedule.timeOfDay, Number.isFinite(referenceMs) ? Math.max(referenceMs, Date.now()) : Date.now())
     }
 
     return new Date(Date.parse(referenceAt) + task.schedule.everyMinutes * 60 * 1000).toISOString()
@@ -500,7 +583,7 @@ export class ScheduledTaskService {
 
         return {
           ...currentTask,
-          enabled: currentTask.schedule.kind === 'interval' ? currentTask.enabled : (context.consumeSchedule ? Boolean(nextRunAt) : currentTask.enabled),
+          enabled: keepsEnabledAfterRun(currentTask.schedule.kind) ? currentTask.enabled : (context.consumeSchedule ? Boolean(nextRunAt) : currentTask.enabled),
           nextRunAt,
           retryScheduledAt: null,
           lastRunAt: finishedAt,
@@ -557,7 +640,7 @@ export class ScheduledTaskService {
 
           return {
             ...currentTask,
-            enabled: currentTask.schedule.kind === 'interval' ? currentTask.enabled : (context.consumeSchedule ? Boolean(nextRunAt) : currentTask.enabled),
+            enabled: keepsEnabledAfterRun(currentTask.schedule.kind) ? currentTask.enabled : (context.consumeSchedule ? Boolean(nextRunAt) : currentTask.enabled),
             nextRunAt,
             retryScheduledAt: null,
             lastRunAt: finishedAt,

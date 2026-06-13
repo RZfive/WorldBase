@@ -207,6 +207,21 @@ export interface MemoryCompactionResult {
   }>
 }
 
+export interface MemoryCompactionStatus {
+  id: string | null
+  status: 'idle' | 'running' | 'completed' | 'failed'
+  stage: string
+  detail?: string
+  scanned: number
+  totalChunks: number
+  completedChunks: number
+  startedAt?: string
+  updatedAt: string
+  finishedAt?: string
+  result?: MemoryCompactionResult
+  error?: string
+}
+
 export interface MemoryPromptContext {
   sections: string[]
   entries: MemoryEntry[]

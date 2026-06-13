@@ -2,16 +2,21 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import ScheduledTaskReportDialog from './ScheduledTaskReportDialog.vue'
 
+type ScheduleKind = 'once' | 'interval' | 'daily' | 'weekly' | 'dates'
+
 interface ScheduledTaskDraft {
   id: string
   title: string
   enabled: boolean
   createdBy: 'manual' | 'ai'
   prompt: string
-  scheduleKind: 'once' | 'interval' | 'dates'
+  scheduleKind: ScheduleKind
   runAtInput: string
   everyMinutes: number
+  intervalPreset: string
   startAtInput: string
+  timeOfDayInput: string
+  weekdays: number[]
   dateInputs: string[]
   nextDateInput: string
   selectedSkillIds: string[]
@@ -32,6 +37,35 @@ const aiGenerating = ref(false)
 const statusMessage = ref('')
 const aiDraftPrompt = ref('')
 const activeReportId = ref<string | null>(null)
+
+const scheduleModeOptions: Array<{ id: ScheduleKind; label: string; detail: string }> = [
+  { id: 'daily', label: '每天', detail: '固定时间' },
+  { id: 'weekly', label: '每周', detail: '选择星期' },
+  { id: 'interval', label: '间隔', detail: '按分钟/小时' },
+  { id: 'once', label: '单次', detail: '只运行一次' },
+  { id: 'dates', label: '日期', detail: '多个时间点' }
+]
+
+const intervalPresetOptions = [
+  { value: '15', label: '每 15 分钟' },
+  { value: '30', label: '每 30 分钟' },
+  { value: '60', label: '每 1 小时' },
+  { value: '120', label: '每 2 小时' },
+  { value: '360', label: '每 6 小时' },
+  { value: '720', label: '每 12 小时' },
+  { value: '1440', label: '每天' },
+  { value: 'custom', label: '自定义' }
+]
+
+const weekdayOptions = [
+  { value: 1, label: '周一' },
+  { value: 2, label: '周二' },
+  { value: 3, label: '周三' },
+  { value: 4, label: '周四' },
+  { value: 5, label: '周五' },
+  { value: 6, label: '周六' },
+  { value: 7, label: '周日' }
+]
 
 let cleanupTasksChanged: (() => void) | null = null
 let cleanupReportsChanged: (() => void) | null = null
@@ -89,6 +123,19 @@ function fromLocalDateTimeInput (value: string): string | null {
   return date.toISOString()
 }
 
+function normalizeTimeOfDayInput (value: string): string | null {
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) return null
+
+  const hours = Number(match[1])
+  const minutes = Number(match[2])
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return null
+  }
+
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`
+}
+
 function formatTimestamp (value?: string | null): string {
   if (!value) return '未安排'
   const date = new Date(value)
@@ -125,14 +172,36 @@ function runStatusLabel (status: ScheduledTaskRunReport['status']): string {
   }
 }
 
+function formatWeekdays (weekdays: number[]): string {
+  const labels = new Map(weekdayOptions.map(option => [option.value, option.label]))
+  return weekdays.map(weekday => labels.get(weekday)).filter(Boolean).join('、')
+}
+
 function scheduleSummary (task: ScheduledTaskDefinition): string {
   if (task.schedule.kind === 'once') {
     return `单次执行 · ${formatTimestamp(task.schedule.runAt)}`
+  }
+  if (task.schedule.kind === 'daily') {
+    return `每天执行 · ${task.schedule.timeOfDay}`
+  }
+  if (task.schedule.kind === 'weekly') {
+    return `每周执行 · ${formatWeekdays(task.schedule.weekdays)} ${task.schedule.timeOfDay}`
   }
   if (task.schedule.kind === 'dates') {
     return `指定日期 · ${task.schedule.dates.length} 个时间点`
   }
   return `重复执行 · 每 ${task.schedule.everyMinutes} 分钟`
+}
+
+function intervalPresetFor (everyMinutes: number): string {
+  const normalized = Math.floor(Number(everyMinutes))
+  return intervalPresetOptions.some(option => option.value === String(normalized))
+    ? String(normalized)
+    : 'custom'
+}
+
+function isScheduleKind (value: unknown): value is ScheduleKind {
+  return value === 'once' || value === 'interval' || value === 'daily' || value === 'weekly' || value === 'dates'
 }
 
 function buildEmptyDraft (): ScheduledTaskDraft {
@@ -142,10 +211,13 @@ function buildEmptyDraft (): ScheduledTaskDraft {
     enabled: true,
     createdBy: 'manual',
     prompt: '',
-    scheduleKind: 'interval',
+    scheduleKind: 'daily',
     runAtInput: '',
     everyMinutes: 60,
+    intervalPreset: '60',
     startAtInput: '',
+    timeOfDayInput: '09:00',
+    weekdays: [1, 2, 3, 4, 5],
     dateInputs: [],
     nextDateInput: '',
     selectedSkillIds: [],
@@ -165,7 +237,10 @@ function buildDraftFromTask (task: ScheduledTaskDefinition): ScheduledTaskDraft 
     scheduleKind: task.schedule.kind,
     runAtInput: task.schedule.kind === 'once' ? toLocalDateTimeInput(task.schedule.runAt) : '',
     everyMinutes: task.schedule.kind === 'interval' ? task.schedule.everyMinutes : 60,
+    intervalPreset: task.schedule.kind === 'interval' ? intervalPresetFor(task.schedule.everyMinutes) : '60',
     startAtInput: task.schedule.kind === 'interval' ? toLocalDateTimeInput(task.schedule.startAt) : '',
+    timeOfDayInput: task.schedule.kind === 'daily' || task.schedule.kind === 'weekly' ? task.schedule.timeOfDay : '09:00',
+    weekdays: task.schedule.kind === 'weekly' ? [...task.schedule.weekdays] : [1, 2, 3, 4, 5],
     dateInputs: task.schedule.kind === 'dates' ? task.schedule.dates.map(value => toLocalDateTimeInput(value)).filter(Boolean) : [],
     nextDateInput: '',
     selectedSkillIds: [...task.selectedSkillIds],
@@ -204,6 +279,27 @@ function materializeDraft (value: ScheduledTaskDraft): ScheduledTaskDefinition |
       return null
     }
     schedule = { kind: 'dates', dates }
+  } else if (value.scheduleKind === 'daily') {
+    const timeOfDay = normalizeTimeOfDayInput(value.timeOfDayInput)
+    if (!timeOfDay) {
+      setStatus('请选择每天执行时间')
+      return null
+    }
+    schedule = { kind: 'daily', timeOfDay }
+  } else if (value.scheduleKind === 'weekly') {
+    const timeOfDay = normalizeTimeOfDayInput(value.timeOfDayInput)
+    const weekdays = Array.from(new Set(value.weekdays))
+      .filter(weekday => Number.isInteger(weekday) && weekday >= 1 && weekday <= 7)
+      .sort((left, right) => left - right)
+    if (!timeOfDay) {
+      setStatus('请选择每周执行时间')
+      return null
+    }
+    if (weekdays.length === 0) {
+      setStatus('请至少选择一个星期')
+      return null
+    }
+    schedule = { kind: 'weekly', weekdays, timeOfDay }
   } else {
     if (!Number.isFinite(Number(value.everyMinutes)) || Number(value.everyMinutes) <= 0) {
       setStatus('重复执行间隔必须大于 0')
@@ -286,19 +382,30 @@ function applyGeneratedDraft (payload: Record<string, unknown>) {
   nextDraft.enabled = typeof payload.enabled === 'boolean' ? payload.enabled : nextDraft.enabled
   nextDraft.createdBy = 'ai'
 
-  const scheduleKind = payload.schedule_kind === 'once' || payload.schedule_kind === 'dates' || payload.schedule_kind === 'interval'
+  nextDraft.scheduleKind = isScheduleKind(payload.schedule_kind)
     ? payload.schedule_kind
     : nextDraft.scheduleKind
-  nextDraft.scheduleKind = scheduleKind
 
   if (typeof payload.run_at === 'string') {
     nextDraft.runAtInput = toLocalDateTimeInput(payload.run_at)
   }
   if (Number.isFinite(Number(payload.every_minutes)) && Number(payload.every_minutes) > 0) {
     nextDraft.everyMinutes = Math.floor(Number(payload.every_minutes))
+    nextDraft.intervalPreset = intervalPresetFor(nextDraft.everyMinutes)
   }
   if (typeof payload.start_at === 'string') {
     nextDraft.startAtInput = toLocalDateTimeInput(payload.start_at)
+  }
+  if (typeof payload.time_of_day === 'string') {
+    nextDraft.timeOfDayInput = normalizeTimeOfDayInput(payload.time_of_day) || nextDraft.timeOfDayInput
+  }
+  if (Array.isArray(payload.weekdays)) {
+    const weekdays = payload.weekdays
+      .map(value => Number(value))
+      .filter(weekday => Number.isInteger(weekday) && weekday >= 1 && weekday <= 7)
+    if (weekdays.length > 0) {
+      nextDraft.weekdays = Array.from(new Set(weekdays)).sort((left, right) => left - right)
+    }
   }
   if (Array.isArray(payload.dates)) {
     nextDraft.dateInputs = payload.dates
@@ -394,6 +501,31 @@ function removeDateInput (value: string) {
   draft.value.dateInputs = draft.value.dateInputs.filter(item => item !== value)
 }
 
+function applyIntervalPreset () {
+  if (!draft.value || draft.value.intervalPreset === 'custom') return
+  const everyMinutes = Number(draft.value.intervalPreset)
+  if (Number.isFinite(everyMinutes) && everyMinutes > 0) {
+    draft.value.everyMinutes = Math.floor(everyMinutes)
+  }
+}
+
+function markIntervalCustom () {
+  if (!draft.value) return
+  draft.value.intervalPreset = 'custom'
+}
+
+function toggleWeekday (weekday: number) {
+  if (!draft.value) return
+
+  const selected = new Set(draft.value.weekdays)
+  if (selected.has(weekday)) {
+    selected.delete(weekday)
+  } else {
+    selected.add(weekday)
+  }
+  draft.value.weekdays = Array.from(selected).sort((left, right) => left - right)
+}
+
 async function saveDraft () {
   if (!draft.value || !window.electronAPI?.saveScheduledTask) return
   const task = materializeDraft(draft.value)
@@ -477,8 +609,9 @@ async function generateDraftWithAi () {
     const systemPrompt = [
       '你是一个定时任务配置生成器。',
       '根据用户描述，返回严格 JSON，不要输出 Markdown，不要解释，不要调用任何工具。',
-      'JSON 字段仅允许使用：title, prompt, enabled, schedule_kind, run_at, every_minutes, start_at, dates, selected_skill_ids, selected_mcp_server_ids, max_retries, retry_delay_minutes。',
-      'schedule_kind 只能是 once、interval、dates。',
+      'JSON 字段仅允许使用：title, prompt, enabled, schedule_kind, run_at, every_minutes, start_at, time_of_day, weekdays, dates, selected_skill_ids, selected_mcp_server_ids, max_retries, retry_delay_minutes。',
+      'schedule_kind 只能是 once、interval、daily、weekly、dates。',
+      '每天或每周固定时间执行时优先使用 daily 或 weekly，time_of_day 用 HH:mm；weekly 的 weekdays 用 1-7 表示周一到周日。',
       'selected_skill_ids 和 selected_mcp_server_ids 必须只从提供的可用 ID 中选择。'
     ].join('\n')
 
@@ -645,53 +778,100 @@ onUnmounted(() => {
               <textarea v-model="draft.prompt" rows="7" class="st-textarea" placeholder="输入要让 AI 自动执行的提示词" />
             </label>
 
-            <label class="st-field">
-              <span>执行方式</span>
-              <select v-model="draft.scheduleKind">
-                <option value="once">单次执行</option>
-                <option value="interval">重复间隔执行</option>
-                <option value="dates">特定日期执行</option>
-              </select>
-            </label>
-
-            <template v-if="draft.scheduleKind === 'once'">
-              <label class="st-field">
-                <span>执行时间</span>
-                <input v-model="draft.runAtInput" type="datetime-local" />
-              </label>
-            </template>
-
-            <template v-else-if="draft.scheduleKind === 'interval'">
-              <label class="st-field">
-                <span>间隔分钟</span>
-                <input v-model.number="draft.everyMinutes" type="number" min="1" step="1" />
-              </label>
-              <label class="st-field">
-                <span>首次执行时间</span>
-                <input v-model="draft.startAtInput" type="datetime-local" />
-              </label>
-            </template>
-
-            <template v-else>
-              <div class="st-field full-span">
-                <span>指定日期</span>
-                <div class="st-date-row">
-                  <input v-model="draft.nextDateInput" type="datetime-local" />
-                  <button class="st-ghost-btn" type="button" @click="addDateInput">添加时间点</button>
-                </div>
-                <div v-if="draft.dateInputs.length > 0" class="st-tag-list compact">
-                  <button
-                    v-for="dateInput in draft.dateInputs"
-                    :key="dateInput"
-                    type="button"
-                    class="st-tag removable"
-                    @click="removeDateInput(dateInput)"
-                  >
-                    {{ dateInput.replace('T', ' ') }} ×
-                  </button>
-                </div>
+            <div class="st-schedule-block full-span">
+              <span class="st-field-label">执行方式</span>
+              <div class="st-mode-grid">
+                <button
+                  v-for="mode in scheduleModeOptions"
+                  :key="mode.id"
+                  type="button"
+                  class="st-mode-option"
+                  :class="{ active: draft.scheduleKind === mode.id }"
+                  @click="draft.scheduleKind = mode.id"
+                >
+                  <strong>{{ mode.label }}</strong>
+                  <span>{{ mode.detail }}</span>
+                </button>
               </div>
-            </template>
+
+              <div class="st-schedule-panel">
+                <template v-if="draft.scheduleKind === 'daily'">
+                  <label class="st-field">
+                    <span>每天执行时间</span>
+                    <input v-model="draft.timeOfDayInput" type="time" />
+                  </label>
+                </template>
+
+                <template v-else-if="draft.scheduleKind === 'weekly'">
+                  <div class="st-field full-span">
+                    <span>星期</span>
+                    <div class="st-weekday-grid">
+                      <button
+                        v-for="weekday in weekdayOptions"
+                        :key="weekday.value"
+                        type="button"
+                        class="st-weekday-chip"
+                        :class="{ active: draft.weekdays.includes(weekday.value) }"
+                        @click="toggleWeekday(weekday.value)"
+                      >
+                        {{ weekday.label }}
+                      </button>
+                    </div>
+                  </div>
+                  <label class="st-field">
+                    <span>执行时间</span>
+                    <input v-model="draft.timeOfDayInput" type="time" />
+                  </label>
+                </template>
+
+                <template v-else-if="draft.scheduleKind === 'interval'">
+                  <label class="st-field">
+                    <span>重复间隔</span>
+                    <select v-model="draft.intervalPreset" @change="applyIntervalPreset">
+                      <option v-for="option in intervalPresetOptions" :key="option.value" :value="option.value">
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label v-if="draft.intervalPreset === 'custom'" class="st-field">
+                    <span>间隔分钟</span>
+                    <input v-model.number="draft.everyMinutes" type="number" min="1" step="1" @input="markIntervalCustom" />
+                  </label>
+                  <label class="st-field">
+                    <span>首次执行时间</span>
+                    <input v-model="draft.startAtInput" type="datetime-local" />
+                  </label>
+                </template>
+
+                <template v-else-if="draft.scheduleKind === 'once'">
+                  <label class="st-field">
+                    <span>执行时间</span>
+                    <input v-model="draft.runAtInput" type="datetime-local" />
+                  </label>
+                </template>
+
+                <template v-else>
+                  <div class="st-field full-span">
+                    <span>指定日期</span>
+                    <div class="st-date-row">
+                      <input v-model="draft.nextDateInput" type="datetime-local" />
+                      <button class="st-ghost-btn" type="button" @click="addDateInput">添加时间点</button>
+                    </div>
+                    <div v-if="draft.dateInputs.length > 0" class="st-tag-list compact">
+                      <button
+                        v-for="dateInput in draft.dateInputs"
+                        :key="dateInput"
+                        type="button"
+                        class="st-tag removable"
+                        @click="removeDateInput(dateInput)"
+                      >
+                        {{ dateInput.replace('T', ' ') }} ×
+                      </button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
 
             <label class="st-field">
               <span>失败重试次数</span>
@@ -832,21 +1012,24 @@ onUnmounted(() => {
 
 <style scoped>
 .st-root {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
-  background:
-    radial-gradient(circle at top left, rgba(14, 165, 233, 0.08), transparent 24%),
-    linear-gradient(180deg, var(--app-main-surface), var(--app-panel-subtle));
+  overflow: hidden;
+  background: var(--app-main-surface);
+}
+
+.st-root * {
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .st-sidebar {
-  width: 320px;
-  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 18px;
+  padding: 16px;
   border-right: 1px solid var(--app-border);
   overflow-y: auto;
 }
@@ -857,9 +1040,10 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 24px;
+  gap: 14px;
+  padding: 20px;
   overflow-y: auto;
+  container-type: inline-size;
 }
 
 .st-sidebar-header,
@@ -871,6 +1055,18 @@ onUnmounted(() => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.st-main-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.st-sidebar-header .st-primary-btn {
+  flex: 0 0 auto;
 }
 
 .st-sidebar-header h3,
@@ -906,17 +1102,23 @@ onUnmounted(() => {
 .st-task-card,
 .st-report-item,
 .st-tag.removable {
-  border-radius: 14px;
+  border-radius: 8px;
   border: 1px solid var(--app-border);
-  transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
 }
 
 .st-primary-btn,
 .st-ghost-btn,
 .st-danger-btn {
-  padding: 9px 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 8px 12px;
   font-size: 0.82rem;
+  line-height: 1.2;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .st-primary-btn {
@@ -941,7 +1143,7 @@ onUnmounted(() => {
 .st-task-card:hover,
 .st-report-item:hover,
 .st-tag.removable:hover {
-  transform: translateY(-1px);
+  border-color: rgba(14, 165, 233, 0.35);
 }
 
 .st-feedback,
@@ -950,7 +1152,7 @@ onUnmounted(() => {
 .st-editor-card,
 .st-summary-card,
 .st-report-card {
-  border-radius: 20px;
+  border-radius: 8px;
   border: 1px solid var(--app-border);
   background: rgba(255, 255, 255, 0.04);
   backdrop-filter: blur(10px);
@@ -972,7 +1174,7 @@ onUnmounted(() => {
 .st-task-card,
 .st-report-item {
   width: 100%;
-  padding: 14px;
+  padding: 12px;
   background: rgba(255, 255, 255, 0.03);
   text-align: left;
   cursor: pointer;
@@ -1043,30 +1245,29 @@ onUnmounted(() => {
 
 .st-editor-layout,
 .st-detail-grid {
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
 }
 
 .st-form-grid,
 .st-metrics-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .st-scope-grid,
 .st-scope-summary-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
 .st-editor-card,
 .st-summary-card,
 .st-report-card,
 .st-scope-card {
-  padding: 18px;
+  padding: 16px;
 }
 
 .st-editor-card.ai-card {
-  position: sticky;
-  top: 0;
+  position: static;
 }
 
 .st-section-head span {
@@ -1082,6 +1283,13 @@ onUnmounted(() => {
   color: var(--app-text);
 }
 
+.st-field-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.84rem;
+  color: var(--app-text);
+}
+
 .st-field.full-span {
   grid-column: 1 / -1;
 }
@@ -1093,15 +1301,23 @@ onUnmounted(() => {
   align-self: end;
 }
 
+.st-field.checkbox-field input,
+.st-check-item input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+
 .st-field input,
 .st-field select,
 .st-textarea {
   width: 100%;
-  border-radius: 14px;
+  border-radius: 8px;
   border: 1px solid var(--app-border);
   background: rgba(255, 255, 255, 0.04);
   color: var(--app-text);
-  padding: 12px 14px;
+  padding: 10px 12px;
   font: inherit;
   box-sizing: border-box;
 }
@@ -1116,10 +1332,86 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   margin-top: 12px;
+  flex-wrap: wrap;
 }
 
 .st-date-row input {
-  flex: 1;
+  flex: 1 1 220px;
+}
+
+.st-schedule-block {
+  min-width: 0;
+}
+
+.st-mode-grid,
+.st-schedule-panel,
+.st-weekday-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.st-mode-grid {
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+}
+
+.st-mode-option,
+.st-weekday-chip {
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--app-text);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.st-mode-option {
+  min-height: 64px;
+  padding: 10px;
+  text-align: left;
+}
+
+.st-mode-option strong,
+.st-mode-option span {
+  display: block;
+}
+
+.st-mode-option strong {
+  margin-bottom: 4px;
+  font-size: 0.86rem;
+}
+
+.st-mode-option span {
+  color: var(--app-text-faint);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.st-mode-option.active,
+.st-weekday-chip.active {
+  border-color: rgba(14, 165, 233, 0.55);
+  background: rgba(14, 165, 233, 0.12);
+  color: var(--app-accent);
+}
+
+.st-schedule-panel {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: end;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.st-weekday-grid {
+  grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
+}
+
+.st-weekday-chip {
+  min-height: 34px;
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 0.8rem;
 }
 
 .st-check-item {
@@ -1138,6 +1430,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  overflow-wrap: anywhere;
 }
 
 .st-tag-list {
@@ -1155,9 +1448,14 @@ onUnmounted(() => {
 .st-summary-block,
 .st-metric,
 .st-scope-card {
-  border-radius: 16px;
+  border-radius: 8px;
   border: 1px solid var(--app-border);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.st-scope-card {
+  max-height: 260px;
+  overflow-y: auto;
 }
 
 .st-summary-block,
@@ -1178,26 +1476,22 @@ onUnmounted(() => {
   margin-top: 12px;
 }
 
-@media (max-width: 1180px) {
+@container (min-width: 1080px) {
   .st-editor-layout,
   .st-detail-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .st-editor-card.ai-card {
-    position: static;
+    grid-template-columns: minmax(0, 0.9fr) minmax(480px, 1fr);
   }
 }
 
 @media (max-width: 880px) {
   .st-root {
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
 
   .st-sidebar {
-    width: auto;
     border-right: none;
     border-bottom: 1px solid var(--app-border);
+    max-height: 240px;
   }
 
   .st-form-grid,

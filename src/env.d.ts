@@ -17,6 +17,7 @@ type ImageLibraryQuery = import('./shared/image-studio-types.js').ImageLibraryQu
 type ImageLibraryData = import('./shared/image-studio-types.js').ImageLibraryData
 type ImageLibraryFolderCard = import('./shared/image-studio-types.js').ImageLibraryFolderCard
 type MemoryCompactionResult = import('./shared/agent-workspace-types.js').MemoryCompactionResult
+type MemoryCompactionStatus = import('./shared/agent-workspace-types.js').MemoryCompactionStatus
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -686,6 +687,15 @@ type ScheduledTaskSchedule =
     startAt?: string
   }
   | {
+    kind: 'daily'
+    timeOfDay: string
+  }
+  | {
+    kind: 'weekly'
+    weekdays: number[]
+    timeOfDay: string
+  }
+  | {
     kind: 'dates'
     dates: string[]
   }
@@ -832,6 +842,8 @@ interface ElectronAPI {
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
   compactMemory: () => Promise<MemoryCompactionResult>
+  getMemoryCompactionStatus: () => Promise<MemoryCompactionStatus>
+  onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => () => void
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   saveMarkdownToFile: (markdown: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   generateStudioImage: (req: ImageStudioGenerateRequest) => Promise<ImageStudioGenerateResponse>
