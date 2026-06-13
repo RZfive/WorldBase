@@ -158,6 +158,9 @@ watch(
 <style scoped>
 .conv-item {
   position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -335,6 +338,7 @@ watch(
 }
 
 .conv-copy {
+  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
