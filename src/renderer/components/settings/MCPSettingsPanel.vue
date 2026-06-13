@@ -364,7 +364,6 @@ function formatTimestamp (value?: string | null): string {
       <div class="mcp-sidebar-header">
         <div>
           <h3>MCP 服务器</h3>
-          <p>管理外部上下文、工具与提示源</p>
         </div>
         <div class="mcp-sidebar-actions">
           <button class="ghost-btn" type="button" @click="refreshSelected" :disabled="refreshing">
@@ -375,7 +374,7 @@ function formatTimestamp (value?: string | null): string {
       </div>
 
       <div v-if="serverCards.length === 0" class="mcp-empty-list">
-        还没有配置 MCP 服务器。新增一个 stdio 或 HTTP/SSE 服务后，Agent 就能发现其 tools / resources / prompts。
+        暂无 MCP 服务器。
       </div>
 
       <button
@@ -406,11 +405,6 @@ function formatTimestamp (value?: string | null): string {
       <div class="mcp-main-header">
         <div>
           <h3>{{ editing ? (draft?.name || '新增 MCP 服务器') : (selectedConfig?.name || 'MCP 管理') }}</h3>
-          <p>
-            {{ editing
-              ? '配置连接方式、命令参数与网络头。保存后主进程会自动尝试发现远端能力。'
-              : '在这里查看连接状态，并管理可供 Agent 使用的外部工具、资源和提示模板。' }}
-          </p>
         </div>
 
         <div class="mcp-main-actions" v-if="!editing && selectedConfig">
@@ -494,11 +488,11 @@ function formatTimestamp (value?: string | null): string {
       <div v-else-if="selectedConfig" class="mcp-detail-grid">
         <section class="mcp-summary-card">
           <div class="mcp-summary-head">
-            <div>
+            <div class="mcp-summary-title">
               <span class="mcp-pill" :class="statusClass(selectedSnapshot?.status)">
                 {{ statusLabel(selectedSnapshot?.status) }}
               </span>
-              <h4>{{ selectedConfig.name }}</h4>
+              <strong>{{ selectedConfig.name }}</strong>
             </div>
             <span class="mcp-updated-at">上次刷新：{{ formatTimestamp(selectedSnapshot?.updatedAt) }}</span>
           </div>
@@ -530,38 +524,38 @@ function formatTimestamp (value?: string | null): string {
             </div>
           </div>
 
+          <div class="mcp-config-preview">
+            <span v-if="selectedConfig.transport === 'stdio'">
+              <strong>命令</strong>
+              <code>{{ selectedConfig.command || '未设置' }}</code>
+            </span>
+            <span v-if="selectedConfig.transport === 'stdio'">
+              <strong>参数</strong>
+              <code>{{ selectedConfig.args.join(' ') || '无' }}</code>
+            </span>
+            <span v-if="selectedConfig.transport !== 'stdio'">
+              <strong>URL</strong>
+              <code>{{ selectedConfig.url || '未设置' }}</code>
+            </span>
+          </div>
+
           <div v-if="selectedSnapshot?.error" class="mcp-error-box">
             {{ selectedSnapshot.error }}
           </div>
-
-          <div class="mcp-config-preview">
-            <div v-if="selectedConfig.transport === 'stdio'">
-              <strong>命令：</strong>
-              <span>{{ selectedConfig.command || '未设置' }}</span>
-            </div>
-            <div v-if="selectedConfig.transport === 'stdio'">
-              <strong>参数：</strong>
-              <span>{{ selectedConfig.args.join(' ') || '无' }}</span>
-            </div>
-            <div v-if="selectedConfig.transport !== 'stdio'">
-              <strong>URL：</strong>
-              <span>{{ selectedConfig.url || '未设置' }}</span>
-            </div>
-          </div>
         </section>
 
-        <section class="mcp-list-card">
+        <section class="mcp-list-card mcp-tools-card">
           <div class="mcp-list-card-head">
             <h4>Tools</h4>
             <span>{{ detailStats.tools }}</span>
           </div>
           <div v-if="(selectedSnapshot?.tools.length || 0) === 0" class="mcp-empty-block">当前未发现远端工具。</div>
-          <div v-for="tool in selectedSnapshot?.tools || []" :key="tool.localName" class="mcp-entry">
-            <div class="mcp-entry-title-row">
-              <strong>{{ tool.name }}</strong>
-              <code>{{ tool.localName }}</code>
+          <div v-else class="mcp-entry-list">
+            <div v-for="tool in selectedSnapshot?.tools || []" :key="tool.localName" class="mcp-entry mcp-tool-entry">
+              <strong class="mcp-tool-name">{{ tool.name }}</strong>
+              <code class="mcp-tool-local-name">{{ tool.localName }}</code>
+              <p class="mcp-tool-description">{{ tool.description || '无描述' }}</p>
             </div>
-            <p>{{ tool.description || '无描述' }}</p>
           </div>
         </section>
 
@@ -571,12 +565,14 @@ function formatTimestamp (value?: string | null): string {
             <span>{{ detailStats.resources }}</span>
           </div>
           <div v-if="(selectedSnapshot?.resources.length || 0) === 0" class="mcp-empty-block">当前未发现可读资源。</div>
-          <div v-for="resource in selectedSnapshot?.resources || []" :key="resource.uri" class="mcp-entry">
-            <div class="mcp-entry-title-row">
-              <strong>{{ resource.name }}</strong>
-              <code>{{ resource.uri }}</code>
+          <div v-else class="mcp-entry-list">
+            <div v-for="resource in selectedSnapshot?.resources || []" :key="resource.uri" class="mcp-entry">
+              <div class="mcp-entry-title-row">
+                <strong>{{ resource.name }}</strong>
+                <code>{{ resource.uri }}</code>
+              </div>
+              <p>{{ resource.description || resource.mimeType || '无描述' }}</p>
             </div>
-            <p>{{ resource.description || resource.mimeType || '无描述' }}</p>
           </div>
         </section>
 
@@ -586,23 +582,25 @@ function formatTimestamp (value?: string | null): string {
             <span>{{ detailStats.prompts }}</span>
           </div>
           <div v-if="(selectedSnapshot?.prompts.length || 0) === 0" class="mcp-empty-block">当前未发现提示模板。</div>
-          <div v-for="prompt in selectedSnapshot?.prompts || []" :key="prompt.name" class="mcp-entry">
-            <div class="mcp-entry-title-row">
-              <strong>{{ prompt.name }}</strong>
-              <span>{{ prompt.arguments.length }} args</span>
-            </div>
-            <p>{{ prompt.description || '无描述' }}</p>
-            <div v-if="prompt.arguments.length > 0" class="mcp-arg-list">
-              <span v-for="arg in prompt.arguments" :key="arg.name" class="mcp-arg-pill">
-                {{ arg.name }}<template v-if="arg.required">*</template>
-              </span>
+          <div v-else class="mcp-entry-list">
+            <div v-for="prompt in selectedSnapshot?.prompts || []" :key="prompt.name" class="mcp-entry">
+              <div class="mcp-entry-title-row">
+                <strong>{{ prompt.name }}</strong>
+                <span>{{ prompt.arguments.length }} args</span>
+              </div>
+              <p>{{ prompt.description || '无描述' }}</p>
+              <div v-if="prompt.arguments.length > 0" class="mcp-arg-list">
+                <span v-for="arg in prompt.arguments" :key="arg.name" class="mcp-arg-pill">
+                  {{ arg.name }}<template v-if="arg.required">*</template>
+                </span>
+              </div>
             </div>
           </div>
         </section>
       </div>
 
       <div v-else class="mcp-empty-main">
-        选择左侧服务器查看详情，或新增一个 MCP 服务器开始接入外部能力。
+        选择左侧服务器查看详情。
       </div>
     </section>
   </div>
@@ -613,6 +611,7 @@ function formatTimestamp (value?: string | null): string {
   display: flex;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
   background:
     radial-gradient(circle at top left, rgba(34, 197, 94, 0.08), transparent 28%),
     linear-gradient(180deg, var(--app-main-surface), var(--app-panel-subtle));
@@ -624,7 +623,7 @@ function formatTimestamp (value?: string | null): string {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 18px;
+  padding: 16px;
   border-right: 1px solid var(--app-border);
   overflow-y: auto;
 }
@@ -632,9 +631,14 @@ function formatTimestamp (value?: string | null): string {
 .mcp-sidebar-header,
 .mcp-main-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
+}
+
+.mcp-sidebar-header > div:first-child,
+.mcp-main-header > div:first-child {
+  min-width: 0;
 }
 
 .mcp-sidebar-header h3,
@@ -644,6 +648,13 @@ function formatTimestamp (value?: string | null): string {
   margin: 0;
   font-size: 1rem;
   color: var(--app-text);
+}
+
+.mcp-sidebar-header h3,
+.mcp-main-header h3 {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .mcp-sidebar-header p,
@@ -668,16 +679,25 @@ function formatTimestamp (value?: string | null): string {
 .mcp-editor-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: nowrap;
+  gap: 8px;
 }
 
 .primary-btn,
 .ghost-btn,
 .danger-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
   border: 1px solid var(--app-border);
   border-radius: 10px;
-  padding: 8px 14px;
+  min-width: 58px;
+  min-height: 34px;
+  padding: 7px 12px;
   font-size: 0.82rem;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
 }
@@ -790,9 +810,9 @@ function formatTimestamp (value?: string | null): string {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 24px;
-  overflow-y: auto;
+  gap: 12px;
+  padding: 20px 24px;
+  overflow: hidden;
 }
 
 .mcp-feedback,
@@ -804,7 +824,7 @@ function formatTimestamp (value?: string | null): string {
 .mcp-summary-card,
 .mcp-list-card {
   border: 1px solid var(--app-border);
-  border-radius: 18px;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.04);
   backdrop-filter: blur(10px);
 }
@@ -827,13 +847,18 @@ function formatTimestamp (value?: string | null): string {
 .mcp-editor-card,
 .mcp-summary-card,
 .mcp-list-card {
-  padding: 18px;
+  padding: 14px;
+}
+
+.mcp-editor-card {
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .mcp-form-grid,
 .mcp-detail-grid {
   display: grid;
-  gap: 16px;
+  gap: 12px;
 }
 
 .mcp-form-grid {
@@ -841,12 +866,26 @@ function formatTimestamp (value?: string | null): string {
 }
 
 .mcp-detail-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
+  flex: 1;
+  min-height: 0;
+  grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr);
+  grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
 }
 
 .mcp-summary-card {
   grid-column: 1 / -1;
+}
+
+.mcp-list-card {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.mcp-tools-card {
+  grid-row: 2 / 4;
 }
 
 .mcp-field {
@@ -897,25 +936,54 @@ function formatTimestamp (value?: string | null): string {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
+  padding: 4px 9px;
   border-radius: 999px;
   font-size: 0.75rem;
   color: var(--app-text-soft);
   background: rgba(255, 255, 255, 0.05);
 }
 
+.mcp-summary-head {
+  align-items: center;
+}
+
+.mcp-summary-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mcp-summary-title strong {
+  min-width: 0;
+  color: var(--app-text);
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .mcp-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .mcp-metric {
-  padding: 12px;
-  border-radius: 14px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  padding: 6px 9px;
+  border-radius: 10px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.mcp-metric span {
+  margin: 0;
+  line-height: 1.2;
 }
 
 .mcp-metric strong,
@@ -925,9 +993,37 @@ function formatTimestamp (value?: string | null): string {
 }
 
 .mcp-config-preview {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-top: 16px;
+  margin-top: 10px;
+}
+
+.mcp-config-preview span {
+  min-width: 0;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.mcp-config-preview code {
+  min-width: 0;
+  color: var(--app-text-soft);
+  font-size: 0.76rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcp-error-box {
+  margin-top: 10px;
+  color: #b91c1c;
+  background: rgba(185, 28, 28, 0.08);
+  border-color: rgba(185, 28, 28, 0.18);
 }
 
 .mcp-entry {
@@ -935,9 +1031,58 @@ function formatTimestamp (value?: string | null): string {
   border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.mcp-entry:first-of-type {
+.mcp-list-card-head {
+  flex: 0 0 auto;
+  padding-bottom: 10px;
+}
+
+.mcp-entry-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-scrollbar) transparent;
+}
+
+.mcp-entry-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.mcp-entry-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.mcp-entry-list::-webkit-scrollbar-thumb {
+  background: var(--app-scrollbar);
+  border-radius: 999px;
+}
+
+.mcp-entry-list .mcp-entry:first-child {
   border-top: none;
   padding-top: 0;
+}
+
+.mcp-tool-entry {
+  display: grid;
+  gap: 7px;
+}
+
+.mcp-tool-name {
+  display: block;
+  font-size: 0.95rem;
+  line-height: 1.25;
+  word-break: break-word;
+}
+
+.mcp-tool-local-name {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.mcp-entry .mcp-tool-description {
+  margin: 0;
 }
 
 .mcp-entry code {
@@ -968,14 +1113,32 @@ function formatTimestamp (value?: string | null): string {
 
   .mcp-sidebar {
     width: 100%;
+    max-height: 34vh;
     border-right: none;
     border-bottom: 1px solid var(--app-border);
+  }
+
+  .mcp-main {
+    overflow-y: auto;
   }
 
   .mcp-detail-grid,
   .mcp-form-grid,
   .mcp-summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .mcp-detail-grid {
+    flex: 0 0 auto;
+    grid-template-rows: none;
+  }
+
+  .mcp-tools-card {
+    grid-row: auto;
+  }
+
+  .mcp-list-card {
+    max-height: 360px;
   }
 }
 </style>

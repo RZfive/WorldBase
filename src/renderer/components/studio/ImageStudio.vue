@@ -632,14 +632,26 @@ onUnmounted(() => {
           <span class="studio-emoji">🎨</span>
           <div>
             <h2>绘制工作台</h2>
-            <p>使用图片生成 / 编辑模型创作并管理图片</p>
           </div>
         </div>
       </div>
 
       <div class="studio-tabs">
-        <button :class="['tab-btn', { active: studioTab === 'workbench' }]" type="button" @click="studioTab = 'workbench'">工作台</button>
-        <button :class="['tab-btn', { active: studioTab === 'library' }]" type="button" @click="studioTab = 'library'">图片库</button>
+        <button
+          :class="['tab-btn', { active: studioTab === 'workbench' && mode === 'generate' }]"
+          type="button"
+          @click="studioTab = 'workbench'; mode = 'generate'"
+        >文生图</button>
+        <button
+          :class="['tab-btn', { active: studioTab === 'workbench' && mode === 'edit' }]"
+          type="button"
+          @click="studioTab = 'workbench'; mode = 'edit'"
+        >图片编辑</button>
+        <button
+          :class="['tab-btn', { active: studioTab === 'library' }]"
+          type="button"
+          @click="studioTab = 'library'"
+        >图片库</button>
       </div>
     </header>
 
@@ -648,11 +660,6 @@ onUnmounted(() => {
       <template v-if="studioTab === 'workbench'">
         <!-- Parameter panel -->
         <aside class="studio-params">
-          <div class="studio-mode-toggle">
-            <button :class="['mode-btn', { active: mode === 'generate' }]" type="button" @click="mode = 'generate'">文生图</button>
-            <button :class="['mode-btn', { active: mode === 'edit' }]" type="button" @click="mode = 'edit'">图片编辑</button>
-          </div>
-
           <div v-if="modelOptions.length === 0" class="param-empty">
             <p>未找到{{ mode === 'edit' ? '图片编辑' : '图片生成' }}类模型</p>
             <span>请到「设置 → 供应商」为模型勾选对应能力</span>
@@ -666,29 +673,33 @@ onUnmounted(() => {
             </select>
           </label>
 
-          <label class="param-field">
-            <span class="param-label">提示词</span>
-            <textarea v-model="prompt" class="param-textarea" rows="4" placeholder="描述你想要的画面…"></textarea>
-            <button
-              v-if="textModelOptions.length > 0"
-              class="optimize-btn"
-              type="button"
-              :disabled="!prompt.trim()"
-              @click="openOptimizeDialog(false)"
-            >✨ AI 优化</button>
-          </label>
+          <div class="param-field">
+            <div class="param-field-head">
+              <label class="param-label" for="studio-prompt">提示词</label>
+              <button
+                v-if="textModelOptions.length > 0"
+                class="optimize-btn"
+                type="button"
+                :disabled="!prompt.trim()"
+                @click="openOptimizeDialog(false)"
+              >✨ AI 优化</button>
+            </div>
+            <textarea id="studio-prompt" v-model="prompt" class="param-textarea" rows="3" placeholder="描述你想要的画面…"></textarea>
+          </div>
 
-          <label v-if="mode === 'generate'" class="param-field">
-            <span class="param-label">负向提示词 <span class="param-hint">（部分供应商支持）</span></span>
-            <textarea v-model="negativePrompt" class="param-textarea" rows="2" placeholder="不希望出现的内容…"></textarea>
-            <button
-              v-if="textModelOptions.length > 0"
-              class="optimize-btn"
-              type="button"
-              :disabled="!negativePrompt.trim()"
-              @click="openOptimizeDialog(true)"
-            >✨ AI 优化</button>
-          </label>
+          <div v-if="mode === 'generate'" class="param-field">
+            <div class="param-field-head">
+              <label class="param-label" for="studio-negative-prompt">负向提示词 <span class="param-hint">（部分供应商支持）</span></label>
+              <button
+                v-if="textModelOptions.length > 0"
+                class="optimize-btn"
+                type="button"
+                :disabled="!negativePrompt.trim()"
+                @click="openOptimizeDialog(true)"
+              >✨ AI 优化</button>
+            </div>
+            <textarea id="studio-negative-prompt" v-model="negativePrompt" class="param-textarea" rows="2" placeholder="不希望出现的内容…"></textarea>
+          </div>
 
           <!-- Edit mode inputs -->
           <div v-if="mode === 'edit'" class="param-field">
@@ -721,29 +732,31 @@ onUnmounted(() => {
             </div>
           </label>
 
-          <label class="param-field">
-            <span class="param-label">尺寸</span>
-            <div class="size-row">
-              <select v-model="sizeMode" class="param-input size-mode">
-                <option value="preset">预设</option>
-                <option value="custom">自定义</option>
-              </select>
-              <select v-if="sizeMode === 'preset'" v-model="selectedSize" class="param-input">
-                <option v-for="size in currentRatio.sizes" :key="size" :value="size">{{ size }}</option>
-              </select>
-              <div v-else class="custom-size">
-                <input v-model.number="customWidth" type="number" class="param-input" :min="MIN_DIMENSION" :max="MAX_DIMENSION" @change="clampCustomDimensions" />
-                <span class="custom-x">×</span>
-                <input v-model.number="customHeight" type="number" class="param-input" :min="MIN_DIMENSION" :max="MAX_DIMENSION" @change="clampCustomDimensions" />
+          <div class="param-row size-count-row">
+            <label class="param-field">
+              <span class="param-label">尺寸</span>
+              <div class="size-row">
+                <select v-model="sizeMode" class="param-input size-mode">
+                  <option value="preset">预设</option>
+                  <option value="custom">自定义</option>
+                </select>
+                <select v-if="sizeMode === 'preset'" v-model="selectedSize" class="param-input">
+                  <option v-for="size in currentRatio.sizes" :key="size" :value="size">{{ size }}</option>
+                </select>
+                <div v-else class="custom-size">
+                  <input v-model.number="customWidth" type="number" class="param-input" :min="MIN_DIMENSION" :max="MAX_DIMENSION" @change="clampCustomDimensions" />
+                  <span class="custom-x">×</span>
+                  <input v-model.number="customHeight" type="number" class="param-input" :min="MIN_DIMENSION" :max="MAX_DIMENSION" @change="clampCustomDimensions" />
+                </div>
               </div>
-            </div>
-            <span v-if="sizeMode === 'custom' && !finalSize" class="param-error">尺寸需在 {{ MIN_DIMENSION }}–{{ MAX_DIMENSION }} 之间</span>
-          </label>
+              <span v-if="sizeMode === 'custom' && !finalSize" class="param-error">尺寸需在 {{ MIN_DIMENSION }}–{{ MAX_DIMENSION }} 之间</span>
+            </label>
 
-          <label class="param-field">
-            <span class="param-label">数量</span>
-            <input v-model.number="count" type="number" class="param-input" min="1" :max="MAX_COUNT" @change="clampCount" />
-          </label>
+            <label class="param-field">
+              <span class="param-label">数量</span>
+              <input v-model.number="count" type="number" class="param-input count-input" min="1" :max="MAX_COUNT" @change="clampCount" />
+            </label>
+          </div>
 
           <button class="generate-btn" type="button" :disabled="!canGenerate" @click="onGenerate">
             ＋ 加入队列{{ mode === 'edit' ? '（编辑）' : '（生成）' }}
@@ -847,12 +860,12 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 18px 24px;
+  padding: 14px 24px;
   border-bottom: 1px solid var(--app-border);
   background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
 }
 
-.studio-header-left { display: flex; align-items: center; gap: 18px; min-width: 0; }
+.studio-header-left { display: flex; align-items: center; gap: 16px; min-width: 0; }
 
 /* Task queue dropdown */
 .task-dropdown { position: relative; }
@@ -943,6 +956,7 @@ onUnmounted(() => {
 
 .studio-tabs {
   display: flex;
+  flex-shrink: 0;
   padding: 4px;
   border-radius: 12px;
   background: var(--app-panel-muted);
@@ -956,6 +970,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--app-text-soft);
   font-size: 0.85em;
+  white-space: nowrap;
   cursor: pointer;
   transition: all 0.14s ease;
 }
@@ -966,35 +981,9 @@ onUnmounted(() => {
   box-shadow: 0 4px 12px var(--app-accent-glow);
 }
 
-.studio-title { display: flex; align-items: center; gap: 14px; }
-.studio-emoji { font-size: 2em; }
+.studio-title { display: flex; align-items: center; gap: 10px; }
+.studio-emoji { font-size: 1.65em; }
 .studio-title h2 { margin: 0; font-size: 1.1rem; color: var(--app-text-strong); }
-.studio-title p { margin: 2px 0 0; font-size: 0.8rem; color: var(--app-text-muted); }
-
-.studio-mode-toggle {
-  display: flex;
-  padding: 4px;
-  border-radius: 12px;
-  background: var(--app-panel-muted);
-  border: 1px solid var(--app-border);
-}
-
-.mode-btn {
-  padding: 8px 18px;
-  border: none;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--app-text-soft);
-  font-size: 0.85em;
-  cursor: pointer;
-  transition: all 0.14s ease;
-}
-
-.mode-btn.active {
-  background: var(--app-accent);
-  color: #fff;
-  box-shadow: 0 4px 12px var(--app-accent-glow);
-}
 
 .studio-body {
   flex: 1;
@@ -1005,12 +994,12 @@ onUnmounted(() => {
 .studio-params {
   width: 360px;
   flex-shrink: 0;
-  padding: 20px;
+  padding: 16px 18px;
   overflow-y: auto;
   border-right: 1px solid var(--app-border);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   background: var(--app-panel);
 }
 
@@ -1026,21 +1015,40 @@ onUnmounted(() => {
 .param-empty p { margin: 0; color: var(--app-text-muted); }
 .param-empty span { font-size: 0.8em; }
 
-.param-field { display: flex; flex-direction: column; gap: 7px; }
+.param-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.param-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 26px;
+}
 .param-label { font-size: 0.82em; font-weight: 600; color: var(--app-text-soft); }
 .param-hint { font-weight: 400; color: var(--app-text-faint); font-size: 0.9em; }
+
+.param-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  gap: 10px;
+  align-items: start;
+}
+
+.size-count-row {
+  grid-template-columns: minmax(0, 1fr);
+}
 
 .param-input,
 .param-textarea {
   width: 100%;
   box-sizing: border-box;
-  padding: 9px 11px;
+  padding: 8px 10px;
   border-radius: 10px;
   border: 1px solid var(--app-border-strong);
   background: var(--app-panel-subtle);
   color: var(--app-text);
   font-size: 0.86em;
   font-family: inherit;
+  line-height: 1.35;
 }
 
 .param-textarea { resize: vertical; }
@@ -1053,8 +1061,8 @@ onUnmounted(() => {
 }
 
 .optimize-btn {
-  align-self: flex-end;
-  padding: 4px 12px;
+  flex-shrink: 0;
+  padding: 4px 10px;
   border-radius: 8px;
   border: 1px solid var(--app-accent-glow);
   background: var(--app-accent-soft);
@@ -1071,10 +1079,15 @@ onUnmounted(() => {
 
 .optimize-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.ratio-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.ratio-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+}
 
 .ratio-chip {
-  padding: 6px 12px;
+  min-width: 0;
+  padding: 5px 0;
   border-radius: 999px;
   border: 1px solid var(--app-border-strong);
   background: var(--app-panel-subtle);
@@ -1090,10 +1103,13 @@ onUnmounted(() => {
   color: var(--app-text-strong);
 }
 
-.size-row { display: flex; gap: 8px; }
-.size-mode { flex: 0 0 92px; }
+.size-row { display: flex; gap: 7px; min-width: 0; }
+.size-row > .param-input:not(.size-mode) { min-width: 0; }
+.size-mode { flex: 0 0 78px; }
 .custom-size { display: flex; align-items: center; gap: 6px; flex: 1; }
+.custom-size .param-input { min-width: 0; }
 .custom-x { color: var(--app-text-muted); }
+.count-input { text-align: center; }
 
 .param-error { font-size: 0.76em; color: var(--app-danger); }
 .param-error-box {
@@ -1103,13 +1119,13 @@ onUnmounted(() => {
   border: 1px solid rgba(220, 38, 38, 0.3);
 }
 
-.input-images { display: flex; flex-wrap: wrap; gap: 8px; }
+.input-images { display: flex; flex-wrap: wrap; gap: 7px; }
 
 .input-thumb {
   position: relative;
-  width: 64px;
-  height: 64px;
-  border-radius: 10px;
+  width: 52px;
+  height: 52px;
+  border-radius: 9px;
   overflow: hidden;
   border: 1px solid var(--app-border-strong);
 }
@@ -1134,9 +1150,9 @@ onUnmounted(() => {
 }
 
 .input-add {
-  width: 64px;
-  height: 64px;
-  border-radius: 10px;
+  width: 52px;
+  height: 52px;
+  border-radius: 9px;
   border: 1px dashed var(--app-border-strong);
   background: var(--app-panel-subtle);
   color: var(--app-text-muted);
@@ -1148,10 +1164,10 @@ onUnmounted(() => {
 .input-add:hover { border-color: var(--app-accent); color: var(--app-accent); }
 
 .generate-btn {
-  margin-top: 4px;
-  padding: 12px;
+  margin-top: 2px;
+  padding: 10px 12px;
   border: none;
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--app-accent);
   color: #fff;
   font-size: 0.92em;

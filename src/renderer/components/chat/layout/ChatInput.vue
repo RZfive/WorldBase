@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch, type CSSProperties } from 'vue'
 import ProviderDropdown from './ProviderDropdown.vue'
-import ProviderModelDropdown from './ProviderModelDropdown.vue'
 
 interface PendingAttachment {
   id: string
@@ -24,12 +23,6 @@ interface ProjectTagChip {
 
 type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
 type AIExecutionAuthMode = 'strict' | 'auto'
-
-interface ProviderItem {
-  id: string
-  name: string
-  models: string[]
-}
 
 interface AgentOption {
   id: string
@@ -66,10 +59,6 @@ const props = defineProps<{
   providerDefaultTemperature?: number
   authMode: AIExecutionAuthMode
   planModeActive: boolean
-  providers?: ProviderItem[]
-  activeProviderId?: string
-  selectedModel?: string
-  showProviderSelector?: boolean
   availableAgents?: AgentOption[]
   selectedAgentId?: string
   groupMentionHints?: GroupMentionHint[]
@@ -89,8 +78,6 @@ const emit = defineEmits<{
   (e: 'toggleDocumentDock'): void
   (e: 'update:auth-mode', value: AIExecutionAuthMode): void
   (e: 'togglePlanMode'): void
-  (e: 'update:active-provider-id', id: string): void
-  (e: 'update:selected-model', model: string): void
   (e: 'update:selected-agent-id', id: string): void
 }>()
 
@@ -114,10 +101,10 @@ const reasoningLevels: Array<{ value: ReasoningStrength; label: string }> = [
 ]
 const currentReasoningIndex = computed(() => {
   const index = reasoningLevels.findIndex(level => level.value === props.reasoningStrength)
-  return index >= 0 ? index : 1
+  return index >= 0 ? index : reasoningLevels.length - 1
 })
 const currentReasoningLabel = computed(() => {
-  return reasoningLevels[currentReasoningIndex.value]?.label || '中'
+  return reasoningLevels[currentReasoningIndex.value]?.label || '最高'
 })
 const groupReasoningTitle = computed(() => {
   return `群聊中此处不单独调节思考强度，当前会沿用群内各 Agent 自身的思考强度配置（当前界面值：${currentReasoningLabel.value}）。`
@@ -708,6 +695,23 @@ function handleTextareaBlur () {
               <div class="advanced-panel-title">高级设置</div>
               <div class="advanced-setting">
                 <div class="advanced-setting-head">
+                  <span class="advanced-setting-name">思考强度</span>
+                  <span class="advanced-setting-value">{{ currentReasoningLabel }}</span>
+                </div>
+                <div v-if="!props.isGroupConversation" class="advanced-reasoning-options" role="group" aria-label="思考强度">
+                  <button
+                    v-for="level in reasoningLevels"
+                    :key="level.value"
+                    class="advanced-reasoning-option"
+                    :class="{ active: props.reasoningStrength === level.value }"
+                    type="button"
+                    @click="emit('update:reasoning-strength', level.value)"
+                  >{{ level.label }}</button>
+                </div>
+                <div v-else class="advanced-setting-note">{{ groupReasoningTitle }}</div>
+              </div>
+              <div class="advanced-setting">
+                <div class="advanced-setting-head">
                   <span class="advanced-setting-name">模型温度</span>
                   <span class="advanced-setting-value">{{ effectiveTemperature.toFixed(2) }}</span>
                 </div>
@@ -741,44 +745,6 @@ function handleTextareaBlur () {
             title="选择 Agent"
             @update:model-value="emit('update:selected-agent-id', $event)"
           />
-          <template v-if="props.showProviderSelector && props.providers && props.providers.length > 0">
-            <ProviderModelDropdown
-              :providers="props.providers"
-              :active-provider-id="props.activeProviderId"
-              :selected-model="props.selectedModel"
-              title="供应商 / 模型"
-              @update:active-provider-id="emit('update:active-provider-id', $event)"
-              @update:selected-model="emit('update:selected-model', $event)"
-            />
-          </template>
-          <!-- Reasoning strength: segmented pill control -->
-          <div class="tooltip-container reasoning-tooltip">
-            <template v-if="!props.isGroupConversation">
-              <div class="reasoning-segmented">
-                <svg class="reasoning-icon" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-                </svg>
-                <button
-                  v-for="level in reasoningLevels"
-                  :key="level.value"
-                  class="reasoning-pill"
-                  :class="{ active: props.reasoningStrength === level.value }"
-                  type="button"
-                  @click="emit('update:reasoning-strength', level.value)"
-                >{{ level.label }}</button>
-              </div>
-              <span class="tooltip-text">推理强度</span>
-            </template>
-            <template v-else>
-              <div class="reasoning-group-indicator" :title="groupReasoningTitle">
-                <svg class="reasoning-icon" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-                </svg>
-                <span>群聊沿用 Agent 思考强度</span>
-              </div>
-              <span class="tooltip-text">{{ groupReasoningTitle }}</span>
-            </template>
-          </div>
         </div>
         <div class="input-actions-right">
           <!-- Auth mode: icon toggle (lock = strict, unlock = auto) -->
@@ -863,38 +829,62 @@ function handleTextareaBlur () {
 
 .input-container {
   --chat-input-surface: #0a1018;
+  --chat-input-border: var(--app-input-border);
+  --chat-input-control-surface: color-mix(in srgb, var(--app-panel-muted) 84%, transparent);
+  --chat-input-control-border: var(--app-border-strong);
+  --chat-input-floating-surface: color-mix(in srgb, var(--app-panel-strong) 92%, white 8%);
+  --chat-input-hover-surface: var(--app-panel-muted);
+  --chat-input-disabled-surface: var(--app-panel-muted);
+  --chat-input-chip-remove-hover: rgba(255, 255, 255, 0.08);
+  --chat-input-shadow: 0 18px 42px rgba(0, 0, 0, 0.12);
+  --chat-input-focus-shadow: 0 0 0 2px var(--app-accent-soft);
+  --chat-input-busy-shadow: 0 0 0 1px rgba(91, 140, 255, 0.08), 0 18px 36px rgba(91, 140, 255, 0.08);
+  --chat-input-waiting-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12), 0 18px 36px rgba(245, 158, 11, 0.12);
+  --chat-input-popover-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
   position: relative;
   background: var(--chat-input-surface);
-  border: 1px solid var(--app-input-border);
+  border: 1px solid var(--chat-input-border);
   border-radius: 24px;
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
   overflow: visible;
-  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--chat-input-shadow);
 }
 
-:global(:root[data-theme='light']) .input-container {
-  --chat-input-surface: #ffffff;
+:global(:root[data-theme='light'] .chat-input .input-container) {
+  --chat-input-surface: rgba(255, 255, 255, 0.96);
+  --chat-input-border: rgba(15, 23, 42, 0.12);
+  --chat-input-control-surface: rgba(15, 23, 42, 0.035);
+  --chat-input-control-border: rgba(15, 23, 42, 0.11);
+  --chat-input-floating-surface: rgba(255, 255, 255, 0.98);
+  --chat-input-hover-surface: rgba(15, 23, 42, 0.055);
+  --chat-input-disabled-surface: rgba(15, 23, 42, 0.05);
+  --chat-input-chip-remove-hover: rgba(15, 23, 42, 0.08);
+  --chat-input-shadow: 0 18px 44px rgba(15, 23, 42, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.82);
+  --chat-input-focus-shadow: 0 0 0 2px rgba(2, 132, 199, 0.14), 0 18px 44px rgba(15, 23, 42, 0.1);
+  --chat-input-busy-shadow: 0 0 0 1px rgba(2, 132, 199, 0.13), 0 18px 36px rgba(2, 132, 199, 0.08);
+  --chat-input-waiting-shadow: 0 0 0 1px rgba(245, 158, 11, 0.16), 0 18px 36px rgba(245, 158, 11, 0.1);
+  --chat-input-popover-shadow: 0 18px 42px rgba(15, 23, 42, 0.14);
 }
 
 .input-container.focused {
   border-color: var(--app-accent);
-  box-shadow: 0 0 0 2px var(--app-accent-soft);
+  box-shadow: var(--chat-input-focus-shadow);
 }
 
 .input-container.dragging {
   border-color: var(--app-accent);
-  box-shadow: 0 0 0 2px var(--app-accent-soft);
+  box-shadow: var(--chat-input-focus-shadow);
   background: color-mix(in srgb, var(--app-accent) 8%, var(--chat-input-surface));
 }
 
 .input-container.busy {
   border-color: color-mix(in srgb, var(--app-accent-glow) 72%, transparent);
-  box-shadow: 0 0 0 1px rgba(91, 140, 255, 0.08), 0 18px 36px rgba(91, 140, 255, 0.08);
+  box-shadow: var(--chat-input-busy-shadow);
 }
 
 .input-container.waitingAuth {
   border-color: rgba(245, 158, 11, 0.42);
-  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12), 0 18px 36px rgba(245, 158, 11, 0.12);
+  box-shadow: var(--chat-input-waiting-shadow);
   background: color-mix(in srgb, rgb(245, 158, 11) 6%, var(--chat-input-surface));
 }
 
@@ -921,8 +911,8 @@ function handleTextareaBlur () {
   max-width: 280px;
   padding: 10px 12px;
   border-radius: 10px;
-  border: 1px solid var(--app-border-strong);
-  background: var(--app-panel-subtle);
+  border: 1px solid var(--chat-input-control-border);
+  background: var(--chat-input-control-surface);
 }
 
 .file-preview-icon {
@@ -965,7 +955,7 @@ function handleTextareaBlur () {
   height: 56px;
   object-fit: cover;
   border-radius: 8px;
-  border: 1px solid var(--app-border-strong);
+  border: 1px solid var(--chat-input-control-border);
 }
 
 .image-remove {
@@ -1033,9 +1023,9 @@ function handleTextareaBlur () {
   overscroll-behavior: contain;
   padding: 6px;
   border-radius: 12px;
-  border: 1px solid var(--app-border-strong);
-  background: color-mix(in srgb, var(--app-panel-strong) 92%, white 8%);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--chat-input-control-border);
+  background: var(--chat-input-floating-surface);
+  box-shadow: var(--chat-input-popover-shadow);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1117,7 +1107,7 @@ function handleTextareaBlur () {
 }
 
 .project-tag-chip-remove:hover {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--chat-input-chip-remove-hover);
   color: var(--app-danger);
 }
 
@@ -1166,7 +1156,7 @@ function handleTextareaBlur () {
 }
 
 .document-tag-chip-remove:hover {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--chat-input-chip-remove-hover);
   color: var(--app-danger);
 }
 
@@ -1267,12 +1257,12 @@ function handleTextareaBlur () {
   bottom: calc(100% + 8px);
   left: 0;
   z-index: 50;
-  width: 248px;
+  width: 280px;
   padding: 12px;
   border-radius: 12px;
-  border: 1px solid var(--app-border-strong);
-  background: var(--app-panel-strong);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--chat-input-control-border);
+  background: var(--chat-input-floating-surface);
+  box-shadow: var(--chat-input-popover-shadow);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1308,6 +1298,47 @@ function handleTextareaBlur () {
   font-weight: 700;
   color: var(--app-accent);
   font-variant-numeric: tabular-nums;
+}
+
+.advanced-reasoning-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 3px;
+  border-radius: 9px;
+  border: 1px solid var(--chat-input-control-border);
+  background: var(--chat-input-control-surface);
+}
+
+.advanced-reasoning-option {
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 0.74em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
+}
+
+.advanced-reasoning-option:hover {
+  background: var(--chat-input-hover-surface);
+  color: var(--app-text);
+}
+
+.advanced-reasoning-option.active {
+  background: var(--app-accent);
+  color: #ffffff;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--app-accent) 45%, transparent);
+}
+
+.advanced-setting-note {
+  color: var(--app-text-muted);
+  font-size: 0.74em;
+  line-height: 1.45;
 }
 
 .advanced-slider {
@@ -1371,65 +1402,6 @@ function handleTextareaBlur () {
   color: #d97706;
 }
 
-.reasoning-segmented {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  height: 28px;
-  padding: 3px;
-  border-radius: 8px;
-  background: var(--app-panel-muted);
-  border: 1px solid var(--app-border);
-}
-
-.reasoning-group-indicator {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 10px;
-  border-radius: 8px;
-  background: var(--app-panel-muted);
-  border: 1px dashed var(--app-border);
-  color: var(--app-text-soft);
-  font-size: 0.72em;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.reasoning-icon {
-  color: var(--app-accent);
-  margin: 0 3px 0 3px;
-  flex-shrink: 0;
-  opacity: 0.75;
-}
-
-.reasoning-pill {
-  height: 22px;
-  padding: 0 7px;
-  border-radius: 5px;
-  border: none;
-  background: transparent;
-  color: var(--app-text-muted);
-  font-size: 0.72em;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
-  white-space: nowrap;
-  line-height: 22px;
-}
-
-.reasoning-pill:hover {
-  background: color-mix(in srgb, var(--app-panel) 70%, transparent);
-  color: var(--app-text);
-}
-
-.reasoning-pill.active {
-  background: var(--app-accent);
-  color: #ffffff;
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--app-accent) 45%, transparent);
-}
-
 .auth-mode-btn.auto {
   color: #22c55e;
   background: rgba(34, 197, 94, 0.1);
@@ -1474,9 +1446,9 @@ function handleTextareaBlur () {
   font-size: 0.76em;
   line-height: 1.3;
   color: var(--app-text-soft);
-  background: var(--app-panel-strong);
-  border: 1px solid var(--app-border);
-  box-shadow: var(--app-shadow);
+  background: var(--chat-input-floating-surface);
+  border: 1px solid var(--chat-input-control-border);
+  box-shadow: var(--chat-input-popover-shadow);
   transition: opacity 0.16s ease, transform 0.16s ease;
   z-index: 10;
 }
@@ -1494,10 +1466,10 @@ function handleTextareaBlur () {
   bottom: -5px;
   transform: translateX(-50%);
   border: 5px solid transparent;
-  border-top-color: var(--app-panel-strong);
+  border-top-color: var(--chat-input-floating-surface);
 }
 
-.action-btn:hover { background: var(--app-panel-muted); color: var(--app-text); }
+.action-btn:hover { background: var(--chat-input-hover-surface); color: var(--app-text); }
 .action-btn.doc-btn.active { color: var(--app-accent); background: var(--app-accent-soft); }
 .action-btn.upload-btn { cursor: pointer; }
 .action-btn.disabled {
@@ -1540,7 +1512,7 @@ function handleTextareaBlur () {
 }
 
 .action-btn.send-btn:disabled {
-  background: var(--app-panel-muted);
+  background: var(--chat-input-disabled-surface);
   color: var(--app-text-faint);
   cursor: not-allowed;
 }

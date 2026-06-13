@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse } from '../src/shared/image-studio-types.js'
@@ -191,6 +191,15 @@ type ScheduledTaskSchedule =
     kind: 'interval'
     everyMinutes: number
     startAt?: string
+  }
+  | {
+    kind: 'daily'
+    timeOfDay: string
+  }
+  | {
+    kind: 'weekly'
+    weekdays: number[]
+    timeOfDay: string
   }
   | {
     kind: 'dates'
@@ -489,6 +498,8 @@ export interface ElectronAPI {
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
   compactMemory: () => Promise<MemoryCompactionResult>
+  getMemoryCompactionStatus: () => Promise<MemoryCompactionStatus>
+  onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => () => void
   saveImageToFile: (imageUrl: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   saveMarkdownToFile: (markdown: string, defaultName?: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string }>
   generateStudioImage: (req: ImageStudioGenerateRequest) => Promise<ImageStudioGenerateResponse>
@@ -703,6 +714,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pinMemory: (id: string, pinned: boolean) => ipcRenderer.invoke('memory:pin', id, pinned),
   deleteMemory: (id: string) => ipcRenderer.invoke('memory:delete', id),
   compactMemory: () => ipcRenderer.invoke('memory:compact'),
+  getMemoryCompactionStatus: () => ipcRenderer.invoke('memory:compactStatus'),
+  onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, status: MemoryCompactionStatus) => callback(status)
+    ipcRenderer.on('memory:compactionStatusChanged', handler)
+    return () => { ipcRenderer.removeListener('memory:compactionStatusChanged', handler) }
+  },
   saveImageToFile: (imageUrl: string, defaultName?: string) => ipcRenderer.invoke('media:saveImage', imageUrl, defaultName),
   saveMarkdownToFile: (markdown: string, defaultName?: string) => ipcRenderer.invoke('media:saveMarkdown', markdown, defaultName),
   generateStudioImage: (req: ImageStudioGenerateRequest): Promise<ImageStudioGenerateResponse> => ipcRenderer.invoke('image:generate', req),

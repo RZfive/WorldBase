@@ -103,7 +103,8 @@ const sharedProvidersConfig = ref<ProvidersConfig>({
 })
 const sharedActiveProviderId = ref('')
 const sharedSelectedModel = ref('')
-const sharedReasoningStrength = ref<ReasoningStrength>('medium')
+const DEFAULT_REASONING_STRENGTH: ReasoningStrength = 'max'
+const sharedReasoningStrength = ref<ReasoningStrength>(DEFAULT_REASONING_STRENGTH)
 // Per-conversation temperature override. null = follow the provider default.
 const sharedConversationTemperature = ref<number | null>(null)
 const sharedCurrentAuthMode = ref<AIExecutionAuthMode>('strict')
@@ -684,7 +685,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     messages.value = []
     targetProjectId.value = null
     currentAuthMode.value = 'strict'
-    reasoningStrength.value = 'medium'
+    reasoningStrength.value = DEFAULT_REASONING_STRENGTH
     conversationTemperature.value = null
     inputText.value = ''
     resetTransientStreamState()
@@ -950,7 +951,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     messages.value = []
     targetProjectId.value = projectId
     currentAuthMode.value = 'strict'
-    reasoningStrength.value = 'medium'
+    reasoningStrength.value = DEFAULT_REASONING_STRENGTH
     conversationTemperature.value = null
     selectedAgentId.value = getDefaultAgentId()
     selectedGroupId.value = ''
@@ -1217,7 +1218,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       syncPendingAuthRequestsIntoMessages(conv.id, messages.value)
       targetProjectId.value = conv.targetProjectId || null
       currentAuthMode.value = conv.authMode === 'auto' ? 'auto' : 'strict'
-      reasoningStrength.value = conv.reasoningStrength || 'medium'
+      reasoningStrength.value = conv.reasoningStrength || DEFAULT_REASONING_STRENGTH
       conversationTemperature.value = typeof conv.temperature === 'number' ? conv.temperature : null
       selectedAgentId.value = resolveConversationAgentSelection(conv)
       selectedGroupId.value = conv.groupId || ''

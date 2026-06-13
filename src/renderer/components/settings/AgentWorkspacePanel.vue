@@ -25,11 +25,14 @@ const agentTools = ref<ToolCatalogEntry[]>([])
 const memoryQuery = ref('')
 const memoryScopeType = ref<AgentMemoryScope>('user')
 const memoryScopeId = ref('')
-const memoryCompacting = ref(false)
+const memoryCompactionStatus = ref<MemoryCompactionStatus | null>(null)
+const memoryCompactionStarting = ref(false)
+const memoryCompacting = computed(() => memoryCompactionStarting.value || memoryCompactionStatus.value?.status === 'running')
 const statusMessage = ref('')
 let providerChangeCleanup: (() => void) | null = null
 let skillsChangeCleanup: (() => void) | null = null
 let workspaceChangeCleanup: (() => void) | null = null
+let memoryCompactionCleanup: (() => void) | null = null
 
 const draftAgent = reactive({
   id: '',
@@ -81,6 +84,53 @@ const draftBinding = reactive({
 function setStatus (message: string) {
   statusMessage.value = message
 }
+
+function formatMemoryCompactionResult (result: MemoryCompactionResult): string {
+  return `AI 记忆整理完成：扫描 ${result.scanned} 条，删除无用 ${result.removedUseless} 条，合并重复 ${result.merged} 条，更新 ${result.updated} 条，保留 ${result.retained} 条`
+}
+
+function formatMemoryCompactionStatus (status: MemoryCompactionStatus): string {
+  if (status.status === 'running') {
+    const batchText = status.totalChunks > 0
+      ? `（${status.completedChunks}/${status.totalChunks} 批）`
+      : ''
+    const detail = status.detail ? `：${status.detail}` : ''
+    return `AI 记忆整理中：${status.stage}${batchText}${detail}`
+  }
+
+  if (status.status === 'completed' && status.result) {
+    return formatMemoryCompactionResult(status.result)
+  }
+
+  if (status.status === 'failed') {
+    return `AI 记忆整理失败：${status.error || status.detail || '未知错误'}`
+  }
+
+  return ''
+}
+
+function applyMemoryCompactionStatus (status: MemoryCompactionStatus) {
+  memoryCompactionStatus.value = status
+  memoryCompactionStarting.value = false
+  const message = formatMemoryCompactionStatus(status)
+  if (message) {
+    setStatus(message)
+  }
+  if (status.status === 'completed') {
+    void loadMemory()
+  }
+}
+
+const memoryCompactionProgressText = computed(() => {
+  const status = memoryCompactionStatus.value
+  if (!status || status.status !== 'running') return ''
+  const batchText = status.totalChunks > 0
+    ? `${status.completedChunks}/${status.totalChunks} 批`
+    : '准备中'
+  return status.detail
+    ? `${batchText} · ${status.stage} · ${status.detail}`
+    : `${batchText} · ${status.stage}`
+})
 
 function toggleStringValue<T extends string> (collection: T[], value: T): T[] {
   return collection.includes(value)
@@ -329,6 +379,11 @@ async function loadMemory () {
   })
 }
 
+async function syncMemoryCompactionStatus () {
+  if (!window.electronAPI?.getMemoryCompactionStatus) return
+  applyMemoryCompactionStatus(await window.electronAPI.getMemoryCompactionStatus())
+}
+
 async function loadAll () {
   await Promise.all([
     loadProvidersCatalog(),
@@ -481,21 +536,23 @@ async function compactMemory () {
   if (!window.electronAPI?.compactMemory || memoryCompacting.value) return
   if (!window.confirm('AI 将读取当前所有记忆，生成删除、合并和改写方案；置顶记忆不会被自动删除。是否继续？')) return
 
-  memoryCompacting.value = true
-  setStatus('正在调用 AI 整理记忆...')
+  memoryCompactionStarting.value = true
+  setStatus('正在启动 AI 记忆整理...')
   try {
     const result = await window.electronAPI.compactMemory()
     await loadMemory()
-    setStatus(`AI 记忆整理完成：扫描 ${result.scanned} 条，删除无用 ${result.removedUseless} 条，合并重复 ${result.merged} 条，更新 ${result.updated} 条，保留 ${result.retained} 条`)
+    setStatus(formatMemoryCompactionResult(result))
   } catch (err) {
     setStatus(`AI 记忆整理失败：${(err as Error).message}`)
   } finally {
-    memoryCompacting.value = false
+    memoryCompactionStarting.value = false
+    void syncMemoryCompactionStatus()
   }
 }
 
 onMounted(() => {
   void loadAll()
+  void syncMemoryCompactionStatus()
 
   if (window.electronAPI?.onProvidersChanged) {
     providerChangeCleanup = window.electronAPI.onProvidersChanged(() => {
@@ -514,12 +571,19 @@ onMounted(() => {
       void reloadAgentWorkspaceEntities(event.entity)
     })
   }
+
+  if (window.electronAPI?.onMemoryCompactionStatusChanged) {
+    memoryCompactionCleanup = window.electronAPI.onMemoryCompactionStatusChanged((status) => {
+      applyMemoryCompactionStatus(status)
+    })
+  }
 })
 
 onUnmounted(() => {
   providerChangeCleanup?.()
   skillsChangeCleanup?.()
   workspaceChangeCleanup?.()
+  memoryCompactionCleanup?.()
 })
 
 watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
@@ -530,6 +594,7 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
 watch(activeTab, (nextTab, previousTab) => {
   if (nextTab !== 'memory' || nextTab === previousTab) return
   void loadMemory()
+  void syncMemoryCompactionStatus()
 })
 </script>
 
@@ -872,6 +937,9 @@ watch(activeTab, (nextTab, previousTab) => {
           {{ memoryCompacting ? 'AI 整理中...' : 'AI 整理记忆' }}
         </button>
       </div>
+      <div v-if="memoryCompactionProgressText" class="memory-progress" role="status">
+        <span>{{ memoryCompactionProgressText }}</span>
+      </div>
 
       <div class="memory-list">
         <article v-for="entry in memoryEntries" :key="entry.id" class="memory-card">
@@ -1122,6 +1190,18 @@ label {
 
 .memory-toolbar .narrow {
   width: 120px;
+}
+
+.memory-progress {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 26%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 38%, transparent);
+  color: var(--app-text-soft);
+  font-size: 0.82rem;
 }
 
 .memory-list {

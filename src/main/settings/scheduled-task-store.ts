@@ -27,12 +27,28 @@ export interface ScheduledTaskIntervalSchedule {
   startAt?: string
 }
 
+export interface ScheduledTaskDailySchedule {
+  kind: 'daily'
+  timeOfDay: string
+}
+
+export interface ScheduledTaskWeeklySchedule {
+  kind: 'weekly'
+  weekdays: number[]
+  timeOfDay: string
+}
+
 export interface ScheduledTaskDatesSchedule {
   kind: 'dates'
   dates: string[]
 }
 
-export type ScheduledTaskSchedule = ScheduledTaskOnceSchedule | ScheduledTaskIntervalSchedule | ScheduledTaskDatesSchedule
+export type ScheduledTaskSchedule =
+  | ScheduledTaskOnceSchedule
+  | ScheduledTaskIntervalSchedule
+  | ScheduledTaskDailySchedule
+  | ScheduledTaskWeeklySchedule
+  | ScheduledTaskDatesSchedule
 
 export interface ScheduledTaskDefinition {
   id: string
@@ -110,6 +126,35 @@ function normalizeStringArray (value: unknown): string[] {
   return normalized
 }
 
+function normalizeTimeOfDay (value: unknown): string | null {
+  const raw = normalizeString(value)
+  const match = raw.match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) return null
+
+  const hours = Number(match[1])
+  const minutes = Number(match[2])
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return null
+  }
+
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`
+}
+
+function normalizeWeekdays (value: unknown): number[] {
+  if (!Array.isArray(value)) return []
+
+  const seen = new Set<number>()
+  const normalized: number[] = []
+  for (const item of value) {
+    const weekday = Number(item)
+    if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7 || seen.has(weekday)) continue
+    seen.add(weekday)
+    normalized.push(weekday)
+  }
+
+  return normalized.sort((left, right) => left - right)
+}
+
 function normalizeRetryPolicy (value: unknown): ScheduledTaskRetryPolicy {
   const record = (value && typeof value === 'object' && !Array.isArray(value))
     ? value as Record<string, unknown>
@@ -147,6 +192,22 @@ function normalizeSchedule (value: unknown): ScheduledTaskSchedule | null {
       kind: 'interval',
       everyMinutes: Math.min(7 * 24 * 60, Math.floor(everyMinutes)),
       startAt: startAt || undefined
+    }
+  }
+
+  if (kind === 'daily') {
+    const timeOfDay = normalizeTimeOfDay(record.timeOfDay)
+    return timeOfDay ? { kind: 'daily', timeOfDay } : null
+  }
+
+  if (kind === 'weekly') {
+    const timeOfDay = normalizeTimeOfDay(record.timeOfDay)
+    const weekdays = normalizeWeekdays(record.weekdays)
+    if (!timeOfDay || weekdays.length === 0) return null
+    return {
+      kind: 'weekly',
+      weekdays,
+      timeOfDay
     }
   }
 
