@@ -169,6 +169,9 @@ const emit = defineEmits<{
 <style scoped>
 .conv-folder {
   position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
 }
 
 .conv-folder::before,
@@ -205,6 +208,9 @@ const emit = defineEmits<{
 
 .conv-folder-shell {
   position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   display: flex;
   align-items: center;
   min-height: 30px;
@@ -295,6 +301,7 @@ const emit = defineEmits<{
 }
 
 .conv-copy {
+  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -313,6 +320,7 @@ const emit = defineEmits<{
 }
 
 .conv-title-stack {
+  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: row;
@@ -331,10 +339,11 @@ const emit = defineEmits<{
 }
 
 .conv-folder-title {
-  max-width: 112px;
+  max-width: 100%;
 }
 
 .conv-folder-meta {
+  margin-left: auto;
   color: var(--app-text-faint);
   font-size: 0.64rem;
   flex-shrink: 0;

@@ -846,17 +846,22 @@ function handleTextareaBlur () {
 
 <style scoped>
 .chat-input {
+  position: relative;
+  z-index: 6;
   padding: 10px var(--chat-message-gutter, 24px) 18px;
   background: transparent;
 }
 
 .chat-input > * {
+  position: relative;
+  z-index: 1;
   max-width: var(--chat-message-track-max, 1480px);
   margin-left: auto;
   margin-right: auto;
 }
 
 .input-container {
+  position: relative;
   background: var(--app-input-bg);
   border: 1px solid var(--app-input-border);
   border-radius: 24px;

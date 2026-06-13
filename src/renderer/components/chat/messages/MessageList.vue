@@ -639,7 +639,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px var(--chat-message-gutter, 28px) 20px;
+  padding: 24px var(--chat-message-gutter, 28px) 8px;
   scrollbar-gutter: stable;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
@@ -707,7 +707,7 @@ onUnmounted(() => {
 
 @media (max-width: 860px) {
   .chat-messages {
-    padding: 20px 16px 16px;
+    padding: 20px 16px 8px;
   }
 
   .empty-state-card {

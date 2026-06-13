@@ -19,6 +19,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'newConversation'): void
+  (e: 'toggleCollapse'): void
   (e: 'selectConversation', id: string): void
   (e: 'openAgent', agentId: string): void
   (e: 'openGroup', groupId: string): void
@@ -174,7 +175,20 @@ function cancelRenameConversation () {
 <template>
   <div class="conv-sidebar">
     <div class="conv-toolbar">
-      <button class="new-conv-btn" type="button" @click="emit('newConversation')">+ 新对话</button>
+      <div class="conv-toolbar-row">
+        <button class="new-conv-btn" type="button" @click="emit('newConversation')">+ 新对话</button>
+        <button
+          class="conv-collapse-btn"
+          type="button"
+          title="收起对话列表"
+          aria-label="收起对话列表"
+          @click="emit('toggleCollapse')"
+        >
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <path d="M12.5 5L7.5 10L12.5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </div>
       <label class="conv-search-shell">
         <span class="conv-search-icon">⌕</span>
         <input
@@ -389,7 +403,8 @@ function cancelRenameConversation () {
 
 <style scoped>
 .conv-sidebar {
-  width: 252px;
+  box-sizing: border-box;
+  width: 100%;
   background: var(--app-panel);
   border-right: 1px solid var(--app-border);
   display: flex;
@@ -405,7 +420,15 @@ function cancelRenameConversation () {
   border-bottom: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
 }
 
+.conv-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .new-conv-btn {
+  flex: 1;
+  min-width: 0;
   padding: 9px 0;
   background: var(--app-accent);
   color: #ffffff;
@@ -420,6 +443,32 @@ function cancelRenameConversation () {
 
 .new-conv-btn:hover {
   background: var(--app-accent-strong);
+}
+
+.conv-collapse-btn {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
+  background: color-mix(in srgb, var(--app-panel-strong) 86%, transparent);
+  color: var(--app-text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.conv-collapse-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.conv-collapse-btn:hover {
+  border-color: color-mix(in srgb, var(--app-accent) 28%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 36%, var(--app-panel));
+  color: var(--app-text);
 }
 
 .conv-search-shell {
@@ -475,54 +524,58 @@ function cancelRenameConversation () {
 .conv-list {
   flex: 1;
   overflow-y: auto;
-  padding: 10px 8px 12px;
+  overflow-x: hidden;
+  padding: 8px 14px 12px 12px;
+  scrollbar-gutter: stable;
 }
 
 .conv-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 6px;
+  margin-bottom: 8px;
 }
 
 .conv-section-toggle {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
-  background: color-mix(in srgb, var(--app-panel-muted) 54%, transparent);
+  padding: 5px 4px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
   cursor: pointer;
-  transition: border-color 0.18s ease, background 0.18s ease;
+  transition: background 0.18s ease, color 0.18s ease;
 }
 
 .conv-section-toggle-shell {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 2px;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
-  background: color-mix(in srgb, var(--app-panel-muted) 54%, transparent);
-  transition: border-color 0.18s ease, background 0.18s ease;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  transition: background 0.18s ease;
 }
 
 .conv-section-toggle-shell:hover {
-  border-color: color-mix(in srgb, var(--app-accent) 22%, var(--app-border));
-  background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
+  background: color-mix(in srgb, var(--app-panel-muted) 50%, transparent);
 }
 
 .conv-section-toggle-embedded {
-  padding-right: 4px;
+  flex: 1;
+  min-width: 0;
+  padding-right: 0;
   border: none;
   background: transparent;
 }
 
 .conv-section-toggle:hover {
-  border-color: color-mix(in srgb, var(--app-accent) 22%, var(--app-border));
-  background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
+  background: color-mix(in srgb, var(--app-panel-muted) 50%, transparent);
 }
 
 .conv-section-toggle-embedded:hover {
@@ -536,11 +589,11 @@ function cancelRenameConversation () {
 
 .conv-folder-add-btn {
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   margin-right: 0;
   padding: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--app-text-soft);
@@ -549,8 +602,8 @@ function cancelRenameConversation () {
 }
 
 .conv-folder-add-btn svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
 }
 
 .conv-folder-add-btn:hover {
@@ -561,11 +614,11 @@ function cancelRenameConversation () {
 
 .conv-section-caret-btn {
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  margin-right: 4px;
+  width: 24px;
+  height: 24px;
+  margin-right: 0;
   padding: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   border: none;
   background: transparent;
   cursor: pointer;
@@ -583,44 +636,50 @@ function cancelRenameConversation () {
 }
 
 .conv-section-toggle-copy {
+  flex: 1;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
 }
 
 .conv-section-title {
   color: var(--app-text-soft);
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .conv-section-hint {
   color: var(--app-text-faint);
-  font-size: 0.64rem;
+  font-size: 0.68rem;
   line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .conv-section-meta {
   margin-left: auto;
+  flex-shrink: 0;
   color: var(--app-text-faint);
   font-size: 0.66rem;
   font-weight: 600;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--app-panel-muted) 62%, transparent);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .conv-section-caret-shell {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 80%, transparent);
+  border: 1px solid transparent;
   background: transparent;
   color: var(--app-text-muted);
   flex-shrink: 0;
@@ -648,12 +707,13 @@ function cancelRenameConversation () {
 }
 
 .conv-section-body-inner {
+  box-sizing: border-box;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
   transition: opacity 0.2s ease;
-  width: 229px;
+  width: 100%;
 }
 
 .conv-section-body-conversations {
