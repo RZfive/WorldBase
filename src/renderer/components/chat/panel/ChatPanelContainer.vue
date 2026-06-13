@@ -797,11 +797,12 @@ watch(
 }
 
 .chat-panel {
-  --chat-message-gutter: clamp(22px, 4.8vw, 72px);
-  --chat-message-track-max: 1180px;
-  --chat-user-message-max: 820px;
-  --chat-user-bubble-max: 640px;
+  --chat-message-gutter: clamp(32px, 7vw, 128px);
+  --chat-message-track-max: 980px;
+  --chat-user-message-max: 680px;
+  --chat-user-bubble-max: 540px;
   --chat-event-card-max: 100%;
+  --chat-input-overlap: clamp(44px, 7vh, 72px);
   display: flex;
   flex-direction: row;
   flex: 1;
