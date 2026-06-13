@@ -99,6 +99,14 @@ const reasoningLevels: Array<{ value: ReasoningStrength; label: string }> = [
   { value: 'high', label: '高' },
   { value: 'max', label: '最高' }
 ]
+const ADVANCED_SLIDER_THUMB_SIZE = 12
+function sliderFillToThumbCenter (ratio: number): string {
+  const clamped = Math.min(Math.max(ratio, 0), 1)
+  const percent = clamped * 100
+  const offset = (0.5 - clamped) * ADVANCED_SLIDER_THUMB_SIZE
+  const operator = offset >= 0 ? '+' : '-'
+  return `calc(${percent.toFixed(3)}% ${operator} ${Math.abs(offset).toFixed(2)}px)`
+}
 const currentReasoningIndex = computed(() => {
   const index = reasoningLevels.findIndex(level => level.value === props.reasoningStrength)
   return index >= 0 ? index : reasoningLevels.length - 1
@@ -106,19 +114,26 @@ const currentReasoningIndex = computed(() => {
 const currentReasoningLabel = computed(() => {
   return reasoningLevels[currentReasoningIndex.value]?.label || '最高'
 })
+const reasoningSliderFill = computed(() => {
+  return sliderFillToThumbCenter(currentReasoningIndex.value / Math.max(reasoningLevels.length - 1, 1))
+})
 const groupReasoningTitle = computed(() => {
   return `群聊中此处不单独调节思考强度，当前会沿用群内各 Agent 自身的思考强度配置（当前界面值：${currentReasoningLabel.value}）。`
 })
 const TEMPERATURE_MIN = 0
 const TEMPERATURE_MAX = 2
 const showAdvancedPanel = ref(false)
-const isTemperatureOverridden = computed(() => typeof props.temperature === 'number' && Number.isFinite(props.temperature))
 const fallbackTemperature = computed(() => {
   const value = props.providerDefaultTemperature
   return typeof value === 'number' && Number.isFinite(value) ? value : 0.3
 })
 const effectiveTemperature = computed(() => {
-  return isTemperatureOverridden.value ? (props.temperature as number) : fallbackTemperature.value
+  return typeof props.temperature === 'number' && Number.isFinite(props.temperature) ? props.temperature : fallbackTemperature.value
+})
+const temperatureSliderFill = computed(() => {
+  const span = Math.max(TEMPERATURE_MAX - TEMPERATURE_MIN, 1)
+  const value = Math.min(Math.max(effectiveTemperature.value, TEMPERATURE_MIN), TEMPERATURE_MAX)
+  return sliderFillToThumbCenter((value - TEMPERATURE_MIN) / span)
 })
 function toggleAdvancedPanel () {
   showAdvancedPanel.value = !showAdvancedPanel.value
@@ -128,8 +143,11 @@ function onTemperatureInput (e: Event) {
   if (!Number.isFinite(value)) return
   emit('update:temperature', Math.min(Math.max(value, TEMPERATURE_MIN), TEMPERATURE_MAX))
 }
-function resetTemperature () {
-  emit('update:temperature', null)
+function onReasoningInput (e: Event) {
+  const value = Number.parseInt((e.target as HTMLInputElement).value, 10)
+  const level = reasoningLevels[Math.min(Math.max(value, 0), reasoningLevels.length - 1)]
+  if (!level || props.isGroupConversation) return
+  emit('update:reasoning-strength', level.value)
 }
 const projectTags = computed<ProjectTagChip[]>(() => {
   const seenIds = new Set<string>()
@@ -673,7 +691,7 @@ function handleTextareaBlur () {
       </div>
       <div class="input-actions">
         <div class="input-actions-left">
-          <!-- Advanced settings: gear opens a popover (temperature now, more later) -->
+          <!-- Advanced settings expand inline inside the input toolbar. -->
           <div class="advanced-settings-anchor">
             <div class="tooltip-container">
               <button
@@ -688,55 +706,43 @@ function handleTextareaBlur () {
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                 </svg>
               </button>
-              <span class="tooltip-text">高级设置</span>
+              <span v-if="!showAdvancedPanel" class="tooltip-text">高级设置</span>
             </div>
-            <div v-if="showAdvancedPanel" class="advanced-backdrop" @click="showAdvancedPanel = false"></div>
-            <div v-if="showAdvancedPanel" class="advanced-panel">
-              <div class="advanced-panel-title">高级设置</div>
-              <div class="advanced-setting">
-                <div class="advanced-setting-head">
-                  <span class="advanced-setting-name">思考强度</span>
-                  <span class="advanced-setting-value">{{ currentReasoningLabel }}</span>
+            <Transition name="advanced-drawer">
+              <div v-if="showAdvancedPanel" class="advanced-panel">
+                <div class="advanced-setting advanced-reasoning-setting">
+                  <span class="advanced-setting-name" :title="props.isGroupConversation ? groupReasoningTitle : ''">
+                    思考强度 <span class="advanced-setting-value">({{ currentReasoningLabel }})</span>
+                  </span>
+                  <input
+                    class="advanced-slider advanced-reasoning-slider"
+                    type="range"
+                    min="0"
+                    max="3"
+                    step="1"
+                    :value="currentReasoningIndex"
+                    :style="{ '--advanced-slider-fill': reasoningSliderFill }"
+                    :disabled="props.isGroupConversation"
+                    @input="onReasoningInput"
+                  />
                 </div>
-                <div v-if="!props.isGroupConversation" class="advanced-reasoning-options" role="group" aria-label="思考强度">
-                  <button
-                    v-for="level in reasoningLevels"
-                    :key="level.value"
-                    class="advanced-reasoning-option"
-                    :class="{ active: props.reasoningStrength === level.value }"
-                    type="button"
-                    @click="emit('update:reasoning-strength', level.value)"
-                  >{{ level.label }}</button>
-                </div>
-                <div v-else class="advanced-setting-note">{{ groupReasoningTitle }}</div>
-              </div>
-              <div class="advanced-setting">
-                <div class="advanced-setting-head">
-                  <span class="advanced-setting-name">模型温度</span>
-                  <span class="advanced-setting-value">{{ effectiveTemperature.toFixed(2) }}</span>
-                </div>
-                <input
-                  class="advanced-slider"
-                  type="range"
-                  :min="TEMPERATURE_MIN"
-                  :max="TEMPERATURE_MAX"
-                  step="0.1"
-                  :value="effectiveTemperature"
-                  @input="onTemperatureInput"
-                />
-                <div class="advanced-slider-scale">
-                  <span>精确 0</span>
-                  <span>2 发散</span>
-                </div>
-                <div class="advanced-setting-foot">
-                  <span v-if="!isTemperatureOverridden" class="advanced-setting-hint">跟随供应商默认（{{ fallbackTemperature.toFixed(2) }}）</span>
-                  <template v-else>
-                    <span class="advanced-setting-hint accent">仅当前会话</span>
-                    <button class="advanced-reset" type="button" @click="resetTemperature">跟随供应商默认</button>
-                  </template>
+                <div class="advanced-setting advanced-temperature-setting">
+                  <span class="advanced-setting-name">
+                    模型温度 <span class="advanced-setting-value">({{ effectiveTemperature.toFixed(1) }})</span>
+                  </span>
+                  <input
+                    class="advanced-slider"
+                    type="range"
+                    :min="TEMPERATURE_MIN"
+                    :max="TEMPERATURE_MAX"
+                    step="0.1"
+                    :value="effectiveTemperature"
+                    :style="{ '--advanced-slider-fill': temperatureSliderFill }"
+                    @input="onTemperatureInput"
+                  />
                 </div>
               </div>
-            </div>
+            </Transition>
           </div>
           <ProviderDropdown
             v-if="props.isNewConversation && props.availableAgents && props.availableAgents.length > 0"
@@ -1228,12 +1234,15 @@ function handleTextareaBlur () {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1;
+  min-width: 0;
 }
 
 .advanced-settings-anchor {
-  position: relative;
   display: inline-flex;
   align-items: center;
+  gap: 5px;
+  min-width: 0;
 }
 
 .action-btn.advanced-btn {
@@ -1246,150 +1255,167 @@ function handleTextareaBlur () {
   background: var(--app-accent-soft);
 }
 
-.advanced-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-}
-
 .advanced-panel {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  z-index: 50;
-  width: 280px;
-  padding: 12px;
-  border-radius: 12px;
-  border: 1px solid var(--chat-input-control-border);
-  background: var(--chat-input-floating-surface);
-  box-shadow: var(--chat-input-popover-shadow);
+  width: 296px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
+  overflow: visible;
+  transform-origin: left center;
+  will-change: max-width, opacity, transform;
 }
 
-.advanced-panel-title {
-  font-size: 0.74em;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--app-text-muted);
+.advanced-drawer-enter-active,
+.advanced-drawer-leave-active {
+  overflow: hidden;
+  transition:
+    max-width 0.24s cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 0.18s ease,
+    transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1),
+    padding-left 0.24s cubic-bezier(0.2, 0.8, 0.2, 1),
+    padding-right 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.advanced-drawer-enter-from,
+.advanced-drawer-leave-to {
+  max-width: 0;
+  opacity: 0;
+  transform: translateX(-8px) scaleX(0.96);
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.advanced-drawer-enter-to,
+.advanced-drawer-leave-from {
+  max-width: 296px;
+  opacity: 1;
+  transform: translateX(0) scaleX(1);
 }
 
 .advanced-setting {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  min-width: 0;
+  flex-shrink: 0;
 }
 
-.advanced-setting-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.advanced-reasoning-setting {
+  min-width: 136px;
+}
+
+.advanced-temperature-setting {
+  min-width: 136px;
 }
 
 .advanced-setting-name {
-  font-size: 0.82em;
-  font-weight: 600;
-  color: var(--app-text);
-}
-
-.advanced-setting-value {
-  font-size: 0.82em;
-  font-weight: 700;
-  color: var(--app-accent);
-  font-variant-numeric: tabular-nums;
-}
-
-.advanced-reasoning-options {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 4px;
-  padding: 3px;
-  border-radius: 9px;
-  border: 1px solid var(--chat-input-control-border);
-  background: var(--chat-input-control-surface);
-}
-
-.advanced-reasoning-option {
-  height: 26px;
-  padding: 0 8px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--app-text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   font-size: 0.74em;
   font-weight: 600;
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  color: var(--app-text-soft);
   white-space: nowrap;
 }
 
-.advanced-reasoning-option:hover {
-  background: var(--chat-input-hover-surface);
-  color: var(--app-text);
+.advanced-reasoning-setting .advanced-setting-name {
+  flex: 0 0 84px;
 }
 
-.advanced-reasoning-option.active {
-  background: var(--app-accent);
-  color: #ffffff;
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--app-accent) 45%, transparent);
+.advanced-temperature-setting .advanced-setting-name {
+  flex: 0 0 84px;
 }
 
-.advanced-setting-note {
-  color: var(--app-text-muted);
-  font-size: 0.74em;
-  line-height: 1.45;
+.advanced-setting-value {
+  display: inline-block;
+  min-width: 2.7em;
+  font-size: 1em;
+  font-weight: 700;
+  color: var(--app-accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .advanced-slider {
-  width: 100%;
-  accent-color: var(--app-accent);
-  cursor: pointer;
-}
-
-.advanced-slider-scale {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.68em;
-  color: var(--app-text-faint);
-}
-
-.advanced-setting-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 18px;
-}
-
-.advanced-setting-hint {
-  font-size: 0.72em;
-  color: var(--app-text-muted);
-}
-
-.advanced-setting-hint.accent {
-  color: var(--app-accent);
-}
-
-.advanced-reset {
+  --advanced-slider-fill: 0%;
+  width: 48px;
+  height: 16px;
+  min-width: 0;
+  padding: 0;
   border: none;
+  border-radius: 999px;
   background: transparent;
-  color: var(--app-text-muted);
-  font-size: 0.72em;
+  appearance: none;
+  -webkit-appearance: none;
   cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 6px;
-  text-decoration: underline;
+  overflow: visible;
 }
 
-.advanced-reset:hover {
-  color: var(--app-accent);
+.advanced-reasoning-slider {
+  width: 46px;
+}
+
+.advanced-slider:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.advanced-slider::-webkit-slider-runnable-track {
+  height: 14px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--app-accent) 0%,
+    var(--app-accent) var(--advanced-slider-fill),
+    color-mix(in srgb, var(--app-text-muted) 24%, transparent) var(--advanced-slider-fill),
+    color-mix(in srgb, var(--app-text-muted) 24%, transparent) 100%
+  );
+}
+
+.advanced-slider::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: 1px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--app-accent) 70%, white);
+  background: var(--app-panel-strong);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.24);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.advanced-slider::-moz-range-track {
+  height: 14px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--app-accent) 0%,
+    var(--app-accent) var(--advanced-slider-fill),
+    color-mix(in srgb, var(--app-text-muted) 24%, transparent) var(--advanced-slider-fill),
+    color-mix(in srgb, var(--app-text-muted) 24%, transparent) 100%
+  );
+}
+
+.advanced-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--app-accent) 70%, white);
+  background: var(--app-panel-strong);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.24);
 }
 
 .input-actions-right {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .plan-mode-btn.active {
@@ -1520,5 +1546,27 @@ function handleTextareaBlur () {
 @keyframes runtime-pulse {
   0%, 100% { transform: scale(0.9); opacity: 0.72; }
   50% { transform: scale(1.2); opacity: 1; }
+}
+
+@media (max-width: 860px) {
+  .advanced-panel {
+    width: min(300px, calc(100vw - 210px));
+    gap: 8px;
+  }
+
+  .advanced-reasoning-setting,
+  .advanced-temperature-setting {
+    min-width: 0;
+  }
+
+  .advanced-slider,
+  .advanced-reasoning-slider {
+    width: 48px;
+  }
+
+  .advanced-drawer-enter-to,
+  .advanced-drawer-leave-from {
+    max-width: 300px;
+  }
 }
 </style>
