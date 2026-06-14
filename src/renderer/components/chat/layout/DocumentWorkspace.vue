@@ -686,14 +686,6 @@ watch(
           <p class="workspace-subtitle">右侧独立查看文档，不打断主对话。</p>
         </div>
         <div class="workspace-header-actions">
-          <button
-            class="workspace-toggle"
-            type="button"
-            :title="sidebarCollapsed ? '展开文档列表' : '收起文档列表'"
-            @click="toggleSidebarCollapsed"
-          >
-            {{ sidebarCollapsed ? '展开列表' : '收起列表' }}
-          </button>
           <button class="workspace-close" type="button" title="关闭文档工作区" @click="emit('close')">×</button>
         </div>
       </div>
@@ -768,6 +760,22 @@ watch(
             </template>
           </div>
         </aside>
+
+        <button
+          class="workspace-list-toggle"
+          type="button"
+          :style="{ left: `${sidebarWidth}px` }"
+          :title="sidebarCollapsed ? '展开文档列表' : '收起文档列表'"
+          :aria-label="sidebarCollapsed ? '展开文档列表' : '收起文档列表'"
+          @click="toggleSidebarCollapsed"
+        >
+          <svg v-if="sidebarCollapsed" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 6l6 6-6 6" />
+          </svg>
+          <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 6l-6 6 6 6" />
+          </svg>
+        </button>
 
         <section class="workspace-preview" :style="{ minWidth: `${previewMinWidth}px` }">
           <template v-if="selectedDocument">
@@ -914,23 +922,6 @@ watch(
   color: var(--app-text-muted);
 }
 
-.workspace-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--app-border);
-  background: var(--app-panel-subtle);
-  color: var(--app-text);
-  font-size: 0.75em;
-  cursor: pointer;
-}
-
-.workspace-toggle:hover {
-  background: var(--app-panel-muted);
-}
-
 .workspace-close {
   border: none;
   background: none;
@@ -945,10 +936,43 @@ watch(
 }
 
 .workspace-body {
+  position: relative;
   display: flex;
   flex: 1;
   min-width: 0;
   min-height: 0;
+}
+
+.workspace-list-toggle {
+  position: absolute;
+  top: 50%;
+  z-index: 5;
+  width: 18px;
+  height: 64px;
+  padding: 0;
+  border-radius: 9px;
+  border: 1px solid var(--app-border-strong);
+  background: color-mix(in srgb, var(--app-panel) 86%, transparent);
+  color: var(--app-text-muted);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    left 0.18s ease,
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.workspace-list-toggle:hover {
+  border-color: color-mix(in srgb, var(--app-accent) 45%, var(--app-border-strong));
+  background: var(--app-panel-muted);
+  color: var(--app-text-strong);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.16);
 }
 
 .workspace-rail {
@@ -1097,18 +1121,6 @@ watch(
   font-size: 0.76em;
   color: var(--app-text);
   word-break: break-all;
-}
-
-.workspace-rail {
-  width: clamp(280px, 33%, 340px);
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-height: 0;
-  padding: 18px;
-  border-left: 1px solid var(--app-border);
-  background: linear-gradient(180deg, var(--app-panel), color-mix(in srgb, var(--app-panel-subtle) 40%, var(--app-panel)));
 }
 
 .rail-actions {

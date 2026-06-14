@@ -397,6 +397,18 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     return '💬 新对话'
   })
 
+  const currentAssistantIcon = computed(() => {
+    if (currentGroupDefinition.value) return getGroupIcon(currentGroupDefinition.value)
+    if (currentAgentDefinition.value) return getAgentIcon(currentAgentDefinition.value)
+    return '🤖'
+  })
+
+  const currentAssistantName = computed(() => {
+    if (currentGroupDefinition.value) return currentGroupDefinition.value.name
+    if (currentAgentDefinition.value) return currentAgentDefinition.value.name
+    return 'The World AI'
+  })
+
   const currentModelLabel = computed(() => {
     if (currentGroupDefinition.value) {
       return `群组协作 · ${currentGroupDefinition.value.name}`
@@ -1945,6 +1957,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     conversationsLoaded,
     conversationSidebarItems,
     currentAuthMode,
+    currentAssistantIcon,
+    currentAssistantName,
     currentContextDetail,
     currentContextLabel,
     currentConversationId,

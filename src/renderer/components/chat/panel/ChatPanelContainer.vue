@@ -34,6 +34,8 @@ const {
   conversationsLoaded,
   conversationSidebarItems,
   currentAuthMode,
+  currentAssistantIcon,
+  currentAssistantName,
   currentContextDetail,
   currentContextLabel,
   currentConversationId,
@@ -496,6 +498,8 @@ watch(
           :messages="messages"
           :is-loading="isLoading"
           :file-preview="filePreview"
+          :assistant-icon="currentAssistantIcon"
+          :assistant-name="currentAssistantName"
           @respond-auth="respondToAuthRequest"
           @respond-sudo-password="respondToSudoPasswordRequest"
           @open-link="(url) => emit('openWebLink', url)"

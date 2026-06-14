@@ -839,6 +839,7 @@ interface ElectronAPI {
   saveChannelBinding: (binding: Partial<ChannelBinding>) => Promise<ChannelBinding>
   deleteChannelBinding: (id: string) => Promise<boolean>
   listMemory: (options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => Promise<MemoryEntry[]>
+  saveMemory: (entry: Partial<MemoryEntry>) => Promise<MemoryEntry>
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
   compactMemory: () => Promise<MemoryCompactionResult>
