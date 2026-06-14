@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { AIExecutionAuthMode } from './settings-store.js'
 import type { AgentGroupProgressSnapshot, AgentGroupTranscript, AgentSidechatSession } from '../../shared/agent-workspace-types.js'
+import type { ConversationFolderWorkspaceState } from '../../shared/folder-workspace-types.js'
 
 export type ChatMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 export type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
@@ -118,6 +119,8 @@ export interface Conversation {
   channelBindingId?: string
   /** Conversation-scoped document workspace state. */
   documentWorkspace?: ConversationDocumentWorkspaceState
+  /** Conversation-scoped folder/code workspace state. */
+  folderWorkspace?: ConversationFolderWorkspaceState
 }
 
 interface ConversationListEntry extends Omit<Conversation, 'messages'> {

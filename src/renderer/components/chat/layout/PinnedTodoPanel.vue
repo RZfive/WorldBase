@@ -124,22 +124,21 @@ function toggleCollapsed(): void {
 
 <style scoped>
 .todo-shell {
-  padding: 8px var(--chat-message-gutter, 28px) 0;
-  position: absolute;
-  top: 54px;
-  right: -18px;
-  bottom: 0px;
-  width: 500px;
-  z-index: 1;
+  position: relative;
+  z-index: 9;
+  height: 0;
+  padding: 0 var(--chat-message-gutter, 28px);
   pointer-events: none;
 }
 
 .todo-card {
-  width: min(100%, 760px);
-  margin: 0 auto;
+  position: absolute;
+  right: var(--chat-message-gutter, 28px);
+  bottom: 8px;
+  width: min(380px, calc(100vw - 48px));
   border: 1px solid
     color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
-  border-radius: 16px;
+  border-radius: 8px;
   background: linear-gradient(
     180deg,
     var(--app-panel),
@@ -149,6 +148,10 @@ function toggleCollapsed(): void {
   overflow: hidden;
   background-color: var(--app-shell-bg);
   pointer-events: auto;
+}
+
+.todo-card.expanded {
+  width: min(440px, calc(100vw - 48px));
 }
 
 .todo-summary {
@@ -295,7 +298,7 @@ function toggleCollapsed(): void {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 144px;
+  max-height: min(260px, 38vh);
   overflow-y: auto;
   padding-right: 4px;
   scrollbar-width: thin;
@@ -308,7 +311,7 @@ function toggleCollapsed(): void {
   gap: 10px;
   align-items: center;
   padding: 8px 10px;
-  border-radius: 12px;
+  border-radius: 8px;
   border: 1px solid var(--app-border);
   background: var(--app-panel-muted);
 }
@@ -376,7 +379,13 @@ function toggleCollapsed(): void {
 
 @media (max-width: 860px) {
   .todo-shell {
-    padding: 12px 16px 0;
+    padding: 0 16px;
+  }
+
+  .todo-card,
+  .todo-card.expanded {
+    right: 16px;
+    width: min(360px, calc(100vw - 32px));
   }
 
   .todo-summary {

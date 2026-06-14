@@ -135,6 +135,12 @@ const DEFAULT_DOCUMENT_WORKSPACE_WIDTH = 900
 const sharedDocumentWorkspaceDocuments = ref<ConversationDocumentReference[]>([])
 const sharedDocumentWorkspaceActiveFilePath = ref<string | null>(null)
 const sharedDocumentWorkspaceWidth = ref(DEFAULT_DOCUMENT_WORKSPACE_WIDTH)
+const sharedFolderWorkspaceVisible = ref(false)
+const DEFAULT_FOLDER_WORKSPACE_WIDTH = 980
+const sharedFolderWorkspaceRootPath = ref<string | null>(null)
+const sharedFolderWorkspaceRootName = ref<string | null>(null)
+const sharedFolderWorkspaceActiveFilePath = ref<string | null>(null)
+const sharedFolderWorkspaceWidth = ref(DEFAULT_FOLDER_WORKSPACE_WIDTH)
 const sharedStreamingConvIds = reactive(new Set<string>())
 const sharedPendingAuthRequestsByConversation = reactive(new Map<string, AuthRequestPayload[]>())
 const sharedBackgroundStreamMessages = new Map<string, BackgroundStreamState>()
@@ -210,6 +216,11 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const documentWorkspaceDocuments = sharedDocumentWorkspaceDocuments
   const documentWorkspaceActiveFilePath = sharedDocumentWorkspaceActiveFilePath
   const documentWorkspaceWidth = sharedDocumentWorkspaceWidth
+  const folderWorkspaceVisible = sharedFolderWorkspaceVisible
+  const folderWorkspaceRootPath = sharedFolderWorkspaceRootPath
+  const folderWorkspaceRootName = sharedFolderWorkspaceRootName
+  const folderWorkspaceActiveFilePath = sharedFolderWorkspaceActiveFilePath
+  const folderWorkspaceWidth = sharedFolderWorkspaceWidth
   const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
   const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 
@@ -693,6 +704,55 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     documentWorkspaceWidth.value = DEFAULT_DOCUMENT_WORKSPACE_WIDTH
   }
 
+  function getFolderWorkspaceName (rootPath: string, fallback?: string | null): string {
+    const normalizedFallback = fallback?.trim()
+    if (normalizedFallback) return normalizedFallback
+    const segments = rootPath.split(/[\\/]/).filter(Boolean)
+    return segments[segments.length - 1] || rootPath
+  }
+
+  function normalizeFolderWorkspacePathKey (value?: string | null): string {
+    return (value || '')
+      .trim()
+      .replace(/\\/g, '/')
+  }
+
+  function applyFolderWorkspaceState (state?: ConversationFolderWorkspaceState | null): void {
+    const rootPath = state?.rootPath?.trim()
+    if (!rootPath) {
+      resetFolderWorkspaceState()
+      return
+    }
+
+    folderWorkspaceRootPath.value = rootPath
+    folderWorkspaceRootName.value = getFolderWorkspaceName(rootPath, state?.rootName)
+    folderWorkspaceActiveFilePath.value = normalizeFolderWorkspacePathKey(state?.activeFilePath) || null
+
+    const nextWidth = state?.width
+    folderWorkspaceWidth.value = typeof nextWidth === 'number' && Number.isFinite(nextWidth)
+      ? Math.round(nextWidth)
+      : DEFAULT_FOLDER_WORKSPACE_WIDTH
+  }
+
+  function buildCurrentFolderWorkspaceState (): ConversationFolderWorkspaceState | undefined {
+    const rootPath = folderWorkspaceRootPath.value?.trim()
+    if (!rootPath) return undefined
+
+    return {
+      rootPath,
+      rootName: getFolderWorkspaceName(rootPath, folderWorkspaceRootName.value),
+      activeFilePath: normalizeFolderWorkspacePathKey(folderWorkspaceActiveFilePath.value) || undefined,
+      width: folderWorkspaceWidth.value
+    }
+  }
+
+  function resetFolderWorkspaceState (): void {
+    folderWorkspaceRootPath.value = null
+    folderWorkspaceRootName.value = null
+    folderWorkspaceActiveFilePath.value = null
+    folderWorkspaceWidth.value = DEFAULT_FOLDER_WORKSPACE_WIDTH
+  }
+
   function resetConversationComposerState (): void {
     messages.value = []
     targetProjectId.value = null
@@ -705,6 +765,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     pendingFiles.value = []
     uploadFeedback.value = ''
     resetDocumentWorkspaceState()
+    resetFolderWorkspaceState()
   }
 
   function resolveConversationAgentSelection (value: { agentId?: string | null; groupId?: string | null; channelBindingId?: string | null }): string {
@@ -945,7 +1006,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         agentId: selectedAgentId.value || null,
         groupId: selectedGroupId.value || null,
         channelBindingId: selectedChannelBindingId.value || null,
-        documentWorkspace: buildCurrentDocumentWorkspaceState()
+        documentWorkspace: buildCurrentDocumentWorkspaceState(),
+        folderWorkspace: buildCurrentFolderWorkspaceState()
       })
       void doSaveConversation(currentConversationId.value, messages.value, { targetProjectId: targetProjectId.value })
     }
@@ -975,6 +1037,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     uploadFeedback.value = ''
     resetTransientStreamState()
     resetDocumentWorkspaceState()
+    resetFolderWorkspaceState()
     setConversationTarget(conversationId, projectId)
 
     await doSaveConversation(conversationId, [], {
@@ -1213,6 +1276,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       selectedGroupId.value = bg.groupId || ''
       selectedChannelBindingId.value = bg.channelBindingId || ''
       applyDocumentWorkspaceState(bg.documentWorkspace)
+      applyFolderWorkspaceState(bg.folderWorkspace)
       setConversationTarget(id, bg.targetProjectId)
       backgroundStreamMessages.delete(id)
       resetTransientStreamState()
@@ -1236,6 +1300,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       selectedGroupId.value = conv.groupId || ''
       selectedChannelBindingId.value = conv.channelBindingId || ''
       applyDocumentWorkspaceState(conv.documentWorkspace)
+      applyFolderWorkspaceState(conv.folderWorkspace)
       setConversationTarget(conv.id, conv.targetProjectId || null)
       resetTransientStreamState()
       pendingFiles.value = []
@@ -1283,7 +1348,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       agentId: selectedAgentId.value || undefined,
       groupId: selectedGroupId.value || undefined,
       channelBindingId: selectedChannelBindingId.value || undefined,
-      documentWorkspace: buildCurrentDocumentWorkspaceState()
+      documentWorkspace: buildCurrentDocumentWorkspaceState(),
+      folderWorkspace: buildCurrentFolderWorkspaceState()
     })))
 
     await loadConversations()
@@ -1409,6 +1475,15 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   function updateDocumentWorkspaceState (state: ConversationDocumentWorkspaceState) {
     applyDocumentWorkspaceState(state)
+    if (!currentConversationId.value) return
+    void doSaveConversation(currentConversationId.value, messages.value, {
+      targetProjectId: targetProjectId.value,
+      allowEmpty: true
+    })
+  }
+
+  function updateFolderWorkspaceState (state: ConversationFolderWorkspaceState | null) {
+    applyFolderWorkspaceState(state)
     if (!currentConversationId.value) return
     void doSaveConversation(currentConversationId.value, messages.value, {
       targetProjectId: targetProjectId.value,
@@ -1833,7 +1908,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
           selectedGroupId.value || undefined,
           selectedChannelBindingId.value || undefined,
           props.activePageContext ?? undefined,
-          conversationTemperature.value ?? undefined
+          conversationTemperature.value ?? undefined,
+          buildCurrentFolderWorkspaceState()?.rootPath
         )
 
         if (streamingConvIds.has(convId)) {
@@ -1968,6 +2044,11 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     documentWorkspaceActiveFilePath,
     documentWorkspaceDocuments,
     documentWorkspaceWidth,
+    folderWorkspaceActiveFilePath,
+    folderWorkspaceRootName,
+    folderWorkspaceRootPath,
+    folderWorkspaceVisible,
+    folderWorkspaceWidth,
     filePreview,
     groupMentionHints,
     groupSidebarItems,
@@ -2012,6 +2093,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     toggleSkill,
     clearSkills,
     updateDocumentWorkspaceState,
+    updateFolderWorkspaceState,
     uploadFeedback,
     addAttachments
   }

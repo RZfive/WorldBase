@@ -18,6 +18,11 @@ type ImageLibraryData = import('./shared/image-studio-types.js').ImageLibraryDat
 type ImageLibraryFolderCard = import('./shared/image-studio-types.js').ImageLibraryFolderCard
 type MemoryCompactionResult = import('./shared/agent-workspace-types.js').MemoryCompactionResult
 type MemoryCompactionStatus = import('./shared/agent-workspace-types.js').MemoryCompactionStatus
+type ConversationFolderWorkspaceState = import('./shared/folder-workspace-types.js').ConversationFolderWorkspaceState
+type FolderWorkspaceFileEntry = import('./shared/folder-workspace-types.js').FolderWorkspaceFileEntry
+type FolderWorkspaceListResult = import('./shared/folder-workspace-types.js').FolderWorkspaceListResult
+type FolderWorkspacePickResult = import('./shared/folder-workspace-types.js').FolderWorkspacePickResult
+type FolderWorkspaceReadResult = import('./shared/folder-workspace-types.js').FolderWorkspaceReadResult
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -67,6 +72,7 @@ interface ConversationSummary {
   agentId?: string
   groupId?: string
   channelBindingId?: string
+  folderWorkspace?: ConversationFolderWorkspaceState
 }
 
 interface ConversationDocumentReference {
@@ -367,6 +373,7 @@ interface ConversationData extends ConversationSummary {
     blocks?: ChatMessageBlock[]
   }>
   documentWorkspace?: ConversationDocumentWorkspaceState
+  folderWorkspace?: ConversationFolderWorkspaceState
 }
 
 interface AIProviderConfig {
@@ -815,7 +822,7 @@ interface DocumentSummaryDTO {
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
@@ -1004,6 +1011,11 @@ interface ElectronAPI {
   updateDocumentSelectionLabel: (regionId: string, label: string) => Promise<DocumentSelectionDTO | null>
   getDocumentSelections: (artifactId: string) => Promise<DocumentSelectionDTO[]>
   buildDocumentSelectionsPrompt: (regionIds?: string[]) => Promise<string>
+
+  // Folder workspace preview
+  pickFolderWorkspace: () => Promise<FolderWorkspacePickResult>
+  listFolderWorkspaceFiles: (rootPath: string) => Promise<FolderWorkspaceListResult>
+  readFolderWorkspaceFile: (rootPath: string, filePath: string) => Promise<FolderWorkspaceReadResult>
 }
 
 interface Window {

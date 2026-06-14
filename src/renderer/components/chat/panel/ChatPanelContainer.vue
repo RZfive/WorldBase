@@ -5,6 +5,7 @@ import MessageList from '../messages/MessageList.vue'
 import ChatInput from '../layout/ChatInput.vue'
 import ChatHeader from '../layout/ChatHeader.vue'
 import DocumentWorkspace from '../layout/DocumentWorkspace.vue'
+import FolderWorkspace from '../layout/FolderWorkspace.vue'
 import PinnedTodoPanel from '../layout/PinnedTodoPanel.vue'
 import { useChatPanel } from './useChatPanel'
 import type { ChatPanelEmit, ChatPanelProps } from './types'
@@ -45,6 +46,11 @@ const {
   documentWorkspaceActiveFilePath,
   documentWorkspaceDocuments,
   documentWorkspaceWidth,
+  folderWorkspaceActiveFilePath,
+  folderWorkspaceRootName,
+  folderWorkspaceRootPath,
+  folderWorkspaceVisible,
+  folderWorkspaceWidth,
   filePreview,
   groupMentionHints,
   groupSidebarItems,
@@ -89,6 +95,7 @@ const {
   toggleSkill,
   clearSkills,
   updateDocumentWorkspaceState,
+  updateFolderWorkspaceState,
   uploadFeedback,
   addAttachments
 } = useChatPanel(props, {
@@ -105,6 +112,8 @@ const chatSurfaceStatus = computed(() => ({
 }))
 const isOpeningDocumentWorkspace = ref(false)
 const isClosingDocumentWorkspace = ref(false)
+const isOpeningFolderWorkspace = ref(false)
+const isClosingFolderWorkspace = ref(false)
 const chatWindowWidthBeforeWorkspace = ref<number | null>(null)
 const CONVERSATION_SIDEBAR_COLLAPSE_STORAGE_KEY = 'chat-conversation-sidebar-collapsed'
 
@@ -157,15 +166,22 @@ function openCollapsedSidebarConversation (item: typeof conversationSidebarItems
   loadConversation(item.id)
 }
 
-function getPreferredWorkspaceWidth (): number {
+function getPreferredWorkspaceWidth (kind: 'document' | 'folder' = 'document'): number {
+  const preferredWidth = kind === 'folder' ? folderWorkspaceWidth.value : documentWorkspaceWidth.value
   return Math.max(
     MIN_DOCUMENT_WORKSPACE_WIDTH,
-    Math.min(MAX_DOCUMENT_WORKSPACE_WIDTH, Math.round(documentWorkspaceWidth.value || MIN_DOCUMENT_WORKSPACE_WIDTH))
+    Math.min(MAX_DOCUMENT_WORKSPACE_WIDTH, Math.round(preferredWidth || MIN_DOCUMENT_WORKSPACE_WIDTH))
   )
 }
 
-function getRequiredWindowWidthForWorkspace (): number {
-  return conversationSidebarWidth.value + MIN_CHAT_MAIN_WIDTH + getPreferredWorkspaceWidth()
+function getActiveWorkspaceKind (): 'document' | 'folder' | null {
+  if (documentDockVisible.value) return 'document'
+  if (folderWorkspaceVisible.value) return 'folder'
+  return null
+}
+
+function getRequiredWindowWidthForWorkspace (kind: 'document' | 'folder' = getActiveWorkspaceKind() || 'document'): number {
+  return conversationSidebarWidth.value + MIN_CHAT_MAIN_WIDTH + getPreferredWorkspaceWidth(kind)
 }
 
 async function setWindowMinimumWidth (width: number): Promise<void> {
@@ -188,12 +204,12 @@ async function getCurrentWindowWidth (): Promise<number | null> {
   }
 }
 
-async function ensureWindowFitsDocumentWorkspace (options?: { animate?: boolean }): Promise<void> {
+async function ensureWindowFitsWorkspace (kind: 'document' | 'folder', options?: { animate?: boolean }): Promise<void> {
   if (!window.electronAPI?.ensureWindowWidth) return
 
   try {
     await window.electronAPI.ensureWindowWidth(
-      getRequiredWindowWidthForWorkspace(),
+      getRequiredWindowWidthForWorkspace(kind),
       options?.animate
         ? { animate: true, durationMs: WORKSPACE_OPEN_ANIMATION_DURATION_MS }
         : undefined
@@ -236,9 +252,10 @@ async function openDocumentWorkspace (): Promise<void> {
   isOpeningDocumentWorkspace.value = true
 
   try {
+    folderWorkspaceVisible.value = false
     chatWindowWidthBeforeWorkspace.value = await getCurrentWindowWidth()
-    await ensureWindowFitsDocumentWorkspace({ animate: true })
-    await setWindowMinimumWidth(getRequiredWindowWidthForWorkspace())
+    await ensureWindowFitsWorkspace('document', { animate: true })
+    await setWindowMinimumWidth(getRequiredWindowWidthForWorkspace('document'))
   } finally {
     documentDockVisible.value = true
     isOpeningDocumentWorkspace.value = false
@@ -274,6 +291,51 @@ async function toggleDocumentWorkspace (): Promise<void> {
   await openDocumentWorkspace()
 }
 
+async function openFolderWorkspace (): Promise<void> {
+  if (folderWorkspaceVisible.value || isOpeningFolderWorkspace.value || isClosingFolderWorkspace.value) return
+
+  isOpeningFolderWorkspace.value = true
+
+  try {
+    documentDockVisible.value = false
+    chatWindowWidthBeforeWorkspace.value = await getCurrentWindowWidth()
+    await ensureWindowFitsWorkspace('folder', { animate: true })
+    await setWindowMinimumWidth(getRequiredWindowWidthForWorkspace('folder'))
+  } finally {
+    folderWorkspaceVisible.value = true
+    isOpeningFolderWorkspace.value = false
+  }
+}
+
+async function closeFolderWorkspace (): Promise<void> {
+  if (!folderWorkspaceVisible.value || isClosingFolderWorkspace.value) return
+
+  isClosingFolderWorkspace.value = true
+  const currentWindowWidth = await getCurrentWindowWidth()
+  const targetWindowWidth = resolveWorkspaceCloseTargetWidth(currentWindowWidth)
+
+  folderWorkspaceVisible.value = false
+
+  try {
+    await setWindowMinimumWidth(DEFAULT_APP_WINDOW_MIN_WIDTH)
+    await animateWindowWidthRecovery(targetWindowWidth)
+  } finally {
+    chatWindowWidthBeforeWorkspace.value = null
+    isClosingFolderWorkspace.value = false
+  }
+}
+
+async function toggleFolderWorkspace (): Promise<void> {
+  if (isOpeningFolderWorkspace.value || isClosingFolderWorkspace.value) return
+
+  if (folderWorkspaceVisible.value) {
+    await closeFolderWorkspace()
+    return
+  }
+
+  await openFolderWorkspace()
+}
+
 watch(
   chatSurfaceStatus,
   (status) => {
@@ -283,12 +345,14 @@ watch(
 )
 
 watch(
-  [documentDockVisible, documentWorkspaceWidth, conversationSidebarCollapsed],
-  ([visible], previousState) => {
-    const previousVisible = previousState?.[0] ?? false
-    void setWindowMinimumWidth(visible ? getRequiredWindowWidthForWorkspace() : DEFAULT_APP_WINDOW_MIN_WIDTH)
-    if (visible && !previousVisible && !isOpeningDocumentWorkspace.value) {
-      void ensureWindowFitsDocumentWorkspace()
+  [documentDockVisible, folderWorkspaceVisible, documentWorkspaceWidth, folderWorkspaceWidth, conversationSidebarCollapsed],
+  ([documentVisible, folderVisible], previousState) => {
+    const visible = documentVisible || folderVisible
+    const previousVisible = Boolean(previousState?.[0] || previousState?.[1])
+    const kind = documentVisible ? 'document' : 'folder'
+    void setWindowMinimumWidth(visible ? getRequiredWindowWidthForWorkspace(kind) : DEFAULT_APP_WINDOW_MIN_WIDTH)
+    if (visible && !previousVisible && !isOpeningDocumentWorkspace.value && !isOpeningFolderWorkspace.value) {
+      void ensureWindowFitsWorkspace(kind)
     }
   },
   { immediate: true }
@@ -462,7 +526,7 @@ watch(
     </aside>
 
     <div
-      :class="['chat-panel', { 'chat-panel-with-workspace': documentDockVisible }]"
+      :class="['chat-panel', { 'chat-panel-with-workspace': documentDockVisible || folderWorkspaceVisible }]"
       :style="{ '--chat-main-protected-min-width': `${MIN_CHAT_MAIN_WIDTH}px` }"
     >
       <div class="chat-main">
@@ -487,12 +551,6 @@ watch(
           @toggle-skill="toggleSkill"
         />
 
-        <PinnedTodoPanel
-          v-if="activeTodoItems.length > 0"
-          :items="activeTodoItems"
-          :is-loading="isLoading"
-        />
-
         <MessageList
           :key="currentConversationId || 'draft'"
           :messages="messages"
@@ -505,6 +563,12 @@ watch(
           @open-link="(url) => emit('openWebLink', url)"
         />
 
+        <PinnedTodoPanel
+          v-if="activeTodoItems.length > 0"
+          :items="activeTodoItems"
+          :is-loading="isLoading"
+        />
+
         <ChatInput
           v-model="inputText"
           :is-loading="isLoading"
@@ -514,6 +578,7 @@ watch(
           :is-uploading-files="isUploadingFiles"
           :upload-feedback="uploadFeedback"
           :document-dock-visible="documentDockVisible"
+          :folder-workspace-visible="folderWorkspaceVisible"
           :reasoning-strength="reasoningStrength"
           :temperature="conversationTemperature"
           :provider-default-temperature="providerDefaultTemperature"
@@ -532,6 +597,7 @@ watch(
           @update:reasoning-strength="handleReasoningStrengthChange"
           @update:temperature="handleTemperatureChange"
           @toggle-document-dock="toggleDocumentWorkspace"
+          @toggle-folder-workspace="toggleFolderWorkspace"
           @update:auth-mode="handleAuthModeChange"
           @toggle-plan-mode="togglePlanMode"
           @update:selected-agent-id="handleAgentSelectionChange"
@@ -546,6 +612,16 @@ watch(
         @close="closeDocumentWorkspace"
         @insert-selection-tag="insertDocumentTag"
         @update-workspace="updateDocumentWorkspaceState"
+      />
+
+      <FolderWorkspace
+        :visible="folderWorkspaceVisible"
+        :root-path="folderWorkspaceRootPath"
+        :root-name="folderWorkspaceRootName"
+        :active-file-path="folderWorkspaceActiveFilePath"
+        :workspace-width="folderWorkspaceWidth"
+        @close="closeFolderWorkspace"
+        @update-workspace="updateFolderWorkspaceState"
       />
     </div>
   </div>

@@ -3,6 +3,7 @@ import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot,
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse } from '../src/shared/image-studio-types.js'
+import type { ConversationFolderWorkspaceState, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
 
 interface ChatMessage {
   role: string
@@ -64,6 +65,7 @@ interface ConversationSummary {
   agentId?: string
   groupId?: string
   channelBindingId?: string
+  folderWorkspace?: ConversationFolderWorkspaceState
 }
 
 interface ConversationDocumentReference {
@@ -92,6 +94,7 @@ interface ToolRun {
 interface Conversation extends ConversationSummary {
   messages: Array<ChatMessage & { thinking?: string; modelLabel?: string; toolRuns?: ToolRun[] }>
   documentWorkspace?: ConversationDocumentWorkspaceState
+  folderWorkspace?: ConversationFolderWorkspaceState
 }
 
 interface AIProvider {
@@ -457,7 +460,7 @@ interface SystemStatusSnapshot {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
@@ -650,12 +653,17 @@ export interface ElectronAPI {
   updateDocumentSelectionLabel: (regionId: string, label: string) => Promise<unknown | null>
   getDocumentSelections: (artifactId: string) => Promise<unknown[]>
   buildDocumentSelectionsPrompt: (regionIds?: string[]) => Promise<string>
+
+  // Folder workspace preview
+  pickFolderWorkspace: () => Promise<FolderWorkspacePickResult>
+  listFolderWorkspaceFiles: (rootPath: string) => Promise<FolderWorkspaceListResult>
+  readFolderWorkspaceFile: (rootPath: string, filePath: string) => Promise<FolderWorkspaceReadResult>
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext),
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature),
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
@@ -931,5 +939,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   removeDocumentSelection: (regionId: string) => ipcRenderer.invoke('document:removeSelection', regionId),
   updateDocumentSelectionLabel: (regionId: string, label: string) => ipcRenderer.invoke('document:updateSelectionLabel', regionId, label),
   getDocumentSelections: (artifactId: string) => ipcRenderer.invoke('document:getSelections', artifactId),
-  buildDocumentSelectionsPrompt: (regionIds?: string[]) => ipcRenderer.invoke('document:buildSelectionsPrompt', regionIds)
+  buildDocumentSelectionsPrompt: (regionIds?: string[]) => ipcRenderer.invoke('document:buildSelectionsPrompt', regionIds),
+
+  // Folder workspace preview
+  pickFolderWorkspace: () => ipcRenderer.invoke('folderWorkspace:pickFolder'),
+  listFolderWorkspaceFiles: (rootPath: string) => ipcRenderer.invoke('folderWorkspace:listFiles', rootPath),
+  readFolderWorkspaceFile: (rootPath: string, filePath: string) => ipcRenderer.invoke('folderWorkspace:readFile', rootPath, filePath)
 } satisfies ElectronAPI)
