@@ -719,7 +719,7 @@ onUnmounted(() => {
           <h3>{{ editing ? '编辑任务' : (selectedTask?.title || '定时任务管理') }}</h3>
           <p>
             {{ editing
-              ? '保存后任务会在后台自动执行，执行过程自动授权，并只使用你勾选的 Skill 与 MCP 服务。'
+              ? '配置执行计划、失败重试和可用资源。'
               : '查看任务状态、最近执行报告，或立即运行当前任务。' }}
           </p>
         </div>
@@ -740,7 +740,7 @@ onUnmounted(() => {
         <section class="st-editor-card ai-card">
           <div class="st-section-head">
             <h4>AI 生成草稿</h4>
-            <span>自然语言描述你想要的计划</span>
+            <span>用一句话生成草稿</span>
           </div>
           <textarea
             v-model="aiDraftPrompt"
@@ -759,7 +759,7 @@ onUnmounted(() => {
         <section class="st-editor-card">
           <div class="st-section-head">
             <h4>任务配置</h4>
-            <span>支持手动编辑或在 AI 草稿基础上微调</span>
+            <span>名称、提示词、计划与重试</span>
           </div>
 
           <div class="st-form-grid">
@@ -794,7 +794,7 @@ onUnmounted(() => {
                 </button>
               </div>
 
-              <div class="st-schedule-panel">
+              <div class="st-schedule-panel" :class="{ 'is-interval': draft.scheduleKind === 'interval' }">
                 <template v-if="draft.scheduleKind === 'daily'">
                   <label class="st-field">
                     <span>每天执行时间</span>
@@ -825,22 +825,26 @@ onUnmounted(() => {
                 </template>
 
                 <template v-else-if="draft.scheduleKind === 'interval'">
-                  <label class="st-field">
-                    <span>重复间隔</span>
-                    <select v-model="draft.intervalPreset" @change="applyIntervalPreset">
-                      <option v-for="option in intervalPresetOptions" :key="option.value" :value="option.value">
-                        {{ option.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label v-if="draft.intervalPreset === 'custom'" class="st-field">
-                    <span>间隔分钟</span>
-                    <input v-model.number="draft.everyMinutes" type="number" min="1" step="1" @input="markIntervalCustom" />
-                  </label>
-                  <label class="st-field">
-                    <span>首次执行时间</span>
-                    <input v-model="draft.startAtInput" type="datetime-local" />
-                  </label>
+                  <div class="st-interval-fields full-span">
+                    <div class="st-interval-row" :class="{ 'has-custom': draft.intervalPreset === 'custom' }">
+                      <label class="st-field">
+                        <span>间隔时间</span>
+                        <select v-model="draft.intervalPreset" @change="applyIntervalPreset">
+                          <option v-for="option in intervalPresetOptions" :key="option.value" :value="option.value">
+                            {{ option.label }}
+                          </option>
+                        </select>
+                      </label>
+                      <label v-if="draft.intervalPreset === 'custom'" class="st-field">
+                        <span>分钟</span>
+                        <input v-model.number="draft.everyMinutes" type="number" min="1" step="1" @input="markIntervalCustom" />
+                      </label>
+                    </div>
+                    <label class="st-field">
+                      <span>开始时间</span>
+                      <input v-model="draft.startAtInput" type="datetime-local" />
+                    </label>
+                  </div>
                 </template>
 
                 <template v-else-if="draft.scheduleKind === 'once'">
@@ -873,15 +877,19 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <label class="st-field">
-              <span>失败重试次数</span>
-              <input v-model.number="draft.maxRetries" type="number" min="0" step="1" />
-            </label>
-
-            <label class="st-field">
-              <span>重试间隔分钟</span>
-              <input v-model.number="draft.retryDelayMinutes" type="number" min="1" step="1" />
-            </label>
+            <div class="st-retry-block full-span">
+              <span class="st-field-label">失败重试</span>
+              <div class="st-retry-fields">
+                <label class="st-field">
+                  <span>重试次数</span>
+                  <input v-model.number="draft.maxRetries" type="number" min="0" step="1" />
+                </label>
+                <label class="st-field">
+                  <span>失败间隔（分钟）</span>
+                  <input v-model.number="draft.retryDelayMinutes" type="number" min="1" step="1" />
+                </label>
+              </div>
+            </div>
           </div>
 
           <div class="st-scope-grid">
@@ -1013,7 +1021,7 @@ onUnmounted(() => {
 <style scoped>
 .st-root {
   display: grid;
-  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+  grid-template-columns: minmax(248px, 284px) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -1028,8 +1036,8 @@ onUnmounted(() => {
 .st-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px;
+  gap: 10px;
+  padding: 14px;
   border-right: 1px solid var(--app-border);
   overflow-y: auto;
 }
@@ -1040,8 +1048,8 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 20px;
+  gap: 12px;
+  padding: 16px 18px;
   overflow-y: auto;
   container-type: inline-size;
 }
@@ -1062,7 +1070,7 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 7px;
 }
 
 .st-sidebar-header .st-primary-btn {
@@ -1113,8 +1121,8 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 36px;
-  padding: 8px 12px;
+  min-height: 34px;
+  padding: 7px 11px;
   font-size: 0.82rem;
   line-height: 1.2;
   cursor: pointer;
@@ -1174,7 +1182,7 @@ onUnmounted(() => {
 .st-task-card,
 .st-report-item {
   width: 100%;
-  padding: 12px;
+  padding: 11px 12px;
   background: rgba(255, 255, 255, 0.03);
   text-align: left;
   cursor: pointer;
@@ -1240,7 +1248,7 @@ onUnmounted(() => {
 .st-metrics-grid,
 .st-form-grid {
   display: grid;
-  gap: 16px;
+  gap: 12px;
 }
 
 .st-editor-layout,
@@ -1263,7 +1271,15 @@ onUnmounted(() => {
 .st-summary-card,
 .st-report-card,
 .st-scope-card {
-  padding: 16px;
+  padding: 14px;
+}
+
+.st-editor-card,
+.st-summary-card,
+.st-report-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .st-editor-card.ai-card {
@@ -1273,6 +1289,10 @@ onUnmounted(() => {
 .st-section-head span {
   color: var(--app-text-faint);
   font-size: 0.78rem;
+}
+
+.full-span {
+  grid-column: 1 / -1;
 }
 
 .st-field {
@@ -1285,13 +1305,9 @@ onUnmounted(() => {
 
 .st-field-label {
   display: block;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   font-size: 0.84rem;
   color: var(--app-text);
-}
-
-.st-field.full-span {
-  grid-column: 1 / -1;
 }
 
 .st-field.checkbox-field {
@@ -1331,8 +1347,11 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 12px;
   flex-wrap: wrap;
+}
+
+.st-date-row {
+  margin-top: 8px;
 }
 
 .st-date-row input {
@@ -1341,6 +1360,31 @@ onUnmounted(() => {
 
 .st-schedule-block {
   min-width: 0;
+}
+
+.st-interval-fields,
+.st-retry-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.st-interval-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  align-items: end;
+}
+
+.st-interval-row.has-custom {
+  grid-template-columns: minmax(0, 1fr) minmax(96px, 132px);
+}
+
+.st-retry-block {
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: rgba(255, 255, 255, 0.025);
 }
 
 .st-mode-grid,
@@ -1365,8 +1409,8 @@ onUnmounted(() => {
 }
 
 .st-mode-option {
-  min-height: 64px;
-  padding: 10px;
+  min-height: 56px;
+  padding: 9px 10px;
   text-align: left;
 }
 
@@ -1396,11 +1440,15 @@ onUnmounted(() => {
 .st-schedule-panel {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   align-items: end;
-  margin-top: 12px;
+  margin-top: 10px;
   padding: 12px;
   border-radius: 8px;
   border: 1px solid var(--app-border);
   background: rgba(255, 255, 255, 0.025);
+}
+
+.st-schedule-panel.is-interval {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .st-weekday-grid {
@@ -1460,7 +1508,7 @@ onUnmounted(() => {
 
 .st-summary-block,
 .st-metric {
-  padding: 14px;
+  padding: 12px;
 }
 
 .st-summary-block pre {
@@ -1473,7 +1521,7 @@ onUnmounted(() => {
 }
 
 .st-report-item + .st-report-item {
-  margin-top: 12px;
+  margin-top: 0;
 }
 
 @container (min-width: 1080px) {
@@ -1497,7 +1545,8 @@ onUnmounted(() => {
   .st-form-grid,
   .st-metrics-grid,
   .st-scope-grid,
-  .st-scope-summary-grid {
+  .st-scope-summary-grid,
+  .st-interval-row {
     grid-template-columns: 1fr;
   }
 }

@@ -10,6 +10,8 @@ const props = defineProps<{
   messages: ChatMessage[]
   isLoading: boolean
   filePreview: FilePreviewState
+  assistantIcon?: string
+  assistantName?: string
 }>()
 
 const emit = defineEmits<{
@@ -618,6 +620,8 @@ onUnmounted(() => {
           :latest-assistant-message-index="latestAssistantMessageIndex"
           :file-preview="props.filePreview"
           :collapsed-thinking="collapsedThinking"
+          :assistant-icon="props.assistantIcon"
+          :assistant-name="props.assistantName"
           @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
           @respond-sudo-password="(requestId, password) => emit('respondSudoPassword', requestId, password)"
           @toggle-thinking="toggleThinking"

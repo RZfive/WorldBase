@@ -610,6 +610,7 @@ function formatTimestamp (value?: string | null): string {
 .mcp-root {
   display: flex;
   height: 100%;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
   background:
@@ -617,13 +618,19 @@ function formatTimestamp (value?: string | null): string {
     linear-gradient(180deg, var(--app-main-surface), var(--app-panel-subtle));
 }
 
+.mcp-root,
+.mcp-root * {
+  box-sizing: border-box;
+}
+
 .mcp-sidebar {
-  width: 320px;
+  width: clamp(260px, 28%, 300px);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px;
+  min-width: 0;
+  padding: 14px;
   border-right: 1px solid var(--app-border);
   overflow-y: auto;
 }
@@ -692,9 +699,9 @@ function formatTimestamp (value?: string | null): string {
   flex: 0 0 auto;
   border: 1px solid var(--app-border);
   border-radius: 10px;
-  min-width: 58px;
-  min-height: 34px;
-  padding: 7px 12px;
+  min-width: 52px;
+  min-height: 32px;
+  padding: 6px 10px;
   font-size: 0.82rem;
   line-height: 1;
   white-space: nowrap;
@@ -735,7 +742,9 @@ function formatTimestamp (value?: string | null): string {
 }
 
 .mcp-server-card {
-  padding: 14px;
+  width: 100%;
+  min-width: 0;
+  padding: 12px;
   border-radius: 16px;
   border: 1px solid var(--app-border);
   background: rgba(255, 255, 255, 0.03);
@@ -754,6 +763,7 @@ function formatTimestamp (value?: string | null): string {
 .mcp-list-card-head,
 .mcp-summary-head {
   display: flex;
+  min-width: 0;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
@@ -766,6 +776,14 @@ function formatTimestamp (value?: string | null): string {
 .mcp-server-card-titles {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+}
+
+.mcp-server-card-titles strong,
+.mcp-server-card-titles span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mcp-server-card-bottom {
@@ -811,7 +829,7 @@ function formatTimestamp (value?: string | null): string {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 20px 24px;
+  padding: 18px;
   overflow: hidden;
 }
 
@@ -848,6 +866,7 @@ function formatTimestamp (value?: string | null): string {
 .mcp-summary-card,
 .mcp-list-card {
   padding: 14px;
+  min-width: 0;
 }
 
 .mcp-editor-card {
@@ -867,8 +886,9 @@ function formatTimestamp (value?: string | null): string {
 
 .mcp-detail-grid {
   flex: 1;
+  min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
   grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr);
   align-items: stretch;
 }
@@ -945,6 +965,7 @@ function formatTimestamp (value?: string | null): string {
 
 .mcp-summary-head {
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .mcp-summary-title {
@@ -952,6 +973,12 @@ function formatTimestamp (value?: string | null): string {
   align-items: center;
   gap: 10px;
   min-width: 0;
+}
+
+.mcp-updated-at {
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .mcp-summary-title strong {
@@ -1027,6 +1054,7 @@ function formatTimestamp (value?: string | null): string {
 }
 
 .mcp-entry {
+  min-width: 0;
   padding: 12px 0;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
@@ -1034,6 +1062,16 @@ function formatTimestamp (value?: string | null): string {
 .mcp-list-card-head {
   flex: 0 0 auto;
   padding-bottom: 10px;
+}
+
+.mcp-entry-title-row {
+  flex-wrap: wrap;
+}
+
+.mcp-entry-title-row strong,
+.mcp-entry-title-row code {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .mcp-entry-list {
@@ -1088,7 +1126,12 @@ function formatTimestamp (value?: string | null): string {
 .mcp-entry code {
   font-size: 0.72rem;
   color: var(--app-text-soft);
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.mcp-entry p {
+  overflow-wrap: anywhere;
 }
 
 .mcp-arg-list {

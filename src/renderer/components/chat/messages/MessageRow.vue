@@ -24,6 +24,8 @@ const props = defineProps<{
   latestAssistantMessageIndex: number
   filePreview: FilePreviewState
   collapsedThinking: Record<string, boolean>
+  assistantIcon?: string
+  assistantName?: string
 }>()
 
 const emit = defineEmits<{
@@ -60,7 +62,11 @@ function hasRenderableBlock (block: ChatMessageBlock): boolean {
 }
 
 function getMessageAuthor (): string {
-  return props.msg.role === 'assistant' ? (props.msg.speakerName || 'The World AI') : '你'
+  return props.msg.role === 'assistant' ? (props.msg.speakerName || props.assistantName || 'The World AI') : '你'
+}
+
+function getAssistantIcon (): string {
+  return props.assistantIcon?.trim() || '🤖'
 }
 
 function getModelLabel (): string {
@@ -81,10 +87,16 @@ const messageText = computed(() => getMessageText())
   <article class="message-row" :class="props.msg.role">
     <div class="message-column" :class="props.msg.role">
       <div class="message-meta" :class="props.msg.role">
-        <span class="message-role-label" :class="props.msg.role">{{ props.msg.role === 'assistant' ? 'Agent' : '用户' }}</span>
-        <span class="message-author">{{ getMessageAuthor() }}</span>
-        <span v-if="props.msg.role === 'assistant'" class="message-model-chip">{{ getModelLabel() }}</span>
-        <span v-else class="message-user-avatar" aria-hidden="true">你</span>
+        <template v-if="props.msg.role === 'assistant'">
+          <span class="message-agent-avatar" aria-hidden="true">{{ getAssistantIcon() }}</span>
+          <span class="message-author">{{ getMessageAuthor() }}</span>
+          <span class="message-model-chip">{{ getModelLabel() }}</span>
+        </template>
+        <template v-else>
+          <span class="message-role-label user">用户</span>
+          <span class="message-author">你</span>
+          <span class="message-user-avatar" aria-hidden="true">你</span>
+        </template>
       </div>
 
       <div class="message-flow" :class="props.msg.role">
@@ -231,7 +243,7 @@ const messageText = computed(() => getMessageText())
 .message-role-label {
   display: inline-flex;
   align-items: center;
-  min-width: 44px;
+  min-width: 0;
   color: var(--app-accent-strong);
   font-size: 0.72rem;
   font-weight: 800;
@@ -244,7 +256,7 @@ const messageText = computed(() => getMessageText())
 }
 
 .message-author {
-  font-size: 0.82rem;
+  font-size: 0.88rem;
   font-weight: 700;
   color: var(--app-text-strong);
 }
@@ -260,6 +272,7 @@ const messageText = computed(() => getMessageText())
   font-size: 0.72rem;
 }
 
+.message-agent-avatar,
 .message-user-avatar {
   display: inline-flex;
   align-items: center;
@@ -267,11 +280,22 @@ const messageText = computed(() => getMessageText())
   width: 28px;
   height: 28px;
   border-radius: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.message-agent-avatar {
+  border: 1px solid color-mix(in srgb, var(--app-accent) 22%, transparent);
+  background: color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-panel));
+  color: var(--app-text-strong);
+  font-size: 0.9rem;
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--app-accent) 10%, transparent);
+}
+
+.message-user-avatar {
   background: color-mix(in srgb, #10b981 86%, var(--app-accent));
   color: #ffffff;
   font-size: 0.76rem;
-  font-weight: 800;
-  line-height: 1;
 }
 
 @media (max-width: 860px) {

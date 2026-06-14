@@ -9,6 +9,21 @@ interface ToolCatalogEntry {
 
 type WorkspaceTab = 'agents' | 'groups' | 'bindings' | 'memory'
 
+const memoryScopeOptions: Array<{ value: AgentMemoryScope; label: string }> = [
+  { value: 'user', label: '用户' },
+  { value: 'agent', label: 'Agent' },
+  { value: 'project', label: '项目' },
+  { value: 'group', label: '群组' },
+  { value: 'channel', label: '频道' }
+]
+
+const memoryTypeOptions: Array<{ value: MemoryType; label: string }> = [
+  { value: 'knowledge', label: '知识' },
+  { value: 'user_trait', label: '用户特征' },
+  { value: 'agent_skill', label: 'Agent 技能' },
+  { value: 'step', label: '步骤' }
+]
+
 const activeTab = ref<WorkspaceTab>('agents')
 const agents = ref<AgentDefinition[]>([])
 const groups = ref<AgentGroupDefinition[]>([])
@@ -25,6 +40,8 @@ const agentTools = ref<ToolCatalogEntry[]>([])
 const memoryQuery = ref('')
 const memoryScopeType = ref<AgentMemoryScope>('user')
 const memoryScopeId = ref('')
+const addingMemory = ref(false)
+const savingMemory = ref(false)
 const memoryCompactionStatus = ref<MemoryCompactionStatus | null>(null)
 const memoryCompactionStarting = ref(false)
 const memoryCompacting = computed(() => memoryCompactionStarting.value || memoryCompactionStatus.value?.status === 'running')
@@ -81,8 +98,27 @@ const draftBinding = reactive({
   requireApprovalForRiskyTools: true
 })
 
+const draftMemory = reactive({
+  title: '',
+  summary: '',
+  details: '',
+  tagsText: '',
+  scopeType: 'user' as AgentMemoryScope,
+  scopeId: 'local-user',
+  memoryType: 'knowledge' as MemoryType,
+  pinned: true
+})
+
 function setStatus (message: string) {
   statusMessage.value = message
+}
+
+function memoryScopeLabel (value: AgentMemoryScope): string {
+  return memoryScopeOptions.find(option => option.value === value)?.label || value
+}
+
+function memoryTypeLabel (value: MemoryType): string {
+  return memoryTypeOptions.find(option => option.value === value)?.label || value
 }
 
 function formatMemoryCompactionResult (result: MemoryCompactionResult): string {
@@ -377,6 +413,80 @@ async function loadMemory () {
     scopeId: memoryScopeId.value || undefined,
     limit: 50
   })
+}
+
+function resetMemoryDraft () {
+  draftMemory.title = ''
+  draftMemory.summary = ''
+  draftMemory.details = ''
+  draftMemory.tagsText = ''
+  draftMemory.scopeType = memoryScopeType.value
+  draftMemory.scopeId = memoryScopeId.value.trim() || (memoryScopeType.value === 'user' ? 'local-user' : '')
+  draftMemory.memoryType = 'knowledge'
+  draftMemory.pinned = true
+}
+
+function toggleMemoryCreator () {
+  addingMemory.value = !addingMemory.value
+  if (addingMemory.value) {
+    resetMemoryDraft()
+  }
+}
+
+function parseMemoryTags (value: string): string[] {
+  const seen = new Set<string>()
+  const tags: string[] = []
+  for (const rawTag of value.split(/[,，\n]/)) {
+    const tag = rawTag.trim()
+    if (!tag || seen.has(tag)) continue
+    seen.add(tag)
+    tags.push(tag)
+  }
+  return tags
+}
+
+async function saveManualMemory () {
+  if (!window.electronAPI?.saveMemory || savingMemory.value) return
+
+  const title = draftMemory.title.trim()
+  const summary = draftMemory.summary.trim()
+  const scopeId = draftMemory.scopeId.trim()
+  if (!title) {
+    setStatus('请填写记忆标题')
+    return
+  }
+  if (!summary) {
+    setStatus('请填写记忆摘要')
+    return
+  }
+  if (!scopeId) {
+    setStatus('请填写作用域 ID')
+    return
+  }
+
+  savingMemory.value = true
+  try {
+    await window.electronAPI.saveMemory({
+      title,
+      summary,
+      details: draftMemory.details.trim() || undefined,
+      tags: parseMemoryTags(draftMemory.tagsText),
+      scopeType: draftMemory.scopeType,
+      scopeId,
+      memoryType: draftMemory.memoryType,
+      pinned: draftMemory.pinned,
+      importance: draftMemory.pinned ? 0.85 : 0.7,
+      confidence: 1
+    })
+    addingMemory.value = false
+    await loadMemory()
+    setStatus('已添加记忆')
+    resetMemoryDraft()
+  } catch (error) {
+    setStatus(`添加记忆失败：${(error as Error).message}`)
+  } finally {
+    savingMemory.value = false
+  }
 }
 
 async function syncMemoryCompactionStatus () {
@@ -923,20 +1033,63 @@ watch(activeTab, (nextTab, previousTab) => {
 
     <div v-else class="memory-panel">
       <div class="memory-toolbar">
-        <input v-model="memoryQuery" class="input" placeholder="搜索记忆标题、摘要或详情">
-        <select v-model="memoryScopeType" class="input narrow">
-          <option value="user">user</option>
-          <option value="agent">agent</option>
-          <option value="project">project</option>
-          <option value="group">group</option>
-          <option value="channel">channel</option>
+        <input v-model="memoryQuery" class="input memory-search" placeholder="搜索记忆" @keyup.enter="loadMemory">
+        <select v-model="memoryScopeType" class="input memory-scope-select">
+          <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
         </select>
-        <input v-model="memoryScopeId" class="input" placeholder="留空查看全部，或输入 local-user / agent_xxx 等 scope id">
+        <input v-model="memoryScopeId" class="input memory-scope-id" placeholder="Scope ID" @keyup.enter="loadMemory">
         <button class="primary-btn" @click="loadMemory">查询</button>
+        <button class="ghost-btn" @click="toggleMemoryCreator">{{ addingMemory ? '收起' : '新增记忆' }}</button>
         <button class="ghost-btn" :disabled="memoryCompacting" @click="compactMemory">
           {{ memoryCompacting ? 'AI 整理中...' : 'AI 整理记忆' }}
         </button>
       </div>
+
+      <form v-if="addingMemory" class="memory-create-card" @submit.prevent="saveManualMemory">
+        <div class="memory-create-grid">
+          <label>
+            <span>标题</span>
+            <input v-model="draftMemory.title" class="input" placeholder="例如：偏好暗色紧凑界面">
+          </label>
+          <label>
+            <span>类型</span>
+            <select v-model="draftMemory.memoryType" class="input">
+              <option v-for="option in memoryTypeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <label>
+            <span>作用域</span>
+            <select v-model="draftMemory.scopeType" class="input">
+              <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <label>
+            <span>Scope ID</span>
+            <input v-model="draftMemory.scopeId" class="input" placeholder="local-user / agent_xxx / project_xxx">
+          </label>
+          <label class="memory-create-summary">
+            <span>摘要</span>
+            <textarea v-model="draftMemory.summary" class="textarea" rows="2" placeholder="写入会被检索和注入上下文的核心内容" />
+          </label>
+          <label class="memory-create-summary">
+            <span>详情</span>
+            <textarea v-model="draftMemory.details" class="textarea" rows="3" placeholder="可选，补充背景或例子" />
+          </label>
+          <label>
+            <span>标签</span>
+            <input v-model="draftMemory.tagsText" class="input" placeholder="逗号或换行分隔">
+          </label>
+          <label class="check-row memory-pin-row">
+            <input v-model="draftMemory.pinned" type="checkbox">
+            <span>置顶</span>
+          </label>
+        </div>
+        <div class="action-row memory-create-actions">
+          <button class="primary-btn" type="submit" :disabled="savingMemory">{{ savingMemory ? '保存中...' : '保存记忆' }}</button>
+          <button class="ghost-btn" type="button" @click="addingMemory = false">取消</button>
+        </div>
+      </form>
+
       <div v-if="memoryCompactionProgressText" class="memory-progress" role="status">
         <span>{{ memoryCompactionProgressText }}</span>
       </div>
@@ -946,7 +1099,7 @@ watch(activeTab, (nextTab, previousTab) => {
           <div class="memory-card-head">
             <div>
               <strong>{{ entry.title }}</strong>
-              <span>{{ entry.memoryType }} · {{ entry.scopeType }} / {{ entry.scopeId }}</span>
+              <span>{{ memoryTypeLabel(entry.memoryType) }} · {{ memoryScopeLabel(entry.scopeType) }} / {{ entry.scopeId }}</span>
             </div>
             <div class="memory-actions">
               <button class="ghost-btn small" @click="toggleMemoryPinned(entry)">{{ entry.pinned ? '取消置顶' : '置顶' }}</button>
@@ -954,6 +1107,7 @@ watch(activeTab, (nextTab, previousTab) => {
             </div>
           </div>
           <p>{{ entry.summary }}</p>
+          <p v-if="entry.details" class="memory-details">{{ entry.details }}</p>
           <small>{{ entry.tags.join(', ') || '无标签' }}</small>
         </article>
       </div>
@@ -1188,8 +1342,52 @@ label {
   gap: 8px;
 }
 
-.memory-toolbar .narrow {
-  width: 120px;
+.memory-toolbar {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) 92px minmax(108px, 150px) auto auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.memory-toolbar .input,
+.memory-toolbar .ghost-btn,
+.memory-toolbar .primary-btn {
+  min-height: 34px;
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.memory-search,
+.memory-scope-id,
+.memory-scope-select {
+  min-width: 0;
+}
+
+.memory-create-card {
+  padding: 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-main-surface);
+}
+
+.memory-create-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 0.65fr) minmax(120px, 0.65fr) minmax(150px, 1fr);
+  gap: 10px;
+}
+
+.memory-create-summary {
+  grid-column: 1 / -1;
+}
+
+.memory-pin-row {
+  align-self: end;
+  min-height: 38px;
+}
+
+.memory-create-actions {
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 
 .memory-progress {
@@ -1207,7 +1405,7 @@ label {
 .memory-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .memory-card {
@@ -1235,8 +1433,28 @@ label {
   color: var(--app-text);
 }
 
+.memory-card .memory-details {
+  margin-top: 6px;
+  color: var(--app-text-soft);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
 .memory-actions {
   display: flex;
   gap: 8px;
+}
+
+@media (max-width: 1100px) {
+  .memory-toolbar,
+  .memory-create-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .memory-search,
+  .memory-create-summary {
+    grid-column: 1 / -1;
+  }
 }
 </style>

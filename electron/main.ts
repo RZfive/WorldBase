@@ -3600,6 +3600,37 @@ function setupIPC (): void {
     })
   })
 
+  ipcMain.handle('memory:save', async (_event: IpcMainInvokeEvent, entry: Partial<MemoryEntry>) => {
+    const title = typeof entry.title === 'string' ? entry.title.trim() : ''
+    const summary = typeof entry.summary === 'string' ? entry.summary.trim() : ''
+    const scopeType = entry.scopeType || 'user'
+    const scopeId = typeof entry.scopeId === 'string' && entry.scopeId.trim() ? entry.scopeId.trim() : 'local-user'
+    const memoryType = entry.memoryType || 'knowledge'
+
+    if (!title) throw new Error('记忆标题不能为空')
+    if (!summary) throw new Error('记忆摘要不能为空')
+
+    return memoryStore!.upsert({
+      id: entry.id || `manual_${randomUUID()}`,
+      scopeType,
+      scopeId,
+      memoryType,
+      title,
+      summary,
+      details: typeof entry.details === 'string' && entry.details.trim() ? entry.details.trim() : undefined,
+      tags: Array.isArray(entry.tags) ? entry.tags : [],
+      sourceConversationId: entry.sourceConversationId,
+      sourceSessionId: entry.sourceSessionId,
+      sourceMessageIds: Array.isArray(entry.sourceMessageIds) ? entry.sourceMessageIds : [],
+      importance: Number.isFinite(Number(entry.importance)) ? Math.max(0, Math.min(1, Number(entry.importance))) : 0.7,
+      confidence: Number.isFinite(Number(entry.confidence)) ? Math.max(0, Math.min(1, Number(entry.confidence))) : 1,
+      pinned: entry.pinned ?? true,
+      lastUsedAt: entry.lastUsedAt,
+      createdAt: entry.createdAt || new Date().toISOString(),
+      updatedAt: entry.updatedAt || new Date().toISOString()
+    })
+  })
+
   ipcMain.handle('memory:pin', async (_event: IpcMainInvokeEvent, id: string, pinned: boolean) => {
     return memoryEngine!.pinMemory(id, pinned)
   })

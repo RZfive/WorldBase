@@ -495,6 +495,7 @@ export interface ElectronAPI {
   saveChannelBinding: (binding: Partial<ChannelBinding>) => Promise<ChannelBinding>
   deleteChannelBinding: (id: string) => Promise<boolean>
   listMemory: (options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => Promise<MemoryEntry[]>
+  saveMemory: (entry: Partial<MemoryEntry>) => Promise<MemoryEntry>
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
   compactMemory: () => Promise<MemoryCompactionResult>
@@ -711,6 +712,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveChannelBinding: (binding: Partial<ChannelBinding>) => ipcRenderer.invoke('im:saveBinding', binding),
   deleteChannelBinding: (id: string) => ipcRenderer.invoke('im:deleteBinding', id),
   listMemory: (options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => ipcRenderer.invoke('memory:list', options),
+  saveMemory: (entry: Partial<MemoryEntry>) => ipcRenderer.invoke('memory:save', entry),
   pinMemory: (id: string, pinned: boolean) => ipcRenderer.invoke('memory:pin', id, pinned),
   deleteMemory: (id: string) => ipcRenderer.invoke('memory:delete', id),
   compactMemory: () => ipcRenderer.invoke('memory:compact'),
