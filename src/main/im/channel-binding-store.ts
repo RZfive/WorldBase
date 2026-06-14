@@ -6,50 +6,98 @@ export const BUILTIN_CONNECTORS: ConnectorDefinition[] = [
   {
     id: 'feishu',
     name: 'Feishu',
-    description: '为未来接入飞书群、线程与审批链路做准备。',
+    description: '飞书机器人事件回调，支持 URL 校验、加密事件、文本消息接收和消息回复。',
     supportsThreads: true,
     supportsMentions: true,
-    supportsAttachments: true
+    supportsAttachments: true,
+    incomingWebhookPath: '/api/im/webhook/feishu/:bindingId?',
+    credentialFields: [
+      { key: 'verificationToken', label: 'Verification Token', secret: true },
+      { key: 'encryptKey', label: 'Encrypt Key / Sign Key', secret: true },
+      { key: 'appId', label: 'App ID' },
+      { key: 'appSecret', label: 'App Secret', secret: true }
+    ]
+  },
+  {
+    id: 'wechat',
+    name: 'WeChat',
+    description: '微信公众号/测试号回调，支持 URL 校验、明文/加密文本消息接收和被动文本回复。',
+    supportsThreads: false,
+    supportsMentions: false,
+    supportsAttachments: false,
+    incomingWebhookPath: '/api/im/webhook/wechat/:bindingId?',
+    credentialFields: [
+      { key: 'verificationToken', label: 'Token', secret: true },
+      { key: 'encryptKey', label: 'EncodingAESKey', secret: true },
+      { key: 'appId', label: 'App ID' }
+    ]
   },
   {
     id: 'wecom',
     name: 'WeCom',
-    description: '为未来接入企业微信会话与审批流做准备。',
+    description: '企业微信回调与群机器人 Webhook，支持文本消息接收和群机器人回复。',
     supportsThreads: false,
     supportsMentions: true,
-    supportsAttachments: true
+    supportsAttachments: true,
+    incomingWebhookPath: '/api/im/webhook/wecom/:bindingId?',
+    credentialFields: [
+      { key: 'verificationToken', label: 'Token', secret: true },
+      { key: 'encryptKey', label: 'EncodingAESKey', secret: true },
+      { key: 'appId', label: 'Corp ID' },
+      { key: 'outgoingWebhookUrl', label: '群机器人 Webhook', secret: true, placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...' }
+    ]
   },
   {
     id: 'slack',
     name: 'Slack',
-    description: '为未来接入 Slack channel 与 thread 做准备。',
+    description: 'Slack Slash/Event 兼容入口，支持 URL 校验、签名校验、表单文本 payload 与 response_url 回复。',
     supportsThreads: true,
     supportsMentions: true,
-    supportsAttachments: true
+    supportsAttachments: true,
+    incomingWebhookPath: '/api/im/webhook/slack/:bindingId?',
+    credentialFields: [
+      { key: 'incomingSecret', label: 'Signing Secret', secret: true },
+      { key: 'outgoingWebhookUrl', label: 'Incoming Webhook', secret: true }
+    ]
   },
   {
     id: 'discord',
     name: 'Discord',
-    description: '为未来接入 Discord guild channel 与 thread 做准备。',
+    description: 'Discord Webhook 入口，当前支持通用文本 payload 与 Webhook 回复。',
     supportsThreads: true,
     supportsMentions: true,
-    supportsAttachments: true
+    supportsAttachments: true,
+    incomingWebhookPath: '/api/im/webhook/discord/:bindingId?',
+    credentialFields: [
+      { key: 'incomingSecret', label: 'Shared Secret', secret: true },
+      { key: 'outgoingWebhookUrl', label: 'Webhook URL', secret: true }
+    ]
   },
   {
     id: 'telegram',
     name: 'Telegram',
-    description: '为未来接入 Telegram 群组与机器人回复做准备。',
+    description: 'Telegram Bot Webhook，支持文本消息接收和 sendMessage 回复。',
     supportsThreads: false,
     supportsMentions: false,
-    supportsAttachments: true
+    supportsAttachments: true,
+    incomingWebhookPath: '/api/im/webhook/telegram/:bindingId?',
+    credentialFields: [
+      { key: 'incomingSecret', label: 'Webhook Secret Token', secret: true },
+      { key: 'appSecret', label: 'Bot Token', secret: true }
+    ]
   },
   {
     id: 'custom',
     name: 'Custom Webhook',
-    description: '自定义消息入口，适合后续对接中台或内部 IM 网关。',
+    description: '自定义 JSON Webhook，可作为内部 IM 网关或 OpenClaw 风格桥接入口。',
     supportsThreads: true,
     supportsMentions: true,
-    supportsAttachments: true
+    supportsAttachments: true,
+    incomingWebhookPath: '/api/im/webhook/custom/:bindingId?',
+    credentialFields: [
+      { key: 'incomingSecret', label: 'Shared Secret', secret: true },
+      { key: 'outgoingWebhookUrl', label: 'Reply Webhook', secret: true }
+    ]
   }
 ]
 
@@ -63,12 +111,20 @@ function normalizeBinding (value: Partial<ChannelBinding>, existing?: ChannelBin
   return {
     id: value.id || existing?.id || createBindingId(),
     connectorType: value.connectorType || existing?.connectorType || 'custom',
+    name: typeof value.name === 'string' && value.name.trim() ? value.name.trim() : existing?.name,
     externalChannelId: typeof value.externalChannelId === 'string' ? value.externalChannelId.trim() : (existing?.externalChannelId || ''),
     externalThreadId: typeof value.externalThreadId === 'string' && value.externalThreadId.trim() ? value.externalThreadId.trim() : existing?.externalThreadId,
     boundConversationId: typeof value.boundConversationId === 'string' && value.boundConversationId.trim() ? value.boundConversationId.trim() : existing?.boundConversationId,
     boundGroupId: typeof value.boundGroupId === 'string' && value.boundGroupId.trim() ? value.boundGroupId.trim() : existing?.boundGroupId,
     defaultAgentId: typeof value.defaultAgentId === 'string' && value.defaultAgentId.trim() ? value.defaultAgentId.trim() : existing?.defaultAgentId,
     targetProjectId: typeof value.targetProjectId === 'string' && value.targetProjectId.trim() ? value.targetProjectId.trim() : (value.targetProjectId === null ? null : existing?.targetProjectId),
+    incomingSecret: typeof value.incomingSecret === 'string' && value.incomingSecret.trim() ? value.incomingSecret.trim() : existing?.incomingSecret,
+    outgoingWebhookUrl: typeof value.outgoingWebhookUrl === 'string' && value.outgoingWebhookUrl.trim() ? value.outgoingWebhookUrl.trim() : existing?.outgoingWebhookUrl,
+    appId: typeof value.appId === 'string' && value.appId.trim() ? value.appId.trim() : existing?.appId,
+    appSecret: typeof value.appSecret === 'string' && value.appSecret.trim() ? value.appSecret.trim() : existing?.appSecret,
+    verificationToken: typeof value.verificationToken === 'string' && value.verificationToken.trim() ? value.verificationToken.trim() : existing?.verificationToken,
+    encryptKey: typeof value.encryptKey === 'string' && value.encryptKey.trim() ? value.encryptKey.trim() : existing?.encryptKey,
+    botUserId: typeof value.botUserId === 'string' && value.botUserId.trim() ? value.botUserId.trim() : existing?.botUserId,
     autoReply: value.autoReply ?? existing?.autoReply ?? false,
     requireApprovalForRiskyTools: value.requireApprovalForRiskyTools ?? existing?.requireApprovalForRiskyTools ?? true,
     createdAt: existing?.createdAt || value.createdAt || timestamp,
@@ -114,6 +170,18 @@ export class ChannelBindingStore {
 
   get (id: string): ChannelBinding | null {
     return this.readAll().find(item => item.id === id) || null
+  }
+
+  findForEvent (connectorType: ChannelBinding['connectorType'], channelId: string, threadId?: string, bindingId?: string): ChannelBinding | null {
+    const bindings = this.readAll()
+      .filter(item => item.connectorType === connectorType)
+      .filter(item => !bindingId || item.id === bindingId)
+
+    return bindings.find(item => {
+      if (item.externalChannelId !== channelId) return false
+      if (threadId && item.externalThreadId && item.externalThreadId !== threadId) return false
+      return true
+    }) || bindings.find(item => !item.externalChannelId) || null
   }
 
   save (value: Partial<ChannelBinding>): ChannelBinding {

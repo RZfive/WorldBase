@@ -17,6 +17,7 @@
     "build:preload:bytecode": "node scripts/build-preload.mjs --bytecode",
     "build:electron": "pnpm build:main && pnpm build:preload",
     "build:electron:bytecode": "pnpm build:main:bytecode && pnpm build:preload:bytecode",
+    "test:im-gateway": "node scripts/im-gateway-smoke.mjs",
     "electron:dev": "pnpm build && pnpm build:electron && pnpm exec electron .",
     "electron:build": "pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --publish never",
     "electron:build:win": "pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --win --publish never",

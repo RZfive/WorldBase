@@ -12,6 +12,7 @@ import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { AIEngine } from '../ai-engine/ai-engine.js'
 import type { SettingsStore } from '../settings/settings-store.js'
 import type { SystemService } from '../system-capabilities/system-service.js'
+import type { ImGatewayService } from '../im/im-gateway-service.js'
 import type { Server } from 'node:http'
 
 const LOCAL_RESOURCE_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1'])
@@ -152,6 +153,7 @@ export interface LanServerConfig {
   aiEngine: AIEngine
   systemService: SystemService
   settingsStore?: SettingsStore
+  imGatewayService?: ImGatewayService
 }
 
 /**
@@ -221,8 +223,14 @@ export class LanServer {
   }
 
   private _setupMiddleware (): void {
-    this.app.use(express.json({ limit: '10mb' }))
-    this.app.use(express.urlencoded({ extended: true }))
+    const captureRawBody = (req: Request & { rawBody?: Buffer }, _res: Response, buf: Buffer) => {
+      if (buf.length > 0) {
+        req.rawBody = Buffer.from(buf)
+      }
+    }
+    this.app.use(express.json({ limit: '10mb', verify: captureRawBody }))
+    this.app.use(express.urlencoded({ extended: true, verify: captureRawBody }))
+    this.app.use(express.text({ type: ['application/xml', 'text/xml', 'text/plain'], limit: '2mb', verify: captureRawBody }))
 
     // CORS for local network access
     this.app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -242,6 +250,10 @@ export class LanServer {
     this.app.get('/api/health', (_req: Request, res: Response) => {
       res.json({ status: 'ok', timestamp: new Date().toISOString() })
     })
+
+    if (this.services.imGatewayService) {
+      this.app.use('/api/im', this.services.imGatewayService.router())
+    }
 
     this.app.use(['/api/projects', '/api/ai', '/api/system'], this._requireTrustedApiAccess)
 
