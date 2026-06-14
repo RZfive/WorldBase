@@ -4,7 +4,7 @@ export type AgentMemoryScope = 'user' | 'agent' | 'project' | 'group' | 'channel
 
 export type MemoryType = 'user_trait' | 'agent_skill' | 'step' | 'knowledge'
 
-export type ConnectorType = 'feishu' | 'wecom' | 'slack' | 'discord' | 'telegram' | 'custom'
+export type ConnectorType = 'feishu' | 'wechat' | 'wecom' | 'slack' | 'discord' | 'telegram' | 'custom'
 
 export interface AgentMemoryWritePolicy {
   allowUserTraits: boolean
@@ -234,17 +234,32 @@ export interface ConnectorDefinition {
   supportsThreads: boolean
   supportsMentions: boolean
   supportsAttachments: boolean
+  incomingWebhookPath: string
+  credentialFields: Array<{
+    key: keyof Pick<ChannelBinding, 'incomingSecret' | 'outgoingWebhookUrl' | 'appId' | 'appSecret' | 'verificationToken' | 'encryptKey' | 'botUserId'>
+    label: string
+    secret?: boolean
+    placeholder?: string
+  }>
 }
 
 export interface ChannelBinding {
   id: string
   connectorType: ConnectorType
+  name?: string
   externalChannelId: string
   externalThreadId?: string
   boundConversationId?: string
   boundGroupId?: string
   defaultAgentId?: string
   targetProjectId?: string | null
+  incomingSecret?: string
+  outgoingWebhookUrl?: string
+  appId?: string
+  appSecret?: string
+  verificationToken?: string
+  encryptKey?: string
+  botUserId?: string
   autoReply: boolean
   requireApprovalForRiskyTools: boolean
   createdAt: string

@@ -40,6 +40,7 @@ const agentTools = ref<ToolCatalogEntry[]>([])
 const memoryQuery = ref('')
 const memoryScopeType = ref<AgentMemoryScope>('user')
 const memoryScopeId = ref('')
+const showMemoryFilters = ref(false)
 const addingMemory = ref(false)
 const savingMemory = ref(false)
 const memoryCompactionStatus = ref<MemoryCompactionStatus | null>(null)
@@ -88,14 +89,28 @@ const draftGroup = reactive({
 const draftBinding = reactive({
   id: '',
   connectorType: 'custom' as ConnectorType,
+  name: '',
   externalChannelId: '',
   externalThreadId: '',
   boundConversationId: '',
   boundGroupId: '',
   defaultAgentId: '',
   targetProjectId: '',
+  incomingSecret: '',
+  outgoingWebhookUrl: '',
+  appId: '',
+  appSecret: '',
+  verificationToken: '',
+  encryptKey: '',
+  botUserId: '',
   autoReply: false,
   requireApprovalForRiskyTools: true
+})
+
+const bindingTest = reactive({
+  text: '这是一条 IM 绑定测试消息，请用一句话回复。',
+  running: false,
+  result: ''
 })
 
 const draftMemory = reactive({
@@ -107,6 +122,20 @@ const draftMemory = reactive({
   scopeId: 'local-user',
   memoryType: 'knowledge' as MemoryType,
   pinned: true
+})
+
+const selectedConnector = computed(() => {
+  return connectors.value.find(connector => connector.id === draftBinding.connectorType) || null
+})
+
+const bindingWebhookUrl = computed(() => {
+  const bindingPart = draftBinding.id || ':bindingId'
+  return `http://localhost:19527/api/im/webhook/${draftBinding.connectorType}/${bindingPart}`
+})
+
+const bindingOpenClawUrl = computed(() => {
+  const bindingPart = draftBinding.id || ':bindingId'
+  return `http://localhost:19527/api/im/openclaw/${bindingPart}`
 })
 
 function setStatus (message: string) {
@@ -124,6 +153,13 @@ function memoryTypeLabel (value: MemoryType): string {
 function formatMemoryCompactionResult (result: MemoryCompactionResult): string {
   return `AI 记忆整理完成：扫描 ${result.scanned} 条，删除无用 ${result.removedUseless} 条，合并重复 ${result.merged} 条，更新 ${result.updated} 条，保留 ${result.retained} 条`
 }
+
+const hasMemoryScopeFilter = computed(() => memoryScopeId.value.trim().length > 0)
+
+const memoryScopeFilterText = computed(() => {
+  if (!hasMemoryScopeFilter.value) return '全部作用域'
+  return `${memoryScopeLabel(memoryScopeType.value)} / ${memoryScopeId.value.trim()}`
+})
 
 function formatMemoryCompactionStatus (status: MemoryCompactionStatus): string {
   if (status.status === 'running') {
@@ -325,12 +361,20 @@ function loadGroupIntoDraft (group?: AgentGroupDefinition | null) {
 function resetBindingDraft () {
   draftBinding.id = ''
   draftBinding.connectorType = 'custom'
+  draftBinding.name = ''
   draftBinding.externalChannelId = ''
   draftBinding.externalThreadId = ''
   draftBinding.boundConversationId = ''
   draftBinding.boundGroupId = ''
   draftBinding.defaultAgentId = ''
   draftBinding.targetProjectId = ''
+  draftBinding.incomingSecret = ''
+  draftBinding.outgoingWebhookUrl = ''
+  draftBinding.appId = ''
+  draftBinding.appSecret = ''
+  draftBinding.verificationToken = ''
+  draftBinding.encryptKey = ''
+  draftBinding.botUserId = ''
   draftBinding.autoReply = false
   draftBinding.requireApprovalForRiskyTools = true
 }
@@ -343,12 +387,20 @@ function loadBindingIntoDraft (binding?: ChannelBinding | null) {
 
   draftBinding.id = binding.id
   draftBinding.connectorType = binding.connectorType
+  draftBinding.name = binding.name || ''
   draftBinding.externalChannelId = binding.externalChannelId
   draftBinding.externalThreadId = binding.externalThreadId || ''
   draftBinding.boundConversationId = binding.boundConversationId || ''
   draftBinding.boundGroupId = binding.boundGroupId || ''
   draftBinding.defaultAgentId = binding.defaultAgentId || ''
   draftBinding.targetProjectId = binding.targetProjectId || ''
+  draftBinding.incomingSecret = binding.incomingSecret || ''
+  draftBinding.outgoingWebhookUrl = binding.outgoingWebhookUrl || ''
+  draftBinding.appId = binding.appId || ''
+  draftBinding.appSecret = binding.appSecret || ''
+  draftBinding.verificationToken = binding.verificationToken || ''
+  draftBinding.encryptKey = binding.encryptKey || ''
+  draftBinding.botUserId = binding.botUserId || ''
   draftBinding.autoReply = binding.autoReply
   draftBinding.requireApprovalForRiskyTools = binding.requireApprovalForRiskyTools
 }
@@ -413,6 +465,11 @@ async function loadMemory () {
     scopeId: memoryScopeId.value || undefined,
     limit: 50
   })
+}
+
+function clearMemoryScopeFilter () {
+  memoryScopeId.value = ''
+  void loadMemory()
 }
 
 function resetMemoryDraft () {
@@ -604,12 +661,20 @@ async function saveBinding () {
   const saved = await window.electronAPI.saveChannelBinding({
     id: draftBinding.id || undefined,
     connectorType: draftBinding.connectorType,
+    name: draftBinding.name || undefined,
     externalChannelId: draftBinding.externalChannelId,
     externalThreadId: draftBinding.externalThreadId || undefined,
     boundConversationId: draftBinding.boundConversationId || undefined,
     boundGroupId: draftBinding.boundGroupId || undefined,
     defaultAgentId: draftBinding.defaultAgentId || undefined,
     targetProjectId: draftBinding.targetProjectId || undefined,
+    incomingSecret: draftBinding.incomingSecret || undefined,
+    outgoingWebhookUrl: draftBinding.outgoingWebhookUrl || undefined,
+    appId: draftBinding.appId || undefined,
+    appSecret: draftBinding.appSecret || undefined,
+    verificationToken: draftBinding.verificationToken || undefined,
+    encryptKey: draftBinding.encryptKey || undefined,
+    botUserId: draftBinding.botUserId || undefined,
     autoReply: draftBinding.autoReply,
     requireApprovalForRiskyTools: draftBinding.requireApprovalForRiskyTools
   })
@@ -628,6 +693,22 @@ async function removeBinding () {
   resetBindingDraft()
   await loadBindings()
   setStatus('已删除 IM 绑定')
+}
+
+async function testBindingReply () {
+  if (!draftBinding.id || !window.electronAPI?.testChannelBinding || bindingTest.running) return
+  bindingTest.running = true
+  bindingTest.result = ''
+  try {
+    const result = await window.electronAPI.testChannelBinding(draftBinding.id, bindingTest.text)
+    bindingTest.result = result.reply || '未生成回复'
+    setStatus('IM 绑定测试完成')
+  } catch (error) {
+    bindingTest.result = `测试失败：${(error as Error).message}`
+    setStatus('IM 绑定测试失败')
+  } finally {
+    bindingTest.running = false
+  }
 }
 
 async function toggleMemoryPinned (entry: MemoryEntry) {
@@ -968,19 +1049,37 @@ watch(activeTab, (nextTab, previousTab) => {
           :class="['list-item', { active: draftBinding.id === binding.id }]"
           @click="loadBindingIntoDraft(binding)"
         >
-          <strong>{{ binding.connectorType }} · {{ binding.externalChannelId }}</strong>
-          <span>{{ binding.defaultAgentId || '未绑定默认 Agent' }}</span>
+          <strong>{{ binding.name || `${binding.connectorType} · ${binding.externalChannelId || binding.id}` }}</strong>
+          <span>{{ binding.autoReply ? '自动回复' : '仅接收' }} · {{ binding.defaultAgentId || binding.boundGroupId || '默认模型' }}</span>
         </button>
       </aside>
 
       <section class="editor-panel">
         <div class="form-grid two-col">
           <label>
+            <span>绑定名称</span>
+            <input v-model="draftBinding.name" class="input" placeholder="例如：飞书研发群">
+          </label>
+          <label>
             <span>连接器</span>
             <select v-model="draftBinding.connectorType" class="input">
               <option v-for="connector in connectors" :key="connector.id" :value="connector.id">{{ connector.name }}</option>
             </select>
           </label>
+        </div>
+
+        <div class="binding-endpoint-card">
+          <div>
+            <strong>{{ selectedConnector?.name || draftBinding.connectorType }}</strong>
+            <span>{{ selectedConnector?.description }}</span>
+          </div>
+          <div class="binding-endpoint-list">
+            <code>{{ bindingWebhookUrl }}</code>
+            <code v-if="draftBinding.connectorType === 'custom'">{{ bindingOpenClawUrl }}</code>
+          </div>
+        </div>
+
+        <div class="form-grid two-col">
           <label>
             <span>默认 Agent</span>
             <select v-model="draftBinding.defaultAgentId" class="input">
@@ -1019,9 +1118,42 @@ watch(activeTab, (nextTab, previousTab) => {
           </label>
         </div>
 
+        <div v-if="selectedConnector?.credentialFields.length" class="form-grid two-col">
+          <label v-for="field in selectedConnector.credentialFields" :key="field.key">
+            <span>{{ field.label }}</span>
+            <input
+              v-model="draftBinding[field.key]"
+              class="input"
+              :type="field.secret ? 'password' : 'text'"
+              :placeholder="field.placeholder || '可选'"
+            >
+          </label>
+        </div>
+
+        <div class="form-grid two-col">
+          <label>
+            <span>Bot 用户 ID</span>
+            <input v-model="draftBinding.botUserId" class="input" placeholder="可选，用于忽略机器人自己的消息">
+          </label>
+        </div>
+
         <div class="check-grid single-col">
           <label class="check-row"><input v-model="draftBinding.autoReply" type="checkbox"><span>自动回复</span></label>
           <label class="check-row"><input v-model="draftBinding.requireApprovalForRiskyTools" type="checkbox"><span>危险工具仍需审批</span></label>
+        </div>
+
+        <div class="binding-test-card">
+          <div class="binding-test-head">
+            <strong>本地测试</strong>
+            <span>保存后可直接验证 Agent 回复链路</span>
+          </div>
+          <div class="binding-test-row">
+            <input v-model="bindingTest.text" class="input" placeholder="输入一条模拟 IM 消息">
+            <button class="ghost-btn" type="button" :disabled="!draftBinding.id || bindingTest.running" @click="testBindingReply">
+              {{ bindingTest.running ? '测试中...' : '发送测试' }}
+            </button>
+          </div>
+          <p v-if="bindingTest.result" class="binding-test-result">{{ bindingTest.result }}</p>
         </div>
 
         <div class="action-row">
@@ -1033,16 +1165,34 @@ watch(activeTab, (nextTab, previousTab) => {
 
     <div v-else class="memory-panel">
       <div class="memory-toolbar">
-        <input v-model="memoryQuery" class="input memory-search" placeholder="搜索记忆" @keyup.enter="loadMemory">
-        <select v-model="memoryScopeType" class="input memory-scope-select">
-          <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-        </select>
-        <input v-model="memoryScopeId" class="input memory-scope-id" placeholder="Scope ID" @keyup.enter="loadMemory">
-        <button class="primary-btn" @click="loadMemory">查询</button>
-        <button class="ghost-btn" @click="toggleMemoryCreator">{{ addingMemory ? '收起' : '新增记忆' }}</button>
+        <input
+          v-model="memoryQuery"
+          class="input memory-search"
+          type="search"
+          placeholder="搜索标题、摘要、详情或标签"
+          @keyup.enter="loadMemory"
+        >
+        <span :class="['memory-filter-pill', { active: hasMemoryScopeFilter }]">{{ memoryScopeFilterText }}</span>
+        <button class="primary-btn" type="button" @click="loadMemory">查询</button>
+        <button :class="['ghost-btn', { active: showMemoryFilters }]" type="button" @click="showMemoryFilters = !showMemoryFilters">筛选</button>
+        <button class="ghost-btn" type="button" @click="toggleMemoryCreator">{{ addingMemory ? '收起添加' : '手动添加' }}</button>
         <button class="ghost-btn" :disabled="memoryCompacting" @click="compactMemory">
-          {{ memoryCompacting ? 'AI 整理中...' : 'AI 整理记忆' }}
+          {{ memoryCompacting ? '整理中...' : 'AI 整理' }}
         </button>
+      </div>
+
+      <div v-if="showMemoryFilters" class="memory-filter-row">
+        <label>
+          <span>作用域</span>
+          <select v-model="memoryScopeType" class="input memory-scope-select">
+            <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+          </select>
+        </label>
+        <label>
+          <span>Scope ID</span>
+          <input v-model="memoryScopeId" class="input memory-scope-id" placeholder="local-user / agent_xxx / project_xxx" @keyup.enter="loadMemory">
+        </label>
+        <button class="ghost-btn" type="button" :disabled="!hasMemoryScopeFilter" @click="clearMemoryScopeFilter">全部</button>
       </div>
 
       <form v-if="addingMemory" class="memory-create-card" @submit.prevent="saveManualMemory">
@@ -1095,6 +1245,9 @@ watch(activeTab, (nextTab, previousTab) => {
       </div>
 
       <div class="memory-list">
+        <div v-if="memoryEntries.length === 0" class="memory-empty">
+          没有匹配的记忆，可以手动添加一条。
+        </div>
         <article v-for="entry in memoryEntries" :key="entry.id" class="memory-card">
           <div class="memory-card-head">
             <div>
@@ -1172,6 +1325,12 @@ watch(activeTab, (nextTab, previousTab) => {
 .primary-btn {
   background: var(--app-accent-soft);
   border-color: var(--app-accent);
+  color: var(--app-accent);
+}
+
+.ghost-btn.active {
+  background: var(--app-accent-soft);
+  border-color: color-mix(in srgb, var(--app-accent) 58%, var(--app-border));
   color: var(--app-accent);
 }
 
@@ -1342,9 +1501,83 @@ label {
   gap: 8px;
 }
 
+.binding-endpoint-card {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-main-surface);
+}
+
+.binding-endpoint-card strong,
+.binding-endpoint-card span {
+  display: block;
+}
+
+.binding-endpoint-card span {
+  margin-top: 4px;
+  color: var(--app-text-soft);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.binding-endpoint-card code {
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--app-panel-subtle);
+  color: var(--app-text);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.binding-endpoint-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.binding-test-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--app-accent-soft) 18%, var(--app-main-surface));
+}
+
+.binding-test-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.binding-test-head span {
+  color: var(--app-text-soft);
+  font-size: 0.82rem;
+}
+
+.binding-test-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.binding-test-result {
+  margin: 0;
+  color: var(--app-text);
+  font-size: 0.86rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
 .memory-toolbar {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) 92px minmax(108px, 150px) auto auto auto;
+  grid-template-columns: minmax(220px, 1fr) auto auto auto auto auto;
   align-items: center;
   gap: 8px;
 }
@@ -1352,6 +1585,55 @@ label {
 .memory-toolbar .input,
 .memory-toolbar .ghost-btn,
 .memory-toolbar .primary-btn {
+  min-height: 34px;
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.memory-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 220px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-main-surface);
+  color: var(--app-text-soft);
+  font-size: 0.8rem;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.memory-filter-pill.active {
+  border-color: color-mix(in srgb, var(--app-accent) 38%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 48%, var(--app-main-surface));
+  color: var(--app-accent);
+}
+
+.memory-filter-row {
+  display: grid;
+  grid-template-columns: minmax(118px, 160px) minmax(220px, 320px) auto;
+  align-items: end;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-main-surface);
+}
+
+.memory-filter-row label {
+  gap: 4px;
+}
+
+.memory-filter-row label span {
+  font-size: 0.78rem;
+}
+
+.memory-filter-row .input,
+.memory-filter-row .ghost-btn {
   min-height: 34px;
   padding-top: 7px;
   padding-bottom: 7px;
@@ -1408,6 +1690,18 @@ label {
   gap: 8px;
 }
 
+.memory-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+  border: 1px dashed var(--app-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--app-main-surface) 68%, transparent);
+  color: var(--app-text-soft);
+  font-size: 0.86rem;
+}
+
 .memory-card {
   border: 1px solid var(--app-border);
   border-radius: 12px;
@@ -1447,14 +1741,21 @@ label {
 }
 
 @media (max-width: 1100px) {
-  .memory-toolbar,
+  .binding-endpoint-card,
+  .memory-filter-row,
   .memory-create-grid {
     grid-template-columns: 1fr 1fr;
   }
 
-  .memory-search,
+  .binding-endpoint-card code,
+  .binding-test-row,
+  .memory-filter-row label:nth-child(2),
   .memory-create-summary {
     grid-column: 1 / -1;
+  }
+
+  .binding-test-row {
+    grid-template-columns: 1fr;
   }
 }
 </style>

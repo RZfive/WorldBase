@@ -494,6 +494,7 @@ export interface ElectronAPI {
   getChannelBinding: (id: string) => Promise<ChannelBinding | null>
   saveChannelBinding: (binding: Partial<ChannelBinding>) => Promise<ChannelBinding>
   deleteChannelBinding: (id: string) => Promise<boolean>
+  testChannelBinding: (id: string, text?: string) => Promise<{ ok: boolean; reply: string | null }>
   listMemory: (options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => Promise<MemoryEntry[]>
   saveMemory: (entry: Partial<MemoryEntry>) => Promise<MemoryEntry>
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
@@ -711,6 +712,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getChannelBinding: (id: string) => ipcRenderer.invoke('im:getBinding', id),
   saveChannelBinding: (binding: Partial<ChannelBinding>) => ipcRenderer.invoke('im:saveBinding', binding),
   deleteChannelBinding: (id: string) => ipcRenderer.invoke('im:deleteBinding', id),
+  testChannelBinding: (id: string, text?: string) => ipcRenderer.invoke('im:testBinding', id, text),
   listMemory: (options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => ipcRenderer.invoke('memory:list', options),
   saveMemory: (entry: Partial<MemoryEntry>) => ipcRenderer.invoke('memory:save', entry),
   pinMemory: (id: string, pinned: boolean) => ipcRenderer.invoke('memory:pin', id, pinned),
