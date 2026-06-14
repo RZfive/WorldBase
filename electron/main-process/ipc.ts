@@ -22,6 +22,8 @@ import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '../../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
+import type { FolderWorkspacePickResult } from '../../src/shared/folder-workspace-types.js'
+import { assertFolderWorkspaceRoot, getFolderWorkspaceRootName, listFolderWorkspaceFiles, readFolderWorkspaceFile } from '../../src/main/folder-workspace/folder-workspace-fs.js'
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
 import { mainState, activeChatSessions, pendingPageAutomationRequests, projectWindows, type EnsureWindowWidthOptions } from './state.js'
 import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH } from './constants.js'
@@ -35,6 +37,33 @@ import { applyMcpServersToService } from './services.js'
 import { drainPendingStudioImageTasks } from './media/image-studio-queue.js'
 import { attachProjectRuntimeLogForwarding, broadcastToAppWindows, buildActivePagePromptSection, buildRendererWindowUrl, createProjectPackageDefaultName, ensureWindowHasMinimumWidth, getPreferredLanIpv4Addresses, getProjectsDir, getSenderWindow, guessImageExtension, resolveImageBuffer, runWithAiRequestWindow, setWindowMinimumWidth } from './windows.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
+
+function buildFolderWorkspacePromptSection (workspaceRoot: string | null): string | null {
+  if (!workspaceRoot) return null
+  const rootName = getFolderWorkspaceRootName(workspaceRoot)
+  return [
+    '## Conversation folder workspace',
+    `The user selected a local folder workspace for this conversation: ${rootName}`,
+    `Absolute folder path: ${workspaceRoot}`,
+    '- For code development in this conversation, use the folder workspace tools instead of project tools unless the user explicitly asks for a managed project.',
+    '- Use relative paths inside the selected folder. Do not use absolute paths as tool arguments.',
+    '- Explore with list_workspace_files, read_workspace_file, grep_workspace, and glob_workspace.',
+    '- Before editing an existing file, read it with read_workspace_file, then use edit_workspace_file for targeted exact replacements. Use write_workspace_file for new files or broad rewrites, and patch_workspace_file for line-range patches when appropriate.',
+    '- Verify changes with run_workspace_command for short install, build, test, lint, type-check, or diagnostic commands. If a workspace command times out, check it with get_workspace_command_status before retrying.',
+    '- Plan mode still applies: read/search tools are allowed, while workspace write/delete/run tools are blocked until planning exits.'
+  ].join('\n')
+}
+
+async function resolveFolderWorkspaceRootForRequest (workspaceRoot?: string | null): Promise<string | null> {
+  const requestedRoot = typeof workspaceRoot === 'string' ? workspaceRoot.trim() : ''
+  if (!requestedRoot) return null
+  try {
+    return await assertFolderWorkspaceRoot(requestedRoot)
+  } catch (error) {
+    console.warn('[ai:chatStream] Ignoring invalid folder workspace root:', (error as Error).message)
+    return null
+  }
+}
 
 export function setupIPC (): void {
   const getMainWindow = () => mainState.mainWindow
@@ -145,13 +174,15 @@ export function setupIPC (): void {
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => {
     const sender = event.sender
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
     const authModeRef = { current: authMode ?? 'strict' }
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
+    const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
+    const folderWorkspacePromptSection = buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
     const baseRuntimeContext = resolveAgentRuntimeContext({
       messages,
       agentId,
@@ -389,6 +420,7 @@ export function setupIPC (): void {
             conversationId,
             sessionId,
             targetProjectId: runtimeContext.effectiveTargetProjectId,
+            workspaceRoot: resolvedFolderWorkspaceRoot,
             providerConfig: runtimeContext.providerConfig,
             abortSignal: abortController.signal,
             authMode: authModeRef.current,
@@ -397,6 +429,7 @@ export function setupIPC (): void {
             activeSkillContents: runtimeContext.activeSkillContents,
             systemPromptSections: [
               ...runtimeContext.systemPromptSections,
+              ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
               ...(activePagePromptSection ? [activePagePromptSection] : []),
               ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),
               ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
@@ -1016,6 +1049,35 @@ export function setupIPC (): void {
 
   ipcMain.handle('document:buildSelectionsPrompt', async (_event: IpcMainInvokeEvent, regionIds?: string[]) => {
     return documentStore!.buildSelectionsPrompt(regionIds)
+  })
+
+  // ─── Folder workspace preview ────────────────────────────────────────
+
+  ipcMain.handle('folderWorkspace:pickFolder', async (event: IpcMainInvokeEvent): Promise<FolderWorkspacePickResult> => {
+    const senderWindow = getSenderWindow(event) || getMainWindow()
+    const dialogOptions = {
+      title: '选择代码工作区文件夹',
+      properties: ['openDirectory' as const]
+    }
+    const result = senderWindow
+      ? await dialog.showOpenDialog(senderWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions)
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true }
+
+    const rootPath = path.resolve(result.filePaths[0])
+    return {
+      canceled: false,
+      rootPath,
+      rootName: getFolderWorkspaceRootName(rootPath)
+    }
+  })
+
+  ipcMain.handle('folderWorkspace:listFiles', async (_event: IpcMainInvokeEvent, rootPath: string) => {
+    return listFolderWorkspaceFiles(rootPath)
+  })
+
+  ipcMain.handle('folderWorkspace:readFile', async (_event: IpcMainInvokeEvent, rootPath: string, filePath: string) => {
+    return readFolderWorkspaceFile(rootPath, filePath)
   })
 
   // Project management

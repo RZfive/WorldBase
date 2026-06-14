@@ -79,6 +79,11 @@ const COMMAND_SAFETY_RULES: CommandSafetyRule[] = [
 const ALWAYS_SAFE_TOOLS = new Set([
   'read_project_file',
   'list_project_files',
+  'read_workspace_file',
+  'list_workspace_files',
+  'glob_workspace',
+  'grep_workspace',
+  'get_workspace_command_status',
   'list_projects',
   'list_scheduled_tasks',
   'manage_todo_list',
@@ -169,7 +174,7 @@ export class PermissionEngine {
     }
 
     // Layer 3: Auto-classification for command tools
-    if (toolName === 'run_project_command' || toolName === 'local_run_command') {
+    if (toolName === 'run_project_command' || toolName === 'run_workspace_command' || toolName === 'local_run_command') {
       const command = String(args.command || '')
       const classification = this._classifyCommand(command)
 
@@ -300,7 +305,7 @@ export class PermissionEngine {
   ): string {
     const parts = [reason]
 
-    if (toolName === 'run_project_command' || toolName === 'local_run_command') {
+    if (toolName === 'run_project_command' || toolName === 'run_workspace_command' || toolName === 'local_run_command') {
       parts.push(`命令: ${String(args.command || '').slice(0, 200)}`)
     } else if (toolName === 'local_file_read' || toolName === 'local_file_write') {
       parts.push(`文件: ${String(args.file_path || '').slice(0, 200)}`)

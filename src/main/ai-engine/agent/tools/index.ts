@@ -25,6 +25,18 @@ import { toolOpenProjectApp } from './tool-open-project-app.js'
 import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
 import { toolGlobSearch } from './tool-glob-search.js'
 import { toolGrepSearch } from './tool-grep-search.js'
+import {
+  toolDeleteWorkspaceFile,
+  toolEditWorkspaceFile,
+  toolGetWorkspaceCommandStatus,
+  toolGlobWorkspace,
+  toolGrepWorkspace,
+  toolListWorkspaceFiles,
+  toolPatchWorkspaceFile,
+  toolReadWorkspaceFile,
+  toolRunWorkspaceCommand,
+  toolWriteWorkspaceFile
+} from './tool-workspace-files.js'
 import { toolWebSearch } from './tool-web-search.js'
 import { toolFetchWebpage } from './tool-fetch-webpage.js'
 import { toolInteractCurrentPage, toolReadCurrentPage } from './tool-active-page.js'
@@ -81,6 +93,8 @@ export interface ToolServices {
   scheduledTaskService?: ScheduledTaskService
   /** Optional subagent service — injects the spawn_subagents tool when provided. */
   subagentService?: SubagentService
+  /** Conversation-scoped local folder selected by the user for code work. */
+  workspaceRoot?: string | null
 }
 
 /**
@@ -138,6 +152,21 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolCreateAgent(services, () => agent.getToolDefinitions()),
     toolCreateAgentGroup(services)
   ]
+
+  if (services.workspaceRoot) {
+    tools.push(
+      toolListWorkspaceFiles({ workspaceRoot: services.workspaceRoot }),
+      toolReadWorkspaceFile({ workspaceRoot: services.workspaceRoot }, readTracker),
+      toolWriteWorkspaceFile({ workspaceRoot: services.workspaceRoot }, readTracker),
+      toolEditWorkspaceFile({ workspaceRoot: services.workspaceRoot }, readTracker),
+      toolPatchWorkspaceFile({ workspaceRoot: services.workspaceRoot }, readTracker),
+      toolDeleteWorkspaceFile({ workspaceRoot: services.workspaceRoot }),
+      toolGlobWorkspace({ workspaceRoot: services.workspaceRoot }),
+      toolGrepWorkspace({ workspaceRoot: services.workspaceRoot }),
+      toolRunWorkspaceCommand({ workspaceRoot: services.workspaceRoot }),
+      toolGetWorkspaceCommandStatus()
+    )
+  }
 
   if (services.readActivePage) {
     tools.push(toolReadCurrentPage(services))

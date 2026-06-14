@@ -57,6 +57,7 @@ export interface ConversationSummary {
   agentId?: string
   groupId?: string
   channelBindingId?: string
+  folderWorkspace?: ConversationFolderWorkspaceState
 }
 
 export interface ChatPanelProps {
@@ -170,6 +171,7 @@ export interface BackgroundStreamState {
   groupId: string | null
   channelBindingId: string | null
   documentWorkspace?: ConversationDocumentWorkspaceState
+  folderWorkspace?: ConversationFolderWorkspaceState
 }
 
 export interface UploadedAttachmentResult {

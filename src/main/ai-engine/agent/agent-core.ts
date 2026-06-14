@@ -72,6 +72,8 @@ export interface SessionState {
   createdProjectId: string | null
   /** An existing project ID the user wants to edit/optimize (set via chat context). */
   targetProjectId: string | null
+  /** User-selected local folder workspace for this conversation. */
+  workspaceRoot?: string | null
   /** Conversation identifier that owns the current execution. */
   conversationId?: string
   /** Renderer-side streaming session identifier for routing UI events back to the right chat. */
@@ -108,6 +110,11 @@ export class AgentCore {
   private static readonly CONCURRENCY_SAFE_TOOLS: ReadonlySet<string> = new Set([
     'read_project_file',
     'list_project_files',
+    'read_workspace_file',
+    'list_workspace_files',
+    'grep_workspace',
+    'glob_workspace',
+    'get_workspace_command_status',
     'list_projects',
     'get_project_status',
     'get_project_logs',

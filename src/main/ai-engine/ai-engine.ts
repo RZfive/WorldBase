@@ -63,6 +63,7 @@ export interface AIConfigInput {
 
 export interface AIRequestOptions {
   targetProjectId?: string | null
+  workspaceRoot?: string | null
   providerConfig?: AIConfigInput
   abortSignal?: AbortSignal
   conversationId?: string
@@ -244,9 +245,11 @@ export class AIEngine {
         })
       : undefined
 
-    const toolServices = subagentService
-      ? { ...this.services, subagentService }
-      : this.services
+    const toolServices = {
+      ...this.services,
+      workspaceRoot: options?.workspaceRoot ?? null,
+      ...(subagentService ? { subagentService } : {})
+    }
 
     registerAllTools(agent, toolServices)
     this.registerMcpTools(agent, options?.allowedMcpServerIds)
@@ -261,6 +264,7 @@ export class AIEngine {
     // back to the correct conversation in the renderer.
     agent.sessionState.conversationId = options?.conversationId
     agent.sessionState.sessionId = options?.sessionId
+    agent.sessionState.workspaceRoot = options?.workspaceRoot ?? null
     // Wire up permission engine with window context for user-auth dialogs
     agent.setPermissionContext({
       getMainWindow: this.services.getMainWindow,
