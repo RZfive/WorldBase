@@ -14,6 +14,17 @@ const completedCount = computed(
 const inProgressItem = computed(
   () => props.items.find((item) => item.status === "in-progress") || null,
 );
+const currentStepItem = computed(
+  () =>
+    inProgressItem.value ||
+    props.items.find((item) => item.status === "not-started") ||
+    props.items[props.items.length - 1] ||
+    null,
+);
+const currentStepTitle = computed(() => {
+  if (currentStepItem.value) return currentStepItem.value.title;
+  return `已完成 ${completedCount.value}/${props.items.length} 项`;
+});
 const progressPercent = computed(() => {
   if (props.items.length === 0) return 0;
   return Math.round((completedCount.value / props.items.length) * 100);
@@ -45,79 +56,76 @@ function toggleCollapsed(): void {
 
 <template>
   <section class="todo-shell" aria-label="当前执行清单">
-    <div class="todo-card" :class="{ expanded: !collapsed }">
-      <button class="todo-summary" type="button" @click="toggleCollapsed">
-        <div class="todo-summary-copy">
-          <div class="todo-summary-kicker-row">
-            <span class="todo-kicker">Todo</span>
-            <span
-              class="todo-badge sync"
-              :class="{ active: props.isLoading }"
-              >{{ props.isLoading ? "同步中" : "已暂停" }}</span
+    <div class="todo-float" :class="{ expanded: !collapsed }">
+      <Transition name="todo-expand">
+        <div v-if="!collapsed" class="todo-detail">
+          <div class="todo-detail-head">
+            <span>全部 Todo</span>
+            <span>{{ completedCount }}/{{ props.items.length }}</span>
+          </div>
+
+          <div class="todo-progress-track" aria-hidden="true">
+            <div
+              class="todo-progress-bar"
+              :style="{ width: `${progressPercent}%` }"
+            />
+          </div>
+
+          <div class="todo-scroll">
+            <div
+              v-for="item in props.items"
+              :key="item.id"
+              class="todo-item"
+              :class="item.status"
             >
-          </div>
-          <div class="todo-heading">
-            {{
-              inProgressItem
-                ? inProgressItem.title
-                : `已完成 ${completedCount}/${props.items.length} 项`
-            }}
-          </div>
-          <div class="todo-subtitle">
-            {{
-              collapsed
-                ? `共 ${props.items.length} 步`
-                : "当前会话的 AI Todo 进度"
-            }}
-          </div>
-        </div>
-
-        <div class="todo-summary-actions">
-          <div class="todo-progress-text">
-            {{ completedCount }}/{{ props.items.length }}
-          </div>
-          <div class="todo-toggle" :class="{ collapsed }" aria-hidden="true">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </div>
-        </div>
-      </button>
-
-      <div v-if="!collapsed" class="todo-detail">
-        <div class="todo-progress-track" aria-hidden="true">
-          <div
-            class="todo-progress-bar"
-            :style="{ width: `${progressPercent}%` }"
-          />
-        </div>
-
-        <div class="todo-scroll">
-          <div
-            v-for="item in props.items"
-            :key="item.id"
-            class="todo-item"
-            :class="item.status"
-          >
-            <div class="todo-item-index">{{ item.id }}</div>
-            <div class="todo-item-copy">
-              <div class="todo-item-title">{{ item.title }}</div>
+              <div class="todo-item-index">{{ item.id }}</div>
+              <div class="todo-item-copy">
+                <div class="todo-item-title">{{ item.title }}</div>
+              </div>
+              <span class="todo-item-status" :class="item.status">{{
+                getStatusLabel(item.status)
+              }}</span>
             </div>
-            <span class="todo-item-status" :class="item.status">{{
-              getStatusLabel(item.status)
-            }}</span>
           </div>
         </div>
-      </div>
+      </Transition>
+
+      <button
+        class="todo-strip"
+        type="button"
+        :aria-expanded="!collapsed"
+        @click="toggleCollapsed"
+      >
+        <span
+          v-if="currentStepItem"
+          class="todo-strip-status"
+          :class="currentStepItem.status"
+        >
+          {{ getStatusLabel(currentStepItem.status) }}
+        </span>
+        <span class="todo-strip-title">{{ currentStepTitle }}</span>
+        <span class="todo-strip-count">{{ completedCount }}/{{ props.items.length }}</span>
+        <span
+          class="todo-live-dot"
+          :class="{ active: props.isLoading }"
+          :title="props.isLoading ? '同步中' : '已暂停'"
+          aria-hidden="true"
+        />
+        <span class="todo-toggle" :class="{ collapsed }" aria-hidden="true">
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </span>
+      </button>
     </div>
   </section>
 </template>
@@ -127,128 +135,113 @@ function toggleCollapsed(): void {
   position: relative;
   z-index: 9;
   height: 0;
+  width: 100%;
+  max-width: var(--chat-message-track-max, 980px);
+  margin: 0 auto;
   padding: 0 var(--chat-message-gutter, 28px);
+  box-sizing: border-box;
   pointer-events: none;
 }
 
-.todo-card {
+.todo-float {
   position: absolute;
-  right: var(--chat-message-gutter, 28px);
-  bottom: 8px;
-  width: min(380px, calc(100vw - 48px));
+  left: 50%;
+  bottom: max(0px, calc(var(--chat-input-overlap, 56px) - 10px));
+  width: min(520px, calc(100% - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  pointer-events: auto;
+  transform: translateX(-50%);
+}
+
+.todo-strip {
+  width: 100%;
+  height: 36px;
+  min-width: 0;
+  padding: 0 8px 0 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
   border: 1px solid
     color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
-  border-radius: 8px;
-  background: linear-gradient(
-    180deg,
-    var(--app-panel),
-    var(--app-panel-subtle)
-  );
-  box-shadow: var(--app-shadow);
-  overflow: hidden;
-  background-color: var(--app-shell-bg);
-  pointer-events: auto;
-}
-
-.todo-card.expanded {
-  width: min(440px, calc(100vw - 48px));
-}
-
-.todo-summary {
-  width: 100%;
-  padding: 10px 12px;
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
-  border: none;
-  background: transparent;
-  color: inherit;
-  text-align: left;
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  background: color-mix(in srgb, var(--app-panel) 96%, transparent);
+  box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.16);
+  color: var(--app-text);
   cursor: pointer;
+  text-align: left;
+  backdrop-filter: blur(14px) saturate(130%);
+  -webkit-backdrop-filter: blur(14px) saturate(130%);
 }
 
-.todo-summary:hover {
-  background: var(--app-panel-muted);
+.todo-strip:hover {
+  border-color: color-mix(in srgb, var(--app-accent) 30%, var(--app-border-strong));
+  border-bottom: 0;
+  background: color-mix(in srgb, var(--app-accent-soft) 34%, var(--app-panel));
 }
 
-.todo-summary-copy {
+.todo-strip-title {
   min-width: 0;
-}
-
-.todo-summary-kicker-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.todo-kicker {
-  font-size: 0.67rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--app-accent);
-}
-
-.todo-heading {
-  margin-top: 4px;
-  font-size: 0.83rem;
-  font-weight: 700;
   color: var(--app-text-strong);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: 0.8rem;
+  font-weight: 700;
 }
 
-.todo-subtitle {
-  margin-top: 2px;
-  font-size: 0.7rem;
-  line-height: 1.35;
-  color: var(--app-text-muted);
-}
-
-.todo-summary-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.todo-badge {
+.todo-strip-status,
+.todo-strip-count {
   display: inline-flex;
   align-items: center;
-  padding: 4px 8px;
-  border-radius: 999px;
-  font-size: 0.68rem;
-  font-weight: 600;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 7px;
   border: 1px solid var(--app-border-strong);
   background: var(--app-panel-strong);
   color: var(--app-text-muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
-.todo-badge.sync.active {
-  border-color: color-mix(
-    in srgb,
-    var(--app-accent) 28%,
-    var(--app-border-strong)
-  );
+.todo-strip-status.in-progress {
   color: var(--app-accent);
+  border-color: color-mix(in srgb, var(--app-accent) 30%, var(--app-border-strong));
   background: var(--app-accent-soft);
 }
 
-.todo-progress-text {
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: var(--app-text-strong);
+.todo-strip-status.completed {
+  color: var(--app-success);
+  border-color: color-mix(in srgb, var(--app-success) 28%, var(--app-border-strong));
+  background: color-mix(in srgb, var(--app-success) 12%, var(--app-panel));
+}
+
+.todo-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-text-faint);
+}
+
+.todo-live-dot.active {
+  border-color: color-mix(in srgb, var(--app-accent) 34%, var(--app-border-strong));
+  background: var(--app-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 14%, transparent);
 }
 
 .todo-toggle {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: 7px;
   border: 1px solid var(--app-border-strong);
   background: var(--app-panel-strong);
   color: var(--app-text-muted);
@@ -259,10 +252,10 @@ function toggleCollapsed(): void {
 }
 
 .todo-toggle.collapsed {
-  transform: rotate(-90deg);
+  transform: rotate(180deg);
 }
 
-.todo-card.expanded .todo-toggle {
+.todo-float.expanded .todo-toggle {
   color: var(--app-accent);
   border-color: color-mix(
     in srgb,
@@ -272,7 +265,26 @@ function toggleCollapsed(): void {
 }
 
 .todo-detail {
-  padding: 0 12px 10px;
+  padding: 10px;
+  border: 1px solid
+    color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-panel) 96%, transparent);
+  box-shadow: var(--app-shadow);
+  overflow: hidden;
+  backdrop-filter: blur(14px) saturate(130%);
+  -webkit-backdrop-filter: blur(14px) saturate(130%);
+}
+
+.todo-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--app-text-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
 }
 
 .todo-progress-track {
@@ -377,19 +389,35 @@ function toggleCollapsed(): void {
   background: color-mix(in srgb, var(--app-success) 12%, var(--app-panel));
 }
 
+.todo-expand-enter-active,
+.todo-expand-leave-active {
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+  transform-origin: bottom center;
+}
+
+.todo-expand-enter-from,
+.todo-expand-leave-to {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+}
+
 @media (max-width: 860px) {
   .todo-shell {
     padding: 0 16px;
   }
 
-  .todo-card,
-  .todo-card.expanded {
-    right: 16px;
-    width: min(360px, calc(100vw - 32px));
+  .todo-float {
+    width: calc(100% - 16px);
   }
 
-  .todo-summary {
-    align-items: flex-start;
+  .todo-strip {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+  }
+
+  .todo-live-dot {
+    display: none;
   }
 
   .todo-item {
