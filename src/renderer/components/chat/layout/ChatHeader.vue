@@ -50,12 +50,20 @@ function onChannelBindingChange (event: Event) {
 const allSkillsSelected = computed(() => {
   return props.availableSkills.length > 0 && props.activeSkillIds.size === props.availableSkills.length
 })
+
+const hasHeaderDetail = computed(() => {
+  return Boolean(
+    (props.showProviderSelector && props.providers && props.providers.length > 0) ||
+    props.contextDetail
+  )
+})
 </script>
 
 <template>
   <div class="chat-header">
     <div class="chat-header-copy">
-      <h2>{{ contextLabel }}</h2>
+      <h2 :title="contextLabel">{{ contextLabel }}</h2>
+      <span v-if="hasHeaderDetail" class="header-meta-separator" aria-hidden="true">·</span>
       <div v-if="showProviderSelector && providers && providers.length > 0" class="header-model-picker">
         <ProviderModelDropdown
           :providers="providers"
@@ -66,7 +74,7 @@ const allSkillsSelected = computed(() => {
           @update:selected-model="emit('update:selected-model', $event)"
         />
       </div>
-      <p v-else>{{ contextDetail }}</p>
+      <p v-else-if="contextDetail" :title="contextDetail">{{ contextDetail }}</p>
     </div>
     <div class="header-controls">
       <div v-if="availableChannelBindings.length > 0" class="channel-binding-selector">
@@ -114,20 +122,32 @@ const allSkillsSelected = computed(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
 }
 
 .chat-header h2 {
+  flex: 0 1 auto;
+  min-width: 0;
   margin: 0;
   font-size: 1.1em;
   color: var(--app-text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-header-copy {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
 }
 
 .chat-header-copy p {
-  margin: 4px 0 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
   color: var(--app-text-soft);
   font-size: 0.82rem;
   white-space: nowrap;
@@ -135,16 +155,24 @@ const allSkillsSelected = computed(() => {
   text-overflow: ellipsis;
 }
 
+.header-meta-separator {
+  flex: 0 0 auto;
+  color: var(--app-text-muted);
+  font-size: 0.82rem;
+  opacity: 0.7;
+}
+
 .header-model-picker {
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
-  margin-top: 3px;
+  max-width: min(420px, 44vw);
   min-width: 0;
 }
 
 .header-model-picker :deep(.provider-model-trigger) {
   height: 24px;
-  max-width: min(420px, 48vw);
+  max-width: 100%;
   padding: 0;
   border: none;
   background: transparent;
@@ -167,18 +195,22 @@ const allSkillsSelected = computed(() => {
 }
 
 .header-controls {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  min-width: 0;
 }
 
 .channel-binding-selector,
 .auth-mode-selector {
   display: flex;
   align-items: center;
+  min-width: 0;
 }
 
 .select-input {
+  max-width: min(220px, 24vw);
   background: var(--app-input-bg);
   border: 1px solid var(--app-input-border);
   border-radius: 6px;
