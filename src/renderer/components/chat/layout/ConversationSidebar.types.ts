@@ -10,6 +10,7 @@ export interface AgentSidebarItem {
   modelOptions: string[]
   isStreaming: boolean
   pendingAuthCount: number
+  unreadCount: number
   isActive: boolean
 }
 
@@ -22,6 +23,7 @@ export interface GroupSidebarItem {
   icon: string
   isStreaming: boolean
   pendingAuthCount: number
+  unreadCount: number
   isActive: boolean
 }
 
@@ -33,6 +35,7 @@ export interface ConversationSidebarItem {
   icon: string
   isStreaming: boolean
   pendingAuthCount: number
+  unreadCount: number
   isActive: boolean
   isPinned?: boolean
 }

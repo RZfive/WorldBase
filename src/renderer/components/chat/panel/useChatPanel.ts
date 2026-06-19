@@ -40,7 +40,6 @@ import {
 } from './message-blocks'
 import {
   buildOutgoingChatMessages,
-  ensureAuthRequestBlockInMessages,
   finalizePendingAuthBlocks,
   findLatestAssistantMessage,
   getConversationTitleText,
@@ -65,6 +64,8 @@ import type {
   AIExecutionAuthMode,
   BackgroundStreamState,
   AuthRequestPayload,
+  AskUserAnswerPayload,
+  AskUserRequestPayload,
   ChannelBinding,
   ChatMessage,
   ChatMessageBlock,
@@ -143,6 +144,8 @@ const sharedFolderWorkspaceActiveFilePath = ref<string | null>(null)
 const sharedFolderWorkspaceWidth = ref(DEFAULT_FOLDER_WORKSPACE_WIDTH)
 const sharedStreamingConvIds = reactive(new Set<string>())
 const sharedPendingAuthRequestsByConversation = reactive(new Map<string, AuthRequestPayload[]>())
+const sharedPendingAskUserRequestsByConversation = reactive(new Map<string, AskUserRequestPayload[]>())
+const sharedUnreadConversationIds = reactive(new Set<string>())
 const sharedBackgroundStreamMessages = new Map<string, BackgroundStreamState>()
 const sharedActiveCleanups = new Map<string, () => void>()
 const sharedActiveStreamSessionIds = new Map<string, string>()
@@ -150,6 +153,7 @@ const sharedConversationTargets = new Map<string, string | null>()
 let sharedProviderChangeCleanup: (() => void) | null = null
 let sharedAuthRequestCleanup: (() => void) | null = null
 let sharedSudoPasswordRequestCleanup: (() => void) | null = null
+let sharedAskUserRequestCleanup: (() => void) | null = null
 let sharedAuthResponseCleanup: (() => void) | null = null
 let sharedAuthResolvedCleanup: (() => void) | null = null
 let sharedSkillsChangedCleanup: (() => void) | null = null
@@ -169,6 +173,8 @@ function cleanupSharedChatPanelResources (): void {
   sharedAuthRequestCleanup = null
   sharedSudoPasswordRequestCleanup?.()
   sharedSudoPasswordRequestCleanup = null
+  sharedAskUserRequestCleanup?.()
+  sharedAskUserRequestCleanup = null
   sharedAuthResolvedCleanup?.()
   sharedAuthResolvedCleanup = null
   sharedSkillsChangedCleanup?.()
@@ -226,6 +232,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   const streamingConvIds = sharedStreamingConvIds
   const pendingAuthRequestsByConversation = sharedPendingAuthRequestsByConversation
+  const pendingAskUserRequestsByConversation = sharedPendingAskUserRequestsByConversation
+  const unreadConversationIds = sharedUnreadConversationIds
   const backgroundStreamMessages = sharedBackgroundStreamMessages
   const activeCleanups = sharedActiveCleanups
   const activeStreamSessionIds = sharedActiveStreamSessionIds
@@ -246,6 +254,47 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   const currentPendingAuthCount = computed(() => {
     return currentConversationId.value ? getPendingAuthRequests(currentConversationId.value).length : 0
+  })
+
+  const currentPendingAuthRequest = computed<AuthRequestPayload | null>(() => {
+    if (!currentConversationId.value) return null
+    const list = getPendingAuthRequests(currentConversationId.value)
+    return list.length > 0 ? list[0] : null
+  })
+
+  function getPendingAskUserRequests (conversationId?: string | null): AskUserRequestPayload[] {
+    if (!conversationId) {
+      return []
+    }
+    return pendingAskUserRequestsByConversation.get(conversationId) ?? []
+  }
+
+  const currentAskUserRequest = computed<AskUserRequestPayload | null>(() => {
+    if (!currentConversationId.value) return null
+    const list = getPendingAskUserRequests(currentConversationId.value)
+    return list.length > 0 ? list[0] : null
+  })
+
+  function getUnreadCount (conversationId?: string | null): number {
+    if (!conversationId) return 0
+    return unreadConversationIds.has(conversationId) ? 1 : 0
+  }
+
+  function markConversationUnread (conversationId: string | null | undefined): void {
+    if (!conversationId) return
+    if (currentConversationId.value === conversationId) return
+    unreadConversationIds.add(conversationId)
+  }
+
+  function clearConversationUnread (conversationId: string | null | undefined): void {
+    if (!conversationId) return
+    unreadConversationIds.delete(conversationId)
+  }
+
+  // Whenever the user navigates into a conversation (via load, open, etc.) we clear
+  // any unread badge. Hooked here as a backstop for code paths that bypass loadConversation.
+  watch(currentConversationId, (id) => {
+    if (id) clearConversationUnread(id)
   })
 
   const activeTodoItems = computed(() => getLatestVisibleTodoItems(messages.value, isLoading.value))
@@ -322,6 +371,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
           modelOptions: selection.modelOptions,
           isStreaming: conversation ? streamingConvIds.has(conversation.id) : false,
           pendingAuthCount: conversation ? getPendingAuthRequests(conversation.id).length : 0,
+          unreadCount: conversation ? getUnreadCount(conversation.id) : 0,
           isActive: Boolean(conversation && currentConversationId.value === conversation.id)
         }
       })
@@ -349,6 +399,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         icon: getGroupIcon(group),
         isStreaming: conversation ? streamingConvIds.has(conversation.id) : false,
         pendingAuthCount: conversation ? getPendingAuthRequests(conversation.id).length : 0,
+        unreadCount: conversation ? getUnreadCount(conversation.id) : 0,
         isActive: Boolean(conversation && currentConversationId.value === conversation.id)
       }
     })
@@ -392,6 +443,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         icon: resolveConversationIcon(conversation, groupsById.value, agentsById.value),
         isStreaming: streamingConvIds.has(conversation.id),
         pendingAuthCount: getPendingAuthRequests(conversation.id).length,
+        unreadCount: getUnreadCount(conversation.id),
         isActive: currentConversationId.value === conversation.id
       }))
   })
@@ -931,6 +983,13 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     activeStreamSessionIds.delete(convId)
     streamingConvIds.delete(convId)
     backgroundStreamMessages.delete(convId)
+    // If a stream wraps up while the user is looking at a different conversation,
+    // surface an unread badge on the originating conversation so they notice that
+    // it has new output. Streaming sessions tied to the active conversation are
+    // already visible, so we don't badge those.
+    if (currentConversationId.value !== convId) {
+      unreadConversationIds.add(convId)
+    }
   }
 
   function getTrackedMessagesBySessionId (sessionId?: string): ChatMessage[] | null {
@@ -957,10 +1016,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     return backgroundStreamMessages.get(conversationId)?.messages ?? null
   }
 
-  function syncPendingAuthRequestsIntoMessages (conversationId: string, targetMessages: ChatMessage[]): void {
-    for (const request of getPendingAuthRequests(conversationId)) {
-      ensureAuthRequestBlockInMessages(targetMessages, request)
-    }
+  function syncPendingAuthRequestsIntoMessages (_conversationId: string, _targetMessages: ChatMessage[]): void {
+    // Auth requests now render in the floating AuthPermissionPanel above the chat input
+    // rather than as message blocks, so there is nothing to sync into the transcript.
   }
 
   function getTrackedMessageCollections (): ChatMessage[][] {
@@ -1263,6 +1321,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       stashCurrentConversationForNavigation()
     }
 
+    clearConversationUnread(id)
+
     const bg = backgroundStreamMessages.get(id)
     if (bg) {
       currentConversationId.value = id
@@ -1497,13 +1557,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       console.warn('[chat] Ignoring auth request that could not be routed to a conversation', request)
       return
     }
-
-    const targetMessages = getTrackedMessagesByConversationId(trackedRequest.conversationId)
-      ?? getTrackedMessagesBySessionId(trackedRequest.sessionId)
-
-    if (targetMessages) {
-      ensureAuthRequestBlockInMessages(targetMessages, trackedRequest)
-    }
+    // Intentionally do NOT inject the request into the transcript — the floating
+    // AuthPermissionPanel above the chat input now owns the approve/deny UI so the
+    // streaming output stays free of authorization noise.
   }
 
   function applyAuthResolution (requestId: string, approved: boolean) {
@@ -1564,6 +1620,54 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       }
     }
     window.electronAPI?.respondSudoPassword(requestId, password)
+  }
+
+  function resolveAskUserConversationId (request: AskUserRequestPayload): string | null {
+    if (request.conversationId) return request.conversationId
+    if (!request.sessionId) return currentConversationId.value || null
+
+    for (const [convId, activeSessionId] of activeStreamSessionIds.entries()) {
+      if (activeSessionId === request.sessionId) return convId
+    }
+
+    return currentConversationId.value || null
+  }
+
+  function handleAskUserRequest (request: AskUserRequestPayload) {
+    const conversationId = resolveAskUserConversationId(request)
+    if (!conversationId) {
+      // Cannot route — cancel immediately so the agent isn't left waiting forever.
+      window.electronAPI?.respondAskUser(request.requestId, null)
+      return
+    }
+    const normalized: AskUserRequestPayload = { ...request, conversationId }
+    const list = getPendingAskUserRequests(conversationId)
+    if (!list.some(item => item.requestId === normalized.requestId)) {
+      pendingAskUserRequestsByConversation.set(conversationId, [...list, normalized])
+    }
+    // If the user is currently looking at a different conversation, badge the
+    // origin conversation so they know it's blocked on their input.
+    if (currentConversationId.value !== conversationId) {
+      unreadConversationIds.add(conversationId)
+    }
+  }
+
+  function clearPendingAskUserRequest (requestId: string): void {
+    for (const [conversationId, requests] of pendingAskUserRequestsByConversation.entries()) {
+      const next = requests.filter(item => item.requestId !== requestId)
+      if (next.length === requests.length) continue
+      if (next.length > 0) {
+        pendingAskUserRequestsByConversation.set(conversationId, next)
+      } else {
+        pendingAskUserRequestsByConversation.delete(conversationId)
+      }
+      return
+    }
+  }
+
+  function respondToAskUserRequest (requestId: string, answers: AskUserAnswerPayload[] | null) {
+    clearPendingAskUserRequest(requestId)
+    window.electronAPI?.respondAskUser(requestId, answers)
   }
 
   async function sendMessage () {
@@ -1980,6 +2084,10 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         sharedSudoPasswordRequestCleanup = window.electronAPI.onSudoPasswordRequest(handleSudoPasswordRequest)
       }
 
+      if (window.electronAPI?.onAskUserRequest) {
+        sharedAskUserRequestCleanup = window.electronAPI.onAskUserRequest(handleAskUserRequest)
+      }
+
       if (window.electronAPI?.onAuthResolved) {
         sharedAuthResolvedCleanup = window.electronAPI.onAuthResolved(handleAuthResolution)
       }
@@ -2039,6 +2147,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     currentContextLabel,
     currentConversationId,
     currentPendingAuthCount,
+    currentPendingAuthRequest,
     deleteConversation,
     documentDockVisible,
     documentWorkspaceActiveFilePath,
@@ -2082,6 +2191,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     removeImage,
     respondToAuthRequest,
     respondToSudoPasswordRequest,
+    respondToAskUserRequest,
+    currentAskUserRequest,
     selectedChannelBindingId,
     selectedModel,
     selectAllSkills,

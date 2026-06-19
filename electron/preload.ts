@@ -638,6 +638,10 @@ export interface ElectronAPI {
   onSudoPasswordRequest: (callback: (req: { requestId: string; conversationId?: string; sessionId?: string; command: string }) => void) => () => void
   respondSudoPassword: (requestId: string, password: string | null) => void
 
+  // Ask-user (in-app clarification questions surfaced above the chat input)
+  onAskUserRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; questions: Array<{ id: string; question: string; options: string[] }> }) => void) => () => void
+  respondAskUser: (requestId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }> | null) => void
+
   // Document import / preview / selection
   pickDocumentFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
   pickOfficeFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
@@ -923,6 +927,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   respondSudoPassword: (requestId: string, password: string | null) => {
     ipcRenderer.send('auth:sudo-response', { requestId, password })
+  },
+  onAskUserRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; questions: Array<{ id: string; question: string; options: string[] }> }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, request: { requestId: string; conversationId?: string; sessionId?: string; questions: Array<{ id: string; question: string; options: string[] }> }) => callback(request)
+    ipcRenderer.on('askUser:request', handler)
+    return () => { ipcRenderer.removeListener('askUser:request', handler) }
+  },
+  respondAskUser: (requestId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }> | null) => {
+    ipcRenderer.send('askUser:response', { requestId, answers })
   },
 
   // Document import / preview / selection

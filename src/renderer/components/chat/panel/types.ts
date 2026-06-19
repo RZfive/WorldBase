@@ -92,6 +92,7 @@ export interface SidebarAgentItem {
   modelOptions: string[]
   isStreaming: boolean
   pendingAuthCount: number
+  unreadCount: number
   isActive: boolean
 }
 
@@ -104,6 +105,7 @@ export interface SidebarGroupItem {
   icon: string
   isStreaming: boolean
   pendingAuthCount: number
+  unreadCount: number
   isActive: boolean
 }
 
@@ -115,6 +117,7 @@ export interface SidebarConversationItem {
   icon: string
   isStreaming: boolean
   pendingAuthCount: number
+  unreadCount: number
   isActive: boolean
 }
 
@@ -188,6 +191,25 @@ export interface AuthRequestPayload {
   sessionId?: string
   title: string
   detail: string
+}
+
+export interface AskUserQuestionPayload {
+  id: string
+  question: string
+  options: string[]
+}
+
+export interface AskUserRequestPayload {
+  requestId: string
+  conversationId?: string
+  sessionId?: string
+  questions: AskUserQuestionPayload[]
+}
+
+export interface AskUserAnswerPayload {
+  questionId: string
+  selectedOption: string | null
+  customAnswer: string | null
 }
 
 export interface SkillItem {
