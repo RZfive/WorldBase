@@ -47,6 +47,7 @@ import { toolInstallMcpServer } from './tool-install-mcp-server.js'
 import { toolCreateScheduledTask, toolListScheduledTasks } from './tool-scheduled-task.js'
 import { toolCreateAgent, toolCreateAgentGroup, toolListAgentWorkspaceCatalog } from './tool-agent-workspace.js'
 import { toolManageTodoList, type TodoItem } from './tool-manage-todo-list.js'
+import { toolAskUser } from './tool-ask-user.js'
 import { toolGenerateImage, toolEditImage } from './tool-generate-image.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
@@ -146,6 +147,11 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolInstallSkill(services, () => agent.getSkillEngine()),
     toolInstallMcpServer(services),
     toolManageTodoList(todoState),
+    toolAskUser({
+      getMainWindow: services.getMainWindow,
+      getSessionState,
+      getAbortSignal
+    }),
     toolListScheduledTasks(services),
     toolCreateScheduledTask(services),
     toolListAgentWorkspaceCatalog(services, () => agent.getToolDefinitions()),

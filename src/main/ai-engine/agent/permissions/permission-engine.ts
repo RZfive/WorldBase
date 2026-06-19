@@ -87,6 +87,7 @@ const ALWAYS_SAFE_TOOLS = new Set([
   'list_projects',
   'list_scheduled_tasks',
   'manage_todo_list',
+  'ask_user',
   'get_project_status',
   'get_project_logs',
   'get_project_command_status',

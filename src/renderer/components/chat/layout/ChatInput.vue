@@ -860,6 +860,7 @@ function handleTextareaBlur () {
   --chat-input-waiting-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12), 0 18px 36px rgba(245, 158, 11, 0.12);
   --chat-input-popover-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
   position: relative;
+  box-sizing: border-box;
   background: var(--chat-input-surface);
   border: 1px solid var(--chat-input-border);
   border-radius: 24px;
@@ -869,11 +870,11 @@ function handleTextareaBlur () {
 }
 
 :global(:root[data-theme='light'] .chat-input .input-container) {
-  --chat-input-surface: rgba(255, 255, 255, 0.96);
+  --chat-input-surface: #ffffff;
   --chat-input-border: rgba(15, 23, 42, 0.12);
   --chat-input-control-surface: rgba(15, 23, 42, 0.035);
   --chat-input-control-border: rgba(15, 23, 42, 0.11);
-  --chat-input-floating-surface: rgba(255, 255, 255, 0.98);
+  --chat-input-floating-surface: #ffffff;
   --chat-input-hover-surface: rgba(15, 23, 42, 0.055);
   --chat-input-disabled-surface: rgba(15, 23, 42, 0.05);
   --chat-input-chip-remove-hover: rgba(15, 23, 42, 0.08);

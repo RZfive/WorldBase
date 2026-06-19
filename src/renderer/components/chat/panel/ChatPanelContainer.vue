@@ -7,6 +7,8 @@ import ChatHeader from '../layout/ChatHeader.vue'
 import DocumentWorkspace from '../layout/DocumentWorkspace.vue'
 import FolderWorkspace from '../layout/FolderWorkspace.vue'
 import PinnedTodoPanel from '../layout/PinnedTodoPanel.vue'
+import AskUserPanel from '../layout/AskUserPanel.vue'
+import AuthPermissionPanel from '../layout/AuthPermissionPanel.vue'
 import { useChatPanel } from './useChatPanel'
 import type { ChatPanelEmit, ChatPanelProps } from './types'
 
@@ -35,12 +37,14 @@ const {
   conversationsLoaded,
   conversationSidebarItems,
   currentAuthMode,
+  currentAskUserRequest,
   currentAssistantIcon,
   currentAssistantName,
   currentContextDetail,
   currentContextLabel,
   currentConversationId,
   currentPendingAuthCount,
+  currentPendingAuthRequest,
   deleteConversation,
   documentDockVisible,
   documentWorkspaceActiveFilePath,
@@ -84,6 +88,7 @@ const {
   removeImage,
   respondToAuthRequest,
   respondToSudoPasswordRequest,
+  respondToAskUserRequest,
   selectedChannelBindingId,
   selectedModel,
   selectAllSkills,
@@ -567,6 +572,20 @@ watch(
           v-if="activeTodoItems.length > 0"
           :items="activeTodoItems"
           :is-loading="isLoading"
+        />
+
+        <AskUserPanel
+          v-if="currentAskUserRequest"
+          :request="currentAskUserRequest"
+          @submit="(requestId, answers) => respondToAskUserRequest(requestId, answers)"
+          @cancel="(requestId) => respondToAskUserRequest(requestId, null)"
+        />
+
+        <AuthPermissionPanel
+          v-if="currentPendingAuthRequest"
+          :request="currentPendingAuthRequest"
+          :pending-count="currentPendingAuthCount"
+          @respond="respondToAuthRequest"
         />
 
         <ChatInput

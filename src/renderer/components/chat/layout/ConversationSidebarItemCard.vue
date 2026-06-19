@@ -134,6 +134,14 @@ watch(
             <span class="conv-status-dot"></span>
             <template v-if="!isCompactConversation">运行中</template>
           </span>
+          <span
+            v-else-if="item.unreadCount > 0"
+            :class="['conv-status', 'unread', { compact: isCompactConversation }]"
+            title="有未查看的回复"
+          >
+            <span class="conv-status-dot"></span>
+            <template v-if="!isCompactConversation">未读</template>
+          </span>
         </div>
         <span v-if="!isCompactConversation" class="conv-subtitle">{{ item.subtitle }}</span>
       </div>
@@ -670,6 +678,11 @@ watch(
 .conv-status.auth {
   color: #b45309;
   background: rgba(245, 158, 11, 0.16);
+}
+
+.conv-status.unread {
+  color: var(--app-danger);
+  background: color-mix(in srgb, var(--app-danger) 14%, transparent);
 }
 
 .conv-status-dot {
