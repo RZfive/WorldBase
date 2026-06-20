@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ConversationSidebar from '../layout/ConversationSidebar.vue'
 import MessageList from '../messages/MessageList.vue'
 import ChatInput from '../layout/ChatInput.vue'
@@ -124,6 +124,34 @@ const isOpeningFolderWorkspace = ref(false)
 const isClosingFolderWorkspace = ref(false)
 const chatWindowWidthBeforeWorkspace = ref<number | null>(null)
 const CONVERSATION_SIDEBAR_COLLAPSE_STORAGE_KEY = 'chat-conversation-sidebar-collapsed'
+
+// The ChatHeader floats as a frosted bar over the message list. Its height is
+// dynamic (provider/skill controls render conditionally), so we measure it and
+// expose it as a CSS token the MessageList uses for top padding — keeping the
+// first message clear of the overlay without a hard divider line.
+const chatHeaderRef = ref<{ $el?: HTMLElement } | null>(null)
+const chatHeaderHeight = ref(0)
+let headerResizeObserver: ResizeObserver | null = null
+
+function measureChatHeader (): void {
+  const el = chatHeaderRef.value?.$el
+  if (!el) return
+  chatHeaderHeight.value = el.offsetHeight
+}
+
+onMounted(() => {
+  measureChatHeader()
+  const el = chatHeaderRef.value?.$el
+  if (el && typeof ResizeObserver !== 'undefined') {
+    headerResizeObserver = new ResizeObserver(() => measureChatHeader())
+    headerResizeObserver.observe(el)
+  }
+})
+
+onBeforeUnmount(() => {
+  headerResizeObserver?.disconnect()
+  headerResizeObserver = null
+})
 
 function loadConversationSidebarCollapsed (): boolean {
   if (typeof window === 'undefined') return false
@@ -537,8 +565,9 @@ watch(
       :class="['chat-panel', { 'chat-panel-with-workspace': documentDockVisible || folderWorkspaceVisible }]"
       :style="{ '--chat-main-protected-min-width': `${MIN_CHAT_MAIN_WIDTH}px` }"
     >
-      <div class="chat-main">
+      <div class="chat-main" :style="{ '--chat-header-height': `${chatHeaderHeight}px` }">
         <ChatHeader
+          ref="chatHeaderRef"
           :context-label="currentContextLabel"
           :context-detail="currentContextDetail"
           :available-channel-bindings="availableChannelBindings"
@@ -927,6 +956,7 @@ watch(
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  position: relative;
 }
 
 .chat-panel-with-workspace .chat-main {
