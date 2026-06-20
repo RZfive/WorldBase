@@ -126,7 +126,15 @@ export class SkillEngine {
   parseSkill (rawContent: string, fallbackName?: string): SkillDefinition {
     const { frontmatter, body } = parseYamlFrontmatter(rawContent)
 
-    const name = String(frontmatter.name || fallbackName || 'unnamed-skill')
+    // Name resolution mirrors SkillStore.parseSkillMeta so the engine's
+    // registered name matches the displayed (stored) name:
+    //   frontmatter `name` → first markdown heading → fallbackName → 'unnamed-skill'
+    let name = frontmatter.name ? String(frontmatter.name) : ''
+    if (!name) {
+      const headingMatch = body.match(/^#+\s+(.+)$/m)
+      if (headingMatch) name = headingMatch[1].trim()
+    }
+    if (!name) name = fallbackName || 'unnamed-skill'
     const description = String(frontmatter.description || '')
     const whenToUse = frontmatter.whenToUse ? String(frontmatter.whenToUse) : undefined
     const context = frontmatter.context === 'fork' ? 'fork' : 'inline'

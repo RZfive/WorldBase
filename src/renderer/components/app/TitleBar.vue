@@ -81,7 +81,6 @@ const isWindows = computed(() => {
   padding: 0 14px;
   box-sizing: border-box;
   background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
-  border-bottom: 1px solid var(--app-border);
   flex-shrink: 0;
   user-select: none;
   gap: 12px;
@@ -91,7 +90,7 @@ const isWindows = computed(() => {
   height: 40px;
   padding: 0 0 0 12px;
   gap: 0;
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
 }
 
 .titlebar-drag {

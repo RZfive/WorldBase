@@ -1263,6 +1263,8 @@ onUnmounted(() => {
   --dock-accent: var(--app-accent);
   --dock-accent-soft: var(--app-accent-soft);
   --dock-accent-glow: var(--app-accent-glow);
+  --dock-width: 70px;
+  --app-frame-corner-radius: 16px;
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -1280,9 +1282,28 @@ onUnmounted(() => {
 }
 
 .app-layout {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;
+}
+
+/*
+ * Fuse the TitleBar (window-control row) and the DockBar into one continuous
+ * panel surface. The pseudo-element sits behind `.main-content` at the inner
+ * corner where the two frame strips meet and fills the gap left by the rounded
+ * content corner, so the panel wraps the curve seamlessly instead of meeting
+ * at a hard 90° seam.
+ */
+.app-layout::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--dock-width);
+  width: var(--app-frame-corner-radius);
+  height: var(--app-frame-corner-radius);
+  background: var(--app-panel);
+  pointer-events: none;
 }
 
 .main-content {
@@ -1291,6 +1312,9 @@ onUnmounted(() => {
   overflow: hidden;
   position: relative;
   background: var(--app-main-surface);
+  border-top: 1px solid var(--app-border);
+  border-left: 1px solid var(--app-border);
+  border-top-left-radius: var(--app-frame-corner-radius);
 }
 
 .chat-shell {

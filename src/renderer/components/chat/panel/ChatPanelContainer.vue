@@ -9,6 +9,7 @@ import FolderWorkspace from '../layout/FolderWorkspace.vue'
 import PinnedTodoPanel from '../layout/PinnedTodoPanel.vue'
 import AskUserPanel from '../layout/AskUserPanel.vue'
 import AuthPermissionPanel from '../layout/AuthPermissionPanel.vue'
+import SudoPasswordPanel from '../layout/SudoPasswordPanel.vue'
 import { useChatPanel } from './useChatPanel'
 import type { ChatPanelEmit, ChatPanelProps } from './types'
 
@@ -45,6 +46,8 @@ const {
   currentConversationId,
   currentPendingAuthCount,
   currentPendingAuthRequest,
+  currentPendingSudoPasswordCount,
+  currentSudoPasswordRequest,
   deleteConversation,
   documentDockVisible,
   documentWorkspaceActiveFilePath,
@@ -586,6 +589,13 @@ watch(
           :request="currentPendingAuthRequest"
           :pending-count="currentPendingAuthCount"
           @respond="respondToAuthRequest"
+        />
+
+        <SudoPasswordPanel
+          v-if="currentSudoPasswordRequest"
+          :request="currentSudoPasswordRequest"
+          :pending-count="currentPendingSudoPasswordCount"
+          @respond="respondToSudoPasswordRequest"
         />
 
         <ChatInput

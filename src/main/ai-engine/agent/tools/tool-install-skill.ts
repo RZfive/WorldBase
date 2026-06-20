@@ -68,7 +68,7 @@ export function toolInstallSkill (services: ToolServices, getSkillEngine: () => 
         return { error: 'Either content or file_path is required to install a skill.' }
       }
 
-      const fallbackName = normalizeSkillName(args.name) || 'Imported Skill'
+      const explicitName = normalizeSkillName(args.name)
       const description = typeof args.description === 'string' ? args.description.trim() : undefined
       const activateNow = args.activate_now !== false
 
@@ -88,9 +88,11 @@ export function toolInstallSkill (services: ToolServices, getSkillEngine: () => 
           return { error: `Failed to import skill from file: ${message}` }
         }
       } else {
-        // Import from raw content
-        onProgress?.('🧩 Installing skill...', fallbackName)
-        skill = services.skillStore.importFromContent(fallbackName, content, description)
+        // Import from raw content. Pass the raw (possibly empty) name so the
+        // store can fall back to the skill's frontmatter `name` / heading when
+        // the agent did not explicitly name it.
+        onProgress?.('🧩 Installing skill...', explicitName || 'Imported Skill')
+        skill = services.skillStore.importFromContent(explicitName, content, description)
       }
 
       services.notifySkillsChanged?.({ action: 'imported', count: 1 })

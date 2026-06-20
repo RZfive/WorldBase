@@ -194,6 +194,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   position: relative;
+  border-top: 1px solid var(--app-border);
 }
 
 .project-window-frame {
