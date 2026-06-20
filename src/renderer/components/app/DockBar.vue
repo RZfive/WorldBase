@@ -129,7 +129,6 @@ function resolveIcon (app: RunningApp) {
 
 <style scoped>
 .dock-bar {
-  --dock-width: 70px;
   --dock-slot-size: 60px;
   --dock-surface-size: 56px;
   --dock-icon-size: 30px;
@@ -144,8 +143,7 @@ function resolveIcon (app: RunningApp) {
   align-items: center;
   gap: 10px;
   padding: 8px calc((var(--dock-width) - var(--dock-slot-size)) / 2) 7px;
-  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
-  border-right: 1px solid var(--app-border);
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-strong) 55%, var(--app-panel));
 }
 
 .dock-top,

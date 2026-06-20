@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import ScheduledTaskReportDialog from './ScheduledTaskReportDialog.vue'
+import { renderMarkdown } from '../chat/markdown'
 
 type ScheduleKind = 'once' | 'interval' | 'daily' | 'weekly' | 'dates'
 
@@ -37,6 +38,7 @@ const aiGenerating = ref(false)
 const statusMessage = ref('')
 const aiDraftPrompt = ref('')
 const activeReportId = ref<string | null>(null)
+const activeDetailTab = ref<'details' | 'logs'>('details')
 
 const scheduleModeOptions: Array<{ id: ScheduleKind; label: string; detail: string }> = [
   { id: 'daily', label: '每天', detail: '固定时间' },
@@ -486,6 +488,7 @@ function cancelEdit () {
 function selectTask (taskId: string) {
   if (editing.value) return
   selectedTaskId.value = taskId
+  activeDetailTab.value = 'details'
 }
 
 function addDateInput () {
@@ -586,6 +589,7 @@ async function runSelectedTaskNow () {
   try {
     const report = await window.electronAPI.runScheduledTaskNow(selectedTask.value.id)
     activeReportId.value = report.id
+    activeDetailTab.value = 'logs'
     setStatus('任务已开始执行')
     await loadData()
   } catch (error) {
@@ -933,8 +937,27 @@ onUnmounted(() => {
         </section>
       </div>
 
-      <div v-else-if="selectedTask" class="st-detail-grid">
-        <section class="st-summary-card">
+      <div v-else-if="selectedTask" class="st-detail">
+        <div class="st-detail-tabs">
+          <button
+            type="button"
+            class="st-detail-tab"
+            :class="{ active: activeDetailTab === 'details' }"
+            @click="activeDetailTab = 'details'"
+          >
+            任务详情
+          </button>
+          <button
+            type="button"
+            class="st-detail-tab"
+            :class="{ active: activeDetailTab === 'logs' }"
+            @click="activeDetailTab = 'logs'"
+          >
+            执行日志<span v-if="selectedTaskReports.length > 0" class="st-detail-tab-count">{{ selectedTaskReports.length }}</span>
+          </button>
+        </div>
+
+        <section v-show="activeDetailTab === 'details'" class="st-summary-card">
           <div class="st-section-head">
             <h4>任务概览</h4>
             <span>{{ selectedTask.createdBy === 'ai' ? 'AI 创建' : '手动创建' }}</span>
@@ -963,7 +986,7 @@ onUnmounted(() => {
           </div>
           <div class="st-summary-block">
             <strong>执行提示词</strong>
-            <pre>{{ selectedTask.prompt }}</pre>
+            <div class="st-prompt-md markdown-body" v-html="renderMarkdown(selectedTask.prompt)"></div>
           </div>
           <div class="st-scope-summary-grid">
             <div class="st-summary-block">
@@ -983,9 +1006,9 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <section class="st-report-card">
+        <section v-show="activeDetailTab === 'logs'" class="st-report-card">
           <div class="st-section-head">
-            <h4>最近执行报告</h4>
+            <h4>执行日志</h4>
             <span>{{ selectedTaskReports.length }} 条</span>
           </div>
           <div v-if="selectedTaskReports.length === 0" class="st-empty-inline">还没有执行记录。</div>
@@ -1242,7 +1265,6 @@ onUnmounted(() => {
 }
 
 .st-editor-layout,
-.st-detail-grid,
 .st-scope-grid,
 .st-scope-summary-grid,
 .st-metrics-grid,
@@ -1251,10 +1273,67 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.st-editor-layout,
-.st-detail-grid {
+.st-editor-layout {
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
+}
+
+.st-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.st-detail-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--app-border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.st-detail-tab {
+  position: relative;
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 12px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--app-text-soft);
+  font-size: 0.84rem;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.st-detail-tab:hover {
+  color: var(--app-text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.st-detail-tab.active {
+  color: #f8fbff;
+  background: linear-gradient(135deg, #0284c7, #0ea5e9);
+  border-color: transparent;
+}
+
+.st-detail-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 0.72rem;
+  line-height: 1;
 }
 
 .st-form-grid,
@@ -1520,13 +1599,24 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 
+.st-prompt-md {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--app-text);
+  font-size: 0.82rem;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
 .st-report-item + .st-report-item {
   margin-top: 0;
 }
 
 @container (min-width: 1080px) {
-  .st-editor-layout,
-  .st-detail-grid {
+  .st-editor-layout {
     grid-template-columns: minmax(0, 0.9fr) minmax(480px, 1fr);
   }
 }

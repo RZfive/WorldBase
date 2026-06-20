@@ -59,6 +59,18 @@ const SCRIPT_EXTENSIONS: Record<string, string> = {
   '.php': 'php'
 }
 
+/** Strip surrounding quotes (single/double) from a simple YAML scalar value. */
+function stripYamlQuotes (value: string): string {
+  if (value.length >= 2) {
+    const first = value[0]
+    const last = value[value.length - 1]
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return value.slice(1, -1)
+    }
+  }
+  return value
+}
+
 /**
  * SkillStore — 管理用户导入的 AI Skill
  * 支持单文件（md/txt）、zip 压缩包和文件夹导入。
@@ -171,16 +183,22 @@ export class SkillStore {
     })
   }
 
-  /** Import a skill from raw content. */
+  /** Import a skill from raw content.
+   *
+   * `name` is an optional explicit display name (e.g. the install_skill `name`
+   * argument). When empty, the skill's frontmatter `name` / heading is used.
+   */
   importFromContent (name: string, content: string, description?: string): Skill {
-    const meta = this.parseSkillMeta(content, name)
-    const id = this.createSkillId(name)
+    const explicitName = typeof name === 'string' ? name.trim() : ''
+    const fallbackName = explicitName || 'Imported Skill'
+    const meta = this.parseSkillMeta(content, fallbackName, explicitName)
+    const id = this.createSkillId(meta.name || fallbackName)
     const skillDir = this.ensureSkillDir(id)
     const filesDir = path.join(skillDir, 'files')
     fs.mkdirSync(filesDir, { recursive: true })
 
     // Save content as a markdown file
-    const fileName = `${this.sanitizeFileName(name)}.md`
+    const fileName = `${this.sanitizeFileName(meta.name || fallbackName)}.md`
     fs.writeFileSync(path.join(filesDir, fileName), content, 'utf-8')
 
     const fileInfo: SkillFile = {
@@ -316,20 +334,45 @@ export class SkillStore {
     })
   }
 
-  /** Extract name, description, and tools from markdown skill content. */
-  private parseSkillMeta (content: string, fallbackName: string): { name: string; description: string; tools: string[] } {
-    let name = fallbackName
+  /** Extract name, description, and tools from markdown skill content.
+   *
+   * Name resolution priority:
+   *   1. `explicitName` (caller-provided display name, e.g. install_skill `name` arg)
+   *   2. `name` field in the YAML frontmatter (the canonical skill name)
+   *   3. first markdown heading
+   *   4. `fallbackName` (file base name / default placeholder)
+   *
+   * Reading the frontmatter `name` keeps the stored/displayed name consistent
+   * with the SkillEngine's parser (which uses frontmatter `name`); otherwise
+   * agent-installed skills that declare their real name in frontmatter but use
+   * a generic `# Skill` heading would display "Skill" instead of the real name.
+   */
+  private parseSkillMeta (content: string, fallbackName: string, explicitName?: string): { name: string; description: string; tools: string[] } {
+    const providedName = typeof explicitName === 'string' ? explicitName.trim() : ''
+    let name = providedName || fallbackName
     let description = ''
     const tools: string[] = []
 
     if (!content) return { name, description, tools }
 
-    // Parse YAML frontmatter for tools
+    // Fields parsed from YAML frontmatter (if present)
+    let frontmatterName = ''
+    let frontmatterDescription = ''
+    let bodyText = content
+
+    // Parse YAML frontmatter for name/description/tools
     const trimmed = content.replace(/^\uFEFF/, '')
     if (trimmed.startsWith('---')) {
       const endIndex = trimmed.indexOf('\n---', 3)
       if (endIndex >= 0) {
         const yamlBlock = trimmed.slice(4, endIndex)
+        bodyText = trimmed.slice(endIndex + 4)
+        // Extract the canonical name declared in frontmatter
+        const nameMatch = yamlBlock.match(/^name:\s*(.+?)\s*$/m)
+        if (nameMatch) frontmatterName = stripYamlQuotes(nameMatch[1].trim())
+        // Extract description declared in frontmatter
+        const descMatch = yamlBlock.match(/^description:\s*(.+?)\s*$/m)
+        if (descMatch) frontmatterDescription = stripYamlQuotes(descMatch[1].trim())
         // Extract tool names from allowedTools or tools field
         const toolsMatch = yamlBlock.match(/(?:allowedTools|tools):\s*\n((?:\s+-\s+.+\n?)+)/m)
         if (toolsMatch) {
@@ -350,20 +393,33 @@ export class SkillStore {
       }
     }
 
-    const lines = content.split('\n')
-    for (const line of lines) {
+    // Frontmatter name is canonical \u2014 use it unless the caller explicitly named the skill.
+    if (!providedName && frontmatterName) {
+      name = frontmatterName
+    }
+    if (frontmatterDescription) {
+      description = frontmatterDescription
+    }
+
+    // A heading may still supply the name when neither an explicit name nor a
+    // frontmatter name is available (e.g. plain markdown files without frontmatter).
+    const allowHeadingName = !providedName && !frontmatterName
+
+    // Iterate only the body (frontmatter already stripped) so frontmatter lines
+    // are never mistaken for a heading or description.
+    for (const line of bodyText.split('\n')) {
       const lineTrimmed = line.trim()
-      if (!lineTrimmed || lineTrimmed === '---') continue
-      // First heading is the name
-      if (!name || name === fallbackName) {
+      if (!lineTrimmed) continue
+      // First heading is the name (only when no explicit/frontmatter name)
+      if (allowHeadingName && (!name || name === fallbackName)) {
         const headingMatch = lineTrimmed.match(/^#+\s+(.+)$/)
         if (headingMatch) {
           name = headingMatch[1].trim()
           continue
         }
       }
-      // First non-empty, non-heading, non-frontmatter line is the description
-      if (lineTrimmed && !lineTrimmed.startsWith('#') && !lineTrimmed.startsWith('---') && !description) {
+      // First non-empty, non-heading line is the description (only if not already set from frontmatter)
+      if (!lineTrimmed.startsWith('#') && !description) {
         description = lineTrimmed.substring(0, 200)
         break
       }

@@ -17,7 +17,6 @@ import {
   createAttachmentBlock,
   createContentBlock,
   createFilePreviewBlock,
-  createSudoPasswordRequestBlock,
   createThinkingBlock,
   createToolBlock,
   createToolRun,
@@ -66,6 +65,7 @@ import type {
   AuthRequestPayload,
   AskUserAnswerPayload,
   AskUserRequestPayload,
+  SudoPasswordRequestPayload,
   ChannelBinding,
   ChatMessage,
   ChatMessageBlock,
@@ -144,6 +144,7 @@ const sharedFolderWorkspaceActiveFilePath = ref<string | null>(null)
 const sharedFolderWorkspaceWidth = ref(DEFAULT_FOLDER_WORKSPACE_WIDTH)
 const sharedStreamingConvIds = reactive(new Set<string>())
 const sharedPendingAuthRequestsByConversation = reactive(new Map<string, AuthRequestPayload[]>())
+const sharedPendingSudoPasswordRequestsByConversation = reactive(new Map<string, SudoPasswordRequestPayload[]>())
 const sharedPendingAskUserRequestsByConversation = reactive(new Map<string, AskUserRequestPayload[]>())
 const sharedUnreadConversationIds = reactive(new Set<string>())
 const sharedBackgroundStreamMessages = new Map<string, BackgroundStreamState>()
@@ -232,6 +233,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   const streamingConvIds = sharedStreamingConvIds
   const pendingAuthRequestsByConversation = sharedPendingAuthRequestsByConversation
+  const pendingSudoPasswordRequestsByConversation = sharedPendingSudoPasswordRequestsByConversation
   const pendingAskUserRequestsByConversation = sharedPendingAskUserRequestsByConversation
   const unreadConversationIds = sharedUnreadConversationIds
   const backgroundStreamMessages = sharedBackgroundStreamMessages
@@ -261,6 +263,47 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     const list = getPendingAuthRequests(currentConversationId.value)
     return list.length > 0 ? list[0] : null
   })
+
+  function getPendingSudoPasswordRequests (conversationId?: string | null): SudoPasswordRequestPayload[] {
+    if (!conversationId) return []
+    return pendingSudoPasswordRequestsByConversation.get(conversationId) ?? []
+  }
+
+  const currentPendingSudoPasswordCount = computed(() => {
+    return currentConversationId.value ? getPendingSudoPasswordRequests(currentConversationId.value).length : 0
+  })
+
+  const currentSudoPasswordRequest = computed<SudoPasswordRequestPayload | null>(() => {
+    if (!currentConversationId.value) return null
+    const list = getPendingSudoPasswordRequests(currentConversationId.value)
+    return list.length > 0 ? list[0] : null
+  })
+
+  function trackPendingSudoPasswordRequest (req: SudoPasswordRequestPayload): SudoPasswordRequestPayload | null {
+    const conversationId = resolveAuthConversationId(req)
+    if (!conversationId) return null
+
+    const normalized: SudoPasswordRequestPayload = { ...req, conversationId }
+    const currentRequests = getPendingSudoPasswordRequests(conversationId)
+    if (!currentRequests.some(item => item.requestId === normalized.requestId)) {
+      pendingSudoPasswordRequestsByConversation.set(conversationId, [...currentRequests, normalized])
+    }
+    return normalized
+  }
+
+  function clearPendingSudoPasswordRequest (requestId: string): void {
+    for (const [conversationId, requests] of pendingSudoPasswordRequestsByConversation.entries()) {
+      const nextRequests = requests.filter(item => item.requestId !== requestId)
+      if (nextRequests.length === requests.length) continue
+
+      if (nextRequests.length > 0) {
+        pendingSudoPasswordRequestsByConversation.set(conversationId, nextRequests)
+      } else {
+        pendingSudoPasswordRequestsByConversation.delete(conversationId)
+      }
+      return
+    }
+  }
 
   function getPendingAskUserRequests (conversationId?: string | null): AskUserRequestPayload[] {
     if (!conversationId) {
@@ -1586,39 +1629,19 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     window.electronAPI?.respondAuth(requestId, approved)
   }
 
-  function handleSudoPasswordRequest (req: { requestId: string; conversationId?: string; sessionId?: string; command: string }) {
-    const targetMessages = getTrackedMessagesByConversationId(req.conversationId)
-      ?? getTrackedMessagesBySessionId(req.sessionId)
-
-    if (!targetMessages) {
+  function handleSudoPasswordRequest (req: SudoPasswordRequestPayload) {
+    const trackedRequest = trackPendingSudoPasswordRequest(req)
+    if (!trackedRequest) {
       // Cannot route — cancel immediately so the tool is not left waiting forever
       window.electronAPI?.respondSudoPassword(req.requestId, null)
       return
     }
-
-    let assistantMessage = findLatestAssistantMessage(targetMessages)
-    if (!assistantMessage) {
-      const placeholder: ChatMessage = { role: 'assistant', content: '', blocks: [] }
-      targetMessages.push(placeholder)
-      assistantMessage = placeholder
-    }
-    ensureBlocks(assistantMessage).push(createSudoPasswordRequestBlock(req.requestId, req.command))
+    // The floating SudoPasswordPanel above the chat input owns the password entry UI
+    // so the streaming transcript stays free of authorization noise.
   }
 
   function respondToSudoPasswordRequest (requestId: string, password: string | null) {
-    for (const chatMessages of getTrackedMessageCollections()) {
-      for (const message of chatMessages) {
-        if (!Array.isArray(message.blocks)) continue
-        const block = message.blocks.find(
-          (b): b is Extract<ChatMessageBlock, { kind: 'sudo_password_request' }> =>
-            b.kind === 'sudo_password_request' && (b as Extract<ChatMessageBlock, { kind: 'sudo_password_request' }>).requestId === requestId
-        )
-        if (block) {
-          block.status = password !== null ? 'submitted' : 'canceled'
-          break
-        }
-      }
-    }
+    clearPendingSudoPasswordRequest(requestId)
     window.electronAPI?.respondSudoPassword(requestId, password)
   }
 
@@ -2148,6 +2171,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     currentConversationId,
     currentPendingAuthCount,
     currentPendingAuthRequest,
+    currentPendingSudoPasswordCount,
+    currentSudoPasswordRequest,
     deleteConversation,
     documentDockVisible,
     documentWorkspaceActiveFilePath,

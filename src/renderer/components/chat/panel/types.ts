@@ -193,6 +193,13 @@ export interface AuthRequestPayload {
   detail: string
 }
 
+export interface SudoPasswordRequestPayload {
+  requestId: string
+  conversationId?: string
+  sessionId?: string
+  command: string
+}
+
 export interface AskUserQuestionPayload {
   id: string
   question: string
