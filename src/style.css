@@ -15,6 +15,11 @@
   --app-shell-tint-1: rgba(56, 189, 248, 0.08);
   --app-shell-tint-2: rgba(245, 158, 11, 0.06);
   --app-main-surface: rgba(6, 10, 16, 0.72);
+  /* Opaque flatten of --app-main-surface over --app-shell-bg — the solid color
+     the semi-transparent chat canvas actually reads as. Used by surfaces that
+     must fully occlude content (e.g. the floating chat header) while matching
+     the message-list background exactly, instead of the bluer raw shell-bg. */
+  --app-chat-canvas: #070a10;
   --app-panel: rgba(15, 23, 42, 0.92);
   --app-panel-strong: rgba(10, 16, 24, 0.96);
   --app-panel-muted: rgba(255, 255, 255, 0.04);
@@ -45,6 +50,10 @@
   --app-shell-tint-1: rgba(14, 165, 233, 0.12);
   --app-shell-tint-2: rgba(245, 158, 11, 0.1);
   --app-main-surface: rgba(255, 255, 255, 0.74);
+  /* Opaque flatten of --app-main-surface over --app-shell-bg — near-white, so
+     the floating chat header matches the message-list canvas instead of the
+     bluer raw shell-bg (#eef3f9). */
+  --app-chat-canvas: #fbfcfd;
   --app-panel: rgba(255, 255, 255, 0.88);
   --app-panel-strong: rgba(255, 255, 255, 0.96);
   --app-panel-muted: rgba(15, 23, 42, 0.04);

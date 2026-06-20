@@ -116,13 +116,39 @@ const hasHeaderDetail = computed(() => {
 
 <style scoped>
 .chat-header {
+  /*
+   * --app-panel is rgba(...0.92) — not fully opaque, so message text bled
+   * through the "solid" region. Use --app-chat-canvas: the opaque flatten of
+   * --app-main-surface over --app-shell-bg, i.e. the exact solid color the
+   * semi-transparent message-list canvas reads as. The header fully occludes
+   * scrolling text while colour-matching the text-area background (raw
+   * --app-shell-bg is bluer than the canvas and caused a visible tint seam).
+   */
+  --chat-header-solid: var(--app-chat-canvas);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 12;
   padding: 12px 24px;
-  border-bottom: 1px solid var(--app-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   min-width: 0;
+  /*
+   * No backdrop blur and no divider line. The header is a solid panel surface
+   * across the top (where the controls live, so they stay readable) that fades
+   * to transparent toward the bottom edge. Scrolling messages rise through that
+   * transparent tail and bleed in via a pure color wash — a gradient fade
+   * instead of a frosted slab, consistent with the solid panel surfaces used
+   * elsewhere (sidebar / dock).
+   */
+  background: linear-gradient(180deg,
+    var(--chat-header-solid) 0%,
+    var(--chat-header-solid) 72%,
+    color-mix(in srgb, var(--chat-header-solid) 38%, transparent) 88%,
+    transparent 100%);
 }
 
 .chat-header h2 {

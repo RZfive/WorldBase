@@ -643,7 +643,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px var(--chat-message-gutter, 28px) calc(8px + var(--chat-input-overlap, 0px));
+  padding: calc(24px + var(--chat-header-height, 0px)) var(--chat-message-gutter, 28px) calc(8px + var(--chat-input-overlap, 0px));
   scrollbar-gutter: stable;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
@@ -711,7 +711,7 @@ onUnmounted(() => {
 
 @media (max-width: 860px) {
   .chat-messages {
-    padding: 20px 16px calc(8px + var(--chat-input-overlap, 0px));
+    padding: calc(20px + var(--chat-header-height, 0px)) 16px calc(8px + var(--chat-input-overlap, 0px));
   }
 
   .empty-state-card {
