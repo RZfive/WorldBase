@@ -47,7 +47,8 @@
     "pnpm": "10.33.0",
     "qrcode": "^1.5.4",
     "readable-stream": "2.3.8",
-    "sharp": "^0.34.4"
+    "sharp": "^0.34.4",
+    "vue-i18n": "^9.14.5"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

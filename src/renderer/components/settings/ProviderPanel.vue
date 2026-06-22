@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { ModelPricing } from '../../../main/ai-engine/cost-tracker'
 import { resolveDefaultModelPricing } from '../../../main/ai-engine/cost-tracker'
 
@@ -39,6 +40,7 @@ type PricingField = keyof ModelPricingEntry
 const CONTEXT_WINDOW_UNIT = 1000
 const DEFAULT_CONTEXT_WINDOW = 100000
 const FEEDBACK_DISPLAY_DURATION_MS = 2200
+const { t, locale } = useI18n()
 
 const providers = ref<AIProvider[]>([])
 const defaultProviderId = ref('')
@@ -69,8 +71,10 @@ const selectedProvider = computed(() => {
 })
 
 const editingProviderLabel = computed(() => {
-  if (!editDraft.value) return '添加供应商'
-  return providers.value.some(provider => provider.id === editDraft.value!.id) ? '编辑供应商' : '添加供应商'
+  if (!editDraft.value) return t('settings.provider.addProvider')
+  return providers.value.some(provider => provider.id === editDraft.value!.id)
+    ? t('settings.provider.editProvider')
+    : t('settings.provider.addProvider')
 })
 
 onMounted(async () => {
@@ -140,7 +144,7 @@ async function loadSettings () {
       selectedProviderId.value = ''
     }
   } catch (err) {
-    statusMsg.value = `加载失败: ${(err as Error).message}`
+    statusMsg.value = t('settings.provider.loadFailed', { message: (err as Error).message })
   }
 }
 
@@ -221,7 +225,7 @@ function addModel () {
   const model = newModelInput.value.trim()
   if (!model) return
   if (editDraft.value.models.includes(model)) {
-    statusMsg.value = '该模型已存在'
+    statusMsg.value = t('settings.provider.modelExists')
     return
   }
 
@@ -321,7 +325,7 @@ function clearTemperature () {
 }
 
 function formatTemperature (value: number | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '默认 (0.3)'
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : t('settings.provider.defaultTemperature')
 }
 
 function handlePricingInput (model: string, field: PricingField, event: Event) {
@@ -372,7 +376,7 @@ function buildPersistedCostSettings (): CostSettings {
   }
 }
 
-async function saveAll (successMessage = '模型服务已保存') {
+async function saveAll (successMessage = t('settings.provider.saved')) {
   if (!window.electronAPI?.saveProviders || !window.electronAPI?.saveCostSettings) return
 
   saving.value = true
@@ -396,7 +400,7 @@ async function saveAll (successMessage = '模型服务已保存') {
 
     statusMsg.value = successMessage
   } catch (err) {
-    statusMsg.value = `保存失败: ${(err as Error).message}`
+    statusMsg.value = t('common.saveFailed', { message: (err as Error).message })
   } finally {
     saving.value = false
     window.setTimeout(() => {
@@ -406,7 +410,7 @@ async function saveAll (successMessage = '模型服务已保存') {
 }
 
 async function saveBudgetOnly () {
-  await saveAll('预算已保存')
+  await saveAll(t('settings.provider.budgetSaved'))
 }
 
 async function saveEdit () {
@@ -414,11 +418,11 @@ async function saveEdit () {
 
   const nextProvider = editDraft.value
   if (!nextProvider.name.trim()) {
-    statusMsg.value = '请填写供应商名称'
+    statusMsg.value = t('settings.provider.requiredName')
     return
   }
   if (nextProvider.models.length === 0) {
-    statusMsg.value = '请至少添加一个模型'
+    statusMsg.value = t('settings.provider.requiredModel')
     return
   }
   if (!nextProvider.models.includes(nextProvider.activeModel)) {
@@ -476,13 +480,13 @@ async function deleteProvider (id: string) {
 
   editing.value = false
   editDraft.value = null
-  await saveAll('模型平台已删除')
+  await saveAll(t('settings.provider.deleted'))
 }
 
 async function toggleEnabled (id: string) {
   if (isEnabled(id)) {
     if (enabledProviderIds.value.length <= 1) {
-      statusMsg.value = '至少保留一个已启用供应商'
+      statusMsg.value = t('settings.provider.keepOneEnabled')
       return
     }
     enabledProviderIds.value = enabledProviderIds.value.filter(providerId => providerId !== id)
@@ -497,7 +501,7 @@ async function toggleEnabled (id: string) {
   }
 
   statusMsg.value = ''
-  await saveAll('启用状态已更新')
+  await saveAll(t('settings.provider.enabledUpdated'))
 }
 
 async function setDefault (id: string) {
@@ -505,7 +509,7 @@ async function setDefault (id: string) {
   if (!enabledProviderIds.value.includes(id)) {
     enabledProviderIds.value = getOrderedEnabledIds([id, ...enabledProviderIds.value])
   }
-  await saveAll('默认模型平台已更新')
+  await saveAll(t('settings.provider.defaultUpdated'))
 }
 
 function toggleKey (id: string) {
@@ -525,11 +529,13 @@ function formatPricing (value: number): string {
 }
 
 function formatContextWindow (value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return `${DEFAULT_CONTEXT_WINDOW / CONTEXT_WINDOW_UNIT}k tokens`
-  if (value % CONTEXT_WINDOW_UNIT === 0) {
-    return `${value / CONTEXT_WINDOW_UNIT}k tokens`
+  if (!Number.isFinite(value) || value <= 0) {
+    return t('settings.provider.contextWindowK', { count: DEFAULT_CONTEXT_WINDOW / CONTEXT_WINDOW_UNIT })
   }
-  return `${value.toLocaleString()} tokens`
+  if (value % CONTEXT_WINDOW_UNIT === 0) {
+    return t('settings.provider.contextWindowK', { count: value / CONTEXT_WINDOW_UNIT })
+  }
+  return t('settings.provider.contextWindowTokens', { count: value.toLocaleString(locale.value) })
 }
 </script>
 
@@ -537,7 +543,7 @@ function formatContextWindow (value: number): string {
   <div class="pp-root">
     <div class="pp-list">
       <div class="pp-list-top">
-        <input v-model="searchQuery" type="text" class="pp-search" placeholder="搜索模型平台或模型..." />
+        <input v-model="searchQuery" type="text" class="pp-search" :placeholder="$t('settings.provider.searchPlaceholder')" />
       </div>
 
       <div class="pp-providers">
@@ -547,15 +553,15 @@ function formatContextWindow (value: number): string {
           :class="['pp-item', { active: selectedProviderId === provider.id }]"
           @click="selectProvider(provider.id)"
         >
-          <span class="pp-item-name">{{ provider.name || '(未命名)' }}</span>
+          <span class="pp-item-name">{{ provider.name || $t('settings.provider.unnamed') }}</span>
           <span class="pp-item-badges">
-            <span v-if="isEnabled(provider.id)" class="pp-on-badge">ON</span>
-            <span v-if="isDefault(provider.id)" class="pp-default-badge">默认</span>
+            <span v-if="isEnabled(provider.id)" class="pp-on-badge">{{ $t('settings.provider.on') }}</span>
+            <span v-if="isDefault(provider.id)" class="pp-default-badge">{{ $t('settings.provider.default') }}</span>
           </span>
         </button>
       </div>
 
-      <button class="pp-add-btn" @click="startAdd">+ 添加</button>
+      <button class="pp-add-btn" @click="startAdd">{{ $t('settings.provider.addButton') }}</button>
     </div>
 
     <div class="pp-detail">
@@ -563,14 +569,14 @@ function formatContextWindow (value: number): string {
         <section class="pp-global-card">
           <div class="pp-global-header">
             <div>
-              <h3 class="pp-detail-title">模型服务</h3>
-              <p class="pp-global-hint">成本核算已整合到这里，模型价格单位为美元 / 每百万 token。</p>
+              <h3 class="pp-detail-title">{{ $t('settings.provider.title') }}</h3>
+              <p class="pp-global-hint">{{ $t('settings.provider.description') }}</p>
             </div>
-            <span v-if="saving" class="pp-saving">保存中…</span>
+            <span v-if="saving" class="pp-saving">{{ $t('common.saving') }}</span>
           </div>
 
           <div class="pp-budget-row">
-            <span class="pp-row-label">会话预算上限</span>
+            <span class="pp-row-label">{{ $t('settings.provider.budgetLimit') }}</span>
             <div class="pp-budget-input-wrap">
               <span class="pp-budget-prefix">$</span>
               <input
@@ -578,47 +584,47 @@ function formatContextWindow (value: number): string {
                 type="number"
                 step="0.01"
                 min="0"
-                placeholder="不限"
+                :placeholder="$t('settings.provider.unlimited')"
                 class="pp-budget-input"
                 @change="saveBudgetOnly"
               >
             </div>
           </div>
 
-          <p class="pp-global-note">未单独覆盖的模型会自动使用内置默认价格。相同模型名会共享同一套成本定价。</p>
+          <p class="pp-global-note">{{ $t('settings.provider.pricingNote') }}</p>
         </section>
 
         <div v-if="!selectedProvider && !editing" class="pp-empty">
-          <p>先在左侧选择一个模型平台，或新建一个供应商。</p>
+          <p>{{ $t('settings.provider.emptyHint') }}</p>
         </div>
 
         <template v-else-if="editing && editDraft">
           <h3 class="pp-section-title-main">{{ editingProviderLabel }}</h3>
 
           <div class="pp-field">
-            <label>名称</label>
-            <input v-model="editDraft.name" type="text" placeholder="例如: OpenAI, DeepSeek" />
+            <label>{{ $t('settings.provider.name') }}</label>
+            <input v-model="editDraft.name" type="text" :placeholder="$t('settings.provider.namePlaceholder')" />
           </div>
 
           <div class="pp-separator" />
 
           <div class="pp-field">
-            <label>API 地址</label>
+            <label>{{ $t('settings.provider.apiUrl') }}</label>
             <input v-model="editDraft.baseUrl" type="text" placeholder="https://api.openai.com/v1" />
           </div>
 
           <div class="pp-separator" />
 
           <div class="pp-field">
-            <label>API 密钥</label>
+            <label>{{ $t('settings.provider.apiKey') }}</label>
             <input v-model="editDraft.apiKey" type="password" placeholder="sk-..." />
-            <span class="pp-hint">仅保存在本地，不会上传。</span>
+            <span class="pp-hint">{{ $t('settings.provider.apiKeyHint') }}</span>
           </div>
 
           <div class="pp-separator" />
 
           <div class="pp-field">
-            <label>模型与价格</label>
+            <label>{{ $t('settings.provider.modelsAndPricing') }}</label>
             <div v-if="editDraft.models.length > 0" class="pp-model-list">
               <div v-for="(model, index) in editDraft.models" :key="model" class="pp-model-card">
                 <div class="pp-model-card-head">
@@ -628,7 +634,7 @@ function formatContextWindow (value: number): string {
 
                 <div class="pp-model-fields">
                   <label class="pp-inline-field">
-                    <span>上下文窗口 (k)</span>
+                    <span>{{ $t('settings.provider.contextWindow') }}</span>
                     <input
                       :value="getCtxInK(editDraft, model)"
                       type="number"
@@ -639,7 +645,7 @@ function formatContextWindow (value: number): string {
                     >
                   </label>
                   <label class="pp-inline-field">
-                    <span>输入价</span>
+                    <span>{{ $t('settings.provider.inputPrice') }}</span>
                     <input
                       :value="getPricing(editDraft, model).inputPerMillion"
                       type="number"
@@ -650,7 +656,7 @@ function formatContextWindow (value: number): string {
                     >
                   </label>
                   <label class="pp-inline-field">
-                    <span>输出价</span>
+                    <span>{{ $t('settings.provider.outputPrice') }}</span>
                     <input
                       :value="getPricing(editDraft, model).outputPerMillion"
                       type="number"
@@ -661,7 +667,7 @@ function formatContextWindow (value: number): string {
                     >
                   </label>
                   <label class="pp-inline-field">
-                    <span>缓存读取</span>
+                    <span>{{ $t('settings.provider.cacheRead') }}</span>
                     <input
                       :value="getPricing(editDraft, model).cacheReadPerMillion"
                       type="number"
@@ -675,7 +681,7 @@ function formatContextWindow (value: number): string {
 
                 <div class="pp-model-capability-row">
                   <button class="pp-capability-chip" type="button" :class="{ on: getModelCapabilities(editDraft, model).imageGeneration }" @click="toggleModelCapability(model, 'imageGeneration')">
-                    <span>图片生成</span>
+                    <span>{{ $t('settings.provider.imageGeneration') }}</span>
                   </button>
                   <button
                     class="pp-capability-chip"
@@ -684,22 +690,22 @@ function formatContextWindow (value: number): string {
                     :disabled="!getModelCapabilities(editDraft, model).imageGeneration"
                     @click="toggleModelCapability(model, 'imageEditing')"
                   >
-                    <span>图片编辑</span>
+                    <span>{{ $t('settings.provider.imageEditing') }}</span>
                   </button>
                 </div>
               </div>
             </div>
 
             <div class="pp-model-add">
-              <input v-model="newModelInput" type="text" placeholder="模型名称，如 gpt-4o" @keydown.enter.prevent="addModel" />
-              <button @click="addModel">添加</button>
+              <input v-model="newModelInput" type="text" :placeholder="$t('settings.provider.modelPlaceholder')" @keydown.enter.prevent="addModel" />
+              <button @click="addModel">{{ $t('settings.provider.add') }}</button>
             </div>
           </div>
 
           <div class="pp-separator" />
 
           <div class="pp-field" v-if="editDraft.models.length > 0">
-            <label>默认模型</label>
+            <label>{{ $t('settings.provider.defaultModel') }}</label>
             <select v-model="editDraft.activeModel" class="pp-select">
               <option v-for="model in editDraft.models" :key="model" :value="model">{{ model }}</option>
             </select>
@@ -708,15 +714,15 @@ function formatContextWindow (value: number): string {
           <div class="pp-separator" />
 
           <div class="pp-field pp-toggle-row" @click.prevent="editDraft.enableThinking = !editDraft.enableThinking">
-            <label>启用思考模式</label>
+            <label>{{ $t('settings.provider.enableThinking') }}</label>
             <span :class="['pp-toggle', { on: editDraft.enableThinking }]"><span class="pp-toggle-thumb" /></span>
           </div>
-          <span class="pp-hint">开启后，支持的模型将展示思考过程。</span>
+          <span class="pp-hint">{{ $t('settings.provider.thinkingHint') }}</span>
 
           <div class="pp-separator" />
 
           <div class="pp-field">
-            <label>模型温度</label>
+            <label>{{ $t('settings.provider.temperature') }}</label>
             <div class="pp-temp-row">
               <input
                 class="pp-temp-slider"
@@ -737,14 +743,14 @@ function formatContextWindow (value: number): string {
                 :value="editDraft.temperature ?? ''"
                 @input="handleTemperatureNumber"
               >
-              <button v-if="editDraft.temperature !== undefined" class="pp-temp-reset" type="button" @click="clearTemperature">重置</button>
+              <button v-if="editDraft.temperature !== undefined" class="pp-temp-reset" type="button" @click="clearTemperature">{{ $t('settings.provider.reset') }}</button>
             </div>
-            <span class="pp-hint">控制输出的随机性：低更确定（适合编码 / 精确任务），高更发散。未设置时默认 0.3，新会话以此为初始值，可在对话框 ⚙ 里临时调整。</span>
+            <span class="pp-hint">{{ $t('settings.provider.temperatureHint') }}</span>
           </div>
 
           <div class="pp-actions">
-            <button class="pp-btn-primary" @click="saveEdit">保存</button>
-            <button class="pp-btn-ghost" @click="cancelEdit">取消</button>
+            <button class="pp-btn-primary" @click="saveEdit">{{ $t('settings.provider.save') }}</button>
+            <button class="pp-btn-ghost" @click="cancelEdit">{{ $t('common.cancel') }}</button>
           </div>
 
           <span v-if="statusMsg" class="pp-status">{{ statusMsg }}</span>
@@ -759,13 +765,13 @@ function formatContextWindow (value: number): string {
                 class="pp-btn-ghost pp-btn-small"
                 @click="setDefault(selectedProvider.id)"
               >
-                设为默认
+                {{ $t('settings.provider.setDefault') }}
               </button>
-              <span v-else class="pp-default-badge">默认</span>
+              <span v-else class="pp-default-badge">{{ $t('settings.provider.default') }}</span>
               <span
                 :class="['pp-toggle', { on: isEnabled(selectedProvider.id) }]"
                 @click="toggleEnabled(selectedProvider.id)"
-                title="切换启用状态"
+                :title="$t('settings.provider.toggleEnabled')"
               ><span class="pp-toggle-thumb" /></span>
             </div>
           </div>
@@ -773,7 +779,7 @@ function formatContextWindow (value: number): string {
           <div class="pp-separator" />
 
           <div class="pp-row">
-            <span class="pp-row-label">API 密钥</span>
+            <span class="pp-row-label">{{ $t('settings.provider.apiKey') }}</span>
             <span class="pp-row-value mono" @click="toggleKey(selectedProvider.id)">
               {{ showKey[selectedProvider.id] ? selectedProvider.apiKey : maskKey(selectedProvider.apiKey) }}
             </span>
@@ -782,45 +788,45 @@ function formatContextWindow (value: number): string {
           <div class="pp-separator" />
 
           <div class="pp-row">
-            <span class="pp-row-label">API 地址</span>
+            <span class="pp-row-label">{{ $t('settings.provider.apiUrl') }}</span>
             <span class="pp-row-value">{{ selectedProvider.baseUrl }}</span>
           </div>
 
           <div class="pp-separator" />
 
-          <div class="pp-section-label">模型 <small>{{ selectedProvider.models.length }}</small></div>
+          <div class="pp-section-label">{{ $t('settings.provider.models') }} <small>{{ selectedProvider.models.length }}</small></div>
           <div v-for="model in selectedProvider.models" :key="model" class="pp-model-view-row">
             <div class="pp-model-view-main">
               <span class="pp-model-view-name">{{ model }}</span>
               <div class="pp-model-view-meta">
                 <span>{{ formatContextWindow(getCtx(selectedProvider, model)) }}</span>
-                <span>输入 {{ formatPricing(getPricing(selectedProvider, model).inputPerMillion) }}</span>
-                <span>输出 {{ formatPricing(getPricing(selectedProvider, model).outputPerMillion) }}</span>
-                <span>缓存 {{ formatPricing(getPricing(selectedProvider, model).cacheReadPerMillion) }}</span>
-                <span v-if="getModelCapabilities(selectedProvider, model).imageGeneration">图片生成</span>
-                <span v-if="getModelCapabilities(selectedProvider, model).imageEditing">图片编辑</span>
+                <span>{{ $t('settings.provider.inputMeta', { price: formatPricing(getPricing(selectedProvider, model).inputPerMillion) }) }}</span>
+                <span>{{ $t('settings.provider.outputMeta', { price: formatPricing(getPricing(selectedProvider, model).outputPerMillion) }) }}</span>
+                <span>{{ $t('settings.provider.cacheMeta', { price: formatPricing(getPricing(selectedProvider, model).cacheReadPerMillion) }) }}</span>
+                <span v-if="getModelCapabilities(selectedProvider, model).imageGeneration">{{ $t('settings.provider.imageGeneration') }}</span>
+                <span v-if="getModelCapabilities(selectedProvider, model).imageEditing">{{ $t('settings.provider.imageEditing') }}</span>
               </div>
             </div>
-            <span v-if="model === selectedProvider.activeModel" class="pp-default-badge">默认</span>
+            <span v-if="model === selectedProvider.activeModel" class="pp-default-badge">{{ $t('settings.provider.default') }}</span>
           </div>
 
           <div class="pp-separator" />
 
           <div class="pp-row">
-            <span class="pp-row-label">思考模式</span>
-            <span class="pp-row-value">{{ selectedProvider.enableThinking ? '已启用' : '未启用' }}</span>
+            <span class="pp-row-label">{{ $t('settings.provider.thinkingMode') }}</span>
+            <span class="pp-row-value">{{ selectedProvider.enableThinking ? $t('settings.provider.enabled') : $t('settings.provider.notEnabled') }}</span>
           </div>
 
           <div class="pp-separator" />
 
           <div class="pp-row">
-            <span class="pp-row-label">模型温度</span>
+            <span class="pp-row-label">{{ $t('settings.provider.temperature') }}</span>
             <span class="pp-row-value">{{ formatTemperature(selectedProvider.temperature) }}</span>
           </div>
 
           <div class="pp-actions">
-            <button class="pp-btn-primary" @click="startEdit">编辑</button>
-            <button class="pp-btn-danger" @click="deleteProvider(selectedProvider.id)">删除</button>
+            <button class="pp-btn-primary" @click="startEdit">{{ $t('settings.provider.edit') }}</button>
+            <button class="pp-btn-danger" @click="deleteProvider(selectedProvider.id)">{{ $t('common.delete') }}</button>
           </div>
 
           <span v-if="statusMsg" class="pp-status">{{ statusMsg }}</span>

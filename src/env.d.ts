@@ -416,7 +416,18 @@ interface WebAppShortcut {
   updatedAt: string
 }
 
+interface PinnedDockApp {
+  id: string
+  kind: 'project' | 'browser'
+  name: string
+  type?: string
+  icon?: string
+  url?: string
+  addedAt: string
+}
+
 type ThemePreference = 'system' | 'light' | 'dark'
+type LanguagePreference = 'zh-CN' | 'en-US' | 'system'
 type AIExecutionAuthMode = 'strict' | 'auto'
 
 interface AIExecutionPreferences {
@@ -941,6 +952,8 @@ interface ElectronAPI {
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
+  getLocalePreference: () => Promise<LanguagePreference>
+  saveLocalePreference: (preference: LanguagePreference) => Promise<{ success: boolean }>
   getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
   getMcpServers: () => Promise<MCPServerConfig[]>
@@ -962,6 +975,8 @@ interface ElectronAPI {
   saveLaunchpadLayout: (layout: LaunchpadLayout) => Promise<{ success: boolean }>
   getWebApps: () => Promise<WebAppShortcut[]>
   saveWebApps: (webApps: WebAppShortcut[]) => Promise<{ success: boolean }>
+  getPinnedDockApps: () => Promise<PinnedDockApp[]>
+  savePinnedDockApps: (apps: PinnedDockApp[]) => Promise<{ success: boolean }>
   listScheduledTasks: () => Promise<ScheduledTaskDefinition[]>
   saveScheduledTask: (task: ScheduledTaskDefinition) => Promise<ScheduledTaskDefinition>
   deleteScheduledTask: (taskId: string) => Promise<boolean>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ScheduledTaskReportDialog from './ScheduledTaskReportDialog.vue'
 import { renderMarkdown } from '../chat/markdown'
 
@@ -39,34 +40,35 @@ const statusMessage = ref('')
 const aiDraftPrompt = ref('')
 const activeReportId = ref<string | null>(null)
 const activeDetailTab = ref<'details' | 'logs'>('details')
+const { t, locale } = useI18n()
 
-const scheduleModeOptions: Array<{ id: ScheduleKind; label: string; detail: string }> = [
-  { id: 'daily', label: '每天', detail: '固定时间' },
-  { id: 'weekly', label: '每周', detail: '选择星期' },
-  { id: 'interval', label: '间隔', detail: '按分钟/小时' },
-  { id: 'once', label: '单次', detail: '只运行一次' },
-  { id: 'dates', label: '日期', detail: '多个时间点' }
+const scheduleModeOptions: Array<{ id: ScheduleKind; labelKey: string; detailKey: string }> = [
+  { id: 'daily', labelKey: 'settings.scheduledTasks.modeDaily', detailKey: 'settings.scheduledTasks.modeDailyDetail' },
+  { id: 'weekly', labelKey: 'settings.scheduledTasks.modeWeekly', detailKey: 'settings.scheduledTasks.modeWeeklyDetail' },
+  { id: 'interval', labelKey: 'settings.scheduledTasks.modeInterval', detailKey: 'settings.scheduledTasks.modeIntervalDetail' },
+  { id: 'once', labelKey: 'settings.scheduledTasks.modeOnce', detailKey: 'settings.scheduledTasks.modeOnceDetail' },
+  { id: 'dates', labelKey: 'settings.scheduledTasks.modeDates', detailKey: 'settings.scheduledTasks.modeDatesDetail' }
 ]
 
 const intervalPresetOptions = [
-  { value: '15', label: '每 15 分钟' },
-  { value: '30', label: '每 30 分钟' },
-  { value: '60', label: '每 1 小时' },
-  { value: '120', label: '每 2 小时' },
-  { value: '360', label: '每 6 小时' },
-  { value: '720', label: '每 12 小时' },
-  { value: '1440', label: '每天' },
-  { value: 'custom', label: '自定义' }
+  { value: '15', labelKey: 'settings.scheduledTasks.interval15' },
+  { value: '30', labelKey: 'settings.scheduledTasks.interval30' },
+  { value: '60', labelKey: 'settings.scheduledTasks.interval60' },
+  { value: '120', labelKey: 'settings.scheduledTasks.interval120' },
+  { value: '360', labelKey: 'settings.scheduledTasks.interval360' },
+  { value: '720', labelKey: 'settings.scheduledTasks.interval720' },
+  { value: '1440', labelKey: 'settings.scheduledTasks.interval1440' },
+  { value: 'custom', labelKey: 'settings.scheduledTasks.intervalCustom' }
 ]
 
 const weekdayOptions = [
-  { value: 1, label: '周一' },
-  { value: 2, label: '周二' },
-  { value: 3, label: '周三' },
-  { value: 4, label: '周四' },
-  { value: 5, label: '周五' },
-  { value: 6, label: '周六' },
-  { value: 7, label: '周日' }
+  { value: 1, labelKey: 'settings.scheduledTasks.weekdayMon' },
+  { value: 2, labelKey: 'settings.scheduledTasks.weekdayTue' },
+  { value: 3, labelKey: 'settings.scheduledTasks.weekdayWed' },
+  { value: 4, labelKey: 'settings.scheduledTasks.weekdayThu' },
+  { value: 5, labelKey: 'settings.scheduledTasks.weekdayFri' },
+  { value: 6, labelKey: 'settings.scheduledTasks.weekdaySat' },
+  { value: 7, labelKey: 'settings.scheduledTasks.weekdaySun' }
 ]
 
 let cleanupTasksChanged: (() => void) | null = null
@@ -139,19 +141,19 @@ function normalizeTimeOfDayInput (value: string): string | null {
 }
 
 function formatTimestamp (value?: string | null): string {
-  if (!value) return '未安排'
+  if (!value) return t('settings.scheduledTasks.notScheduled')
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN')
+  return date.toLocaleString(locale.value)
 }
 
 function statusLabel (status?: ScheduledTaskDefinition['lastStatus']): string {
   switch (status) {
-    case 'completed': return '已完成'
-    case 'failed': return '失败'
-    case 'retrying': return '重试中'
-    case 'running': return '执行中'
-    default: return '空闲'
+    case 'completed': return t('settings.scheduledTasks.statusCompleted')
+    case 'failed': return t('settings.scheduledTasks.statusFailed')
+    case 'retrying': return t('settings.scheduledTasks.statusRetrying')
+    case 'running': return t('settings.scheduledTasks.statusRunning')
+    default: return t('settings.scheduledTasks.statusIdle')
   }
 }
 
@@ -167,32 +169,32 @@ function statusClass (status?: ScheduledTaskDefinition['lastStatus']): string {
 
 function runStatusLabel (status: ScheduledTaskRunReport['status']): string {
   switch (status) {
-    case 'completed': return '已完成'
-    case 'failed': return '失败'
-    case 'retrying': return '重试中'
-    default: return '执行中'
+    case 'completed': return t('settings.scheduledTasks.statusCompleted')
+    case 'failed': return t('settings.scheduledTasks.statusFailed')
+    case 'retrying': return t('settings.scheduledTasks.statusRetrying')
+    default: return t('settings.scheduledTasks.statusRunning')
   }
 }
 
 function formatWeekdays (weekdays: number[]): string {
-  const labels = new Map(weekdayOptions.map(option => [option.value, option.label]))
-  return weekdays.map(weekday => labels.get(weekday)).filter(Boolean).join('、')
+  const labels = new Map(weekdayOptions.map(option => [option.value, t(option.labelKey)]))
+  return weekdays.map(weekday => labels.get(weekday)).filter(Boolean).join(t('settings.scheduledTasks.listDelimiter'))
 }
 
 function scheduleSummary (task: ScheduledTaskDefinition): string {
   if (task.schedule.kind === 'once') {
-    return `单次执行 · ${formatTimestamp(task.schedule.runAt)}`
+    return t('settings.scheduledTasks.summaryOnce', { time: formatTimestamp(task.schedule.runAt) })
   }
   if (task.schedule.kind === 'daily') {
-    return `每天执行 · ${task.schedule.timeOfDay}`
+    return t('settings.scheduledTasks.summaryDaily', { time: task.schedule.timeOfDay })
   }
   if (task.schedule.kind === 'weekly') {
-    return `每周执行 · ${formatWeekdays(task.schedule.weekdays)} ${task.schedule.timeOfDay}`
+    return t('settings.scheduledTasks.summaryWeekly', { weekdays: formatWeekdays(task.schedule.weekdays), time: task.schedule.timeOfDay })
   }
   if (task.schedule.kind === 'dates') {
-    return `指定日期 · ${task.schedule.dates.length} 个时间点`
+    return t('settings.scheduledTasks.summaryDates', { count: task.schedule.dates.length })
   }
-  return `重复执行 · 每 ${task.schedule.everyMinutes} 分钟`
+  return t('settings.scheduledTasks.summaryInterval', { minutes: task.schedule.everyMinutes })
 }
 
 function intervalPresetFor (everyMinutes: number): string {
@@ -259,7 +261,7 @@ function normalizeSelection (values: string[], allowedValues: Set<string>): stri
 function materializeDraft (value: ScheduledTaskDraft): ScheduledTaskDefinition | null {
   const prompt = value.prompt.trim()
   if (!prompt) {
-    setStatus('请填写要执行的提示词')
+    setStatus(t('settings.scheduledTasks.requiredPrompt'))
     return null
   }
 
@@ -267,7 +269,7 @@ function materializeDraft (value: ScheduledTaskDraft): ScheduledTaskDefinition |
   if (value.scheduleKind === 'once') {
     const runAt = fromLocalDateTimeInput(value.runAtInput)
     if (!runAt) {
-      setStatus('请填写单次执行时间')
+      setStatus(t('settings.scheduledTasks.requiredOnceTime'))
       return null
     }
     schedule = { kind: 'once', runAt }
@@ -277,14 +279,14 @@ function materializeDraft (value: ScheduledTaskDraft): ScheduledTaskDefinition |
       .filter((date): date is string => Boolean(date))
       .sort((left, right) => left.localeCompare(right))
     if (dates.length === 0) {
-      setStatus('请至少添加一个指定执行时间')
+      setStatus(t('settings.scheduledTasks.requiredDates'))
       return null
     }
     schedule = { kind: 'dates', dates }
   } else if (value.scheduleKind === 'daily') {
     const timeOfDay = normalizeTimeOfDayInput(value.timeOfDayInput)
     if (!timeOfDay) {
-      setStatus('请选择每天执行时间')
+      setStatus(t('settings.scheduledTasks.requiredDailyTime'))
       return null
     }
     schedule = { kind: 'daily', timeOfDay }
@@ -294,17 +296,17 @@ function materializeDraft (value: ScheduledTaskDraft): ScheduledTaskDefinition |
       .filter(weekday => Number.isInteger(weekday) && weekday >= 1 && weekday <= 7)
       .sort((left, right) => left - right)
     if (!timeOfDay) {
-      setStatus('请选择每周执行时间')
+      setStatus(t('settings.scheduledTasks.requiredWeeklyTime'))
       return null
     }
     if (weekdays.length === 0) {
-      setStatus('请至少选择一个星期')
+      setStatus(t('settings.scheduledTasks.requiredWeekday'))
       return null
     }
     schedule = { kind: 'weekly', weekdays, timeOfDay }
   } else {
     if (!Number.isFinite(Number(value.everyMinutes)) || Number(value.everyMinutes) <= 0) {
-      setStatus('重复执行间隔必须大于 0')
+      setStatus(t('settings.scheduledTasks.requiredInterval'))
       return null
     }
     schedule = {
@@ -321,7 +323,7 @@ function materializeDraft (value: ScheduledTaskDraft): ScheduledTaskDefinition |
 
   return {
     id: value.id,
-    title: value.title.trim() || prompt.replace(/\s+/g, ' ').slice(0, 24) || '未命名任务',
+    title: value.title.trim() || prompt.replace(/\s+/g, ' ').slice(0, 24) || t('settings.scheduledTasks.untitledTask'),
     enabled: value.enabled,
     createdBy: existingTask?.createdBy || value.createdBy,
     prompt,
@@ -461,7 +463,7 @@ async function loadData () {
       selectedTaskId.value = ''
     }
   } catch (error) {
-    setStatus(`加载定时任务失败: ${(error as Error).message}`)
+    setStatus(t('settings.scheduledTasks.loadFailed', { message: (error as Error).message }))
   }
 }
 
@@ -538,14 +540,14 @@ async function saveDraft () {
   try {
     const savedTask = await window.electronAPI.saveScheduledTask(task)
     tasks.value = [savedTask, ...tasks.value.filter(item => item.id !== savedTask.id)]
-      .sort((left, right) => left.title.localeCompare(right.title, 'zh-CN'))
+      .sort((left, right) => left.title.localeCompare(right.title, locale.value))
     selectedTaskId.value = savedTask.id
     editing.value = false
     draft.value = null
-    setStatus('定时任务已保存')
+    setStatus(t('settings.scheduledTasks.saved'))
     await loadData()
   } catch (error) {
-    setStatus(`保存失败: ${(error as Error).message}`)
+    setStatus(t('common.saveFailed', { message: (error as Error).message }))
   } finally {
     saving.value = false
   }
@@ -553,16 +555,16 @@ async function saveDraft () {
 
 async function deleteSelectedTask () {
   if (!selectedTask.value || !window.electronAPI?.deleteScheduledTask) return
-  if (!window.confirm(`确认删除定时任务“${selectedTask.value.title}”吗？`)) return
+  if (!window.confirm(t('settings.scheduledTasks.deleteConfirm', { title: selectedTask.value.title }))) return
 
   try {
     await window.electronAPI.deleteScheduledTask(selectedTask.value.id)
     activeReportId.value = null
     selectedTaskId.value = ''
     await loadData()
-    setStatus('定时任务已删除')
+    setStatus(t('settings.scheduledTasks.deleted'))
   } catch (error) {
-    setStatus(`删除失败: ${(error as Error).message}`)
+    setStatus(t('settings.scheduledTasks.deleteFailed', { message: (error as Error).message }))
   }
 }
 
@@ -577,9 +579,9 @@ async function toggleSelectedTaskEnabled () {
     })
     selectedTaskId.value = savedTask.id
     await loadData()
-    setStatus(savedTask.enabled ? '任务已启用' : '任务已停用')
+    setStatus(savedTask.enabled ? t('settings.scheduledTasks.taskEnabled') : t('settings.scheduledTasks.taskDisabled'))
   } catch (error) {
-    setStatus(`更新启用状态失败: ${(error as Error).message}`)
+    setStatus(t('settings.scheduledTasks.enableUpdateFailed', { message: (error as Error).message }))
   }
 }
 
@@ -590,10 +592,10 @@ async function runSelectedTaskNow () {
     const report = await window.electronAPI.runScheduledTaskNow(selectedTask.value.id)
     activeReportId.value = report.id
     activeDetailTab.value = 'logs'
-    setStatus('任务已开始执行')
+    setStatus(t('settings.scheduledTasks.started'))
     await loadData()
   } catch (error) {
-    setStatus(`立即执行失败: ${(error as Error).message}`)
+    setStatus(t('settings.scheduledTasks.runNowFailed', { message: (error as Error).message }))
   }
 }
 
@@ -638,13 +640,13 @@ async function generateDraftWithAi () {
     const text = extractAssistantText(response.content as string | Array<{ type: string; text?: string }>)
     const payload = parseJsonPayload(text)
     if (!payload) {
-      throw new Error('AI 返回的内容不是有效 JSON')
+      throw new Error(t('settings.scheduledTasks.invalidAiJson'))
     }
 
     applyGeneratedDraft(payload)
-    setStatus('AI 已生成任务草稿，可继续编辑后保存')
+    setStatus(t('settings.scheduledTasks.aiDraftReady'))
   } catch (error) {
-    setStatus(`AI 生成失败: ${(error as Error).message}`)
+    setStatus(t('settings.scheduledTasks.aiGenerateFailed', { message: (error as Error).message }))
   } finally {
     aiGenerating.value = false
   }
@@ -684,14 +686,14 @@ onUnmounted(() => {
     <aside class="st-sidebar">
       <div class="st-sidebar-header">
         <div>
-          <h3>定时任务</h3>
-          <p>让 AI 按计划自动执行提示词，支持重试、Skill 与 MCP 限定。</p>
+          <h3>{{ $t('settings.scheduledTasks.title') }}</h3>
+          <p>{{ $t('settings.scheduledTasks.description') }}</p>
         </div>
-        <button class="st-primary-btn" type="button" @click="startAdd">新增任务</button>
+        <button class="st-primary-btn" type="button" @click="startAdd">{{ $t('settings.scheduledTasks.addTask') }}</button>
       </div>
 
       <div v-if="tasks.length === 0" class="st-empty-list">
-        还没有定时任务。你可以手动配置，也可以先让 AI 生成任务草稿。
+        {{ $t('settings.scheduledTasks.emptyList') }}
       </div>
 
       <button
@@ -708,11 +710,11 @@ onUnmounted(() => {
         </div>
         <p>{{ scheduleSummary(task) }}</p>
         <div class="st-task-card-meta">
-          <span>{{ task.enabled ? '已启用' : '已停用' }}</span>
-          <span>{{ task.createdBy === 'ai' ? 'AI 创建' : '手动创建' }}</span>
+          <span>{{ task.enabled ? $t('settings.scheduledTasks.enabled') : $t('settings.scheduledTasks.disabled') }}</span>
+          <span>{{ task.createdBy === 'ai' ? $t('settings.scheduledTasks.createdByAi') : $t('settings.scheduledTasks.createdByManual') }}</span>
         </div>
         <div class="st-task-card-meta muted">
-          <span>下次执行：{{ formatTimestamp(task.retryScheduledAt || task.nextRunAt) }}</span>
+          <span>{{ $t('settings.scheduledTasks.nextRun', { time: formatTimestamp(task.retryScheduledAt || task.nextRunAt) }) }}</span>
         </div>
       </button>
     </aside>
@@ -720,21 +722,21 @@ onUnmounted(() => {
     <section class="st-main">
       <div class="st-main-header">
         <div>
-          <h3>{{ editing ? '编辑任务' : (selectedTask?.title || '定时任务管理') }}</h3>
+          <h3>{{ editing ? $t('settings.scheduledTasks.editTask') : (selectedTask?.title || $t('settings.scheduledTasks.manageTitle')) }}</h3>
           <p>
             {{ editing
-              ? '配置执行计划、失败重试和可用资源。'
-              : '查看任务状态、最近执行报告，或立即运行当前任务。' }}
+              ? $t('settings.scheduledTasks.editDescription')
+              : $t('settings.scheduledTasks.detailDescription') }}
           </p>
         </div>
 
         <div v-if="!editing && selectedTask" class="st-main-actions">
           <button class="st-ghost-btn" type="button" @click="toggleSelectedTaskEnabled">
-            {{ selectedTask.enabled ? '停用' : '启用' }}
+            {{ selectedTask.enabled ? $t('settings.scheduledTasks.disable') : $t('settings.scheduledTasks.enable') }}
           </button>
-          <button class="st-ghost-btn" type="button" @click="runSelectedTaskNow">立即执行</button>
-          <button class="st-ghost-btn" type="button" @click="startEdit">编辑</button>
-          <button class="st-danger-btn" type="button" @click="deleteSelectedTask">删除</button>
+          <button class="st-ghost-btn" type="button" @click="runSelectedTaskNow">{{ $t('settings.scheduledTasks.runNow') }}</button>
+          <button class="st-ghost-btn" type="button" @click="startEdit">{{ $t('settings.scheduledTasks.edit') }}</button>
+          <button class="st-danger-btn" type="button" @click="deleteSelectedTask">{{ $t('common.delete') }}</button>
         </div>
       </div>
 
@@ -743,47 +745,47 @@ onUnmounted(() => {
       <div v-if="editing && draft" class="st-editor-layout">
         <section class="st-editor-card ai-card">
           <div class="st-section-head">
-            <h4>AI 生成草稿</h4>
-            <span>用一句话生成草稿</span>
+            <h4>{{ $t('settings.scheduledTasks.aiDraftTitle') }}</h4>
+            <span>{{ $t('settings.scheduledTasks.aiDraftSubtitle') }}</span>
           </div>
           <textarea
             v-model="aiDraftPrompt"
             rows="5"
             class="st-textarea"
-            placeholder="例如：每个工作日上午 9 点检查昨日构建日志，失败时 10 分钟后自动重试 2 次，并允许使用 browser MCP 与测试 Skill。"
+            :placeholder="$t('settings.scheduledTasks.aiDraftPlaceholder')"
           />
           <div class="st-editor-actions">
-            <button class="st-ghost-btn" type="button" @click="aiDraftPrompt = ''">清空</button>
+            <button class="st-ghost-btn" type="button" @click="aiDraftPrompt = ''">{{ $t('settings.scheduledTasks.clear') }}</button>
             <button class="st-primary-btn" type="button" @click="generateDraftWithAi" :disabled="aiGenerating">
-              {{ aiGenerating ? '生成中…' : 'AI 生成草稿' }}
+              {{ aiGenerating ? $t('settings.scheduledTasks.generating') : $t('settings.scheduledTasks.generateDraft') }}
             </button>
           </div>
         </section>
 
         <section class="st-editor-card">
           <div class="st-section-head">
-            <h4>任务配置</h4>
-            <span>名称、提示词、计划与重试</span>
+            <h4>{{ $t('settings.scheduledTasks.configTitle') }}</h4>
+            <span>{{ $t('settings.scheduledTasks.configSubtitle') }}</span>
           </div>
 
           <div class="st-form-grid">
             <label class="st-field">
-              <span>任务名称</span>
-              <input v-model="draft.title" type="text" placeholder="例如：晨间巡检报告" />
+              <span>{{ $t('settings.scheduledTasks.taskName') }}</span>
+              <input v-model="draft.title" type="text" :placeholder="$t('settings.scheduledTasks.taskNamePlaceholder')" />
             </label>
 
             <label class="st-field checkbox-field">
               <input v-model="draft.enabled" type="checkbox" />
-              <span>保存后立即启用</span>
+              <span>{{ $t('settings.scheduledTasks.enableAfterSave') }}</span>
             </label>
 
             <label class="st-field full-span">
-              <span>提示词</span>
-              <textarea v-model="draft.prompt" rows="7" class="st-textarea" placeholder="输入要让 AI 自动执行的提示词" />
+              <span>{{ $t('settings.scheduledTasks.prompt') }}</span>
+              <textarea v-model="draft.prompt" rows="7" class="st-textarea" :placeholder="$t('settings.scheduledTasks.promptPlaceholder')" />
             </label>
 
             <div class="st-schedule-block full-span">
-              <span class="st-field-label">执行方式</span>
+              <span class="st-field-label">{{ $t('settings.scheduledTasks.scheduleMode') }}</span>
               <div class="st-mode-grid">
                 <button
                   v-for="mode in scheduleModeOptions"
@@ -793,22 +795,22 @@ onUnmounted(() => {
                   :class="{ active: draft.scheduleKind === mode.id }"
                   @click="draft.scheduleKind = mode.id"
                 >
-                  <strong>{{ mode.label }}</strong>
-                  <span>{{ mode.detail }}</span>
+                  <strong>{{ $t(mode.labelKey) }}</strong>
+                  <span>{{ $t(mode.detailKey) }}</span>
                 </button>
               </div>
 
               <div class="st-schedule-panel" :class="{ 'is-interval': draft.scheduleKind === 'interval' }">
                 <template v-if="draft.scheduleKind === 'daily'">
                   <label class="st-field">
-                    <span>每天执行时间</span>
+                    <span>{{ $t('settings.scheduledTasks.dailyTime') }}</span>
                     <input v-model="draft.timeOfDayInput" type="time" />
                   </label>
                 </template>
 
                 <template v-else-if="draft.scheduleKind === 'weekly'">
                   <div class="st-field full-span">
-                    <span>星期</span>
+                    <span>{{ $t('settings.scheduledTasks.weekday') }}</span>
                     <div class="st-weekday-grid">
                       <button
                         v-for="weekday in weekdayOptions"
@@ -818,12 +820,12 @@ onUnmounted(() => {
                         :class="{ active: draft.weekdays.includes(weekday.value) }"
                         @click="toggleWeekday(weekday.value)"
                       >
-                        {{ weekday.label }}
+                        {{ $t(weekday.labelKey) }}
                       </button>
                     </div>
                   </div>
                   <label class="st-field">
-                    <span>执行时间</span>
+                    <span>{{ $t('settings.scheduledTasks.runTime') }}</span>
                     <input v-model="draft.timeOfDayInput" type="time" />
                   </label>
                 </template>
@@ -832,20 +834,20 @@ onUnmounted(() => {
                   <div class="st-interval-fields full-span">
                     <div class="st-interval-row" :class="{ 'has-custom': draft.intervalPreset === 'custom' }">
                       <label class="st-field">
-                        <span>间隔时间</span>
+                        <span>{{ $t('settings.scheduledTasks.intervalTime') }}</span>
                         <select v-model="draft.intervalPreset" @change="applyIntervalPreset">
                           <option v-for="option in intervalPresetOptions" :key="option.value" :value="option.value">
-                            {{ option.label }}
+                            {{ $t(option.labelKey) }}
                           </option>
                         </select>
                       </label>
                       <label v-if="draft.intervalPreset === 'custom'" class="st-field">
-                        <span>分钟</span>
+                        <span>{{ $t('settings.scheduledTasks.minutes') }}</span>
                         <input v-model.number="draft.everyMinutes" type="number" min="1" step="1" @input="markIntervalCustom" />
                       </label>
                     </div>
                     <label class="st-field">
-                      <span>开始时间</span>
+                      <span>{{ $t('settings.scheduledTasks.startTime') }}</span>
                       <input v-model="draft.startAtInput" type="datetime-local" />
                     </label>
                   </div>
@@ -853,17 +855,17 @@ onUnmounted(() => {
 
                 <template v-else-if="draft.scheduleKind === 'once'">
                   <label class="st-field">
-                    <span>执行时间</span>
+                    <span>{{ $t('settings.scheduledTasks.runTime') }}</span>
                     <input v-model="draft.runAtInput" type="datetime-local" />
                   </label>
                 </template>
 
                 <template v-else>
                   <div class="st-field full-span">
-                    <span>指定日期</span>
+                    <span>{{ $t('settings.scheduledTasks.specificDates') }}</span>
                     <div class="st-date-row">
                       <input v-model="draft.nextDateInput" type="datetime-local" />
-                      <button class="st-ghost-btn" type="button" @click="addDateInput">添加时间点</button>
+                      <button class="st-ghost-btn" type="button" @click="addDateInput">{{ $t('settings.scheduledTasks.addDate') }}</button>
                     </div>
                     <div v-if="draft.dateInputs.length > 0" class="st-tag-list compact">
                       <button
@@ -882,14 +884,14 @@ onUnmounted(() => {
             </div>
 
             <div class="st-retry-block full-span">
-              <span class="st-field-label">失败重试</span>
+              <span class="st-field-label">{{ $t('settings.scheduledTasks.retryTitle') }}</span>
               <div class="st-retry-fields">
                 <label class="st-field">
-                  <span>重试次数</span>
+                  <span>{{ $t('settings.scheduledTasks.retryCount') }}</span>
                   <input v-model.number="draft.maxRetries" type="number" min="0" step="1" />
                 </label>
                 <label class="st-field">
-                  <span>失败间隔（分钟）</span>
+                  <span>{{ $t('settings.scheduledTasks.retryDelay') }}</span>
                   <input v-model.number="draft.retryDelayMinutes" type="number" min="1" step="1" />
                 </label>
               </div>
@@ -899,10 +901,10 @@ onUnmounted(() => {
           <div class="st-scope-grid">
             <section class="st-scope-card">
               <div class="st-section-head">
-                <h4>允许使用的 Skill</h4>
-                <span>{{ draft.selectedSkillIds.length }} 项</span>
+                <h4>{{ $t('settings.scheduledTasks.allowedSkills') }}</h4>
+                <span>{{ $t('settings.scheduledTasks.itemCount', { count: draft.selectedSkillIds.length }) }}</span>
               </div>
-              <div v-if="skills.length === 0" class="st-empty-inline">暂无 Skill，可留空表示不限制。</div>
+              <div v-if="skills.length === 0" class="st-empty-inline">{{ $t('settings.scheduledTasks.noSkills') }}</div>
               <label v-for="skill in skills" :key="skill.id" class="st-check-item">
                 <input v-model="draft.selectedSkillIds" type="checkbox" :value="skill.id" />
                 <span>
@@ -914,24 +916,24 @@ onUnmounted(() => {
 
             <section class="st-scope-card">
               <div class="st-section-head">
-                <h4>允许使用的 MCP 服务</h4>
-                <span>{{ draft.selectedMcpServerIds.length }} 项</span>
+                <h4>{{ $t('settings.scheduledTasks.allowedMcp') }}</h4>
+                <span>{{ $t('settings.scheduledTasks.itemCount', { count: draft.selectedMcpServerIds.length }) }}</span>
               </div>
-              <div v-if="mcpServers.length === 0" class="st-empty-inline">暂无 MCP 服务，可留空表示不限制。</div>
+              <div v-if="mcpServers.length === 0" class="st-empty-inline">{{ $t('settings.scheduledTasks.noMcp') }}</div>
               <label v-for="server in mcpServers" :key="server.id" class="st-check-item">
                 <input v-model="draft.selectedMcpServerIds" type="checkbox" :value="server.id" />
                 <span>
                   <strong>{{ server.name }}</strong>
-                  <small>{{ server.id }} · {{ server.enabled ? '已启用' : '已禁用' }}</small>
+                  <small>{{ server.id }} · {{ server.enabled ? $t('settings.scheduledTasks.enabled') : $t('settings.scheduledTasks.disabled') }}</small>
                 </span>
               </label>
             </section>
           </div>
 
           <div class="st-editor-actions">
-            <button class="st-ghost-btn" type="button" @click="cancelEdit">取消</button>
+            <button class="st-ghost-btn" type="button" @click="cancelEdit">{{ $t('common.cancel') }}</button>
             <button class="st-primary-btn" type="button" @click="saveDraft" :disabled="saving">
-              {{ saving ? '保存中…' : '保存任务' }}
+              {{ saving ? $t('common.saving') : $t('settings.scheduledTasks.saveTask') }}
             </button>
           </div>
         </section>
@@ -945,7 +947,7 @@ onUnmounted(() => {
             :class="{ active: activeDetailTab === 'details' }"
             @click="activeDetailTab = 'details'"
           >
-            任务详情
+            {{ $t('settings.scheduledTasks.detailsTab') }}
           </button>
           <button
             type="button"
@@ -953,54 +955,54 @@ onUnmounted(() => {
             :class="{ active: activeDetailTab === 'logs' }"
             @click="activeDetailTab = 'logs'"
           >
-            执行日志<span v-if="selectedTaskReports.length > 0" class="st-detail-tab-count">{{ selectedTaskReports.length }}</span>
+            {{ $t('settings.scheduledTasks.logsTab') }}<span v-if="selectedTaskReports.length > 0" class="st-detail-tab-count">{{ selectedTaskReports.length }}</span>
           </button>
         </div>
 
         <section v-show="activeDetailTab === 'details'" class="st-summary-card">
           <div class="st-section-head">
-            <h4>任务概览</h4>
-            <span>{{ selectedTask.createdBy === 'ai' ? 'AI 创建' : '手动创建' }}</span>
+            <h4>{{ $t('settings.scheduledTasks.overview') }}</h4>
+            <span>{{ selectedTask.createdBy === 'ai' ? $t('settings.scheduledTasks.createdByAi') : $t('settings.scheduledTasks.createdByManual') }}</span>
           </div>
           <div class="st-metrics-grid">
             <div class="st-metric">
-              <span>当前状态</span>
+              <span>{{ $t('settings.scheduledTasks.currentStatus') }}</span>
               <strong>{{ statusLabel(selectedTask.lastStatus) }}</strong>
             </div>
             <div class="st-metric">
-              <span>下次执行</span>
+              <span>{{ $t('settings.scheduledTasks.nextRunLabel') }}</span>
               <strong>{{ formatTimestamp(selectedTask.retryScheduledAt || selectedTask.nextRunAt) }}</strong>
             </div>
             <div class="st-metric">
-              <span>上次执行</span>
+              <span>{{ $t('settings.scheduledTasks.lastRunLabel') }}</span>
               <strong>{{ formatTimestamp(selectedTask.lastRunAt) }}</strong>
             </div>
             <div class="st-metric">
-              <span>重试策略</span>
-              <strong>{{ selectedTask.retryPolicy.maxRetries }} 次 / {{ selectedTask.retryPolicy.retryDelayMinutes }} 分钟</strong>
+              <span>{{ $t('settings.scheduledTasks.retryPolicy') }}</span>
+              <strong>{{ $t('settings.scheduledTasks.retryPolicyValue', { retries: selectedTask.retryPolicy.maxRetries, minutes: selectedTask.retryPolicy.retryDelayMinutes }) }}</strong>
             </div>
           </div>
           <div class="st-summary-block">
-            <strong>计划方式</strong>
+            <strong>{{ $t('settings.scheduledTasks.scheduleMode') }}</strong>
             <p>{{ scheduleSummary(selectedTask) }}</p>
           </div>
           <div class="st-summary-block">
-            <strong>执行提示词</strong>
+            <strong>{{ $t('settings.scheduledTasks.executionPrompt') }}</strong>
             <div class="st-prompt-md markdown-body" v-html="renderMarkdown(selectedTask.prompt)"></div>
           </div>
           <div class="st-scope-summary-grid">
             <div class="st-summary-block">
-              <strong>Skill 限定</strong>
+              <strong>{{ $t('settings.scheduledTasks.skillLimit') }}</strong>
               <div class="st-tag-list">
                 <span v-for="skillId in selectedTask.selectedSkillIds" :key="skillId" class="st-tag">{{ skillNameMap.get(skillId) || skillId }}</span>
-                <span v-if="selectedTask.selectedSkillIds.length === 0" class="st-empty-inline">未限制</span>
+                <span v-if="selectedTask.selectedSkillIds.length === 0" class="st-empty-inline">{{ $t('settings.scheduledTasks.unlimited') }}</span>
               </div>
             </div>
             <div class="st-summary-block">
-              <strong>MCP 限定</strong>
+              <strong>{{ $t('settings.scheduledTasks.mcpLimit') }}</strong>
               <div class="st-tag-list">
                 <span v-for="serverId in selectedTask.selectedMcpServerIds" :key="serverId" class="st-tag">{{ mcpNameMap.get(serverId) || serverId }}</span>
-                <span v-if="selectedTask.selectedMcpServerIds.length === 0" class="st-empty-inline">未限制</span>
+                <span v-if="selectedTask.selectedMcpServerIds.length === 0" class="st-empty-inline">{{ $t('settings.scheduledTasks.unlimited') }}</span>
               </div>
             </div>
           </div>
@@ -1008,10 +1010,10 @@ onUnmounted(() => {
 
         <section v-show="activeDetailTab === 'logs'" class="st-report-card">
           <div class="st-section-head">
-            <h4>执行日志</h4>
-            <span>{{ selectedTaskReports.length }} 条</span>
+            <h4>{{ $t('settings.scheduledTasks.logsTab') }}</h4>
+            <span>{{ $t('settings.scheduledTasks.recordCount', { count: selectedTaskReports.length }) }}</span>
           </div>
-          <div v-if="selectedTaskReports.length === 0" class="st-empty-inline">还没有执行记录。</div>
+          <div v-if="selectedTaskReports.length === 0" class="st-empty-inline">{{ $t('settings.scheduledTasks.noReports') }}</div>
           <button
             v-for="report in selectedTaskReports"
             :key="report.id"
@@ -1025,15 +1027,15 @@ onUnmounted(() => {
             </div>
             <p>{{ report.summary }}</p>
             <div class="st-report-item-meta">
-              <span>{{ report.trigger === 'manual' ? '手动执行' : '计划触发' }}</span>
-              <span>第 {{ report.attempt }} 次尝试</span>
+              <span>{{ report.trigger === 'manual' ? $t('settings.scheduledTasks.manualTrigger') : $t('settings.scheduledTasks.scheduledTrigger') }}</span>
+              <span>{{ $t('settings.scheduledTasks.attemptCount', { count: report.attempt }) }}</span>
             </div>
           </button>
         </section>
       </div>
 
       <div v-else class="st-empty-main">
-        选择左侧任务查看详情，或新增一个定时任务开始配置自动执行。
+        {{ $t('settings.scheduledTasks.emptyMain') }}
       </div>
     </section>
 

@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+const { t, locale } = useI18n()
 
 const skills = ref<SkillInfo[]>([])
 const expandedSkillId = ref<string | null>(null)
@@ -35,7 +38,7 @@ function toggleExpand (id: string) {
 }
 
 function formatDate (ts: string | number) {
-  return new Date(ts).toLocaleDateString('zh-CN', {
+  return new Date(ts).toLocaleDateString(locale.value, {
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit'
   })
@@ -57,15 +60,19 @@ function getFileTypeSummary (skill: SkillInfo): string {
     types[f.type] = (types[f.type] || 0) + 1
   }
   const labels: Record<string, string> = {
-    markdown: '文档',
-    script: '脚本',
-    config: '配置',
-    code: '代码',
-    other: '其它'
+    markdown: t('settings.skills.fileTypes.markdown'),
+    script: t('settings.skills.fileTypes.script'),
+    config: t('settings.skills.fileTypes.config'),
+    code: t('settings.skills.fileTypes.code'),
+    other: t('settings.skills.fileTypes.other')
   }
   return Object.entries(types)
     .map(([type, count]) => `${labels[type] || type} ${count}`)
-    .join('、')
+    .join(t('settings.skills.listDelimiter'))
+}
+
+function formatToolList (tools: string[]): string {
+  return tools.join(t('settings.skills.listDelimiter'))
 }
 
 onMounted(loadSkills)
@@ -75,19 +82,19 @@ onMounted(loadSkills)
   <div class="sm-root">
     <div class="sm-header">
       <div>
-        <h3 class="sm-title">Skill 管理</h3>
-        <p class="sm-desc">导入 Skill 文件、zip 技能包或文件夹让 AI 掌握专业技能，在聊天中选择激活</p>
+        <h3 class="sm-title">{{ $t('settings.skills.title') }}</h3>
+        <p class="sm-desc">{{ $t('settings.skills.description') }}</p>
       </div>
-      <button class="sm-import" @click="importSkill">📥 导入 Skill</button>
+      <button class="sm-import" @click="importSkill">📥 {{ $t('settings.skills.importAction') }}</button>
     </div>
 
     <div class="sm-separator" />
 
-    <div v-if="loading" class="sm-empty">加载中...</div>
+    <div v-if="loading" class="sm-empty">{{ $t('settings.skills.loading') }}</div>
 
     <div v-else-if="skills.length === 0" class="sm-empty">
-      <p>还没有导入任何 Skill</p>
-      <p class="sm-empty-hint">点击「导入 Skill」添加 .md、.txt、.zip 格式的技能文件或整个文件夹</p>
+      <p>{{ $t('settings.skills.emptyTitle') }}</p>
+      <p class="sm-empty-hint">{{ $t('settings.skills.emptyHint') }}</p>
     </div>
 
     <div v-else class="sm-list">
@@ -102,12 +109,12 @@ onMounted(loadSkills)
             <span v-if="skill.description && expandedSkillId !== skill.id" class="sm-item-brief">{{ skill.description }}</span>
             <span class="sm-item-meta">
               {{ formatDate(skill.createdAt) }}
-              <template v-if="skill.fileCount > 0"> · {{ skill.fileCount }} 个文件</template>
-              <template v-if="skill.tools.length > 0"> · {{ skill.tools.length }} 个工具</template>
+              <template v-if="skill.fileCount > 0"> · {{ $t('settings.skills.fileCount', { count: skill.fileCount }) }}</template>
+              <template v-if="skill.tools.length > 0"> · {{ $t('settings.skills.toolCount', { count: skill.tools.length }) }}</template>
             </span>
           </div>
           <div class="sm-item-actions">
-            <button class="sm-del" @click.stop="deleteSkill(skill.id)" title="删除">×</button>
+            <button class="sm-del" @click.stop="deleteSkill(skill.id)" :title="$t('settings.skills.deleteTitle')">×</button>
             <span class="sm-arrow">{{ expandedSkillId === skill.id ? '▾' : '▸' }}</span>
           </div>
         </div>
@@ -117,20 +124,20 @@ onMounted(loadSkills)
           <!-- Stats overview -->
           <div class="sm-stats">
             <div class="sm-stat-row">
-              <span class="sm-stat-label">📁 文件</span>
-              <span class="sm-stat-value">{{ skill.fileCount }} 个 ({{ formatFileSize(getTotalSize(skill)) }})</span>
+              <span class="sm-stat-label">📁 {{ $t('settings.skills.statsFiles') }}</span>
+              <span class="sm-stat-value">{{ $t('settings.skills.statsFileValue', { count: skill.fileCount, size: formatFileSize(getTotalSize(skill)) }) }}</span>
             </div>
             <div v-if="skill.fileCount > 0" class="sm-stat-row">
-              <span class="sm-stat-label">📄 组成</span>
+              <span class="sm-stat-label">📄 {{ $t('settings.skills.statsComposition') }}</span>
               <span class="sm-stat-value">{{ getFileTypeSummary(skill) }}</span>
             </div>
             <div v-if="skill.tools.length > 0" class="sm-stat-row">
-              <span class="sm-stat-label">🔧 提供工具</span>
-              <span class="sm-stat-value">{{ skill.tools.join('、') }}</span>
+              <span class="sm-stat-label">🔧 {{ $t('settings.skills.statsProvidedTools') }}</span>
+              <span class="sm-stat-value">{{ formatToolList(skill.tools) }}</span>
             </div>
             <div v-if="skill.scripts.length > 0" class="sm-stat-row">
-              <span class="sm-stat-label">⚡ 可执行脚本</span>
-              <span class="sm-stat-value">{{ skill.scripts.length }} 个</span>
+              <span class="sm-stat-label">⚡ {{ $t('settings.skills.statsExecutableScripts') }}</span>
+              <span class="sm-stat-value">{{ $t('settings.skills.scriptCount', { count: skill.scripts.length }) }}</span>
             </div>
           </div>
 
@@ -144,7 +151,7 @@ onMounted(loadSkills)
 
           <!-- File list -->
           <div v-if="skill.fileCount > 0" class="sm-files">
-            <div class="sm-files-title">文件列表</div>
+            <div class="sm-files-title">{{ $t('settings.skills.fileList') }}</div>
             <div class="sm-files-scroll">
               <div v-for="file in skill.files" :key="file.relativePath" class="sm-file-item">
                 <span class="sm-file-path">{{ file.relativePath }}</span>

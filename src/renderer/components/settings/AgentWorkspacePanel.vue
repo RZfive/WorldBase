@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import MultiSelectDropdown from './MultiSelectDropdown.vue'
 
 interface ToolCatalogEntry {
@@ -9,19 +10,21 @@ interface ToolCatalogEntry {
 
 type WorkspaceTab = 'agents' | 'groups' | 'bindings' | 'memory'
 
-const memoryScopeOptions: Array<{ value: AgentMemoryScope; label: string }> = [
-  { value: 'user', label: '用户' },
-  { value: 'agent', label: 'Agent' },
-  { value: 'project', label: '项目' },
-  { value: 'group', label: '群组' },
-  { value: 'channel', label: '频道' }
+const { t } = useI18n()
+
+const memoryScopeOptions: Array<{ value: AgentMemoryScope; labelKey: string }> = [
+  { value: 'user', labelKey: 'settings.agentWorkspace.scopeUser' },
+  { value: 'agent', labelKey: 'settings.agentWorkspace.scopeAgent' },
+  { value: 'project', labelKey: 'settings.agentWorkspace.scopeProject' },
+  { value: 'group', labelKey: 'settings.agentWorkspace.scopeGroup' },
+  { value: 'channel', labelKey: 'settings.agentWorkspace.scopeChannel' }
 ]
 
-const memoryTypeOptions: Array<{ value: MemoryType; label: string }> = [
-  { value: 'knowledge', label: '知识' },
-  { value: 'user_trait', label: '用户特征' },
-  { value: 'agent_skill', label: 'Agent 技能' },
-  { value: 'step', label: '步骤' }
+const memoryTypeOptions: Array<{ value: MemoryType; labelKey: string }> = [
+  { value: 'knowledge', labelKey: 'settings.agentWorkspace.memoryTypeKnowledge' },
+  { value: 'user_trait', labelKey: 'settings.agentWorkspace.memoryTypeUserTrait' },
+  { value: 'agent_skill', labelKey: 'settings.agentWorkspace.memoryTypeAgentSkill' },
+  { value: 'step', labelKey: 'settings.agentWorkspace.memoryTypeStep' }
 ]
 
 const activeTab = ref<WorkspaceTab>('agents')
@@ -108,7 +111,7 @@ const draftBinding = reactive({
 })
 
 const bindingTest = reactive({
-  text: '这是一条 IM 绑定测试消息，请用一句话回复。',
+  text: t('settings.agentWorkspace.bindingTestDefaultText'),
   running: false,
   result: ''
 })
@@ -143,31 +146,39 @@ function setStatus (message: string) {
 }
 
 function memoryScopeLabel (value: AgentMemoryScope): string {
-  return memoryScopeOptions.find(option => option.value === value)?.label || value
+  const option = memoryScopeOptions.find(item => item.value === value)
+  return option ? t(option.labelKey) : value
 }
 
 function memoryTypeLabel (value: MemoryType): string {
-  return memoryTypeOptions.find(option => option.value === value)?.label || value
+  const option = memoryTypeOptions.find(item => item.value === value)
+  return option ? t(option.labelKey) : value
 }
 
 function formatMemoryCompactionResult (result: MemoryCompactionResult): string {
-  return `AI 记忆整理完成：扫描 ${result.scanned} 条，删除无用 ${result.removedUseless} 条，合并重复 ${result.merged} 条，更新 ${result.updated} 条，保留 ${result.retained} 条`
+  return t('settings.agentWorkspace.memoryCompactionCompleted', {
+    scanned: result.scanned,
+    removed: result.removedUseless,
+    merged: result.merged,
+    updated: result.updated,
+    retained: result.retained
+  })
 }
 
 const hasMemoryScopeFilter = computed(() => memoryScopeId.value.trim().length > 0)
 
 const memoryScopeFilterText = computed(() => {
-  if (!hasMemoryScopeFilter.value) return '全部作用域'
+  if (!hasMemoryScopeFilter.value) return t('settings.agentWorkspace.allScopes')
   return `${memoryScopeLabel(memoryScopeType.value)} / ${memoryScopeId.value.trim()}`
 })
 
 function formatMemoryCompactionStatus (status: MemoryCompactionStatus): string {
   if (status.status === 'running') {
     const batchText = status.totalChunks > 0
-      ? `（${status.completedChunks}/${status.totalChunks} 批）`
+      ? t('settings.agentWorkspace.memoryBatchProgressWrapped', { completed: status.completedChunks, total: status.totalChunks })
       : ''
-    const detail = status.detail ? `：${status.detail}` : ''
-    return `AI 记忆整理中：${status.stage}${batchText}${detail}`
+    const detail = status.detail ? t('settings.agentWorkspace.colonDetail', { detail: status.detail }) : ''
+    return t('settings.agentWorkspace.memoryCompactionRunning', { stage: status.stage, batch: batchText, detail })
   }
 
   if (status.status === 'completed' && status.result) {
@@ -175,7 +186,7 @@ function formatMemoryCompactionStatus (status: MemoryCompactionStatus): string {
   }
 
   if (status.status === 'failed') {
-    return `AI 记忆整理失败：${status.error || status.detail || '未知错误'}`
+    return t('settings.agentWorkspace.memoryCompactionFailed', { message: status.error || status.detail || t('common.unknown') })
   }
 
   return ''
@@ -197,8 +208,8 @@ const memoryCompactionProgressText = computed(() => {
   const status = memoryCompactionStatus.value
   if (!status || status.status !== 'running') return ''
   const batchText = status.totalChunks > 0
-    ? `${status.completedChunks}/${status.totalChunks} 批`
-    : '准备中'
+    ? t('settings.agentWorkspace.memoryBatchProgress', { completed: status.completedChunks, total: status.totalChunks })
+    : t('settings.agentWorkspace.preparing')
   return status.detail
     ? `${batchText} · ${status.stage} · ${status.detail}`
     : `${batchText} · ${status.stage}`
@@ -509,15 +520,15 @@ async function saveManualMemory () {
   const summary = draftMemory.summary.trim()
   const scopeId = draftMemory.scopeId.trim()
   if (!title) {
-    setStatus('请填写记忆标题')
+    setStatus(t('settings.agentWorkspace.requiredMemoryTitle'))
     return
   }
   if (!summary) {
-    setStatus('请填写记忆摘要')
+    setStatus(t('settings.agentWorkspace.requiredMemorySummary'))
     return
   }
   if (!scopeId) {
-    setStatus('请填写作用域 ID')
+    setStatus(t('settings.agentWorkspace.requiredScopeId'))
     return
   }
 
@@ -537,10 +548,10 @@ async function saveManualMemory () {
     })
     addingMemory.value = false
     await loadMemory()
-    setStatus('已添加记忆')
+    setStatus(t('settings.agentWorkspace.memoryAdded'))
     resetMemoryDraft()
   } catch (error) {
-    setStatus(`添加记忆失败：${(error as Error).message}`)
+    setStatus(t('settings.agentWorkspace.memoryAddFailed', { message: (error as Error).message }))
   } finally {
     savingMemory.value = false
   }
@@ -610,19 +621,19 @@ async function saveAgent () {
   })
   await loadAgents()
   loadAgentIntoDraft(saved)
-  setStatus(`已保存 Agent: ${saved.name}`)
+  setStatus(t('settings.agentWorkspace.agentSaved', { name: saved.name }))
 }
 
 async function removeAgent () {
   if (!draftAgent.id || !window.electronAPI?.deleteAgent) return
   const deleted = await window.electronAPI.deleteAgent(draftAgent.id)
   if (!deleted) {
-    setStatus('默认 Agent 不能删除，或删除失败')
+    setStatus(t('settings.agentWorkspace.agentDeleteBlocked'))
     return
   }
   resetAgentDraft()
   await loadAgents()
-  setStatus('已删除 Agent')
+  setStatus(t('settings.agentWorkspace.agentDeleted'))
 }
 
 async function saveGroup () {
@@ -641,19 +652,19 @@ async function saveGroup () {
   })
   await loadGroups()
   loadGroupIntoDraft(saved)
-  setStatus(`已保存群组: ${saved.name}`)
+  setStatus(t('settings.agentWorkspace.groupSaved', { name: saved.name }))
 }
 
 async function removeGroup () {
   if (!draftGroup.id || !window.electronAPI?.deleteAgentGroup) return
   const deleted = await window.electronAPI.deleteAgentGroup(draftGroup.id)
   if (!deleted) {
-    setStatus('删除群组失败')
+    setStatus(t('settings.agentWorkspace.groupDeleteFailed'))
     return
   }
   resetGroupDraft()
   await loadGroups()
-  setStatus('已删除群组')
+  setStatus(t('settings.agentWorkspace.groupDeleted'))
 }
 
 async function saveBinding () {
@@ -680,19 +691,19 @@ async function saveBinding () {
   })
   await loadBindings()
   loadBindingIntoDraft(saved)
-  setStatus(`已保存 IM 绑定: ${saved.externalChannelId}`)
+  setStatus(t('settings.agentWorkspace.bindingSaved', { channel: saved.externalChannelId }))
 }
 
 async function removeBinding () {
   if (!draftBinding.id || !window.electronAPI?.deleteChannelBinding) return
   const deleted = await window.electronAPI.deleteChannelBinding(draftBinding.id)
   if (!deleted) {
-    setStatus('删除 IM 绑定失败')
+    setStatus(t('settings.agentWorkspace.bindingDeleteFailed'))
     return
   }
   resetBindingDraft()
   await loadBindings()
-  setStatus('已删除 IM 绑定')
+  setStatus(t('settings.agentWorkspace.bindingDeleted'))
 }
 
 async function testBindingReply () {
@@ -701,11 +712,11 @@ async function testBindingReply () {
   bindingTest.result = ''
   try {
     const result = await window.electronAPI.testChannelBinding(draftBinding.id, bindingTest.text)
-    bindingTest.result = result.reply || '未生成回复'
-    setStatus('IM 绑定测试完成')
+    bindingTest.result = result.reply || t('settings.agentWorkspace.noReplyGenerated')
+    setStatus(t('settings.agentWorkspace.bindingTestDone'))
   } catch (error) {
-    bindingTest.result = `测试失败：${(error as Error).message}`
-    setStatus('IM 绑定测试失败')
+    bindingTest.result = t('settings.agentWorkspace.bindingTestFailedWithMessage', { message: (error as Error).message })
+    setStatus(t('settings.agentWorkspace.bindingTestFailed'))
   } finally {
     bindingTest.running = false
   }
@@ -725,16 +736,16 @@ async function removeMemory (entry: MemoryEntry) {
 
 async function compactMemory () {
   if (!window.electronAPI?.compactMemory || memoryCompacting.value) return
-  if (!window.confirm('AI 将读取当前所有记忆，生成删除、合并和改写方案；置顶记忆不会被自动删除。是否继续？')) return
+  if (!window.confirm(t('settings.agentWorkspace.memoryCompactConfirm'))) return
 
   memoryCompactionStarting.value = true
-  setStatus('正在启动 AI 记忆整理...')
+  setStatus(t('settings.agentWorkspace.memoryCompactionStarting'))
   try {
     const result = await window.electronAPI.compactMemory()
     await loadMemory()
     setStatus(formatMemoryCompactionResult(result))
   } catch (err) {
-    setStatus(`AI 记忆整理失败：${(err as Error).message}`)
+    setStatus(t('settings.agentWorkspace.memoryCompactionFailed', { message: (err as Error).message }))
   } finally {
     memoryCompactionStarting.value = false
     void syncMemoryCompactionStatus()
@@ -793,24 +804,24 @@ watch(activeTab, (nextTab, previousTab) => {
   <div class="workspace-panel">
     <div class="panel-header">
       <div>
-        <h2>Agent 工作台</h2>
-        <p>管理自定义 Agent、Agent 群组、IM 绑定以及长期记忆。</p>
+        <h2>{{ $t('settings.agentWorkspace.title') }}</h2>
+        <p>{{ $t('settings.agentWorkspace.description') }}</p>
       </div>
       <span v-if="statusMessage" class="status-chip">{{ statusMessage }}</span>
     </div>
 
     <div class="tab-strip">
       <button :class="['tab-btn', { active: activeTab === 'agents' }]" @click="activeTab = 'agents'">Agent</button>
-      <button :class="['tab-btn', { active: activeTab === 'groups' }]" @click="activeTab = 'groups'">群组</button>
-      <button :class="['tab-btn', { active: activeTab === 'bindings' }]" @click="activeTab = 'bindings'">IM 绑定</button>
-      <button :class="['tab-btn', { active: activeTab === 'memory' }]" @click="activeTab = 'memory'">记忆</button>
+      <button :class="['tab-btn', { active: activeTab === 'groups' }]" @click="activeTab = 'groups'">{{ $t('settings.agentWorkspace.tabGroups') }}</button>
+      <button :class="['tab-btn', { active: activeTab === 'bindings' }]" @click="activeTab = 'bindings'">{{ $t('settings.agentWorkspace.tabBindings') }}</button>
+      <button :class="['tab-btn', { active: activeTab === 'memory' }]" @click="activeTab = 'memory'">{{ $t('settings.agentWorkspace.tabMemory') }}</button>
     </div>
 
     <div v-if="activeTab === 'agents'" class="workspace-grid">
       <aside class="list-panel">
         <div class="list-toolbar">
-          <button class="ghost-btn" @click="loadAgentIntoDraft(null)">新建 Agent</button>
-          <button class="ghost-btn" @click="loadAgents">刷新</button>
+          <button class="ghost-btn" @click="loadAgentIntoDraft(null)">{{ $t('settings.agentWorkspace.newAgent') }}</button>
+          <button class="ghost-btn" @click="loadAgents">{{ $t('settings.agentWorkspace.refresh') }}</button>
         </div>
         <button
           v-for="agent in agents"
@@ -822,7 +833,7 @@ watch(activeTab, (nextTab, previousTab) => {
             <span class="list-item-icon">{{ agent.icon || '🤖' }}</span>
             <div>
               <strong>{{ agent.name }}</strong>
-              <span>{{ agent.description || '无描述' }}</span>
+              <span>{{ agent.description || $t('settings.agentWorkspace.noDescription') }}</span>
             </div>
           </div>
         </button>
@@ -831,18 +842,18 @@ watch(activeTab, (nextTab, previousTab) => {
       <section class="editor-panel">
         <div class="form-grid two-col">
           <label>
-            <span>名称</span>
-            <input v-model="draftAgent.name" class="input" placeholder="例如：前端实施 Agent">
+            <span>{{ $t('settings.agentWorkspace.name') }}</span>
+            <input v-model="draftAgent.name" class="input" :placeholder="$t('settings.agentWorkspace.agentNamePlaceholder')">
           </label>
           <label>
-            <span>图标</span>
-            <input v-model="draftAgent.icon" class="input" maxlength="4" placeholder="例如：🤖">
+            <span>{{ $t('settings.agentWorkspace.icon') }}</span>
+            <input v-model="draftAgent.icon" class="input" maxlength="4" :placeholder="$t('settings.agentWorkspace.agentIconPlaceholder')">
           </label>
         </div>
 
         <div class="form-grid two-col">
           <label>
-            <span>推理强度</span>
+            <span>{{ $t('settings.agentWorkspace.reasoningStrength') }}</span>
             <select v-model="draftAgent.reasoningStrength" class="input">
               <option value="low">low</option>
               <option value="medium">medium</option>
@@ -851,61 +862,61 @@ watch(activeTab, (nextTab, previousTab) => {
             </select>
           </label>
           <label>
-            <span>模型供应商</span>
+            <span>{{ $t('settings.agentWorkspace.modelProvider') }}</span>
             <select v-model="draftAgent.providerId" class="input">
-              <option value="">请选择供应商</option>
+              <option value="">{{ $t('settings.agentWorkspace.selectProvider') }}</option>
               <option v-for="provider in providersConfig.providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
             </select>
           </label>
           <label>
-            <span>模型</span>
+            <span>{{ $t('settings.agentWorkspace.model') }}</span>
             <select v-model="draftAgent.modelId" class="input" :disabled="!draftAgent.providerId">
-              <option value="">请选择模型</option>
+              <option value="">{{ $t('settings.agentWorkspace.selectModel') }}</option>
               <option v-for="model in availableModels" :key="model" :value="model">{{ model }}</option>
             </select>
           </label>
         </div>
 
         <label>
-          <span>描述</span>
-          <input v-model="draftAgent.description" class="input" placeholder="该 Agent 的职责与边界">
+          <span>{{ $t('settings.agentWorkspace.descriptionLabel') }}</span>
+          <input v-model="draftAgent.description" class="input" :placeholder="$t('settings.agentWorkspace.agentDescriptionPlaceholder')">
         </label>
 
         <label>
-          <span>系统提示词</span>
-          <textarea v-model="draftAgent.systemPrompt" class="textarea" rows="8" placeholder="这里写 Agent 专属提示词"></textarea>
+          <span>{{ $t('settings.agentWorkspace.systemPrompt') }}</span>
+          <textarea v-model="draftAgent.systemPrompt" class="textarea" rows="8" :placeholder="$t('settings.agentWorkspace.systemPromptPlaceholder')"></textarea>
         </label>
 
         <div class="form-grid three-col multi-select-grid">
           <MultiSelectDropdown
             v-model="draftAgent.skillIds"
-            label="默认 Skills"
-            placeholder="选择一个或多个 Skill"
-            search-placeholder="搜索 Skill"
-            empty-text="暂无已安装 Skill"
+            :label="$t('settings.agentWorkspace.defaultSkills')"
+            :placeholder="$t('settings.agentWorkspace.selectSkills')"
+            :search-placeholder="$t('settings.agentWorkspace.searchSkill')"
+            :empty-text="$t('settings.agentWorkspace.noInstalledSkills')"
             :options="skillOptions"
           />
           <MultiSelectDropdown
             v-model="draftAgent.allowedTools"
-            label="允许工具"
-            placeholder="留空表示不限制"
-            search-placeholder="搜索工具"
-            empty-text="暂无可选工具"
+            :label="$t('settings.agentWorkspace.allowedTools')"
+            :placeholder="$t('settings.agentWorkspace.emptyMeansUnlimited')"
+            :search-placeholder="$t('settings.agentWorkspace.searchTool')"
+            :empty-text="$t('settings.agentWorkspace.noTools')"
             :options="toolOptions"
           />
           <MultiSelectDropdown
             v-model="draftAgent.deniedTools"
-            label="拒绝工具"
-            placeholder="选择要禁用的工具"
-            search-placeholder="搜索工具"
-            empty-text="暂无可选工具"
+            :label="$t('settings.agentWorkspace.deniedTools')"
+            :placeholder="$t('settings.agentWorkspace.selectDisabledTools')"
+            :search-placeholder="$t('settings.agentWorkspace.searchTool')"
+            :empty-text="$t('settings.agentWorkspace.noTools')"
             :options="toolOptions"
           />
         </div>
 
         <div class="check-grid">
           <div>
-            <h3>记忆作用域</h3>
+            <h3>{{ $t('settings.agentWorkspace.memoryScopes') }}</h3>
             <label v-for="scope in ['user', 'agent', 'project', 'group', 'channel']" :key="scope" class="check-row">
               <input
                 :checked="draftAgent.memoryScopes.includes(scope as AgentMemoryScope)"
@@ -917,23 +928,23 @@ watch(activeTab, (nextTab, previousTab) => {
           </div>
 
           <div>
-            <h3>记忆写入策略</h3>
-            <label class="check-row"><input v-model="draftAgent.allowUserTraits" type="checkbox"><span>保留用户特征</span></label>
-            <label class="check-row"><input v-model="draftAgent.allowAgentSkills" type="checkbox"><span>保留 Agent 技能</span></label>
-            <label class="check-row"><input v-model="draftAgent.allowSteps" type="checkbox"><span>保留重要步骤</span></label>
-            <label class="check-row"><input v-model="draftAgent.allowKnowledge" type="checkbox"><span>保留知识点</span></label>
+            <h3>{{ $t('settings.agentWorkspace.memoryWritePolicy') }}</h3>
+            <label class="check-row"><input v-model="draftAgent.allowUserTraits" type="checkbox"><span>{{ $t('settings.agentWorkspace.keepUserTraits') }}</span></label>
+            <label class="check-row"><input v-model="draftAgent.allowAgentSkills" type="checkbox"><span>{{ $t('settings.agentWorkspace.keepAgentSkills') }}</span></label>
+            <label class="check-row"><input v-model="draftAgent.allowSteps" type="checkbox"><span>{{ $t('settings.agentWorkspace.keepImportantSteps') }}</span></label>
+            <label class="check-row"><input v-model="draftAgent.allowKnowledge" type="checkbox"><span>{{ $t('settings.agentWorkspace.keepKnowledge') }}</span></label>
           </div>
 
           <div>
-            <h3>自动回复</h3>
-            <label class="check-row"><input v-model="draftAgent.autoReplyEnabled" type="checkbox"><span>启用自动回复</span></label>
-            <label class="check-row"><input v-model="draftAgent.autoReplyRequireMention" type="checkbox"><span>需要 @ 才回复</span></label>
+            <h3>{{ $t('settings.agentWorkspace.autoReply') }}</h3>
+            <label class="check-row"><input v-model="draftAgent.autoReplyEnabled" type="checkbox"><span>{{ $t('settings.agentWorkspace.enableAutoReply') }}</span></label>
+            <label class="check-row"><input v-model="draftAgent.autoReplyRequireMention" type="checkbox"><span>{{ $t('settings.agentWorkspace.requireMention') }}</span></label>
           </div>
         </div>
 
         <div class="action-row">
-          <button class="primary-btn" @click="saveAgent">保存 Agent</button>
-          <button class="ghost-btn" @click="removeAgent" :disabled="!draftAgent.id">删除 Agent</button>
+          <button class="primary-btn" @click="saveAgent">{{ $t('settings.agentWorkspace.saveAgent') }}</button>
+          <button class="ghost-btn" @click="removeAgent" :disabled="!draftAgent.id">{{ $t('settings.agentWorkspace.deleteAgent') }}</button>
         </div>
       </section>
     </div>
@@ -941,8 +952,8 @@ watch(activeTab, (nextTab, previousTab) => {
     <div v-else-if="activeTab === 'groups'" class="workspace-grid">
       <aside class="list-panel">
         <div class="list-toolbar">
-          <button class="ghost-btn" @click="loadGroupIntoDraft(null)">新建群组</button>
-          <button class="ghost-btn" @click="loadGroups">刷新</button>
+          <button class="ghost-btn" @click="loadGroupIntoDraft(null)">{{ $t('settings.agentWorkspace.newGroup') }}</button>
+          <button class="ghost-btn" @click="loadGroups">{{ $t('settings.agentWorkspace.refresh') }}</button>
         </div>
         <button
           v-for="group in groups"
@@ -954,7 +965,7 @@ watch(activeTab, (nextTab, previousTab) => {
             <span class="list-item-icon group">{{ group.icon || '👥' }}</span>
             <div>
               <strong>{{ group.name }}</strong>
-              <span>{{ group.description || '无描述' }}</span>
+              <span>{{ group.description || $t('settings.agentWorkspace.noDescription') }}</span>
             </div>
           </div>
         </button>
@@ -963,44 +974,44 @@ watch(activeTab, (nextTab, previousTab) => {
       <section class="editor-panel">
         <div class="form-grid two-col">
           <label>
-            <span>群组名称</span>
-            <input v-model="draftGroup.name" class="input" placeholder="例如：前端修复组">
+            <span>{{ $t('settings.agentWorkspace.groupName') }}</span>
+            <input v-model="draftGroup.name" class="input" :placeholder="$t('settings.agentWorkspace.groupNamePlaceholder')">
           </label>
           <label>
-            <span>图标</span>
-            <input v-model="draftGroup.icon" class="input" maxlength="4" placeholder="例如：👥">
+            <span>{{ $t('settings.agentWorkspace.icon') }}</span>
+            <input v-model="draftGroup.icon" class="input" maxlength="4" :placeholder="$t('settings.agentWorkspace.groupIconPlaceholder')">
           </label>
         </div>
 
         <div class="form-grid two-col">
           <label>
-            <span>协调 Agent</span>
+            <span>{{ $t('settings.agentWorkspace.coordinatorAgent') }}</span>
             <select v-model="draftGroup.coordinatorAgentId" class="input">
-              <option value="">请选择</option>
+              <option value="">{{ $t('settings.agentWorkspace.pleaseSelect') }}</option>
               <option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
             </select>
           </label>
         </div>
 
         <label>
-          <span>描述</span>
-          <input v-model="draftGroup.description" class="input" placeholder="群组的目标与职责">
+          <span>{{ $t('settings.agentWorkspace.descriptionLabel') }}</span>
+          <input v-model="draftGroup.description" class="input" :placeholder="$t('settings.agentWorkspace.groupDescriptionPlaceholder')">
         </label>
 
         <div class="form-grid two-col">
           <label>
-            <span>最大轮次</span>
+            <span>{{ $t('settings.agentWorkspace.maxRounds') }}</span>
             <input v-model.number="draftGroup.maxRounds" class="input" min="1" max="5" type="number">
           </label>
           <label>
-            <span>最大并行成员</span>
+            <span>{{ $t('settings.agentWorkspace.maxParallelWorkers') }}</span>
             <input v-model.number="draftGroup.maxParallelWorkers" class="input" min="1" max="5" type="number">
           </label>
         </div>
 
         <div class="check-grid">
           <div>
-            <h3>成员</h3>
+            <h3>{{ $t('settings.agentWorkspace.members') }}</h3>
             <label v-for="agent in agents" :key="agent.id" class="check-row">
               <input
                 :checked="draftGroup.memberAgentIds.includes(agent.id)"
@@ -1012,7 +1023,7 @@ watch(activeTab, (nextTab, previousTab) => {
           </div>
 
           <div>
-            <h3>共享记忆作用域</h3>
+            <h3>{{ $t('settings.agentWorkspace.sharedMemoryScopes') }}</h3>
             <label v-for="scope in ['group', 'project', 'channel']" :key="scope" class="check-row">
               <input
                 :checked="draftGroup.sharedMemoryScopes.includes(scope as 'group' | 'project' | 'channel')"
@@ -1024,15 +1035,15 @@ watch(activeTab, (nextTab, previousTab) => {
           </div>
 
           <div>
-            <h3>可见性</h3>
-            <label class="check-row"><input v-model="draftGroup.visibility" type="radio" value="summary_only"><span>仅摘要</span></label>
-            <label class="check-row"><input v-model="draftGroup.visibility" type="radio" value="expandable_internal_transcript"><span>可展开内部记录</span></label>
+            <h3>{{ $t('settings.agentWorkspace.visibility') }}</h3>
+            <label class="check-row"><input v-model="draftGroup.visibility" type="radio" value="summary_only"><span>{{ $t('settings.agentWorkspace.summaryOnly') }}</span></label>
+            <label class="check-row"><input v-model="draftGroup.visibility" type="radio" value="expandable_internal_transcript"><span>{{ $t('settings.agentWorkspace.expandableTranscript') }}</span></label>
           </div>
         </div>
 
         <div class="action-row">
-          <button class="primary-btn" @click="saveGroup">保存群组</button>
-          <button class="ghost-btn" @click="removeGroup" :disabled="!draftGroup.id">删除群组</button>
+          <button class="primary-btn" @click="saveGroup">{{ $t('settings.agentWorkspace.saveGroup') }}</button>
+          <button class="ghost-btn" @click="removeGroup" :disabled="!draftGroup.id">{{ $t('settings.agentWorkspace.deleteGroup') }}</button>
         </div>
       </section>
     </div>
@@ -1040,8 +1051,8 @@ watch(activeTab, (nextTab, previousTab) => {
     <div v-else-if="activeTab === 'bindings'" class="workspace-grid">
       <aside class="list-panel">
         <div class="list-toolbar">
-          <button class="ghost-btn" @click="loadBindingIntoDraft(null)">新建绑定</button>
-          <button class="ghost-btn" @click="loadBindings">刷新</button>
+          <button class="ghost-btn" @click="loadBindingIntoDraft(null)">{{ $t('settings.agentWorkspace.newBinding') }}</button>
+          <button class="ghost-btn" @click="loadBindings">{{ $t('settings.agentWorkspace.refresh') }}</button>
         </div>
         <button
           v-for="binding in bindings"
@@ -1050,18 +1061,18 @@ watch(activeTab, (nextTab, previousTab) => {
           @click="loadBindingIntoDraft(binding)"
         >
           <strong>{{ binding.name || `${binding.connectorType} · ${binding.externalChannelId || binding.id}` }}</strong>
-          <span>{{ binding.autoReply ? '自动回复' : '仅接收' }} · {{ binding.defaultAgentId || binding.boundGroupId || '默认模型' }}</span>
+          <span>{{ binding.autoReply ? $t('settings.agentWorkspace.autoReply') : $t('settings.agentWorkspace.receiveOnly') }} · {{ binding.defaultAgentId || binding.boundGroupId || $t('settings.agentWorkspace.defaultModel') }}</span>
         </button>
       </aside>
 
       <section class="editor-panel">
         <div class="form-grid two-col">
           <label>
-            <span>绑定名称</span>
-            <input v-model="draftBinding.name" class="input" placeholder="例如：飞书研发群">
+            <span>{{ $t('settings.agentWorkspace.bindingName') }}</span>
+            <input v-model="draftBinding.name" class="input" :placeholder="$t('settings.agentWorkspace.bindingNamePlaceholder')">
           </label>
           <label>
-            <span>连接器</span>
+            <span>{{ $t('settings.agentWorkspace.connector') }}</span>
             <select v-model="draftBinding.connectorType" class="input">
               <option v-for="connector in connectors" :key="connector.id" :value="connector.id">{{ connector.name }}</option>
             </select>
@@ -1081,9 +1092,9 @@ watch(activeTab, (nextTab, previousTab) => {
 
         <div class="form-grid two-col">
           <label>
-            <span>默认 Agent</span>
+            <span>{{ $t('settings.agentWorkspace.defaultAgent') }}</span>
             <select v-model="draftBinding.defaultAgentId" class="input">
-              <option value="">无</option>
+              <option value="">{{ $t('settings.agentWorkspace.none') }}</option>
               <option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
             </select>
           </label>
@@ -1091,30 +1102,30 @@ watch(activeTab, (nextTab, previousTab) => {
 
         <div class="form-grid two-col">
           <label>
-            <span>外部频道 ID</span>
-            <input v-model="draftBinding.externalChannelId" class="input" placeholder="必填">
+            <span>{{ $t('settings.agentWorkspace.externalChannelId') }}</span>
+            <input v-model="draftBinding.externalChannelId" class="input" :placeholder="$t('settings.agentWorkspace.required')">
           </label>
           <label>
-            <span>外部线程 ID</span>
-            <input v-model="draftBinding.externalThreadId" class="input" placeholder="可选">
+            <span>{{ $t('settings.agentWorkspace.externalThreadId') }}</span>
+            <input v-model="draftBinding.externalThreadId" class="input" :placeholder="$t('settings.agentWorkspace.optional')">
           </label>
         </div>
 
         <div class="form-grid three-col">
           <label>
-            <span>绑定会话 ID</span>
-            <input v-model="draftBinding.boundConversationId" class="input" placeholder="可选">
+            <span>{{ $t('settings.agentWorkspace.boundConversationId') }}</span>
+            <input v-model="draftBinding.boundConversationId" class="input" :placeholder="$t('settings.agentWorkspace.optional')">
           </label>
           <label>
-            <span>绑定群组</span>
+            <span>{{ $t('settings.agentWorkspace.boundGroup') }}</span>
             <select v-model="draftBinding.boundGroupId" class="input">
-              <option value="">无</option>
+              <option value="">{{ $t('settings.agentWorkspace.none') }}</option>
               <option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }}</option>
             </select>
           </label>
           <label>
-            <span>目标项目 ID</span>
-            <input v-model="draftBinding.targetProjectId" class="input" placeholder="可选">
+            <span>{{ $t('settings.agentWorkspace.targetProjectId') }}</span>
+            <input v-model="draftBinding.targetProjectId" class="input" :placeholder="$t('settings.agentWorkspace.optional')">
           </label>
         </div>
 
@@ -1125,40 +1136,40 @@ watch(activeTab, (nextTab, previousTab) => {
               v-model="draftBinding[field.key]"
               class="input"
               :type="field.secret ? 'password' : 'text'"
-              :placeholder="field.placeholder || '可选'"
+              :placeholder="field.placeholder || $t('settings.agentWorkspace.optional')"
             >
           </label>
         </div>
 
         <div class="form-grid two-col">
           <label>
-            <span>Bot 用户 ID</span>
-            <input v-model="draftBinding.botUserId" class="input" placeholder="可选，用于忽略机器人自己的消息">
+            <span>{{ $t('settings.agentWorkspace.botUserId') }}</span>
+            <input v-model="draftBinding.botUserId" class="input" :placeholder="$t('settings.agentWorkspace.botUserIdPlaceholder')">
           </label>
         </div>
 
         <div class="check-grid single-col">
-          <label class="check-row"><input v-model="draftBinding.autoReply" type="checkbox"><span>自动回复</span></label>
-          <label class="check-row"><input v-model="draftBinding.requireApprovalForRiskyTools" type="checkbox"><span>危险工具仍需审批</span></label>
+          <label class="check-row"><input v-model="draftBinding.autoReply" type="checkbox"><span>{{ $t('settings.agentWorkspace.autoReply') }}</span></label>
+          <label class="check-row"><input v-model="draftBinding.requireApprovalForRiskyTools" type="checkbox"><span>{{ $t('settings.agentWorkspace.requireRiskyApproval') }}</span></label>
         </div>
 
         <div class="binding-test-card">
           <div class="binding-test-head">
-            <strong>本地测试</strong>
-            <span>保存后可直接验证 Agent 回复链路</span>
+            <strong>{{ $t('settings.agentWorkspace.localTest') }}</strong>
+            <span>{{ $t('settings.agentWorkspace.localTestHint') }}</span>
           </div>
           <div class="binding-test-row">
-            <input v-model="bindingTest.text" class="input" placeholder="输入一条模拟 IM 消息">
+            <input v-model="bindingTest.text" class="input" :placeholder="$t('settings.agentWorkspace.bindingTestPlaceholder')">
             <button class="ghost-btn" type="button" :disabled="!draftBinding.id || bindingTest.running" @click="testBindingReply">
-              {{ bindingTest.running ? '测试中...' : '发送测试' }}
+              {{ bindingTest.running ? $t('settings.agentWorkspace.testing') : $t('settings.agentWorkspace.sendTest') }}
             </button>
           </div>
           <p v-if="bindingTest.result" class="binding-test-result">{{ bindingTest.result }}</p>
         </div>
 
         <div class="action-row">
-          <button class="primary-btn" @click="saveBinding">保存绑定</button>
-          <button class="ghost-btn" @click="removeBinding" :disabled="!draftBinding.id">删除绑定</button>
+          <button class="primary-btn" @click="saveBinding">{{ $t('settings.agentWorkspace.saveBinding') }}</button>
+          <button class="ghost-btn" @click="removeBinding" :disabled="!draftBinding.id">{{ $t('settings.agentWorkspace.deleteBinding') }}</button>
         </div>
       </section>
     </div>
@@ -1169,48 +1180,48 @@ watch(activeTab, (nextTab, previousTab) => {
           v-model="memoryQuery"
           class="input memory-search"
           type="search"
-          placeholder="搜索标题、摘要、详情或标签"
+          :placeholder="$t('settings.agentWorkspace.memorySearchPlaceholder')"
           @keyup.enter="loadMemory"
         >
         <span :class="['memory-filter-pill', { active: hasMemoryScopeFilter }]">{{ memoryScopeFilterText }}</span>
-        <button class="primary-btn" type="button" @click="loadMemory">查询</button>
-        <button :class="['ghost-btn', { active: showMemoryFilters }]" type="button" @click="showMemoryFilters = !showMemoryFilters">筛选</button>
-        <button class="ghost-btn" type="button" @click="toggleMemoryCreator">{{ addingMemory ? '收起添加' : '手动添加' }}</button>
+        <button class="primary-btn" type="button" @click="loadMemory">{{ $t('settings.agentWorkspace.query') }}</button>
+        <button :class="['ghost-btn', { active: showMemoryFilters }]" type="button" @click="showMemoryFilters = !showMemoryFilters">{{ $t('settings.agentWorkspace.filter') }}</button>
+        <button class="ghost-btn" type="button" @click="toggleMemoryCreator">{{ addingMemory ? $t('settings.agentWorkspace.collapseAdd') : $t('settings.agentWorkspace.manualAdd') }}</button>
         <button class="ghost-btn" :disabled="memoryCompacting" @click="compactMemory">
-          {{ memoryCompacting ? '整理中...' : 'AI 整理' }}
+          {{ memoryCompacting ? $t('settings.agentWorkspace.compacting') : $t('settings.agentWorkspace.aiCompact') }}
         </button>
       </div>
 
       <div v-if="showMemoryFilters" class="memory-filter-row">
         <label>
-          <span>作用域</span>
+          <span>{{ $t('settings.agentWorkspace.scope') }}</span>
           <select v-model="memoryScopeType" class="input memory-scope-select">
-            <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ $t(option.labelKey) }}</option>
           </select>
         </label>
         <label>
           <span>Scope ID</span>
           <input v-model="memoryScopeId" class="input memory-scope-id" placeholder="local-user / agent_xxx / project_xxx" @keyup.enter="loadMemory">
         </label>
-        <button class="ghost-btn" type="button" :disabled="!hasMemoryScopeFilter" @click="clearMemoryScopeFilter">全部</button>
+        <button class="ghost-btn" type="button" :disabled="!hasMemoryScopeFilter" @click="clearMemoryScopeFilter">{{ $t('settings.agentWorkspace.all') }}</button>
       </div>
 
       <form v-if="addingMemory" class="memory-create-card" @submit.prevent="saveManualMemory">
         <div class="memory-create-grid">
           <label>
-            <span>标题</span>
-            <input v-model="draftMemory.title" class="input" placeholder="例如：偏好暗色紧凑界面">
+            <span>{{ $t('settings.agentWorkspace.memoryTitle') }}</span>
+            <input v-model="draftMemory.title" class="input" :placeholder="$t('settings.agentWorkspace.memoryTitlePlaceholder')">
           </label>
           <label>
-            <span>类型</span>
+            <span>{{ $t('settings.agentWorkspace.type') }}</span>
             <select v-model="draftMemory.memoryType" class="input">
-              <option v-for="option in memoryTypeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              <option v-for="option in memoryTypeOptions" :key="option.value" :value="option.value">{{ $t(option.labelKey) }}</option>
             </select>
           </label>
           <label>
-            <span>作用域</span>
+            <span>{{ $t('settings.agentWorkspace.scope') }}</span>
             <select v-model="draftMemory.scopeType" class="input">
-              <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ $t(option.labelKey) }}</option>
             </select>
           </label>
           <label>
@@ -1218,25 +1229,25 @@ watch(activeTab, (nextTab, previousTab) => {
             <input v-model="draftMemory.scopeId" class="input" placeholder="local-user / agent_xxx / project_xxx">
           </label>
           <label class="memory-create-summary">
-            <span>摘要</span>
-            <textarea v-model="draftMemory.summary" class="textarea" rows="2" placeholder="写入会被检索和注入上下文的核心内容" />
+            <span>{{ $t('settings.agentWorkspace.summary') }}</span>
+            <textarea v-model="draftMemory.summary" class="textarea" rows="2" :placeholder="$t('settings.agentWorkspace.memorySummaryPlaceholder')" />
           </label>
           <label class="memory-create-summary">
-            <span>详情</span>
-            <textarea v-model="draftMemory.details" class="textarea" rows="3" placeholder="可选，补充背景或例子" />
+            <span>{{ $t('settings.agentWorkspace.details') }}</span>
+            <textarea v-model="draftMemory.details" class="textarea" rows="3" :placeholder="$t('settings.agentWorkspace.memoryDetailsPlaceholder')" />
           </label>
           <label>
-            <span>标签</span>
-            <input v-model="draftMemory.tagsText" class="input" placeholder="逗号或换行分隔">
+            <span>{{ $t('settings.agentWorkspace.tags') }}</span>
+            <input v-model="draftMemory.tagsText" class="input" :placeholder="$t('settings.agentWorkspace.tagsPlaceholder')">
           </label>
           <label class="check-row memory-pin-row">
             <input v-model="draftMemory.pinned" type="checkbox">
-            <span>置顶</span>
+            <span>{{ $t('settings.agentWorkspace.pin') }}</span>
           </label>
         </div>
         <div class="action-row memory-create-actions">
-          <button class="primary-btn" type="submit" :disabled="savingMemory">{{ savingMemory ? '保存中...' : '保存记忆' }}</button>
-          <button class="ghost-btn" type="button" @click="addingMemory = false">取消</button>
+          <button class="primary-btn" type="submit" :disabled="savingMemory">{{ savingMemory ? $t('common.saving') : $t('settings.agentWorkspace.saveMemory') }}</button>
+          <button class="ghost-btn" type="button" @click="addingMemory = false">{{ $t('common.cancel') }}</button>
         </div>
       </form>
 
@@ -1246,7 +1257,7 @@ watch(activeTab, (nextTab, previousTab) => {
 
       <div class="memory-list">
         <div v-if="memoryEntries.length === 0" class="memory-empty">
-          没有匹配的记忆，可以手动添加一条。
+          {{ $t('settings.agentWorkspace.noMemoryMatches') }}
         </div>
         <article v-for="entry in memoryEntries" :key="entry.id" class="memory-card">
           <div class="memory-card-head">
@@ -1255,13 +1266,13 @@ watch(activeTab, (nextTab, previousTab) => {
               <span>{{ memoryTypeLabel(entry.memoryType) }} · {{ memoryScopeLabel(entry.scopeType) }} / {{ entry.scopeId }}</span>
             </div>
             <div class="memory-actions">
-              <button class="ghost-btn small" @click="toggleMemoryPinned(entry)">{{ entry.pinned ? '取消置顶' : '置顶' }}</button>
-              <button class="ghost-btn small danger" @click="removeMemory(entry)">删除</button>
+              <button class="ghost-btn small" @click="toggleMemoryPinned(entry)">{{ entry.pinned ? $t('settings.agentWorkspace.unpin') : $t('settings.agentWorkspace.pin') }}</button>
+              <button class="ghost-btn small danger" @click="removeMemory(entry)">{{ $t('common.delete') }}</button>
             </div>
           </div>
           <p>{{ entry.summary }}</p>
           <p v-if="entry.details" class="memory-details">{{ entry.details }}</p>
-          <small>{{ entry.tags.join(', ') || '无标签' }}</small>
+          <small>{{ entry.tags.join(', ') || $t('settings.agentWorkspace.noTags') }}</small>
         </article>
       </div>
     </div>

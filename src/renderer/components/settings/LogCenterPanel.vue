@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import VirtualJsonTree from './VirtualJsonTree.vue'
 import { loadAIExecutionPreferences, persistAIExecutionPreferences } from '../../utils/ai-execution-preferences'
 
 const FEEDBACK_DISPLAY_DURATION_MS = 1800
+const { t, locale } = useI18n()
 const loading = ref(false)
 const deleting = ref(false)
 const savingPreferences = ref(false)
@@ -24,7 +26,7 @@ const activeSessions = computed(() => {
 function formatTime (value?: string): string {
   if (!value) return '—'
   try {
-    return new Date(value).toLocaleString()
+    return new Date(value).toLocaleString(locale.value)
   } catch {
     return value
   }
@@ -64,13 +66,13 @@ async function savePreferences (enableAiLogging: boolean) {
 
   try {
     await persistAIExecutionPreferences(executionPreferences.value)
-    setFeedback(enableAiLogging ? '日志记录已开启' : '日志记录已关闭')
+    setFeedback(enableAiLogging ? t('settings.logCenter.enabledFeedback') : t('settings.logCenter.disabledFeedback'))
   } catch (error) {
     executionPreferences.value = {
       ...executionPreferences.value,
       enableAiLogging: previousValue
     }
-    setFeedback(`保存失败：${(error as Error).message}`)
+    setFeedback(t('common.saveFailed', { message: (error as Error).message }))
   } finally {
     savingPreferences.value = false
   }
@@ -106,12 +108,12 @@ async function deleteConversationLog () {
   feedback.value = ''
   try {
     await window.electronAPI.deleteAILogConversation(activeConversationId.value)
-    feedback.value = '日志已删除'
+    feedback.value = t('settings.logCenter.deleteSuccess')
     activeConversationId.value = null
     activeConversation.value = null
     await loadConversations()
   } catch (error) {
-    feedback.value = `删除失败：${(error as Error).message}`
+    feedback.value = t('settings.logCenter.deleteFailed', { message: (error as Error).message })
   } finally {
     deleting.value = false
   }
@@ -128,19 +130,19 @@ onMounted(async () => {
     <aside class="lc-sidebar">
       <div class="lc-sidebar-header">
         <div>
-          <h3 class="lc-title">日志中心</h3>
-          <p class="lc-desc">查看已记录的 AI 对话、请求内容、工具执行和错误信息。</p>
+          <h3 class="lc-title">{{ $t('settings.logCenter.title') }}</h3>
+          <p class="lc-desc">{{ $t('settings.logCenter.description') }}</p>
         </div>
         <button class="lc-refresh" :disabled="loading" @click="loadConversations">
-          刷新
+          {{ $t('settings.logCenter.refresh') }}
         </button>
       </div>
 
       <div class="lc-status" :class="{ disabled: !executionPreferences.enableAiLogging }">
         <div class="lc-status-header">
           <div class="lc-status-copy">
-            <strong>{{ executionPreferences.enableAiLogging ? '日志记录已开启' : '日志记录未开启' }}</strong>
-            <span>{{ executionPreferences.enableAiLogging ? '新对话会持续写入日志，便于排查模型请求、工具调用和错误。' : '关闭后不会再写入新的 AI 日志，历史记录仍可继续查看。' }}</span>
+            <strong>{{ executionPreferences.enableAiLogging ? $t('settings.logCenter.loggingEnabled') : $t('settings.logCenter.loggingDisabled') }}</strong>
+            <span>{{ executionPreferences.enableAiLogging ? $t('settings.logCenter.loggingEnabledDesc') : $t('settings.logCenter.loggingDisabledDesc') }}</span>
           </div>
           <input
             type="checkbox"
@@ -150,13 +152,13 @@ onMounted(async () => {
             @change="savePreferences(($event.target as HTMLInputElement).checked)"
           >
         </div>
-        <span class="lc-status-tip">开关只影响新的对话会话，当前已生成的日志不会被删除。</span>
+        <span class="lc-status-tip">{{ $t('settings.logCenter.statusTip') }}</span>
       </div>
 
       <p v-if="feedback" class="lc-feedback">{{ feedback }}</p>
 
       <div v-if="conversations.length === 0" class="lc-empty">
-        暂无日志记录
+        {{ $t('settings.logCenter.empty') }}
       </div>
 
       <button
@@ -171,8 +173,8 @@ onMounted(async () => {
         </div>
         <div class="lc-item-meta">
           <span>{{ formatTime(conversation.updatedAt) }}</span>
-          <span>{{ conversation.sessionCount }} 次会话</span>
-          <span>{{ conversation.errorCount }} 条错误</span>
+          <span>{{ $t('settings.logCenter.sessionCount', { count: conversation.sessionCount }) }}</span>
+          <span>{{ $t('settings.logCenter.errorCount', { count: conversation.errorCount }) }}</span>
         </div>
       </button>
     </aside>
@@ -183,11 +185,11 @@ onMounted(async () => {
           <div>
             <h3 class="lc-detail-title">{{ activeConversation.title }}</h3>
             <p class="lc-detail-meta">
-              创建于 {{ formatTime(activeConversation.createdAt) }} · 更新于 {{ formatTime(activeConversation.updatedAt) }}
+              {{ $t('settings.logCenter.detailMeta', { createdAt: formatTime(activeConversation.createdAt), updatedAt: formatTime(activeConversation.updatedAt) }) }}
             </p>
           </div>
           <button class="lc-delete" :disabled="deleting" @click="deleteConversationLog">
-            删除此日志
+            {{ $t('settings.logCenter.deleteLog') }}
           </button>
         </header>
 
@@ -195,11 +197,11 @@ onMounted(async () => {
           <article v-for="session in activeSessions" :key="session.id" class="lc-session-card">
             <div class="lc-session-header">
               <div>
-                <div class="lc-session-title">会话 {{ session.id }}</div>
+                <div class="lc-session-title">{{ $t('settings.logCenter.sessionTitle', { id: session.id }) }}</div>
                 <div class="lc-session-meta">
-                  <span>状态：{{ session.status }}</span>
-                  <span>开始：{{ formatTime(session.startedAt) }}</span>
-                  <span>结束：{{ formatTime(session.finishedAt) }}</span>
+                  <span>{{ $t('settings.logCenter.sessionStatus', { status: session.status }) }}</span>
+                  <span>{{ $t('settings.logCenter.sessionStarted', { time: formatTime(session.startedAt) }) }}</span>
+                  <span>{{ $t('settings.logCenter.sessionFinished', { time: formatTime(session.finishedAt) }) }}</span>
                 </div>
               </div>
               <div class="lc-session-tags">
@@ -211,35 +213,35 @@ onMounted(async () => {
             </div>
 
             <details open class="lc-section">
-              <summary>上传给 AI 的消息 ({{ session.uploadedMessages.length }})</summary>
+              <summary>{{ $t('settings.logCenter.uploadedMessages', { count: session.uploadedMessages.length }) }}</summary>
               <div class="lc-section-body">
                 <VirtualJsonTree :value="session.uploadedMessages" :max-height="360" />
               </div>
             </details>
 
             <details class="lc-section">
-              <summary>模型请求 / 响应 ({{ session.providerCalls.length }})</summary>
+              <summary>{{ $t('settings.logCenter.providerCalls', { count: session.providerCalls.length }) }}</summary>
               <div class="lc-section-body">
                 <VirtualJsonTree :value="session.providerCalls" :max-height="360" />
               </div>
             </details>
 
             <details class="lc-section">
-              <summary>工具调用 ({{ session.toolExecutions.length }})</summary>
+              <summary>{{ $t('settings.logCenter.toolExecutions', { count: session.toolExecutions.length }) }}</summary>
               <div class="lc-section-body">
                 <VirtualJsonTree :value="session.toolExecutions" :max-height="360" />
               </div>
             </details>
 
             <details class="lc-section" :open="session.errors.length > 0">
-              <summary>错误记录 ({{ session.errors.length }})</summary>
+              <summary>{{ $t('settings.logCenter.errors', { count: session.errors.length }) }}</summary>
               <div class="lc-section-body">
                 <VirtualJsonTree :value="session.errors" :max-height="300" />
               </div>
             </details>
 
             <details v-if="session.finalAssistantMessage" class="lc-section">
-              <summary>最终回复</summary>
+              <summary>{{ $t('settings.logCenter.finalReply') }}</summary>
               <div class="lc-section-body">
                 <VirtualJsonTree :value="session.finalAssistantMessage" :max-height="280" />
               </div>
@@ -249,7 +251,7 @@ onMounted(async () => {
       </template>
 
       <div v-else class="lc-detail-empty">
-        请选择左侧一条日志记录查看详情。
+        {{ $t('settings.logCenter.detailEmpty') }}
       </div>
     </section>
   </div>

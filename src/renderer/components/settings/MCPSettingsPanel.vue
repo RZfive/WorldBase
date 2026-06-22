@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 interface MCPServerDraft {
   id: string
@@ -17,6 +18,7 @@ interface MCPServerDraft {
 
 const DEFAULT_TIMEOUT_MS = 15000
 const FEEDBACK_DISPLAY_DURATION_MS = 2400
+const { t, locale } = useI18n()
 
 const servers = ref<MCPServerConfig[]>([])
 const state = ref<MCPStateSnapshot>({ servers: [], updatedAt: new Date().toISOString() })
@@ -93,10 +95,10 @@ function setStatus (message: string) {
 
 function statusLabel (value?: MCPServerSnapshot['status']): string {
   switch (value) {
-    case 'connected': return '已连接'
-    case 'connecting': return '连接中'
-    case 'error': return '异常'
-    default: return '未连接'
+    case 'connected': return t('settings.mcp.statusConnected')
+    case 'connecting': return t('settings.mcp.statusConnecting')
+    case 'error': return t('settings.mcp.statusError')
+    default: return t('settings.mcp.statusDisconnected')
   }
 }
 
@@ -110,7 +112,7 @@ function statusClass (value?: MCPServerSnapshot['status']): string {
 }
 
 function sortServers () {
-  servers.value = [...servers.value].sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+  servers.value = [...servers.value].sort((left, right) => left.name.localeCompare(locale.value))
 }
 
 function encodeArgs (args: string[]): string {
@@ -213,7 +215,7 @@ async function loadData () {
       selectedServerId.value = ''
     }
   } catch (error) {
-    setStatus(`加载 MCP 配置失败: ${(error as Error).message}`)
+    setStatus(t('settings.mcp.loadFailed', { message: (error as Error).message }))
   }
 }
 
@@ -251,7 +253,7 @@ async function persistServers (successMessage: string) {
     state.value = await window.electronAPI.getMcpState()
     setStatus(successMessage)
   } catch (error) {
-    setStatus(`保存 MCP 配置失败: ${(error as Error).message}`)
+    setStatus(t('settings.mcp.saveFailed', { message: (error as Error).message }))
   } finally {
     saving.value = false
   }
@@ -262,15 +264,15 @@ async function saveDraft () {
 
   const nextServer = materializeDraft(draft.value)
   if (!nextServer.name) {
-    setStatus('请填写服务器名称')
+    setStatus(t('settings.mcp.requiredName'))
     return
   }
   if (nextServer.transport === 'stdio' && !nextServer.command) {
-    setStatus('stdio 模式下必须填写启动命令')
+    setStatus(t('settings.mcp.requiredCommand'))
     return
   }
   if (nextServer.transport !== 'stdio' && !nextServer.url) {
-    setStatus('HTTP / SSE 模式下必须填写服务 URL')
+    setStatus(t('settings.mcp.requiredUrl'))
     return
   }
 
@@ -285,13 +287,13 @@ async function saveDraft () {
   selectedServerId.value = nextServer.id
   editing.value = false
   draft.value = null
-  await persistServers('MCP 服务器配置已保存')
+  await persistServers(t('settings.mcp.saved'))
 }
 
 async function deleteSelected () {
   const server = selectedConfig.value
   if (!server) return
-  if (!window.confirm(`确认删除 MCP 服务器“${server.name}”吗？`)) return
+  if (!window.confirm(t('settings.mcp.deleteConfirm', { name: server.name }))) return
 
   servers.value = servers.value.filter(item => item.id !== server.id)
   if (selectedServerId.value === server.id) {
@@ -299,7 +301,7 @@ async function deleteSelected () {
   }
   editing.value = false
   draft.value = null
-  await persistServers('MCP 服务器已删除')
+  await persistServers(t('settings.mcp.deleted'))
 }
 
 async function refreshSelected () {
@@ -310,7 +312,7 @@ async function refreshSelected () {
     const result = await window.electronAPI.refreshMcpServer(serverId || undefined)
     if ('servers' in result) {
       state.value = result
-      setStatus('已刷新全部 MCP 服务器状态')
+      setStatus(t('settings.mcp.refreshedAll'))
     } else {
       state.value = {
         ...state.value,
@@ -318,12 +320,12 @@ async function refreshSelected () {
         servers: state.value.servers
           .filter(server => server.id !== result.id)
           .concat(result)
-          .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+          .sort((left, right) => left.name.localeCompare(locale.value))
       }
-      setStatus(`已刷新 ${result.name}`)
+      setStatus(t('settings.mcp.refreshedOne', { name: result.name }))
     }
   } catch (error) {
-    setStatus(`刷新 MCP 状态失败: ${(error as Error).message}`)
+    setStatus(t('settings.mcp.refreshFailed', { message: (error as Error).message }))
   } finally {
     refreshing.value = false
   }
@@ -340,21 +342,21 @@ async function disconnectSelected () {
       servers: state.value.servers
         .filter(server => server.id !== snapshot.id)
         .concat(snapshot)
-        .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+        .sort((left, right) => left.name.localeCompare(locale.value))
     }
-    setStatus(`已断开 ${snapshot.name}`)
+    setStatus(t('settings.mcp.disconnected', { name: snapshot.name }))
   } catch (error) {
-    setStatus(`断开 MCP 连接失败: ${(error as Error).message}`)
+    setStatus(t('settings.mcp.disconnectFailed', { message: (error as Error).message }))
   } finally {
     refreshing.value = false
   }
 }
 
 function formatTimestamp (value?: string | null): string {
-  if (!value) return '尚未刷新'
+  if (!value) return t('settings.mcp.neverRefreshed')
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN')
+  return date.toLocaleString(locale.value)
 }
 </script>
 
@@ -363,18 +365,18 @@ function formatTimestamp (value?: string | null): string {
     <aside class="mcp-sidebar">
       <div class="mcp-sidebar-header">
         <div>
-          <h3>MCP 服务器</h3>
+          <h3>{{ $t('settings.mcp.title') }}</h3>
         </div>
         <div class="mcp-sidebar-actions">
           <button class="ghost-btn" type="button" @click="refreshSelected" :disabled="refreshing">
-            {{ refreshing ? '刷新中…' : '刷新' }}
+            {{ refreshing ? $t('settings.mcp.refreshing') : $t('settings.mcp.refresh') }}
           </button>
-          <button class="primary-btn" type="button" @click="startAdd">新增</button>
+          <button class="primary-btn" type="button" @click="startAdd">{{ $t('settings.mcp.add') }}</button>
         </div>
       </div>
 
       <div v-if="serverCards.length === 0" class="mcp-empty-list">
-        暂无 MCP 服务器。
+        {{ $t('settings.mcp.emptyList') }}
       </div>
 
       <button
@@ -389,14 +391,14 @@ function formatTimestamp (value?: string | null): string {
           <span class="mcp-status-dot" :class="statusClass(item.snapshot?.status)" />
           <div class="mcp-server-card-titles">
             <strong>{{ item.config.name }}</strong>
-            <span>{{ item.config.transport }} · {{ item.config.enabled ? '已启用' : '已禁用' }}</span>
+            <span>{{ item.config.transport }} · {{ item.config.enabled ? $t('settings.mcp.enabled') : $t('settings.mcp.disabled') }}</span>
           </div>
         </div>
         <div class="mcp-server-card-bottom">
           <span>{{ statusLabel(item.snapshot?.status) }}</span>
-          <span>{{ item.snapshot?.tools.length || 0 }} tools</span>
-          <span>{{ item.snapshot?.resources.length || 0 }} resources</span>
-          <span>{{ item.snapshot?.prompts.length || 0 }} prompts</span>
+          <span>{{ $t('settings.mcp.toolsCount', { count: item.snapshot?.tools.length || 0 }) }}</span>
+          <span>{{ $t('settings.mcp.resourcesCount', { count: item.snapshot?.resources.length || 0 }) }}</span>
+          <span>{{ $t('settings.mcp.promptsCount', { count: item.snapshot?.prompts.length || 0 }) }}</span>
         </div>
       </button>
     </aside>
@@ -404,13 +406,13 @@ function formatTimestamp (value?: string | null): string {
     <section class="mcp-main">
       <div class="mcp-main-header">
         <div>
-          <h3>{{ editing ? (draft?.name || '新增 MCP 服务器') : (selectedConfig?.name || 'MCP 管理') }}</h3>
+          <h3>{{ editing ? (draft?.name || $t('settings.mcp.addTitle')) : (selectedConfig?.name || $t('settings.mcp.manageTitle')) }}</h3>
         </div>
 
         <div class="mcp-main-actions" v-if="!editing && selectedConfig">
-          <button class="ghost-btn" type="button" @click="startEdit">编辑</button>
-          <button class="ghost-btn" type="button" @click="disconnectSelected" :disabled="refreshing">断开</button>
-          <button class="danger-btn" type="button" @click="deleteSelected">删除</button>
+          <button class="ghost-btn" type="button" @click="startEdit">{{ $t('settings.mcp.edit') }}</button>
+          <button class="ghost-btn" type="button" @click="disconnectSelected" :disabled="refreshing">{{ $t('settings.mcp.disconnect') }}</button>
+          <button class="danger-btn" type="button" @click="deleteSelected">{{ $t('common.delete') }}</button>
         </div>
       </div>
 
@@ -419,12 +421,12 @@ function formatTimestamp (value?: string | null): string {
       <div v-if="editing && draft" class="mcp-editor-card">
         <div class="mcp-form-grid">
           <label class="mcp-field">
-            <span>名称</span>
-            <input v-model="draft.name" type="text" placeholder="例如：Filesystem / Figma / Browser" />
+            <span>{{ $t('settings.mcp.name') }}</span>
+            <input v-model="draft.name" type="text" :placeholder="$t('settings.mcp.namePlaceholder')" />
           </label>
 
           <label class="mcp-field">
-            <span>Transport</span>
+            <span>{{ $t('settings.mcp.transport') }}</span>
             <select v-model="draft.transport">
               <option value="stdio">stdio</option>
               <option value="streamable-http">streamable-http</option>
@@ -434,53 +436,53 @@ function formatTimestamp (value?: string | null): string {
 
           <label class="mcp-field checkbox-field">
             <input v-model="draft.enabled" type="checkbox" />
-            <span>启用该服务器</span>
+            <span>{{ $t('settings.mcp.enableServer') }}</span>
           </label>
 
           <label class="mcp-field">
-            <span>超时 (ms)</span>
+            <span>{{ $t('settings.mcp.timeoutMs') }}</span>
             <input v-model.number="draft.timeoutMs" type="number" min="1000" step="1000" />
           </label>
 
           <template v-if="draft.transport === 'stdio'">
             <label class="mcp-field full-span">
-              <span>启动命令</span>
-              <input v-model="draft.command" type="text" placeholder="例如：npx / uvx / node / python" />
+              <span>{{ $t('settings.mcp.command') }}</span>
+              <input v-model="draft.command" type="text" :placeholder="$t('settings.mcp.commandPlaceholder')" />
             </label>
 
             <label class="mcp-field full-span">
-              <span>工作目录</span>
-              <input v-model="draft.cwd" type="text" placeholder="可选。留空则使用应用当前工作目录" />
+              <span>{{ $t('settings.mcp.cwd') }}</span>
+              <input v-model="draft.cwd" type="text" :placeholder="$t('settings.mcp.cwdPlaceholder')" />
             </label>
 
             <label class="mcp-field full-span">
-              <span>命令参数</span>
-              <textarea v-model="draft.argsText" rows="5" placeholder="每行一个参数，例如：&#10;-y&#10;@modelcontextprotocol/server-filesystem&#10;D:\\codeProject" />
+              <span>{{ $t('settings.mcp.args') }}</span>
+              <textarea v-model="draft.argsText" rows="5" :placeholder="$t('settings.mcp.argsPlaceholder')" />
             </label>
 
             <label class="mcp-field full-span">
-              <span>环境变量</span>
-              <textarea v-model="draft.envText" rows="5" placeholder="每行一个 KEY=VALUE，例如：&#10;API_KEY=xxxx&#10;LOG_LEVEL=debug" />
+              <span>{{ $t('settings.mcp.env') }}</span>
+              <textarea v-model="draft.envText" rows="5" :placeholder="$t('settings.mcp.envPlaceholder')" />
             </label>
           </template>
 
           <template v-else>
             <label class="mcp-field full-span">
-              <span>服务 URL</span>
-              <input v-model="draft.url" type="url" placeholder="例如：https://example.com/mcp 或 http://localhost:3000/mcp" />
+              <span>{{ $t('settings.mcp.url') }}</span>
+              <input v-model="draft.url" type="url" :placeholder="$t('settings.mcp.urlPlaceholder')" />
             </label>
 
             <label class="mcp-field full-span">
-              <span>请求头</span>
-              <textarea v-model="draft.headersText" rows="5" placeholder="每行一个 KEY=VALUE，例如：&#10;Authorization=Bearer xxx&#10;X-Tenant=demo" />
+              <span>{{ $t('settings.mcp.headers') }}</span>
+              <textarea v-model="draft.headersText" rows="5" :placeholder="$t('settings.mcp.headersPlaceholder')" />
             </label>
           </template>
         </div>
 
         <div class="mcp-editor-actions">
-          <button class="ghost-btn" type="button" @click="cancelEdit">取消</button>
+          <button class="ghost-btn" type="button" @click="cancelEdit">{{ $t('common.cancel') }}</button>
           <button class="primary-btn" type="button" @click="saveDraft" :disabled="saving">
-            {{ saving ? '保存中…' : '保存并连接' }}
+            {{ saving ? $t('common.saving') : $t('settings.mcp.saveAndConnect') }}
           </button>
         </div>
       </div>
@@ -494,48 +496,48 @@ function formatTimestamp (value?: string | null): string {
               </span>
               <strong>{{ selectedConfig.name }}</strong>
             </div>
-            <span class="mcp-updated-at">上次刷新：{{ formatTimestamp(selectedSnapshot?.updatedAt) }}</span>
+            <span class="mcp-updated-at">{{ $t('settings.mcp.lastRefresh', { time: formatTimestamp(selectedSnapshot?.updatedAt) }) }}</span>
           </div>
 
           <div class="mcp-summary-grid">
             <div class="mcp-metric">
-              <span>Transport</span>
+              <span>{{ $t('settings.mcp.transport') }}</span>
               <strong>{{ selectedConfig.transport }}</strong>
             </div>
             <div class="mcp-metric">
-              <span>启用状态</span>
-              <strong>{{ selectedConfig.enabled ? '启用' : '禁用' }}</strong>
+              <span>{{ $t('settings.mcp.enabledStatus') }}</span>
+              <strong>{{ selectedConfig.enabled ? $t('settings.mcp.enable') : $t('settings.mcp.disable') }}</strong>
             </div>
             <div class="mcp-metric">
-              <span>Tools</span>
+              <span>{{ $t('settings.mcp.tools') }}</span>
               <strong>{{ detailStats.tools }}</strong>
             </div>
             <div class="mcp-metric">
-              <span>Resources</span>
+              <span>{{ $t('settings.mcp.resources') }}</span>
               <strong>{{ detailStats.resources }}</strong>
             </div>
             <div class="mcp-metric">
-              <span>Prompts</span>
+              <span>{{ $t('settings.mcp.prompts') }}</span>
               <strong>{{ detailStats.prompts }}</strong>
             </div>
             <div class="mcp-metric">
-              <span>超时</span>
+              <span>{{ $t('settings.mcp.timeout') }}</span>
               <strong>{{ selectedConfig.timeoutMs }}ms</strong>
             </div>
           </div>
 
           <div class="mcp-config-preview">
             <span v-if="selectedConfig.transport === 'stdio'">
-              <strong>命令</strong>
-              <code>{{ selectedConfig.command || '未设置' }}</code>
+              <strong>{{ $t('settings.mcp.commandShort') }}</strong>
+              <code>{{ selectedConfig.command || $t('settings.mcp.notSet') }}</code>
             </span>
             <span v-if="selectedConfig.transport === 'stdio'">
-              <strong>参数</strong>
-              <code>{{ selectedConfig.args.join(' ') || '无' }}</code>
+              <strong>{{ $t('settings.mcp.argsShort') }}</strong>
+              <code>{{ selectedConfig.args.join(' ') || $t('settings.mcp.none') }}</code>
             </span>
             <span v-if="selectedConfig.transport !== 'stdio'">
-              <strong>URL</strong>
-              <code>{{ selectedConfig.url || '未设置' }}</code>
+              <strong>{{ $t('settings.mcp.urlShort') }}</strong>
+              <code>{{ selectedConfig.url || $t('settings.mcp.notSet') }}</code>
             </span>
           </div>
 
@@ -546,49 +548,49 @@ function formatTimestamp (value?: string | null): string {
 
         <section class="mcp-list-card mcp-tools-card">
           <div class="mcp-list-card-head">
-            <h4>Tools</h4>
+            <h4>{{ $t('settings.mcp.tools') }}</h4>
             <span>{{ detailStats.tools }}</span>
           </div>
-          <div v-if="(selectedSnapshot?.tools.length || 0) === 0" class="mcp-empty-block">当前未发现远端工具。</div>
+          <div v-if="(selectedSnapshot?.tools.length || 0) === 0" class="mcp-empty-block">{{ $t('settings.mcp.emptyTools') }}</div>
           <div v-else class="mcp-entry-list">
             <div v-for="tool in selectedSnapshot?.tools || []" :key="tool.localName" class="mcp-entry mcp-tool-entry">
               <strong class="mcp-tool-name">{{ tool.name }}</strong>
               <code class="mcp-tool-local-name">{{ tool.localName }}</code>
-              <p class="mcp-tool-description">{{ tool.description || '无描述' }}</p>
+              <p class="mcp-tool-description">{{ tool.description || $t('settings.mcp.noDescription') }}</p>
             </div>
           </div>
         </section>
 
         <section class="mcp-list-card">
           <div class="mcp-list-card-head">
-            <h4>Resources</h4>
+            <h4>{{ $t('settings.mcp.resources') }}</h4>
             <span>{{ detailStats.resources }}</span>
           </div>
-          <div v-if="(selectedSnapshot?.resources.length || 0) === 0" class="mcp-empty-block">当前未发现可读资源。</div>
+          <div v-if="(selectedSnapshot?.resources.length || 0) === 0" class="mcp-empty-block">{{ $t('settings.mcp.emptyResources') }}</div>
           <div v-else class="mcp-entry-list">
             <div v-for="resource in selectedSnapshot?.resources || []" :key="resource.uri" class="mcp-entry">
               <div class="mcp-entry-title-row">
                 <strong>{{ resource.name }}</strong>
                 <code>{{ resource.uri }}</code>
               </div>
-              <p>{{ resource.description || resource.mimeType || '无描述' }}</p>
+              <p>{{ resource.description || resource.mimeType || $t('settings.mcp.noDescription') }}</p>
             </div>
           </div>
         </section>
 
         <section class="mcp-list-card">
           <div class="mcp-list-card-head">
-            <h4>Prompts</h4>
+            <h4>{{ $t('settings.mcp.prompts') }}</h4>
             <span>{{ detailStats.prompts }}</span>
           </div>
-          <div v-if="(selectedSnapshot?.prompts.length || 0) === 0" class="mcp-empty-block">当前未发现提示模板。</div>
+          <div v-if="(selectedSnapshot?.prompts.length || 0) === 0" class="mcp-empty-block">{{ $t('settings.mcp.emptyPrompts') }}</div>
           <div v-else class="mcp-entry-list">
             <div v-for="prompt in selectedSnapshot?.prompts || []" :key="prompt.name" class="mcp-entry">
               <div class="mcp-entry-title-row">
                 <strong>{{ prompt.name }}</strong>
-                <span>{{ prompt.arguments.length }} args</span>
+                <span>{{ $t('settings.mcp.argsCount', { count: prompt.arguments.length }) }}</span>
               </div>
-              <p>{{ prompt.description || '无描述' }}</p>
+              <p>{{ prompt.description || $t('settings.mcp.noDescription') }}</p>
               <div v-if="prompt.arguments.length > 0" class="mcp-arg-list">
                 <span v-for="arg in prompt.arguments" :key="arg.name" class="mcp-arg-pill">
                   {{ arg.name }}<template v-if="arg.required">*</template>
@@ -600,7 +602,7 @@ function formatTimestamp (value?: string | null): string {
       </div>
 
       <div v-else class="mcp-empty-main">
-        选择左侧服务器查看详情。
+        {{ $t('settings.mcp.selectHint') }}
       </div>
     </section>
   </div>

@@ -35,6 +35,10 @@ interface RunningApp {
   isWindow: boolean
   closable?: boolean
   savedToLaunchpad?: boolean
+  /** Present on dock items the user pinned to the dock. */
+  pinned?: boolean
+  /** Whether a pinned dock item is currently open/running. */
+  isRunning?: boolean
 }
 
 interface ProjectStatus {
@@ -141,12 +145,39 @@ const browserAutomationHandles = new Map<string, BrowserAutomationViewHandle>()
 const runningApps = ref(new Map<string, RunningApp>())
 const browserApps = ref(new Map<string, RunningApp>())
 const savedWebApps = ref<SavedWebApp[]>([])
+const pinnedDockApps = ref<PinnedDockApp[]>([])
+
+/** Running apps minus any that are pinned (pinned ones render in their own section). */
 const dockApps = computed(() => {
   const apps = new Map(runningApps.value)
   for (const [appId, app] of browserApps.value) {
     apps.set(appId, app)
   }
+  for (const pinned of pinnedDockApps.value) {
+    apps.delete(pinned.id)
+  }
   return apps
+})
+
+/** Pinned dock items resolved to renderable RunningApp shapes, with live run state. */
+const pinnedDockItems = computed<RunningApp[]>(() => {
+  return pinnedDockApps.value.map(pinned => {
+    const running = runningApps.value.get(pinned.id) || browserApps.value.get(pinned.id)
+    return {
+      id: pinned.id,
+      name: running?.name || pinned.name,
+      kind: pinned.kind,
+      type: running?.type || pinned.type || (pinned.kind === 'browser' ? 'browser' : 'unknown'),
+      icon: running?.icon || pinned.icon,
+      url: running?.url || pinned.url,
+      port: running?.port,
+      isWindow: running?.isWindow ?? false,
+      closable: running?.closable,
+      savedToLaunchpad: running?.savedToLaunchpad,
+      pinned: true,
+      isRunning: Boolean(running)
+    }
+  })
 })
 
 function resolveUrlOrigin (value: string | null | undefined): string | null {
@@ -406,6 +437,63 @@ function upsertBrowserApp (app: RunningApp) {
   const nextBrowserApps = new Map(browserApps.value)
   nextBrowserApps.set(app.id, app)
   browserApps.value = nextBrowserApps
+}
+
+async function loadPinnedDockApps () {
+  if (!window.electronAPI?.getPinnedDockApps) return
+  pinnedDockApps.value = await window.electronAPI.getPinnedDockApps()
+}
+
+async function persistPinnedDockApps (next: PinnedDockApp[]) {
+  pinnedDockApps.value = next
+  if (!window.electronAPI?.savePinnedDockApps) return
+  try {
+    await window.electronAPI.savePinnedDockApps(next)
+  } catch (err) {
+    console.error('[dock] persistPinnedDockApps failed', err)
+  }
+}
+
+function isDockAppPinned (app: RunningApp): boolean {
+  return pinnedDockApps.value.some(pinned => pinned.id === app.id)
+}
+
+function isDockAppRunning (app: RunningApp): boolean {
+  return Boolean(
+    runningApps.value.get(app.id) ||
+    browserApps.value.get(app.id) ||
+    embeddedApps.value.has(app.id)
+  )
+}
+
+async function pinAppToDock (app: RunningApp) {
+  hideDockCtx()
+  if (isDockAppPinned(app)) return
+
+  const next: PinnedDockApp = {
+    id: app.id,
+    kind: app.kind,
+    name: app.name,
+    type: app.kind === 'project' ? app.type : undefined,
+    icon: app.icon && app.icon !== '🌐' ? app.icon : undefined,
+    url: app.kind === 'browser' ? app.url : undefined,
+    addedAt: new Date().toISOString()
+  }
+  await persistPinnedDockApps([...pinnedDockApps.value, next])
+}
+
+async function unpinAppFromDock (app: RunningApp) {
+  hideDockCtx()
+  if (!isDockAppPinned(app)) return
+  await persistPinnedDockApps(pinnedDockApps.value.filter(pinned => pinned.id !== app.id))
+}
+
+async function toggleDockPin (app: RunningApp) {
+  if (isDockAppPinned(app)) {
+    await unpinAppFromDock(app)
+  } else {
+    await pinAppToDock(app)
+  }
 }
 
 interface BrowserAppOpenOptions {
@@ -696,10 +784,23 @@ async function openProjectInShell (projectId: string, mode: 'embed' | 'window' =
 
 async function switchToApp (app: RunningApp) {
   if (app.kind === 'browser') {
-    showLaunchpad.value = false
-    appChatPresentation.value = 'bubble'
-    currentView.value = 'app'
-    activeEmbeddedProjectId.value = app.id
+    // Already open — just focus it. Otherwise launch the pinned shortcut.
+    if (embeddedApps.value.has(app.id)) {
+      showLaunchpad.value = false
+      appChatPresentation.value = 'bubble'
+      currentView.value = 'app'
+      activeEmbeddedProjectId.value = app.id
+      return
+    }
+
+    if (app.url) {
+      openWebLinkInApp(app.url, {
+        appId: app.id,
+        name: app.name,
+        icon: app.icon,
+        savedToLaunchpad: resolveSavedWebAppId({ id: app.id, kind: 'browser', url: app.url }) !== null
+      })
+    }
     return
   }
 
@@ -1016,6 +1117,7 @@ onMounted(async () => {
   if (isStandaloneProjectWindow) return
 
   await loadSavedWebApps()
+  await loadPinnedDockApps()
   await refreshRunningApps()
   runningAppsInterval = setInterval(() => {
     void refreshRunningApps()
@@ -1104,6 +1206,7 @@ onUnmounted(() => {
           :current-view="currentView"
           :show-launchpad="showLaunchpad"
           :running-apps="dockApps"
+          :pinned-apps="pinnedDockItems"
           :embedded-project-id="activeEmbeddedProjectId"
           @open-chat="openChat"
           @open-studio="openStudio"
@@ -1220,14 +1323,18 @@ onUnmounted(() => {
             <div class="dock-ctx-item" @click="dockOpenSource(dockCtx.app!)">📁 打开源码</div>
             <div class="dock-ctx-item" @click="dockOptimizeInChat(dockCtx.app!)">💬 继续优化</div>
             <div class="dock-ctx-item" @click="dockShowLanAccess(dockCtx.app!)">📱 局域网访问</div>
+            <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-divider"></div>
+            <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-item dock-ctx-danger" @click="dockStopApp(dockCtx.app!)">⏹️ 停止</div>
             <div class="dock-ctx-divider"></div>
-            <div class="dock-ctx-item dock-ctx-danger" @click="dockStopApp(dockCtx.app!)">⏹️ 停止</div>
+            <div class="dock-ctx-item" @click="toggleDockPin(dockCtx.app!)">{{ isDockAppPinned(dockCtx.app!) ? '📌 从 Dock 取消固定' : '📌 固定到 Dock' }}</div>
           </template>
           <template v-else>
             <div class="dock-ctx-item" @click="dockSaveBrowserApp(dockCtx.app!)">{{ dockCtx.app?.savedToLaunchpad ? '💾 更新启动台条目' : '📌 添加到启动台' }}</div>
             <div v-if="dockCtx.app?.savedToLaunchpad" class="dock-ctx-item" @click="dockRemoveBrowserApp(dockCtx.app!)">🗑️ 从启动台移除</div>
+            <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-divider"></div>
+            <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-item dock-ctx-danger" @click="closeDockApp(dockCtx.app!.id)">✖️ 关闭网页</div>
             <div class="dock-ctx-divider"></div>
-            <div class="dock-ctx-item dock-ctx-danger" @click="closeDockApp(dockCtx.app!.id)">✖️ 关闭网页</div>
+            <div class="dock-ctx-item" @click="toggleDockPin(dockCtx.app!)">{{ isDockAppPinned(dockCtx.app!) ? '📌 从 Dock 取消固定' : '📌 固定到 Dock' }}</div>
           </template>
         </div>
       </Teleport>

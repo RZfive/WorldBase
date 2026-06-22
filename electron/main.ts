@@ -6,6 +6,7 @@ import { APP_DISPLAY_NAME } from './main-process/constants.js'
 import { mainState } from './main-process/state.js'
 import { initializeServices } from './main-process/services.js'
 import { setupIPC } from './main-process/ipc.js'
+import { setMainLocale } from '../src/main/i18n/main-i18n.js'
 import { createWindow, setupEmbeddedAppCorsWorkaround } from './main-process/windows.js'
 
 app.setName(APP_DISPLAY_NAME)
@@ -41,6 +42,10 @@ if (!gotTheLock) {
 app.whenReady().then(async () => {
   await initializeServices()
   setupEmbeddedAppCorsWorkaround()
+  // Bootstrap main-process locale from the persisted preference so IPC errors,
+  // OS notifications, and dialog titles render in the user's language from the
+  // very first interaction (the renderer reconciles its own locale separately).
+  setMainLocale(mainState.settingsStore!.getLanguagePreference())
   setupIPC()
 
   // Stream image-library thumbnails/originals from disk. Thumbnails are generated

@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 const props = defineProps<{
   active: boolean
 }>()
+
+const { t } = useI18n()
 
 const snapshot = ref<ProcessManagerSnapshot | null>(null)
 const systemStatus = ref<SystemStatusSnapshot | null>(null)
@@ -22,9 +25,9 @@ const totalMemory = computed(() => managedProcesses.value.reduce((sum, process) 
 const resourceCards = computed(() => {
   if (!systemStatus.value) {
     return [
-      { label: 'CPU', value: '不可用', detail: '资源采样未返回', tone: 'degraded' },
-      { label: '系统内存', value: '不可用', detail: '资源采样未返回', tone: 'degraded' },
-      { label: 'GPU', value: '不可用', detail: '资源采样未返回', tone: 'degraded' }
+      { label: 'CPU', value: t('settings.processManager.unavailable'), detail: t('settings.processManager.resourceSamplingUnavailable'), tone: 'degraded' },
+      { label: t('settings.processManager.systemMemory'), value: t('settings.processManager.unavailable'), detail: t('settings.processManager.resourceSamplingUnavailable'), tone: 'degraded' },
+      { label: 'GPU', value: t('settings.processManager.unavailable'), detail: t('settings.processManager.resourceSamplingUnavailable'), tone: 'degraded' }
     ]
   }
 
@@ -32,11 +35,11 @@ const resourceCards = computed(() => {
     {
       label: 'CPU',
       value: formatPercent(systemStatus.value.summary.cpuUsagePercent),
-      detail: `${systemStatus.value.cpu.model} · ${systemStatus.value.cpu.cores} 核`,
+      detail: `${systemStatus.value.cpu.model} · ${t('settings.processManager.cpuCores', { count: systemStatus.value.cpu.cores })}`,
       tone: (systemStatus.value.summary.cpuUsagePercent ?? 0) >= 85 ? 'busy' : ''
     },
     {
-      label: '系统内存',
+      label: t('settings.processManager.systemMemory'),
       value: formatPercent(systemStatus.value.summary.memoryUsagePercent),
       detail: `${formatBytes(systemStatus.value.memory.usedBytes)} / ${formatBytes(systemStatus.value.memory.totalBytes)}`,
       tone: systemStatus.value.summary.memoryUsagePercent >= 85 ? 'busy' : ''
@@ -53,10 +56,10 @@ const resourceCards = computed(() => {
 const processCards = computed(() => {
   if (!snapshot.value) return []
   return [
-    { label: '运行中', value: `${runningCount.value}`, detail: '当前活跃应用进程', tone: runningCount.value > 0 ? 'ok' : '' },
-    { label: '总进程', value: `${managedProcesses.value.length}`, detail: '受管应用总数', tone: '' },
-    { label: '总内存占用', value: formatBytes(totalMemory.value), detail: '受管应用 RSS 汇总', tone: '' },
-    { label: '遗留进程', value: `${orphanProcesses.value.length}`, detail: '可能需要手动清理', tone: orphanProcesses.value.length > 0 ? 'degraded' : 'ok' }
+    { label: t('settings.processManager.runningProcesses'), value: `${runningCount.value}`, detail: t('settings.processManager.runningProcessesDetail'), tone: runningCount.value > 0 ? 'ok' : '' },
+    { label: t('settings.processManager.totalProcesses'), value: `${managedProcesses.value.length}`, detail: t('settings.processManager.totalProcessesDetail'), tone: '' },
+    { label: t('settings.processManager.totalMemory'), value: formatBytes(totalMemory.value), detail: t('settings.processManager.totalMemoryDetail'), tone: '' },
+    { label: t('settings.processManager.orphanProcesses'), value: `${orphanProcesses.value.length}`, detail: t('settings.processManager.orphanProcessesDetail'), tone: orphanProcesses.value.length > 0 ? 'degraded' : 'ok' }
   ]
 })
 
@@ -102,7 +105,7 @@ async function loadData () {
     snapshot.value = processResult.value
   } else {
     snapshot.value = null
-    error.value = processResult.reason instanceof Error ? processResult.reason.message : '进程快照加载失败'
+    error.value = processResult.reason instanceof Error ? processResult.reason.message : t('settings.processManager.snapshotLoadFailed')
   }
 
   if (systemResult.status === 'fulfilled') {
@@ -120,7 +123,7 @@ async function doRestart (projectId: string) {
   try {
     const result = await window.electronAPI!.restartManagedProcess(projectId)
     if (!result.success) {
-      error.value = result.error || '重启失败'
+      error.value = result.error || t('settings.processManager.restartFailed')
     }
     await loadData()
   } catch (err) {
@@ -136,7 +139,7 @@ async function doStop (projectId: string) {
   try {
     const result = await window.electronAPI!.stopManagedProcess(projectId)
     if (!result.success) {
-      error.value = result.error || '停止失败'
+      error.value = result.error || t('settings.processManager.stopFailed')
     }
     await loadData()
   } catch (err) {
@@ -152,7 +155,7 @@ async function doForceKill (projectId: string) {
   try {
     const result = await window.electronAPI!.forceKillManagedProcess(projectId)
     if (!result.success) {
-      error.value = result.error || '强制终止失败'
+      error.value = result.error || t('settings.processManager.forceKillFailed')
     }
     await loadData()
   } catch (err) {
@@ -168,7 +171,7 @@ async function doKillOrphan (pid: number) {
   try {
     const result = await window.electronAPI!.killOrphanProcess(pid)
     if (!result.success) {
-      error.value = result.error || '终止遗留进程失败'
+      error.value = result.error || t('settings.processManager.killOrphanFailed')
     }
     await loadData()
   } catch (err) {
@@ -179,7 +182,7 @@ async function doKillOrphan (pid: number) {
 }
 
 function formatPercent (value?: number | null): string {
-  return typeof value === 'number' ? `${value.toFixed(1)}%` : '采样中'
+  return typeof value === 'number' ? `${value.toFixed(1)}%` : t('settings.processManager.sampling')
 }
 
 function formatBytes (value: number) {
@@ -196,19 +199,19 @@ function formatBytes (value: number) {
 
 function formatDuration (seconds?: number) {
   if (typeof seconds !== 'number') return '-'
-  if (seconds < 60) return `${Math.floor(seconds)} 秒`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时`
-  return `${Math.floor(seconds / 86400)} 天`
+  if (seconds < 60) return t('settings.processManager.seconds', { count: Math.floor(seconds) })
+  if (seconds < 3600) return t('settings.processManager.minutes', { count: Math.floor(seconds / 60) })
+  if (seconds < 86400) return t('settings.processManager.hours', { count: Math.floor(seconds / 3600) })
+  return t('settings.processManager.days', { count: Math.floor(seconds / 86400) })
 }
 
 function formatStatus (value: string) {
-  if (value === 'running') return '运行中'
-  if (value === 'starting') return '启动中'
-  if (value === 'stopping') return '停止中'
-  if (value === 'stopped' || value === 'not_started' || value === 'not_running') return '已停止'
-  if (value === 'crashed') return '已崩溃'
-  if (value === 'error') return '错误'
+  if (value === 'running') return t('settings.processManager.statusRunning')
+  if (value === 'starting') return t('settings.processManager.statusStarting')
+  if (value === 'stopping') return t('settings.processManager.statusStopping')
+  if (value === 'stopped' || value === 'not_started' || value === 'not_running') return t('settings.processManager.statusStopped')
+  if (value === 'crashed') return t('settings.processManager.statusCrashed')
+  if (value === 'error') return t('settings.processManager.statusError')
   return value
 }
 
@@ -220,10 +223,10 @@ function statusTone (value: string): string {
 }
 
 function formatGpuStatus (value: SystemStatusSnapshot['gpu']['status']) {
-  if (value === 'hardware') return '硬件加速'
-  if (value === 'software') return '软件渲染'
-  if (value === 'disabled') return '已禁用'
-  return '不可用'
+  if (value === 'hardware') return t('settings.processManager.gpuHardware')
+  if (value === 'software') return t('settings.processManager.gpuSoftware')
+  if (value === 'disabled') return t('settings.processManager.gpuDisabled')
+  return t('settings.processManager.gpuUnavailable')
 }
 
 function gpuTone (value: SystemStatusSnapshot['gpu']['status']): string {
@@ -238,7 +241,7 @@ function formatGpuFeatureSummary (featureStatus: Record<string, string>): string
     .map(([name]) => name)
 
   if (enabledFeatures.length === 0) {
-    return '未启用硬件加速功能'
+    return t('settings.processManager.gpuNoHardwareFeatures')
   }
   return enabledFeatures.slice(0, 3).join(' / ')
 }
@@ -252,10 +255,10 @@ function isAlive (status: string): boolean {
   <div class="pm-root">
     <div class="pm-header">
       <div>
-        <h3 class="pm-title">进程管理</h3>
-        <p class="pm-desc">管理当前运行的应用进程，并查看 CPU、内存、GPU 的宿主状态。</p>
+        <h3 class="pm-title">{{ $t('settings.processManager.title') }}</h3>
+        <p class="pm-desc">{{ $t('settings.processManager.description') }}</p>
       </div>
-      <button class="pm-btn" :disabled="loading" @click="loadData">刷新</button>
+      <button class="pm-btn" :disabled="loading" @click="loadData">{{ $t('settings.processManager.refresh') }}</button>
     </div>
 
     <div v-if="error" class="pm-alert">
@@ -263,10 +266,10 @@ function isAlive (status: string): boolean {
       <button class="pm-alert-close" @click="error = null">✕</button>
     </div>
 
-    <div v-if="loading && !snapshot" class="pm-empty">加载中…</div>
+    <div v-if="loading && !snapshot" class="pm-empty">{{ $t('settings.processManager.loading') }}</div>
     <div v-else-if="snapshot" class="pm-content">
       <section class="pm-section">
-        <div class="pm-section-title">主机资源</div>
+        <div class="pm-section-title">{{ $t('settings.processManager.hostResources') }}</div>
         <div class="pm-summary-grid">
           <div
             v-for="card in resourceCards"
@@ -281,7 +284,7 @@ function isAlive (status: string): boolean {
       </section>
 
       <section class="pm-section">
-        <div class="pm-section-title">进程概览</div>
+        <div class="pm-section-title">{{ $t('settings.processManager.processOverview') }}</div>
         <div class="pm-summary-grid">
           <div
             v-for="card in processCards"
@@ -296,19 +299,19 @@ function isAlive (status: string): boolean {
       </section>
 
       <section class="pm-card">
-        <div class="pm-card-header">应用进程</div>
-        <div v-if="managedProcesses.length === 0" class="pm-empty-inline">暂无应用进程</div>
+        <div class="pm-card-header">{{ $t('settings.processManager.appProcesses') }}</div>
+        <div v-if="managedProcesses.length === 0" class="pm-empty-inline">{{ $t('settings.processManager.noAppProcesses') }}</div>
         <div v-else class="pm-table-wrap">
           <table class="pm-table">
             <thead>
               <tr>
-                <th>应用名称</th>
-                <th>状态</th>
+                <th>{{ $t('settings.processManager.columnAppName') }}</th>
+                <th>{{ $t('settings.processManager.columnStatus') }}</th>
                 <th>PID</th>
-                <th>端口</th>
-                <th>内存</th>
-                <th>运行时长</th>
-                <th>操作</th>
+                <th>{{ $t('settings.processManager.columnPort') }}</th>
+                <th>{{ $t('settings.processManager.columnMemory') }}</th>
+                <th>{{ $t('settings.processManager.columnUptime') }}</th>
+                <th>{{ $t('settings.processManager.columnActions') }}</th>
               </tr>
             </thead>
             <tbody>
@@ -328,7 +331,7 @@ function isAlive (status: string): boolean {
                     v-if="isAlive(process.status)"
                     class="pm-action-btn pm-action-restart"
                     :disabled="!!actionInProgress"
-                    :title="actionInProgress === `restart:${process.projectId}` ? '重启中…' : '重启'"
+                    :title="actionInProgress === `restart:${process.projectId}` ? $t('settings.processManager.restartBusy') : $t('settings.processManager.restart')"
                     @click="doRestart(process.projectId)"
                   >
                     {{ actionInProgress === `restart:${process.projectId}` ? '⏳' : '🔄' }}
@@ -337,7 +340,7 @@ function isAlive (status: string): boolean {
                     v-if="isAlive(process.status)"
                     class="pm-action-btn pm-action-stop"
                     :disabled="!!actionInProgress"
-                    :title="actionInProgress === `stop:${process.projectId}` ? '停止中…' : '停止'"
+                    :title="actionInProgress === `stop:${process.projectId}` ? $t('settings.processManager.stopBusy') : $t('settings.processManager.stop')"
                     @click="doStop(process.projectId)"
                   >
                     {{ actionInProgress === `stop:${process.projectId}` ? '⏳' : '⏹' }}
@@ -346,7 +349,7 @@ function isAlive (status: string): boolean {
                     v-if="isAlive(process.status)"
                     class="pm-action-btn pm-action-kill"
                     :disabled="!!actionInProgress"
-                    :title="actionInProgress === `kill:${process.projectId}` ? '终止中…' : '强制终止'"
+                    :title="actionInProgress === `kill:${process.projectId}` ? $t('settings.processManager.killBusy') : $t('settings.processManager.forceKill')"
                     @click="doForceKill(process.projectId)"
                   >
                     {{ actionInProgress === `kill:${process.projectId}` ? '⏳' : '💀' }}
@@ -361,19 +364,19 @@ function isAlive (status: string): boolean {
 
       <section class="pm-card">
         <div class="pm-card-header">
-          遗留进程
-          <span class="pm-card-header-hint">系统中发现的可能由本应用产生的遗留 Node 进程</span>
+          {{ $t('settings.processManager.orphanProcesses') }}
+          <span class="pm-card-header-hint">{{ $t('settings.processManager.orphanProcessesHint') }}</span>
         </div>
-        <div v-if="orphanProcesses.length === 0" class="pm-empty-inline">未发现遗留进程 ✓</div>
+        <div v-if="orphanProcesses.length === 0" class="pm-empty-inline">{{ $t('settings.processManager.noOrphanProcesses') }}</div>
         <div v-else class="pm-table-wrap">
           <table class="pm-table">
             <thead>
               <tr>
                 <th>PID</th>
-                <th>进程名</th>
-                <th>内存</th>
-                <th>命令行</th>
-                <th>操作</th>
+                <th>{{ $t('settings.processManager.columnProcessName') }}</th>
+                <th>{{ $t('settings.processManager.columnMemory') }}</th>
+                <th>{{ $t('settings.processManager.columnCommandLine') }}</th>
+                <th>{{ $t('settings.processManager.columnActions') }}</th>
               </tr>
             </thead>
             <tbody>
@@ -386,7 +389,7 @@ function isAlive (status: string): boolean {
                   <button
                     class="pm-action-btn pm-action-kill"
                     :disabled="!!actionInProgress"
-                    :title="actionInProgress === `orphan:${process.pid}` ? '终止中…' : '终止'"
+                    :title="actionInProgress === `orphan:${process.pid}` ? $t('settings.processManager.killBusy') : $t('settings.processManager.kill')"
                     @click="doKillOrphan(process.pid)"
                   >
                     {{ actionInProgress === `orphan:${process.pid}` ? '⏳' : '💀' }}
@@ -399,9 +402,9 @@ function isAlive (status: string): boolean {
       </section>
 
       <div class="pm-footer">
-        <span class="pm-footer-text">进程更新: {{ snapshot.fetchedAt }}</span>
-        <span v-if="systemStatus" class="pm-footer-text">资源更新: {{ systemStatus.fetchedAt }}</span>
-        <span class="pm-footer-text">自动刷新: 每 {{ POLL_INTERVAL_MS / 1000 }} 秒</span>
+        <span class="pm-footer-text">{{ $t('settings.processManager.processUpdated', { time: snapshot.fetchedAt }) }}</span>
+        <span v-if="systemStatus" class="pm-footer-text">{{ $t('settings.processManager.resourceUpdated', { time: systemStatus.fetchedAt }) }}</span>
+        <span class="pm-footer-text">{{ $t('settings.processManager.autoRefresh', { seconds: POLL_INTERVAL_MS / 1000 }) }}</span>
       </div>
     </div>
   </div>

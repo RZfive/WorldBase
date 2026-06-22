@@ -1,32 +1,35 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { ThemePreference } from '../../utils/theme'
 import { applyThemePreference, resolveThemePreference, watchSystemThemeChange } from '../../utils/theme'
 
 interface ThemeOption {
   id: ThemePreference
-  label: string
-  description: string
+  labelKey: string
+  descKey: string
   previewTone: 'light' | 'dark' | 'system'
 }
+
+const { t } = useI18n()
 
 const themeOptions: ThemeOption[] = [
   {
     id: 'system',
-    label: '跟随系统',
-    description: '自动匹配当前系统外观，适合 macOS 自动切换。',
+    labelKey: 'settings.appearancePanel.themeSystem',
+    descKey: 'settings.appearancePanel.themeSystemDesc',
     previewTone: 'system'
   },
   {
     id: 'light',
-    label: '浅色模式',
-    description: '更明亮、通透，适合白天或高亮环境下使用。',
+    labelKey: 'settings.appearancePanel.themeLight',
+    descKey: 'settings.appearancePanel.themeLightDesc',
     previewTone: 'light'
   },
   {
     id: 'dark',
-    label: '深色模式',
-    description: '更聚焦、更克制，适合夜间或长时间使用。',
+    labelKey: 'settings.appearancePanel.themeDark',
+    descKey: 'settings.appearancePanel.themeDarkDesc',
     previewTone: 'dark'
   }
 ]
@@ -39,7 +42,7 @@ let stopThemeWatcher: (() => void) | null = null
 
 const effectiveThemeLabel = computed(() => {
   const resolved = resolveThemePreference(preference.value)
-  return resolved === 'dark' ? '当前实际为深色' : '当前实际为浅色'
+  return resolved === 'dark' ? t('settings.appearancePanel.statusDark') : t('settings.appearancePanel.statusLight')
 })
 
 async function loadThemePreference () {
@@ -65,11 +68,11 @@ async function selectTheme (nextPreference: ThemePreference) {
 
   try {
     await window.electronAPI?.saveThemePreference?.(nextPreference)
-    feedback.value = '主题偏好已保存'
+    feedback.value = t('settings.appearancePanel.saved')
   } catch (err) {
     preference.value = previousPreference
     applyThemePreference(previousPreference)
-    feedback.value = `保存失败：${(err as Error).message}`
+    feedback.value = t('common.saveFailed', { message: (err as Error).message })
   } finally {
     saving.value = false
     window.setTimeout(() => {
@@ -95,8 +98,8 @@ onUnmounted(() => {
 <template>
   <div class="ap-root">
     <div class="ap-header">
-      <h3 class="ap-title">主题模式</h3>
-      <p class="ap-desc">在浅色、深色与跟随系统之间切换。{{ effectiveThemeLabel }}。</p>
+      <h3 class="ap-title">{{ $t('settings.appearancePanel.title') }}</h3>
+      <p class="ap-desc">{{ $t('settings.appearancePanel.description', { status: effectiveThemeLabel }) }}</p>
       <span v-if="feedback" class="ap-feedback">{{ feedback }}</span>
     </div>
 
@@ -112,8 +115,8 @@ onUnmounted(() => {
         <div class="ap-item-left">
           <span class="ap-item-icon">{{ option.previewTone === 'light' ? '☀️' : option.previewTone === 'dark' ? '🌙' : '💻' }}</span>
           <div class="ap-item-text">
-            <span class="ap-item-label">{{ option.label }}</span>
-            <span class="ap-item-hint">{{ option.description }}</span>
+            <span class="ap-item-label">{{ $t(option.labelKey) }}</span>
+            <span class="ap-item-hint">{{ $t(option.descKey) }}</span>
           </div>
         </div>
         <span v-if="preference === option.id" class="ap-check">✓</span>
@@ -123,8 +126,8 @@ onUnmounted(() => {
     <div class="ap-separator" />
 
     <div class="ap-note">
-      <span class="ap-note-title">提示</span>
-      <p>主题切换会立即作用到当前窗口。跟随系统模式在系统外观切换时会自动更新。</p>
+      <span class="ap-note-title">{{ $t('settings.appearancePanel.noteTitle') }}</span>
+      <p>{{ $t('settings.appearancePanel.noteText') }}</p>
     </div>
   </div>
 </template>

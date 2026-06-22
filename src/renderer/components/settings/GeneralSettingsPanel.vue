@@ -1,16 +1,29 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { loadAIExecutionPreferences, persistAIExecutionPreferences } from '../../utils/ai-execution-preferences'
 import type { ThemePreference } from '../../utils/theme'
 import { applyThemePreference, resolveThemePreference, watchSystemThemeChange } from '../../utils/theme'
+import { setLocale } from '../../i18n'
+import { loadLocalePreference, persistLocalePreference } from '../../utils/locale'
+import type { LanguagePreference } from '../../../locales'
 
-type GeneralSectionId = 'appearance' | 'execution' | 'transfer'
+type GeneralSectionId = 'appearance' | 'execution' | 'transfer' | 'language'
 
 interface ThemeOption {
   id: ThemePreference
-  label: string
-  description: string
+  labelKey: string
+  descKey: string
   previewTone: 'light' | 'dark' | 'system'
+}
+
+interface LanguageOption {
+  id: LanguagePreference
+  labelKey: string
+  descKey: string
+  mark: string
+  badge: string
+  tone: 'zh' | 'en' | 'system'
 }
 
 interface GeneralSection {
@@ -24,35 +37,29 @@ interface GeneralSection {
 }
 
 const FEEDBACK_DISPLAY_DURATION_MS = 2200
+const { t } = useI18n()
 
 const themeOptions: ThemeOption[] = [
-  {
-    id: 'system',
-    label: '跟随系统',
-    description: '自动匹配当前系统外观，适合在不同工作环境间切换。',
-    previewTone: 'system'
-  },
-  {
-    id: 'light',
-    label: '浅色模式',
-    description: '层次更清晰，适合白天或长时间阅读。',
-    previewTone: 'light'
-  },
-  {
-    id: 'dark',
-    label: '深色模式',
-    description: '更聚焦，适合夜间或低亮环境。',
-    previewTone: 'dark'
-  }
+  { id: 'system', labelKey: 'settings.general.appearance.themeSystem', descKey: 'settings.general.appearance.themeSystemDesc', previewTone: 'system' },
+  { id: 'light', labelKey: 'settings.general.appearance.themeLight', descKey: 'settings.general.appearance.themeLightDesc', previewTone: 'light' },
+  { id: 'dark', labelKey: 'settings.general.appearance.themeDark', descKey: 'settings.general.appearance.themeDarkDesc', previewTone: 'dark' }
+]
+
+const languageOptions: LanguageOption[] = [
+  { id: 'zh-CN', labelKey: 'settings.general.language.zhCN', descKey: 'settings.general.language.zhCNDesc', mark: '中', badge: '简体', tone: 'zh' },
+  { id: 'en-US', labelKey: 'settings.general.language.enUS', descKey: 'settings.general.language.enUSDesc', mark: 'EN', badge: 'US', tone: 'en' },
+  { id: 'system', labelKey: 'settings.general.language.system', descKey: 'settings.general.language.systemDesc', mark: 'A/文', badge: 'Auto', tone: 'system' }
 ]
 
 const activeSectionId = ref<GeneralSectionId>('appearance')
 const themePreference = ref<ThemePreference>('system')
+const languagePreference = ref<LanguagePreference>('system')
 const executionPreferences = ref<AIExecutionPreferences>({
   notifyOnTaskComplete: true,
   enableAiLogging: false
 })
 const savingTheme = ref(false)
+const savingLanguage = ref(false)
 const savingExecution = ref(false)
 const exporting = ref(false)
 const importing = ref(false)
@@ -64,47 +71,63 @@ const currentThemeOption = computed(() => {
   return themeOptions.find(option => option.id === themePreference.value) || themeOptions[0]
 })
 
+const currentLanguageOption = computed(() => {
+  return languageOptions.find(option => option.id === languagePreference.value) || languageOptions[0]
+})
+
 const effectiveThemeLabel = computed(() => {
   const resolved = resolveThemePreference(themePreference.value)
-  return resolved === 'dark' ? '当前实际为深色' : '当前实际为浅色'
+  return resolved === 'dark' ? t('settings.general.appearance.statusDark') : t('settings.general.appearance.statusLight')
 })
 
 const sections = computed<GeneralSection[]>(() => {
-  const themeSummary = currentThemeOption.value.label
-  const executionSummary = executionPreferences.value.notifyOnTaskComplete ? '系统通知已开启' : '系统通知已关闭'
+  const themeSummary = t('settings.general.appearance.summary', { label: currentThemeOption.value ? t(currentThemeOption.value.labelKey) : '' })
+  const executionSummary = executionPreferences.value.notifyOnTaskComplete
+    ? t('settings.general.execution.summaryOn')
+    : t('settings.general.execution.summaryOff')
   const transferSummary = exporting.value
-    ? '正在导出配置包'
+    ? t('settings.general.transfer.summaryExporting')
     : importing.value
-      ? '正在导入配置包'
-      : '导入与导出加密配置'
+      ? t('settings.general.transfer.summaryImporting')
+      : t('settings.general.transfer.summaryIdle')
+  const languageSummary = t('settings.general.language.summary', { label: t(currentLanguageOption.value.labelKey) })
 
   return [
     {
       id: 'appearance',
       icon: '◐',
-      label: '显示设置',
+      label: t('settings.general.appearance.navLabel'),
       summary: themeSummary,
       status: effectiveThemeLabel.value,
-      title: '显示设置',
-      description: '切换浅色、深色与跟随系统，并立即预览界面外观。'
+      title: t('settings.general.appearance.title'),
+      description: t('settings.general.appearance.description')
     },
     {
       id: 'execution',
       icon: '◎',
-      label: '执行通知',
+      label: t('settings.general.execution.navLabel'),
       summary: executionSummary,
-      status: '授权模式已移到聊天顶部',
-      title: '执行通知',
-      description: '这里只保留任务结束提醒，日志开关已迁移到日志中心。'
+      status: t('settings.general.execution.status'),
+      title: t('settings.general.execution.title'),
+      description: t('settings.general.execution.description')
+    },
+    {
+      id: 'language',
+      icon: '⌘',
+      label: t('settings.general.language.navLabel'),
+      summary: languageSummary,
+      status: t('settings.general.language.status'),
+      title: t('settings.general.language.title'),
+      description: t('settings.general.language.description')
     },
     {
       id: 'transfer',
       icon: '⇄',
-      label: '配置迁移',
+      label: t('settings.general.transfer.navLabel'),
       summary: transferSummary,
-      status: '配置包使用应用私有格式加密',
-      title: '配置迁移',
-      description: '导出或导入通用配置快照，适合在多台设备间同步设置。'
+      status: t('settings.general.transfer.status'),
+      title: t('settings.general.transfer.title'),
+      description: t('settings.general.transfer.description')
     }
   ]
 })
@@ -132,6 +155,8 @@ async function loadSettings () {
 
   executionPreferences.value = await loadAIExecutionPreferences()
 
+  languagePreference.value = await loadLocalePreference()
+
   applyThemePreference(themePreference.value)
 }
 
@@ -147,13 +172,35 @@ async function selectTheme (nextPreference: ThemePreference) {
 
   try {
     await window.electronAPI?.saveThemePreference?.(nextPreference)
-    setFeedback('主题偏好已保存')
+    setFeedback(t('common.saved'))
   } catch (err) {
     themePreference.value = previousPreference
     applyThemePreference(previousPreference)
-    setFeedback(`保存失败：${(err as Error).message}`)
+    setFeedback(t('common.saveFailed', { message: (err as Error).message }))
   } finally {
     savingTheme.value = false
+  }
+}
+
+async function selectLanguage (nextPreference: LanguagePreference) {
+  if (savingLanguage.value) return
+
+  const previousPreference = languagePreference.value
+  languagePreference.value = nextPreference
+  setLocale(nextPreference)
+
+  savingLanguage.value = true
+  feedback.value = ''
+
+  try {
+    await persistLocalePreference(nextPreference)
+    setFeedback(t('settings.general.language.saved'))
+  } catch (err) {
+    languagePreference.value = previousPreference
+    setLocale(previousPreference)
+    setFeedback(t('common.saveFailed', { message: (err as Error).message }))
+  } finally {
+    savingLanguage.value = false
   }
 }
 
@@ -171,13 +218,13 @@ async function saveTaskNotificationPreference (notifyOnTaskComplete: boolean) {
 
   try {
     await persistAIExecutionPreferences(executionPreferences.value)
-    setFeedback('通知偏好已保存')
+    setFeedback(t('common.saved'))
   } catch (err) {
     executionPreferences.value = {
       ...executionPreferences.value,
       notifyOnTaskComplete: previousValue
     }
-    setFeedback(`保存失败：${(err as Error).message}`)
+    setFeedback(t('common.saveFailed', { message: (err as Error).message }))
   } finally {
     savingExecution.value = false
   }
@@ -195,9 +242,11 @@ async function exportConfig () {
   try {
     const result = await window.electronAPI.exportAppConfig()
     if (result.canceled) return
-    setFeedback(result.success ? `配置已导出到 ${result.filePath || '目标文件'}` : '配置导出未完成')
+    setFeedback(result.success
+      ? t('settings.general.transfer.exportDone', { path: result.filePath || t('settings.general.transfer.targetFile') })
+      : t('settings.general.transfer.exportIncomplete'))
   } catch (error) {
-    setFeedback(`导出失败：${(error as Error).message}`)
+    setFeedback(t('settings.general.transfer.exportFailed', { message: (error as Error).message }))
   } finally {
     exporting.value = false
   }
@@ -205,21 +254,21 @@ async function exportConfig () {
 
 async function importConfig () {
   if (!window.electronAPI?.importAppConfig || exporting.value || importing.value) return
-  if (!window.confirm('导入会覆盖当前本地配置，并在完成后刷新当前窗口。是否继续？')) return
+  if (!window.confirm(t('settings.general.transfer.importConfirm'))) return
 
   importing.value = true
   feedback.value = ''
   try {
     const result = await window.electronAPI.importAppConfig()
     if (result.canceled) return
-    setFeedback('配置已导入，正在刷新窗口…')
+    setFeedback(t('settings.general.transfer.importDone'))
     if (result.requiresReload) {
       window.setTimeout(() => {
         window.location.reload()
       }, 500)
     }
   } catch (error) {
-    setFeedback(`导入失败：${(error as Error).message}`)
+    setFeedback(t('settings.general.transfer.importFailed', { message: (error as Error).message }))
   } finally {
     importing.value = false
   }
@@ -275,11 +324,11 @@ onUnmounted(() => {
                   <span class="gs-theme-orb orb-b" />
                   <span class="gs-theme-orb orb-c" />
                 </div>
-                <span v-if="themePreference === option.id" class="gs-theme-badge">当前使用</span>
+                <span v-if="themePreference === option.id" class="gs-theme-badge">{{ $t('common.current') }}</span>
               </div>
               <div class="gs-theme-card-body">
-                <span class="gs-theme-label">{{ option.label }}</span>
-                <span class="gs-theme-hint">{{ option.description }}</span>
+                <span class="gs-theme-label">{{ $t(option.labelKey) }}</span>
+                <span class="gs-theme-hint">{{ $t(option.descKey) }}</span>
               </div>
             </button>
           </div>
@@ -288,8 +337,8 @@ onUnmounted(() => {
         <template v-else-if="activeSectionId === 'execution'">
           <section class="gs-control-card">
             <div class="gs-control-copy">
-              <span class="gs-control-title">任务结束后发送系统通知</span>
-              <p class="gs-control-hint">任务完成、失败或被停止时，通知中心会显示任务名称和状态，适合后台执行场景。</p>
+              <span class="gs-control-title">{{ $t('settings.general.execution.notifyTitle') }}</span>
+              <p class="gs-control-hint">{{ $t('settings.general.execution.notifyHint') }}</p>
             </div>
             <button
               type="button"
@@ -297,7 +346,7 @@ onUnmounted(() => {
               :disabled="savingExecution"
               role="switch"
               :aria-checked="executionPreferences.notifyOnTaskComplete"
-              :aria-label="executionPreferences.notifyOnTaskComplete ? '关闭任务结束通知' : '开启任务结束通知'"
+              :aria-label="executionPreferences.notifyOnTaskComplete ? $t('settings.general.execution.notifyOff') : $t('settings.general.execution.notifyOn')"
               @click="toggleTaskNotificationPreference"
             >
               <span class="gs-switch-track" :class="{ on: executionPreferences.notifyOnTaskComplete }">
@@ -307,32 +356,56 @@ onUnmounted(() => {
           </section>
         </template>
 
+        <template v-else-if="activeSectionId === 'language'">
+          <div class="gs-theme-grid">
+            <button
+              v-for="option in languageOptions"
+              :key="option.id"
+              :class="['gs-theme-card', 'tone-system', { active: languagePreference === option.id }]"
+              :disabled="savingLanguage"
+              @click="selectLanguage(option.id)"
+            >
+              <div class="gs-theme-card-top">
+                <div :class="['gs-language-visual', `lang-${option.tone}`]" aria-hidden="true">
+                  <span class="gs-language-mark">{{ option.mark }}</span>
+                  <span class="gs-language-submark">{{ option.badge }}</span>
+                </div>
+                <span v-if="languagePreference === option.id" class="gs-theme-badge">{{ $t('common.current') }}</span>
+              </div>
+              <div class="gs-theme-card-body">
+                <span class="gs-theme-label">{{ $t(option.labelKey) }}</span>
+                <span class="gs-theme-hint">{{ $t(option.descKey) }}</span>
+              </div>
+            </button>
+          </div>
+        </template>
+
         <template v-else>
 
           <div class="gs-transfer-grid">
             <button class="gs-transfer-card primary" :disabled="exporting || importing" @click="exportConfig">
-              <span class="gs-transfer-kicker">Export</span>
-              <strong class="gs-transfer-title">导出加密配置</strong>
-              <p class="gs-transfer-text">把当前本地设置打包为可迁移配置文件。</p>
-              <span class="gs-transfer-action">{{ exporting ? '正在导出…' : '开始导出' }}</span>
+              <span class="gs-transfer-kicker">{{ $t('settings.general.transfer.exportKicker') }}</span>
+              <strong class="gs-transfer-title">{{ $t('settings.general.transfer.exportTitle') }}</strong>
+              <p class="gs-transfer-text">{{ $t('settings.general.transfer.exportText') }}</p>
+              <span class="gs-transfer-action">{{ exporting ? $t('settings.general.transfer.exportActionBusy') : $t('settings.general.transfer.exportAction') }}</span>
             </button>
 
             <button class="gs-transfer-card secondary" :disabled="exporting || importing" @click="importConfig">
-              <span class="gs-transfer-kicker">Import</span>
-              <strong class="gs-transfer-title">导入加密配置</strong>
-              <p class="gs-transfer-text">覆盖本地设置并刷新窗口，快速同步到当前设备。</p>
-              <span class="gs-transfer-action">{{ importing ? '正在导入…' : '开始导入' }}</span>
+              <span class="gs-transfer-kicker">{{ $t('settings.general.transfer.importKicker') }}</span>
+              <strong class="gs-transfer-title">{{ $t('settings.general.transfer.importTitle') }}</strong>
+              <p class="gs-transfer-text">{{ $t('settings.general.transfer.importText') }}</p>
+              <span class="gs-transfer-action">{{ importing ? $t('settings.general.transfer.importActionBusy') : $t('settings.general.transfer.importAction') }}</span>
             </button>
           </div>
 
           <div class="gs-note-grid">
             <article class="gs-note-card">
-              <span class="gs-note-title">包含内容</span>
-              <p>模型服务配置、模型定价、主题偏好、任务通知、启动台布局、网页快捷方式，以及项目打开方式偏好。</p>
+              <span class="gs-note-title">{{ $t('settings.general.transfer.noteIncludedTitle') }}</span>
+              <p>{{ $t('settings.general.transfer.noteIncludedText') }}</p>
             </article>
             <article class="gs-note-card">
-              <span class="gs-note-title">不会导入</span>
-              <p>聊天记录、项目源码和文档工作台里的已导入文件不会被带入目标设备。</p>
+              <span class="gs-note-title">{{ $t('settings.general.transfer.noteExcludedTitle') }}</span>
+              <p>{{ $t('settings.general.transfer.noteExcludedText') }}</p>
             </article>
           </div>
         </template>
@@ -641,6 +714,60 @@ onUnmounted(() => {
   border-radius: 18px;
   position: relative;
   overflow: hidden;
+}
+
+.gs-language-visual {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 72px;
+  height: 72px;
+  padding: 12px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.lang-zh {
+  background: linear-gradient(135deg, #fff4e8, #ffb76c);
+  color: #6a2d00;
+}
+
+.lang-en {
+  background: linear-gradient(135deg, #eef4ff, #8db9ff);
+  color: #10294f;
+}
+
+.lang-system {
+  background: linear-gradient(135deg, #eef4fb 0%, #d9e6f6 48%, #10192a 52%, #1a2940 100%);
+  color: #f5f8ff;
+}
+
+.gs-language-mark {
+  font-size: 1.5em;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.lang-system .gs-language-mark {
+  font-size: 1.16em;
+  letter-spacing: -0.03em;
+}
+
+.gs-language-submark {
+  align-self: flex-start;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.42);
+  font-size: 0.72em;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.lang-system .gs-language-submark {
+  background: rgba(255, 255, 255, 0.16);
+  color: #f5f8ff;
 }
 
 .tone-light .gs-theme-visual {

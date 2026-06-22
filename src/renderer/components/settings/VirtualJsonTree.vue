@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 const props = withDefaults(defineProps<{
   value: unknown
@@ -33,6 +34,7 @@ interface ExpandQueueEntry {
 const ROOT_PATH = '$'
 const OVERSCAN = 8
 const EXPAND_ALL_BATCH_SIZE = 300
+const { t } = useI18n()
 
 const viewportRef = ref<HTMLDivElement | null>(null)
 const scrollTop = ref(0)
@@ -56,8 +58,8 @@ function isContainer (value: unknown): value is Record<string, unknown> | unknow
 
 function describeContainer (value: Record<string, unknown> | unknown[]): string {
   return Array.isArray(value)
-    ? `[${value.length} 项]`
-    : `{${Object.keys(value).length} 个字段}`
+    ? `[${t('settings.jsonTree.arrayItems', { count: value.length })}]`
+    : `{${t('settings.jsonTree.objectFields', { count: Object.keys(value).length })}}`
 }
 
 function shouldExpandByDefault (value: unknown): boolean {
@@ -274,12 +276,12 @@ const visibleRows = computed(() => {
 
 const rootSummary = computed(() => {
   if (Array.isArray(props.value)) {
-    return `数组 · ${props.value.length} 项`
+    return t('settings.jsonTree.rootArray', { count: props.value.length })
   }
   if (isContainer(props.value)) {
-    return `对象 · ${Object.keys(props.value).length} 个字段`
+    return t('settings.jsonTree.rootObject', { count: Object.keys(props.value).length })
   }
-  return '单值'
+  return t('settings.jsonTree.rootValue')
 })
 
 const hasCollapsedRows = computed(() => rows.value.some((row) => row.expandable && !row.expanded))
@@ -299,16 +301,16 @@ watch([totalHeight, viewportHeight], () => {
 <template>
   <div class="json-tree">
     <div class="json-tree-toolbar">
-      <span class="json-tree-meta">{{ rootSummary }} · {{ rows.length }} 个可见节点</span>
+      <span class="json-tree-meta">{{ rootSummary }} · {{ $t('settings.jsonTree.visibleNodes', { count: rows.length }) }}</span>
       <div v-if="rows.length > 0" class="json-tree-actions">
         <button type="button" class="json-tree-action" :disabled="expandingAll || !hasCollapsedRows" @click="expandOneLevel">
-          展开一级
+          {{ $t('settings.jsonTree.expandOneLevel') }}
         </button>
         <button type="button" class="json-tree-action" :disabled="expandingAll || !hasCollapsedRows" @click="expandAll">
-          {{ expandingAll ? '全部展开中…' : '全部展开' }}
+          {{ expandingAll ? $t('settings.jsonTree.expandingAll') : $t('settings.jsonTree.expandAll') }}
         </button>
         <button type="button" class="json-tree-action" :disabled="!hasExpandedRows && !expandingAll" @click="collapseAll">
-          全部收起
+          {{ $t('settings.jsonTree.collapseAll') }}
         </button>
       </div>
     </div>
@@ -336,7 +338,7 @@ watch([totalHeight, viewportHeight], () => {
             v-if="row.expandable"
             type="button"
             class="json-tree-toggle"
-            :aria-label="row.expanded ? '折叠节点' : '展开节点'"
+            :aria-label="row.expanded ? $t('settings.jsonTree.collapseNode') : $t('settings.jsonTree.expandNode')"
             @click.stop="togglePath(row.path)"
           >
             {{ row.expanded ? '▾' : '▸' }}
