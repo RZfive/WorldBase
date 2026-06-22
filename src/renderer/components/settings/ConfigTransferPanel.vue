@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 const FEEDBACK_DISPLAY_DURATION_MS = 2200
+const { t } = useI18n()
 
 const exporting = ref(false)
 const importing = ref(false)
@@ -24,9 +26,11 @@ async function exportConfig () {
   try {
     const result = await window.electronAPI.exportAppConfig()
     if (result.canceled) return
-    setFeedback(result.success ? `配置已导出到 ${result.filePath || '目标文件'}` : '配置导出未完成')
+    setFeedback(result.success
+      ? t('settings.configTransferPanel.exportDone', { path: result.filePath || t('settings.configTransferPanel.targetFile') })
+      : t('settings.configTransferPanel.exportIncomplete'))
   } catch (error) {
-    setFeedback(`导出失败：${(error as Error).message}`)
+    setFeedback(t('settings.configTransferPanel.exportFailed', { message: (error as Error).message }))
   } finally {
     exporting.value = false
   }
@@ -34,21 +38,21 @@ async function exportConfig () {
 
 async function importConfig () {
   if (!window.electronAPI?.importAppConfig || exporting.value || importing.value) return
-  if (!window.confirm('导入会覆盖当前本地配置，并在完成后刷新当前窗口。是否继续？')) return
+  if (!window.confirm(t('settings.configTransferPanel.importConfirm'))) return
 
   importing.value = true
   feedback.value = ''
   try {
     const result = await window.electronAPI.importAppConfig()
     if (result.canceled) return
-    setFeedback('配置已导入，正在刷新窗口…')
+    setFeedback(t('settings.configTransferPanel.importDone'))
     if (result.requiresReload) {
       window.setTimeout(() => {
         window.location.reload()
       }, 500)
     }
   } catch (error) {
-    setFeedback(`导入失败：${(error as Error).message}`)
+    setFeedback(t('settings.configTransferPanel.importFailed', { message: (error as Error).message }))
   } finally {
     importing.value = false
   }
@@ -58,8 +62,8 @@ async function importConfig () {
 <template>
   <div class="ctp-root">
     <div class="ctp-header">
-      <h3 class="ctp-title">配置迁移</h3>
-      <p class="ctp-desc">快速复制当前基座配置。导出的配置包不是明文 JSON，内容会被应用私有格式加密后保存。</p>
+      <h3 class="ctp-title">{{ $t('settings.configTransferPanel.title') }}</h3>
+      <p class="ctp-desc">{{ $t('settings.configTransferPanel.description') }}</p>
       <span v-if="feedback" class="ctp-feedback">{{ feedback }}</span>
     </div>
 
@@ -67,23 +71,23 @@ async function importConfig () {
 
     <div class="ctp-actions">
       <button class="ctp-primary" :disabled="exporting || importing" @click="exportConfig">
-        {{ exporting ? '正在导出…' : '导出加密配置' }}
+        {{ exporting ? $t('settings.configTransferPanel.exportActionBusy') : $t('settings.configTransferPanel.exportAction') }}
       </button>
       <button class="ctp-secondary" :disabled="exporting || importing" @click="importConfig">
-        {{ importing ? '正在导入…' : '导入加密配置' }}
+        {{ importing ? $t('settings.configTransferPanel.importActionBusy') : $t('settings.configTransferPanel.importAction') }}
       </button>
     </div>
 
     <div class="ctp-separator" />
 
     <div class="ctp-note">
-      <span class="ctp-note-title">包含内容</span>
-      <p>模型服务配置、主题偏好、执行通知、启动台布局、网页快捷方式，以及项目打开方式偏好。</p>
+      <span class="ctp-note-title">{{ $t('settings.configTransferPanel.includedTitle') }}</span>
+      <p>{{ $t('settings.configTransferPanel.includedText') }}</p>
     </div>
 
     <div class="ctp-note">
-      <span class="ctp-note-title">说明</span>
-      <p>导入会覆盖当前本地配置，不会导入聊天记录、项目源码或文档工作台里的已导入文件。</p>
+      <span class="ctp-note-title">{{ $t('settings.configTransferPanel.noteTitle') }}</span>
+      <p>{{ $t('settings.configTransferPanel.noteText') }}</p>
     </div>
   </div>
 </template>

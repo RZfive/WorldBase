@@ -143,27 +143,27 @@ onMounted(() => {
     <div v-if="!selectedDb" class="dv-list">
       <div class="dv-list-header">
         <div>
-          <h3 class="dv-title">数据库总览</h3>
-          <p class="dv-desc">浏览所有项目的数据库及表结构</p>
+          <h3 class="dv-title">{{ $t('settings.database.title') }}</h3>
+          <p class="dv-desc">{{ $t('settings.database.description') }}</p>
         </div>
         <div class="dv-list-actions">
           <input
             v-model="dbSearchQuery"
             type="text"
-            placeholder="搜索项目或表名…"
+            :placeholder="$t('settings.database.searchPlaceholder')"
             class="dv-search"
           />
-          <button class="dv-btn" @click="loadDatabases" :disabled="dbLoading">刷新</button>
+          <button class="dv-btn" @click="loadDatabases" :disabled="dbLoading">{{ $t('settings.database.refresh') }}</button>
         </div>
       </div>
 
       <div class="dv-separator" />
 
-      <div v-if="dbLoading" class="dv-empty">加载中…</div>
+      <div v-if="dbLoading" class="dv-empty">{{ $t('settings.database.loading') }}</div>
       <div v-else-if="dbError" class="dv-empty dv-error">{{ dbError }}</div>
       <div v-else-if="filteredDatabases.length === 0" class="dv-empty">
-        <p>暂无数据库</p>
-        <p class="dv-empty-hint">当项目配置了数据存储后，这里将展示所有数据库信息</p>
+        <p>{{ $t('settings.database.emptyTitle') }}</p>
+        <p class="dv-empty-hint">{{ $t('settings.database.emptyHint') }}</p>
       </div>
 
       <div v-else class="dv-items">
@@ -189,7 +189,7 @@ onMounted(() => {
             >{{ table.name }}<small v-if="table.rowCount >= 0"> ({{ table.rowCount }})</small></span>
             <span v-if="db.tables.length > 5" class="dv-tag dv-tag-more">+{{ db.tables.length - 5 }}</span>
           </div>
-          <div v-else class="dv-item-no-tables">无表</div>
+          <div v-else class="dv-item-no-tables">{{ $t('settings.database.noTables') }}</div>
         </div>
       </div>
     </div>
@@ -197,7 +197,7 @@ onMounted(() => {
     <!-- DB Detail / Table viewer -->
     <div v-else class="dv-detail">
       <div class="dv-detail-header">
-        <button class="dv-back" @click="backToDbList">← 返回</button>
+        <button class="dv-back" @click="backToDbList">{{ $t('settings.database.back') }}</button>
         <div>
           <h3 class="dv-title">{{ selectedDb.projectName }}</h3>
           <span class="dv-detail-sub">{{ selectedDb.database }} · {{ selectedDb.dbPath }}</span>
@@ -207,7 +207,7 @@ onMounted(() => {
       <div class="dv-detail-layout">
         <!-- Table list sidebar -->
         <div class="dv-sidebar">
-          <div class="dv-sidebar-title">表 ({{ selectedDb.tables.length }})</div>
+          <div class="dv-sidebar-title">{{ $t('settings.database.tableListTitle', { count: selectedDb.tables.length }) }}</div>
           <div
             v-for="table in selectedDb.tables"
             :key="table.name"
@@ -217,17 +217,17 @@ onMounted(() => {
             <span class="dv-sidebar-name">{{ table.name }}</span>
             <span class="dv-sidebar-count" v-if="table.rowCount >= 0">{{ table.rowCount }}</span>
           </div>
-          <div v-if="selectedDb.tables.length === 0" class="dv-sidebar-empty">暂无表</div>
+          <div v-if="selectedDb.tables.length === 0" class="dv-sidebar-empty">{{ $t('settings.database.emptyTables') }}</div>
         </div>
 
         <!-- Table data -->
         <div class="dv-content">
           <div v-if="!selectedTable" class="dv-placeholder">
-            <span>← 选择一个表查看数据</span>
+            <span>{{ $t('settings.database.selectTableHint') }}</span>
           </div>
           <template v-else>
             <div class="dv-schema">
-              <span class="dv-schema-label">字段:</span>
+              <span class="dv-schema-label">{{ $t('settings.database.fieldsLabel') }}</span>
               <span
                 v-for="col in tableColumns"
                 :key="col.name"
@@ -236,8 +236,8 @@ onMounted(() => {
               >{{ col.name }}<small>{{ col.type }}</small></span>
             </div>
 
-            <div v-if="tableLoading" class="dv-loading">加载中…</div>
-            <div v-else-if="tableRows.length === 0" class="dv-loading">无数据</div>
+            <div v-if="tableLoading" class="dv-loading">{{ $t('settings.database.loading') }}</div>
+            <div v-else-if="tableRows.length === 0" class="dv-loading">{{ $t('settings.database.noData') }}</div>
             <div v-else class="dv-table-wrap">
               <table class="dv-table">
                 <thead>
@@ -254,10 +254,10 @@ onMounted(() => {
             </div>
 
             <div class="dv-pagination">
-              <span class="dv-page-info">共 {{ tableTotal }} 条 · 第 {{ tablePage }}/{{ totalPages }} 页</span>
+              <span class="dv-page-info">{{ $t('settings.database.pageInfo', { total: tableTotal, page: tablePage, pages: totalPages }) }}</span>
               <div class="dv-page-btns">
-                <button class="dv-page-btn" :disabled="tablePage <= 1" @click="prevPage">‹ 上一页</button>
-                <button class="dv-page-btn" :disabled="tablePage >= totalPages" @click="nextPage">下一页 ›</button>
+                <button class="dv-page-btn" :disabled="tablePage <= 1" @click="prevPage">{{ $t('settings.database.previousPage') }}</button>
+                <button class="dv-page-btn" :disabled="tablePage >= totalPages" @click="nextPage">{{ $t('settings.database.nextPage') }}</button>
               </div>
             </div>
           </template>

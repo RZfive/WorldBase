@@ -138,7 +138,18 @@ interface WebAppShortcut {
   updatedAt: string
 }
 
+interface PinnedDockApp {
+  id: string
+  kind: 'project' | 'browser'
+  name: string
+  type?: string
+  icon?: string
+  url?: string
+  addedAt: string
+}
+
 type ThemePreference = 'system' | 'light' | 'dark'
+type LanguagePreference = 'zh-CN' | 'en-US' | 'system'
 type AIExecutionAuthMode = 'strict' | 'auto'
 
 interface CostModelPricingEntry {
@@ -585,6 +596,8 @@ export interface ElectronAPI {
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
+  getLocalePreference: () => Promise<LanguagePreference>
+  saveLocalePreference: (preference: LanguagePreference) => Promise<{ success: boolean }>
   getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
   getMcpServers: () => Promise<MCPServerConfig[]>
@@ -604,6 +617,8 @@ export interface ElectronAPI {
   saveLaunchpadLayout: (layout: LaunchpadLayout) => Promise<{ success: boolean }>
   getWebApps: () => Promise<WebAppShortcut[]>
   saveWebApps: (webApps: WebAppShortcut[]) => Promise<{ success: boolean }>
+  getPinnedDockApps: () => Promise<PinnedDockApp[]>
+  savePinnedDockApps: (apps: PinnedDockApp[]) => Promise<{ success: boolean }>
   listScheduledTasks: () => Promise<ScheduledTaskDefinition[]>
   saveScheduledTask: (task: ScheduledTaskDefinition) => Promise<ScheduledTaskDefinition>
   deleteScheduledTask: (taskId: string) => Promise<boolean>
@@ -833,6 +848,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getThemePreference: () => ipcRenderer.invoke('settings:getThemePreference'),
   saveThemePreference: (preference: ThemePreference) => ipcRenderer.invoke('settings:saveThemePreference', preference),
+  getLocalePreference: () => ipcRenderer.invoke('settings:getLanguagePreference'),
+  saveLocalePreference: (preference: LanguagePreference) => ipcRenderer.invoke('settings:saveLanguagePreference', preference),
   getAIExecutionPreferences: () => ipcRenderer.invoke('settings:getAIExecutionPreferences'),
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => ipcRenderer.invoke('settings:saveAIExecutionPreferences', preferences),
   getMcpServers: () => ipcRenderer.invoke('settings:getMcpServers'),
@@ -856,6 +873,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveLaunchpadLayout: (layout: LaunchpadLayout) => ipcRenderer.invoke('settings:saveLaunchpadLayout', layout),
   getWebApps: () => ipcRenderer.invoke('settings:getWebApps'),
   saveWebApps: (webApps: WebAppShortcut[]) => ipcRenderer.invoke('settings:saveWebApps', webApps),
+  getPinnedDockApps: () => ipcRenderer.invoke('settings:getPinnedDockApps'),
+  savePinnedDockApps: (apps: PinnedDockApp[]) => ipcRenderer.invoke('settings:savePinnedDockApps', apps),
   listScheduledTasks: () => ipcRenderer.invoke('scheduler:listTasks'),
   saveScheduledTask: (task: ScheduledTaskDefinition) => ipcRenderer.invoke('scheduler:saveTask', task),
   deleteScheduledTask: (taskId: string) => ipcRenderer.invoke('scheduler:deleteTask', taskId),

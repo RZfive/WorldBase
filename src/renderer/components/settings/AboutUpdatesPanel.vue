@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 const props = defineProps<{
   active: boolean
 }>()
+
+const { t } = useI18n()
 
 const aboutInfo = ref<AppAboutInfo | null>(null)
 const updateState = ref<AppUpdateState | null>(null)
@@ -27,10 +30,10 @@ onUnmounted(() => {
 
 const statusLabel = computed(() => {
   switch (updateState.value?.status) {
-    case 'checking': return '正在检查更新…'
-    case 'up_to_date': return '当前已是最新版本'
-    case 'update_available': return `发现新版本 ${updateState.value.latestVersion || ''}`.trim()
-    case 'failed': return '更新检查失败'
+    case 'checking': return t('settings.about.statusChecking')
+    case 'up_to_date': return t('settings.about.statusUpToDate')
+    case 'update_available': return t('settings.about.statusUpdateAvailable', { version: updateState.value.latestVersion || '' }).trim()
+    case 'failed': return t('settings.about.statusFailed')
     default: return ''
   }
 })
@@ -104,7 +107,7 @@ async function checkForUpdates () {
         <span class="au-mark">🌍</span>
         <div class="au-product-copy">
           <strong class="au-name">{{ aboutInfo?.productName || 'The World' }}</strong>
-          <span class="au-version">版本 {{ aboutInfo?.version || '—' }}</span>
+          <span class="au-version">{{ $t('settings.about.version', { version: aboutInfo?.version || '—' }) }}</span>
         </div>
       </div>
       <button
@@ -112,7 +115,7 @@ async function checkForUpdates () {
         :disabled="loading || checking"
         @click="checkForUpdates"
       >
-        {{ checking ? '检查中…' : '检查更新' }}
+        {{ checking ? $t('settings.about.checking') : $t('settings.about.check') }}
       </button>
     </div>
 

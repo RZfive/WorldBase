@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../chat/markdown'
 
 const props = defineProps<{
@@ -9,6 +10,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'close'): void
 }>()
+
+const { t, locale } = useI18n()
 
 const visible = computed(() => Boolean(props.report))
 const resultContent = computed(() => {
@@ -27,10 +30,10 @@ function onKeydown (event: KeyboardEvent) {
 }
 
 function formatTimestamp (value?: string | null): string {
-  if (!value) return '未记录'
+  if (!value) return t('settings.taskReport.notRecorded')
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN')
+  return date.toLocaleString(locale.value)
 }
 
 onMounted(() => {
@@ -48,21 +51,21 @@ onUnmounted(() => {
       <div class="task-report-dialog">
         <header class="task-report-header">
           <div>
-            <p class="task-report-eyebrow">定时任务结果</p>
+            <p class="task-report-eyebrow">{{ $t('settings.taskReport.eyebrow') }}</p>
             <h3>{{ report.taskTitle }}</h3>
           </div>
-          <button class="task-report-close" type="button" @click="closeDialog">关闭</button>
+          <button class="task-report-close" type="button" @click="closeDialog">{{ $t('settings.taskReport.close') }}</button>
         </header>
 
         <section class="task-report-section">
-          <h4>执行结果</h4>
+          <h4>{{ $t('settings.taskReport.resultTitle') }}</h4>
           <div v-if="resultContent" class="task-report-result markdown-body" v-html="renderMarkdown(resultContent)"></div>
-          <div v-else class="task-report-empty">暂无执行结果。</div>
+          <div v-else class="task-report-empty">{{ $t('settings.taskReport.emptyResult') }}</div>
         </section>
 
         <section class="task-report-section">
-          <h4>执行过程</h4>
-          <div v-if="report.progress.length === 0" class="task-report-empty">当前没有进度记录。</div>
+          <h4>{{ $t('settings.taskReport.progressTitle') }}</h4>
+          <div v-if="report.progress.length === 0" class="task-report-empty">{{ $t('settings.taskReport.emptyProgress') }}</div>
           <div v-else class="task-report-progress-list">
             <div v-for="entry in report.progress" :key="`${entry.at}-${entry.stage}-${entry.detail || ''}`" class="task-report-progress-item">
               <div class="task-report-progress-time">{{ formatTimestamp(entry.at) }}</div>

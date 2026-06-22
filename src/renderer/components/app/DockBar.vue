@@ -12,12 +12,15 @@ interface RunningApp {
   isWindow: boolean
   closable?: boolean
   savedToLaunchpad?: boolean
+  pinned?: boolean
+  isRunning?: boolean
 }
 
 const props = defineProps<{
   currentView: 'chat' | 'app' | 'source' | 'settings' | 'studio'
   showLaunchpad: boolean
   runningApps: Map<string, RunningApp>
+  pinnedApps: RunningApp[]
   embeddedProjectId: string | null
 }>()
 
@@ -68,7 +71,43 @@ function resolveIcon (app: RunningApp) {
       </div>
     </div>
 
+    <div class="dock-divider" aria-hidden="true"></div>
+
     <div class="dock-apps">
+      <template v-if="props.pinnedApps.length">
+        <div
+          v-for="app in props.pinnedApps"
+          :key="'pin-' + app.id"
+          :class="['dock-item', 'dock-app', 'dock-pinned', { 'dock-active': props.currentView === 'app' && props.embeddedProjectId === app.id, 'dock-windowed': app.isWindow }]"
+          :title="app.name + (app.isWindow ? ' (独立窗口)' : '')"
+          :data-tip="app.name"
+          @click="emit('switchToApp', app)"
+          @contextmenu="handleContextMenu($event, app)"
+        >
+          <span class="dock-item-surface">
+            <span class="dock-item-icon-wrap">
+              <img v-if="resolveIcon(app).kind === 'image'" :src="resolveIcon(app).value" alt="" class="dock-item-icon dock-item-icon-image" />
+              <span v-else class="dock-item-icon">{{ resolveIcon(app).value }}</span>
+            </span>
+            <span class="dock-pin-badge" title="已固定到 Dock">📌</span>
+            <span v-if="app.isWindow" class="dock-window-badge">↗</span>
+            <button
+              v-if="app.closable && app.isRunning"
+              class="dock-close-btn"
+              type="button"
+              title="关闭"
+              @click.stop="emit('closeApp', app.id)"
+            >
+              ×
+            </button>
+            <span v-if="app.isRunning" class="dock-running-dot"></span>
+          </span>
+          <span class="dock-tooltip">{{ app.name }}</span>
+        </div>
+
+        <div v-if="props.runningApps.size" class="dock-divider dock-divider-inline" aria-hidden="true"></div>
+      </template>
+
       <div
         v-for="[appId, app] in props.runningApps"
         :key="appId"
@@ -98,6 +137,8 @@ function resolveIcon (app: RunningApp) {
         <span class="dock-tooltip">{{ app.name }}</span>
       </div>
     </div>
+
+    <div class="dock-divider" aria-hidden="true"></div>
 
     <div class="dock-bottom">
       <div
@@ -382,5 +423,33 @@ function resolveIcon (app: RunningApp) {
   border-radius: 999px;
   background: var(--app-success);
   box-shadow: 0 0 8px rgba(34, 197, 94, 0.36);
+}
+
+.dock-divider {
+  width: 34px;
+  height: 1px;
+  flex-shrink: 0;
+  background: var(--app-border-strong);
+  opacity: 0.45;
+}
+
+.dock-divider-inline {
+  margin: 4px 0;
+}
+
+.dock-pin-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  font-size: 0.5em;
+  line-height: 1;
+  opacity: 0.5;
+  pointer-events: none;
+  transition: opacity 0.14s ease;
+  z-index: 2;
+}
+
+.dock-item:hover .dock-pin-badge {
+  opacity: 1;
 }
 </style>

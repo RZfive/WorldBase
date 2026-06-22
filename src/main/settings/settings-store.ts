@@ -63,7 +63,33 @@ export interface WebAppShortcut {
   updatedAt: string
 }
 
+/**
+ * An app the user pinned to the dock so it stays available even when not
+ * running. `kind: 'project'` references a local project by id; `kind: 'browser'`
+ * references a web shortcut by id/url. Display metadata (name/type/icon) is
+ * captured at pin time so the dock can render a cold pin without a live lookup.
+ */
+export interface PinnedDockApp {
+  id: string
+  kind: 'project' | 'browser'
+  name: string
+  type?: string
+  icon?: string
+  url?: string
+  addedAt: string
+}
+
 export type ThemePreference = 'system' | 'light' | 'dark'
+
+/**
+ * Persisted language preference. `'system'` resolves at runtime to the
+ * platform locale. Kept here (rather than the global env.d.ts type) because the
+ * main process owns persistence; the renderer re-declares the same union in
+ * env.d.ts for its own typing.
+ */
+export type LanguagePreference = 'zh-CN' | 'en-US' | 'system'
+
+export const DEFAULT_LANGUAGE_PREFERENCE: LanguagePreference = 'system'
 export type AIExecutionAuthMode = 'strict' | 'auto'
 
 export interface AIExecutionPreferences {
@@ -95,11 +121,13 @@ export interface MCPServerConfig {
 export interface PortableSettingsConfig {
   providers: AIProvidersConfig
   themePreference: ThemePreference
+  languagePreference: LanguagePreference
   aiExecutionPreferences: AIExecutionPreferences
   costSettings: CostSettings
   mcpServers: MCPServerConfig[]
   launchpadLayout: LaunchpadLayout
   webApps: WebAppShortcut[]
+  pinnedDockApps: PinnedDockApp[]
   projectLaunchModes: Record<string, 'embed' | 'window'>
 }
 
@@ -256,6 +284,13 @@ function normalizeThemePreference (value: unknown): ThemePreference {
     return value
   }
   return 'system'
+}
+
+function normalizeLanguagePreference (value: unknown): LanguagePreference {
+  if (value === 'zh-CN' || value === 'en-US' || value === 'system') {
+    return value
+  }
+  return DEFAULT_LANGUAGE_PREFERENCE
 }
 
 function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreferences {
@@ -458,6 +493,55 @@ function normalizeWebApps (value: unknown): WebAppShortcut[] {
   }
 
   return deduped.reverse()
+}
+
+function normalizePinnedDockApp (value: unknown): PinnedDockApp | null {
+  if (!value || typeof value !== 'object') return null
+
+  const record = value as Record<string, unknown>
+  const id = typeof record.id === 'string' ? record.id.trim() : ''
+  const name = typeof record.name === 'string' ? record.name.trim() : ''
+  const kind = record.kind === 'browser' ? 'browser' : 'project'
+  if (!id || !name) return null
+
+  let url: string | undefined
+  if (kind === 'browser') {
+    const rawUrl = typeof record.url === 'string' ? record.url.trim() : ''
+    if (!rawUrl) return null
+    try {
+      const parsed = new URL(rawUrl)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+      url = parsed.toString()
+    } catch {
+      return null
+    }
+  }
+
+  const type = typeof record.type === 'string' && record.type.trim()
+    ? record.type.trim()
+    : undefined
+  const icon = typeof record.icon === 'string' && record.icon.trim()
+    ? record.icon.trim()
+    : undefined
+  const addedAt = typeof record.addedAt === 'string' && record.addedAt.trim()
+    ? record.addedAt.trim()
+    : new Date().toISOString()
+
+  return { id, kind, name, type, icon, url, addedAt }
+}
+
+function normalizePinnedDockApps (value: unknown): PinnedDockApp[] {
+  if (!Array.isArray(value)) return []
+
+  const seen = new Set<string>()
+  const normalized: PinnedDockApp[] = []
+  for (const item of value) {
+    const pinned = normalizePinnedDockApp(item)
+    if (!pinned || seen.has(pinned.id)) continue
+    seen.add(pinned.id)
+    normalized.push(pinned)
+  }
+  return normalized
 }
 
 function normalizeProjectLaunchModes (value: unknown): Record<string, 'embed' | 'window'> {
@@ -824,6 +908,17 @@ export class SettingsStore {
     this.write({ webApps: normalizeWebApps(webApps) })
   }
 
+  /** Get apps the user pinned to the dock. */
+  getPinnedDockApps (): PinnedDockApp[] {
+    const settings = this.read()
+    return normalizePinnedDockApps(settings.pinnedDockApps)
+  }
+
+  /** Save apps the user pinned to the dock. */
+  savePinnedDockApps (apps: PinnedDockApp[]): void {
+    this.write({ pinnedDockApps: normalizePinnedDockApps(apps) })
+  }
+
   /** Get theme preference: 'system', 'light', or 'dark'. */
   getThemePreference (): ThemePreference {
     const settings = this.read()
@@ -833,6 +928,17 @@ export class SettingsStore {
   /** Save theme preference. */
   saveThemePreference (preference: ThemePreference): void {
     this.write({ themePreference: normalizeThemePreference(preference) })
+  }
+
+  /** Get language preference: 'zh-CN', 'en-US', or 'system'. */
+  getLanguagePreference (): LanguagePreference {
+    const settings = this.read()
+    return normalizeLanguagePreference(settings.languagePreference)
+  }
+
+  /** Save language preference. */
+  saveLanguagePreference (preference: LanguagePreference): void {
+    this.write({ languagePreference: normalizeLanguagePreference(preference) })
   }
 
   /** Get AI execution preferences. */
@@ -896,11 +1002,13 @@ export class SettingsStore {
     return {
       providers: this.getProviders(),
       themePreference: this.getThemePreference(),
+      languagePreference: this.getLanguagePreference(),
       aiExecutionPreferences: this.getAIExecutionPreferences(),
       costSettings: this.getCostSettings(),
       mcpServers: this.getMcpServers(),
       launchpadLayout: this.getLaunchpadLayout(),
       webApps: this.getWebApps(),
+      pinnedDockApps: this.getPinnedDockApps(),
       projectLaunchModes: normalizeProjectLaunchModes(settings.projectLaunchModes)
     }
   }
@@ -920,11 +1028,13 @@ export class SettingsStore {
       aiBaseUrl: activeProvider?.baseUrl || '',
       aiModel: activeProvider?.activeModel || '',
       themePreference: normalizeThemePreference(config.themePreference),
+      languagePreference: normalizeLanguagePreference(config.languagePreference),
       aiExecutionPreferences: normalizeAIExecutionPreferences(config.aiExecutionPreferences),
       costSettings: normalizeCostSettings(config.costSettings),
       mcpServers: normalizeMcpServers(config.mcpServers),
       launchpadLayout: normalizeLaunchpadLayout(config.launchpadLayout),
       webApps: normalizeWebApps(config.webApps),
+      pinnedDockApps: normalizePinnedDockApps(config.pinnedDockApps),
       projectLaunchModes: normalizeProjectLaunchModes(config.projectLaunchModes)
     }
 

@@ -16,20 +16,20 @@ type CategoryId = 'general' | 'about' | 'providers' | 'mcp' | 'skills' | 'agent-
 interface Category {
   id: CategoryId
   icon: string
-  label: string
+  labelKey: string
 }
 
 const categories: Category[] = [
-  { id: 'general', icon: '⚙️', label: '通用设置' },
-  { id: 'providers', icon: '🤖', label: '模型服务' },
-  { id: 'mcp', icon: '🔌', label: 'MCP 管理' },
-  { id: 'skills', icon: '✦', label: 'Skill 管理' },
-  { id: 'agent-workspace', icon: '🧠', label: 'Agent 工作台' },
-  { id: 'scheduler', icon: '⏱', label: '定时任务' },
-  { id: 'logs', icon: '🧾', label: '日志中心' },
-  { id: 'database', icon: '🗄', label: '数据设置' },
-  { id: 'processes', icon: '📊', label: '进程管理' },
-  { id: 'about', icon: 'ℹ️', label: '关于与更新' }
+  { id: 'general', icon: '⚙️', labelKey: 'settings.nav.general' },
+  { id: 'providers', icon: '🤖', labelKey: 'settings.nav.providers' },
+  { id: 'mcp', icon: '🔌', labelKey: 'settings.nav.mcp' },
+  { id: 'skills', icon: '✦', labelKey: 'settings.nav.skills' },
+  { id: 'agent-workspace', icon: '🧠', labelKey: 'settings.nav.agentWorkspace' },
+  { id: 'scheduler', icon: '⏱', labelKey: 'settings.nav.scheduler' },
+  { id: 'logs', icon: '🧾', labelKey: 'settings.nav.logs' },
+  { id: 'database', icon: '🗄', labelKey: 'settings.nav.database' },
+  { id: 'processes', icon: '📊', labelKey: 'settings.nav.processes' },
+  { id: 'about', icon: 'ℹ️', labelKey: 'settings.nav.about' }
 ]
 
 const activeCategoryId = ref<CategoryId>('general')
@@ -46,7 +46,7 @@ const activeCategoryId = ref<CategoryId>('general')
         @click="activeCategoryId = cat.id"
       >
         <span class="cat-icon">{{ cat.icon }}</span>
-        <span class="cat-label">{{ cat.label }}</span>
+        <span class="cat-label">{{ $t(cat.labelKey) }}</span>
       </button>
     </nav>
 

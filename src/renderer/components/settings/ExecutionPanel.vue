@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { loadAIExecutionPreferences, persistAIExecutionPreferences } from '../../utils/ai-execution-preferences'
 
 const FEEDBACK_DISPLAY_DURATION_MS = 1800
+const { t } = useI18n()
 const executionPreferences = ref<AIExecutionPreferences>({
   notifyOnTaskComplete: true,
   enableAiLogging: false
@@ -39,13 +41,13 @@ async function savePreferences (notifyOnTaskComplete: boolean) {
 
   try {
     await persistAIExecutionPreferences(executionPreferences.value)
-    feedback.value = '通知偏好已保存'
+    feedback.value = t('settings.executionPanel.saved')
   } catch (err) {
     executionPreferences.value = {
       ...executionPreferences.value,
       notifyOnTaskComplete: previousNotifyOnTaskComplete
     }
-    feedback.value = `保存失败：${(err as Error).message}`
+    feedback.value = t('common.saveFailed', { message: (err as Error).message })
   } finally {
     saving.value = false
     window.setTimeout(() => {
@@ -62,8 +64,8 @@ onMounted(async () => {
 <template>
   <div class="ep-root">
     <div class="ep-header">
-      <h3 class="ep-title">任务通知</h3>
-      <p class="ep-desc">这里只保留任务结束后的系统通知。AI 日志开关已移到“日志中心”。</p>
+      <h3 class="ep-title">{{ $t('settings.executionPanel.title') }}</h3>
+      <p class="ep-desc">{{ $t('settings.executionPanel.description') }}</p>
       <span v-if="feedback" class="ep-feedback">{{ feedback }}</span>
     </div>
 
@@ -71,8 +73,8 @@ onMounted(async () => {
 
     <label class="ep-toggle">
       <div class="ep-toggle-copy">
-        <span class="ep-toggle-title">任务结束后发送系统通知</span>
-        <span class="ep-toggle-hint">通知中心会显示任务名称和当前状态，适合后台执行时提醒你查看结果。</span>
+        <span class="ep-toggle-title">{{ $t('settings.executionPanel.notifyTitle') }}</span>
+        <span class="ep-toggle-hint">{{ $t('settings.executionPanel.notifyHint') }}</span>
       </div>
         <input
           type="checkbox"
@@ -86,8 +88,8 @@ onMounted(async () => {
       <div class="ep-separator" />
 
       <div class="ep-note">
-        <span class="ep-note-title">说明</span>
-        <p>每个对话都可以在聊天窗口顶部单独切换严格授权或自动执行，不再共享全局授权模式。日志记录请到“日志中心”管理。</p>
+        <span class="ep-note-title">{{ $t('settings.executionPanel.noteTitle') }}</span>
+        <p>{{ $t('settings.executionPanel.noteText') }}</p>
       </div>
   </div>
 </template>

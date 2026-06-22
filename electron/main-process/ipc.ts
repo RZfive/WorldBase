@@ -12,7 +12,8 @@ import type { CreateSelectionPayload } from '../../src/main/ai-engine/agent/tool
 import { readDocumentRenderAsset } from '../../src/main/document-preview/document-render-service.js'
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../../src/main/settings/settings-transfer.js'
 import { runImageStudioRequest } from '../../src/main/settings/image-generation-service.js'
-import type { AIExecutionAuthMode, AIExecutionPreferences, AIProvidersConfig, LaunchpadLayout, PortableSettingsConfig, WebAppShortcut } from '../../src/main/settings/settings-store.js'
+import type { AIExecutionAuthMode, AIExecutionPreferences, AIProvidersConfig, LanguagePreference, LaunchpadLayout, PinnedDockApp, PortableSettingsConfig, WebAppShortcut } from '../../src/main/settings/settings-store.js'
+import { setMainLocale } from '../../src/main/i18n/main-i18n.js'
 import type { Conversation } from '../../src/main/settings/chat-history.js'
 import type { ImageLibraryData, ImageLibraryEntry, ImageLibraryFolderCard, ImageLibraryPage, ImageLibraryQuery, ImageStudioMode } from '../../src/main/settings/image-library-store.js'
 import type { ImageStudioGenerateRequest } from '../../src/shared/image-studio-types.js'
@@ -1424,6 +1425,16 @@ export function setupIPC (): void {
     return { success: true }
   })
 
+  ipcMain.handle('settings:getLanguagePreference', async () => {
+    return settingsStore!.getLanguagePreference()
+  })
+
+  ipcMain.handle('settings:saveLanguagePreference', async (_event: IpcMainInvokeEvent, preference: LanguagePreference) => {
+    settingsStore!.saveLanguagePreference(preference)
+    setMainLocale(preference)
+    return { success: true }
+  })
+
   ipcMain.handle('settings:getAIExecutionPreferences', async () => {
     return settingsStore!.getAIExecutionPreferences()
   })
@@ -1673,6 +1684,15 @@ export function setupIPC (): void {
       url: app.url
     })))
     settingsStore!.saveWebApps(webApps)
+    return { success: true }
+  })
+
+  ipcMain.handle('settings:getPinnedDockApps', async () => {
+    return settingsStore!.getPinnedDockApps()
+  })
+
+  ipcMain.handle('settings:savePinnedDockApps', async (_event: IpcMainInvokeEvent, apps: PinnedDockApp[]) => {
+    settingsStore!.savePinnedDockApps(apps)
     return { success: true }
   })
 

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref, reactive, computed } from 'vue'
+import { onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 interface ModelPricingEntry {
   model: string
@@ -14,6 +15,7 @@ interface CostSettings {
 }
 
 const FEEDBACK_DURATION_MS = 1800
+const { t } = useI18n()
 const loading = ref(true)
 const saving = ref(false)
 const feedback = ref('')
@@ -51,10 +53,10 @@ async function saveSettings () {
         budgetLimit: budgetLimit.value.trim() ? parseFloat(budgetLimit.value) : null
       }
       await api.saveCostSettings(settings)
-      feedback.value = '成本设置已保存'
+      feedback.value = t('settings.cost.saved')
     }
   } catch (err) {
-    feedback.value = `保存失败：${(err as Error).message}`
+    feedback.value = t('common.saveFailed', { message: (err as Error).message })
   } finally {
     saving.value = false
     window.setTimeout(() => { feedback.value = '' }, FEEDBACK_DURATION_MS)
@@ -110,16 +112,16 @@ onMounted(async () => {
 <template>
   <div class="cost-root">
     <div class="cost-header">
-      <h3 class="cost-title">成本核算设置</h3>
-      <p class="cost-desc">配置每个模型的 token 单价，用于追踪 AI 调用成本。</p>
+      <h3 class="cost-title">{{ $t('settings.cost.title') }}</h3>
+      <p class="cost-desc">{{ $t('settings.cost.description') }}</p>
       <span v-if="feedback" class="cost-feedback">{{ feedback }}</span>
     </div>
 
     <div class="cost-separator" />
 
     <div class="cost-section">
-      <h4 class="cost-section-title">会话预算上限</h4>
-      <p class="cost-section-hint">设置单次会话的最大花费（美元），超出后 Agent 将自动停止。留空表示不限制。</p>
+      <h4 class="cost-section-title">{{ $t('settings.cost.budgetTitle') }}</h4>
+      <p class="cost-section-hint">{{ $t('settings.cost.budgetHint') }}</p>
       <div class="budget-row">
         <span class="budget-label">$</span>
         <input
@@ -127,7 +129,7 @@ onMounted(async () => {
           type="number"
           step="0.01"
           min="0"
-          placeholder="不限"
+          :placeholder="$t('settings.cost.budgetPlaceholder')"
           class="cost-input budget-input"
           :disabled="loading"
           @change="onBudgetChange"
@@ -138,15 +140,15 @@ onMounted(async () => {
     <div class="cost-separator" />
 
     <div class="cost-section">
-      <h4 class="cost-section-title">模型定价表</h4>
-      <p class="cost-section-hint">单价为每百万 token 的美元价格。默认已内置常用模型价格，可在此覆盖或添加。</p>
+      <h4 class="cost-section-title">{{ $t('settings.cost.pricingTitle') }}</h4>
+      <p class="cost-section-hint">{{ $t('settings.cost.pricingHint') }}</p>
 
       <div v-if="!loading && pricingEntries.length > 0" class="pricing-table">
         <div class="pricing-header">
-          <span class="col-model">模型</span>
-          <span class="col-price">输入</span>
-          <span class="col-price">输出</span>
-          <span class="col-price">缓存读取</span>
+          <span class="col-model">{{ $t('settings.cost.columnModel') }}</span>
+          <span class="col-price">{{ $t('settings.cost.columnInput') }}</span>
+          <span class="col-price">{{ $t('settings.cost.columnOutput') }}</span>
+          <span class="col-price">{{ $t('settings.cost.columnCacheRead') }}</span>
           <span class="col-action"></span>
         </div>
         <div v-for="(entry, index) in pricingEntries" :key="entry.model" class="pricing-row">
@@ -179,28 +181,28 @@ onMounted(async () => {
             class="cost-input col-price"
             @change="updateEntry(index, 'cacheReadPerMillion', ($event.target as HTMLInputElement).value); saveSettings()"
           >
-          <button class="remove-btn" @click="removePricingEntry(index)" title="删除">✕</button>
+          <button class="remove-btn" @click="removePricingEntry(index)" :title="$t('settings.cost.deleteTitle')">✕</button>
         </div>
       </div>
 
       <div v-if="!loading && pricingEntries.length === 0" class="pricing-empty">
-        暂无自定义定价，将使用内置默认价格。
+        {{ $t('settings.cost.emptyPricing') }}
       </div>
 
       <div class="pricing-add">
-        <input v-model="newModel" placeholder="模型名称" class="cost-input col-model">
-        <input v-model="newInput" type="number" step="0.01" min="0" placeholder="输入" class="cost-input col-price">
-        <input v-model="newOutput" type="number" step="0.01" min="0" placeholder="输出" class="cost-input col-price">
-        <input v-model="newCacheRead" type="number" step="0.01" min="0" placeholder="缓存" class="cost-input col-price">
-        <button class="add-btn" @click="addPricingEntry" :disabled="!newModel.trim()">添加</button>
+        <input v-model="newModel" :placeholder="$t('settings.cost.modelPlaceholder')" class="cost-input col-model">
+        <input v-model="newInput" type="number" step="0.01" min="0" :placeholder="$t('settings.cost.inputPlaceholder')" class="cost-input col-price">
+        <input v-model="newOutput" type="number" step="0.01" min="0" :placeholder="$t('settings.cost.outputPlaceholder')" class="cost-input col-price">
+        <input v-model="newCacheRead" type="number" step="0.01" min="0" :placeholder="$t('settings.cost.cachePlaceholder')" class="cost-input col-price">
+        <button class="add-btn" @click="addPricingEntry" :disabled="!newModel.trim()">{{ $t('settings.cost.add') }}</button>
       </div>
     </div>
 
     <div class="cost-separator" />
 
     <div class="cost-note">
-      <span class="cost-note-title">说明</span>
-      <p>成本数据在每次 AI 请求后自动统计。内置定价支持 GPT-4o、Claude Sonnet/Opus、DeepSeek 等常见模型。自定义定价会覆盖同名模型的内置价格。</p>
+      <span class="cost-note-title">{{ $t('settings.cost.noteTitle') }}</span>
+      <p>{{ $t('settings.cost.noteText') }}</p>
     </div>
   </div>
 </template>

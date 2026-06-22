@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 interface MultiSelectOption {
   value: string
@@ -16,15 +17,14 @@ const props = withDefaults(defineProps<{
   emptyText?: string
   disabled?: boolean
 }>(), {
-  placeholder: '请选择',
-  searchPlaceholder: '搜索',
-  emptyText: '暂无可选项',
   disabled: false
 })
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string[]): void
 }>()
+
+const { t } = useI18n()
 
 const query = ref('')
 const open = ref(false)
@@ -34,6 +34,9 @@ const panelRef = ref<HTMLDivElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
 
 const selectedValues = computed(() => new Set(props.modelValue))
+const placeholderText = computed(() => props.placeholder ?? t('settings.multiSelect.placeholder'))
+const searchPlaceholderText = computed(() => props.searchPlaceholder ?? t('settings.multiSelect.searchPlaceholder'))
+const emptyText = computed(() => props.emptyText ?? t('settings.multiSelect.emptyText'))
 const filteredOptions = computed(() => {
   const normalizedQuery = query.value.trim().toLowerCase()
   if (!normalizedQuery) return props.options
@@ -44,14 +47,17 @@ const filteredOptions = computed(() => {
   })
 })
 const summaryText = computed(() => {
-  if (props.modelValue.length === 0) return props.placeholder
+  if (props.modelValue.length === 0) return placeholderText.value
   const selectedLabels = props.options
     .filter(option => selectedValues.value.has(option.value))
     .map(option => option.label)
 
-  if (selectedLabels.length === 0) return props.placeholder
-  if (selectedLabels.length <= 2) return selectedLabels.join('、')
-  return `${selectedLabels.slice(0, 2).join('、')} 等 ${selectedLabels.length} 项`
+  if (selectedLabels.length === 0) return placeholderText.value
+  if (selectedLabels.length <= 2) return selectedLabels.join(t('settings.multiSelect.delimiter'))
+  return t('settings.multiSelect.summaryMore', {
+    items: selectedLabels.slice(0, 2).join(t('settings.multiSelect.delimiter')),
+    count: selectedLabels.length
+  })
 })
 const panelStyle = computed(() => {
   if (!open.value || !triggerRef.value) return { display: 'none' }
@@ -249,17 +255,17 @@ watch(open, (isOpen) => {
             ref="searchRef"
             v-model="query"
             class="multi-select-search"
-            :placeholder="props.searchPlaceholder"
+            :placeholder="searchPlaceholderText"
           >
           <div class="multi-select-actions">
-            <button type="button" class="multi-select-action" @click.prevent="selectAll">全选</button>
-            <button type="button" class="multi-select-action" @click.prevent="clearAll">清空</button>
+            <button type="button" class="multi-select-action" @click.prevent="selectAll">{{ $t('settings.multiSelect.selectAll') }}</button>
+            <button type="button" class="multi-select-action" @click.prevent="clearAll">{{ $t('settings.multiSelect.clearAll') }}</button>
           </div>
         </div>
 
         <div class="multi-select-panel-summary">
-          <span>{{ props.modelValue.length }} 项已选</span>
-          <span>{{ filteredOptions.length }} 项可见</span>
+          <span>{{ $t('settings.multiSelect.selectedCount', { count: props.modelValue.length }) }}</span>
+          <span>{{ $t('settings.multiSelect.visibleCount', { count: filteredOptions.length }) }}</span>
         </div>
 
         <div v-if="filteredOptions.length > 0" class="multi-select-options">
@@ -282,7 +288,7 @@ watch(open, (isOpen) => {
           </label>
         </div>
 
-        <div v-else class="multi-select-empty">{{ props.emptyText }}</div>
+        <div v-else class="multi-select-empty">{{ emptyText }}</div>
       </div>
     </Teleport>
   </div>
