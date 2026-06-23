@@ -82,17 +82,17 @@ const maximizeLabel = computed(() => props.isMaximized ? t('appShell.restore') :
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 46px;
-  padding: 0 14px;
+  height: 38px;
+  padding: 0 12px;
   box-sizing: border-box;
   background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
   flex-shrink: 0;
   user-select: none;
-  gap: 12px;
+  gap: 10px;
 }
 
 .titlebar.windows {
-  height: 40px;
+  height: 34px;
   padding: 0 0 0 12px;
   gap: 0;
   background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
@@ -110,17 +110,17 @@ const maximizeLabel = computed(() => props.isMaximized ? t('appShell.restore') :
 .titlebar-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
 .titlebar-icon {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--app-panel-muted);
   box-shadow: inset 0 1px 0 var(--app-border);
   font-size: 1em;
