@@ -411,7 +411,7 @@ watch(
   <div class="chat-layout">
     <aside
       :class="['conversation-sidebar-shell', { collapsed: conversationSidebarCollapsed }]"
-      :aria-label="conversationSidebarCollapsed ? '对话列表已收起' : '对话列表'"
+      :aria-label="conversationSidebarCollapsed ? $t('chatUi.conversationListCollapsed') : $t('chatUi.conversationList')"
     >
       <template v-if="!conversationSidebarCollapsed">
         <ConversationSidebar
@@ -433,8 +433,8 @@ watch(
         <button
           class="conversation-sidebar-toggle collapsed"
           type="button"
-          title="展开对话列表"
-          aria-label="展开对话列表"
+          :title="$t('chatUi.expandConversationList')"
+          :aria-label="$t('chatUi.expandConversationList')"
           @click="toggleConversationSidebar"
         >
           <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -444,22 +444,22 @@ watch(
         <button
           class="conversation-sidebar-rail-action"
           type="button"
-          title="新对话"
-          aria-label="新对话"
+          :title="$t('chatUi.newConversation')"
+          :aria-label="$t('chatUi.newConversation')"
           @click="newConversation"
         >
           <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
             <path d="M10 4.5V15.5M4.5 10H15.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
           </svg>
         </button>
-        <div class="conversation-sidebar-rail-sections" aria-label="快速切换">
+        <div class="conversation-sidebar-rail-sections" :aria-label="$t('chatUi.quickSwitch')">
           <div class="conversation-sidebar-rail-group">
             <button
               class="conversation-sidebar-rail-section"
               :class="{ active: collapsedAgentActive }"
               type="button"
-              title="Agent"
-              aria-label="Agent"
+              :title="$t('chatUi.agentSectionHint')"
+              :aria-label="$t('chatUi.agentSectionHint')"
               @click="openFirstCollapsedAgent"
             >
               <span class="conversation-sidebar-rail-icon">🤖</span>
@@ -467,7 +467,7 @@ watch(
             </button>
             <div class="conversation-sidebar-popover">
               <div class="conversation-sidebar-popover-head">
-                <span>Agent</span>
+                <span>{{ $t('chatUi.agentSectionHint') }}</span>
                 <span>{{ agentSidebarItems.length }}</span>
               </div>
               <button
@@ -484,7 +484,7 @@ watch(
                   <span class="conversation-sidebar-popover-subtitle">{{ item.subtitle }}</span>
                 </span>
               </button>
-              <div v-if="agentSidebarItems.length === 0" class="conversation-sidebar-popover-empty">暂无 Agent 会话</div>
+              <div v-if="agentSidebarItems.length === 0" class="conversation-sidebar-popover-empty">{{ $t('chatUi.noAgentConversations') }}</div>
             </div>
           </div>
 
@@ -493,8 +493,8 @@ watch(
               class="conversation-sidebar-rail-section"
               :class="{ active: collapsedGroupActive }"
               type="button"
-              title="群组"
-              aria-label="群组"
+              :title="$t('chatUi.groups')"
+              :aria-label="$t('chatUi.groups')"
               @click="openFirstCollapsedGroup"
             >
               <span class="conversation-sidebar-rail-icon">👥</span>
@@ -502,7 +502,7 @@ watch(
             </button>
             <div class="conversation-sidebar-popover">
               <div class="conversation-sidebar-popover-head">
-                <span>群组</span>
+                <span>{{ $t('chatUi.groups') }}</span>
                 <span>{{ groupSidebarItems.length }}</span>
               </div>
               <button
@@ -519,7 +519,7 @@ watch(
                   <span class="conversation-sidebar-popover-subtitle">{{ item.subtitle }}</span>
                 </span>
               </button>
-              <div v-if="groupSidebarItems.length === 0" class="conversation-sidebar-popover-empty">暂无群组会话</div>
+              <div v-if="groupSidebarItems.length === 0" class="conversation-sidebar-popover-empty">{{ $t('chatUi.noGroupConversations') }}</div>
             </div>
           </div>
 
@@ -528,8 +528,8 @@ watch(
               class="conversation-sidebar-rail-section"
               :class="{ active: collapsedConversationActive }"
               type="button"
-              title="对话"
-              aria-label="对话"
+              :title="$t('chatUi.conversations')"
+              :aria-label="$t('chatUi.conversations')"
               @click="openFirstCollapsedConversation"
             >
               <span class="conversation-sidebar-rail-icon">💬</span>
@@ -537,7 +537,7 @@ watch(
             </button>
             <div class="conversation-sidebar-popover">
               <div class="conversation-sidebar-popover-head">
-                <span>对话</span>
+                <span>{{ $t('chatUi.conversations') }}</span>
                 <span>{{ conversationSidebarItems.length }}</span>
               </div>
               <button
@@ -554,7 +554,7 @@ watch(
                   <span class="conversation-sidebar-popover-subtitle">{{ item.subtitle }}</span>
                 </span>
               </button>
-              <div v-if="conversationSidebarItems.length === 0" class="conversation-sidebar-popover-empty">暂无普通对话</div>
+              <div v-if="conversationSidebarItems.length === 0" class="conversation-sidebar-popover-empty">{{ $t('chatUi.noRegularConversations') }}</div>
             </div>
           </div>
         </div>

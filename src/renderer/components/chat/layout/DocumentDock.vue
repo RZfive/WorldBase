@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import DocumentRenderHost from '../blocks/DocumentRenderHost.vue'
 
 type DocumentNode = DocumentNodeDTO
@@ -22,6 +23,8 @@ const emit = defineEmits<{
   (e: 'selectionsChanged'): void
   (e: 'insertSelectionTag', tag: string): void
 }>()
+
+const { t } = useI18n()
 
 const documents = ref<DocumentSummary[]>([])
 const activeArtifactId = ref<string | null>(null)
@@ -133,7 +136,7 @@ async function handleImportClick () {
         const artifact = result.artifact as DocumentArtifact
         lastImportedArtifactId = artifact.id
       } catch (err) {
-        importError.value = `导入失败: ${(err as Error).message}`
+        importError.value = t('chatUi.importFailedWithMessage', { message: (err as Error).message })
       }
     }
 
@@ -142,7 +145,7 @@ async function handleImportClick () {
       await openArtifact(lastImportedArtifactId)
     }
   } catch (err) {
-    importError.value = `打开文件选择器失败: ${(err as Error).message}`
+    importError.value = t('chatUi.openFilePickerFailed', { message: (err as Error).message })
   }
 
   isImporting.value = false
@@ -164,7 +167,7 @@ async function removeDocument (id: string) {
 
 function formatSelectionLabel (text: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim()
-  if (!normalized) return `选区 ${activeSelections.value.length + 1}`
+  if (!normalized) return t('chatUi.selectionLabel', { index: activeSelections.value.length + 1 })
   return normalized.length > 24 ? `${normalized.slice(0, 24)}…` : normalized
 }
 
@@ -242,7 +245,7 @@ function hasSameNodeSelection (nodeIds: string[], excerpt: string): boolean {
 }
 
 function buildSelectionTag (selection: SelectionRegion): string {
-  const safeLabel = selection.label.replace(/\]\]/g, '').trim() || '文档标签'
+  const safeLabel = selection.label.replace(/\]\]/g, '').trim() || t('chatUi.documentTagFallback')
   return `[[doc:${selection.id}|${safeLabel}]]`
 }
 
@@ -285,7 +288,7 @@ async function openOriginalFile () {
   importError.value = ''
   const result = await window.electronAPI.openDocumentOriginal(activeArtifact.value.id)
   if (!result.success) {
-    importError.value = `打开原文件失败: ${result.error || 'unknown error'}`
+    importError.value = t('chatUi.openOriginalFileFailed', { message: result.error || 'unknown error' })
   }
 }
 
@@ -331,17 +334,17 @@ watch(() => props.visible, (visible) => {
     </div>
 
     <div class="dock-header">
-      <h3 class="dock-title">文档工作台</h3>
-      <button class="dock-close" @click="emit('close')" title="关闭">×</button>
+      <h3 class="dock-title">{{ $t('chatUi.documentWorkbench') }}</h3>
+      <button class="dock-close" @click="emit('close')" :title="$t('common.close')">×</button>
     </div>
 
     <div class="dock-body">
       <div class="dock-sidebar">
         <button class="import-btn" :class="{ disabled: isImporting }" :disabled="isImporting" @click="handleImportClick">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          导入文档
+          {{ $t('chatUi.importDocument') }}
         </button>
-        <div class="import-hint">支持单个文档最大 100MB，大型文档会由 AI 分片读取。</div>
+        <div class="import-hint">{{ $t('chatUi.documentDockImportHint') }}</div>
 
         <div v-if="importError" class="import-error">{{ importError }}</div>
 
@@ -358,14 +361,14 @@ watch(() => props.visible, (visible) => {
               <div class="doc-name">{{ doc.fileName }}</div>
               <div class="doc-detail">
                 {{ getTypeLabel(doc.fileType) }} · {{ formatFileSize(doc.fileSize) }}
-                <span v-if="doc.selectionCount > 0" class="doc-sel-count">· {{ doc.selectionCount }} 标签</span>
+                <span v-if="doc.selectionCount > 0" class="doc-sel-count">· {{ $t('chatUi.tagCount', { count: doc.selectionCount }) }}</span>
               </div>
             </div>
-            <button class="doc-remove" @click.stop="removeDocument(doc.id)" title="移除">×</button>
+            <button class="doc-remove" @click.stop="removeDocument(doc.id)" :title="$t('common.remove')">×</button>
           </div>
 
           <div v-if="documents.length === 0" class="doc-empty">
-            暂无导入文档
+            {{ $t('chatUi.noImportedDocuments') }}
           </div>
         </div>
       </div>
@@ -375,9 +378,9 @@ watch(() => props.visible, (visible) => {
           <div class="selection-toolbar">
             <button class="sel-btn" @click="openOriginalFile">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg>
-              打开原文件
+              {{ $t('chatUi.openOriginalFile') }}
             </button>
-            <span class="sel-hint">拖拽高亮文档内容会自动生成标签。点击标签会插入聊天框，仅这些标签会在发送时注入给 AI。</span>
+            <span class="sel-hint">{{ $t('chatUi.documentDockSelectionHint') }}</span>
           </div>
 
           <div v-if="activeSelections.length > 0" class="selection-tags">
@@ -391,7 +394,7 @@ watch(() => props.visible, (visible) => {
                 <span class="tag-dot"></span>
                 <span class="tag-label">#{{ selection.label }}</span>
               </button>
-              <button class="tag-remove" @click.stop="removeSelection(selection.id)" title="删除标签">×</button>
+              <button class="tag-remove" @click.stop="removeSelection(selection.id)" :title="$t('chatUi.deleteTag')">×</button>
             </div>
           </div>
 
@@ -406,8 +409,8 @@ watch(() => props.visible, (visible) => {
 
         <div v-else class="preview-empty">
           <div class="empty-icon">📂</div>
-          <div class="empty-text">选择左侧文档查看内容</div>
-          <div class="empty-hint">支持 PDF、Excel、Word、PowerPoint，单个文档最大 100MB</div>
+          <div class="empty-text">{{ $t('chatUi.selectDocumentToPreview') }}</div>
+          <div class="empty-hint">{{ $t('chatUi.documentDockEmptyHint') }}</div>
         </div>
       </div>
     </div>

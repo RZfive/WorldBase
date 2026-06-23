@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
 
@@ -23,6 +24,7 @@ const selectedFile = ref<FileTreeItem | null>(null)
 const fileContent = ref<string>('')
 const fileError = ref<string>('')
 const isLoadingFile = ref(false)
+const { t } = useI18n()
 
 /* Expand / collapse state for directories */
 const expandedDirs = ref<Set<string>>(new Set())
@@ -80,7 +82,7 @@ async function openFile (item: FileTreeItem) {
       fileContent.value = await window.electronAPI.readFile(props.project.id as string, item.path)
     }
   } catch (err) {
-    fileError.value = `读取失败：${(err as Error).message}`
+    fileError.value = t('viewer.readFailed', { message: (err as Error).message })
     fileContent.value = ''
   } finally {
     isLoadingFile.value = false
@@ -151,7 +153,7 @@ watch(() => props.project.id, () => {
     <!-- File tree sidebar -->
     <aside class="sv-sidebar">
       <div class="sv-sidebar-header">
-        <button class="sv-back-btn" @click="emit('back')" title="返回">←</button>
+        <button class="sv-back-btn" @click="emit('back')" :title="$t('viewer.back')">←</button>
         <span class="sv-project-name">{{ project.name || project.id }}</span>
       </div>
       <div class="sv-file-tree">
@@ -171,7 +173,7 @@ watch(() => props.project.id, () => {
           </span>
           <span class="sv-tree-name">{{ item.name }}</span>
         </div>
-        <div v-if="flatFileTree.length === 0" class="sv-tree-empty">暂无文件</div>
+        <div v-if="flatFileTree.length === 0" class="sv-tree-empty">{{ $t('viewer.noFiles') }}</div>
       </div>
     </aside>
 
@@ -180,10 +182,10 @@ watch(() => props.project.id, () => {
       <template v-if="selectedFile">
         <div class="sv-file-header">
           <span class="sv-file-path">{{ selectedFile.path }}</span>
-          <span v-if="lineCount > 0" class="sv-line-info">{{ lineCount }} 行</span>
+          <span v-if="lineCount > 0" class="sv-line-info">{{ $t('viewer.lineCount', { count: lineCount }) }}</span>
         </div>
         <div v-if="fileError" class="sv-error">{{ fileError }}</div>
-        <div v-else-if="isLoadingFile" class="sv-loading">加载中…</div>
+        <div v-else-if="isLoadingFile" class="sv-loading">{{ $t('common.loading') }}</div>
         <div v-else class="sv-code-wrapper">
           <div class="sv-line-numbers" aria-hidden="true">
             <span v-for="n in lineCount" :key="n">{{ n }}</span>
@@ -193,7 +195,7 @@ watch(() => props.project.id, () => {
       </template>
       <div v-else class="sv-placeholder">
         <div class="sv-placeholder-icon">💻</div>
-        <p>选择左侧文件查看源码</p>
+        <p>{{ $t('viewer.selectFile') }}</p>
       </div>
     </main>
   </div>

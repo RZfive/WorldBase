@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, toRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ConversationSidebarFolder from './ConversationSidebarFolder.vue'
 import ConversationSidebarItemCard from './ConversationSidebarItemCard.vue'
 import {
@@ -28,9 +29,11 @@ const emit = defineEmits<{
   (e: 'pinConversation', id: string): void
 }>()
 
+const { t } = useI18n()
 const searchQuery = ref('')
 const renamingConversationId = ref<string | null>(null)
 const conversationRenameInput = ref('')
+const defaultFolderName = computed(() => t('launchpad.newFolder'))
 
 const SECTION_COLLAPSE_STORAGE_KEY = 'conversation-sidebar-sections'
 
@@ -130,7 +133,8 @@ const {
   computed(() => props.conversationItems),
   searchQuery,
   normalizeSearchValue,
-  toRef(props, 'conversationListLoaded')
+  toRef(props, 'conversationListLoaded'),
+  defaultFolderName
 )
 
 const hasVisibleItems = computed(() => {
@@ -176,12 +180,12 @@ function cancelRenameConversation () {
   <div class="conv-sidebar">
     <div class="conv-toolbar">
       <div class="conv-toolbar-row">
-        <button class="new-conv-btn" type="button" @click="emit('newConversation')">+ 新对话</button>
+        <button class="new-conv-btn" type="button" @click="emit('newConversation')">+ {{ $t('chatUi.newConversation') }}</button>
         <button
           class="conv-collapse-btn"
           type="button"
-          title="收起对话列表"
-          aria-label="收起对话列表"
+          :title="$t('chatUi.collapseConversationList')"
+          :aria-label="$t('chatUi.collapseConversationList')"
           @click="emit('toggleCollapse')"
         >
           <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -195,13 +199,13 @@ function cancelRenameConversation () {
           v-model="searchQuery"
           class="conv-search-input"
           type="search"
-          placeholder="搜索 Agent、群聊、文件夹或对话内容"
+          :placeholder="$t('chatUi.searchConversationsPlaceholder')"
         >
         <button
           v-if="searchQuery"
           class="conv-search-clear"
           type="button"
-          title="清空搜索"
+          :title="$t('chatUi.clearSearch')"
           @click="searchQuery = ''"
         >×</button>
       </label>
@@ -216,7 +220,7 @@ function cancelRenameConversation () {
         >
           <span class="conv-section-toggle-copy">
             <span class="conv-section-title">Agent</span>
-            <span class="conv-section-hint">专属工作流</span>
+            <span class="conv-section-hint">{{ $t('chatUi.agentSectionHint') }}</span>
           </span>
           <span class="conv-section-meta">{{ filteredAgentItems.length }}/{{ props.agentItems.length }}</span>
           <span class="conv-section-caret-shell" aria-hidden="true">
@@ -236,7 +240,7 @@ function cancelRenameConversation () {
               :item="item"
               variant="agent"
               :show-delete="Boolean(item.conversationId)"
-              delete-title="删除该 Agent 会话"
+              :delete-title="$t('chatUi.deleteAgentConversation')"
               @click="emit('openAgent', item.id)"
               @delete="item.conversationId && emit('deleteConversation', item.conversationId)"
             />
@@ -252,8 +256,8 @@ function cancelRenameConversation () {
           @click="toggleSection('groups')"
         >
           <span class="conv-section-toggle-copy">
-            <span class="conv-section-title">群组</span>
-            <span class="conv-section-hint">多 Agent 协作</span>
+            <span class="conv-section-title">{{ $t('chatUi.groups') }}</span>
+            <span class="conv-section-hint">{{ $t('chatUi.groupSectionHint') }}</span>
           </span>
           <span class="conv-section-meta">{{ filteredGroupItems.length }}/{{ props.groupItems.length }}</span>
           <span class="conv-section-caret-shell" aria-hidden="true">
@@ -273,7 +277,7 @@ function cancelRenameConversation () {
               :item="item"
               variant="group"
               :show-delete="Boolean(item.conversationId)"
-              delete-title="删除该群组会话"
+              :delete-title="$t('chatUi.deleteGroupConversation')"
               @click="emit('openGroup', item.id)"
               @delete="item.conversationId && emit('deleteConversation', item.conversationId)"
             />
@@ -290,12 +294,12 @@ function cancelRenameConversation () {
             @click="toggleSection('conversations')"
           >
             <span class="conv-section-toggle-copy">
-              <span class="conv-section-title">对话</span>
-              <span class="conv-section-hint">自由聊天记录</span>
+              <span class="conv-section-title">{{ $t('appShell.chat') }}</span>
+              <span class="conv-section-hint">{{ $t('chatUi.conversationSectionHint') }}</span>
             </span>
             <span class="conv-section-meta">{{ filteredConversationCount }}/{{ props.conversationItems.length }}</span>
           </button>
-          <button class="conv-folder-add-btn" type="button" title="新建空文件夹" @click.stop="createEmptyFolder">
+          <button class="conv-folder-add-btn" type="button" :title="$t('chatUi.newEmptyFolder')" @click.stop="createEmptyFolder">
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M2.25 4.75A1.5 1.5 0 0 1 3.75 3.25H6.2a1 1 0 0 1 .77.36l.57.7a1 1 0 0 0 .77.36h3.94a1.5 1.5 0 0 1 1.5 1.5v4.08a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
               <path d="M8 6.15v3.7M6.15 8h3.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
@@ -338,7 +342,7 @@ function cancelRenameConversation () {
                 :rename-input="conversationRenameInput"
                 show-delete
                 show-pin
-                delete-title="删除"
+                :delete-title="$t('common.delete')"
                 @click="emit('selectConversation', entry.item.id)"
                 @contextmenu.prevent="startRenameConversation(entry.item)"
                 @update:rename-input="conversationRenameInput = $event"
@@ -396,7 +400,7 @@ function cancelRenameConversation () {
         </div>
       </section>
 
-      <div v-if="!hasVisibleItems" class="conv-empty">{{ isSearching ? '没有找到匹配的对话内容' : '暂无对话记录' }}</div>
+      <div v-if="!hasVisibleItems" class="conv-empty">{{ isSearching ? $t('chatUi.noMatchingConversations') : $t('chatUi.noConversationRecords') }}</div>
     </div>
   </div>
 </template>

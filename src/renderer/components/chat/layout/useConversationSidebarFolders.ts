@@ -9,7 +9,6 @@ import type {
 } from './ConversationSidebar.types'
 
 const CONVERSATION_LAYOUT_STORAGE_KEY = 'conversation-sidebar-layout'
-const DEFAULT_FOLDER_NAME = '新文件夹'
 const TOP_LEVEL_EDGE_RATIO = 0.24
 const FOLDER_ID_PREFIX = 'folder_'
 let transparentDragImage: HTMLCanvasElement | null = null
@@ -40,7 +39,7 @@ function filterConversationIds (value: unknown): string[] {
     : []
 }
 
-function normalizeConversationFolders (value: unknown): ConversationFolderLayout[] {
+function normalizeConversationFolders (value: unknown, defaultFolderName: string): ConversationFolderLayout[] {
   const seenFolderIds = new Set<string>()
   return Array.isArray(value)
     ? value
@@ -52,7 +51,7 @@ function normalizeConversationFolders (value: unknown): ConversationFolderLayout
         seenFolderIds.add(id)
         const name = typeof record.name === 'string' && record.name.trim().length > 0
           ? record.name.trim()
-          : DEFAULT_FOLDER_NAME
+          : defaultFolderName
         return {
           id,
           name,
@@ -78,7 +77,7 @@ function normalizeTopLevelOrder (value: unknown): string[] {
     : []
 }
 
-function loadConversationLayout (): ConversationSidebarLayout {
+function loadConversationLayout (defaultFolderName: string): ConversationSidebarLayout {
   if (typeof window === 'undefined') {
     return { folders: [], topLevelOrder: [], pinnedIds: [] }
   }
@@ -90,7 +89,7 @@ function loadConversationLayout (): ConversationSidebarLayout {
     }
     const parsed = JSON.parse(raw) as { folders?: unknown; topLevelOrder?: unknown; pinnedIds?: unknown }
     return {
-      folders: normalizeConversationFolders(parsed.folders),
+      folders: normalizeConversationFolders(parsed.folders, defaultFolderName),
       topLevelOrder: normalizeTopLevelOrder(parsed.topLevelOrder),
       pinnedIds: filterConversationIds(parsed.pinnedIds)
     }
@@ -121,9 +120,10 @@ export function useConversationSidebarFolders (
   conversationItems: ComputedRef<ConversationSidebarItem[]>,
   searchQuery: Ref<string>,
   normalizeSearchValue: (value: string) => string,
-  conversationListLoaded: Ref<boolean>
+  conversationListLoaded: Ref<boolean>,
+  defaultFolderName: Ref<string>
 ) {
-  const initialConversationLayout = loadConversationLayout()
+  const initialConversationLayout = loadConversationLayout(defaultFolderName.value)
   const conversationFolders = ref<ConversationFolderLayout[]>(initialConversationLayout.folders)
   const conversationTopLevelOrder = ref<string[]>(initialConversationLayout.topLevelOrder)
   const pinnedIds = ref<string[]>(initialConversationLayout.pinnedIds)
@@ -166,7 +166,7 @@ export function useConversationSidebarFolders (
 
       return {
         id: folder.id,
-        name: folder.name.trim() || DEFAULT_FOLDER_NAME,
+        name: folder.name.trim() || defaultFolderName.value,
         conversationIds,
         collapsed: folder.collapsed === true
       }
@@ -386,15 +386,16 @@ export function useConversationSidebarFolders (
 
   function createEmptyFolder () {
     const id = `${FOLDER_ID_PREFIX}${Date.now().toString(36)}`
+    const name = defaultFolderName.value
     conversationFolders.value.push({
       id,
-      name: DEFAULT_FOLDER_NAME,
+      name,
       conversationIds: [],
       collapsed: false
     })
     conversationTopLevelOrder.value = [...conversationTopLevelOrder.value, folderKey(id)]
     renamingFolderId.value = id
-    renameInput.value = DEFAULT_FOLDER_NAME
+    renameInput.value = name
     finalizeConversationLayout()
   }
 
@@ -406,7 +407,7 @@ export function useConversationSidebarFolders (
   function commitRenameFolder (folderId: string) {
     const folder = getFolderById(folderId)
     if (folder) {
-      folder.name = renameInput.value.trim() || folder.name || DEFAULT_FOLDER_NAME
+      folder.name = renameInput.value.trim() || folder.name || defaultFolderName.value
       finalizeConversationLayout()
     }
     renamingFolderId.value = null
@@ -563,12 +564,13 @@ export function useConversationSidebarFolders (
     const targetKey = conversationKey(targetConversationId)
     const targetIndex = conversationTopLevelOrder.value.indexOf(targetKey)
     const id = `${FOLDER_ID_PREFIX}${Date.now().toString(36)}`
+    const name = defaultFolderName.value
 
     detachConversationFromCurrentLocation(draggedConversationId)
     conversationTopLevelOrder.value = conversationTopLevelOrder.value.filter(key => key !== targetKey)
     conversationFolders.value.push({
       id,
-      name: DEFAULT_FOLDER_NAME,
+      name,
       conversationIds: [targetConversationId, draggedConversationId],
       collapsed: false
     })
@@ -578,7 +580,7 @@ export function useConversationSidebarFolders (
     nextOrder.splice(insertIndex, 0, folderKey(id))
     conversationTopLevelOrder.value = nextOrder
     renamingFolderId.value = id
-    renameInput.value = DEFAULT_FOLDER_NAME
+    renameInput.value = name
     finalizeConversationLayout()
   }
 

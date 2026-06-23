@@ -241,18 +241,18 @@ defineExpose({ open })
     <div class="image-lightbox-dialog">
       <div class="image-lightbox-toolbar">
         <div class="image-lightbox-meta">
-          <span class="image-lightbox-title">图片预览</span>
+          <span class="image-lightbox-title">{{ $t('chatUi.imagePreview') }}</span>
           <span class="image-lightbox-counter">{{ (lightboxIndex ?? 0) + 1 }} / {{ props.images.length }}</span>
         </div>
         <div class="image-lightbox-actions">
-          <button class="image-lightbox-btn secondary" type="button" :disabled="!canShowPreviousImage" @click="showPreviousImage">上一张</button>
-          <button class="image-lightbox-btn secondary" type="button" :disabled="!canShowNextImage" @click="showNextImage">下一张</button>
+          <button class="image-lightbox-btn secondary" type="button" :disabled="!canShowPreviousImage" @click="showPreviousImage">{{ $t('chatUi.previousImage') }}</button>
+          <button class="image-lightbox-btn secondary" type="button" :disabled="!canShowNextImage" @click="showNextImage">{{ $t('chatUi.nextImage') }}</button>
           <span class="image-lightbox-zoom">{{ lightboxZoomPercent }}</span>
-          <button class="image-lightbox-btn secondary" type="button" :disabled="lightboxZoom <= 1" @click="zoomOutLightbox">缩小</button>
+          <button class="image-lightbox-btn secondary" type="button" :disabled="lightboxZoom <= 1" @click="zoomOutLightbox">{{ $t('chatUi.zoomOut') }}</button>
           <button class="image-lightbox-btn secondary" type="button" @click="resetLightboxZoom">100%</button>
-          <button class="image-lightbox-btn secondary" type="button" :disabled="lightboxZoom >= 4" @click="zoomInLightbox">放大</button>
-          <button class="image-lightbox-btn" type="button" @click="downloadImage(lightboxImage.url)">下载到本地</button>
-          <button class="image-lightbox-btn secondary" type="button" @click="closeLightbox">关闭</button>
+          <button class="image-lightbox-btn secondary" type="button" :disabled="lightboxZoom >= 4" @click="zoomInLightbox">{{ $t('chatUi.zoomIn') }}</button>
+          <button class="image-lightbox-btn" type="button" @click="downloadImage(lightboxImage.url)">{{ $t('chatUi.downloadLocal') }}</button>
+          <button class="image-lightbox-btn secondary" type="button" @click="closeLightbox">{{ $t('common.close') }}</button>
         </div>
       </div>
       <div ref="lightboxBodyRef" class="image-lightbox-body" @wheel="handleLightboxWheel">

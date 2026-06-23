@@ -72,10 +72,10 @@ onUnmounted(() => {
           <pre class="auth-detail">{{ currentRequest.detail }}</pre>
           <div class="auth-actions">
             <button class="auth-btn deny" @click="respond(false)">
-              拒绝
+              {{ $t('appShell.deny') }}
             </button>
             <button class="auth-btn allow" @click="respond(true)">
-              允许
+              {{ $t('appShell.allow') }}
             </button>
           </div>
         </div>

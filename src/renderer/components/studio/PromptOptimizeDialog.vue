@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 interface TextModelOption {
   providerId: string
@@ -27,6 +28,7 @@ const errorMsg = ref('')
 const optimizedPrompt = ref('')
 const editablePrompt = ref('')
 const selectedValue = ref('')
+const { t } = useI18n()
 
 const selectedOption = computed(() => {
   return props.modelOptions.find(option => option.value === selectedValue.value) ?? null
@@ -34,15 +36,15 @@ const selectedOption = computed(() => {
 
 async function doOptimize () {
   if (!window.electronAPI?.optimizeImagePrompt) {
-    errorMsg.value = '当前环境不支持提示词优化'
+    errorMsg.value = t('studioUi.optimizeUnsupported')
     return
   }
   if (!props.originalPrompt.trim()) {
-    errorMsg.value = '请先输入提示词'
+    errorMsg.value = t('studioUi.enterPromptFirst')
     return
   }
   if (!selectedOption.value) {
-    errorMsg.value = '未找到可用的文本模型'
+    errorMsg.value = t('studioUi.noTextModel')
     return
   }
 
@@ -63,10 +65,10 @@ async function doOptimize () {
       optimizedPrompt.value = result.optimizedPrompt
       editablePrompt.value = result.optimizedPrompt
     } else {
-      errorMsg.value = result.error || '优化失败'
+      errorMsg.value = result.error || t('studioUi.optimizeFailed')
     }
   } catch (error) {
-    errorMsg.value = error instanceof Error ? error.message : '提示词优化失败'
+    errorMsg.value = error instanceof Error ? error.message : t('studioUi.promptOptimizeFailed')
   } finally {
     optimizing.value = false
   }
@@ -83,7 +85,7 @@ function onOpen () {
   errorMsg.value = ''
   selectedValue.value = props.defaultModelValue
   if (!selectedValue.value) {
-    errorMsg.value = '未找到可用的文本模型'
+    errorMsg.value = t('studioUi.noTextModel')
     return
   }
   doOptimize()
@@ -98,50 +100,50 @@ defineExpose({ onOpen })
     <div v-if="props.visible" class="opt-overlay" @click.self="emit('close')">
       <div class="opt-dialog">
         <header class="opt-header">
-          <h3>✨ AI 提示词优化</h3>
-          <span class="opt-type-badge">{{ isNegative ? '负向提示词' : '正向提示词' }}</span>
-          <button class="opt-close" type="button" @click="emit('close')">✕</button>
+          <h3>✨ {{ $t('studioUi.aiPromptOptimize') }}</h3>
+          <span class="opt-type-badge">{{ isNegative ? $t('studioUi.negativePrompt') : $t('studioUi.positivePrompt') }}</span>
+          <button class="opt-close" type="button" @click="emit('close')" :title="$t('common.close')">✕</button>
         </header>
 
         <div class="opt-body">
           <div class="opt-section">
-            <span class="opt-label">优化模型</span>
+            <span class="opt-label">{{ $t('studioUi.optimizeModel') }}</span>
             <select v-model="selectedValue" class="opt-select" :disabled="optimizing || props.modelOptions.length === 0">
               <option v-for="option in props.modelOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
-            <span class="opt-hint">默认使用当前默认供应商的默认模型，也可切换其他文本模型对比效果</span>
+            <span class="opt-hint">{{ $t('studioUi.optimizeModelHint') }}</span>
           </div>
 
           <div class="opt-section">
-            <span class="opt-label">原始提示词</span>
-            <p class="opt-original">{{ props.originalPrompt || '（空）' }}</p>
+            <span class="opt-label">{{ $t('studioUi.originalPrompt') }}</span>
+            <p class="opt-original">{{ props.originalPrompt || $t('studioUi.emptyValue') }}</p>
           </div>
 
           <div v-if="optimizing" class="opt-loading">
             <span class="opt-spinner">⏳</span>
-            <p>正在优化提示词，请稍候…</p>
+            <p>{{ $t('studioUi.optimizingPrompt') }}</p>
           </div>
 
           <div v-else-if="errorMsg" class="opt-error">
             <p>{{ errorMsg }}</p>
-            <button class="opt-btn" type="button" @click="doOptimize">重试</button>
+            <button class="opt-btn" type="button" @click="doOptimize">{{ $t('common.retry') }}</button>
           </div>
 
           <div v-else-if="optimizedPrompt" class="opt-section">
-            <span class="opt-label">优化后的提示词 <span class="opt-hint">（可编辑后应用）</span></span>
+            <span class="opt-label">{{ $t('studioUi.optimizedPrompt') }} <span class="opt-hint">{{ $t('studioUi.editableApplyHint') }}</span></span>
             <textarea
               v-model="editablePrompt"
               class="opt-textarea"
               rows="6"
-              placeholder="优化后的提示词…"
+              :placeholder="$t('studioUi.optimizedPromptPlaceholder')"
             ></textarea>
           </div>
         </div>
 
         <footer class="opt-footer">
-          <button class="opt-btn" type="button" @click="emit('close')">取消</button>
+          <button class="opt-btn" type="button" @click="emit('close')">{{ $t('common.cancel') }}</button>
           <button class="opt-btn opt-btn-retry" type="button" :disabled="optimizing || !props.originalPrompt.trim()" @click="doOptimize">
-            ↻ 使用所选模型优化
+            ↻ {{ $t('studioUi.optimizeWithSelectedModel') }}
           </button>
           <button
             class="opt-btn opt-btn-primary"
@@ -149,7 +151,7 @@ defineExpose({ onOpen })
             :disabled="!editablePrompt.trim()"
             @click="applyPrompt"
           >
-            ✓ 应用到提示词框
+            ✓ {{ $t('studioUi.applyToPrompt') }}
           </button>
         </footer>
       </div>

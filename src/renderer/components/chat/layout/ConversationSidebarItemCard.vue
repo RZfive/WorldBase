@@ -26,7 +26,7 @@ const props = withDefaults(defineProps<{
   isDragging: false,
   dropClass: null,
   nested: false,
-  deleteTitle: '删除',
+  deleteTitle: '',
   showDelete: false,
   showPin: false,
   compact: false,
@@ -118,29 +118,29 @@ watch(
           <span
             v-if="item.pendingAuthCount > 0"
             :class="['conv-status', 'auth', { compact: isCompactConversation }]"
-            :title="`等待授权${item.pendingAuthCount > 1 ? ` ${item.pendingAuthCount} 项` : ''}`"
+            :title="item.pendingAuthCount > 1 ? $t('chatUi.waitingAuthCount', { count: item.pendingAuthCount }) : $t('chatUi.waitingAuth')"
           >
             <span class="conv-status-dot"></span>
             <template v-if="!isCompactConversation">
-              待授权<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
+              {{ $t('chatUi.pendingAuthShort') }}<span v-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
             </template>
             <span v-else-if="item.pendingAuthCount > 1" class="conv-status-count">{{ item.pendingAuthCount }}</span>
           </span>
           <span
             v-else-if="item.isStreaming"
             :class="['conv-status', 'streaming', { compact: isCompactConversation }]"
-            title="生成中"
+            :title="$t('chatUi.generating')"
           >
             <span class="conv-status-dot"></span>
-            <template v-if="!isCompactConversation">运行中</template>
+            <template v-if="!isCompactConversation">{{ $t('chatUi.runningShort') }}</template>
           </span>
           <span
             v-else-if="item.unreadCount > 0"
             :class="['conv-status', 'unread', { compact: isCompactConversation }]"
-            title="有未查看的回复"
+            :title="$t('chatUi.unreadReply')"
           >
             <span class="conv-status-dot"></span>
-            <template v-if="!isCompactConversation">未读</template>
+            <template v-if="!isCompactConversation">{{ $t('chatUi.unread') }}</template>
           </span>
         </div>
         <span v-if="!isCompactConversation" class="conv-subtitle">{{ item.subtitle }}</span>
@@ -152,15 +152,15 @@ watch(
         class="conv-pin"
         :class="{ active: itemIsPinned }"
         type="button"
-        :title="itemIsPinned ? '取消置顶' : '置顶'"
-        :aria-label="itemIsPinned ? '取消置顶' : '置顶'"
+        :title="itemIsPinned ? $t('chatUi.unpin') : $t('chatUi.pin')"
+        :aria-label="itemIsPinned ? $t('chatUi.unpin') : $t('chatUi.pin')"
         @click.stop="emit('pin')"
       >
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M9.5 2.5L13.5 6.5L10.5 7.5L8.5 11.5L7 10L4.5 12.5L6 8.5L4.5 7L8.5 5L9.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
         </svg>
       </button>
-      <button v-if="showDelete" class="conv-delete" type="button" :title="deleteTitle" @click.stop="emit('delete')">×</button>
+      <button v-if="showDelete" class="conv-delete" type="button" :title="deleteTitle || $t('common.delete')" @click.stop="emit('delete')">×</button>
     </div>
   </div>
 </template>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ContextMenu from './ContextMenu.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import LaunchpadGrid from './LaunchpadGrid.vue'
@@ -21,6 +22,8 @@ const emit = defineEmits<{
   (e: 'appStarted'): void
   (e: 'close'): void
 }>()
+
+const { t } = useI18n()
 
 const projects = ref<Project[]>([])
 const folders = ref<LaunchFolder[]>([])
@@ -449,7 +452,7 @@ function createFolderWith (draggedProjectId: string, targetProjectId: string) {
   const targetKey = projectKey(targetProjectId)
   const targetIndex = topLevelOrder.value.indexOf(targetKey)
   const id = 'folder_' + Date.now().toString(36)
-  const name = '新文件夹'
+  const name = t('launchpad.newFolder')
 
   detachProjectFromCurrentLocation(draggedProjectId)
 
@@ -469,11 +472,12 @@ function createFolderWith (draggedProjectId: string, targetProjectId: string) {
 
 function createEmptyFolder () {
   const id = 'folder_' + Date.now().toString(36)
-  folders.value.push({ id, name: '新文件夹', projectIds: [] })
+  const name = t('launchpad.newFolder')
+  folders.value.push({ id, name, projectIds: [] })
   topLevelOrder.value = dedupeOrder([...topLevelOrder.value, folderKey(id)])
   persistLayout()
   renamingId.value = id
-  renameInput.value = '新文件夹'
+  renameInput.value = name
 }
 
 function deleteFolder (folderId: string) {
@@ -653,7 +657,7 @@ async function deleteProject (project: Project) {
   if (project.kind === 'web') return
   confirmDialog.value = {
     visible: true,
-    message: `确定删除项目「${project.name || project.id}」？此操作不可撤销。`,
+    message: t('launchpad.deleteProjectConfirm', { name: project.name || project.id }),
     onConfirm: async () => {
       if (window.electronAPI?.deleteProject) {
         try {
@@ -1126,14 +1130,14 @@ onUnmounted(() => {
               ref="searchRef"
               v-model="searchQuery"
               type="text"
-              placeholder="搜索应用或输入网址…"
+              :placeholder="$t('launchpad.searchPlaceholder')"
               class="lp-search-input"
               @click.stop
               @keydown.enter.prevent="handleSearchEnter"
             />
           </div>
           <button class="lp-import-btn" type="button" :disabled="isPackageActionPending" @click="importProjectPackagesFromDialog">
-            {{ isPackageActionPending ? '处理中…' : '导入应用' }}
+            {{ isPackageActionPending ? $t('launchpad.processing') : $t('launchpad.importApp') }}
           </button>
         </div>
       </div>
@@ -1145,12 +1149,12 @@ onUnmounted(() => {
         @click="openTypedUrl"
       >
         <span class="lp-search-action-icon">🌐</span>
-        <span class="lp-search-action-copy">打开网页 {{ searchUrlCandidate }}</span>
+        <span class="lp-search-action-copy">{{ $t('launchpad.openWebUrl', { url: searchUrlCandidate }) }}</span>
       </button>
 
       <!-- Loading -->
       <div v-if="isLoading && projects.length === 0" class="lp-status">
-        <span class="lp-spinner">⏳</span> 加载中…
+        <span class="lp-spinner">⏳</span> {{ $t('common.loading') }}
       </div>
       <div v-else-if="error" class="lp-status lp-error">❌ {{ error }}</div>
 
@@ -1166,14 +1170,14 @@ onUnmounted(() => {
       >
         <div v-if="isPackageDragActive" class="lp-import-drop-overlay">
           <div class="lp-import-drop-card">
-            {{ isPackageActionPending ? '正在安装应用…' : '释放鼠标以安装 The World 应用包 (.twapp)' }}
+            {{ isPackageActionPending ? $t('launchpad.installingApp') : $t('launchpad.dropToInstall') }}
           </div>
         </div>
 
         <div v-if="gridItems.length === 0" class="lp-empty">
           <div class="lp-empty-icon">🚀</div>
-          <p>还没有应用</p>
-          <p class="lp-empty-hint">在 AI 对话中输入需求即可创建新应用，或导入 .twapp 应用包</p>
+          <p>{{ $t('launchpad.emptyTitle') }}</p>
+          <p class="lp-empty-hint">{{ $t('launchpad.emptyHint') }}</p>
         </div>
 
         <LaunchpadGrid

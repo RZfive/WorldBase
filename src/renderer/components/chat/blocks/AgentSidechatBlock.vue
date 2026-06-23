@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../markdown'
 import type { AgentSidechatSession } from '../../../../shared/agent-workspace-types.js'
 import type { ChatMessageBlock } from '../types'
@@ -8,21 +9,22 @@ const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'agent_sidechat' }>
 }>()
 
+const { t } = useI18n()
 const session = computed(() => props.block.session)
-const requestHtml = computed(() => renderMarkdown(session.value.request || '(无请求内容)'))
-const responseHtml = computed(() => renderMarkdown(session.value.response || (session.value.status === 'running' ? '处理中…' : '(暂无回复)')))
+const requestHtml = computed(() => renderMarkdown(session.value.request || t('chatUi.agentSidechatNoRequest')))
+const responseHtml = computed(() => renderMarkdown(session.value.response || (session.value.status === 'running' ? t('chatUi.agentSidechatProcessing') : t('chatUi.agentSidechatNoReply'))))
 const recentProgress = computed(() => session.value.progress.slice(-3))
 
 function getStatusLabel (status: AgentSidechatSession['status']): string {
-  if (status === 'running') return '进行中'
-  if (status === 'failed') return '失败'
-  return '已完成'
+  if (status === 'running') return t('chatUi.groupStatusRunning')
+  if (status === 'failed') return t('chatUi.groupStatusFailed')
+  return t('chatUi.groupStatusCompleted')
 }
 
 function getModeLabel (mode: AgentSidechatSession['mode']): string {
-  if (mode === 'group_deliberation') return '群内分工'
-  if (mode === 'coordinator_assigned') return '主 Agent 指派'
-  return '用户定向'
+  if (mode === 'group_deliberation') return t('chatUi.agentSidechatModeGroup')
+  if (mode === 'coordinator_assigned') return t('chatUi.agentSidechatModeCoordinator')
+  return t('chatUi.agentSidechatModeUser')
 }
 </script>
 
@@ -30,12 +32,12 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
   <section class="sidechat-card" :class="session.status">
     <div class="sidechat-header">
       <div class="sidechat-copy">
-        <span class="sidechat-label">Agent 单聊</span>
+        <span class="sidechat-label">{{ $t('chatUi.agentSidechatLabel') }}</span>
         <h4 class="sidechat-title">{{ session.agentName }}</h4>
         <div class="sidechat-meta">
           <span>{{ getModeLabel(session.mode) }}</span>
           <span>{{ session.initiatedByName }} → {{ session.agentName }} → {{ session.reportToName }}</span>
-          <span>第 {{ session.round }} 轮</span>
+          <span>{{ $t('chatUi.groupRoundTitle', { round: session.round }) }}</span>
         </div>
       </div>
 

@@ -1,4 +1,5 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { emitAuthResolution, onAuthResolution, type AuthResolutionPayload } from '../../../utils/auth-events'
 import {
   MAX_IMAGE_ATTACHMENT_SIZE_BYTES,
@@ -189,6 +190,7 @@ function cleanupSharedChatPanelResources (): void {
 }
 
 export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindings) {
+  const { t, locale } = useI18n()
   const messages = sharedMessages
   const inputText = sharedInputText
   const conversations = sharedConversations
@@ -393,13 +395,13 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       .filter(agent => agent.id !== defaultAgentId)
       .map((agent) => {
         const conversation = getPinnedAgentConversation(conversations.value, agent.id)
-        const selection = getAgentModelSelection(agent, providersById.value, activeProviderId.value)
+        const selection = getAgentModelSelection(agent, providersById.value, activeProviderId.value, t('chatUi.unconfiguredProvider'))
 
         return {
           id: agent.id,
           conversationId: conversation?.id || null,
           title: agent.name,
-          subtitle: `${selection.providerName} · ${selection.modelId || '未配置模型'}`,
+          subtitle: `${selection.providerName} · ${selection.modelId || t('chatUi.unconfiguredModel')}`,
           searchText: buildSidebarSearchText([
             agent.name,
             selection.providerName,
@@ -424,14 +426,14 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     return availableAgentGroups.value.map((group) => {
       const conversation = getPinnedGroupConversation(conversations.value, group.id)
       const coordinatorName = group.coordinatorAgentId
-        ? agentsById.value.get(group.coordinatorAgentId)?.name || '未设置协调 Agent'
-        : '未设置协调 Agent'
+        ? agentsById.value.get(group.coordinatorAgentId)?.name || t('chatUi.unsetCoordinatorAgent')
+        : t('chatUi.unsetCoordinatorAgent')
 
       return {
         id: group.id,
         conversationId: conversation?.id || null,
         title: group.name,
-        subtitle: `${group.memberAgentIds.length} 位 Agent · 协调 ${coordinatorName}`,
+        subtitle: t('chatUi.groupSidebarSubtitle', { count: group.memberAgentIds.length, coordinator: coordinatorName }),
         searchText: buildSidebarSearchText([
           group.name,
           coordinatorName,
@@ -475,13 +477,13 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         id: conversation.id,
         title: conversation.title,
         subtitle: conversation.previewText
-          ? `${formatConversationSubtitle(conversation.updatedAt)} · ${conversation.previewText}`
-          : formatConversationSubtitle(conversation.updatedAt),
+          ? `${formatConversationSubtitle(conversation.updatedAt, locale.value)} · ${conversation.previewText}`
+          : formatConversationSubtitle(conversation.updatedAt, locale.value),
         searchText: buildSidebarSearchText([
           conversation.title,
           conversation.previewText,
           conversation.searchText,
-          formatConversationSubtitle(conversation.updatedAt)
+          formatConversationSubtitle(conversation.updatedAt, locale.value)
         ]),
         icon: resolveConversationIcon(conversation, groupsById.value, agentsById.value),
         isStreaming: streamingConvIds.has(conversation.id),
@@ -500,7 +502,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       return `${getAgentIcon(currentAgentDefinition.value)} ${currentAgentDefinition.value.name}`
     }
 
-    return '💬 新对话'
+    return `💬 ${t('chatUi.newConversation')}`
   })
 
   const currentAssistantIcon = computed(() => {
@@ -517,13 +519,13 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   const currentModelLabel = computed(() => {
     if (currentGroupDefinition.value) {
-      return `群组协作 · ${currentGroupDefinition.value.name}`
+      return t('chatUi.groupCollaborationLabel', { name: currentGroupDefinition.value.name })
     }
 
     const defaultAgentId = getDefaultAgentId()
     const isNonDefaultAgent = Boolean(selectedAgentId.value) && selectedAgentId.value !== defaultAgentId
     if (currentAgentDefinition.value && isNonDefaultAgent) {
-      const selection = getAgentModelSelection(currentAgentDefinition.value, providersById.value, activeProviderId.value)
+      const selection = getAgentModelSelection(currentAgentDefinition.value, providersById.value, activeProviderId.value, t('chatUi.unconfiguredProvider'))
       const labelParts = [selection.modelId, selection.providerName].filter(Boolean)
       return labelParts.length > 0 ? labelParts.join(' · ') : currentAgentDefinition.value.name
     }
@@ -535,7 +537,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   const currentContextDetail = computed(() => {
     if (currentGroupDefinition.value) {
-      return `${currentGroupDefinition.value.memberAgentIds.length} 位 Agent 协作 · 默认全群讨论，@主Agent 或协调者可决定是否拉群，单独 @成员 直接回复，@多人 / @all 指定讨论范围`
+      return t('chatUi.groupContextDetail', { count: currentGroupDefinition.value.memberAgentIds.length })
     }
 
     return currentModelLabel.value
@@ -601,7 +603,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     if (coordinator || group.coordinatorAgentId) {
       hints.push({
         token: '@主Agent',
-        label: coordinator?.name || '主 Agent',
+        label: coordinator?.name || t('chatUi.mainAgentFallback'),
         aliases: [
           '主Agent',
           '主协调',
@@ -616,7 +618,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
     hints.push({
       token: '@all',
-      label: `${group.name} 全组讨论`,
+      label: t('chatUi.groupAllDiscussionLabel', { name: group.name }),
       aliases: ['all', 'everyone', '全组', '全员', '全部agent', '所有agent']
     })
 
@@ -1427,7 +1429,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     const shouldKeepManualTitle = Boolean(existingConversation?.manualTitle && !options?.titleOverride)
     const resolvedTitle = options?.titleOverride || (shouldKeepManualTitle ? existingConversation?.title : '') || getPinnedContextTitle() || (titleText
       ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
-      : (existingConversation?.title || '新对话'))
+      : (existingConversation?.title || t('chatUi.newConversation')))
     const resolvedManualTitle = shouldKeepManualTitle || undefined
     const resolvedTargetProjectId = options && Object.prototype.hasOwnProperty.call(options, 'targetProjectId')
       ? (options.targetProjectId ?? null)
@@ -1522,7 +1524,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       for (const file of files) {
         if (isImageAttachment(file)) {
           if (file.size > MAX_IMAGE_ATTACHMENT_SIZE_BYTES) {
-            uploadFeedback.value = `${file.name} 添加失败：图片大小不能超过 20MB`
+            uploadFeedback.value = t('chatUi.uploadImageTooLarge', { name: file.name })
             continue
           }
 
@@ -1534,7 +1536,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
             })
             uploadFeedback.value = ''
           } catch (err) {
-            uploadFeedback.value = `${file.name} 添加失败：${(err as Error).message}`
+            uploadFeedback.value = t('chatUi.uploadAddFailed', { name: file.name, message: (err as Error).message })
           }
           continue
         }
@@ -1552,7 +1554,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
           })
           uploadFeedback.value = ''
         } catch (err) {
-          uploadFeedback.value = `${file.name} 添加失败：${(err as Error).message}`
+          uploadFeedback.value = t('chatUi.uploadAddFailed', { name: file.name, message: (err as Error).message })
         }
       }
     } finally {

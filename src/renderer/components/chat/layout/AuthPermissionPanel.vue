@@ -37,14 +37,14 @@ function toggleCollapsed (): void {
 </script>
 
 <template>
-  <section class="auth-shell" aria-label="待授权的工具操作">
+  <section class="auth-shell" :aria-label="$t('chatUi.pendingToolAuth')">
     <div class="auth-float" :class="{ expanded: !collapsed }">
       <Transition name="auth-expand">
         <div v-if="!collapsed" class="auth-detail">
           <div class="auth-detail-head">
-            <span>操作授权</span>
-            <span v-if="props.pendingCount > 1">{{ props.pendingCount }} 项排队</span>
-            <span v-else>等待授权</span>
+            <span>{{ $t('chatUi.operationAuth') }}</span>
+            <span v-if="props.pendingCount > 1">{{ $t('chatUi.pendingQueue', { count: props.pendingCount }) }}</span>
+            <span v-else>{{ $t('chatUi.waitingAuth') }}</span>
           </div>
 
           <div class="auth-detail-title">{{ props.request.title }}</div>
@@ -56,13 +56,13 @@ function toggleCollapsed (): void {
                 <line x1="18" y1="6" x2="6" y2="18"/>
                 <line x1="6" y1="6" x2="18" y2="18"/>
               </svg>
-              拒绝
+              {{ $t('chatUi.deny') }}
             </button>
             <button class="auth-btn allow" type="button" @click="approve">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="20 6 9 17 4 12"/>
               </svg>
-              允许执行
+              {{ $t('chatUi.allowExecution') }}
             </button>
           </div>
         </div>
@@ -74,7 +74,7 @@ function toggleCollapsed (): void {
         :aria-expanded="!collapsed"
         @click="toggleCollapsed"
       >
-        <span class="auth-strip-status">等待授权</span>
+        <span class="auth-strip-status">{{ $t('chatUi.waitingAuth') }}</span>
         <span class="auth-strip-title">{{ props.request.title }}</span>
         <span v-if="props.pendingCount > 1" class="auth-strip-count">{{ props.pendingCount }}</span>
         <span class="auth-toggle" :class="{ collapsed }" aria-hidden="true">

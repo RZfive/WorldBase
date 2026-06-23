@@ -1,10 +1,18 @@
 <script setup lang="ts">
-import { getToolRunStatusLabel } from '../message-utils'
-import type { ChatMessageBlock } from '../types'
+import { useI18n } from 'vue-i18n'
+import type { ChatMessageBlock, ToolRun } from '../types'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'tool' }>
 }>()
+
+const { t } = useI18n()
+
+function getToolRunStatusLabel (status: ToolRun['status']): string {
+  if (status === 'completed') return t('chatUi.toolStatusCompleted')
+  if (status === 'failed') return t('chatUi.toolStatusFailed')
+  return t('chatUi.toolStatusRunning')
+}
 </script>
 
 <template>

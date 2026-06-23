@@ -8,7 +8,7 @@ const props = defineProps<{
 
 <template>
   <div class="message-event-card error-event-card" role="alert">
-    <div class="error-title">执行出错</div>
+    <div class="error-title">{{ $t('chatUi.executionError') }}</div>
     <div class="error-message">{{ props.block.message }}</div>
   </div>
 </template>

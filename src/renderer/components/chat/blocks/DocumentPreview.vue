@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 interface DocumentNode {
   id: string
@@ -30,6 +31,7 @@ const emit = defineEmits<{
   (e: 'highlightSelection', payload: { nodeIds: string[]; text: string }): void
 }>()
 
+const { t } = useI18n()
 const previewRoot = ref<HTMLElement | null>(null)
 
 const nodeSelectionMap = computed(() => {
@@ -84,6 +86,10 @@ function getSheetHeaders (node: DocumentNode): string[] {
 
 function getRowCells (node: DocumentNode): string[] {
   return (node.meta?.cells as string[] | undefined) ?? []
+}
+
+function getSheetHeaderLabel (header: string, index: number): string {
+  return header || t('chatUi.excelColumnFallback', { index: index + 1 })
 }
 
 function isSelectionInsidePreview (selection: Selection): boolean {
@@ -145,7 +151,7 @@ function handleTextSelection () {
               <thead>
                 <tr>
                   <th class="row-num-col">#</th>
-                  <th v-for="(header, headerIndex) in getSheetHeaders(node)" :key="headerIndex">{{ header || `列${headerIndex + 1}` }}</th>
+                  <th v-for="(header, headerIndex) in getSheetHeaders(node)" :key="headerIndex">{{ getSheetHeaderLabel(header, headerIndex) }}</th>
                 </tr>
               </thead>
               <tbody>

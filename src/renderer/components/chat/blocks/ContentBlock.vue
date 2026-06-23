@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, type Ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../markdown'
 import { getContentParts, hasRenderableContent, collapseWhitespace } from '../message-utils'
 import { splitMarkdownWithMermaid, type MarkdownSegment } from '../mermaid'
@@ -32,6 +33,7 @@ const emit = defineEmits<{
   (e: 'openMermaidPreview', code: string): void
 }>()
 
+const { t } = useI18n()
 const exportCaptureRef = ref<HTMLElement | null>(null)
 const markdownExportState = ref<ExportState>('idle')
 const imageExportState = ref<ExportState>('idle')
@@ -49,24 +51,24 @@ const exportResetTimers: Record<ExportKind, number | null> = {
   copy: null
 }
 
-const exportStateLabels: Record<ExportKind, Record<ExportState, string>> = {
+const exportStateLabelKeys: Record<ExportKind, Record<ExportState, string>> = {
   md: {
-    idle: '导出 MD',
-    pending: '导出中…',
-    done: '已保存',
-    error: '失败'
+    idle: 'chatUi.exportMarkdown',
+    pending: 'chatUi.exporting',
+    done: 'chatUi.exportSaved',
+    error: 'chatUi.exportFailed'
   },
   image: {
-    idle: '导出长图',
-    pending: '生成中…',
-    done: '已保存',
-    error: '失败'
+    idle: 'chatUi.exportLongImage',
+    pending: 'chatUi.generatingEllipsis',
+    done: 'chatUi.exportSaved',
+    error: 'chatUi.exportFailed'
   },
   copy: {
-    idle: '复制',
-    pending: '复制中…',
-    done: '已复制',
-    error: '失败'
+    idle: 'chatUi.copy',
+    pending: 'chatUi.copying',
+    done: 'chatUi.copied',
+    error: 'chatUi.exportFailed'
   }
 }
 
@@ -108,7 +110,7 @@ function setExportState (kind: ExportKind, state: ExportState) {
 }
 
 function getExportLabel (kind: ExportKind): string {
-  return exportStateLabels[kind][getExportState(kind)]
+  return t(exportStateLabelKeys[kind][getExportState(kind)])
 }
 
 async function exportMarkdown (): Promise<void> {
@@ -230,7 +232,7 @@ onBeforeUnmount(() => {
             @click="emit('openLightbox', props.messageIndex, props.blockIndex, partIndex)"
           >
             <img :src="part.image_url.url" class="message-image" v-stable-image />
-            <span class="message-image-action">点击查看大图</span>
+            <span class="message-image-action">{{ $t('chatUi.viewLargeImage') }}</span>
           </button>
         </template>
       </div>
@@ -263,7 +265,7 @@ onBeforeUnmount(() => {
       </div>
     </template>
     <div v-else class="message-placeholder">
-      {{ props.role === 'assistant' ? '正在流式输出…' : collapseWhitespace(props.messageText) }}
+      {{ props.role === 'assistant' ? $t('chatUi.streamingOutput') : collapseWhitespace(props.messageText) }}
     </div>
   </div>
 </template>

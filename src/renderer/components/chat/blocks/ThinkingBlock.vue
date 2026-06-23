@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../markdown'
 import type { ChatMessageBlock } from '../types'
 
@@ -12,6 +13,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'toggle'): void
 }>()
+
+const { t, locale } = useI18n()
 
 // Keep each rendered markdown slice small enough to avoid long synchronous parse/render stalls.
 const SEGMENT_TARGET_CHARS = 2200
@@ -31,6 +34,10 @@ const savedViewportScrollTop = ref(0)
 const measuredSegmentHeights = reactive<Record<number, number>>({})
 const segmentObservers = new Map<number, ResizeObserver>()
 let viewportObserver: ResizeObserver | null = null
+
+const thinkingCharacterCount = computed(() => {
+  return t('chatUi.characterCount', { count: props.block.text.length.toLocaleString(locale.value) })
+})
 
 interface ThinkingSegment {
   id: string
@@ -340,8 +347,8 @@ onBeforeUnmount(() => {
         <svg v-else class="thinking-brain-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M12 2a5 5 0 0 1 5 5c0 1.07-.34 2.06-.9 2.88A4 4 0 0 1 20 14a4 4 0 0 1-4 4h-1v2a1 1 0 0 1-2 0v-2H8a4 4 0 0 1-4-4 4 4 0 0 1 3.9-3.12A5 5 0 0 1 7 7a5 5 0 0 1 5-5z"/>
         </svg>
-        <span class="thinking-header-label">{{ props.isStreaming ? '思考中…' : '思考过程' }}</span>
-        <span v-if="!props.isStreaming" class="thinking-char-count">{{ props.block.text.length.toLocaleString() }} 字</span>
+        <span class="thinking-header-label">{{ props.isStreaming ? $t('chatUi.thinkingStreaming') : $t('chatUi.thinkingProcess') }}</span>
+        <span v-if="!props.isStreaming" class="thinking-char-count">{{ thinkingCharacterCount }}</span>
       </span>
       <span class="thinking-chevron" :class="{ expanded: !props.isCollapsed }" aria-hidden="true">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">

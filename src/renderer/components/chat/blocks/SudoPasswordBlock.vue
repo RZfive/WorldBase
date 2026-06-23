@@ -56,14 +56,14 @@ function truncate (str: string, max = 120): string {
         </svg>
       </div>
       <div class="sudo-label-group">
-        <span class="sudo-badge">sudo 密码</span>
+        <span class="sudo-badge">{{ $t('chatUi.sudoPassword') }}</span>
         <span class="sudo-status" :class="localStatus">
-          {{ localStatus === 'submitted' ? '✓ 已提交' : (localStatus === 'canceled' ? '✕ 已取消' : '⏳ 等待输入') }}
+          {{ localStatus === 'submitted' ? $t('chatUi.sudoSubmitted') : (localStatus === 'canceled' ? $t('chatUi.sudoCanceled') : $t('chatUi.sudoWaitingInput')) }}
         </span>
       </div>
     </div>
 
-    <div class="sudo-command-label">执行命令需要 sudo 权限：</div>
+    <div class="sudo-command-label">{{ $t('chatUi.sudoCommandRequiresPermissionColon') }}</div>
     <pre class="sudo-command-preview">{{ truncate(props.block.command) }}</pre>
 
     <template v-if="localStatus === 'pending'">
@@ -72,7 +72,7 @@ function truncate (str: string, max = 120): string {
           v-model="passwordInput"
           class="sudo-password-input"
           type="password"
-          placeholder="输入 sudo 密码..."
+          :placeholder="$t('chatUi.sudoPasswordPlaceholder')"
           autocomplete="current-password"
           @keydown.enter="onConfirm"
           @keydown.esc="onCancel"
@@ -84,13 +84,13 @@ function truncate (str: string, max = 120): string {
             <line x1="18" y1="6" x2="6" y2="18"/>
             <line x1="6" y1="6" x2="18" y2="18"/>
           </svg>
-          取消
+          {{ $t('common.cancel') }}
         </button>
         <button class="sudo-btn confirm" type="button" @click="onConfirm">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="20 6 9 17 4 12"/>
           </svg>
-          确认
+          {{ $t('common.confirm') }}
         </button>
       </div>
     </template>

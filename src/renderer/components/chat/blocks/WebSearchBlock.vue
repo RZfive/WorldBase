@@ -18,10 +18,10 @@ function getHostLabel (url: string): string {
   <div class="message-event-card web-search-card">
     <div class="web-search-header">
       <div class="web-search-header-main">
-        <span class="web-search-label">网页搜索</span>
+        <span class="web-search-label">{{ $t('chatUi.webSearch') }}</span>
         <span class="web-search-engine">{{ props.block.engine }}</span>
       </div>
-      <span class="web-search-count">{{ props.block.results.length }} 条结果</span>
+      <span class="web-search-count">{{ $t('chatUi.webResultCount', { count: props.block.results.length }) }}</span>
     </div>
 
     <div class="web-search-query">{{ props.block.query }}</div>
@@ -37,7 +37,7 @@ function getHostLabel (url: string): string {
       </li>
     </ol>
 
-    <div v-else class="web-search-empty">未找到可用的公开网页结果。</div>
+    <div v-else class="web-search-empty">{{ $t('chatUi.noPublicWebResults') }}</div>
   </div>
 </template>
 

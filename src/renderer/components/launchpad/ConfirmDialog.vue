@@ -16,8 +16,8 @@ const emit = defineEmits<{
       <div class="confirm-box">
         <p>{{ props.message }}</p>
         <div class="confirm-actions">
-          <button class="confirm-btn danger" @click="emit('confirm')">确认删除</button>
-          <button class="confirm-btn" @click="emit('cancel')">取消</button>
+          <button class="confirm-btn danger" @click="emit('confirm')">{{ $t('launchpad.confirmDelete') }}</button>
+          <button class="confirm-btn" @click="emit('cancel')">{{ $t('common.cancel') }}</button>
         </div>
       </div>
     </div>

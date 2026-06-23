@@ -17,14 +17,14 @@ const hasDelta = computed(() => props.block.added > 0 || props.block.removed > 0
 <template>
   <div class="file-write-row" :class="{ active: props.block.active }">
     <span class="fw-icon">{{ props.block.active ? '✏️' : '📄' }}</span>
-    <span class="fw-label">{{ props.block.active ? '写入' : '已写入' }}</span>
+    <span class="fw-label">{{ props.block.active ? $t('chatUi.filePreviewWriting') : $t('chatUi.filePreviewWritten') }}</span>
     <span class="fw-path" :title="props.block.filePath">{{ fileName }}</span>
     <span class="fw-stat">
       <template v-if="hasDelta">
         <span v-if="props.block.added > 0" class="fw-add">+{{ props.block.added }}</span>
         <span v-if="props.block.removed > 0" class="fw-del">-{{ props.block.removed }}</span>
       </template>
-      <span v-else-if="props.block.lineCount > 0" class="fw-lines">{{ props.block.lineCount }} 行</span>
+      <span v-else-if="props.block.lineCount > 0" class="fw-lines">{{ $t('chatUi.lineCount', { count: props.block.lineCount }) }}</span>
     </span>
   </div>
 </template>

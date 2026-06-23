@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 const props = defineProps<{
   isLoading: boolean
@@ -11,6 +12,8 @@ const emit = defineEmits<{
   (e: 'open'): void
 }>()
 
+const { t } = useI18n()
+
 const bubbleState = computed(() => {
   if (props.pendingAuthCount > 0) return 'attention'
   if (props.isLoading) return 'working'
@@ -20,27 +23,30 @@ const bubbleState = computed(() => {
 
 const statusLabel = computed(() => {
   if (props.pendingAuthCount > 0) {
-    return '等待授权'
+    return t('appShell.waitingAuth')
   }
 
   if (props.isLoading) {
-    return '执行中'
+    return t('appShell.running')
   }
 
   if (props.activeTodoCount > 0) {
-    return '待继续'
+    return t('appShell.pendingContinue')
   }
 
-  return '待命'
+  return t('appShell.idle')
 })
+
+const titleText = computed(() => t('appShell.aiStatusTitle', { status: statusLabel.value }))
+const ariaText = computed(() => t('appShell.aiStatusAria', { status: statusLabel.value }))
 </script>
 
 <template>
   <button
     :class="['task-bubble', `task-bubble-${bubbleState}`]"
     type="button"
-    :title="`AI 状态：${statusLabel}`"
-    :aria-label="`AI 状态：${statusLabel}，点击展开对话`"
+    :title="titleText"
+    :aria-label="ariaText"
     @click="emit('open')"
   >
     <span class="task-bubble-orb">

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 interface ProviderItem {
   id: string
@@ -14,7 +15,7 @@ const props = withDefaults(defineProps<{
   title?: string
   disabled?: boolean
 }>(), {
-  title: '供应商 / 模型',
+  title: '',
   disabled: false
 })
 
@@ -22,6 +23,8 @@ const emit = defineEmits<{
   (e: 'update:active-provider-id', id: string): void
   (e: 'update:selected-model', model: string): void
 }>()
+
+const { t } = useI18n()
 
 const triggerRef = ref<HTMLButtonElement | null>(null)
 const open = ref(false)
@@ -59,7 +62,7 @@ const combinedLabel = computed(() => {
   if (resolvedSelectedProvider.value?.name) {
     return resolvedSelectedProvider.value.name
   }
-  return props.title
+  return props.title || t('chatUi.providerModelTitle')
 })
 
 const triggerTitle = computed(() => {
@@ -250,7 +253,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div v-else class="provider-model-empty">暂无可用模型</div>
+        <div v-else class="provider-model-empty">{{ $t('chatUi.noAvailableModels') }}</div>
       </div>
     </div>
   </Teleport>

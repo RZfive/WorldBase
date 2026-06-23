@@ -43,15 +43,15 @@ function toggleExpanded (): void {
   <section class="group-transcript-card">
     <div class="group-transcript-header">
       <div class="group-transcript-header-main">
-        <span class="group-transcript-label">Agent 协作摘要</span>
+        <span class="group-transcript-label">{{ $t('chatUi.groupTranscriptLabel') }}</span>
         <h4 class="group-transcript-title">{{ transcript.groupName }}</h4>
         <div class="group-transcript-meta">
-          <span>{{ transcript.roundCount }} 轮</span>
-          <span>{{ transcript.entryCount }} 条工作笔记</span>
-          <span>{{ canExpand ? '可展开 transcript' : '仅摘要可见' }}</span>
+          <span>{{ $t('chatUi.groupRoundCount', { count: transcript.roundCount }) }}</span>
+          <span>{{ $t('chatUi.groupWorkNoteCount', { count: transcript.entryCount }) }}</span>
+          <span>{{ canExpand ? $t('chatUi.groupTranscriptExpandable') : $t('chatUi.groupTranscriptSummaryOnly') }}</span>
         </div>
         <div v-if="transcript.request" class="group-transcript-request">
-          <span class="group-transcript-request-label">讨论内容</span>
+          <span class="group-transcript-request-label">{{ $t('chatUi.groupDiscussionContent') }}</span>
           <p>{{ transcript.request }}</p>
         </div>
       </div>
@@ -62,7 +62,7 @@ function toggleExpanded (): void {
         type="button"
         @click="toggleExpanded"
       >
-        {{ expanded ? '收起 transcript' : '展开 transcript' }}
+        {{ expanded ? $t('chatUi.groupCollapseTranscript') : $t('chatUi.groupExpandTranscript') }}
       </button>
     </div>
 
@@ -74,7 +74,7 @@ function toggleExpanded (): void {
         :key="`${transcript.groupId}-round-${round.round}`"
         class="group-transcript-round"
       >
-        <div class="group-transcript-round-header">第 {{ round.round }} 轮</div>
+        <div class="group-transcript-round-header">{{ $t('chatUi.groupRoundTitle', { round: round.round }) }}</div>
 
         <article
           v-for="entry in round.entries"
@@ -83,7 +83,7 @@ function toggleExpanded (): void {
         >
           <div class="group-transcript-entry-head">
             <div class="group-transcript-entry-agent">{{ entry.agentName }}</div>
-            <span class="group-transcript-entry-round">第 {{ round.round }} 轮</span>
+            <span class="group-transcript-entry-round">{{ $t('chatUi.groupRoundTitle', { round: round.round }) }}</span>
           </div>
           <div class="group-transcript-entry-body markdown-body" v-html="entry.html" />
         </article>

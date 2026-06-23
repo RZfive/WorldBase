@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import TitleBar from './TitleBar.vue'
 import { getProjectIcon } from '../../utils/project-icon'
 
@@ -28,6 +29,7 @@ const error = ref('')
 const isMaximized = ref(false)
 const frameVersion = ref(0)
 const PROJECT_IFRAME_ALLOW = 'clipboard-read; clipboard-write; fullscreen'
+const { t } = useI18n()
 
 let projectChangedCleanup: (() => void) | null = null
 
@@ -41,9 +43,9 @@ const projectIcon = computed(() => {
 
 const projectSubtitle = computed(() => {
   if (typeof project.value?.type === 'string' && project.value.type) {
-    return `${project.value.type} 独立窗口`
+    return t('appShell.projectWindowSubtitleWithType', { type: project.value.type })
   }
-  return '独立窗口'
+  return t('appShell.independentWindow')
 })
 
 async function refreshWindowState () {
@@ -91,11 +93,11 @@ async function resolveProjectUrl () {
       frameVersion.value += 1
     } else {
       iframeUrl.value = ''
-      error.value = '应用未能在独立窗口中启动。'
+      error.value = t('appShell.projectWindowStartTimeout')
     }
   } catch (err) {
     iframeUrl.value = ''
-    error.value = (err as Error).message || '应用启动失败'
+    error.value = (err as Error).message || t('appShell.projectWindowStartFailed')
   } finally {
     loading.value = false
     await refreshWindowState()
@@ -127,7 +129,7 @@ onMounted(async () => {
 
     if (event.action === 'stopped') {
       iframeUrl.value = ''
-      error.value = '应用已停止运行。'
+      error.value = t('appShell.projectStopped')
       loading.value = false
       void loadProjectMeta()
       return
@@ -157,14 +159,14 @@ onUnmounted(() => {
     <div class="project-window-body">
       <div v-if="loading" class="project-window-loading">
         <div class="project-window-spinner"></div>
-        <p>正在连接 {{ projectTitle }}…</p>
+        <p>{{ $t('appShell.connectingProject', { title: projectTitle }) }}</p>
       </div>
 
       <div v-else-if="error" class="project-window-error">
         <div class="project-window-error-icon">⚠️</div>
-        <h3>独立窗口连接失败</h3>
+        <h3>{{ $t('appShell.projectWindowConnectFailed') }}</h3>
         <p>{{ error }}</p>
-        <button class="project-window-retry" @click="resolveProjectUrl">重新连接</button>
+        <button class="project-window-retry" @click="resolveProjectUrl">{{ $t('appShell.reconnect') }}</button>
       </div>
 
       <iframe

@@ -272,7 +272,7 @@ onUnmounted(() => {
     </div>
     <div class="preview-zoom">
       <button class="preview-zoom-btn" type="button" @click="zoomOut" :disabled="zoomLevel <= MIN_ZOOM">−</button>
-      <span class="preview-zoom-label" title="点击复位" @click="zoomReset">{{ zoomPercent }}</span>
+      <span class="preview-zoom-label" :title="$t('studioUi.clickToReset')" @click="zoomReset">{{ zoomPercent }}</span>
       <button class="preview-zoom-btn" type="button" @click="zoomIn" :disabled="zoomLevel >= maxZoom">+</button>
     </div>
   </div>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { EventBus, PDFLinkService, PDFViewer } from 'pdfjs-dist/legacy/web/pdf_viewer.mjs'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy } from 'pdfjs-dist/types/src/display/api'
@@ -24,6 +25,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'highlightSelection', payload: { text: string; pageIndex?: number }): void
 }>()
+
+const { t } = useI18n()
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
@@ -127,7 +130,7 @@ async function loadPdfDocument (bytes: Uint8Array) {
   const loadId = ++activeLoadId
 
   if (!bytes || bytes.length === 0) {
-    loadError.value = 'PDF 预览资源为空。'
+    loadError.value = t('chatUi.pdfPreviewEmpty')
     return
   }
 
@@ -155,7 +158,7 @@ async function loadPdfDocument (bytes: Uint8Array) {
     schedulePdfScaleSync()
   } catch (error) {
     if (loadId !== activeLoadId) return
-    loadError.value = `PDF 预览加载失败: ${(error as Error).message}`
+    loadError.value = t('chatUi.pdfPreviewLoadFailed', { message: (error as Error).message })
   } finally {
     if (loadId === activeLoadId) {
       isLoading.value = false
@@ -214,7 +217,7 @@ onBeforeUnmount(() => {
     <div v-if="loadError" class="pdf-state pdf-error">{{ loadError }}</div>
     <div v-else class="pdf-shell">
       <div ref="containerRef" class="pdf-container" @mouseup="handleTextSelection" @keyup="handleTextSelection">
-        <div v-if="isLoading" class="pdf-state pdf-loading">正在生成真实文档预览…</div>
+        <div v-if="isLoading" class="pdf-state pdf-loading">{{ $t('chatUi.generatingRealDocumentPreview') }}</div>
         <div ref="viewerRef" class="pdfViewer"></div>
       </div>
     </div>

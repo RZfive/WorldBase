@@ -82,7 +82,7 @@ function resolveIcon (project: Project) {
           </div>
           <div class="folder-bubble-body" @dragover="emit('dragoverBody', $event)" @drop="emit('dropBody', $event)">
             <div v-if="openFolderProjects.length === 0" class="folder-empty">
-              文件夹为空，拖拽应用到此文件夹
+              {{ $t('launchpad.folderEmptyDropHint') }}
             </div>
             <div v-else class="folder-bubble-grid">
               <div

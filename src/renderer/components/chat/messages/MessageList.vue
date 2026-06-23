@@ -592,13 +592,13 @@ onUnmounted(() => {
     <div v-if="props.messages.length === 0" class="empty-state">
       <div class="empty-state-card">
         <div class="empty-state-icon">AI</div>
-        <h3>开始一段新对话</h3>
-        <p>我可以为你创建应用、修改项目、分析数据，或者直接协助调试现有代码。</p>
+        <h3>{{ $t('chatUi.emptyChatTitle') }}</h3>
+        <p>{{ $t('chatUi.emptyChatHint') }}</p>
         <ul>
-          <li>创建一个新的 Web 应用项目</li>
-          <li>修改现有项目的前后端逻辑</li>
-          <li>分析项目中的数据库与业务数据</li>
-          <li>调用运行中项目的 API 进行排查</li>
+          <li>{{ $t('chatUi.emptyChatIdeaCreateWebApp') }}</li>
+          <li>{{ $t('chatUi.emptyChatIdeaModifyProject') }}</li>
+          <li>{{ $t('chatUi.emptyChatIdeaAnalyzeData') }}</li>
+          <li>{{ $t('chatUi.emptyChatIdeaDebugApi') }}</li>
         </ul>
       </div>
     </div>

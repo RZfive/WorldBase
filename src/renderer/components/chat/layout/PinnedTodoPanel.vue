@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import type { TodoItem } from "../types";
 
 const props = defineProps<{
@@ -7,6 +8,7 @@ const props = defineProps<{
   isLoading: boolean;
 }>();
 
+const { t } = useI18n();
 const collapsed = ref(true);
 const completedCount = computed(
   () => props.items.filter((item) => item.status === "completed").length,
@@ -23,7 +25,10 @@ const currentStepItem = computed(
 );
 const currentStepTitle = computed(() => {
   if (currentStepItem.value) return currentStepItem.value.title;
-  return `已完成 ${completedCount.value}/${props.items.length} 项`;
+  return t("chatUi.todoCompletedSummary", {
+    completed: completedCount.value,
+    total: props.items.length,
+  });
 });
 const progressPercent = computed(() => {
   if (props.items.length === 0) return 0;
@@ -44,9 +49,9 @@ watch(
 );
 
 function getStatusLabel(status: TodoItem["status"]): string {
-  if (status === "completed") return "已完成";
-  if (status === "in-progress") return "进行中";
-  return "未开始";
+  if (status === "completed") return t("chatUi.todoStatusCompleted");
+  if (status === "in-progress") return t("chatUi.todoStatusInProgress");
+  return t("chatUi.todoStatusNotStarted");
 }
 
 function toggleCollapsed(): void {
@@ -55,12 +60,12 @@ function toggleCollapsed(): void {
 </script>
 
 <template>
-  <section class="todo-shell" aria-label="当前执行清单">
+  <section class="todo-shell" :aria-label="$t('chatUi.todoCurrentListAria')">
     <div class="todo-float" :class="{ expanded: !collapsed }">
       <Transition name="todo-expand">
         <div v-if="!collapsed" class="todo-detail">
           <div class="todo-detail-head">
-            <span>全部 Todo</span>
+            <span>{{ $t('chatUi.todoAll') }}</span>
             <span>{{ completedCount }}/{{ props.items.length }}</span>
           </div>
 
@@ -108,7 +113,7 @@ function toggleCollapsed(): void {
         <span
           class="todo-live-dot"
           :class="{ active: props.isLoading }"
-          :title="props.isLoading ? '同步中' : '已暂停'"
+          :title="props.isLoading ? $t('chatUi.todoSyncing') : $t('chatUi.todoPaused')"
           aria-hidden="true"
         />
         <span class="todo-toggle" :class="{ collapsed }" aria-hidden="true">

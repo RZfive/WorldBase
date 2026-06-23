@@ -69,7 +69,7 @@ const hasHeaderDetail = computed(() => {
           :providers="providers"
           :active-provider-id="activeProviderId"
           :selected-model="selectedModel"
-          title="供应商 / 模型"
+          :title="$t('chatUi.providerModelTitle')"
           @update:active-provider-id="emit('update:active-provider-id', $event)"
           @update:selected-model="emit('update:selected-model', $event)"
         />
@@ -79,7 +79,7 @@ const hasHeaderDetail = computed(() => {
     <div class="header-controls">
       <div v-if="availableChannelBindings.length > 0" class="channel-binding-selector">
         <select :value="selectedChannelBindingId" class="select-input" @change="onChannelBindingChange">
-          <option value="">无 IM 绑定</option>
+          <option value="">{{ $t('chatUi.noImBinding') }}</option>
           <option v-for="binding in availableChannelBindings" :key="binding.id" :value="binding.id">
             {{ binding.connectorType }} · {{ binding.externalChannelId }}
           </option>
@@ -92,12 +92,12 @@ const hasHeaderDetail = computed(() => {
           :class="{ 'has-active': activeSkillIds.size > 0 }"
           @click="emit('toggleSkillPicker')"
         >
-          🧠 Skills{{ activeSkillIds.size > 0 ? ` (${activeSkillIds.size})` : '' }}
+          🧠 {{ $t('chatUi.skillsLabel') }}{{ activeSkillIds.size > 0 ? ` (${activeSkillIds.size})` : '' }}
         </button>
         <div v-if="showSkillPicker" class="skill-dropdown">
           <div class="skill-dropdown-actions">
-            <button type="button" class="skill-dropdown-action" :disabled="allSkillsSelected" @click="emit('selectAllSkills')">全选</button>
-            <button type="button" class="skill-dropdown-action" :disabled="activeSkillIds.size === 0" @click="emit('clearSkills')">清空</button>
+            <button type="button" class="skill-dropdown-action" :disabled="allSkillsSelected" @click="emit('selectAllSkills')">{{ $t('common.selectAll') }}</button>
+            <button type="button" class="skill-dropdown-action" :disabled="activeSkillIds.size === 0" @click="emit('clearSkills')">{{ $t('common.clear') }}</button>
           </div>
           <div
             v-for="skill in availableSkills"

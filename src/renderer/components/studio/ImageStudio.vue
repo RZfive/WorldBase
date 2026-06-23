@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type {
   ImageLibraryEntry,
   ImageLibraryItem,
@@ -24,6 +25,8 @@ import {
   normalizeCustomSize,
   fileToDataUrl
 } from './image-studio-utils'
+
+const { t } = useI18n()
 
 const MAX_INPUT_IMAGES = 4
 const MAX_COUNT = 4
@@ -245,7 +248,7 @@ async function executeTask (task: ImageStudioTask) {
     }
   } catch (error) {
     task.status = 'error'
-    task.error = error instanceof Error ? error.message : '图片生成失败'
+    task.error = error instanceof Error ? error.message : t('studioUi.imageGenerationFailed')
   } finally {
     runScheduler()
   }
@@ -253,7 +256,7 @@ async function executeTask (task: ImageStudioTask) {
 
 function enqueueTask (req: ImageStudioGenerateRequest, opts?: { createdByAgent?: boolean }) {
   if (!window.electronAPI?.generateStudioImage) {
-    errorMsg.value = '当前环境不支持图片生成'
+    errorMsg.value = t('studioUi.imageGenerationUnsupported')
     return
   }
   errorMsg.value = ''
@@ -592,7 +595,7 @@ onUnmounted(() => {
             :class="{ active: showTaskDropdown }"
             @click="toggleTaskDropdown"
           >
-            📋 任务队列
+            📋 {{ $t('studioUi.taskQueue') }}
             <span v-if="activeTaskCount > 0" class="task-trigger-badge">{{ activeTaskCount }}</span>
           </button>
           <div v-if="showTaskDropdown" class="task-panel">
@@ -607,14 +610,14 @@ onUnmounted(() => {
         </div>
 
         <!-- Concurrency control: how many queue jobs run at once -->
-        <div class="task-concurrency" title="同时进行的生成 / 编辑任务数（并发）">
-          <span class="task-concurrency-label">并发</span>
+        <div class="task-concurrency" :title="$t('studioUi.concurrencyTitle')">
+          <span class="task-concurrency-label">{{ $t('studioUi.concurrency') }}</span>
           <div class="task-concurrency-stepper">
             <button
               type="button"
               class="task-concurrency-btn"
               :disabled="maxConcurrentTasks <= MIN_CONCURRENT_TASKS"
-              title="减少并发数"
+              :title="$t('studioUi.decreaseConcurrency')"
               @click="setConcurrency(maxConcurrentTasks - 1)"
             >−</button>
             <span class="task-concurrency-value">{{ maxConcurrentTasks }}</span>
@@ -622,7 +625,7 @@ onUnmounted(() => {
               type="button"
               class="task-concurrency-btn"
               :disabled="maxConcurrentTasks >= MAX_CONCURRENT_TASKS_LIMIT"
-              title="增加并发数"
+              :title="$t('studioUi.increaseConcurrency')"
               @click="setConcurrency(maxConcurrentTasks + 1)"
             >＋</button>
           </div>
@@ -631,7 +634,7 @@ onUnmounted(() => {
         <div class="studio-title">
           <span class="studio-emoji">🎨</span>
           <div>
-            <h2>绘制工作台</h2>
+            <h2>{{ $t('studioUi.workbenchTitle') }}</h2>
           </div>
         </div>
       </div>
@@ -641,17 +644,17 @@ onUnmounted(() => {
           :class="['tab-btn', { active: studioTab === 'workbench' && mode === 'generate' }]"
           type="button"
           @click="studioTab = 'workbench'; mode = 'generate'"
-        >文生图</button>
+        >{{ $t('studioUi.textToImage') }}</button>
         <button
           :class="['tab-btn', { active: studioTab === 'workbench' && mode === 'edit' }]"
           type="button"
           @click="studioTab = 'workbench'; mode = 'edit'"
-        >图片编辑</button>
+        >{{ $t('studioUi.imageEdit') }}</button>
         <button
           :class="['tab-btn', { active: studioTab === 'library' }]"
           type="button"
           @click="studioTab = 'library'"
-        >图片库</button>
+        >{{ $t('studioUi.imageLibrary') }}</button>
       </div>
     </header>
 
@@ -661,13 +664,13 @@ onUnmounted(() => {
         <!-- Parameter panel -->
         <aside class="studio-params">
           <div v-if="modelOptions.length === 0" class="param-empty">
-            <p>未找到{{ mode === 'edit' ? '图片编辑' : '图片生成' }}类模型</p>
-            <span>请到「设置 → 供应商」为模型勾选对应能力</span>
+            <p>{{ $t('studioUi.noImageModels', { mode: mode === 'edit' ? $t('studioUi.imageEdit') : $t('studioUi.imageGeneration') }) }}</p>
+            <span>{{ $t('studioUi.noImageModelsHint') }}</span>
           </div>
 
         <template v-else>
           <label class="param-field">
-            <span class="param-label">模型</span>
+            <span class="param-label">{{ $t('studioUi.model') }}</span>
             <select v-model="selectedValue" class="param-input">
               <option v-for="option in modelOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
@@ -675,35 +678,35 @@ onUnmounted(() => {
 
           <div class="param-field">
             <div class="param-field-head">
-              <label class="param-label" for="studio-prompt">提示词</label>
+              <label class="param-label" for="studio-prompt">{{ $t('studioUi.prompt') }}</label>
               <button
                 v-if="textModelOptions.length > 0"
                 class="optimize-btn"
                 type="button"
                 :disabled="!prompt.trim()"
                 @click="openOptimizeDialog(false)"
-              >✨ AI 优化</button>
+              >✨ {{ $t('studioUi.aiOptimize') }}</button>
             </div>
-            <textarea id="studio-prompt" v-model="prompt" class="param-textarea" rows="3" placeholder="描述你想要的画面…"></textarea>
+            <textarea id="studio-prompt" v-model="prompt" class="param-textarea" rows="3" :placeholder="$t('studioUi.promptPlaceholder')"></textarea>
           </div>
 
           <div v-if="mode === 'generate'" class="param-field">
             <div class="param-field-head">
-              <label class="param-label" for="studio-negative-prompt">负向提示词 <span class="param-hint">（部分供应商支持）</span></label>
+              <label class="param-label" for="studio-negative-prompt">{{ $t('studioUi.negativePrompt') }} <span class="param-hint">{{ $t('studioUi.partialProviderSupport') }}</span></label>
               <button
                 v-if="textModelOptions.length > 0"
                 class="optimize-btn"
                 type="button"
                 :disabled="!negativePrompt.trim()"
                 @click="openOptimizeDialog(true)"
-              >✨ AI 优化</button>
+              >✨ {{ $t('studioUi.aiOptimize') }}</button>
             </div>
-            <textarea id="studio-negative-prompt" v-model="negativePrompt" class="param-textarea" rows="2" placeholder="不希望出现的内容…"></textarea>
+            <textarea id="studio-negative-prompt" v-model="negativePrompt" class="param-textarea" rows="2" :placeholder="$t('studioUi.negativePromptPlaceholder')"></textarea>
           </div>
 
           <!-- Edit mode inputs -->
           <div v-if="mode === 'edit'" class="param-field">
-            <span class="param-label">输入图片 <span class="param-hint">（最多 {{ MAX_INPUT_IMAGES }} 张）</span></span>
+            <span class="param-label">{{ $t('studioUi.inputImages') }} <span class="param-hint">{{ $t('studioUi.maxImagesHint', { count: MAX_INPUT_IMAGES }) }}</span></span>
             <div class="input-images">
               <div v-for="(img, index) in inputImages" :key="index" class="input-thumb">
                 <img :src="img" alt="" />
@@ -720,7 +723,7 @@ onUnmounted(() => {
           </div>
 
           <label class="param-field">
-            <span class="param-label">比例</span>
+            <span class="param-label">{{ $t('studioUi.aspectRatio') }}</span>
             <div class="ratio-grid">
               <button
                 v-for="ratio in RATIO_PRESETS"
@@ -734,11 +737,11 @@ onUnmounted(() => {
 
           <div class="param-row size-count-row">
             <label class="param-field">
-              <span class="param-label">尺寸</span>
+              <span class="param-label">{{ $t('studioUi.size') }}</span>
               <div class="size-row">
                 <select v-model="sizeMode" class="param-input size-mode">
-                  <option value="preset">预设</option>
-                  <option value="custom">自定义</option>
+                  <option value="preset">{{ $t('studioUi.preset') }}</option>
+                  <option value="custom">{{ $t('studioUi.custom') }}</option>
                 </select>
                 <select v-if="sizeMode === 'preset'" v-model="selectedSize" class="param-input">
                   <option v-for="size in currentRatio.sizes" :key="size" :value="size">{{ size }}</option>
@@ -749,17 +752,17 @@ onUnmounted(() => {
                   <input v-model.number="customHeight" type="number" class="param-input" :min="MIN_DIMENSION" :max="MAX_DIMENSION" @change="clampCustomDimensions" />
                 </div>
               </div>
-              <span v-if="sizeMode === 'custom' && !finalSize" class="param-error">尺寸需在 {{ MIN_DIMENSION }}–{{ MAX_DIMENSION }} 之间</span>
+              <span v-if="sizeMode === 'custom' && !finalSize" class="param-error">{{ $t('studioUi.sizeRangeError', { min: MIN_DIMENSION, max: MAX_DIMENSION }) }}</span>
             </label>
 
             <label class="param-field">
-              <span class="param-label">数量</span>
+              <span class="param-label">{{ $t('studioUi.count') }}</span>
               <input v-model.number="count" type="number" class="param-input count-input" min="1" :max="MAX_COUNT" @change="clampCount" />
             </label>
           </div>
 
           <button class="generate-btn" type="button" :disabled="!canGenerate" @click="onGenerate">
-            ＋ 加入队列{{ mode === 'edit' ? '（编辑）' : '（生成）' }}
+            ＋ {{ $t('studioUi.addToQueue', { mode: mode === 'edit' ? $t('studioUi.editModeParenthetical') : $t('studioUi.generateModeParenthetical') }) }}
           </button>
 
           <p v-if="errorMsg" class="param-error param-error-box">{{ errorMsg }}</p>
@@ -770,10 +773,10 @@ onUnmounted(() => {
         <main class="studio-main studio-main-workbench">
           <div v-if="latestSuccessEntry" class="workbench-result">
             <div class="workbench-result-head">
-              <h3>最近完成<span v-if="latestSuccessEntries.length > 1" class="workbench-result-count">{{ workbenchResultIndex + 1 }} / {{ latestSuccessEntries.length }}</span></h3>
+              <h3>{{ $t('studioUi.recentlyFinished') }}<span v-if="latestSuccessEntries.length > 1" class="workbench-result-count">{{ workbenchResultIndex + 1 }} / {{ latestSuccessEntries.length }}</span></h3>
               <div class="workbench-result-actions">
-                <button class="lib-like-btn" type="button" @click="handleSaveToFile(latestSuccessEntry!)">⤓ 保存到文件</button>
-                <button class="lib-like-btn" type="button" @click="handleUseAsInput(latestSuccessEntry!)">⇲ 作为编辑输入</button>
+                <button class="lib-like-btn" type="button" @click="handleSaveToFile(latestSuccessEntry!)">⤓ {{ $t('studioUi.saveToFile') }}</button>
+                <button class="lib-like-btn" type="button" @click="handleUseAsInput(latestSuccessEntry!)">⇲ {{ $t('studioUi.useAsInput') }}</button>
               </div>
             </div>
             <ImagePreview class="workbench-preview" :src="latestSuccessEntry.dataUrl" :alt="latestSuccessEntry.prompt" />
@@ -785,7 +788,7 @@ onUnmounted(() => {
                 type="button"
                 class="workbench-thumb"
                 :class="{ active: i === workbenchResultIndex }"
-                :title="`第 ${i + 1} 张`"
+                :title="$t('studioUi.imageIndexTitle', { index: i + 1 })"
                 @click="workbenchResultIndex = i"
               >
                 <img :src="entry.dataUrl" alt="" />
@@ -794,8 +797,8 @@ onUnmounted(() => {
           </div>
           <div v-else class="workbench-empty">
             <span class="workbench-empty-emoji">🖼️</span>
-            <p>{{ activeTaskCount > 0 ? '任务进行中，完成后会在这里预览…' : '在左侧填写参数并加入队列，结果会显示在这里' }}</p>
-            <span class="workbench-empty-hint">点击左上角「📋 任务队列」查看全部生成 / 编辑任务</span>
+            <p>{{ activeTaskCount > 0 ? $t('studioUi.tasksRunningPreview') : $t('studioUi.workbenchEmpty') }}</p>
+            <span class="workbench-empty-hint">{{ $t('studioUi.workbenchEmptyHint') }}</span>
           </div>
         </main>
       </template>

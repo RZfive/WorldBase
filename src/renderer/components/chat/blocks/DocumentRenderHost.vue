@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import DocumentHtmlPreview from './DocumentHtmlPreview.vue'
 import DocumentPdfPreview from './DocumentPdfPreview.vue'
 import DocumentPreview from './DocumentPreview.vue'
@@ -64,6 +65,7 @@ const renderAsset = ref<RenderAssetPayload | null>(null)
 const htmlContent = ref('')
 const renderLoading = ref(false)
 const renderError = ref('')
+const { t } = useI18n()
 
 async function loadRenderAsset () {
   const render = props.artifact.render
@@ -81,7 +83,7 @@ async function loadRenderAsset () {
   try {
     renderAsset.value = await window.electronAPI.getDocumentRenderData(props.artifact.id) as RenderAssetPayload | null
     if (!renderAsset.value) {
-      renderError.value = render.error || '真实预览资源不可用，已回退到结构化视图。'
+      renderError.value = render.error || t('chatUi.documentRenderUnavailableFallback')
       return
     }
 
@@ -104,7 +106,7 @@ watch(() => `${props.artifact.id}:${props.artifact.render?.generatedAt || ''}`, 
 
 <template>
   <div class="document-render-host">
-    <div v-if="renderLoading" class="render-state">正在准备真实文件预览…</div>
+    <div v-if="renderLoading" class="render-state">{{ $t('chatUi.preparingRealFilePreview') }}</div>
     <div v-else-if="renderAsset && props.artifact.render?.kind === 'pdf'" class="render-surface">
       <DocumentPdfPreview
         :key="`${props.artifact.id}:${props.artifact.render?.generatedAt || ''}:pdf`"

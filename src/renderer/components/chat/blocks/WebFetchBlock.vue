@@ -33,10 +33,10 @@ function getQuoteSnippets (): string[] {
   <div class="message-event-card web-fetch-card" :class="{ failed: !props.block.result.ok }">
     <div class="web-fetch-header">
       <div class="web-fetch-header-main">
-        <span class="web-fetch-label">{{ props.block.result.ok ? '网页引用' : '网页抓取失败' }}</span>
+        <span class="web-fetch-label">{{ props.block.result.ok ? $t('chatUi.webReference') : $t('chatUi.webFetchFailed') }}</span>
         <span v-if="props.block.query" class="web-fetch-query">{{ props.block.query }}</span>
       </div>
-      <span class="web-fetch-status">{{ props.block.result.status ? `${props.block.result.status}` : '错误' }}</span>
+      <span class="web-fetch-status">{{ props.block.result.status ? `${props.block.result.status}` : $t('chatUi.error') }}</span>
     </div>
 
     <a class="web-fetch-link" :href="getDisplayUrl()" data-chat-external="true">
@@ -46,11 +46,11 @@ function getQuoteSnippets (): string[] {
     <div class="web-fetch-meta">
       <span>{{ getHostLabel() }}</span>
       <span v-if="props.block.result.content_type">{{ props.block.result.content_type }}</span>
-      <span v-if="props.block.result.truncated">内容已截断</span>
+      <span v-if="props.block.result.truncated">{{ $t('chatUi.contentTruncated') }}</span>
     </div>
 
     <div v-if="!props.block.result.ok" class="web-fetch-error">
-      {{ props.block.result.error || '网页抓取失败' }}
+      {{ props.block.result.error || $t('chatUi.webFetchFailed') }}
     </div>
 
     <template v-else>
