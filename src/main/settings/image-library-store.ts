@@ -39,6 +39,8 @@ export interface ImageLibraryRecord {
   negativePrompt?: string
   aspectRatio?: string
   size: string
+  quality?: ImageLibraryEntry['quality']
+  outputFormat?: ImageLibraryEntry['outputFormat']
   fileName: string
   sourceImageFileNames?: string[]
   /** Cached thumbnail file name (<id>.thumb.webp). */
@@ -163,6 +165,8 @@ export class ImageLibraryStore {
       negative_prompt: record.negativePrompt ?? null,
       aspect_ratio: record.aspectRatio ?? null,
       size: record.size ?? null,
+      quality: record.quality ?? null,
+      output_format: record.outputFormat ?? null,
       file_name: record.fileName,
       thumb_name: record.thumbName ?? null,
       source_file_names: record.sourceImageFileNames?.length ? JSON.stringify(record.sourceImageFileNames) : null,
@@ -184,6 +188,8 @@ export class ImageLibraryStore {
       negativePrompt: row.negative_prompt ?? undefined,
       aspectRatio: row.aspect_ratio ?? undefined,
       size: row.size ?? '',
+      quality: row.quality as ImageLibraryItem['quality'] ?? undefined,
+      outputFormat: row.output_format as ImageLibraryItem['outputFormat'] ?? undefined,
       folder: row.folder ?? undefined,
       tags: parseJsonStringArray(row.tags),
       width: row.width ?? undefined,

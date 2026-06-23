@@ -116,6 +116,8 @@ interface ImagesGenerationsBody {
   size?: string
   response_format?: 'url' | 'b64_json'
   negative_prompt?: string
+  quality?: 'auto' | 'low' | 'medium' | 'high' | 'standard' | 'hd'
+  output_format?: 'png' | 'jpeg' | 'webp'
 }
 
 /** Result of a parameterized image generation / edit request. */
@@ -131,6 +133,8 @@ export interface GenerateImagesOptions {
   prompt: string
   negativePrompt?: string
   size?: string
+  quality?: 'auto' | 'low' | 'medium' | 'high'
+  outputFormat?: 'png' | 'jpeg' | 'webp'
   n?: number
   abortSignal?: AbortSignal
 }
@@ -143,6 +147,8 @@ export interface EditImagesOptions {
   /** Optional mask as a data URL. */
   mask?: string
   size?: string
+  quality?: 'auto' | 'low' | 'medium' | 'high'
+  outputFormat?: 'png' | 'jpeg' | 'webp'
   n?: number
   abortSignal?: AbortSignal
 }
@@ -325,6 +331,10 @@ export class OpenAIProvider {
     return normalized.includes('dall-e') ||
       normalized.includes('dalle') ||
       normalized.includes('gpt-image')
+  }
+
+  private isGptImageModel (): boolean {
+    return this.model.toLowerCase().includes('gpt-image')
   }
 
   private supportsImageEditing (): boolean {
@@ -1063,8 +1073,10 @@ export class OpenAIProvider {
       model: this.model,
       prompt,
       n: 1,
-      size: '1024x1024',
-      response_format: 'b64_json'
+      size: '1024x1024'
+    }
+    if (this.shouldUseImageResponseFormat()) {
+      body.response_format = 'b64_json'
     }
 
     const callId = this.logger?.logProviderCallStart({
@@ -1208,17 +1220,51 @@ export class OpenAIProvider {
     }
   }
 
+  private outputFormatToMime (format?: 'png' | 'jpeg' | 'webp'): string {
+    switch (format) {
+      case 'jpeg': return 'image/jpeg'
+      case 'webp': return 'image/webp'
+      case 'png':
+      default: return 'image/png'
+    }
+  }
+
+  private normalizeImageQuality (quality?: 'auto' | 'low' | 'medium' | 'high'): ImagesGenerationsBody['quality'] | undefined {
+    if (!quality) return undefined
+    const normalized = this.model.toLowerCase()
+    if (normalized.includes('dall-e') || normalized.includes('dalle')) {
+      return quality === 'high' ? 'hd' : undefined
+    }
+    return quality
+  }
+
+  private shouldUseImageResponseFormat (): boolean {
+    return !this.isGptImageModel()
+  }
+
+  private isUnsupportedImageParameterError (error: Error, params: string[]): boolean {
+    const message = error.message.toLowerCase()
+    return params.some(param => message.includes(param.toLowerCase())) &&
+      (message.includes('unknown') ||
+        message.includes('unsupported') ||
+        message.includes('not supported') ||
+        message.includes('unrecognized') ||
+        message.includes('invalid') ||
+        message.includes('extra'))
+  }
+
   /** Extract image URLs (and an optional revised prompt) from an /images/* response. */
-  private extractImagesResult (data: ImagesGenerationsResponse): ImageGenerationResult {
+  private extractImagesResult (data: ImagesGenerationsResponse, outputFormat?: 'png' | 'jpeg' | 'webp'): ImageGenerationResult {
     const images: string[] = []
     let revisedPrompt: string | undefined
+    const mime = this.outputFormatToMime(outputFormat)
 
     for (const item of data.data ?? []) {
       if (item.revised_prompt && !revisedPrompt) {
         revisedPrompt = item.revised_prompt
       }
       if (item.b64_json) {
-        images.push(`data:image/png;base64,${item.b64_json}`)
+        images.push(`data:${mime};base64,${item.b64_json}`)
       } else if (item.url) {
         images.push(item.url)
       }
@@ -1240,16 +1286,23 @@ export class OpenAIProvider {
     const negativePrompt = opts.negativePrompt?.trim()
     const requestOptions: RequestOptions = { timeoutMs: OpenAIProvider.IMAGE_REQUEST_TIMEOUT_MS }
 
-    const sendRequest = async (includeNegative: boolean): Promise<ImageGenerationResult> => {
+    const sendRequest = async (includeNegative: boolean, includeAdvancedOptions: boolean, includeResponseFormat: boolean): Promise<ImageGenerationResult> => {
       const body: ImagesGenerationsBody = {
         model: this.model,
         prompt,
         n: opts.n && opts.n > 0 ? opts.n : 1,
-        size: opts.size || '1024x1024',
-        response_format: 'b64_json'
+        size: opts.size || '1024x1024'
       }
+      if (includeResponseFormat) body.response_format = 'b64_json'
       if (includeNegative && negativePrompt) {
         body.negative_prompt = negativePrompt
+      }
+      if (includeAdvancedOptions) {
+        const quality = this.normalizeImageQuality(opts.quality)
+        if (quality) body.quality = quality
+        if (opts.outputFormat && !this.model.toLowerCase().includes('dall-e') && !this.model.toLowerCase().includes('dalle')) {
+          body.output_format = opts.outputFormat
+        }
       }
 
       const callId = this.logger?.logProviderCallStart({
@@ -1266,7 +1319,7 @@ export class OpenAIProvider {
         if (data.usage && this.onUsage) {
           this.onUsage(data.usage as Parameters<UsageCallback>[0])
         }
-        const result = this.extractImagesResult(data)
+        const result = this.extractImagesResult(data, body.output_format)
         if (callId) {
           this.logger?.logProviderCallSuccess(callId, { message: { role: 'assistant', content: result.images.join('\n') }, raw: data })
         }
@@ -1280,16 +1333,34 @@ export class OpenAIProvider {
       }
     }
 
-    try {
-      return await sendRequest(true)
-    } catch (error) {
-      // Retry once without the negative prompt if the provider rejected it.
-      const message = error instanceof Error ? error.message.toLowerCase() : ''
-      if (negativePrompt && (message.includes('negative_prompt') || message.includes('(400)') || message.includes('unknown') || message.includes('unsupported'))) {
-        return await sendRequest(false)
+    let includeNegative = Boolean(negativePrompt)
+    let includeAdvancedOptions = Boolean(opts.quality || opts.outputFormat)
+    let includeResponseFormat = this.shouldUseImageResponseFormat()
+    let lastError: unknown
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await sendRequest(includeNegative, includeAdvancedOptions, includeResponseFormat)
+      } catch (error) {
+        lastError = error
+        const normalized = error instanceof Error ? error : new Error(String(error))
+        if (includeNegative && this.isUnsupportedImageParameterError(normalized, ['negative_prompt'])) {
+          includeNegative = false
+          continue
+        }
+        if (includeAdvancedOptions && this.isUnsupportedImageParameterError(normalized, ['quality', 'output_format'])) {
+          includeAdvancedOptions = false
+          continue
+        }
+        if (includeResponseFormat && this.isUnsupportedImageParameterError(normalized, ['response_format'])) {
+          includeResponseFormat = false
+          continue
+        }
+        throw error
       }
-      throw error
     }
+
+    throw lastError
   }
 
   /**
@@ -1304,53 +1375,72 @@ export class OpenAIProvider {
     }
 
     const prompt = opts.prompt.trim() || 'Edit the image'
-    const form = new FormData()
-    form.append('model', this.model)
-    form.append('prompt', prompt)
-    form.append('n', String(opts.n && opts.n > 0 ? opts.n : 1))
-    if (opts.size) {
-      form.append('size', opts.size)
+    const sendRequest = async (includeAdvancedOptions: boolean): Promise<ImageGenerationResult> => {
+      const form = new FormData()
+      form.append('model', this.model)
+      form.append('prompt', prompt)
+      form.append('n', String(opts.n && opts.n > 0 ? opts.n : 1))
+      if (opts.size) {
+        form.append('size', opts.size)
+      }
+      if (includeAdvancedOptions) {
+        const quality = this.normalizeImageQuality(opts.quality)
+        if (quality) form.append('quality', quality)
+        if (opts.outputFormat && !this.model.toLowerCase().includes('dall-e') && !this.model.toLowerCase().includes('dalle')) {
+          form.append('output_format', opts.outputFormat)
+        }
+      }
+
+      const multiple = opts.images.length > 1
+      opts.images.forEach((dataUrl, index) => {
+        const { blob, ext } = this.dataUrlToBlob(dataUrl)
+        form.append(multiple ? 'image[]' : 'image', blob, `image-${index}.${ext}`)
+      })
+
+      if (opts.mask) {
+        const { blob, ext } = this.dataUrlToBlob(opts.mask)
+        form.append('mask', blob, `mask.${ext}`)
+      }
+
+      const callId = this.logger?.logProviderCallStart({
+        stream: false,
+        model: this.model,
+        baseUrl: this.getImagesEditsUrl(),
+        messages: [{ role: 'user', content: prompt }],
+        tools: []
+      })
+
+      try {
+        const response = await this.fetchMultipartWithRetry(
+          this.getImagesEditsUrl(),
+          form,
+          opts.abortSignal,
+          { timeoutMs: OpenAIProvider.IMAGE_REQUEST_TIMEOUT_MS }
+        )
+        const data = await response.json() as ImagesGenerationsResponse
+        if (data.usage && this.onUsage) {
+          this.onUsage(data.usage as Parameters<UsageCallback>[0])
+        }
+        const result = this.extractImagesResult(data, includeAdvancedOptions ? opts.outputFormat : undefined)
+        if (callId) {
+          this.logger?.logProviderCallSuccess(callId, { message: { role: 'assistant', content: result.images.join('\n') }, raw: data })
+        }
+        return result
+      } catch (error) {
+        const normalized = this.normalizeRequestError(error)
+        if (callId) {
+          this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
+        }
+        throw normalized
+      }
     }
-
-    const multiple = opts.images.length > 1
-    opts.images.forEach((dataUrl, index) => {
-      const { blob, ext } = this.dataUrlToBlob(dataUrl)
-      form.append(multiple ? 'image[]' : 'image', blob, `image-${index}.${ext}`)
-    })
-
-    if (opts.mask) {
-      const { blob, ext } = this.dataUrlToBlob(opts.mask)
-      form.append('mask', blob, `mask.${ext}`)
-    }
-
-    const callId = this.logger?.logProviderCallStart({
-      stream: false,
-      model: this.model,
-      baseUrl: this.getImagesEditsUrl(),
-      messages: [{ role: 'user', content: prompt }],
-      tools: []
-    })
 
     try {
-      const response = await this.fetchMultipartWithRetry(
-        this.getImagesEditsUrl(),
-        form,
-        opts.abortSignal,
-        { timeoutMs: OpenAIProvider.IMAGE_REQUEST_TIMEOUT_MS }
-      )
-      const data = await response.json() as ImagesGenerationsResponse
-      if (data.usage && this.onUsage) {
-        this.onUsage(data.usage as Parameters<UsageCallback>[0])
-      }
-      const result = this.extractImagesResult(data)
-      if (callId) {
-        this.logger?.logProviderCallSuccess(callId, { message: { role: 'assistant', content: result.images.join('\n') }, raw: data })
-      }
-      return result
+      return await sendRequest(Boolean(opts.quality || opts.outputFormat))
     } catch (error) {
       const normalized = this.normalizeRequestError(error)
-      if (callId) {
-        this.logger?.logProviderCallFailure(callId, normalized, { stream: false, model: this.model })
+      if (this.isUnsupportedImageParameterError(normalized, ['quality', 'output_format'])) {
+        return await sendRequest(false)
       }
       throw normalized
     }

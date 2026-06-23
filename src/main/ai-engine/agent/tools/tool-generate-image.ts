@@ -7,13 +7,18 @@ import type { ImageLibraryStore } from '../../../settings/image-library-store.js
 import type { ImageStudioGenerateRequest } from '../../../../shared/image-studio-types.js'
 import {
   ASPECT_RATIOS,
+  IMAGE_QUALITIES,
+  IMAGE_RESOLUTION_TIERS,
   MAX_IMAGES_PER_REQUEST,
   MAX_DIMENSION,
   MIN_DIMENSION,
-  defaultSizeForRatio,
   listImageModels,
+  normalizeImageQuality,
+  normalizeOutputFormat,
+  normalizeResolutionTier,
   normalizeSize,
-  resolveImageModel
+  resolveImageModel,
+  sizeForRatioTier
 } from '../../../settings/image-generation-service.js'
 
 interface Tool {
@@ -65,6 +70,8 @@ interface QueuedTaskInfo {
   providerId: string
   model: string
   size: string
+  quality?: string
+  outputFormat?: string
   n: number
   folder?: string
   inputCount?: number
@@ -107,7 +114,7 @@ export function toolGenerateImage (settingsStore: SettingsStore, _imageLibrarySt
         'Batch text-to-image generation, mirroring the drawing studio (绘制工作台) 文生图 form.',
         'Tasks are NOT run here — they are added to the studio\'s shared task queue and execute under the workbench\'s own concurrency setting, so user- and agent-initiated jobs are managed together.',
         'After this returns, the tasks are visible (and retryable/removable) under 绘制工作台 → 📋 任务队列, and finished images land in the 图片库. The tool returns immediately and does NOT wait for images to finish.',
-        'Controllable parameters match the studio: model, prompt, negative prompt, aspect ratio, size, and count (n).',
+        'Controllable parameters match the studio: model, prompt, negative prompt, resolution tier, aspect ratio, size, quality, output format, and count (n).',
         'Provider/model are auto-selected from the first configured model with the 图片生成 capability when not specified; pass `model` (or `provider_id`) to pick a specific one.',
         'Use top-level fields as shared defaults applied to every task; per-task fields override them.'
       ].join(' '),
@@ -123,7 +130,10 @@ export function toolGenerateImage (settingsStore: SettingsStore, _imageLibrarySt
                 prompt: { type: 'string', description: 'Required. What to draw.' },
                 negative_prompt: { type: 'string', description: 'Optional. Content to avoid (only some providers honor it).' },
                 aspect_ratio: { type: 'string', enum: [...ASPECT_RATIOS], description: 'Optional aspect ratio preset. Used to derive size when no explicit size is given.' },
-                size: { type: 'string', description: `Optional explicit pixel size "WxH" (each side ${MIN_DIMENSION}-${MAX_DIMENSION}). Overrides aspect_ratio.` },
+                resolution: { type: 'string', enum: [...IMAGE_RESOLUTION_TIERS], description: 'Optional resolution tier used with aspect_ratio when no explicit size is given. Defaults to 1K.' },
+                size: { type: 'string', description: `Optional explicit pixel size "WxH" (each side ${MIN_DIMENSION}-${MAX_DIMENSION}, dimensions must be multiples of 16). Overrides resolution and aspect_ratio.` },
+                quality: { type: 'string', enum: [...IMAGE_QUALITIES], description: 'Optional image quality. Defaults to high for clearer 2K/4K output.' },
+                output_format: { type: 'string', enum: ['png', 'jpeg', 'webp'], description: 'Optional output format. Defaults to png.' },
                 n: { type: 'integer', description: `Optional image count, 1-${MAX_IMAGES_PER_REQUEST}. Defaults to 1.` },
                 model: { type: 'string', description: 'Optional model name override for this task.' },
                 folder: { type: 'string', description: 'Optional image-library folder to file this task\'s images under.' },
@@ -135,7 +145,10 @@ export function toolGenerateImage (settingsStore: SettingsStore, _imageLibrarySt
           provider_id: { type: 'string', description: 'Optional default provider id for all tasks.' },
           model: { type: 'string', description: 'Optional default model name for all tasks.' },
           aspect_ratio: { type: 'string', enum: [...ASPECT_RATIOS], description: 'Optional default aspect ratio for all tasks.' },
+          resolution: { type: 'string', enum: [...IMAGE_RESOLUTION_TIERS], description: 'Optional default resolution tier for all tasks. Defaults to 1K.' },
           size: { type: 'string', description: 'Optional default explicit size "WxH" for all tasks.' },
+          quality: { type: 'string', enum: [...IMAGE_QUALITIES], description: 'Optional default image quality. Defaults to high.' },
+          output_format: { type: 'string', enum: ['png', 'jpeg', 'webp'], description: 'Optional default output format. Defaults to png.' },
           n: { type: 'integer', description: `Optional default image count (1-${MAX_IMAGES_PER_REQUEST}) for all tasks.` },
           negative_prompt: { type: 'string', description: 'Optional default negative prompt for all tasks.' },
           folder: { type: 'string', description: 'Optional default image-library folder for all tasks (great for organizing a batch).' },
@@ -158,7 +171,10 @@ export function toolGenerateImage (settingsStore: SettingsStore, _imageLibrarySt
       const defaultModel = asString(args.model)
       const defaultProviderId = asString(args.provider_id)
       const defaultRatio = asString(args.aspect_ratio)
+      const defaultResolution = normalizeResolutionTier(args.resolution) ?? '1K'
       const defaultSize = asString(args.size)
+      const defaultQuality = normalizeImageQuality(args.quality) ?? 'high'
+      const defaultOutputFormat = normalizeOutputFormat(args.output_format) ?? 'png'
       const defaultNegative = asString(args.negative_prompt)
       const defaultFolder = asString(args.folder)
       const defaultTags = asStringArray(args.tags)
@@ -184,19 +200,37 @@ export function toolGenerateImage (settingsStore: SettingsStore, _imageLibrarySt
 
           const ratio = asString(task.aspect_ratio) || defaultRatio
           const explicitSize = asString(task.size) || defaultSize
+          const rawResolution = asString(task.resolution)
+          const rawQuality = asString(task.quality)
+          const taskQuality = rawQuality ? normalizeImageQuality(rawQuality) : defaultQuality
+          if (!taskQuality) {
+            errors.push({ index, prompt, error: `画质 ${rawQuality} 无效（可选：${IMAGE_QUALITIES.join('、')}）。` })
+            return
+          }
+          const rawOutputFormat = asString(task.output_format)
+          const taskOutputFormat = rawOutputFormat ? normalizeOutputFormat(rawOutputFormat) : defaultOutputFormat
+          if (!taskOutputFormat) {
+            errors.push({ index, prompt, error: `输出格式 ${rawOutputFormat} 无效（可选：png、jpeg、webp）。` })
+            return
+          }
           let size: string
           let aspectRatio: string | undefined
           if (explicitSize) {
             const normalized = normalizeSize(explicitSize)
             if (!normalized) {
-              errors.push({ index, prompt, error: `尺寸 ${explicitSize} 无效（需 WxH，单边 ${MIN_DIMENSION}-${MAX_DIMENSION}）。` })
+              errors.push({ index, prompt, error: `尺寸 ${explicitSize} 无效（需 WxH，单边 ${MIN_DIMENSION}-${MAX_DIMENSION}，宽高为 16 的倍数且总像素不超过 3840x2160）。` })
               return
             }
             size = normalized
             aspectRatio = ratio || undefined
           } else {
+            const resolution = rawResolution ? normalizeResolutionTier(rawResolution) : defaultResolution
+            if (!resolution) {
+              errors.push({ index, prompt, error: `清晰度 ${rawResolution} 无效（可选：${IMAGE_RESOLUTION_TIERS.join('、')}）。` })
+              return
+            }
             aspectRatio = ratio || '1:1'
-            size = defaultSizeForRatio(aspectRatio)
+            size = sizeForRatioTier(aspectRatio, resolution)
           }
 
           const folder = asString(task.folder) || defaultFolder
@@ -212,11 +246,13 @@ export function toolGenerateImage (settingsStore: SettingsStore, _imageLibrarySt
             negativePrompt: (asString(task.negative_prompt) || defaultNegative) || undefined,
             aspectRatio,
             size,
+            quality: taskQuality,
+            outputFormat: taskOutputFormat,
             n,
             folder: folder || undefined,
             tags: tags.length ? tags : undefined
           })
-          queued.push({ index, prompt, mode: 'generate', providerId: resolved.providerId, model: resolved.model, size, n, folder: folder || undefined })
+          queued.push({ index, prompt, mode: 'generate', providerId: resolved.providerId, model: resolved.model, size, quality: taskQuality, outputFormat: taskOutputFormat, n, folder: folder || undefined })
         } catch (error) {
           errors.push({ index, prompt, error: error instanceof Error ? error.message : '解析任务失败' })
         }
@@ -288,7 +324,7 @@ export function toolEditImage (settingsStore: SettingsStore, imageLibraryStore: 
         'Tasks are NOT run here — they are added to the studio\'s shared task queue and execute under the workbench\'s own concurrency setting, alongside user-initiated jobs.',
         'After this returns, the tasks are visible (and retryable/removable) under 绘制工作台 → 📋 任务队列, and finished images land in the 图片库. The tool returns immediately and does NOT wait for images to finish.',
         `Each task supplies a prompt plus one or more input images (max ${MAX_INPUT_IMAGES}) from: image-library ids (input_image_ids — e.g. ids previously generated), local file paths (input_image_paths), or raw base64 data URLs (input_images).`,
-        'Controllable parameters match the studio: model, prompt, size, and count (n). Provider/model auto-select from the first model with the 图片编辑 capability unless `model`/`provider_id` is given.',
+        'Controllable parameters match the studio: model, prompt, aspect ratio, resolution tier, size, quality, output format, and count (n). Provider/model auto-select from the first model with the 图片编辑 capability unless `model`/`provider_id` is given.',
         'Top-level fields are shared defaults; per-task fields override them.'
       ].join(' '),
       parameters: {
@@ -304,7 +340,11 @@ export function toolEditImage (settingsStore: SettingsStore, imageLibraryStore: 
                 input_image_ids: { type: 'array', items: { type: 'string' }, description: 'Image-library ids to edit (e.g. ids of images generated earlier).' },
                 input_image_paths: { type: 'array', items: { type: 'string' }, description: 'Absolute local file paths of source images (png/jpg/jpeg/webp/gif).' },
                 input_images: { type: 'array', items: { type: 'string' }, description: 'Raw base64 data URLs of source images.' },
-                size: { type: 'string', description: `Optional output size "WxH" (each side ${MIN_DIMENSION}-${MAX_DIMENSION}).` },
+                aspect_ratio: { type: 'string', enum: [...ASPECT_RATIOS], description: 'Optional output aspect ratio preset. Used with resolution when no explicit size is given.' },
+                resolution: { type: 'string', enum: [...IMAGE_RESOLUTION_TIERS], description: 'Optional output resolution tier used with aspect_ratio when no explicit size is given.' },
+                size: { type: 'string', description: `Optional output size "WxH" (each side ${MIN_DIMENSION}-${MAX_DIMENSION}, dimensions must be multiples of 16).` },
+                quality: { type: 'string', enum: [...IMAGE_QUALITIES], description: 'Optional image quality. Defaults to high.' },
+                output_format: { type: 'string', enum: ['png', 'jpeg', 'webp'], description: 'Optional output format. Defaults to png.' },
                 n: { type: 'integer', description: `Optional output count, 1-${MAX_IMAGES_PER_REQUEST}. Defaults to 1.` },
                 model: { type: 'string', description: 'Optional model name override for this task.' },
                 folder: { type: 'string', description: 'Optional image-library folder for this task\'s results.' },
@@ -315,7 +355,11 @@ export function toolEditImage (settingsStore: SettingsStore, imageLibraryStore: 
           },
           provider_id: { type: 'string', description: 'Optional default provider id for all tasks.' },
           model: { type: 'string', description: 'Optional default model name for all tasks.' },
+          aspect_ratio: { type: 'string', enum: [...ASPECT_RATIOS], description: 'Optional default output aspect ratio.' },
+          resolution: { type: 'string', enum: [...IMAGE_RESOLUTION_TIERS], description: 'Optional default output resolution tier.' },
           size: { type: 'string', description: 'Optional default output size "WxH" for all tasks.' },
+          quality: { type: 'string', enum: [...IMAGE_QUALITIES], description: 'Optional default image quality. Defaults to high.' },
+          output_format: { type: 'string', enum: ['png', 'jpeg', 'webp'], description: 'Optional default output format. Defaults to png.' },
           n: { type: 'integer', description: `Optional default output count (1-${MAX_IMAGES_PER_REQUEST}) for all tasks.` },
           folder: { type: 'string', description: 'Optional default image-library folder for all tasks.' },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional default tags for all tasks.' }
@@ -336,7 +380,11 @@ export function toolEditImage (settingsStore: SettingsStore, imageLibraryStore: 
       const truncated = rawTasks.length - tasks.length
       const defaultModel = asString(args.model)
       const defaultProviderId = asString(args.provider_id)
+      const defaultRatio = asString(args.aspect_ratio)
+      const defaultResolution = normalizeResolutionTier(args.resolution)
       const defaultSize = asString(args.size)
+      const defaultQuality = normalizeImageQuality(args.quality) ?? 'high'
+      const defaultOutputFormat = normalizeOutputFormat(args.output_format) ?? 'png'
       const defaultFolder = asString(args.folder)
       const defaultTags = asStringArray(args.tags)
       const defaultN = args.n
@@ -366,14 +414,39 @@ export function toolEditImage (settingsStore: SettingsStore, imageLibraryStore: 
           })
 
           let size = ''
+          let aspectRatio: string | undefined
           const explicitSize = asString(task.size) || defaultSize
+          const rawQuality = asString(task.quality)
+          const taskQuality = rawQuality ? normalizeImageQuality(rawQuality) : defaultQuality
+          if (!taskQuality) {
+            errors.push({ index, prompt, error: `画质 ${rawQuality} 无效（可选：${IMAGE_QUALITIES.join('、')}）。` })
+            continue
+          }
+          const rawOutputFormat = asString(task.output_format)
+          const taskOutputFormat = rawOutputFormat ? normalizeOutputFormat(rawOutputFormat) : defaultOutputFormat
+          if (!taskOutputFormat) {
+            errors.push({ index, prompt, error: `输出格式 ${rawOutputFormat} 无效（可选：png、jpeg、webp）。` })
+            continue
+          }
           if (explicitSize) {
             const normalized = normalizeSize(explicitSize)
             if (!normalized) {
-              errors.push({ index, prompt, error: `尺寸 ${explicitSize} 无效（需 WxH，单边 ${MIN_DIMENSION}-${MAX_DIMENSION}）。` })
+              errors.push({ index, prompt, error: `尺寸 ${explicitSize} 无效（需 WxH，单边 ${MIN_DIMENSION}-${MAX_DIMENSION}，宽高为 16 的倍数且总像素不超过 3840x2160）。` })
               continue
             }
             size = normalized
+            aspectRatio = asString(task.aspect_ratio) || defaultRatio || undefined
+          } else {
+            const ratio = asString(task.aspect_ratio) || defaultRatio
+            const rawResolution = asString(task.resolution)
+            const resolution = rawResolution ? normalizeResolutionTier(rawResolution) : defaultResolution
+            if (ratio && resolution) {
+              aspectRatio = ratio
+              size = sizeForRatioTier(aspectRatio, resolution)
+            } else if (ratio && rawResolution) {
+              errors.push({ index, prompt, error: `清晰度 ${rawResolution} 无效（可选：${IMAGE_RESOLUTION_TIERS.join('、')}）。` })
+              continue
+            }
           }
 
           const folder = asString(task.folder) || defaultFolder
@@ -386,13 +459,16 @@ export function toolEditImage (settingsStore: SettingsStore, imageLibraryStore: 
             model: resolved.model,
             mode: 'edit',
             prompt,
+            aspectRatio,
             size,
+            quality: taskQuality,
+            outputFormat: taskOutputFormat,
             n,
             inputImages: images,
             folder: folder || undefined,
             tags: tags.length ? tags : undefined
           })
-          queued.push({ index, prompt, mode: 'edit', providerId: resolved.providerId, model: resolved.model, size: size || '原图尺寸', n, folder: folder || undefined, inputCount: images.length, inputNotes: notes.length ? notes : undefined })
+          queued.push({ index, prompt, mode: 'edit', providerId: resolved.providerId, model: resolved.model, size: size || '原图尺寸', quality: taskQuality, outputFormat: taskOutputFormat, n, folder: folder || undefined, inputCount: images.length, inputNotes: notes.length ? notes : undefined })
         } catch (error) {
           errors.push({ index, prompt, error: error instanceof Error ? error.message : '解析任务失败' })
         }

@@ -91,6 +91,7 @@ watch(() => props.task?.id, () => {
             <div class="detail-row"><span class="detail-key">{{ $t('studioUi.mode') }}</span><span>{{ task.request.mode === 'edit' ? $t('studioUi.imageEdit') : $t('studioUi.textToImage') }}</span></div>
             <div class="detail-row"><span class="detail-key">{{ $t('studioUi.model') }}</span><span>{{ task.request.model }}</span></div>
             <div class="detail-row"><span class="detail-key">{{ $t('studioUi.size') }}</span><span>{{ task.request.size }}<template v-if="task.request.aspectRatio"> · {{ task.request.aspectRatio }}</template></span></div>
+            <div v-if="task.request.quality || task.request.outputFormat" class="detail-row"><span class="detail-key">{{ $t('studioUi.quality') }}</span><span><template v-if="task.request.quality">{{ $t(`studioUi.quality_${task.request.quality}`) }}</template><template v-if="task.request.quality && task.request.outputFormat"> · </template><template v-if="task.request.outputFormat">{{ task.request.outputFormat.toUpperCase() }}</template></span></div>
             <div class="detail-row"><span class="detail-key">{{ $t('studioUi.count') }}</span><span>{{ task.request.n ?? 1 }}</span></div>
             <div class="detail-block">
               <span class="detail-key">{{ $t('studioUi.prompt') }}</span>
@@ -200,8 +201,18 @@ watch(() => props.task?.id, () => {
   gap: 12px;
 }
 
-.detail-preview-wrap { flex: 1; min-height: 0; }
-.detail-preview { width: 100%; height: 100%; }
+.detail-preview-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.detail-preview {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
 
 .detail-state {
   flex: 1;

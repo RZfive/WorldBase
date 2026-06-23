@@ -27,6 +27,7 @@ const panY = ref(0)
 const draggingPan = ref(false)
 const dragState = ref({ pointerId: -1, startX: 0, startY: 0, panX: 0, panY: 0 })
 let gestureBaseZoom = 1
+let resizeObserver: ResizeObserver | null = null
 
 const zoomPercent = computed(() => `${Math.round(zoomLevel.value * 100)}%`)
 
@@ -65,7 +66,15 @@ const canPan = computed(() => {
 
 const imageStyle = computed(() => {
   const m = metrics.value
-  if (!m) return {}
+  if (!m) {
+    return {
+      width: 'auto',
+      height: 'auto',
+      maxWidth: '100%',
+      maxHeight: '100%',
+      transform: 'translate(0, 0)'
+    }
+  }
   return {
     width: `${m.renderedWidth}px`,
     height: `${m.renderedHeight}px`,
@@ -111,7 +120,11 @@ function panBy (deltaX: number, deltaY: number): boolean {
 function updateViewport () {
   nextTick(() => {
     if (!wrapperRef.value) return
-    viewport.value = { width: wrapperRef.value.clientWidth, height: wrapperRef.value.clientHeight }
+    const rect = wrapperRef.value.getBoundingClientRect()
+    viewport.value = {
+      width: Math.max(0, rect.width),
+      height: Math.max(0, rect.height)
+    }
     clampPan()
   })
 }
@@ -238,10 +251,17 @@ watch(() => props.src, () => {
 onMounted(() => {
   window.addEventListener('resize', updateViewport)
   updateViewport()
+  nextTick(() => {
+    if (!wrapperRef.value || typeof ResizeObserver === 'undefined') return
+    resizeObserver = new ResizeObserver(() => updateViewport())
+    resizeObserver.observe(wrapperRef.value)
+  })
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', updateViewport)
+  resizeObserver?.disconnect()
+  resizeObserver = null
 })
 </script>
 
@@ -285,6 +305,8 @@ onUnmounted(() => {
   min-height: 0;
   width: 100%;
   height: 100%;
+  overflow: hidden;
+  display: block;
 }
 
 .preview-wrapper {

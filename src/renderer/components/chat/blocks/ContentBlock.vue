@@ -346,7 +346,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--app-border-strong);
   background: color-mix(in srgb, var(--app-panel-muted) 78%, transparent);
   color: var(--app-text);
-  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-family: inherit;
   font-size: 0.84em;
   line-height: 1.58;
   white-space: pre-wrap;
@@ -452,7 +452,7 @@ onBeforeUnmount(() => {
 }
 
 .message-output :deep(code) {
-  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-family: inherit;
   font-size: 0.9em;
 }
 
@@ -487,6 +487,7 @@ onBeforeUnmount(() => {
   border-left: 3px solid var(--app-accent);
   padding-left: 12px;
   color: var(--app-text-muted);
+  font-family: inherit;
   margin: 0.55em 0;
 }
 

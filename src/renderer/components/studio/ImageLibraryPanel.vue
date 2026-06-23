@@ -967,6 +967,7 @@ onUnmounted(() => {
               <div class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.mode') }}</span><span>{{ lightbox.mode === 'edit' ? $t('studioUi.imageEdit') : $t('studioUi.textToImage') }}</span></div>
               <div class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.model') }}</span><span>{{ lightbox.model }}</span></div>
               <div class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.size') }}</span><span>{{ lightbox.size }}<template v-if="lightbox.aspectRatio"> · {{ lightbox.aspectRatio }}</template></span></div>
+              <div v-if="lightbox.quality || lightbox.outputFormat" class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.quality') }}</span><span><template v-if="lightbox.quality">{{ $t(`studioUi.quality_${lightbox.quality}`) }}</template><template v-if="lightbox.quality && lightbox.outputFormat"> · </template><template v-if="lightbox.outputFormat">{{ lightbox.outputFormat.toUpperCase() }}</template></span></div>
               <div class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.time') }}</span><span>{{ formatTime(lightbox.createdAt) }}</span></div>
               <div v-if="lightbox.folder" class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.folder') }}</span><span>📁 {{ lightbox.folder }}</span></div>
               <div class="lib-meta-block">
@@ -1433,6 +1434,7 @@ onUnmounted(() => {
   position: relative;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .lib-lightbox-nav {
@@ -1524,7 +1526,13 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.lib-lightbox-preview { min-width: 0; min-height: 0; }
+.lib-lightbox-preview {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 
 .lib-meta {
   min-width: 0;

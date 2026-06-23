@@ -1,6 +1,8 @@
 /** Shared types for the drawing studio (image generation / editing). */
 
 export type ImageStudioMode = 'generate' | 'edit'
+export type ImageStudioImageQuality = 'auto' | 'low' | 'medium' | 'high'
+export type ImageStudioOutputFormat = 'png' | 'jpeg' | 'webp'
 
 /** Request payload sent from the renderer to generate or edit images. */
 export interface ImageStudioGenerateRequest {
@@ -13,6 +15,10 @@ export interface ImageStudioGenerateRequest {
   aspectRatio?: string
   /** Final pixel size, e.g. '1024x1024'. */
   size: string
+  /** Provider image quality setting. GPT Image models support auto / low / medium / high. */
+  quality?: ImageStudioImageQuality
+  /** Requested output file format for providers that support it. */
+  outputFormat?: ImageStudioOutputFormat
   /** Number of images to generate (1-4). */
   n?: number
   /** Source images as base64 data URLs (edit mode). */
@@ -34,6 +40,8 @@ export interface ImageLibraryEntry {
   negativePrompt?: string
   aspectRatio?: string
   size: string
+  quality?: ImageStudioImageQuality
+  outputFormat?: ImageStudioOutputFormat
   fileName: string
   sourceImageFileNames?: string[]
   /** Generated image as a data URL. */
@@ -65,6 +73,8 @@ export interface ImageLibraryItem {
   negativePrompt?: string
   aspectRatio?: string
   size: string
+  quality?: ImageStudioImageQuality
+  outputFormat?: ImageStudioOutputFormat
   folder?: string
   tags?: string[]
   width?: number
