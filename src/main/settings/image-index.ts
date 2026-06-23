@@ -13,6 +13,8 @@ export interface ImageIndexRow {
   negative_prompt: string | null
   aspect_ratio: string | null
   size: string | null
+  quality: string | null
+  output_format: string | null
   file_name: string
   thumb_name: string | null
   /** JSON array of source image file names (edit mode), or null. */
@@ -25,7 +27,7 @@ export interface ImageIndexRow {
 }
 
 const SELECT_COLUMNS =
-  'id, created_at, mode, provider_id, model, prompt, negative_prompt, aspect_ratio, size, file_name, thumb_name, source_file_names, folder, tags, width, height'
+  'id, created_at, mode, provider_id, model, prompt, negative_prompt, aspect_ratio, size, quality, output_format, file_name, thumb_name, source_file_names, folder, tags, width, height'
 
 /**
  * SQLite-backed metadata index for the image library. The image bytes stay on
@@ -52,6 +54,8 @@ export class ImageIndex {
         negative_prompt TEXT,
         aspect_ratio TEXT,
         size TEXT,
+        quality TEXT,
+        output_format TEXT,
         file_name TEXT NOT NULL,
         thumb_name TEXT,
         source_file_names TEXT,
@@ -64,6 +68,15 @@ export class ImageIndex {
       CREATE INDEX IF NOT EXISTS idx_images_folder ON images(folder);
       CREATE TABLE IF NOT EXISTS folders ( name TEXT PRIMARY KEY );
     `)
+    this.ensureColumn('quality', 'TEXT')
+    this.ensureColumn('output_format', 'TEXT')
+  }
+
+  private ensureColumn (name: string, type: string): void {
+    const rows = this.db.prepare('PRAGMA table_info(images)').all() as Array<{ name: string }>
+    if (!rows.some(row => row.name === name)) {
+      this.db.prepare(`ALTER TABLE images ADD COLUMN ${name} ${type}`).run()
+    }
   }
 
   count (): number {
@@ -73,12 +86,12 @@ export class ImageIndex {
   upsert (row: ImageIndexRow): void {
     this.db.prepare(`
       INSERT INTO images (${SELECT_COLUMNS})
-      VALUES (@id, @created_at, @mode, @provider_id, @model, @prompt, @negative_prompt, @aspect_ratio, @size, @file_name, @thumb_name, @source_file_names, @folder, @tags, @width, @height)
+      VALUES (@id, @created_at, @mode, @provider_id, @model, @prompt, @negative_prompt, @aspect_ratio, @size, @quality, @output_format, @file_name, @thumb_name, @source_file_names, @folder, @tags, @width, @height)
       ON CONFLICT(id) DO UPDATE SET
         created_at=excluded.created_at, mode=excluded.mode, provider_id=excluded.provider_id,
         model=excluded.model, prompt=excluded.prompt, negative_prompt=excluded.negative_prompt,
-        aspect_ratio=excluded.aspect_ratio, size=excluded.size, file_name=excluded.file_name,
-        thumb_name=excluded.thumb_name, source_file_names=excluded.source_file_names,
+        aspect_ratio=excluded.aspect_ratio, size=excluded.size, quality=excluded.quality,
+        output_format=excluded.output_format, file_name=excluded.file_name, thumb_name=excluded.thumb_name, source_file_names=excluded.source_file_names,
         folder=excluded.folder, tags=excluded.tags, width=excluded.width, height=excluded.height
     `).run(row)
   }
@@ -87,12 +100,12 @@ export class ImageIndex {
   upsertMany (rows: ImageIndexRow[]): void {
     const insert = this.db.prepare(`
       INSERT INTO images (${SELECT_COLUMNS})
-      VALUES (@id, @created_at, @mode, @provider_id, @model, @prompt, @negative_prompt, @aspect_ratio, @size, @file_name, @thumb_name, @source_file_names, @folder, @tags, @width, @height)
+      VALUES (@id, @created_at, @mode, @provider_id, @model, @prompt, @negative_prompt, @aspect_ratio, @size, @quality, @output_format, @file_name, @thumb_name, @source_file_names, @folder, @tags, @width, @height)
       ON CONFLICT(id) DO UPDATE SET
         created_at=excluded.created_at, mode=excluded.mode, provider_id=excluded.provider_id,
         model=excluded.model, prompt=excluded.prompt, negative_prompt=excluded.negative_prompt,
-        aspect_ratio=excluded.aspect_ratio, size=excluded.size, file_name=excluded.file_name,
-        thumb_name=excluded.thumb_name, source_file_names=excluded.source_file_names,
+        aspect_ratio=excluded.aspect_ratio, size=excluded.size, quality=excluded.quality,
+        output_format=excluded.output_format, file_name=excluded.file_name, thumb_name=excluded.thumb_name, source_file_names=excluded.source_file_names,
         folder=excluded.folder, tags=excluded.tags, width=excluded.width, height=excluded.height
     `)
     const tx = this.db.transaction((items: ImageIndexRow[]) => {

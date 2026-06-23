@@ -2,19 +2,31 @@ import type { ImageStudioMode } from '../../../shared/image-studio-types'
 import type { ProviderOption, ProvidersConfig } from '../chat/panel/types'
 
 /** Aspect ratio preset with candidate pixel sizes. */
+export interface SizePreset {
+  value: string
+  label: string
+}
+
 export interface RatioPreset {
   label: string
   /** Candidate pixel sizes (`WxH`) offered for this ratio. */
   sizes: string[]
+  /** Candidate pixel sizes with a human-readable resolution tier label. */
+  sizePresets: SizePreset[]
   /** Default size selected when this ratio is chosen. */
   defaultSize: string
 }
 
 export const MIN_DIMENSION = 560
-export const MAX_DIMENSION = 8192
+export const MAX_DIMENSION = 3840
+const MAX_TOTAL_PIXELS = 3840 * 2160
 
-const PRESET_REFERENCE_DIMENSIONS = [560, 720, 1080, 1440, 2160, 4320]
-const DEFAULT_REFERENCE_DIMENSION = 1080
+const PRESET_REFERENCE_DIMENSIONS = [
+  { label: '1K', shortSide: 1024 },
+  { label: '2K', shortSide: 1440 },
+  { label: '4K', shortSide: 2160 }
+] as const
+const DEFAULT_REFERENCE_DIMENSION = 1024
 
 const RATIO_DEFINITIONS = [
   { label: '1:1', width: 1, height: 1 },
@@ -23,20 +35,21 @@ const RATIO_DEFINITIONS = [
   { label: '16:9', width: 16, height: 9 },
   { label: '9:16', width: 9, height: 16 },
   { label: '4:3', width: 4, height: 3 },
-  { label: '3:4', width: 3, height: 4 }
+  { label: '3:4', width: 3, height: 4 },
+  { label: '4:7', width: 4, height: 7 }
 ] as const
 
-function roundToEven (value: number): number {
-  return Math.round(value / 2) * 2
+function roundToMultipleOf16 (value: number): number {
+  return Math.round(value / 16) * 16
 }
 
 function buildPresetSize (widthRatio: number, heightRatio: number, referenceDimension: number): string | null {
   const shortSide = Math.min(widthRatio, heightRatio)
   const scale = referenceDimension / shortSide
-  const width = roundToEven(widthRatio * scale)
-  const height = roundToEven(heightRatio * scale)
+  const width = roundToMultipleOf16(widthRatio * scale)
+  const height = roundToMultipleOf16(heightRatio * scale)
 
-  if (width < MIN_DIMENSION || width > MAX_DIMENSION || height < MIN_DIMENSION || height > MAX_DIMENSION) {
+  if (width < MIN_DIMENSION || width > MAX_DIMENSION || height < MIN_DIMENSION || height > MAX_DIMENSION || width * height > MAX_TOTAL_PIXELS) {
     return null
   }
 
@@ -44,19 +57,27 @@ function buildPresetSize (widthRatio: number, heightRatio: number, referenceDime
 }
 
 export const RATIO_PRESETS: RatioPreset[] = RATIO_DEFINITIONS.map((ratio) => {
-  const sizes = Array.from(
-    new Set(
-      PRESET_REFERENCE_DIMENSIONS
-        .map(referenceDimension => buildPresetSize(ratio.width, ratio.height, referenceDimension))
-        .filter((size): size is string => Boolean(size))
-    )
-  )
+  const seen = new Set<string>()
+  const sizePresets = PRESET_REFERENCE_DIMENSIONS
+    .map<SizePreset | null>(({ label, shortSide }) => {
+      const value = buildPresetSize(ratio.width, ratio.height, shortSide)
+      return value ? { label, value } : null
+    })
+    .filter((preset): preset is SizePreset => preset !== null)
+    .filter((preset) => {
+      if (seen.has(preset.value)) return false
+      seen.add(preset.value)
+      return true
+    })
+
+  const sizes = sizePresets.map(preset => preset.value)
 
   const defaultSize = buildPresetSize(ratio.width, ratio.height, DEFAULT_REFERENCE_DIMENSION) ?? sizes[0]
 
   return {
     label: ratio.label,
     sizes,
+    sizePresets,
     defaultSize
   }
 })
@@ -148,6 +169,8 @@ export function normalizeCustomSize (width: number, height: number): string | nu
   const w = Math.round(width)
   const h = Math.round(height)
   if (w < MIN_DIMENSION || w > MAX_DIMENSION || h < MIN_DIMENSION || h > MAX_DIMENSION) return null
+  if (w % 16 !== 0 || h % 16 !== 0) return null
+  if (w * h > MAX_TOTAL_PIXELS) return null
   return `${w}x${h}`
 }
 

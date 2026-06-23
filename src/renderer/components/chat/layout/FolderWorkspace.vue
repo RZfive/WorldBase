@@ -17,6 +17,11 @@ interface CodeLine {
   html: string
 }
 
+interface TemplateHighlightState {
+  embeddedLanguage: string | null
+  inAstroFrontmatter: boolean
+}
+
 const props = withDefaults(defineProps<{
   visible: boolean
   rootPath?: string | null
@@ -41,6 +46,7 @@ const treeListRef = ref<HTMLElement | null>(null)
 const fileSearchInputRef = ref<HTMLInputElement | null>(null)
 const codePreviewRef = ref<HTMLElement | null>(null)
 const codeScrollRef = ref<HTMLElement | null>(null)
+const codeSelectionToolbarRef = ref<HTMLElement | null>(null)
 const workspaceWidth = ref(props.workspaceWidth)
 const currentRootPath = ref<string | null>(props.rootPath || null)
 const currentRootName = ref<string | null>(props.rootName || null)
@@ -52,6 +58,7 @@ const fileSearchQuery = ref('')
 const activeSearchIndex = ref(0)
 const codeSelectionStart = ref<number | null>(null)
 const codeSelectionEnd = ref<number | null>(null)
+const codeSelectionToolbarStyle = ref<Record<string, string>>({ top: '10px', left: '70px' })
 const isPickingFolder = ref(false)
 const isLoadingTree = ref(false)
 const isLoadingFile = ref(false)
@@ -73,6 +80,39 @@ let resizeStartWidth = 0
 let resizing = false
 let layoutObserver: ResizeObserver | null = null
 let workspaceShortcutsBound = false
+let toolbarPositionFrame: number | null = null
+
+const SCRIPT_CLOSE_PREFIX = '<' + '/script'
+const SCRIPT_CLOSE_TAG = `${SCRIPT_CLOSE_PREFIX}>`
+const STYLE_CLOSE_PREFIX = '<' + '/style'
+const STYLE_CLOSE_TAG = `${STYLE_CLOSE_PREFIX}>`
+
+const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, string> = {
+  vue: 'xml',
+  svelte: 'xml',
+  astro: 'xml',
+  mdx: 'markdown',
+  ejs: 'xml',
+  eta: 'xml',
+  blade: 'php-template',
+  razor: 'xml',
+  cshtml: 'xml',
+  jinja2: 'jinja',
+  nunjucks: 'jinja',
+  njk: 'jinja',
+  liquid: 'django',
+  gohtml: 'handlebars',
+  gotmpl: 'handlebars',
+  tmpl: 'handlebars',
+  mustache: 'handlebars',
+  pug: 'haml',
+  eex: 'xml',
+  heex: 'xml',
+  jsp: 'xml',
+  ftl: 'xml',
+  thymeleaf: 'xml',
+  velocity: 'xml'
+}
 
 const flatFileTree = computed(() => flattenFileTree(fileTree.value))
 const allFileEntries = computed(() => flattenAllFileTree(fileTree.value))
@@ -117,18 +157,113 @@ const codeLines = computed<CodeLine[]>(() => {
   if (!file || file.isMarkdown) return []
   if (file.content === '') return []
 
+  const state: TemplateHighlightState = {
+    embeddedLanguage: null,
+    inAstroFrontmatter: false
+  }
   return file.content.split('\n').map((line, index) => ({
     number: index + 1,
-    html: highlightCodeLine(line, file)
+    html: highlightCodeLine(line, file, state, index)
   }))
 })
 
-function highlightCodeLine (line: string, file: WorkspaceReadResult): string {
-  const language = file.language?.trim().toLowerCase()
-  if (language && hljs.getLanguage(language)) {
-    return hljs.highlight(line, { language, ignoreIllegals: true }).value
+function highlightCodeLine (line: string, file: WorkspaceReadResult, state: TemplateHighlightState, index: number): string {
+  const language = getLineHighlightLanguage(line, file, state, index)
+  return highlightLineWithLanguage(line, language)
+}
+
+function highlightLineWithLanguage (line: string, language?: string | null): string {
+  const resolvedLanguage = resolveHighlightLanguage(language)
+  if (resolvedLanguage && hljs.getLanguage(resolvedLanguage)) {
+    return hljs.highlight(line, { language: resolvedLanguage, ignoreIllegals: true }).value
   }
   return escapeHtml(line)
+}
+
+function getLineHighlightLanguage (line: string, file: WorkspaceReadResult, state: TemplateHighlightState, index: number): string | null {
+  const fileLanguage = file.language?.trim().toLowerCase() || null
+  if (!fileLanguage) return null
+
+  if (fileLanguage === 'astro') {
+    const trimmed = line.trim()
+    if (index === 0 && trimmed === '---') {
+      state.inAstroFrontmatter = true
+      return 'xml'
+    }
+    if (state.inAstroFrontmatter) {
+      if (trimmed === '---') {
+        state.inAstroFrontmatter = false
+        return 'xml'
+      }
+      return 'typescript'
+    }
+  }
+
+  if (!isSingleFileTemplateLanguage(fileLanguage)) return fileLanguage
+
+  const trimmedLower = line.trim().toLowerCase()
+  if (state.embeddedLanguage) {
+    if (trimmedLower.startsWith(SCRIPT_CLOSE_PREFIX) || trimmedLower.startsWith(STYLE_CLOSE_PREFIX)) {
+      state.embeddedLanguage = null
+      return 'xml'
+    }
+    const activeLanguage = state.embeddedLanguage
+    if (trimmedLower.includes(SCRIPT_CLOSE_TAG) || trimmedLower.includes(STYLE_CLOSE_TAG)) {
+      state.embeddedLanguage = null
+    }
+    return activeLanguage
+  }
+
+  const scriptMatch = line.match(/<script\b([^>]*)>/i)
+  if (scriptMatch) {
+    if (!line.slice(scriptMatch.index || 0).toLowerCase().includes(SCRIPT_CLOSE_TAG)) {
+      state.embeddedLanguage = getScriptBlockLanguage(scriptMatch[1] || '')
+    }
+    return 'xml'
+  }
+
+  const styleMatch = line.match(/<style\b([^>]*)>/i)
+  if (styleMatch) {
+    if (!line.slice(styleMatch.index || 0).toLowerCase().includes(STYLE_CLOSE_TAG)) {
+      state.embeddedLanguage = getStyleBlockLanguage(styleMatch[1] || '')
+    }
+    return 'xml'
+  }
+
+  return fileLanguage
+}
+
+function isSingleFileTemplateLanguage (language: string): boolean {
+  return language === 'vue' || language === 'svelte' || language === 'astro'
+}
+
+function getAttributeLanguage (attributes: string): string | null {
+  const match = attributes.match(/\blang=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i)
+  return (match?.[1] || match?.[2] || match?.[3] || '').trim().toLowerCase() || null
+}
+
+function getScriptBlockLanguage (attributes: string): string {
+  const language = getAttributeLanguage(attributes)
+  if (language === 'ts' || language === 'tsx') return 'typescript'
+  if (language === 'jsx') return 'javascript'
+  if (language === 'coffee' || language === 'coffeescript') return 'coffeescript'
+  return 'javascript'
+}
+
+function getStyleBlockLanguage (attributes: string): string {
+  const language = getAttributeLanguage(attributes)
+  if (language === 'scss' || language === 'sass') return 'scss'
+  if (language === 'less') return 'less'
+  if (language === 'styl' || language === 'stylus') return 'stylus'
+  return 'css'
+}
+
+function resolveHighlightLanguage (language?: string | null): string | null {
+  const normalized = language?.trim().toLowerCase()
+  if (!normalized) return null
+  if (hljs.getLanguage(normalized)) return normalized
+  const alias = HIGHLIGHT_LANGUAGE_ALIASES[normalized]
+  return alias && hljs.getLanguage(alias) ? alias : null
 }
 
 function escapeHtml (value: string): string {
@@ -348,9 +483,11 @@ function selectCodeLine (lineNumber: number): void {
   if (!codeSelectionStart.value || codeSelectionEnd.value) {
     codeSelectionStart.value = lineNumber
     codeSelectionEnd.value = null
+    queueCodeSelectionToolbarPositionUpdate()
     return
   }
   codeSelectionEnd.value = lineNumber
+  queueCodeSelectionToolbarPositionUpdate()
 }
 
 function isCodeLineSelected (lineNumber: number): boolean {
@@ -398,6 +535,7 @@ function handleCodeTextSelection (): void {
   if (selectedLines.length > 0) {
     codeSelectionStart.value = Math.min(...selectedLines)
     codeSelectionEnd.value = Math.max(...selectedLines)
+    queueCodeSelectionToolbarPositionUpdate()
     return
   }
 
@@ -406,6 +544,62 @@ function handleCodeTextSelection (): void {
   if (!anchorLine || !focusLine) return
   codeSelectionStart.value = anchorLine
   codeSelectionEnd.value = focusLine
+  queueCodeSelectionToolbarPositionUpdate()
+}
+
+function updateCodeSelectionToolbarPosition (): void {
+  const preview = codePreviewRef.value
+  const scroll = codeScrollRef.value
+  const selection = normalizedCodeSelection.value
+  if (!preview || !scroll || !selection || selectedFile.value?.isMarkdown) return
+
+  const firstLine = scroll.querySelector<HTMLElement>(`.code-line[data-line-number="${selection.start}"]`)
+  if (!firstLine) return
+  const lastLine = scroll.querySelector<HTMLElement>(`.code-line[data-line-number="${selection.end}"]`) || firstLine
+
+  const toolbar = codeSelectionToolbarRef.value
+  const toolbarWidth = toolbar?.offsetWidth || 248
+  const toolbarHeight = toolbar?.offsetHeight || 34
+  const firstTop = firstLine.offsetTop
+  const lastBottom = lastLine.offsetTop + lastLine.offsetHeight
+  const selectionHeight = Math.max(firstLine.offsetHeight, lastBottom - firstTop)
+  const desiredTop = selectionHeight > toolbarHeight + 8
+    ? firstTop + 4
+    : firstTop + firstLine.offsetHeight + 4
+
+  const minTop = preview.scrollTop + 8
+  const maxTop = preview.scrollTop + preview.clientHeight - toolbarHeight - 8
+  const top = Math.max(minTop, Math.min(desiredTop, Math.max(minTop, maxTop)))
+  const gutterWidth = firstLine.querySelector<HTMLElement>('.line-number')?.offsetWidth || 58
+  const minLeft = preview.scrollLeft + 8
+  const preferredLeft = preview.scrollLeft + gutterWidth + 10
+  const maxLeft = preview.scrollLeft + preview.clientWidth - toolbarWidth - 12
+  const left = Math.max(minLeft, Math.min(preferredLeft, Math.max(minLeft, maxLeft)))
+
+  codeSelectionToolbarStyle.value = {
+    top: `${Math.round(top)}px`,
+    left: `${Math.round(left)}px`
+  }
+}
+
+function queueCodeSelectionToolbarPositionUpdate (): void {
+  void nextTick(() => {
+    if (typeof window === 'undefined') {
+      updateCodeSelectionToolbarPosition()
+      return
+    }
+    if (toolbarPositionFrame !== null) {
+      window.cancelAnimationFrame(toolbarPositionFrame)
+    }
+    toolbarPositionFrame = window.requestAnimationFrame(() => {
+      toolbarPositionFrame = null
+      updateCodeSelectionToolbarPosition()
+    })
+  })
+}
+
+function handleCodePreviewScroll (): void {
+  updateCodeSelectionToolbarPosition()
 }
 
 function insertCodeSelectionTag (): void {
@@ -619,6 +813,11 @@ watch(searchResults, (results) => {
   }
 })
 
+watch(normalizedCodeSelection, (selection) => {
+  if (!selection) return
+  queueCodeSelectionToolbarPositionUpdate()
+}, { flush: 'post' })
+
 onMounted(() => {
   if (!props.visible) return
   bindLayoutObserver()
@@ -627,6 +826,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopResize()
+  if (toolbarPositionFrame !== null) {
+    window.cancelAnimationFrame(toolbarPositionFrame)
+    toolbarPositionFrame = null
+  }
   if (workspaceShortcutsBound) {
     document.removeEventListener('keydown', handleWorkspaceKeydown)
     workspaceShortcutsBound = false
@@ -744,19 +947,12 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div v-if="normalizedCodeSelection && !selectedFile.isMarkdown" class="code-selection-bar">
-              <span>{{ $t('chatUi.codeSelectionReady', { range: codeSelectionLabel }) }}</span>
-              <div class="code-selection-actions">
-                <button type="button" @click="insertCodeSelectionTag">{{ $t('chatUi.insertCodeSelectionTag') }}</button>
-                <button type="button" @click="resetCodeSelection">{{ $t('common.cancel') }}</button>
-              </div>
-            </div>
-
             <div v-if="selectedFile.isMarkdown" class="markdown-preview markdown-body" v-html="renderedMarkdown"></div>
             <div
               v-else
               ref="codePreviewRef"
               class="code-preview"
+              @scroll="handleCodePreviewScroll"
               @mouseup="handleCodeTextSelection"
               @touchend="handleCodeTextSelection"
             >
@@ -777,6 +973,19 @@ onBeforeUnmount(() => {
                     {{ line.number }}
                   </button>
                   <code class="code-line-content hljs" v-html="line.html || '&nbsp;'"></code>
+                </div>
+              </div>
+              <div
+                v-if="normalizedCodeSelection"
+                ref="codeSelectionToolbarRef"
+                class="code-selection-popover"
+                :style="codeSelectionToolbarStyle"
+                @mousedown.stop
+              >
+                <span class="code-selection-range" :title="codeSelectionLabel">{{ $t('chatUi.codeSelectionReady', { range: codeSelectionLabel }) }}</span>
+                <div class="code-selection-popover-actions">
+                  <button class="code-selection-insert" type="button" @mousedown.prevent @click="insertCodeSelectionTag">{{ $t('chatUi.insertCodeSelectionTag') }}</button>
+                  <button class="code-selection-cancel" type="button" :title="$t('common.cancel')" @mousedown.prevent @click="resetCodeSelection">×</button>
                 </div>
               </div>
             </div>
@@ -1235,53 +1444,8 @@ onBeforeUnmount(() => {
   font-size: 0.7rem;
 }
 
-.code-selection-bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 12px;
-  border-bottom: 1px solid rgba(56, 189, 248, 0.18);
-  background:
-    linear-gradient(90deg, rgba(14, 165, 233, 0.18), rgba(34, 197, 94, 0.08)),
-    rgba(8, 13, 22, 0.96);
-  color: #c7d2fe;
-  font-size: 0.72rem;
-}
-
-.code-selection-bar > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.code-selection-actions {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.code-selection-actions button {
-  height: 26px;
-  padding: 0 10px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #e2e8f0;
-  font-size: 0.68rem;
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.code-selection-actions button:hover {
-  border-color: rgba(56, 189, 248, 0.44);
-  background: rgba(14, 165, 233, 0.18);
-}
-
 .code-preview {
+  position: relative;
   flex: 1;
   width: 100%;
   max-width: 100%;
@@ -1291,6 +1455,71 @@ onBeforeUnmount(() => {
   background: #0b0f16;
   scrollbar-color: rgba(71, 85, 105, 0.86) rgba(15, 23, 42, 0.86);
   scrollbar-width: auto;
+}
+
+.code-selection-popover {
+  position: absolute;
+  z-index: 6;
+  max-width: calc(100% - 16px);
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 5px 4px 10px;
+  border: 1px solid rgba(56, 189, 248, 0.34);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(14, 165, 233, 0.24), rgba(34, 197, 94, 0.12)),
+    rgba(8, 13, 22, 0.96);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.34);
+  color: #dbeafe;
+  backdrop-filter: blur(10px);
+}
+
+.code-selection-range {
+  min-width: 0;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #bfdbfe;
+  font-size: 0.68rem;
+  font-weight: 750;
+}
+
+.code-selection-popover-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.code-selection-popover button {
+  height: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 7px;
+  color: #e2e8f0;
+  font-size: 0.68rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.code-selection-insert {
+  padding: 0 9px;
+  background: rgba(14, 165, 233, 0.26);
+}
+
+.code-selection-cancel {
+  width: 24px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.code-selection-popover button:hover {
+  border-color: rgba(125, 211, 252, 0.56);
+  background: rgba(14, 165, 233, 0.34);
 }
 
 .code-preview::-webkit-scrollbar {

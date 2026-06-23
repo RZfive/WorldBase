@@ -100,6 +100,10 @@ html, body, #app {
   font-size: var(--chat-font-size);
 }
 
+.markdown-body * {
+  font-family: inherit;
+}
+
 .markdown-body .katex {
   font-size: 1em;
 }
@@ -132,13 +136,6 @@ html, body, #app {
   font-size: 0.85em;
   line-height: 1.55;
   margin: 10px 0;
-}
-
-.markdown-body code,
-.markdown-body kbd,
-.markdown-body samp,
-.markdown-body var {
-  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
 }
 
 .markdown-body code {
@@ -186,6 +183,7 @@ html, body, #app {
   border-left: 3px solid var(--app-accent);
   padding-left: 12px;
   color: var(--app-text-muted);
+  font-family: inherit;
   margin: 0.55em 0;
 }
 
@@ -279,7 +277,7 @@ html, body, #app {
   border-radius: 999px;
   background: var(--app-panel-muted);
   color: var(--app-text-muted);
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;

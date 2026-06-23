@@ -43,16 +43,22 @@ const BINARY_EXTENSIONS = new Set([
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   '.js': 'javascript',
   '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
   '.ts': 'typescript',
   '.tsx': 'typescript',
-  '.vue': 'xml',
+  '.mts': 'typescript',
+  '.cts': 'typescript',
+  '.vue': 'vue',
   '.html': 'xml',
   '.htm': 'xml',
-  '.svelte': 'xml',
+  '.svelte': 'svelte',
+  '.astro': 'astro',
   '.css': 'css',
   '.scss': 'scss',
   '.sass': 'scss',
   '.less': 'less',
+  '.styl': 'stylus',
   '.json': 'json',
   '.jsonc': 'json',
   '.yaml': 'yaml',
@@ -86,9 +92,52 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   '.svg': 'xml',
   '.graphql': 'graphql',
   '.gql': 'graphql',
+  '.hbs': 'handlebars',
+  '.handlebars': 'handlebars',
+  '.mustache': 'mustache',
+  '.ejs': 'ejs',
+  '.eta': 'ejs',
+  '.twig': 'twig',
+  '.njk': 'nunjucks',
+  '.nunjucks': 'nunjucks',
+  '.jinja': 'jinja',
+  '.jinja2': 'jinja2',
+  '.j2': 'jinja2',
+  '.liquid': 'liquid',
+  '.pug': 'pug',
+  '.jade': 'pug',
+  '.haml': 'haml',
+  '.erb': 'erb',
+  '.eex': 'eex',
+  '.heex': 'heex',
+  '.gohtml': 'gohtml',
+  '.gotmpl': 'gotmpl',
+  '.tmpl': 'tmpl',
+  '.tpl': 'tmpl',
+  '.cshtml': 'cshtml',
+  '.razor': 'razor',
+  '.jsp': 'jsp',
+  '.ftl': 'ftl',
+  '.vm': 'velocity',
+  '.phtml': 'php-template',
+  '.aspx': 'vbscript-html',
+  '.asp': 'vbscript-html',
   '.dockerfile': 'dockerfile',
   'dockerfile': 'dockerfile'
 }
+
+const LANGUAGE_BY_FILENAME_SUFFIX: Array<[string, string]> = [
+  ['.blade.php', 'blade'],
+  ['.component.html', 'xml'],
+  ['.module.css', 'css'],
+  ['.module.scss', 'scss'],
+  ['.module.sass', 'scss'],
+  ['.module.less', 'less'],
+  ['.stories.jsx', 'javascript'],
+  ['.stories.tsx', 'typescript'],
+  ['.stories.js', 'javascript'],
+  ['.stories.ts', 'typescript']
+]
 
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.log', '.csv', '.tsv', '.gitignore', '.npmrc', '.editorconfig',
@@ -120,6 +169,16 @@ export function resolveFolderWorkspacePath (rootPath: string, relativePath = '')
   return resolved
 }
 
+function getWorkspaceLanguage (filePath: string): string | undefined {
+  const normalizedPath = normalizeWorkspaceRelativePath(filePath).toLowerCase()
+  const baseName = path.basename(normalizedPath)
+  for (const [suffix, language] of LANGUAGE_BY_FILENAME_SUFFIX) {
+    if (baseName.endsWith(suffix)) return language
+  }
+  const ext = path.extname(baseName)
+  return LANGUAGE_BY_EXTENSION[ext] || LANGUAGE_BY_EXTENSION[baseName]
+}
+
 export function classifyWorkspaceFile (filePath: string, size = 0): { kind: FolderWorkspaceFileKind; language?: string; isMarkdown: boolean } {
   const baseName = path.basename(filePath).toLowerCase()
   const ext = path.extname(baseName)
@@ -133,10 +192,10 @@ export function classifyWorkspaceFile (filePath: string, size = 0): { kind: Fold
   }
 
   if (size > MAX_PREVIEW_BYTES) {
-    return { kind: 'large', language: LANGUAGE_BY_EXTENSION[ext], isMarkdown: false }
+    return { kind: 'large', language: getWorkspaceLanguage(filePath), isMarkdown: false }
   }
 
-  const language = LANGUAGE_BY_EXTENSION[ext] || LANGUAGE_BY_EXTENSION[baseName]
+  const language = getWorkspaceLanguage(filePath)
   if (language) {
     return { kind: 'code', language, isMarkdown: false }
   }

@@ -56,12 +56,48 @@ export const DEFAULT_CHAT_FONT_STACK = `-apple-system, BlinkMacSystemFont, 'Sego
  * Curated fallback shown when the Local Font Access API is unavailable or the
  * `local-fonts` permission was denied. Cross-platform, CJK-first ordering.
  */
-export const FALLBACK_SYSTEM_FONTS: readonly string[] = [
-  'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'SimHei', 'STSong',
-  'Source Han Sans SC', 'Noto Sans CJK SC', 'Heiti SC', 'STHeiti',
+const CJK_SYSTEM_FONT_CANDIDATES: ReadonlyArray<{ family: string; displayName: string; aliases: readonly string[] }> = [
+  { family: 'PingFang SC', displayName: '苹方', aliases: ['苹方-简', '平方'] },
+  { family: 'Hiragino Sans GB', displayName: '冬青黑体', aliases: ['冬青黑体简体中文'] },
+  { family: 'Heiti SC', displayName: '黑体-简', aliases: ['黑体'] },
+  { family: 'STHeiti', displayName: '华文黑体', aliases: ['黑体'] },
+  { family: 'Songti SC', displayName: '宋体-简', aliases: ['宋体'] },
+  { family: 'STSong', displayName: '华文宋体', aliases: ['宋体'] },
+  { family: 'Kaiti SC', displayName: '楷体-简', aliases: ['楷体'] },
+  { family: 'STKaiti', displayName: '华文楷体', aliases: ['楷体'] },
+  { family: 'STFangsong', displayName: '华文仿宋', aliases: ['仿宋'] },
+  { family: 'Microsoft YaHei', displayName: '微软雅黑', aliases: ['雅黑'] },
+  { family: 'Microsoft JhengHei', displayName: '微软正黑体', aliases: [] },
+  { family: 'SimHei', displayName: '黑体', aliases: [] },
+  { family: 'SimSun', displayName: '宋体', aliases: [] },
+  { family: 'NSimSun', displayName: '新宋体', aliases: [] },
+  { family: 'KaiTi', displayName: '楷体', aliases: [] },
+  { family: 'FangSong', displayName: '仿宋', aliases: [] },
+  { family: 'DengXian', displayName: '等线', aliases: [] },
+  { family: 'Source Han Sans SC', displayName: '思源黑体', aliases: ['思源黑体简体中文'] },
+  { family: 'Source Han Serif SC', displayName: '思源宋体', aliases: ['思源宋体简体中文'] },
+  { family: 'Noto Sans CJK SC', displayName: 'Noto Sans 简体中文', aliases: ['思源黑体'] },
+  { family: 'Noto Serif CJK SC', displayName: 'Noto Serif 简体中文', aliases: ['思源宋体'] },
+  { family: 'WenQuanYi Micro Hei', displayName: '文泉驿微米黑', aliases: [] },
+  { family: 'WenQuanYi Zen Hei', displayName: '文泉驿正黑', aliases: [] },
+  { family: 'LXGW WenKai', displayName: '霞鹜文楷', aliases: [] },
+  { family: 'MiSans', displayName: '小米兰亭', aliases: [] }
+]
+
+const FALLBACK_LATIN_FONTS: readonly string[] = [
   'Arial', 'Helvetica', 'Georgia', 'Times New Roman', 'Verdana',
   'Tahoma', 'Trebuchet MS', 'Courier New'
 ]
+
+export const FALLBACK_SYSTEM_FONTS: readonly string[] = [
+  ...CJK_SYSTEM_FONT_CANDIDATES.map(font => font.family),
+  ...FALLBACK_LATIN_FONTS
+]
+
+const CJK_FONT_ORDER = new Map(CJK_SYSTEM_FONT_CANDIDATES.map((font, index) => [font.family, index]))
+const FONT_DETECTION_SAMPLE = 'mmmmmmmmmm 你好世界 中文字体 AaBb 1234567890'
+const FONT_DETECTION_BASES = ['monospace', 'serif', 'sans-serif'] as const
+let fontDetectionContext: CanvasRenderingContext2D | null | undefined
 
 function clampChatFontSize (value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_CHAT_FONT_SIZE
@@ -80,6 +116,77 @@ function normalizeChatFontPreferences (value: unknown): ChatFontPreferences {
     ? input.fontSize
     : Number.parseFloat(input.fontSize as string))
   return { fontFamily, fontSize }
+}
+
+function cleanFontFamilyName (value: unknown): string {
+  return typeof value === 'string' ? value.replace(/["',]/g, '').trim() : ''
+}
+
+function createFontSet (fonts: Iterable<string>): Set<string> {
+  const families = new Set<string>()
+  for (const font of fonts) {
+    const family = cleanFontFamilyName(font)
+    if (family) families.add(family)
+  }
+  return families
+}
+
+function getFontDetectionContext (): CanvasRenderingContext2D | null {
+  if (fontDetectionContext !== undefined) return fontDetectionContext
+  try {
+    fontDetectionContext = document.createElement('canvas').getContext('2d')
+  } catch {
+    fontDetectionContext = null
+  }
+  return fontDetectionContext
+}
+
+function quoteFontFamilyForCss (family: string): string {
+  return `"${family.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+function measureFontWidth (family: string): number | null {
+  const context = getFontDetectionContext()
+  if (!context) return null
+
+  const widths = FONT_DETECTION_BASES.map((base) => {
+    context.font = `72px ${family ? `${quoteFontFamilyForCss(family)}, ` : ''}${base}`
+    return context.measureText(FONT_DETECTION_SAMPLE).width
+  })
+  return widths.reduce((sum, width) => sum + width, 0)
+}
+
+function isFontProbablyAvailable (family: string): boolean {
+  const familyWidth = measureFontWidth(family)
+  if (familyWidth == null) return false
+
+  const baselineWidths = FONT_DETECTION_BASES
+    .map(base => measureFontWidth(base))
+    .filter((width): width is number => typeof width === 'number')
+
+  return baselineWidths.length > 0 && baselineWidths.some(width => Math.abs(width - familyWidth) > 0.5)
+}
+
+function mergeDetectedCjkFonts (families: Set<string>): Set<string> {
+  const merged = new Set(families)
+  for (const font of CJK_SYSTEM_FONT_CANDIDATES) {
+    if (families.has(font.family) || isFontProbablyAvailable(font.family)) {
+      merged.add(font.family)
+    }
+  }
+  return merged
+}
+
+function sortFontFamilies (families: Iterable<string>): string[] {
+  const list = Array.from(createFontSet(families))
+  return list.sort((left, right) => {
+    const leftOrder = CJK_FONT_ORDER.get(left)
+    const rightOrder = CJK_FONT_ORDER.get(right)
+    if (leftOrder !== undefined || rightOrder !== undefined) {
+      return (leftOrder ?? Number.MAX_SAFE_INTEGER) - (rightOrder ?? Number.MAX_SAFE_INTEGER)
+    }
+    return left.localeCompare(right, 'zh-CN')
+  })
 }
 
 function readLocalChatFontPreferences (): ChatFontPreferences {
@@ -133,6 +240,23 @@ export function resolveChatFontFamilyValue (fontFamily: string): string {
   return `"${trimmed}", ${DEFAULT_CHAT_FONT_STACK}`
 }
 
+export function getChatFontSearchText (fontFamily: string): string {
+  const known = CJK_SYSTEM_FONT_CANDIDATES.find(font => font.family === fontFamily)
+  return [fontFamily, known?.displayName, ...(known?.aliases || [])]
+    .filter((item): item is string => Boolean(item))
+    .join(' ')
+    .toLowerCase()
+}
+
+export function getChatFontDisplayName (fontFamily: string): string {
+  return CJK_SYSTEM_FONT_CANDIDATES.find(font => font.family === fontFamily)?.displayName || fontFamily
+}
+
+export function getChatFontSecondaryName (fontFamily: string): string {
+  const displayName = getChatFontDisplayName(fontFamily)
+  return displayName === fontFamily ? '' : fontFamily
+}
+
 /** Apply the chat font preferences to the document root as CSS variables. */
 export function applyChatFontPreferences (preferences: ChatFontPreferences): void {
   const root = document.documentElement
@@ -149,16 +273,16 @@ export async function loadSystemFonts (): Promise<string[]> {
   try {
     if (typeof window.queryLocalFonts === 'function') {
       const fonts = await window.queryLocalFonts()
-      const families = new Set<string>()
+      const families = createFontSet([])
       for (const font of fonts) {
-        const family = font?.family?.trim()
+        const family = cleanFontFamilyName(font?.family)
         if (family) families.add(family)
       }
-      const list = Array.from(families).sort((a, b) => a.localeCompare(b, 'zh-CN'))
+      const list = sortFontFamilies(mergeDetectedCjkFonts(families))
       if (list.length > 0) return list
     }
   } catch {
     // Permission denied or API error — fall through to the curated list.
   }
-  return [...FALLBACK_SYSTEM_FONTS]
+  return sortFontFamilies(FALLBACK_SYSTEM_FONTS)
 }

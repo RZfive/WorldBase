@@ -2,12 +2,14 @@
 import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type {
+  ImageStudioImageQuality,
   ImageLibraryEntry,
   ImageLibraryItem,
   ImageLibraryFolderCard,
   ImageLibraryData,
   ImageStudioGenerateRequest,
   ImageStudioMode,
+  ImageStudioOutputFormat,
   ImageStudioTask
 } from '../../../shared/image-studio-types'
 import type { ProvidersConfig } from '../chat/panel/types'
@@ -49,8 +51,10 @@ const negativePrompt = ref('')
 const aspectRatio = ref('1:1')
 const sizeMode = ref<'preset' | 'custom'>('preset')
 const selectedSize = ref(RATIO_PRESETS[0]?.defaultSize ?? '1080x1080')
-const customWidth = ref(1080)
-const customHeight = ref(1080)
+const customWidth = ref(1024)
+const customHeight = ref(1024)
+const quality = ref<ImageStudioImageQuality>('high')
+const outputFormat = ref<ImageStudioOutputFormat>('png')
 const count = ref(1)
 const inputImages = ref<string[]>([])
 
@@ -126,6 +130,9 @@ const latestSuccessEntry = computed<ImageLibraryEntry | null>(() => {
   const entries = latestSuccessEntries.value
   return entries[workbenchResultIndex.value] ?? entries[0] ?? null
 })
+
+const QUALITY_OPTIONS: ImageStudioImageQuality[] = ['high', 'auto', 'medium', 'low']
+const OUTPUT_FORMAT_OPTIONS: ImageStudioOutputFormat[] = ['png', 'webp', 'jpeg']
 
 // Reset the selection when a different task becomes the latest result, or when the
 // current selection falls out of range (e.g. an image was deleted).
@@ -322,6 +329,8 @@ function buildRequestFromForm (): ImageStudioGenerateRequest | null {
     negativePrompt: mode.value === 'generate' && negativePrompt.value.trim() ? negativePrompt.value.trim() : undefined,
     aspectRatio: sizeMode.value === 'preset' ? aspectRatio.value : undefined,
     size: finalSize.value,
+    quality: quality.value,
+    outputFormat: outputFormat.value,
     n: count.value,
     inputImages: mode.value === 'edit' ? [...inputImages.value] : undefined
   }
@@ -363,7 +372,10 @@ function clampCount () {
 }
 
 function clampCustomDimensions () {
-  const clamp = (value: number) => Math.min(MAX_DIMENSION, Math.max(MIN_DIMENSION, Math.round(Number.isFinite(value) ? value : MIN_DIMENSION)))
+  const clamp = (value: number) => {
+    const rounded = Math.round((Number.isFinite(value) ? value : MIN_DIMENSION) / 16) * 16
+    return Math.min(MAX_DIMENSION, Math.max(MIN_DIMENSION, rounded))
+  }
   customWidth.value = clamp(customWidth.value)
   customHeight.value = clamp(customHeight.value)
 }
@@ -396,6 +408,8 @@ async function handleRegenerate (item: ImageLibraryItem) {
     negativePrompt: item.mode === 'generate' ? item.negativePrompt : undefined,
     aspectRatio: item.aspectRatio,
     size: item.size,
+    quality: item.quality,
+    outputFormat: item.outputFormat,
     n: 1,
     inputImages
   })
@@ -430,6 +444,8 @@ async function handleLoadParams (item: ImageLibraryItem) {
       customHeight.value = h
     }
   }
+  quality.value = item.quality ?? 'high'
+  outputFormat.value = item.outputFormat ?? 'png'
 
   if (item.mode === 'edit') {
     const data = window.electronAPI?.getImageLibraryData ? await window.electronAPI.getImageLibraryData(item.id) : null
@@ -744,7 +760,7 @@ onUnmounted(() => {
                   <option value="custom">{{ $t('studioUi.custom') }}</option>
                 </select>
                 <select v-if="sizeMode === 'preset'" v-model="selectedSize" class="param-input">
-                  <option v-for="size in currentRatio.sizes" :key="size" :value="size">{{ size }}</option>
+                  <option v-for="preset in currentRatio.sizePresets" :key="preset.value" :value="preset.value">{{ preset.label }} · {{ preset.value }}</option>
                 </select>
                 <div v-else class="custom-size">
                   <input v-model.number="customWidth" type="number" class="param-input" :min="MIN_DIMENSION" :max="MAX_DIMENSION" @change="clampCustomDimensions" />
@@ -758,6 +774,22 @@ onUnmounted(() => {
             <label class="param-field">
               <span class="param-label">{{ $t('studioUi.count') }}</span>
               <input v-model.number="count" type="number" class="param-input count-input" min="1" :max="MAX_COUNT" @change="clampCount" />
+            </label>
+          </div>
+
+          <div class="param-row quality-format-row">
+            <label class="param-field">
+              <span class="param-label">{{ $t('studioUi.quality') }}</span>
+              <select v-model="quality" class="param-input">
+                <option v-for="option in QUALITY_OPTIONS" :key="option" :value="option">{{ $t(`studioUi.quality_${option}`) }}</option>
+              </select>
+            </label>
+
+            <label class="param-field">
+              <span class="param-label">{{ $t('studioUi.outputFormat') }}</span>
+              <select v-model="outputFormat" class="param-input">
+                <option v-for="option in OUTPUT_FORMAT_OPTIONS" :key="option" :value="option">{{ option.toUpperCase() }}</option>
+              </select>
             </label>
           </div>
 
@@ -1040,6 +1072,10 @@ onUnmounted(() => {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.quality-format-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
 .param-input,
 .param-textarea {
   width: 100%;
@@ -1084,7 +1120,7 @@ onUnmounted(() => {
 
 .ratio-grid {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 5px;
 }
 
@@ -1238,7 +1274,12 @@ onUnmounted(() => {
 
 .lib-like-btn:hover { background: var(--app-accent-soft); color: var(--app-text-strong); }
 
-.workbench-preview { flex: 1; min-height: 0; }
+.workbench-preview {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 
 /* Thumbnail strip below the preview for switching between multiple generated images */
 .workbench-thumbs {

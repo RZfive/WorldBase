@@ -13,6 +13,9 @@ import {
   CHAT_FONT_SIZE_MIN,
   CHAT_FONT_SIZE_TICKS,
   chatFontSizeToPercent,
+  getChatFontDisplayName,
+  getChatFontSearchText,
+  getChatFontSecondaryName,
   loadChatFontPreferences,
   loadSystemFonts,
   persistChatFontPreferences,
@@ -90,6 +93,7 @@ const fontsUnavailable = ref(false)
 const fontDropdownOpen = ref(false)
 const fontSearch = ref('')
 const fontTriggerRef = ref<HTMLButtonElement | null>(null)
+const fontPanelRef = ref<HTMLDivElement | null>(null)
 const fontPanelStyle = ref<Record<string, string>>({ display: 'none' })
 
 let stopThemeWatcher: (() => void) | null = null
@@ -106,12 +110,12 @@ const fontSliderStyle = computed(() => ({
 const filteredSystemFonts = computed(() => {
   const query = fontSearch.value.trim().toLowerCase()
   if (!query) return systemFonts.value
-  return systemFonts.value.filter(font => font.toLowerCase().includes(query))
+  return systemFonts.value.filter(font => getChatFontSearchText(font).includes(query))
 })
 
 const currentFontFamilyLabel = computed(() => {
   return chatFontPreferences.value.fontFamily.trim()
-    ? chatFontPreferences.value.fontFamily.trim()
+    ? getChatFontDisplayName(chatFontPreferences.value.fontFamily.trim())
     : t('settings.general.font.systemDefault')
 })
 
@@ -308,18 +312,38 @@ function updateFontPanelPosition () {
     fontPanelStyle.value = { display: 'none' }
     return
   }
+
   const rect = fontTriggerRef.value.getBoundingClientRect()
-  const spaceBelow = window.innerHeight - rect.bottom - 8
-  const spaceAbove = rect.top - 8
-  const estimatedHeight = 320
-  const placeAbove = spaceBelow < estimatedHeight && spaceAbove > spaceBelow
+  const viewportPadding = 10
+  const panelGap = 6
+  const preferredWidth = Math.max(rect.width, 280)
+  const maxWidth = Math.max(220, window.innerWidth - viewportPadding * 2)
+  const width = Math.min(preferredWidth, maxWidth)
+  const left = Math.min(
+    Math.max(rect.left, viewportPadding),
+    window.innerWidth - viewportPadding - width
+  )
+  const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - panelGap - viewportPadding)
+  const spaceAbove = Math.max(0, rect.top - panelGap - viewportPadding)
+  const measuredHeight = fontPanelRef.value?.offsetHeight || 320
+  const desiredHeight = Math.min(measuredHeight, 320)
+  const placeAbove = spaceBelow < desiredHeight && spaceAbove > spaceBelow
+  const availableHeight = placeAbove ? spaceAbove : spaceBelow
+  const maxHeight = Math.min(
+    320,
+    Math.max(120, availableHeight),
+    Math.max(120, window.innerHeight - viewportPadding * 2)
+  )
+  const topLimit = Math.max(viewportPadding, window.innerHeight - viewportPadding - maxHeight)
+  const preferredTop = placeAbove ? rect.top - panelGap - maxHeight : rect.bottom + panelGap
+  const top = Math.min(Math.max(preferredTop, viewportPadding), topLimit)
+
   fontPanelStyle.value = {
     position: 'fixed',
-    left: `${rect.left}px`,
-    width: `${Math.max(rect.width, 240)}px`,
-    ...(placeAbove
-      ? { bottom: `${window.innerHeight - rect.top + 6}px` }
-      : { top: `${rect.bottom + 6}px` })
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${width}px`,
+    maxHeight: `${maxHeight}px`
   }
 }
 
@@ -333,6 +357,7 @@ async function toggleFontDropdown () {
     updateFontPanelPosition()
     void ensureSystemFonts()
     await nextTick(() => {
+      updateFontPanelPosition()
       const searchEl = document.querySelector<HTMLInputElement>('.gs-font-search')
       searchEl?.focus()
     })
@@ -551,7 +576,7 @@ function handleFontReposition () {
               <Teleport to="body">
                 <template v-if="fontDropdownOpen">
                   <div class="gs-font-backdrop" @click="closeFontDropdown" />
-                  <div class="gs-font-panel" :style="fontPanelStyle" @click.stop>
+                  <div ref="fontPanelRef" class="gs-font-panel" :style="fontPanelStyle" @click.stop>
                     <input
                       v-model="fontSearch"
                       class="gs-font-search"
@@ -580,7 +605,10 @@ function handleFontReposition () {
                         :style="{ fontFamily: resolveChatFontFamilyValue(font) }"
                         @click="selectFontFamily(font)"
                       >
-                        <span class="gs-font-item-name">{{ font }}</span>
+                        <span class="gs-font-item-copy">
+                          <span class="gs-font-item-name">{{ getChatFontDisplayName(font) }}</span>
+                          <span v-if="getChatFontSecondaryName(font)" class="gs-font-item-meta">{{ getChatFontSecondaryName(font) }}</span>
+                        </span>
                       </button>
                       <div v-if="filteredSystemFonts.length === 0" class="gs-font-status">{{ $t('settings.general.font.noMatch') }}</div>
                     </div>
@@ -590,16 +618,9 @@ function handleFontReposition () {
             </div>
           </section>
 
-          <section class="gs-control-card gs-font-size-card">
-            <div class="gs-control-copy">
-              <span class="gs-control-title">{{ $t('settings.general.font.sizeTitle') }}</span>
-              <p class="gs-control-hint">{{ $t('settings.general.font.sizeHint') }}</p>
-            </div>
-            <span class="gs-font-size-value">{{ chatFontPreferences.fontSize }}px</span>
-          </section>
-
           <div class="gs-font-preview" :style="{ fontSize: `${chatFontPreferences.fontSize}px`, fontFamily: currentFontFamilyStyle }">
-            {{ $t('settings.general.font.previewSample') }}
+            <span class="gs-font-preview-text">{{ $t('settings.general.font.previewSample') }}</span>
+            <span class="gs-font-size-value">{{ chatFontPreferences.fontSize }}px</span>
           </div>
 
           <div class="gs-font-slider" :style="fontSliderStyle">
@@ -1430,21 +1451,21 @@ function handleFontReposition () {
   font-size: 0.8em;
 }
 
-.gs-font-size-card {
-  align-items: center;
-}
-
 .gs-font-size-value {
   flex-shrink: 0;
   min-width: 56px;
   text-align: right;
   font-variant-numeric: tabular-nums;
-  font-size: 0.92em;
+  font-size: 0.82em;
   font-weight: 600;
-  color: var(--app-text-strong);
+  color: var(--app-text-muted);
 }
 
 .gs-font-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
   padding: 16px 18px;
   border: 1px solid var(--app-border);
   border-radius: 14px;
@@ -1456,6 +1477,13 @@ function handleFontReposition () {
   white-space: nowrap;
   /* font-size + font-family are bound inline so the preview reflects the live
      slider value and chosen family in real time. */
+}
+
+.gs-font-preview-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Slider — macOS-style: a thin track with a filled portion, a circular thumb,
@@ -1662,6 +1690,23 @@ function handleFontReposition () {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.9em;
+}
+
+.gs-font-item-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gs-font-item-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72em;
+  color: var(--app-text-faint);
+  line-height: 1.2;
 }
 
 .gs-font-item-default {

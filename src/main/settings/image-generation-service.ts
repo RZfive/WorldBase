@@ -7,17 +7,29 @@ import type {
   ImageLibraryEntry,
   ImageStudioGenerateRequest,
   ImageStudioGenerateResponse,
-  ImageStudioMode
+  ImageStudioImageQuality,
+  ImageStudioMode,
+  ImageStudioOutputFormat
 } from '../../shared/image-studio-types.js'
 
 /** Hard cap on images produced by a single generate/edit request (matches the studio UI). */
 export const MAX_IMAGES_PER_REQUEST = 4
 
 /** Aspect-ratio presets offered by the drawing studio. */
-export const ASPECT_RATIOS = ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4'] as const
+export const ASPECT_RATIOS = ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '4:7'] as const
+export const IMAGE_QUALITIES = ['auto', 'low', 'medium', 'high'] as const satisfies readonly ImageStudioImageQuality[]
+export const OUTPUT_FORMATS = ['png', 'jpeg', 'webp'] as const satisfies readonly ImageStudioOutputFormat[]
+export const IMAGE_RESOLUTION_TIERS = ['1K', '2K', '4K'] as const
+export type ImageResolutionTier = typeof IMAGE_RESOLUTION_TIERS[number]
 export const MIN_DIMENSION = 560
-export const MAX_DIMENSION = 8192
-const DEFAULT_REFERENCE_DIMENSION = 1080
+export const MAX_DIMENSION = 3840
+const MAX_TOTAL_PIXELS = 3840 * 2160
+const DEFAULT_REFERENCE_DIMENSION = 1024
+const RESOLUTION_TIER_SHORT_SIDE: Record<ImageResolutionTier, number> = {
+  '1K': 1024,
+  '2K': 1440,
+  '4K': 2160
+}
 
 const RATIO_DIMENSIONS: Record<string, [number, number]> = {
   '1:1': [1, 1],
@@ -26,27 +38,36 @@ const RATIO_DIMENSIONS: Record<string, [number, number]> = {
   '16:9': [16, 9],
   '9:16': [9, 16],
   '4:3': [4, 3],
-  '3:4': [3, 4]
+  '3:4': [3, 4],
+  '4:7': [4, 7]
 }
 
-function roundToEven (value: number): number {
-  return Math.round(value / 2) * 2
+function roundToMultipleOf16 (value: number): number {
+  return Math.round(value / 16) * 16
 }
 
 function clampDimension (value: number): number {
   return Math.min(MAX_DIMENSION, Math.max(MIN_DIMENSION, value))
 }
 
+function sizeForRatioReference (ratio: string | undefined, referenceDimension: number): string {
+  const [w, h] = RATIO_DIMENSIONS[ratio ?? '1:1'] ?? RATIO_DIMENSIONS['1:1']
+  const scale = referenceDimension / Math.min(w, h)
+  const width = clampDimension(roundToMultipleOf16(w * scale))
+  const height = clampDimension(roundToMultipleOf16(h * scale))
+  return `${width}x${height}`
+}
+
 /**
- * Pixel size for an aspect-ratio preset, scaled so the short side is ~1080 and
- * clamped to the studio's allowed range. Mirrors the renderer's preset builder.
+ * Pixel size for an aspect-ratio preset, scaled so the short side is 1K by
+ * default and every dimension is valid for GPT Image arbitrary-size requests.
  */
 export function defaultSizeForRatio (ratio?: string): string {
-  const [w, h] = RATIO_DIMENSIONS[ratio ?? '1:1'] ?? RATIO_DIMENSIONS['1:1']
-  const scale = DEFAULT_REFERENCE_DIMENSION / Math.min(w, h)
-  const width = clampDimension(roundToEven(w * scale))
-  const height = clampDimension(roundToEven(h * scale))
-  return `${width}x${height}`
+  return sizeForRatioReference(ratio, DEFAULT_REFERENCE_DIMENSION)
+}
+
+export function sizeForRatioTier (ratio: string | undefined, tier: ImageResolutionTier): string {
+  return sizeForRatioReference(ratio, RESOLUTION_TIER_SHORT_SIDE[tier])
 }
 
 /** Validate/normalize a `WxH` size string; returns null when out of range or malformed. */
@@ -57,7 +78,27 @@ export function normalizeSize (raw: string): string | null {
   const height = Number(match[2])
   if (!Number.isFinite(width) || !Number.isFinite(height)) return null
   if (width < MIN_DIMENSION || width > MAX_DIMENSION || height < MIN_DIMENSION || height > MAX_DIMENSION) return null
+  if (width % 16 !== 0 || height % 16 !== 0) return null
+  if (width * height > MAX_TOTAL_PIXELS) return null
   return `${width}x${height}`
+}
+
+export function normalizeImageQuality (value: unknown): ImageStudioImageQuality | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim().toLowerCase()
+  return IMAGE_QUALITIES.includes(normalized as ImageStudioImageQuality) ? normalized as ImageStudioImageQuality : undefined
+}
+
+export function normalizeOutputFormat (value: unknown): ImageStudioOutputFormat | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim().toLowerCase()
+  return OUTPUT_FORMATS.includes(normalized as ImageStudioOutputFormat) ? normalized as ImageStudioOutputFormat : undefined
+}
+
+export function normalizeResolutionTier (value: unknown): ImageResolutionTier | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim().toUpperCase()
+  return IMAGE_RESOLUTION_TIERS.includes(normalized as ImageResolutionTier) ? normalized as ImageResolutionTier : undefined
 }
 
 /** Capability flag backing each studio mode. */
@@ -190,6 +231,8 @@ export async function runImageStudioRequest (
           prompt: req.prompt,
           images: req.inputImages ?? [],
           size: req.size,
+          quality: req.quality,
+          outputFormat: req.outputFormat,
           n,
           abortSignal: deps.abortSignal
         })
@@ -197,6 +240,8 @@ export async function runImageStudioRequest (
           prompt: req.prompt,
           negativePrompt: req.negativePrompt,
           size: req.size,
+          quality: req.quality,
+          outputFormat: req.outputFormat,
           n,
           abortSignal: deps.abortSignal
         })
@@ -217,6 +262,8 @@ export async function runImageStudioRequest (
         negativePrompt: req.negativePrompt || undefined,
         aspectRatio: req.aspectRatio || undefined,
         size: req.size,
+        quality: req.quality,
+        outputFormat: req.outputFormat,
         folder: req.folder?.trim() || undefined,
         tags: req.tags?.length ? req.tags : undefined
       },
