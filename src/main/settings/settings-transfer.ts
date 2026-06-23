@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto'
+import { t } from '../i18n/main-i18n.js'
 import type { PortableSettingsConfig } from './settings-store.js'
 
 export const PORTABLE_SETTINGS_APP_ID = 'com.theworld.app'
@@ -30,13 +31,13 @@ function derivePortableSettingsKey (appId: string): Buffer {
 
 function decodeBase64Field (value: unknown, fieldName: string): Buffer {
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error(`配置包字段无效: ${fieldName}`)
+    throw new Error(t('mainDialog.configInvalidField', { field: fieldName }))
   }
 
   try {
     return Buffer.from(value, 'base64')
   } catch {
-    throw new Error(`配置包字段无法解码: ${fieldName}`)
+    throw new Error(t('mainDialog.configFieldDecodeFailed', { field: fieldName }))
   }
 }
 
@@ -72,20 +73,20 @@ export function decryptPortableSettingsConfig (serialized: string, appId = PORTA
   try {
     envelope = JSON.parse(serialized) as PortableSettingsEnvelope
   } catch {
-    throw new Error('配置包不是有效的 JSON 文件。')
+    throw new Error(t('mainDialog.configInvalidJson'))
   }
 
   if (envelope.format !== PORTABLE_SETTINGS_FORMAT) {
-    throw new Error('不是 The World 可识别的配置包格式。')
+    throw new Error(t('mainDialog.configUnknownFormat'))
   }
   if (envelope.version !== PORTABLE_SETTINGS_VERSION) {
-    throw new Error(`不支持的配置包版本: ${String(envelope.version)}`)
+    throw new Error(t('mainDialog.configUnsupportedVersion', { version: String(envelope.version) }))
   }
   if (envelope.algorithm !== PORTABLE_SETTINGS_ALGORITHM) {
-    throw new Error(`不支持的配置包加密算法: ${String(envelope.algorithm)}`)
+    throw new Error(t('mainDialog.configUnsupportedAlgorithm', { algorithm: String(envelope.algorithm) }))
   }
   if (envelope.appId !== appId) {
-    throw new Error('该配置包不属于当前应用。')
+    throw new Error(t('mainDialog.configWrongApp'))
   }
 
   const iv = decodeBase64Field(envelope.iv, 'iv')
@@ -102,10 +103,10 @@ export function decryptPortableSettingsConfig (serialized: string, appId = PORTA
 
     const payload = JSON.parse(plaintext) as PortableSettingsPayload
     if (!payload || typeof payload !== 'object' || !payload.config || typeof payload.exportedAt !== 'string') {
-      throw new Error('配置包内容缺失。')
+      throw new Error(t('mainDialog.configMissingContent'))
     }
     return payload
   } catch (error) {
-    throw new Error(`配置包解密失败: ${(error as Error).message || String(error)}`)
+    throw new Error(t('mainDialog.configDecryptFailed', { message: (error as Error).message || String(error) }))
   }
 }

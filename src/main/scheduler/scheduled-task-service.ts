@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { Notification, type BrowserWindow } from 'electron'
 import { AIEngine, type AIConfigInput, type ProgressEvent } from '../ai-engine/ai-engine.js'
+import { t } from '../i18n/main-i18n.js'
 import type { SkillStore } from '../settings/skill-store.js'
 import {
   ScheduledTaskStore,
@@ -195,7 +196,7 @@ export class ScheduledTaskService {
   saveTask (input: ScheduledTaskDefinition): ScheduledTaskDefinition {
     const existing = this.tasks.find(task => task.id === input.id)
     if (existing && this.runningTaskIds.has(existing.id)) {
-      throw new Error('任务正在执行中，暂不支持编辑')
+      throw new Error(t('mainDialog.scheduledTaskRunningEditBlocked'))
     }
 
     const now = new Date().toISOString()
@@ -228,7 +229,7 @@ export class ScheduledTaskService {
     this.options.store.saveTasks(nextTasks)
     const savedTask = this.options.store.getTasks().find(task => task.id === id)
     if (!savedTask) {
-      throw new Error('保存定时任务失败，任务配置无效')
+      throw new Error(t('mainDialog.scheduledTaskSaveInvalid'))
     }
 
     const resolvedTask = this.resolveSavedTask(savedTask, existing, scheduleChanged || enabledChanged)
@@ -243,7 +244,7 @@ export class ScheduledTaskService {
     const task = this.tasks.find(item => item.id === taskId)
     if (!task) return false
     if (this.runningTaskIds.has(taskId)) {
-      throw new Error('任务正在执行中，无法删除')
+      throw new Error(t('mainDialog.scheduledTaskRunningDeleteBlocked'))
     }
 
     this.clearTaskTimer(taskId)
@@ -259,7 +260,7 @@ export class ScheduledTaskService {
   runNow (taskId: string): ScheduledTaskRunReport {
     const task = this.getTaskOrThrow(taskId)
     if (this.runningTaskIds.has(taskId)) {
-      throw new Error('任务正在执行中，请稍后重试')
+      throw new Error(t('mainDialog.scheduledTaskRunningRetryLater'))
     }
 
     const report = this.createReport(task, {
@@ -282,7 +283,7 @@ export class ScheduledTaskService {
   private getTaskOrThrow (taskId: string): ScheduledTaskDefinition {
     const task = this.tasks.find(item => item.id === taskId)
     if (!task) {
-      throw new Error(`未找到定时任务: ${taskId}`)
+      throw new Error(t('mainDialog.scheduledTaskNotFound', { id: taskId }))
     }
     return task
   }
@@ -446,7 +447,7 @@ export class ScheduledTaskService {
       finishedAt: null,
       attempt: context.attempt,
       prompt: task.prompt,
-      summary: context.attempt > 1 ? '任务正在重试执行' : '任务开始执行',
+      summary: context.attempt > 1 ? t('mainDialog.scheduledTaskRetryingSummary') : t('mainDialog.scheduledTaskRunningSummary'),
       resultText: '',
       progress: [],
       selectedSkillIds: [...task.selectedSkillIds],
@@ -526,22 +527,27 @@ export class ScheduledTaskService {
       if (stageOrEvent.type === 'todo_update') {
         const completed = stageOrEvent.items.filter(item => item.status === 'completed').length
         const inProgress = stageOrEvent.items.find(item => item.status === 'in-progress')
-        appendProgress('更新 Todo', `共 ${stageOrEvent.items.length} 项，已完成 ${completed} 项${inProgress ? `，进行中：${inProgress.title}` : ''}`)
+        appendProgress(
+          t('mainDialog.scheduledTaskTodoStage'),
+          inProgress
+            ? t('mainDialog.scheduledTaskTodoDetailWithCurrent', { total: stageOrEvent.items.length, completed, title: inProgress.title })
+            : t('mainDialog.scheduledTaskTodoDetail', { total: stageOrEvent.items.length, completed })
+        )
         return
       }
 
       if (stageOrEvent.type === 'file_preview_start') {
-        appendProgress('生成文件预览', stageOrEvent.filePath)
+        appendProgress(t('mainDialog.scheduledTaskFilePreviewStage'), stageOrEvent.filePath)
         return
       }
 
       if (stageOrEvent.type === 'web_search_result') {
-        appendProgress('返回网页搜索结果', `${stageOrEvent.query} · ${stageOrEvent.results.length} 条结果`)
+        appendProgress(t('mainDialog.scheduledTaskWebSearchStage'), t('mainDialog.scheduledTaskWebSearchDetail', { query: stageOrEvent.query, count: stageOrEvent.results.length }))
         return
       }
 
       if (stageOrEvent.type === 'web_fetch_result') {
-        appendProgress('抓取网页内容', stageOrEvent.result.url)
+        appendProgress(t('mainDialog.scheduledTaskWebFetchStage'), stageOrEvent.result.url)
       }
     }
 
@@ -567,7 +573,7 @@ export class ScheduledTaskService {
       }
 
       const finishedAt = new Date().toISOString()
-      const summary = buildSummary(resultText, '任务执行完成')
+      const summary = buildSummary(resultText, t('mainDialog.scheduledTaskCompletedSummary'))
       this.updateReport(reportId, (report) => {
         report.status = 'completed'
         report.finishedAt = finishedAt
@@ -595,7 +601,7 @@ export class ScheduledTaskService {
       this.notifyCompletion(this.getReport(reportId)!)
       this.scheduleTask(updatedTask)
     } catch (error) {
-      const errorMessage = (error as Error).message || '任务执行失败'
+      const errorMessage = (error as Error).message || t('mainDialog.scheduledTaskFailedSummary')
       const taskForRetry = this.getTaskOrThrow(taskId)
       const shouldRetry = context.attempt <= taskForRetry.retryPolicy.maxRetries
       const finishedAt = new Date().toISOString()
@@ -607,7 +613,7 @@ export class ScheduledTaskService {
           report.finishedAt = finishedAt
           report.error = errorMessage
           report.retryScheduledAt = retryAt
-          report.summary = `执行失败，将在 ${taskForRetry.retryPolicy.retryDelayMinutes} 分钟后重试`
+          report.summary = t('mainDialog.scheduledTaskRetrySummary', { minutes: taskForRetry.retryPolicy.retryDelayMinutes })
         })
 
         const retryTask = this.updateTask(taskId, (currentTask) => ({
@@ -669,11 +675,11 @@ export class ScheduledTaskService {
     }
 
     const title = report.status === 'completed'
-      ? `定时任务已完成: ${report.taskTitle}`
-      : `定时任务执行失败: ${report.taskTitle}`
+      ? t('mainDialog.scheduledTaskCompletedNotificationTitle', { title: report.taskTitle })
+      : t('mainDialog.scheduledTaskFailedNotificationTitle', { title: report.taskTitle })
     const body = report.status === 'completed'
-      ? buildSummary(report.summary, '点击查看执行报告')
-      : buildSummary(report.error || report.summary, '点击查看失败详情')
+      ? buildSummary(report.summary, t('mainDialog.scheduledTaskViewReport'))
+      : buildSummary(report.error || report.summary, t('mainDialog.scheduledTaskViewFailure'))
 
     const notification = new Notification({ title, body })
     notification.once('click', () => {

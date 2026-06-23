@@ -8,6 +8,7 @@ import { mainState } from '../state.js'
 import { broadcastToAppWindows } from '../windows.js'
 import { getMessageText, truncateSectionText } from '../chat-message-utils.js'
 import { resolveProviderConfig } from './agent-context.js'
+import { t } from '../../../src/main/i18n/main-i18n.js'
 
 export function cloneMemoryCompactionStatus (): MemoryCompactionStatus {
   return {
@@ -94,7 +95,7 @@ export function parseMemoryCompactionPlan (rawText: string, chunkEntries: Memory
   const allowedIds = new Set(chunkEntries.map(entry => entry.id))
   const jsonCandidate = extractJsonObjectCandidate(rawText)
   if (!jsonCandidate) {
-    throw new Error('AI 未返回有效 JSON 整理方案')
+    throw new Error(t('mainDialog.memoryCompactionInvalidJsonPlan'))
   }
 
   const parsed = JSON.parse(jsonCandidate) as Record<string, unknown>
@@ -200,7 +201,7 @@ export function chunkMemoryEntriesForAiCompaction (entries: MemoryEntry[]): Memo
 export function createMemoryCompactionProvider (): OpenAIProvider {
   const providerConfig = resolveProviderConfig()
   if (!providerConfig?.apiKey || !providerConfig.baseUrl || !providerConfig.model) {
-    throw new Error('当前 AI 供应商未配置完整，无法执行 AI 记忆整理')
+    throw new Error(t('mainDialog.memoryCompactionProviderIncomplete'))
   }
 
   const provider = new OpenAIProvider()
@@ -254,23 +255,23 @@ export async function buildMemoryCompactionPlanWithAi (
   const chunks = chunkMemoryEntriesForAiCompaction(entries)
   const plans: MemoryCompactionPlan[] = []
   onProgress?.({
-    stage: '准备整理',
-    detail: `共 ${chunks.length} 批记忆`,
+    stage: t('mainDialog.memoryCompactionPreparing'),
+    detail: t('mainDialog.memoryCompactionBatchCount', { count: chunks.length }),
     totalChunks: chunks.length,
     completedChunks: 0
   })
 
   for (let index = 0; index < chunks.length; index++) {
     onProgress?.({
-      stage: 'AI 分析记忆',
-      detail: `正在整理第 ${index + 1}/${chunks.length} 批`,
+      stage: t('mainDialog.memoryCompactionAnalyzing'),
+      detail: t('mainDialog.memoryCompactionAnalyzingBatch', { current: index + 1, total: chunks.length }),
       totalChunks: chunks.length,
       completedChunks: index
     })
     plans.push(await requestMemoryCompactionPlanChunk(provider, chunks[index], index, chunks.length))
     onProgress?.({
-      stage: 'AI 分析记忆',
-      detail: `已完成 ${index + 1}/${chunks.length} 批`,
+      stage: t('mainDialog.memoryCompactionAnalyzing'),
+      detail: t('mainDialog.memoryCompactionBatchDone', { current: index + 1, total: chunks.length }),
       totalChunks: chunks.length,
       completedChunks: index + 1
     })
@@ -285,8 +286,8 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
   updateMemoryCompactionStatus({
     id: taskId,
     status: 'running',
-    stage: '扫描记忆',
-    detail: '正在读取当前所有记忆',
+    stage: t('mainDialog.memoryCompactionScanning'),
+    detail: t('mainDialog.memoryCompactionReadingAll'),
     scanned: 0,
     totalChunks: 0,
     completedChunks: 0,
@@ -301,8 +302,8 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
     updateMemoryCompactionStatus({
       id: taskId,
       status: 'running',
-      stage: entries.length > 0 ? '准备整理' : '无需整理',
-      detail: entries.length > 0 ? `已扫描 ${entries.length} 条记忆` : '当前没有可整理的记忆',
+      stage: entries.length > 0 ? t('mainDialog.memoryCompactionPreparing') : t('mainDialog.memoryCompactionNoop'),
+      detail: entries.length > 0 ? t('mainDialog.memoryCompactionScannedCount', { count: entries.length }) : t('mainDialog.memoryCompactionNoEntries'),
       scanned: entries.length,
       totalChunks: entries.length > 0 ? mainState.memoryCompactionStatus.totalChunks : 0,
       completedChunks: 0
@@ -323,8 +324,8 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
     updateMemoryCompactionStatus({
       id: taskId,
       status: 'running',
-      stage: '应用整理结果',
-      detail: '正在删除、合并和更新记忆',
+      stage: t('mainDialog.memoryCompactionApplying'),
+      detail: t('mainDialog.memoryCompactionApplyingDetail'),
       scanned: entries.length,
       completedChunks: mainState.memoryCompactionStatus.totalChunks
     })
@@ -333,8 +334,8 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
     updateMemoryCompactionStatus({
       id: taskId,
       status: 'completed',
-      stage: '整理完成',
-      detail: `扫描 ${result.scanned} 条，删除 ${result.removedUseless} 条，合并 ${result.merged} 条，更新 ${result.updated} 条`,
+      stage: t('mainDialog.memoryCompactionDone'),
+      detail: t('mainDialog.memoryCompactionDoneDetail', { scanned: result.scanned, removed: result.removedUseless, merged: result.merged, updated: result.updated }),
       scanned: result.scanned,
       completedChunks: mainState.memoryCompactionStatus.totalChunks,
       finishedAt: new Date().toISOString(),
@@ -347,7 +348,7 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
     updateMemoryCompactionStatus({
       id: taskId,
       status: 'failed',
-      stage: '整理失败',
+      stage: t('mainDialog.memoryCompactionFailedStage'),
       detail: message,
       finishedAt: new Date().toISOString(),
       error: message

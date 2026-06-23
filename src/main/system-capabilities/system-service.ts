@@ -1,5 +1,6 @@
 import os from 'node:os'
 import { app } from 'electron'
+import { t } from '../i18n/main-i18n.js'
 import type { AppGateway, ServiceMap } from '../project-runtime/app-gateway.js'
 import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
 
@@ -245,11 +246,11 @@ export class SystemService {
           active: Boolean(device.active),
           deviceString: typeof device.deviceString === 'string' && device.deviceString.trim()
             ? device.deviceString.trim()
-            : '未知 GPU'
+            : t('mainDialog.unknownGpu')
         }))
 
       const activeDevice = devices.find(device => device.active) || devices[0]
-      const primaryDevice = activeDevice?.deviceString || '未检测到 GPU'
+      const primaryDevice = activeDevice?.deviceString || t('mainDialog.gpuNotDetected')
       const secondaryDevices = devices
         .filter(device => device !== activeDevice)
         .map(device => device.deviceString)
@@ -273,7 +274,7 @@ export class SystemService {
     } catch {
       return {
         status: 'unavailable',
-        primaryDevice: '未检测到 GPU',
+        primaryDevice: t('mainDialog.gpuNotDetected'),
         secondaryDevices: [],
         featureStatus: {}
       }

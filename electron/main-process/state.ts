@@ -31,6 +31,7 @@ import type { MCPService } from '../../src/main/mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
 import type { MemoryCompactionResult, MemoryCompactionStatus } from '../../src/shared/agent-workspace-types.js'
 import type { PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
+import { t } from '../../src/main/i18n/main-i18n.js'
 
 export type WindowBounds = ReturnType<BrowserWindow['getBounds']>
 export type EnsureWindowWidthOptions = {
@@ -90,7 +91,7 @@ export const mainState = {
   memoryCompactionStatus: {
     id: null,
     status: 'idle',
-    stage: '空闲',
+    stage: t('mainDialog.memoryCompactionIdle'),
     scanned: 0,
     totalChunks: 0,
     completedChunks: 0,

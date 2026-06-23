@@ -1146,7 +1146,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     selectedGroupId.value = ''
     selectedChannelBindingId.value = ''
     syncProviderSelectionForAgent(selectedAgentId.value)
-    inputText.value = `${projectRef}${projectRef ? '\n' : ''}请先检查这个项目的当前代码、运行状态和最近日志，明确告诉我这个项目现在的具体问题、风险点和可优化项，然后再继续修改。`
+    inputText.value = `${projectRef}${projectRef ? '\n' : ''}${t('chatUi.optimizationInitialPrompt')}`
     pendingImages.value = []
     pendingFiles.value = []
     uploadFeedback.value = ''

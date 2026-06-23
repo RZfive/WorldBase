@@ -1,4 +1,5 @@
 import { buildDocumentRenderPreview } from '../../../src/main/document-preview/document-render-service.js'
+import { t } from '../../../src/main/i18n/main-i18n.js'
 import { mainState } from '../state.js'
 
 export async function ensureDocumentRenderPreview (artifactId: string) {
@@ -16,7 +17,7 @@ export async function ensureDocumentRenderPreview (artifactId: string) {
       kind: 'structured',
       source: 'fallback',
       status: 'unavailable',
-      error: `真实预览生成失败，已回退到结构化视图: ${(error as Error).message || String(error)}`,
+      error: t('mainDialog.documentPreviewFallbackError', { message: (error as Error).message || String(error) }),
       generatedAt: new Date().toISOString()
     }
   }

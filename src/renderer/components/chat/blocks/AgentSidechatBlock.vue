@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../markdown'
 import type { AgentSidechatSession } from '../../../../shared/agent-workspace-types.js'
 import type { ChatMessageBlock } from '../types'
+import { formatProgressEntry } from '../progress-i18n'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'agent_sidechat' }>
@@ -25,6 +26,10 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
   if (mode === 'group_deliberation') return t('chatUi.agentSidechatModeGroup')
   if (mode === 'coordinator_assigned') return t('chatUi.agentSidechatModeCoordinator')
   return t('chatUi.agentSidechatModeUser')
+}
+
+function getProgressText (step: AgentSidechatSession['progress'][number]): string {
+  return formatProgressEntry(step, t, t('chatUi.progressDotSeparator'))
 }
 </script>
 
@@ -58,7 +63,7 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
 
     <div v-if="recentProgress.length > 0 || session.error" class="sidechat-footer">
       <div v-for="(step, index) in recentProgress" :key="`${session.id}-progress-${index}`" class="sidechat-progress-chip">
-        {{ step.stage }}<span v-if="step.detail"> · {{ step.detail }}</span>
+        {{ getProgressText(step) }}
       </div>
       <div v-if="session.error" class="sidechat-error">{{ session.error }}</div>
     </div>

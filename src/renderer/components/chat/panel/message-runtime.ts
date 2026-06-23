@@ -17,8 +17,13 @@ interface ConversationTitleFormatters {
   attachmentTitle?: (attachmentNames: string[]) => string
 }
 
+interface AuthRequestProgressCopy {
+  waitingAuthStage: string
+}
+
 const LEGACY_STOPPED_STAGE = '\u5df2\u505c\u6b62'
 const LEGACY_STOPPED_CONTENT = '(\u5df2\u505c\u6b62)'
+const LEGACY_WAITING_AUTH_STAGE = '\u7b49\u5f85\u6388\u6743'
 const DEFAULT_STOP_COPY: AssistantStopCopy = {
   stage: 'Stopped',
   detail: 'The user stopped this generation',
@@ -270,7 +275,11 @@ export function buildOutgoingChatMessages (sourceMessages: ChatMessage[]): Array
   return outgoingMessages
 }
 
-export function ensureAuthRequestBlockInMessages (targetMessages: ChatMessage[], request: AuthRequestPayload): void {
+export function ensureAuthRequestBlockInMessages (
+  targetMessages: ChatMessage[],
+  request: AuthRequestPayload,
+  copy: AuthRequestProgressCopy
+): void {
   let assistantMessage = findLatestAssistantMessage(targetMessages)
 
   if (!assistantMessage) {
@@ -291,9 +300,9 @@ export function ensureAuthRequestBlockInMessages (targetMessages: ChatMessage[],
 
   const toolBlock = findLastRunningToolBlock(assistantMessage)
   if (toolBlock) {
-    const alreadyLogged = toolBlock.toolRun.progress.some(step => step.stage === '等待授权' && step.detail === request.title)
+    const alreadyLogged = toolBlock.toolRun.progress.some(step => (step.stage === copy.waitingAuthStage || step.stage === LEGACY_WAITING_AUTH_STAGE) && step.detail === request.title)
     if (!alreadyLogged) {
-      toolBlock.toolRun.progress.push({ stage: '等待授权', detail: request.title })
+      toolBlock.toolRun.progress.push({ stage: copy.waitingAuthStage, detail: request.title })
     }
   }
 

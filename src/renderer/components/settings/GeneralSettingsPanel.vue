@@ -21,9 +21,10 @@ interface LanguageOption {
   id: LanguagePreference
   labelKey: string
   descKey: string
-  mark: string
+  glyphs: readonly [string, string]
+  displayName: string
   sample: string
-  badge: string
+  localeCode: string
   tone: 'zh' | 'en' | 'auto'
 }
 
@@ -47,9 +48,9 @@ const themeOptions: ThemeOption[] = [
 ]
 
 const languageOptions: LanguageOption[] = [
-  { id: 'zh-CN', labelKey: 'settings.general.language.zhCN', descKey: 'settings.general.language.zhCNDesc', mark: '中', sample: '简体中文', badge: 'ZH-CN', tone: 'zh' },
-  { id: 'en-US', labelKey: 'settings.general.language.enUS', descKey: 'settings.general.language.enUSDesc', mark: 'EN', sample: 'English', badge: 'EN-US', tone: 'en' },
-  { id: 'system', labelKey: 'settings.general.language.system', descKey: 'settings.general.language.systemDesc', mark: 'AUTO', sample: '中 / EN', badge: 'SYSTEM', tone: 'auto' }
+  { id: 'zh-CN', labelKey: 'settings.general.language.zhCN', descKey: 'settings.general.language.zhCNDesc', glyphs: ['中', '文'], displayName: '中文', sample: '你好，世界', localeCode: 'ZH-CN', tone: 'zh' },
+  { id: 'en-US', labelKey: 'settings.general.language.enUS', descKey: 'settings.general.language.enUSDesc', glyphs: ['E', 'N'], displayName: 'English', sample: 'Hello, world', localeCode: 'EN-US', tone: 'en' },
+  { id: 'system', labelKey: 'settings.general.language.system', descKey: 'settings.general.language.systemDesc', glyphs: ['中', 'A'], displayName: 'Auto', sample: '跟随系统 / System', localeCode: 'AUTO', tone: 'auto' }
 ]
 
 const activeSectionId = ref<GeneralSectionId>('appearance')
@@ -368,9 +369,18 @@ onUnmounted(() => {
             >
               <div class="gs-language-card-top">
                 <div :class="['gs-language-visual', `lang-${option.tone}`]" aria-hidden="true">
-                  <span class="gs-language-mark">{{ option.mark }}</span>
+                  <span class="gs-language-code">{{ option.localeCode }}</span>
+                  <span class="gs-language-glyphs">
+                    <span
+                      v-for="glyph in option.glyphs"
+                      :key="glyph"
+                      class="gs-language-glyph"
+                    >
+                      {{ glyph }}
+                    </span>
+                  </span>
+                  <span class="gs-language-display">{{ option.displayName }}</span>
                   <span class="gs-language-sample">{{ option.sample }}</span>
-                  <span class="gs-language-submark">{{ option.badge }}</span>
                 </div>
                 <span v-if="languagePreference === option.id" class="gs-language-badge">{{ $t('common.current') }}</span>
               </div>
@@ -766,76 +776,122 @@ onUnmounted(() => {
 .gs-language-visual {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  width: 88px;
-  height: 88px;
-  padding: 12px 13px;
+  width: 132px;
+  min-height: 126px;
+  padding: 12px;
   border-radius: 22px;
   border: 1px solid rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+  position: relative;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.18),
     0 16px 28px rgba(16, 24, 40, 0.16);
 }
 
+.gs-language-visual::after {
+  content: '';
+  position: absolute;
+  right: -24px;
+  bottom: -28px;
+  width: 82px;
+  height: 82px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+  pointer-events: none;
+}
+
 .lang-zh {
   background:
-    linear-gradient(135deg, rgba(255, 246, 229, 0.98), rgba(255, 197, 104, 0.96)),
-    #ffc568;
-  color: #6a2400;
+    radial-gradient(circle at 85% 16%, rgba(255, 255, 255, 0.58), transparent 26%),
+    linear-gradient(135deg, rgba(255, 240, 210, 0.98), rgba(245, 156, 78, 0.96)),
+    #f59c4e;
+  color: #642400;
 }
 
 .lang-en {
   background:
-    linear-gradient(135deg, rgba(238, 247, 255, 0.98), rgba(119, 184, 255, 0.92)),
-    #77b8ff;
-  color: #10294f;
+    radial-gradient(circle at 86% 16%, rgba(255, 255, 255, 0.56), transparent 26%),
+    linear-gradient(135deg, rgba(232, 246, 255, 0.98), rgba(62, 151, 222, 0.92)),
+    #3e97de;
+  color: #09284a;
 }
 
 .lang-auto {
   background:
-    linear-gradient(135deg, rgba(255, 248, 225, 0.98), rgba(232, 243, 255, 0.96) 52%, rgba(224, 255, 244, 0.92)),
-    #eef7ff;
+    radial-gradient(circle at 86% 16%, rgba(255, 255, 255, 0.58), transparent 26%),
+    linear-gradient(135deg, rgba(255, 238, 201, 0.98), rgba(221, 239, 255, 0.96) 52%, rgba(212, 248, 232, 0.92)),
+    #ddefef;
   color: #1d2c44;
 }
 
-.gs-language-mark {
-  font-size: 1.68em;
+.gs-language-code {
+  align-self: flex-start;
+  position: relative;
+  z-index: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.48);
+  font-size: 0.66em;
   line-height: 1;
-  font-weight: 700;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.gs-language-glyphs {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.gs-language-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  aspect-ratio: 1;
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.46);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.38);
+  font-size: 1.52em;
+  line-height: 1;
+  font-weight: 800;
   letter-spacing: -0.04em;
 }
 
-.lang-auto .gs-language-mark {
-  font-size: 1.02em;
-  letter-spacing: 0.08em;
+.lang-en .gs-language-glyph {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 1.42em;
+  letter-spacing: 0;
+}
+
+.lang-auto .gs-language-glyph {
   color: #1d2c44;
 }
 
-.gs-language-sample {
-  margin-top: auto;
-  font-size: 0.86em;
+.gs-language-display {
+  position: relative;
+  z-index: 1;
+  margin-top: 10px;
+  font-size: 0.84em;
   line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.gs-language-sample {
+  position: relative;
+  z-index: 1;
+  margin-top: 7px;
+  font-size: 0.78em;
+  line-height: 1.2;
   font-weight: 700;
   letter-spacing: -0.01em;
 }
 
 .lang-auto .gs-language-sample {
-  color: #1d2c44;
-}
-
-.gs-language-submark {
-  align-self: flex-start;
-  margin-top: 7px;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.5);
-  font-size: 0.68em;
-  line-height: 1;
-  font-weight: 700;
-}
-
-.lang-auto .gs-language-submark {
-  background: rgba(29, 44, 68, 0.1);
   color: #1d2c44;
 }
 

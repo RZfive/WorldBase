@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { normalizeProjectMeta } from './project-meta.js'
+import { t } from '../i18n/main-i18n.js'
 import type { ProjectFS, ProjectMeta } from './project-fs.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 
@@ -199,24 +200,24 @@ export class ProjectPackageService {
     const archive = await JSZip.loadAsync(await fs.readFile(filePath))
     const manifestEntry = archive.file(PROJECT_PACKAGE_MANIFEST_PATH)
     if (!manifestEntry) {
-      throw new Error('应用包缺少 manifest.json，无法导入。')
+      throw new Error(t('mainDialog.appPackageMissingManifest'))
     }
 
     const manifest = JSON.parse(await manifestEntry.async('text')) as Partial<ProjectPackageManifest>
     if (manifest.packageType !== PROJECT_PACKAGE_KIND || manifest.formatVersion !== PROJECT_PACKAGE_FORMAT_VERSION) {
-      throw new Error('不是受支持的 The World 应用包格式。')
+      throw new Error(t('mainDialog.appPackageUnsupportedFormat'))
     }
 
     const packageProjectName = typeof manifest.project?.name === 'string' && manifest.project.name.trim()
       ? manifest.project.name.trim()
       : typeof manifest.sourceProjectId === 'string' && manifest.sourceProjectId.trim()
         ? manifest.sourceProjectId.trim()
-        : '导入应用'
+        : t('mainDialog.appPackageDefaultImportName')
     const projectId = generateProjectId(packageProjectName)
     const projectRoot = path.join(this.projectFS.projectsDir, projectId)
 
     if (existsSync(projectRoot)) {
-      throw new Error(`导入目标目录已存在：${projectId}`)
+      throw new Error(t('mainDialog.appPackageTargetExists', { projectId }))
     }
 
     await fs.mkdir(projectRoot, { recursive: true })
@@ -250,7 +251,7 @@ export class ProjectPackageService {
         const destinationPath = path.join(projectRoot, ...safeRelativePath.split('/'))
         const resolvedDestination = path.resolve(destinationPath)
         if (!resolvedDestination.startsWith(projectRoot)) {
-          throw new Error(`应用包包含越界路径：${safeRelativePath}`)
+          throw new Error(t('mainDialog.appPackageUnsafePath', { path: safeRelativePath }))
         }
 
         await fs.mkdir(path.dirname(resolvedDestination), { recursive: true })

@@ -9,6 +9,7 @@ import type {
   ImageLibraryQuery,
   ImageStudioMode
 } from '../../shared/image-studio-types.js'
+import { t } from '../i18n/main-i18n.js'
 import { ImageIndex, type ImageIndexRow } from './image-index.js'
 import { generateThumbnail, readImageDimensions } from './image-thumbnailer.js'
 
@@ -114,7 +115,7 @@ export class ImageLibraryStore {
   private writeImage (id: string, dataUrl: string, suffix = ''): string {
     const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
     if (!match) {
-      throw new Error('不支持的图片数据格式')
+      throw new Error(t('mainDialog.unsupportedImageData'))
     }
     const ext = guessExtensionFromMime(match[1])
     const fileName = `${this.sanitizeId(id)}${suffix}.${ext}`

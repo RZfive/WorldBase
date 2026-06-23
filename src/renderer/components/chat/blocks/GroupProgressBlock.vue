@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ChatMessageBlock } from '../types'
+import { formatProgressEntry } from '../progress-i18n'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'group_progress' }>
@@ -44,8 +45,12 @@ function getProgressPercent (item: typeof snapshot.value.items[number]): number 
 function getRecentProgressText (item: typeof snapshot.value.items[number]): string {
   const steps = item.progress.slice(-2)
   return steps
-    .map(step => step.detail ? `${step.stage}：${step.detail}` : step.stage)
-    .join(' / ')
+    .map(step => formatProgressEntry(step, t, t('chatUi.progressColonSeparator')))
+    .join(t('chatUi.progressSlashSeparator'))
+}
+
+function getItemProgressText (item: typeof snapshot.value.items[number]): string {
+  return formatProgressEntry(item, t, t('chatUi.progressDotSeparator'))
 }
 </script>
 
@@ -98,7 +103,7 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
         </div>
 
         <div class="group-progress-stage">
-          {{ item.stage }}<span v-if="item.detail"> · {{ item.detail }}</span>
+          {{ getItemProgressText(item) }}
         </div>
 
         <div v-if="item.summary" class="group-progress-summary">{{ item.summary }}</div>

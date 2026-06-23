@@ -1,6 +1,7 @@
 import type { BrowserWindow } from 'electron'
 import type { SessionState } from '../agent-core.js'
 import { requestUserAuth } from '../tools/user-auth.js'
+import { t } from '../../../i18n/main-i18n.js'
 
 /**
  * Permission decision for a tool invocation.
@@ -49,6 +50,7 @@ interface CommandSafetyRule {
   pattern: RegExp
   level: SafetyLevel
   reason?: string
+  reasonKey?: string
 }
 
 const COMMAND_SAFETY_RULES: CommandSafetyRule[] = [
@@ -60,17 +62,17 @@ const COMMAND_SAFETY_RULES: CommandSafetyRule[] = [
   { pattern: /^node --check\b/, level: 'safe' },
   { pattern: /^git (status|log|diff|show|branch|tag|remote|stash list)\b/, level: 'safe' },
   // Risky: package installation
-  { pattern: /^npm (install|i|ci|add|remove|uninstall)\b/, level: 'risky', reason: '包管理器写操作' },
+  { pattern: /^npm (install|i|ci|add|remove|uninstall)\b/, level: 'risky', reason: '包管理器写操作', reasonKey: 'mainDialog.permissionReasonPackageManagerWrite' },
   // Risky: git write operations
-  { pattern: /^git (push|reset|rebase|merge|checkout|clean)\b/, level: 'risky', reason: 'Git 写操作' },
+  { pattern: /^git (push|reset|rebase|merge|checkout|clean)\b/, level: 'risky', reason: 'Git 写操作', reasonKey: 'mainDialog.permissionReasonGitWrite' },
   // Risky: build commands
-  { pattern: /^npm run (build|dev|start|test)\b/, level: 'risky', reason: '可能修改文件系统' },
+  { pattern: /^npm run (build|dev|start|test)\b/, level: 'risky', reason: '可能修改文件系统', reasonKey: 'mainDialog.permissionReasonMayModifyFileSystem' },
   // Deny: destructive commands
-  { pattern: /\brm\s+(-[rRf]+\s+|--recursive)/, level: 'deny', reason: '递归删除操作' },
-  { pattern: /\bchmod\s+777\b/, level: 'deny', reason: '不安全的权限修改' },
-  { pattern: /\bcurl\b.*\|\s*(ba)?sh\b/, level: 'deny', reason: '远程代码执行' },
-  { pattern: /\bwget\b.*\|\s*(ba)?sh\b/, level: 'deny', reason: '远程代码执行' },
-  { pattern: /\b(mkfs|fdisk|dd\s)\b/, level: 'deny', reason: '磁盘操作' }
+  { pattern: /\brm\s+(-[rRf]+\s+|--recursive)/, level: 'deny', reason: '递归删除操作', reasonKey: 'mainDialog.permissionReasonRecursiveDelete' },
+  { pattern: /\bchmod\s+777\b/, level: 'deny', reason: '不安全的权限修改', reasonKey: 'mainDialog.permissionReasonUnsafePermissionChange' },
+  { pattern: /\bcurl\b.*\|\s*(ba)?sh\b/, level: 'deny', reason: '远程代码执行', reasonKey: 'mainDialog.permissionReasonRemoteCodeExecution' },
+  { pattern: /\bwget\b.*\|\s*(ba)?sh\b/, level: 'deny', reason: '远程代码执行', reasonKey: 'mainDialog.permissionReasonRemoteCodeExecution' },
+  { pattern: /\b(mkfs|fdisk|dd\s)\b/, level: 'deny', reason: '磁盘操作', reasonKey: 'mainDialog.permissionReasonDiskOperation' }
 ]
 
 /**
@@ -170,7 +172,7 @@ export class PermissionEngine {
         return { allowed: false, reason: ruleResult.reason || 'Denied by rule', askedUser: false, rule: ruleResult.rule }
       }
       // decision === 'ask' → fall through to user confirmation
-      const approved = await this._askUser(toolName, args, ruleResult.reason || '规则要求用户确认')
+      const approved = await this._askUser(toolName, args, ruleResult.reason || t('mainDialog.permissionReasonRuleRequiresConfirmation'))
       return { allowed: approved, reason: ruleResult.reason || 'User decision', askedUser: true, rule: ruleResult.rule }
     }
 
@@ -188,7 +190,7 @@ export class PermissionEngine {
       }
 
       if (classification.level === 'risky') {
-        const approved = await this._askUser(toolName, args, classification.reason || '该命令需要确认')
+        const approved = await this._askUser(toolName, args, this._localizeCommandReason(classification, 'mainDialog.permissionReasonCommandNeedsConfirmation'))
         return { allowed: approved, reason: classification.reason || 'Risky command', askedUser: true }
       }
 
@@ -199,22 +201,22 @@ export class PermissionEngine {
     }
 
     if (toolName.startsWith('mcp__')) {
-      const approved = await this._askUser(toolName, args, '该操作会调用外部 MCP 服务')
+      const approved = await this._askUser(toolName, args, t('mainDialog.permissionReasonExternalMcp'))
       return { allowed: approved, reason: 'External MCP tool invocation', askedUser: true }
     }
 
     if (toolName === 'install_skill') {
-      const approved = await this._askUser(toolName, args, '该操作会把 Skill 安装到本地应用，并可在当前会话中立即启用')
+      const approved = await this._askUser(toolName, args, t('mainDialog.permissionReasonInstallSkill'))
       return { allowed: approved, reason: 'Skill installation requires confirmation', askedUser: true }
     }
 
     if (toolName === 'install_mcp_server') {
-      const approved = await this._askUser(toolName, args, '该操作会写入 MCP 服务配置，并可能立即连接外部服务')
+      const approved = await this._askUser(toolName, args, t('mainDialog.permissionReasonInstallMcp'))
       return { allowed: approved, reason: 'MCP installation requires confirmation', askedUser: true }
     }
 
     if (toolName === 'create_scheduled_task') {
-      const approved = await this._askUser(toolName, args, '该操作会创建一个会自动运行的 AI 定时任务')
+      const approved = await this._askUser(toolName, args, t('mainDialog.permissionReasonCreateScheduledTask'))
       return { allowed: approved, reason: 'Scheduled task creation requires confirmation', askedUser: true }
     }
 
@@ -223,7 +225,7 @@ export class PermissionEngine {
       const approved = await this._askUser(
         toolName,
         args,
-        '该操作需要访问本地系统资源'
+        t('mainDialog.permissionReasonLocalResourceAccess')
       )
       return { allowed: approved, reason: 'High-risk tool requires confirmation', askedUser: true }
     }
@@ -263,17 +265,24 @@ export class PermissionEngine {
   /**
    * Classify a command string by safety level using built-in rules.
    */
-  private _classifyCommand (command: string): { level: SafetyLevel; reason?: string } {
+  private _classifyCommand (command: string): { level: SafetyLevel; reason?: string; reasonKey?: string } {
     const trimmedCommand = command.trim()
 
     for (const rule of COMMAND_SAFETY_RULES) {
       if (rule.pattern.test(trimmedCommand)) {
-        return { level: rule.level, reason: rule.reason }
+        return { level: rule.level, reason: rule.reason, reasonKey: rule.reasonKey }
       }
     }
 
     // Unknown command → risky by default (require user confirmation)
-    return { level: 'risky', reason: '未识别的命令类型' }
+    return { level: 'risky', reason: '未识别的命令类型', reasonKey: 'mainDialog.permissionReasonUnrecognizedCommandType' }
+  }
+
+  private _localizeCommandReason (
+    classification: { reason?: string; reasonKey?: string },
+    fallbackKey: string
+  ): string {
+    return classification.reasonKey ? t(classification.reasonKey) : (classification.reason || t(fallbackKey))
   }
 
   /**
@@ -284,7 +293,7 @@ export class PermissionEngine {
     args: Record<string, unknown>,
     reason: string
   ): Promise<boolean> {
-    const title = `工具 ${toolName} 需要授权`
+    const title = t('mainDialog.permissionToolAuthTitle', { toolName })
     const detail = this._buildAuthDetail(toolName, args, reason)
 
     return requestUserAuth(
@@ -307,15 +316,15 @@ export class PermissionEngine {
     const parts = [reason]
 
     if (toolName === 'run_project_command' || toolName === 'run_workspace_command' || toolName === 'local_run_command') {
-      parts.push(`命令: ${String(args.command || '').slice(0, 200)}`)
+      parts.push(t('mainDialog.permissionDetailCommand', { command: String(args.command || '').slice(0, 200) }))
     } else if (toolName === 'local_file_read' || toolName === 'local_file_write') {
-      parts.push(`文件: ${String(args.file_path || '').slice(0, 200)}`)
+      parts.push(t('mainDialog.permissionDetailFile', { filePath: String(args.file_path || '').slice(0, 200) }))
     } else {
       const argSummary = Object.entries(args)
         .slice(0, 3)
         .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
         .join(', ')
-      if (argSummary) parts.push(`参数: ${argSummary}`)
+      if (argSummary) parts.push(t('mainDialog.permissionDetailArgs', { args: argSummary }))
     }
 
     return parts.join('\n')

@@ -1,6 +1,7 @@
 import type { AIEngine, ProgressCallback, ProgressEvent } from '../../../src/main/ai-engine/ai-engine.js'
 import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
 import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupDefinition, AgentGroupParticipant, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentSidechatSession, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
+import { t } from '../../../src/main/i18n/main-i18n.js'
 import { mainState } from '../state.js'
 import { buildActiveAgentSection, buildActiveGroupSection, resolveProviderConfig, resolveSkillContentsByIds } from './agent-context.js'
 import { firstNonEmptyLine, getLastUserMessageText, getMessageText, serializeMessageContentForDisplay, truncateSectionText } from '../chat-message-utils.js'
@@ -409,15 +410,16 @@ export function buildGroupTranscriptSummary (
   const latestFocus = entries.length > 0
     ? firstNonEmptyLine(entries[entries.length - 1].content)
     : ''
+  const delimiter = t('mainDialog.groupParticipantDelimiter')
   const lines = [
     mode === 'discussion' || mode === 'coordinator_decides' || mode === 'mentioned_agent_decides'
-      ? `群组 ${group.name} 完成了 ${Math.max(...entries.map(entry => entry.round), 0)} 轮协作讨论，共生成 ${entries.length} 条工作笔记。`
-      : `群组 ${group.name} 完成了 ${entries.length} 条定向单聊回复。`,
-    participantNames.length > 0 ? `参与 Agent：${participantNames.join('、')}。` : ''
+      ? t('mainDialog.groupTranscriptDiscussionSummary', { group: group.name, rounds: Math.max(...entries.map(entry => entry.round), 0), count: entries.length })
+      : t('mainDialog.groupTranscriptTargetedSummary', { group: group.name, count: entries.length }),
+    participantNames.length > 0 ? t('mainDialog.groupTranscriptParticipants', { names: participantNames.join(delimiter) }) : ''
   ]
 
   if (latestFocus) {
-    lines.push(`最近一条聚焦：${truncateSectionText(latestFocus, 220)}`)
+    lines.push(t('mainDialog.groupTranscriptLatestFocus', { focus: truncateSectionText(latestFocus, 220) }))
   }
 
   return lines.filter(Boolean).join('\n')
@@ -452,7 +454,7 @@ export function createGroupProgressSnapshot (
       currentRound: 0,
       completedRounds: 0,
       totalRounds: normalizedTotalRounds,
-      stage: '等待开始',
+      stage: t('mainDialog.groupProgressWaitingStart'),
       updatedAt: timestamp,
       progress: []
     }))
@@ -528,39 +530,46 @@ export function buildGroupCollaborationPlanReason (input: {
 }): string {
   const mentionedNames = input.mentionedParticipants.map(participant => participant.agentName)
   const invitedNames = input.invitedParticipants.map(participant => participant.agentName)
-  const invitedSummary = invitedNames.join('、')
+  const delimiter = t('mainDialog.groupParticipantDelimiter')
+  const invitedSummary = invitedNames.join(delimiter)
+  const focus = input.focus ? truncateSectionText(input.focus, 180) : ''
 
   if (input.phase === 'planning') {
     if (input.mode === 'coordinator_only') {
-      return `${input.plannerName} 将直接处理这次请求，因为当前群组没有其他可协作成员。`
+      return t('mainDialog.groupPlanCoordinatorOnly', { planner: input.plannerName })
     }
     if (input.mode === 'mentioned_agent_decides') {
-      return `${input.plannerName} 被用户单独点名，先由其判断能否独立完成；如需补充信息，再由其决定是否邀请其他成员协作。`
+      return t('mainDialog.groupPlanMentionedAgentDecides', { planner: input.plannerName })
     }
     if (input.mode === 'coordinator_decides') {
-      return `${input.plannerName} 被用户点名为协调者，先由其判断是否需要拉群，再决定协作范围。`
+      return t('mainDialog.groupPlanCoordinatorDecides', { planner: input.plannerName })
     }
     if (input.mode === 'discussion' && mentionedNames.length > 0) {
-      return `这次会按用户点名的范围发起协作，当前优先涉及：${mentionedNames.join('、')}。`
+      return t('mainDialog.groupPlanExplicitDiscussion', { names: mentionedNames.join(delimiter) })
     }
-    return '用户没有点名具体成员，当前按群组默认协作模式准备讨论。'
+    return t('mainDialog.groupPlanDefaultDiscussion')
   }
 
   if (input.phase === 'executing') {
     if (!input.shouldContinue || invitedNames.length === 0) {
-      return `${input.plannerName} 判断当前无需再扩群，准备由 ${input.reportToName} 直接整理回复。`
+      return focus
+        ? t('mainDialog.groupPlanNoMoreExpansionWithFocus', { planner: input.plannerName, reportTo: input.reportToName, focus })
+        : t('mainDialog.groupPlanNoMoreExpansion', { planner: input.plannerName, reportTo: input.reportToName })
     }
-    const focusSuffix = input.focus ? ` 聚焦点：${truncateSectionText(input.focus, 180)}` : ''
     if (input.mode === 'mentioned_agent_decides') {
-      return `${input.plannerName} 判断需要补充协作，已邀请 ${invitedSummary} 加入。${focusSuffix}`.trim()
+      return focus
+        ? t('mainDialog.groupPlanMentionedInviteWithFocus', { planner: input.plannerName, names: invitedSummary, focus })
+        : t('mainDialog.groupPlanMentionedInvite', { planner: input.plannerName, names: invitedSummary })
     }
-    return `${input.plannerName} 在第 ${input.round || 1} 轮邀请 ${invitedSummary} 协作。${focusSuffix}`.trim()
+    return focus
+      ? t('mainDialog.groupPlanRoundInviteWithFocus', { planner: input.plannerName, round: input.round || 1, names: invitedSummary, focus })
+      : t('mainDialog.groupPlanRoundInvite', { planner: input.plannerName, round: input.round || 1, names: invitedSummary })
   }
 
   if (invitedNames.length > 0) {
-    return `内部协作已结束，${input.reportToName} 正在汇总 ${invitedSummary} 的结果并整理最终回复。`
+    return t('mainDialog.groupPlanCompletedWithInvites', { reportTo: input.reportToName, names: invitedSummary })
   }
-  return `${input.reportToName} 未继续扩群，准备直接整理最终回复。`
+  return t('mainDialog.groupPlanCompletedWithoutInvites', { reportTo: input.reportToName })
 }
 
 export function createGroupCollaborationPlan (input: {
@@ -798,10 +807,10 @@ export async function buildGroupDeliberationSection (input: {
   const isDiscussionMode = routing.mode === 'discussion' || routing.mode === 'coordinator_decides' || routing.mode === 'mentioned_agent_decides'
   const memberIds = routing.selectedMemberIds
   const totalRounds = isDiscussionMode ? input.group.maxRounds : 1
-  const plannerName = planner?.name || coordinator?.name || '主 Agent'
+  const plannerName = planner?.name || coordinator?.name || t('mainDialog.defaultAgentName')
   const coordinatorName = coordinator?.name || plannerName
   const reportToName = routing.mode === 'mentioned_agent_decides' ? plannerName : coordinatorName
-  const initiatorName = routing.mode === 'targeted' ? '用户' : reportToName
+  const initiatorName = routing.mode === 'targeted' ? t('mainDialog.localUserName') : reportToName
   const sidechatMode: AgentSidechatSession['mode'] = isDiscussionMode
     ? 'group_deliberation'
     : 'user_targeted'
@@ -909,12 +918,12 @@ export async function buildGroupDeliberationSection (input: {
         item.currentRound = round
         const canFinishWithoutMoreChanges = roundPlan.shouldContinue && item.completedRounds > 0
         item.status = canFinishWithoutMoreChanges ? 'completed' : 'queued'
-        item.stage = canFinishWithoutMoreChanges ? '已完成' : '等待下一轮'
+        item.stage = canFinishWithoutMoreChanges ? t('mainDialog.groupProgressCompleted') : t('mainDialog.groupProgressWaitingNextRound')
         item.detail = canFinishWithoutMoreChanges
-          ? '主协调判断无需继续修改'
-          : (roundPlan.shouldContinue ? '本轮未被选中' : '协调结束讨论')
+          ? t('mainDialog.groupProgressNoMoreChanges')
+          : (roundPlan.shouldContinue ? t('mainDialog.groupProgressNotSelectedThisRound') : t('mainDialog.groupProgressDiscussionEndedByCoordinator'))
         item.updatedAt = new Date().toISOString()
-        appendGroupProgressStep(item, canFinishWithoutMoreChanges ? '完成' : '等待', item.detail)
+        appendGroupProgressStep(item, canFinishWithoutMoreChanges ? t('mainDialog.groupProgressDone') : t('mainDialog.groupProgressWaiting'), item.detail)
       }
       emitGroupProgressSnapshot(input.onProgress, snapshot)
     }
@@ -953,10 +962,10 @@ export async function buildGroupDeliberationSection (input: {
         if (!member) {
           item.status = 'failed'
           item.currentRound = round
-          item.stage = '配置无效'
-          item.detail = `找不到 Agent: ${memberId}`
+          item.stage = t('mainDialog.groupProgressInvalidConfig')
+          item.detail = t('mainDialog.groupProgressAgentNotFound', { id: memberId })
           item.updatedAt = new Date().toISOString()
-          appendGroupProgressStep(item, '配置无效', item.detail)
+          appendGroupProgressStep(item, t('mainDialog.groupProgressInvalidConfig'), item.detail)
           emitGroupProgressSnapshot(input.onProgress, snapshot)
           return { memberId, member: null, error: item.detail, noteText: '', noteDisplayText: '' }
         }
@@ -964,10 +973,10 @@ export async function buildGroupDeliberationSection (input: {
         item.agentName = member.name
         item.status = 'running'
         item.currentRound = round
-        item.stage = '准备上下文'
-        item.detail = `第 ${round} 轮`
+        item.stage = t('mainDialog.groupProgressPrepareContext')
+        item.detail = t('mainDialog.groupProgressRoundDetail', { round })
         item.updatedAt = new Date().toISOString()
-        appendGroupProgressStep(item, '准备上下文', item.detail)
+        appendGroupProgressStep(item, t('mainDialog.groupProgressPrepareContext'), item.detail)
         emitGroupProgressSnapshot(input.onProgress, snapshot)
 
         const memberMemory = mainState.memoryEngine?.buildPromptContext({
@@ -991,8 +1000,8 @@ export async function buildGroupDeliberationSection (input: {
         })
         emitAgentSidechatSession(input.onProgress, sidechatSession)
 
-        item.stage = isDiscussionMode ? '群内协作' : '定向单聊'
-        item.detail = roundPlan.focus || `第 ${round} 轮`
+        item.stage = isDiscussionMode ? t('mainDialog.groupProgressGroupCollaboration') : t('mainDialog.groupProgressTargetedSidechat')
+        item.detail = roundPlan.focus || t('mainDialog.groupProgressRoundDetail', { round })
         item.updatedAt = new Date().toISOString()
         appendGroupProgressStep(item, item.stage, item.detail)
         emitGroupProgressSnapshot(input.onProgress, snapshot)
@@ -1043,13 +1052,13 @@ export async function buildGroupDeliberationSection (input: {
               sidechatSession.updatedAt = new Date().toISOString()
               emitAgentSidechatSession(input.onProgress, sidechatSession)
             } else if (sidechatEvent.type === 'thinking' && sidechatEvent.content) {
-              appendAgentSidechatProgress(sidechatSession, '思考中', truncateSectionText(sidechatEvent.content, 120))
+              appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressThinking'), truncateSectionText(sidechatEvent.content, 120))
               emitAgentSidechatSession(input.onProgress, sidechatSession)
             } else if (sidechatEvent.type === 'tool_start' && sidechatEvent.name) {
-              appendAgentSidechatProgress(sidechatSession, '调用工具', sidechatEvent.name)
+              appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressToolStart'), sidechatEvent.name)
               emitAgentSidechatSession(input.onProgress, sidechatSession)
             } else if (sidechatEvent.type === 'tool_end' && sidechatEvent.name) {
-              appendAgentSidechatProgress(sidechatSession, '工具完成', sidechatEvent.name)
+              appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressToolEnd'), sidechatEvent.name)
               emitAgentSidechatSession(input.onProgress, sidechatSession)
             } else if (sidechatEvent.type === 'progress' && sidechatEvent.stage) {
               appendAgentSidechatProgress(sidechatSession, sidechatEvent.stage, sidechatEvent.detail)
@@ -1060,7 +1069,7 @@ export async function buildGroupDeliberationSection (input: {
               sidechatSession.response = noteDisplayText
               sidechatSession.status = 'completed'
               sidechatSession.updatedAt = new Date().toISOString()
-              appendAgentSidechatProgress(sidechatSession, '单聊完成', `第 ${round} 轮`)
+              appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressSidechatDone'), t('mainDialog.groupProgressRoundDetail', { round }))
               emitAgentSidechatSession(input.onProgress, sidechatSession)
             } else if (sidechatEvent.type === 'error') {
               throw new Error(sidechatEvent.error)
@@ -1079,13 +1088,13 @@ export async function buildGroupDeliberationSection (input: {
           sidechatSession.status = 'failed'
           sidechatSession.error = truncateSectionText(errorMessage, 200)
           sidechatSession.updatedAt = new Date().toISOString()
-          appendAgentSidechatProgress(sidechatSession, '失败', sidechatSession.error)
+          appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressFailed'), sidechatSession.error)
           emitAgentSidechatSession(input.onProgress, sidechatSession)
           item.status = 'failed'
-          item.stage = '失败'
+          item.stage = t('mainDialog.groupProgressFailed')
           item.detail = truncateSectionText(errorMessage, 200)
           item.updatedAt = new Date().toISOString()
-          appendGroupProgressStep(item, '失败', item.detail)
+          appendGroupProgressStep(item, t('mainDialog.groupProgressFailed'), item.detail)
           emitGroupProgressSnapshot(input.onProgress, snapshot)
           return { memberId, member, error: errorMessage, noteText: '', noteDisplayText: '' }
         }
@@ -1096,7 +1105,7 @@ export async function buildGroupDeliberationSection (input: {
         if (!item) continue
         if (item.status === 'failed') {
           if (result.error) {
-            notes.push(`### Round ${round} · ${result.member?.name || item.agentName}\n失败：${truncateSectionText(result.error, 300)}`)
+            notes.push(`### Round ${round} · ${result.member?.name || item.agentName}\n${t('mainDialog.groupProgressFailureNote', { message: truncateSectionText(result.error, 300) })}`)
             plannerNotes.push({
               memberId: result.memberId,
               review: [
@@ -1155,12 +1164,12 @@ export async function buildGroupDeliberationSection (input: {
         }
 
         const finishedDetail = result.noteText
-          ? `第 ${round} 轮已完成`
-          : `第 ${round} 轮未产出工作笔记`
+          ? t('mainDialog.groupProgressRoundCompleted', { round })
+          : t('mainDialog.groupProgressRoundNoNote', { round })
         item.status = round >= totalRounds ? 'completed' : 'queued'
-        item.stage = round >= totalRounds ? '已完成' : '等待下一轮'
-        item.detail = round >= totalRounds ? '全部轮次完成' : finishedDetail
-        appendGroupProgressStep(item, result.noteText ? '本轮完成' : '未产出笔记', finishedDetail)
+        item.stage = round >= totalRounds ? t('mainDialog.groupProgressCompleted') : t('mainDialog.groupProgressWaitingNextRound')
+        item.detail = round >= totalRounds ? t('mainDialog.groupProgressAllRoundsDone') : finishedDetail
+        appendGroupProgressStep(item, result.noteText ? t('mainDialog.groupProgressRoundDone') : t('mainDialog.groupProgressNoNote'), finishedDetail)
         emitGroupProgressSnapshot(input.onProgress, snapshot)
       }
     }
@@ -1169,8 +1178,8 @@ export async function buildGroupDeliberationSection (input: {
   for (const item of snapshot.items) {
     if (item.status === 'queued') {
       item.status = 'completed'
-      item.stage = '已完成'
-      item.detail = item.completedRounds > 0 ? '讨论已结束' : '未被安排参与本次讨论'
+      item.stage = t('mainDialog.groupProgressCompleted')
+      item.detail = item.completedRounds > 0 ? t('mainDialog.groupProgressDiscussionEnded') : t('mainDialog.groupProgressNotScheduled')
       item.updatedAt = new Date().toISOString()
     }
   }

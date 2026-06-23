@@ -9,6 +9,7 @@ import type { CallToolResult, Prompt, Resource, Tool } from '@modelcontextprotoc
 import type { ProgressCallback } from '../ai-engine/agent/agent-core.js'
 import type { ToolDefinition } from '../ai-engine/providers/openai-provider.js'
 import type { MCPServerConfig } from '../settings/settings-store.js'
+import { t } from '../i18n/main-i18n.js'
 
 type MCPClientTransport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
 
@@ -164,7 +165,7 @@ async function withTimeout<T> (promise: Promise<T>, timeoutMs: number, label: st
       promise,
       new Promise<T>((_resolve, reject) => {
         timer = setTimeout(() => {
-          reject(new Error(`${label} 超时 (${timeoutMs}ms)`))
+          reject(new Error(t('mainDialog.mcpOperationTimeout', { label, timeoutMs })))
         }, timeoutMs)
       })
     ])
@@ -504,7 +505,7 @@ export class MCPService extends EventEmitter {
   private getSessionOrThrow (serverId: string): MCPServerSession {
     const session = this.sessions.get(serverId)
     if (!session) {
-      throw new Error(`未找到 MCP 服务器: ${serverId}`)
+      throw new Error(t('mainDialog.mcpServerNotFound', { serverId }))
     }
     return session
   }
@@ -552,7 +553,7 @@ export class MCPService extends EventEmitter {
   private async ensureConnected (serverId: string): Promise<MCPServerSession> {
     const session = this.getSessionOrThrow(serverId)
     if (!session.config.enabled) {
-      throw new Error(`MCP 服务器 ${session.config.name} 当前已禁用`)
+      throw new Error(t('mainDialog.mcpServerDisabled', { name: session.config.name }))
     }
 
     if (session.client && session.status === 'connected') {
@@ -582,7 +583,7 @@ export class MCPService extends EventEmitter {
         version: process.env.npm_package_version || '0.1.0'
       })
 
-      await withTimeout(client.connect(transport), session.config.timeoutMs, `连接 MCP 服务器 ${session.config.name}`)
+      await withTimeout(client.connect(transport), session.config.timeoutMs, t('mainDialog.mcpConnectServerLabel', { name: session.config.name }))
 
       session.client = client
       session.transport = transport
@@ -605,7 +606,7 @@ export class MCPService extends EventEmitter {
 
   private createTransport (config: MCPServerConfig): MCPClientTransport {
     if (config.transport === 'streamable-http') {
-      if (!config.url) throw new Error(`MCP 服务器 ${config.name} 缺少 URL`)
+      if (!config.url) throw new Error(t('mainDialog.mcpServerMissingUrl', { name: config.name }))
       return new StreamableHTTPClientTransport(new URL(config.url), {
         requestInit: Object.keys(config.headers).length > 0
           ? { headers: config.headers }
@@ -614,7 +615,7 @@ export class MCPService extends EventEmitter {
     }
 
     if (config.transport === 'sse') {
-      if (!config.url) throw new Error(`MCP 服务器 ${config.name} 缺少 URL`)
+      if (!config.url) throw new Error(t('mainDialog.mcpServerMissingUrl', { name: config.name }))
       return new SSEClientTransport(new URL(config.url), {
         requestInit: Object.keys(config.headers).length > 0
           ? { headers: config.headers }
@@ -623,7 +624,7 @@ export class MCPService extends EventEmitter {
     }
 
     if (!config.command) {
-      throw new Error(`MCP 服务器 ${config.name} 缺少 command`)
+      throw new Error(t('mainDialog.mcpServerMissingCommand', { name: config.name }))
     }
 
     const env: Record<string, string> = {}

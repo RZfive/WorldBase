@@ -39,6 +39,26 @@ import { drainPendingStudioImageTasks } from './media/image-studio-queue.js'
 import { attachProjectRuntimeLogForwarding, broadcastToAppWindows, buildActivePagePromptSection, buildRendererWindowUrl, createProjectPackageDefaultName, ensureWindowHasMinimumWidth, getPreferredLanIpv4Addresses, getProjectsDir, getSenderWindow, guessImageExtension, resolveImageBuffer, runWithAiRequestWindow, setWindowMinimumWidth } from './windows.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
 
+const AGENT_WORKSPACE_TOOL_DESCRIPTION_KEYS: Record<string, string> = {
+  run_skill: 'settings.agentWorkspace.toolDescriptionRunSkill',
+  list_skills: 'settings.agentWorkspace.toolDescriptionListSkills',
+  enter_plan_mode: 'settings.agentWorkspace.toolDescriptionEnterPlanMode',
+  exit_plan_mode: 'settings.agentWorkspace.toolDescriptionExitPlanMode',
+  ask_user: 'settings.agentWorkspace.toolDescriptionAskUser',
+  generate_image: 'settings.agentWorkspace.toolDescriptionGenerateImage',
+  edit_image: 'settings.agentWorkspace.toolDescriptionEditImage',
+  mcp_list_servers: 'settings.agentWorkspace.toolDescriptionMcpListServers',
+  mcp_list_resources: 'settings.agentWorkspace.toolDescriptionMcpListResources',
+  mcp_read_resource: 'settings.agentWorkspace.toolDescriptionMcpReadResource',
+  mcp_list_prompts: 'settings.agentWorkspace.toolDescriptionMcpListPrompts',
+  mcp_get_prompt: 'settings.agentWorkspace.toolDescriptionMcpGetPrompt'
+}
+
+function getAgentWorkspaceToolDescription (name: string, fallback: string): string {
+  const key = AGENT_WORKSPACE_TOOL_DESCRIPTION_KEYS[name]
+  return key ? t(key) : fallback
+}
+
 function buildFolderWorkspacePromptSection (workspaceRoot: string | null): string | null {
   if (!workspaceRoot) return null
   const rootName = getFolderWorkspaceRootName(workspaceRoot)
@@ -99,12 +119,12 @@ export function setupIPC (): void {
     clearTimeout(pending.timeout)
 
     if (!payload.ok) {
-      pending.reject(new Error(payload.error || '页面操作失败'))
+      pending.reject(new Error(payload.error || t('mainDialog.pageAutomationFailed')))
       return
     }
 
     if (typeof payload.result === 'undefined') {
-      pending.reject(new Error('页面操作返回了空结果'))
+      pending.reject(new Error(t('mainDialog.pageAutomationEmptyResult')))
       return
     }
 
@@ -488,7 +508,7 @@ export function setupIPC (): void {
         executionPreferences,
         messages,
         finalStatus,
-        errorMessage === USER_ABORT_MESSAGE ? '用户中断了本次任务' : errorMessage
+        errorMessage === USER_ABORT_MESSAGE ? t('mainDialog.userAbortedTask') : errorMessage
       )
       aiLogger?.logError('stream', err as Error, { sessionId, conversationId })
       aiLogger?.finish(finalStatus)
@@ -571,7 +591,7 @@ export function setupIPC (): void {
     return aiEngine!.getAvailableTools()
       .map(tool => ({
         name: tool.name,
-        description: tool.description
+        description: getAgentWorkspaceToolDescription(tool.name, tool.description)
       }))
       .sort((left, right) => left.name.localeCompare(right.name, 'en'))
   })
@@ -627,18 +647,18 @@ export function setupIPC (): void {
   ipcMain.handle('im:testBinding', async (_event: IpcMainInvokeEvent, id: string, text?: string) => {
     const binding = channelBindingStore!.get(id)
     if (!binding) {
-      throw new Error('IM 绑定不存在')
+      throw new Error(t('mainDialog.imBindingMissing'))
     }
     const messageText = typeof text === 'string' && text.trim()
       ? text.trim()
-      : '这是一条 IM 绑定测试消息，请用一句话回复。'
+      : t('mainDialog.imBindingDefaultTestMessage')
     const event: ChannelEvent = {
       connectorType: binding.connectorType,
       channelId: binding.externalChannelId || 'test-channel',
       threadId: binding.externalThreadId,
       messageId: `test_${Date.now().toString(36)}`,
       senderId: 'test-user',
-      senderName: 'IM 测试',
+      senderName: t('mainDialog.imBindingTestSender'),
       text: messageText,
       createdAt: new Date().toISOString()
     }
@@ -666,8 +686,8 @@ export function setupIPC (): void {
     const scopeId = typeof entry.scopeId === 'string' && entry.scopeId.trim() ? entry.scopeId.trim() : 'local-user'
     const memoryType = entry.memoryType || 'knowledge'
 
-    if (!title) throw new Error('记忆标题不能为空')
-    if (!summary) throw new Error('记忆摘要不能为空')
+    if (!title) throw new Error(t('mainDialog.memoryTitleRequired'))
+    if (!summary) throw new Error(t('mainDialog.memorySummaryRequired'))
 
     return memoryStore!.upsert({
       id: entry.id || `manual_${randomUUID()}`,

@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { t } from '../i18n/main-i18n.js'
 import type { AIExecutionAuthMode } from './settings-store.js'
 
 export interface AILogContentPart {
@@ -249,7 +250,7 @@ export class AILogStore {
   createSessionLogger (input: AILogSessionStartInput): AILogSessionLogger {
     const createdAt = new Date().toISOString()
     const uploadedMessages = cloneJson(input.uploadedMessages)
-    const initialTitle = input.title || extractMessageText(uploadedMessages.find(message => message.role === 'user')) || '未命名对话'
+    const initialTitle = input.title || extractMessageText(uploadedMessages.find(message => message.role === 'user')) || t('mainDialog.untitledConversation')
     const conversation = this.readConversation(input.conversationId) || {
       id: input.conversationId,
       title: initialTitle,

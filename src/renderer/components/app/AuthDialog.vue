@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { emitAuthResolution, onAuthResolution } from '../../utils/auth-events'
+import { translateAuthDetail, translateAuthTitle } from '../chat/auth-i18n'
 
 interface AuthRequest {
   requestId: string
@@ -12,6 +14,9 @@ interface AuthRequest {
 
 const currentRequest = ref<AuthRequest | null>(null)
 const queuedRequests = ref<AuthRequest[]>([])
+const { t } = useI18n()
+const translatedTitle = computed(() => currentRequest.value ? translateAuthTitle(currentRequest.value.title, t) : '')
+const translatedDetail = computed(() => currentRequest.value ? translateAuthDetail(currentRequest.value.detail, t) : '')
 let cleanup: (() => void) | null = null
 let responseCleanup: (() => void) | null = null
 
@@ -68,8 +73,8 @@ onUnmounted(() => {
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             </svg>
           </div>
-          <h3 class="auth-title">{{ currentRequest.title }}</h3>
-          <pre class="auth-detail">{{ currentRequest.detail }}</pre>
+          <h3 class="auth-title">{{ translatedTitle }}</h3>
+          <pre class="auth-detail">{{ translatedDetail }}</pre>
           <div class="auth-actions">
             <button class="auth-btn deny" @click="respond(false)">
               {{ $t('appShell.deny') }}

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import type { ChatMessageBlock, ToolRun } from '../types'
+import { translateProgressEntry } from '../progress-i18n'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'tool' }>
@@ -12,6 +13,14 @@ function getToolRunStatusLabel (status: ToolRun['status']): string {
   if (status === 'completed') return t('chatUi.toolStatusCompleted')
   if (status === 'failed') return t('chatUi.toolStatusFailed')
   return t('chatUi.toolStatusRunning')
+}
+
+function getProgressStage (step: ToolRun['progress'][number]): string {
+  return translateProgressEntry(step, t).stage
+}
+
+function getProgressDetail (step: ToolRun['progress'][number]): string | undefined {
+  return translateProgressEntry(step, t).detail
 }
 </script>
 
@@ -35,8 +44,8 @@ function getToolRunStatusLabel (status: ToolRun['status']): string {
       >
         <span class="tool-run-step-index">{{ stepIndex + 1 }}</span>
         <div class="tool-run-step-body">
-          <div class="tool-run-step-stage">{{ step.stage }}</div>
-          <div v-if="step.detail" class="tool-run-step-detail">{{ step.detail }}</div>
+          <div class="tool-run-step-stage">{{ getProgressStage(step) }}</div>
+          <div v-if="getProgressDetail(step)" class="tool-run-step-detail">{{ getProgressDetail(step) }}</div>
         </div>
       </div>
     </div>

@@ -1,12 +1,20 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { ChannelBinding, ConnectorDefinition } from '../../shared/agent-workspace-types.js'
+import { t } from '../i18n/main-i18n.js'
 
-export const BUILTIN_CONNECTORS: ConnectorDefinition[] = [
+type LocalizedConnectorDefinition = Omit<ConnectorDefinition, 'description' | 'credentialFields'> & {
+  descriptionKey: string
+  credentialFields: Array<ConnectorDefinition['credentialFields'][number] & {
+    labelKey?: string
+  }>
+}
+
+const BUILTIN_CONNECTORS: LocalizedConnectorDefinition[] = [
   {
     id: 'feishu',
     name: 'Feishu',
-    description: '飞书机器人事件回调，支持 URL 校验、加密事件、文本消息接收和消息回复。',
+    descriptionKey: 'settings.agentWorkspace.connectorFeishuDescription',
     supportsThreads: true,
     supportsMentions: true,
     supportsAttachments: true,
@@ -21,7 +29,7 @@ export const BUILTIN_CONNECTORS: ConnectorDefinition[] = [
   {
     id: 'wechat',
     name: 'WeChat',
-    description: '微信公众号/测试号回调，支持 URL 校验、明文/加密文本消息接收和被动文本回复。',
+    descriptionKey: 'settings.agentWorkspace.connectorWeChatDescription',
     supportsThreads: false,
     supportsMentions: false,
     supportsAttachments: false,
@@ -35,7 +43,7 @@ export const BUILTIN_CONNECTORS: ConnectorDefinition[] = [
   {
     id: 'wecom',
     name: 'WeCom',
-    description: '企业微信回调与群机器人 Webhook，支持文本消息接收和群机器人回复。',
+    descriptionKey: 'settings.agentWorkspace.connectorWeComDescription',
     supportsThreads: false,
     supportsMentions: true,
     supportsAttachments: true,
@@ -44,13 +52,13 @@ export const BUILTIN_CONNECTORS: ConnectorDefinition[] = [
       { key: 'verificationToken', label: 'Token', secret: true },
       { key: 'encryptKey', label: 'EncodingAESKey', secret: true },
       { key: 'appId', label: 'Corp ID' },
-      { key: 'outgoingWebhookUrl', label: '群机器人 Webhook', secret: true, placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...' }
+      { key: 'outgoingWebhookUrl', label: 'WeCom Bot Webhook', labelKey: 'settings.agentWorkspace.weComBotWebhookLabel', secret: true, placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...' }
     ]
   },
   {
     id: 'slack',
     name: 'Slack',
-    description: 'Slack Slash/Event 兼容入口，支持 URL 校验、签名校验、表单文本 payload 与 response_url 回复。',
+    descriptionKey: 'settings.agentWorkspace.connectorSlackDescription',
     supportsThreads: true,
     supportsMentions: true,
     supportsAttachments: true,
@@ -63,7 +71,7 @@ export const BUILTIN_CONNECTORS: ConnectorDefinition[] = [
   {
     id: 'discord',
     name: 'Discord',
-    description: 'Discord Webhook 入口，当前支持通用文本 payload 与 Webhook 回复。',
+    descriptionKey: 'settings.agentWorkspace.connectorDiscordDescription',
     supportsThreads: true,
     supportsMentions: true,
     supportsAttachments: true,
@@ -76,7 +84,7 @@ export const BUILTIN_CONNECTORS: ConnectorDefinition[] = [
   {
     id: 'telegram',
     name: 'Telegram',
-    description: 'Telegram Bot Webhook，支持文本消息接收和 sendMessage 回复。',
+    descriptionKey: 'settings.agentWorkspace.connectorTelegramDescription',
     supportsThreads: false,
     supportsMentions: false,
     supportsAttachments: true,
@@ -89,7 +97,7 @@ export const BUILTIN_CONNECTORS: ConnectorDefinition[] = [
   {
     id: 'custom',
     name: 'Custom Webhook',
-    description: '自定义 JSON Webhook，可作为内部 IM 网关或 OpenClaw 风格桥接入口。',
+    descriptionKey: 'settings.agentWorkspace.connectorCustomDescription',
     supportsThreads: true,
     supportsMentions: true,
     supportsAttachments: true,
@@ -100,6 +108,17 @@ export const BUILTIN_CONNECTORS: ConnectorDefinition[] = [
     ]
   }
 ]
+
+function localizeConnector (connector: LocalizedConnectorDefinition): ConnectorDefinition {
+  return {
+    ...connector,
+    description: t(connector.descriptionKey),
+    credentialFields: connector.credentialFields.map(({ labelKey, ...field }) => ({
+      ...field,
+      label: labelKey ? t(labelKey) : field.label
+    }))
+  }
+}
 
 function createBindingId (): string {
   return `binding_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
@@ -144,7 +163,7 @@ export class ChannelBindingStore {
   }
 
   listConnectors (): ConnectorDefinition[] {
-    return BUILTIN_CONNECTORS.map(item => ({ ...item }))
+    return BUILTIN_CONNECTORS.map(localizeConnector)
   }
 
   private readAll (): ChannelBinding[] {

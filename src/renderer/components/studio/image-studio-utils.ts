@@ -152,11 +152,11 @@ export function normalizeCustomSize (width: number, height: number): string | nu
 }
 
 /** Read a File into a base64 data URL. */
-export function fileToDataUrl (file: File): Promise<string> {
+export function fileToDataUrl (file: File, fallbackErrorMessage: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(reader.error ?? new Error('读取文件失败'))
+    reader.onerror = () => reject(reader.error ?? new Error(fallbackErrorMessage))
     reader.readAsDataURL(file)
   })
 }
