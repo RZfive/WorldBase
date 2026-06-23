@@ -46,7 +46,8 @@ import {
   getLatestVisibleTodoItems,
   getMessageTextContent,
   hasRenderableContent,
-  markAssistantMessageStopped
+  markAssistantMessageStopped,
+  type AssistantStopCopy
 } from './message-runtime'
 import {
   formatConversationSubtitle,
@@ -152,6 +153,7 @@ const sharedBackgroundStreamMessages = new Map<string, BackgroundStreamState>()
 const sharedActiveCleanups = new Map<string, () => void>()
 const sharedActiveStreamSessionIds = new Map<string, string>()
 const sharedConversationTargets = new Map<string, string | null>()
+const LEGACY_FILE_PREVIEW_STAGE = '\u6587\u4ef6\u9884\u89c8'
 let sharedProviderChangeCleanup: (() => void) | null = null
 let sharedAuthRequestCleanup: (() => void) | null = null
 let sharedSudoPasswordRequestCleanup: (() => void) | null = null
@@ -191,6 +193,16 @@ function cleanupSharedChatPanelResources (): void {
 
 export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindings) {
   const { t, locale } = useI18n()
+  const getAssistantStopCopy = (): AssistantStopCopy => ({
+    stage: t('chatUi.toolStageStopped'),
+    detail: t('chatUi.generationStoppedByUser'),
+    content: t('chatUi.stoppedMessage')
+  })
+  const formatAttachmentConversationTitle = (attachmentNames: string[]) => {
+    const names = attachmentNames.join(t('chatUi.attachmentNameSeparator'))
+    return t('chatUi.attachmentConversationTitle', { names })
+  }
+  const getNoResponseText = () => t('chatUi.noResponse')
   const messages = sharedMessages
   const inputText = sharedInputText
   const conversations = sharedConversations
@@ -1118,7 +1130,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   async function startOptimizationConversation (ctx: Record<string, unknown>) {
     const projectId = typeof ctx.id === 'string' ? ctx.id : null
-    const name = String(ctx.name || ctx.id || '未知项目')
+    const name = String(ctx.name || ctx.id || t('chatUi.unknownProject'))
     const projectRef = projectId ? `[[project:${projectId}|${name}]]` : ''
     const conversationId = generateId()
 
@@ -1144,7 +1156,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     setConversationTarget(conversationId, projectId)
 
     await doSaveConversation(conversationId, [], {
-      titleOverride: `优化 · ${name}`,
+      titleOverride: t('chatUi.optimizationConversationTitle', { name }),
       targetProjectId: projectId
     })
   }
@@ -1425,7 +1437,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     if (msgs.length === 0 && !options?.titleOverride && !options?.allowEmpty && !existingConversation) return
 
     const firstUserMsg = msgs.find(message => message.role === 'user')
-    const titleText = getConversationTitleText(firstUserMsg)
+    const titleText = getConversationTitleText(firstUserMsg, { attachmentTitle: formatAttachmentConversationTitle })
     const shouldKeepManualTitle = Boolean(existingConversation?.manualTitle && !options?.titleOverride)
     const resolvedTitle = options?.titleOverride || (shouldKeepManualTitle ? existingConversation?.title : '') || getPinnedContextTitle() || (titleText
       ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
@@ -1504,7 +1516,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
     const assistantMessage = findLatestAssistantMessage(targetMessages)
     if (assistantMessage) {
-      markAssistantMessageStopped(assistantMessage)
+      markAssistantMessageStopped(assistantMessage, getAssistantStopCopy())
     }
 
     releaseStreamSession(convId, sessionId)
@@ -1529,7 +1541,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
           }
 
           try {
-            const base64 = await readFileAsDataUrl(file)
+            const base64 = await readFileAsDataUrl(file, t('chatUi.readFileFailed', { name: file.name }))
             pendingImages.value.push({
               base64,
               mimeType: file.type || 'image/png'
@@ -1542,7 +1554,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         }
 
         try {
-          const uploaded = await readUploadedAttachment(file)
+          const uploaded = await readUploadedAttachment(file, t('chatUi.readAttachmentUnsupported', { name: file.name }))
           pendingFiles.value.push({
             id: generateId(),
             name: uploaded.fileName,
@@ -1834,7 +1846,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       schedulePendingStreamFlush()
     }
 
-    const ensureActiveToolRun = (name = '执行中') => {
+    const ensureActiveToolRun = (name = t('chatUi.toolStageRunning')) => {
       const existing = findLastRunningToolRun(toolRuns, name) || findLastRunningToolRun(toolRuns)
       if (existing) return existing
       const created = createToolRun(name)
@@ -1875,10 +1887,11 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
               enqueueContentText(event.content)
             } else if (event.type === 'file_preview_start' && event.filePath) {
               flushPendingStreamText()
-              const activeToolRun = ensureActiveToolRun('文件生成')
-              const alreadyLogged = activeToolRun.progress.some(step => step.stage === '文件预览' && step.detail === event.filePath)
+              const filePreviewStage = t('chatUi.toolStageFilePreview')
+              const activeToolRun = ensureActiveToolRun(t('chatUi.toolStageFileGeneration'))
+              const alreadyLogged = activeToolRun.progress.some(step => (step.stage === filePreviewStage || step.stage === LEGACY_FILE_PREVIEW_STAGE) && step.detail === event.filePath)
               if (!alreadyLogged) {
-                activeToolRun.progress.push({ stage: '文件预览', detail: event.filePath })
+                activeToolRun.progress.push({ stage: filePreviewStage, detail: event.filePath })
                 syncAssistantToolRuns()
               }
               ensureBlocks(assistantMessage).push(createFilePreviewBlock(event.filePath))
@@ -1968,9 +1981,10 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
                   appendFinalContentBlock(assistantMessage, event.message.content)
                 }
                 if (!hasRenderableContent(assistantMessage)) {
-                  assistantMessage.content = '(无响应)'
-                  contentAccum = '(无响应)'
-                  ensureBlocks(assistantMessage).push(createContentBlock('(无响应)'))
+                  const noResponseText = getNoResponseText()
+                  assistantMessage.content = noResponseText
+                  contentAccum = noResponseText
+                  ensureBlocks(assistantMessage).push(createContentBlock(noResponseText))
                 }
                 if (event.thinking && !assistantMessage.thinking) {
                   assistantMessage.thinking = event.thinking
@@ -1987,18 +2001,18 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
                 const activeToolRun = findLastRunningToolRun(toolRuns)
                 if (activeToolRun) {
                   activeToolRun.status = 'failed'
-                  activeToolRun.progress.push({ stage: '错误', detail: event.error })
+                  activeToolRun.progress.push({ stage: t('chatUi.toolStageError'), detail: event.error })
                   syncAssistantToolRuns()
                 }
                 finalizePendingAuthBlocks(assistantMessage)
-                setAssistantErrorState(assistantMessage, event.error || '流式响应失败，但未返回具体错误信息', getMessageTextContent)
+                setAssistantErrorState(assistantMessage, event.error || t('chatUi.streamFailedUnknown'), getMessageTextContent)
               } finally {
                 finishSession()
               }
             } else if (event.type === 'stopped') {
               try {
                 flushPendingStreamText()
-                markAssistantMessageStopped(assistantMessage)
+                markAssistantMessageStopped(assistantMessage, getAssistantStopCopy())
                 syncAssistantToolRuns()
               } finally {
                 finishSession(true)
@@ -2011,7 +2025,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
             const activeToolRun = findLastRunningToolRun(toolRuns)
             if (activeToolRun) {
               activeToolRun.status = 'failed'
-              activeToolRun.progress.push({ stage: '渲染错误', detail: (err as Error).message })
+              activeToolRun.progress.push({ stage: t('chatUi.toolStageRenderError'), detail: (err as Error).message })
               syncAssistantToolRuns()
             }
 
@@ -2044,8 +2058,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
         if (streamingConvIds.has(convId)) {
           releaseStreamSession(convId, sessionId)
           if (!hasRenderableContent(assistantMessage)) {
-            assistantMessage.content = '(无响应)'
-            ensureBlocks(assistantMessage).push(createContentBlock('(无响应)'))
+            const noResponseText = getNoResponseText()
+            assistantMessage.content = noResponseText
+            ensureBlocks(assistantMessage).push(createContentBlock(noResponseText))
           }
           finalizePendingAuthBlocks(assistantMessage)
           void doSaveConversation(convId, targetMessages)
@@ -2061,7 +2076,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
           body: JSON.stringify({ messages: chatMessages })
         })
         const response = await res.json() as { content?: string }
-        assistantMessage.content = response.content || '(无响应)'
+        assistantMessage.content = response.content || getNoResponseText()
         ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
         finalizePendingAuthBlocks(assistantMessage)
         activeStreamSessionIds.delete(convId)

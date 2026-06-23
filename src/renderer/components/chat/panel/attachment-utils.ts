@@ -18,11 +18,11 @@ export function isImageAttachment (file: File): boolean {
   return file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name)
 }
 
-export async function readFileAsDataUrl (file: File): Promise<string> {
+export async function readFileAsDataUrl (file: File, fallbackErrorMessage?: string): Promise<string> {
   return await new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(reader.result as string)
-    reader.onerror = () => reject(reader.error || new Error(`无法读取文件：${file.name}`))
+    reader.onerror = () => reject(reader.error || new Error(fallbackErrorMessage || `Unable to read file: ${file.name}`))
     reader.readAsDataURL(file)
   })
 }
@@ -31,7 +31,7 @@ async function readFileAsUint8Array (file: File): Promise<Uint8Array> {
   return new Uint8Array(await file.arrayBuffer())
 }
 
-export async function readUploadedAttachment (file: File): Promise<UploadedAttachmentResult> {
+export async function readUploadedAttachment (file: File, unsupportedErrorMessage?: string): Promise<UploadedAttachmentResult> {
   if (window.electronAPI?.readUploadedAttachmentBuffer) {
     const bytes = await readFileAsUint8Array(file)
     return window.electronAPI.readUploadedAttachmentBuffer({
@@ -46,7 +46,7 @@ export async function readUploadedAttachment (file: File): Promise<UploadedAttac
     return window.electronAPI.readUploadedAttachmentFile(filePath)
   }
 
-  throw new Error(`当前环境不支持读取附件：${file.name}`)
+  throw new Error(unsupportedErrorMessage || `This environment does not support reading attachments: ${file.name}`)
 }
 
 export function trimPreviewText (content: string, maxLength = MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH): string {

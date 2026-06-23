@@ -7,6 +7,32 @@ import {
 } from './message-blocks'
 import type { AuthRequestPayload, ChatMessage, ChatMessageBlock, MessageContent, TodoItem, ToolRun } from './types'
 
+export interface AssistantStopCopy {
+  stage: string
+  detail: string
+  content: string
+}
+
+interface ConversationTitleFormatters {
+  attachmentTitle?: (attachmentNames: string[]) => string
+}
+
+const LEGACY_STOPPED_STAGE = '\u5df2\u505c\u6b62'
+const LEGACY_STOPPED_CONTENT = '(\u5df2\u505c\u6b62)'
+const DEFAULT_STOP_COPY: AssistantStopCopy = {
+  stage: 'Stopped',
+  detail: 'The user stopped this generation',
+  content: '(Stopped)'
+}
+
+function isStoppedStage (stage: string, stoppedStage = DEFAULT_STOP_COPY.stage): boolean {
+  return stage === stoppedStage || stage === DEFAULT_STOP_COPY.stage || stage === LEGACY_STOPPED_STAGE
+}
+
+function includesStoppedContent (content: string, stoppedContent = DEFAULT_STOP_COPY.content): boolean {
+  return content.includes(stoppedContent) || content.includes(DEFAULT_STOP_COPY.content) || content.includes(LEGACY_STOPPED_CONTENT)
+}
+
 export function findLatestAssistantMessage (chatMessages: ChatMessage[]): ChatMessage | null {
   for (let index = chatMessages.length - 1; index >= 0; index--) {
     if (chatMessages[index].role === 'assistant') {
@@ -52,7 +78,7 @@ export function hasRenderableContent (msg: ChatMessage): boolean {
   })
 }
 
-export function getConversationTitleText (msg?: ChatMessage): string {
+export function getConversationTitleText (msg?: ChatMessage, formatters: ConversationTitleFormatters = {}): string {
   if (!msg) return ''
 
   if (Array.isArray(msg.blocks) && msg.blocks.length > 0) {
@@ -73,7 +99,7 @@ export function getConversationTitleText (msg?: ChatMessage): string {
       .map(block => block.fileName)
 
     if (attachmentNames.length > 0) {
-      return `附件：${attachmentNames.join('、')}`
+      return formatters.attachmentTitle?.(attachmentNames) || `Attachments: ${attachmentNames.join(', ')}`
     }
   }
 
@@ -109,37 +135,37 @@ export function finalizePendingAuthBlocks (message: ChatMessage): void {
   }
 }
 
-export function markToolRunStopped (toolRun: ToolRun): void {
+export function markToolRunStopped (toolRun: ToolRun, copy: AssistantStopCopy = DEFAULT_STOP_COPY): void {
   toolRun.status = 'completed'
-  const alreadyMarked = toolRun.progress.some(step => step.stage === '已停止')
+  const alreadyMarked = toolRun.progress.some(step => isStoppedStage(step.stage, copy.stage))
   if (!alreadyMarked) {
-    toolRun.progress.push({ stage: '已停止', detail: '用户中断了本次生成' })
+    toolRun.progress.push({ stage: copy.stage, detail: copy.detail })
   }
 }
 
-export function markAssistantMessageStopped (message: ChatMessage): void {
+export function markAssistantMessageStopped (message: ChatMessage, copy: AssistantStopCopy = DEFAULT_STOP_COPY): void {
   for (const toolRun of message.toolRuns || []) {
     if (toolRun.status === 'running') {
-      markToolRunStopped(toolRun)
+      markToolRunStopped(toolRun, copy)
     }
   }
 
   for (const block of ensureBlocks(message)) {
     if (block.kind === 'tool' && block.toolRun.status === 'running') {
-      markToolRunStopped(block.toolRun)
+      markToolRunStopped(block.toolRun, copy)
     }
   }
 
   finalizePendingAuthBlocks(message)
 
   if (!hasRenderableContent(message)) {
-    message.content = '(已停止)'
-    ensureBlocks(message).push(createContentBlock('(已停止)'))
+    message.content = copy.content
+    ensureBlocks(message).push(createContentBlock(copy.content))
   }
 }
 
-export function isAssistantMessageStopped (message: ChatMessage): boolean {
-  if (getMessageTextContent(message.content).includes('(已停止)')) {
+export function isAssistantMessageStopped (message: ChatMessage, copy: AssistantStopCopy = DEFAULT_STOP_COPY): boolean {
+  if (includesStoppedContent(getMessageTextContent(message.content), copy.content)) {
     return true
   }
 
@@ -149,7 +175,7 @@ export function isAssistantMessageStopped (message: ChatMessage): boolean {
         ? message.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'tool' }> => block.kind === 'tool').map(block => block.toolRun)
         : [])
 
-  return toolRuns.some(toolRun => toolRun.progress.some(step => step.stage === '已停止'))
+  return toolRuns.some(toolRun => toolRun.progress.some(step => isStoppedStage(step.stage, copy.stage)))
 }
 
 export function buildInterruptedRunSummary (history: ChatMessage[]): string | null {
@@ -186,7 +212,7 @@ export function buildInterruptedRunSummary (history: ChatMessage[]): string | nu
     for (const toolRun of toolRuns) {
       const statusLabel = toolRun.status === 'failed'
         ? '失败'
-        : toolRun.progress.some(step => step.stage === '已停止')
+        : toolRun.progress.some(step => isStoppedStage(step.stage))
           ? '已中断'
           : toolRun.status === 'completed'
             ? '已完成'

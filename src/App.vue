@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import QRCode from 'qrcode'
 import ChatPanel from './renderer/components/chat/ChatPanel.vue'
 import Launchpad from './renderer/components/launchpad/Launchpad.vue'
@@ -64,6 +65,7 @@ interface ProjectListItem {
 
 const standaloneProjectId = new URLSearchParams(window.location.search).get('projectWindow')
 const isStandaloneProjectWindow = Boolean(standaloneProjectId)
+const { t } = useI18n()
 
 type MainView = 'chat' | 'app' | 'source' | 'settings' | 'studio'
 type AppChatPresentation = 'full' | 'bubble' | 'overlay'
@@ -133,7 +135,7 @@ const activeEmbeddedProjectId = ref<string | null>(null)
 const sourceProject = ref<Record<string, unknown> | null>(null)
 const showLaunchpad = ref(false)
 const chatSurfaceStatus = ref<ChatSurfaceStatusSummary>({
-  contextLabel: '💬 新对话',
+  contextLabel: t('appShell.newChatContext'),
   contextDetail: 'The World AI',
   isLoading: false,
   pendingAuthCount: 0,
@@ -333,7 +335,7 @@ async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelo
   try {
     const handle = getActiveBrowserAutomationHandle()
     if (!handle) {
-      throw new Error('当前没有可供 AI 操作的活动网页，请先打开并聚焦一个内嵌网页。')
+      throw new Error(t('appShell.pageAutomationNoActivePage'))
     }
 
     const result = payload.request.type === 'snapshot'
@@ -349,7 +351,7 @@ async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelo
     response = {
       requestId: payload.requestId,
       ok: false,
-      error: error instanceof Error ? error.message : '页面操作失败'
+      error: error instanceof Error ? error.message : t('appShell.pageAutomationFailed')
     }
   }
 
@@ -1224,7 +1226,7 @@ onUnmounted(() => {
               <div v-show="activeEmbeddedProjectId === appId" class="embedded-slot">
                 <div v-if="appState.loading" class="embedded-loading">
                   <span class="embedded-spinner">⏳</span>
-                  <p>应用启动中…</p>
+                  <p>{{ $t('appShell.embeddedAppStarting') }}</p>
                 </div>
                 <iframe
                   v-else-if="appState.kind === 'project' && appState.url"
@@ -1246,9 +1248,9 @@ onUnmounted(() => {
                   @context-menu="showBrowserAppCtx"
                 />
                 <div v-else class="embedded-unavailable">
-                  <p>应用未能启动</p>
-                  <button v-if="appState.kind === 'project'" class="embedded-retry-btn" @click="openEmbeddedProject(appId)">🔄 重试</button>
-                  <button v-else class="embedded-retry-btn" @click="openChat">↩️ 返回对话</button>
+                  <p>{{ $t('appShell.embeddedAppStartFailed') }}</p>
+                  <button v-if="appState.kind === 'project'" class="embedded-retry-btn" @click="openEmbeddedProject(appId)">🔄 {{ $t('common.retry') }}</button>
+                  <button v-else class="embedded-retry-btn" @click="openChat">{{ $t('appShell.returnToChat') }}</button>
                 </div>
               </div>
             </template>
@@ -1258,11 +1260,11 @@ onUnmounted(() => {
             <div class="chat-shell-body">
               <div v-if="chatShellMode === 'overlay' && activeBrowserPageSurface" class="chat-overlay-banner">
                 <div class="chat-overlay-banner-copy">
-                  <span class="chat-overlay-kicker">页面操作对话</span>
+                  <span class="chat-overlay-kicker">{{ $t('appShell.pageOperationChat') }}</span>
                   <span class="chat-overlay-title">{{ activeBrowserPageSurface.title }}</span>
-                  <span class="chat-overlay-subtitle">{{ activeBrowserPageSurface.origin || activeBrowserPageSurface.url || '当前应用页面' }}</span>
+                  <span class="chat-overlay-subtitle">{{ activeBrowserPageSurface.origin || activeBrowserPageSurface.url || $t('appShell.currentAppPage') }}</span>
                 </div>
-                <button class="chat-overlay-collapse-btn" type="button" @click="collapsePageChatToBubble">收起圆球</button>
+                <button class="chat-overlay-collapse-btn" type="button" @click="collapsePageChatToBubble">{{ $t('appShell.collapseToBubble') }}</button>
               </div>
 
               <div class="chat-shell-panel">
@@ -1319,22 +1321,22 @@ onUnmounted(() => {
           @click.stop
         >
           <template v-if="dockCtx.app?.kind === 'project'">
-            <div class="dock-ctx-item" @click="dockOpenWindow(dockCtx.app!)">↗️ 独立窗口打开</div>
-            <div class="dock-ctx-item" @click="dockOpenSource(dockCtx.app!)">📁 打开源码</div>
-            <div class="dock-ctx-item" @click="dockOptimizeInChat(dockCtx.app!)">💬 继续优化</div>
-            <div class="dock-ctx-item" @click="dockShowLanAccess(dockCtx.app!)">📱 局域网访问</div>
+            <div class="dock-ctx-item" @click="dockOpenWindow(dockCtx.app!)">{{ $t('appShell.dockOpenIndependentWindow') }}</div>
+            <div class="dock-ctx-item" @click="dockOpenSource(dockCtx.app!)">{{ $t('appShell.dockOpenSource') }}</div>
+            <div class="dock-ctx-item" @click="dockOptimizeInChat(dockCtx.app!)">{{ $t('appShell.dockContinueOptimize') }}</div>
+            <div class="dock-ctx-item" @click="dockShowLanAccess(dockCtx.app!)">{{ $t('appShell.dockLanAccess') }}</div>
             <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-divider"></div>
-            <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-item dock-ctx-danger" @click="dockStopApp(dockCtx.app!)">⏹️ 停止</div>
+            <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-item dock-ctx-danger" @click="dockStopApp(dockCtx.app!)">{{ $t('appShell.dockStop') }}</div>
             <div class="dock-ctx-divider"></div>
-            <div class="dock-ctx-item" @click="toggleDockPin(dockCtx.app!)">{{ isDockAppPinned(dockCtx.app!) ? '📌 从 Dock 取消固定' : '📌 固定到 Dock' }}</div>
+            <div class="dock-ctx-item" @click="toggleDockPin(dockCtx.app!)">{{ isDockAppPinned(dockCtx.app!) ? $t('appShell.dockUnpin') : $t('appShell.dockPin') }}</div>
           </template>
           <template v-else>
-            <div class="dock-ctx-item" @click="dockSaveBrowserApp(dockCtx.app!)">{{ dockCtx.app?.savedToLaunchpad ? '💾 更新启动台条目' : '📌 添加到启动台' }}</div>
-            <div v-if="dockCtx.app?.savedToLaunchpad" class="dock-ctx-item" @click="dockRemoveBrowserApp(dockCtx.app!)">🗑️ 从启动台移除</div>
+            <div class="dock-ctx-item" @click="dockSaveBrowserApp(dockCtx.app!)">{{ dockCtx.app?.savedToLaunchpad ? $t('appShell.dockUpdateLaunchpadItem') : $t('appShell.dockAddToLaunchpad') }}</div>
+            <div v-if="dockCtx.app?.savedToLaunchpad" class="dock-ctx-item" @click="dockRemoveBrowserApp(dockCtx.app!)">{{ $t('appShell.dockRemoveFromLaunchpad') }}</div>
             <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-divider"></div>
-            <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-item dock-ctx-danger" @click="closeDockApp(dockCtx.app!.id)">✖️ 关闭网页</div>
+            <div v-if="isDockAppRunning(dockCtx.app!)" class="dock-ctx-item dock-ctx-danger" @click="closeDockApp(dockCtx.app!.id)">{{ $t('appShell.dockCloseWebPage') }}</div>
             <div class="dock-ctx-divider"></div>
-            <div class="dock-ctx-item" @click="toggleDockPin(dockCtx.app!)">{{ isDockAppPinned(dockCtx.app!) ? '📌 从 Dock 取消固定' : '📌 固定到 Dock' }}</div>
+            <div class="dock-ctx-item" @click="toggleDockPin(dockCtx.app!)">{{ isDockAppPinned(dockCtx.app!) ? $t('appShell.dockUnpin') : $t('appShell.dockPin') }}</div>
           </template>
         </div>
       </Teleport>
@@ -1346,15 +1348,15 @@ onUnmounted(() => {
         >
           <div class="lan-modal">
             <div class="lan-modal-header">
-              <span>📱 局域网访问 — {{ lanModal.appName }}</span>
+              <span>{{ $t('appShell.lanAccessTitle', { name: lanModal.appName }) }}</span>
               <button class="lan-modal-close" @click="closeLanModal">✕</button>
             </div>
             <div class="lan-modal-body">
               <img v-if="lanModal.qrDataUrl" :src="lanModal.qrDataUrl" class="lan-qr-img" alt="QR Code" />
-              <p class="lan-modal-hint">手机扫描二维码或复制下方链接</p>
+              <p class="lan-modal-hint">{{ $t('appShell.lanAccessHint') }}</p>
               <div class="lan-url-row">
                 <code class="lan-url-text" @click="copyLanUrl">{{ lanModal.lanUrl || lanModal.proxyUrl }}</code>
-                <button class="lan-copy-btn" @click="copyLanUrl">{{ lanModal.copied ? '✅ 已复制' : '📋 复制' }}</button>
+                <button class="lan-copy-btn" @click="copyLanUrl">{{ lanModal.copied ? $t('appShell.copied') : $t('appShell.copy') }}</button>
               </div>
             </div>
           </div>

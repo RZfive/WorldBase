@@ -13,7 +13,7 @@ import { readDocumentRenderAsset } from '../../src/main/document-preview/documen
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../../src/main/settings/settings-transfer.js'
 import { runImageStudioRequest } from '../../src/main/settings/image-generation-service.js'
 import type { AIExecutionAuthMode, AIExecutionPreferences, AIProvidersConfig, LanguagePreference, LaunchpadLayout, PinnedDockApp, PortableSettingsConfig, WebAppShortcut } from '../../src/main/settings/settings-store.js'
-import { setMainLocale } from '../../src/main/i18n/main-i18n.js'
+import { setMainLocale, t } from '../../src/main/i18n/main-i18n.js'
 import type { Conversation } from '../../src/main/settings/chat-history.js'
 import type { ImageLibraryData, ImageLibraryEntry, ImageLibraryFolderCard, ImageLibraryPage, ImageLibraryQuery, ImageStudioMode } from '../../src/main/settings/image-library-store.js'
 import type { ImageStudioGenerateRequest } from '../../src/shared/image-studio-types.js'
@@ -716,7 +716,7 @@ export function setupIPC (): void {
     const finalDefaultName = safeDefaultName.includes('.') ? safeDefaultName : `${safeDefaultName}.${extension}`
 
     const dialogOptions = {
-      title: '保存图片',
+      title: t('mainDialog.saveImageTitle'),
       defaultPath: finalDefaultName,
       filters: [
         {
@@ -750,8 +750,8 @@ export function setupIPC (): void {
     n?: number
     inputImages?: string[]
   }): Promise<{ ok: true; entries: ImageLibraryEntry[] } | { ok: false; error: string }> => {
-    if (!imageLibraryStore) return { ok: false, error: '图片库未初始化' }
-    if (!settingsStore) return { ok: false, error: '设置未初始化' }
+      if (!imageLibraryStore) return { ok: false, error: t('mainDialog.imageLibraryNotInitialized') }
+      if (!settingsStore) return { ok: false, error: t('mainDialog.settingsNotInitialized') }
     return runImageStudioRequest(req, {
       getProvidersConfig: () => settingsStore!.getProviders(),
       imageLibraryStore
@@ -794,16 +794,16 @@ export function setupIPC (): void {
 
   ipcMain.handle('image:library:exportFolder', async (event: IpcMainInvokeEvent, folderName: string): Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; error?: string }> => {
     try {
-      if (!imageLibraryStore) throw new Error('图片库未初始化')
+      if (!imageLibraryStore) throw new Error(t('mainDialog.imageLibraryNotInitialized'))
       const senderWindow = getSenderWindow(event) || getMainWindow()
       const filePaths = imageLibraryStore.folderImagePaths(folderName ?? '')
       if (filePaths.length === 0) {
-        return { error: '该分组下没有可导出的图片' }
+        return { error: t('mainDialog.noImagesToExportInFolder') }
       }
 
-      const safeFolderLabel = (folderName?.trim() || '未分组').replace(/[\\/:*?"<>|]/g, '_')
+      const safeFolderLabel = (folderName?.trim() || t('mainDialog.ungroupedFolder')).replace(/[\\/:*?"<>|]/g, '_')
       const dialogOptions = {
-        title: '导出分组为 ZIP',
+        title: t('mainDialog.exportFolderZipTitle'),
         defaultPath: `the-world-${safeFolderLabel}.zip`,
         filters: [{ name: 'ZIP', extensions: ['zip'] }]
       }
@@ -831,7 +831,7 @@ export function setupIPC (): void {
       await fs.writeFile(result.filePath, buffer)
       return { success: true, filePath: result.filePath, count: filePaths.length }
     } catch (error) {
-      return { error: error instanceof Error ? error.message : '导出失败' }
+      return { error: error instanceof Error ? error.message : t('mainDialog.exportFailed') }
     }
   })
 
@@ -851,10 +851,10 @@ export function setupIPC (): void {
     try {
       const providersConfig = settingsStore!.getProviders()
       const provider = providersConfig.providers.find(p => p.id === req.providerId)
-      if (!provider) throw new Error('未找到所选供应商')
-      if (!provider.apiKey) throw new Error('所选供应商未配置 API Key')
+      if (!provider) throw new Error(t('mainDialog.providerNotFound'))
+      if (!provider.apiKey) throw new Error(t('mainDialog.providerApiKeyMissing'))
       const model = provider.models.includes(req.model) ? req.model : provider.activeModel
-      if (!model) throw new Error('该供应商未配置可用模型')
+      if (!model) throw new Error(t('mainDialog.providerNoModels'))
 
       const aiProvider = new OpenAIProvider()
       aiProvider.setApiKey(provider.apiKey)
@@ -872,11 +872,11 @@ export function setupIPC (): void {
 
       const result = await aiProvider.chatCompletion(messages)
       const optimized = typeof result.content === 'string' ? result.content.trim() : ''
-      if (!optimized) throw new Error('AI未返回有效结果')
+      if (!optimized) throw new Error(t('mainDialog.aiNoValidResult'))
 
       return { ok: true, optimizedPrompt: optimized }
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : '提示词优化失败' }
+      return { ok: false, error: error instanceof Error ? error.message : t('mainDialog.promptOptimizeFailed') }
     }
   })
 
@@ -886,7 +886,7 @@ export function setupIPC (): void {
     const finalDefaultName = safeDefaultName.toLowerCase().endsWith('.md') ? safeDefaultName : `${safeDefaultName}.md`
 
     const dialogOptions = {
-      title: '导出 Markdown',
+      title: t('mainDialog.exportMarkdownTitle'),
       defaultPath: finalDefaultName,
       filters: [
         {
@@ -913,15 +913,15 @@ export function setupIPC (): void {
     const stat = await fs.stat(resolvedPath)
 
     if (!stat.isFile()) {
-      throw new Error(`路径不是一个文件: ${resolvedPath}`)
+      throw new Error(t('mainDialog.notAFile', { path: resolvedPath }))
     }
 
     if (stat.size > MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
-      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)} MB)，最大支持 10 MB`)
+      throw new Error(t('mainDialog.fileTooLargeTenMb', { size: (stat.size / 1024 / 1024).toFixed(1) }))
     }
 
     if (!isOfficeFile(resolvedPath)) {
-      throw new Error(`暂不支持的 Office 文件格式: ${path.extname(resolvedPath) || 'unknown'}`)
+      throw new Error(t('mainDialog.unsupportedOfficeFormat', { extension: path.extname(resolvedPath) || 'unknown' }))
     }
 
     const result = await readOfficeFile(resolvedPath)
@@ -952,12 +952,12 @@ export function setupIPC (): void {
   ipcMain.handle('document:import', async (_event: IpcMainInvokeEvent, filePath: string) => {
     const resolvedPath = path.resolve(filePath)
     const stat = await fs.stat(resolvedPath)
-    if (!stat.isFile()) throw new Error(`路径不是一个文件: ${resolvedPath}`)
+    if (!stat.isFile()) throw new Error(t('mainDialog.notAFile', { path: resolvedPath }))
     if (stat.size > MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES) {
-      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)} MB)，文档工作台最大支持 100 MB`)
+      throw new Error(t('mainDialog.fileTooLargeDocumentWorkbench', { size: (stat.size / 1024 / 1024).toFixed(1) }))
     }
     if (!isSupportedDocument(resolvedPath)) {
-      throw new Error(`不支持的文档格式: ${path.extname(resolvedPath) || 'unknown'}`)
+      throw new Error(t('mainDialog.unsupportedDocumentFormat', { extension: path.extname(resolvedPath) || 'unknown' }))
     }
     const artifact = await parseDocument(resolvedPath)
     documentStore!.addArtifact(artifact)
@@ -967,9 +967,9 @@ export function setupIPC (): void {
   ipcMain.handle('document:pickFiles', async (event: IpcMainInvokeEvent) => {
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const dialogOptions = {
-      title: '导入文档',
+      title: t('mainDialog.importDocumentTitle'),
       filters: [
-        { name: '文档', extensions: ['pdf', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'] }
+        { name: t('mainDialog.documentFilterName'), extensions: ['pdf', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'] }
       ],
       properties: ['openFile' as const, 'multiSelections' as const]
     }
@@ -983,9 +983,9 @@ export function setupIPC (): void {
   ipcMain.handle('office:pickFiles', async (event: IpcMainInvokeEvent) => {
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const dialogOptions = {
-      title: '上传 Office 文件',
+      title: t('mainDialog.uploadOfficeTitle'),
       filters: [
-        { name: 'Office 文档', extensions: ['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'] }
+        { name: t('mainDialog.officeDocumentFilterName'), extensions: ['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'] }
       ],
       properties: ['openFile' as const, 'multiSelections' as const]
     }
@@ -1017,7 +1017,7 @@ export function setupIPC (): void {
   ipcMain.handle('document:openOriginal', async (_event: IpcMainInvokeEvent, artifactId: string) => {
     const artifact = documentStore!.getArtifact(artifactId)
     if (!artifact) {
-      return { success: false, error: `文档不存在: ${artifactId}` }
+      return { success: false, error: t('mainDialog.documentNotFound', { id: artifactId }) }
     }
 
     const error = await shell.openPath(artifact.filePath)
@@ -1057,7 +1057,7 @@ export function setupIPC (): void {
   ipcMain.handle('folderWorkspace:pickFolder', async (event: IpcMainInvokeEvent): Promise<FolderWorkspacePickResult> => {
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const dialogOptions = {
-      title: '选择代码工作区文件夹',
+      title: t('mainDialog.chooseCodeWorkspaceFolderTitle'),
       properties: ['openDirectory' as const]
     }
     const result = senderWindow
@@ -1138,10 +1138,10 @@ export function setupIPC (): void {
     const meta = await projectFS!.getProjectMeta(projectId)
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const dialogOptions = {
-      title: '导出应用包',
+      title: t('mainDialog.exportAppPackageTitle'),
       defaultPath: createProjectPackageDefaultName((meta.name as string) || projectId, projectId),
       filters: [
-        { name: 'The World 应用包', extensions: [PROJECT_PACKAGE_EXTENSION] }
+        { name: t('mainDialog.appPackageFilterName'), extensions: [PROJECT_PACKAGE_EXTENSION] }
       ]
     }
 
@@ -1166,9 +1166,9 @@ export function setupIPC (): void {
   ipcMain.handle('projects:importPackage', async (event: IpcMainInvokeEvent) => {
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const dialogOptions = {
-      title: '导入应用包',
+      title: t('mainDialog.importAppPackageTitle'),
       filters: [
-        { name: 'The World 应用包', extensions: [PROJECT_PACKAGE_EXTENSION] }
+        { name: t('mainDialog.appPackageFilterName'), extensions: [PROJECT_PACKAGE_EXTENSION] }
       ],
       properties: ['openFile' as const, 'multiSelections' as const]
     }
@@ -1461,10 +1461,10 @@ export function setupIPC (): void {
     const now = new Date()
     const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
     const dialogOptions = {
-      title: '导出加密配置',
+      title: t('mainDialog.exportEncryptedConfigTitle'),
       defaultPath: `the-world-config-${stamp}.${PORTABLE_SETTINGS_EXTENSION}`,
       filters: [
-        { name: 'The World 配置包', extensions: [PORTABLE_SETTINGS_EXTENSION] }
+        { name: t('mainDialog.configPackageFilterName'), extensions: [PORTABLE_SETTINGS_EXTENSION] }
       ]
     }
 
@@ -1484,9 +1484,9 @@ export function setupIPC (): void {
   ipcMain.handle('settings:importConfig', async (event: IpcMainInvokeEvent) => {
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const dialogOptions = {
-      title: '导入加密配置',
+      title: t('mainDialog.importEncryptedConfigTitle'),
       filters: [
-        { name: 'The World 配置包', extensions: [PORTABLE_SETTINGS_EXTENSION] }
+        { name: t('mainDialog.configPackageFilterName'), extensions: [PORTABLE_SETTINGS_EXTENSION] }
       ],
       properties: ['openFile' as const]
     }
@@ -1613,8 +1613,8 @@ export function setupIPC (): void {
 
   ipcMain.handle('skills:import', async () => {
     const result = await dialog.showOpenDialog(getMainWindow()!, {
-      title: '导入 Skill 文件或文件夹',
-      filters: [{ name: 'Skill 文件', extensions: ['md', 'txt', 'zip'] }],
+      title: t('mainDialog.importSkillTitle'),
+      filters: [{ name: t('mainDialog.skillFileFilterName'), extensions: ['md', 'txt', 'zip'] }],
       properties: ['openFile', 'openDirectory', 'multiSelections']
     })
     if (result.canceled || result.filePaths.length === 0) return []
