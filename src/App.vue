@@ -23,6 +23,7 @@ import type {
   PageAutomationResponseEnvelope
 } from './shared/page-automation-types'
 import { applyThemePreference, getAppliedThemePreference, watchSystemThemeChange } from './renderer/utils/theme'
+import { applyChatFontPreferences, loadChatFontPreferences } from './renderer/utils/chat-font-preferences'
 import { createWebAppId, getWebAppNameFromUrl, normalizeWebUrlInput, type SavedWebApp } from './renderer/utils/web-app'
 
 interface RunningApp {
@@ -1115,6 +1116,13 @@ onMounted(async () => {
       applyThemePreference('system')
     }
   })
+
+  try {
+    const chatFontPreferences = await loadChatFontPreferences()
+    applyChatFontPreferences(chatFontPreferences)
+  } catch {
+    // Keep the CSS defaults on failure.
+  }
 
   if (isStandaloneProjectWindow) return
 

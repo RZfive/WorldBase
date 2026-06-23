@@ -148,13 +148,13 @@ const statusText = computed(() => {
 .auth-request-badge {
   display: inline-flex;
   align-items: center;
-  font-size: 0.82rem;
+  font-size: 0.82em;
   font-weight: 700;
   color: var(--app-text-strong);
 }
 
 .auth-request-status {
-  font-size: 0.74rem;
+  font-size: 0.74em;
 }
 
 .auth-request-status.pending { color: #f59e0b; font-weight: 600; }
@@ -163,7 +163,7 @@ const statusText = computed(() => {
 
 .auth-request-title {
   margin-top: 14px;
-  font-size: 0.88rem;
+  font-size: 0.88em;
 }
 
 .auth-request-detail {
@@ -173,7 +173,7 @@ const statusText = computed(() => {
   border-radius: 12px;
   background: var(--app-panel-subtle);
   color: var(--app-text-soft);
-  font-size: 0.82rem;
+  font-size: 0.82em;
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   line-height: 1.65;
   white-space: pre-wrap;
@@ -199,7 +199,7 @@ const statusText = computed(() => {
   padding: 0 18px;
   border: none;
   border-radius: 12px;
-  font-size: 0.86rem;
+  font-size: 0.86em;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;

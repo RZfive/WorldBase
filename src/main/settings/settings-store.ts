@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { t } from '../i18n/main-i18n.js'
 import type { AppUpdateAssetInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateNotes, AppUpdateProgress, AppUpdateState, AppUpdateStatus, AppUpdateWebsiteLinks } from '../../shared/app-update-types.js'
+import { CHAT_FONT_SIZE_MAX, CHAT_FONT_SIZE_MIN, DEFAULT_CHAT_FONT_SIZE } from '../../shared/chat-font-preferences.js'
 
 export interface AISettings {
   apiKey: string
@@ -98,6 +99,18 @@ export interface AIExecutionPreferences {
   enableAiLogging: boolean
 }
 
+/**
+ * Chat message font customization. `fontFamily` is empty for the app's default
+ * system font stack; otherwise a system font family name returned by the Local
+ * Font Access API. `fontSize` is the message body size in px, clamped to
+ * [CHAT_FONT_SIZE_MIN, CHAT_FONT_SIZE_MAX]. Older snapshots stored a coarse
+ * `fontSizePreset` bucket — `normalizeChatFontPreferences` migrates those.
+ */
+export interface ChatFontPreferences {
+  fontFamily: string
+  fontSize: number
+}
+
 export interface CostSettings {
   modelPricing: Array<{ model: string; inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }>
   budgetLimit: number | null
@@ -124,6 +137,7 @@ export interface PortableSettingsConfig {
   themePreference: ThemePreference
   languagePreference: LanguagePreference
   aiExecutionPreferences: AIExecutionPreferences
+  chatFontPreferences: ChatFontPreferences
   costSettings: CostSettings
   mcpServers: MCPServerConfig[]
   launchpadLayout: LaunchpadLayout
@@ -135,6 +149,18 @@ export interface PortableSettingsConfig {
 export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
   notifyOnTaskComplete: true,
   enableAiLogging: false
+}
+
+export const DEFAULT_CHAT_FONT_PREFERENCES: ChatFontPreferences = {
+  fontFamily: '',
+  fontSize: DEFAULT_CHAT_FONT_SIZE
+}
+
+/** Legacy coarse bucket → px, for migrating older portable config snapshots. */
+const FONT_SIZE_PRESET_TO_PX: Record<string, number> = {
+  small: 14,
+  medium: 16,
+  large: 18
 }
 
 export const DEFAULT_MODEL_CONTEXT_WINDOW = 100000
@@ -303,6 +329,41 @@ function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreference
     enableAiLogging: typeof input.enableAiLogging === 'boolean'
       ? input.enableAiLogging
       : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging
+  }
+}
+
+function clampChatFontSize (value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_CHAT_FONT_SIZE
+  const rounded = Math.round(value)
+  if (rounded < CHAT_FONT_SIZE_MIN) return CHAT_FONT_SIZE_MIN
+  if (rounded > CHAT_FONT_SIZE_MAX) return CHAT_FONT_SIZE_MAX
+  return rounded
+}
+
+function normalizeChatFontSize (value: unknown, legacyPreset: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return clampChatFontSize(value)
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value)
+    if (Number.isFinite(parsed)) return clampChatFontSize(parsed)
+  }
+  // Legacy coarse bucket from older portable config snapshots.
+  if (typeof legacyPreset === 'string' && FONT_SIZE_PRESET_TO_PX[legacyPreset] !== undefined) {
+    return FONT_SIZE_PRESET_TO_PX[legacyPreset]
+  }
+  return DEFAULT_CHAT_FONT_SIZE
+}
+
+function normalizeChatFontPreferences (value: unknown): ChatFontPreferences {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+  const rawFamily = typeof input.fontFamily === 'string' ? input.fontFamily.trim() : ''
+  // Strip stray quotes/commas a user (or a malformed import) might have introduced,
+  // so the value is always a bare family name.
+  const fontFamily = rawFamily.replace(/["',]/g, '').trim()
+  return {
+    fontFamily,
+    fontSize: normalizeChatFontSize(input.fontSize, input.fontSizePreset)
   }
 }
 
@@ -953,6 +1014,17 @@ export class SettingsStore {
     this.write({ aiExecutionPreferences: normalizeAIExecutionPreferences(preferences) })
   }
 
+  /** Get chat message font preferences. */
+  getChatFontPreferences (): ChatFontPreferences {
+    const settings = this.read()
+    return normalizeChatFontPreferences(settings.chatFontPreferences)
+  }
+
+  /** Save chat message font preferences. */
+  saveChatFontPreferences (preferences: ChatFontPreferences): void {
+    this.write({ chatFontPreferences: normalizeChatFontPreferences(preferences) })
+  }
+
   /** Get the persisted update source configuration. */
   getAppUpdateConfig (): AppUpdateConfig {
     const settings = this.read()
@@ -1005,6 +1077,7 @@ export class SettingsStore {
       themePreference: this.getThemePreference(),
       languagePreference: this.getLanguagePreference(),
       aiExecutionPreferences: this.getAIExecutionPreferences(),
+      chatFontPreferences: this.getChatFontPreferences(),
       costSettings: this.getCostSettings(),
       mcpServers: this.getMcpServers(),
       launchpadLayout: this.getLaunchpadLayout(),
@@ -1031,6 +1104,7 @@ export class SettingsStore {
       themePreference: normalizeThemePreference(config.themePreference),
       languagePreference: normalizeLanguagePreference(config.languagePreference),
       aiExecutionPreferences: normalizeAIExecutionPreferences(config.aiExecutionPreferences),
+      chatFontPreferences: normalizeChatFontPreferences(config.chatFontPreferences),
       costSettings: normalizeCostSettings(config.costSettings),
       mcpServers: normalizeMcpServers(config.mcpServers),
       launchpadLayout: normalizeLaunchpadLayout(config.launchpadLayout),

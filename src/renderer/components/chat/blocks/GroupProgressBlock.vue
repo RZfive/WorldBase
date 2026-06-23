@@ -135,7 +135,7 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
   display: inline-flex;
   align-items: center;
   color: #0369a1;
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -143,7 +143,7 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
 
 .group-progress-title {
   margin: 6px 0 0;
-  font-size: 0.98rem;
+  font-size: 0.98em;
   color: var(--app-text-strong);
 }
 
@@ -153,7 +153,7 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
   flex-wrap: wrap;
   gap: 8px;
   color: var(--app-text-muted);
-  font-size: 0.76rem;
+  font-size: 0.76em;
 }
 
 .group-progress-counters {
@@ -173,7 +173,7 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
   display: inline-flex;
   align-items: center;
   color: #0369a1;
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -182,7 +182,7 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
 .group-progress-request p {
   margin: 8px 0 0;
   color: var(--app-text);
-  font-size: 0.8rem;
+  font-size: 0.8em;
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -190,7 +190,7 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
 .group-progress-counter {
   padding: 3px 9px;
   border-radius: 999px;
-  font-size: 0.74rem;
+  font-size: 0.74em;
   font-weight: 700;
   background: transparent;
   border: 1px solid var(--app-border);
@@ -251,14 +251,14 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
 }
 
 .group-progress-item-name {
-  font-size: 0.84rem;
+  font-size: 0.84em;
   font-weight: 700;
   color: var(--app-text-strong);
 }
 
 .group-progress-item-meta {
   margin-top: 4px;
-  font-size: 0.75rem;
+  font-size: 0.75em;
   color: var(--app-text-muted);
 }
 
@@ -266,7 +266,7 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
   flex-shrink: 0;
   padding: 3px 9px;
   border-radius: 999px;
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 700;
   background: transparent;
   border: 1px solid var(--app-border);
@@ -303,14 +303,14 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
 }
 
 .group-progress-stage {
-  font-size: 0.78rem;
+  font-size: 0.78em;
   font-weight: 600;
   color: var(--app-text-strong);
 }
 
 .group-progress-summary,
 .group-progress-recent {
-  font-size: 0.77rem;
+  font-size: 0.77em;
   line-height: 1.55;
   color: var(--app-text);
 }

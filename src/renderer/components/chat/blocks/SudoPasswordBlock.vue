@@ -173,13 +173,13 @@ function truncate (str: string, max = 120): string {
 .sudo-badge {
   display: inline-flex;
   align-items: center;
-  font-size: 0.82rem;
+  font-size: 0.82em;
   font-weight: 700;
   color: var(--app-text-strong);
 }
 
 .sudo-status {
-  font-size: 0.74rem;
+  font-size: 0.74em;
 }
 
 .sudo-status.pending { color: #f59e0b; font-weight: 600; }
@@ -188,7 +188,7 @@ function truncate (str: string, max = 120): string {
 
 .sudo-command-label {
   margin-top: 14px;
-  font-size: 0.82rem;
+  font-size: 0.82em;
   color: var(--app-text-soft);
 }
 
@@ -199,7 +199,7 @@ function truncate (str: string, max = 120): string {
   border-radius: 10px;
   background: var(--app-panel-subtle);
   color: var(--app-text-soft);
-  font-size: 0.80rem;
+  font-size: 0.80em;
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   line-height: 1.55;
   white-space: pre-wrap;
@@ -218,7 +218,7 @@ function truncate (str: string, max = 120): string {
   border-radius: 10px;
   background: var(--app-panel-subtle);
   color: var(--app-text);
-  font-size: 0.88rem;
+  font-size: 0.88em;
   outline: none;
   box-sizing: border-box;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -246,7 +246,7 @@ function truncate (str: string, max = 120): string {
   padding: 0 16px;
   border: none;
   border-radius: 10px;
-  font-size: 0.84rem;
+  font-size: 0.84em;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;

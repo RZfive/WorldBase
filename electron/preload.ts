@@ -308,6 +308,11 @@ interface AIExecutionPreferences {
   enableAiLogging: boolean
 }
 
+interface ChatFontPreferences {
+  fontFamily: string
+  fontSize: number
+}
+
 interface AILogConversationSummary {
   id: string
   title: string
@@ -600,6 +605,8 @@ export interface ElectronAPI {
   saveLocalePreference: (preference: LanguagePreference) => Promise<{ success: boolean }>
   getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
+  getChatFontPreferences: () => Promise<ChatFontPreferences>
+  saveChatFontPreferences: (preferences: ChatFontPreferences) => Promise<{ success: boolean }>
   getMcpServers: () => Promise<MCPServerConfig[]>
   saveMcpServers: (servers: MCPServerConfig[]) => Promise<{ success: boolean }>
   getMcpState: () => Promise<MCPStateSnapshot>
@@ -852,6 +859,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveLocalePreference: (preference: LanguagePreference) => ipcRenderer.invoke('settings:saveLanguagePreference', preference),
   getAIExecutionPreferences: () => ipcRenderer.invoke('settings:getAIExecutionPreferences'),
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => ipcRenderer.invoke('settings:saveAIExecutionPreferences', preferences),
+  getChatFontPreferences: () => ipcRenderer.invoke('settings:getChatFontPreferences'),
+  saveChatFontPreferences: (preferences: ChatFontPreferences) => ipcRenderer.invoke('settings:saveChatFontPreferences', preferences),
   getMcpServers: () => ipcRenderer.invoke('settings:getMcpServers'),
   saveMcpServers: (servers: MCPServerConfig[]) => ipcRenderer.invoke('settings:saveMcpServers', servers),
   getMcpState: () => ipcRenderer.invoke('settings:getMcpState'),

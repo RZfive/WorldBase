@@ -347,7 +347,7 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--app-panel-muted) 78%, transparent);
   color: var(--app-text);
   font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-  font-size: 0.84rem;
+  font-size: 0.84em;
   line-height: 1.58;
   white-space: pre-wrap;
   word-break: break-word;
@@ -390,7 +390,7 @@ onBeforeUnmount(() => {
 }
 
 .message-image-action {
-  font-size: 0.78rem;
+  font-size: 0.78em;
   color: var(--app-text-muted);
 }
 
@@ -415,7 +415,7 @@ onBeforeUnmount(() => {
   color: var(--app-text-muted);
   border-radius: 999px;
   padding: 4px 10px;
-  font-size: 0.72rem;
+  font-size: 0.72em;
   line-height: 1.2;
   letter-spacing: 0.01em;
   cursor: pointer;

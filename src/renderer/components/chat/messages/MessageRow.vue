@@ -225,6 +225,11 @@ const messageText = computed(() => getMessageText())
   flex-direction: column;
   align-items: stretch;
   gap: 12px;
+  /* Base size for chat content blocks. Block components use em so their text
+     and row heights scale with this value when the user changes the chat font
+     size. The message meta (author/model label) above is intentionally not
+     affected — it stays a stable chrome size. */
+  font-size: var(--chat-font-size);
 }
 
 .message-flow.user {

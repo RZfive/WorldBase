@@ -114,7 +114,7 @@ function toggleExpanded (): void {
   display: inline-flex;
   align-items: center;
   color: var(--app-accent-strong);
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -122,7 +122,7 @@ function toggleExpanded (): void {
 
 .group-transcript-title {
   margin: 6px 0 0;
-  font-size: 0.98rem;
+  font-size: 0.98em;
   color: var(--app-text-strong);
 }
 
@@ -132,7 +132,7 @@ function toggleExpanded (): void {
   flex-wrap: wrap;
   gap: 8px;
   color: var(--app-text-muted);
-  font-size: 0.76rem;
+  font-size: 0.76em;
 }
 
 .group-transcript-toggle {
@@ -143,7 +143,7 @@ function toggleExpanded (): void {
   border-radius: 999px;
   padding: 5px 11px;
   cursor: pointer;
-  font-size: 0.78rem;
+  font-size: 0.78em;
 }
 
 .group-transcript-summary {
@@ -162,7 +162,7 @@ function toggleExpanded (): void {
   display: inline-flex;
   align-items: center;
   color: var(--app-accent-strong);
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -171,7 +171,7 @@ function toggleExpanded (): void {
 .group-transcript-request p {
   margin: 8px 0 0;
   color: var(--app-text);
-  font-size: 0.8rem;
+  font-size: 0.8em;
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -190,7 +190,7 @@ function toggleExpanded (): void {
 }
 
 .group-transcript-round-header {
-  font-size: 0.82rem;
+  font-size: 0.82em;
   font-weight: 700;
   color: var(--app-text-strong);
 }
@@ -209,7 +209,7 @@ function toggleExpanded (): void {
 }
 
 .group-transcript-entry-agent {
-  font-size: 0.78rem;
+  font-size: 0.78em;
   font-weight: 700;
   color: var(--app-accent-strong);
 }
@@ -217,14 +217,14 @@ function toggleExpanded (): void {
 .group-transcript-entry-round {
   flex-shrink: 0;
   color: var(--app-text-muted);
-  font-size: 0.7rem;
+  font-size: 0.7em;
   font-weight: 700;
 }
 
 .group-transcript-entry-body,
 .group-transcript-summary {
   color: var(--app-text);
-  font-size: 0.82rem;
+  font-size: 0.82em;
   line-height: 1.6;
 }
 

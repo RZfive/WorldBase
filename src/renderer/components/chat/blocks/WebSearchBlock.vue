@@ -69,14 +69,14 @@ function getHostLabel (url: string): string {
 }
 
 .web-search-label {
-  font-size: 0.84rem;
+  font-size: 0.84em;
   font-weight: 700;
   color: var(--app-text-strong);
 }
 
 .web-search-engine,
 .web-search-count {
-  font-size: 0.74rem;
+  font-size: 0.74em;
   color: var(--app-text-muted);
 }
 
@@ -86,7 +86,7 @@ function getHostLabel (url: string): string {
   border-radius: 12px;
   background: var(--app-panel-strong);
   color: var(--app-text);
-  font-size: 0.82rem;
+  font-size: 0.82em;
   word-break: break-word;
 }
 
@@ -126,19 +126,19 @@ function getHostLabel (url: string): string {
   background: var(--app-panel-strong);
   border: 1px solid var(--app-border-strong);
   color: var(--app-text-muted);
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 700;
 }
 
 .web-search-source {
-  font-size: 0.74rem;
+  font-size: 0.74em;
   color: var(--app-text-muted);
 }
 
 .web-search-link {
   color: var(--app-accent-strong);
   text-decoration: none;
-  font-size: 0.88rem;
+  font-size: 0.88em;
   font-weight: 600;
   line-height: 1.45;
 }
@@ -150,13 +150,13 @@ function getHostLabel (url: string): string {
 .web-search-snippet {
   margin: 6px 0 0;
   color: var(--app-text-soft);
-  font-size: 0.8rem;
+  font-size: 0.8em;
   line-height: 1.55;
 }
 
 .web-search-empty {
   margin-top: 12px;
   color: var(--app-text-muted);
-  font-size: 0.8rem;
+  font-size: 0.8em;
 }
 </style>
