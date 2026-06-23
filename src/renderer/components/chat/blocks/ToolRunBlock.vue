@@ -86,7 +86,7 @@ function getProgressDetail (step: ToolRun['progress'][number]): string | undefin
 }
 
 .tool-run-name {
-  font-size: 0.84rem;
+  font-size: 0.84em;
   font-weight: 600;
   color: var(--app-text-strong);
 }
@@ -96,7 +96,7 @@ function getProgressDetail (step: ToolRun['progress'][number]): string | undefin
   align-items: center;
   padding: 4px 10px;
   border-radius: 999px;
-  font-size: 0.74rem;
+  font-size: 0.74em;
   border: 1px solid var(--app-border-strong);
   color: var(--app-text-muted);
   background: var(--app-panel-strong);
@@ -144,7 +144,7 @@ function getProgressDetail (step: ToolRun['progress'][number]): string | undefin
   background: var(--app-panel-strong);
   border: 1px solid var(--app-border-strong);
   color: var(--app-text-muted);
-  font-size: 0.72rem;
+  font-size: 0.72em;
 }
 
 .tool-run-step-body {
@@ -152,13 +152,13 @@ function getProgressDetail (step: ToolRun['progress'][number]): string | undefin
 }
 
 .tool-run-step-stage {
-  font-size: 0.82rem;
+  font-size: 0.82em;
   color: var(--app-text);
 }
 
 .tool-run-step-detail {
   margin-top: 3px;
-  font-size: 0.76rem;
+  font-size: 0.76em;
   color: var(--app-text-muted);
   word-break: break-word;
 }

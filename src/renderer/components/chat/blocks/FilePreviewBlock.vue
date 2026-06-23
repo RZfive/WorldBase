@@ -39,7 +39,7 @@ const hasDelta = computed(() => props.block.added > 0 || props.block.removed > 0
   border: 1px solid var(--app-border-strong);
   border-radius: 10px;
   background: var(--app-panel);
-  font-size: 0.8rem;
+  font-size: 0.8em;
   color: var(--app-text-soft);
 }
 

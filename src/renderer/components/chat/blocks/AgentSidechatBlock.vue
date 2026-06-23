@@ -96,7 +96,7 @@ function getProgressText (step: AgentSidechatSession['progress'][number]): strin
   display: inline-flex;
   align-items: center;
   color: var(--app-accent-strong);
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -104,7 +104,7 @@ function getProgressText (step: AgentSidechatSession['progress'][number]): strin
 
 .sidechat-title {
   margin: 6px 0 0;
-  font-size: 0.98rem;
+  font-size: 0.98em;
   color: var(--app-text-strong);
 }
 
@@ -114,7 +114,7 @@ function getProgressText (step: AgentSidechatSession['progress'][number]): strin
   flex-wrap: wrap;
   gap: 8px;
   color: var(--app-text-muted);
-  font-size: 0.76rem;
+  font-size: 0.76em;
 }
 
 .sidechat-status {
@@ -124,7 +124,7 @@ function getProgressText (step: AgentSidechatSession['progress'][number]): strin
   border: 1px solid var(--app-border);
   background: transparent;
   color: var(--app-text-muted);
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 700;
 }
 
@@ -157,7 +157,7 @@ function getProgressText (step: AgentSidechatSession['progress'][number]): strin
 
 .sidechat-entry-title {
   margin-bottom: 8px;
-  font-size: 0.78rem;
+  font-size: 0.78em;
   font-weight: 700;
   color: var(--app-text-strong);
 }
@@ -175,7 +175,7 @@ function getProgressText (step: AgentSidechatSession['progress'][number]): strin
   border-radius: 999px;
   background: transparent;
   border: 1px solid var(--app-border);
-  font-size: 0.74rem;
+  font-size: 0.74em;
   color: var(--app-text-muted);
 }
 

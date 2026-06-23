@@ -435,6 +435,11 @@ interface AIExecutionPreferences {
   enableAiLogging: boolean
 }
 
+interface ChatFontPreferences {
+  fontFamily: string
+  fontSize: number
+}
+
 interface CostSettings {
   modelPricing: Array<{
     model: string
@@ -956,6 +961,8 @@ interface ElectronAPI {
   saveLocalePreference: (preference: LanguagePreference) => Promise<{ success: boolean }>
   getAIExecutionPreferences: () => Promise<AIExecutionPreferences>
   saveAIExecutionPreferences: (preferences: AIExecutionPreferences) => Promise<{ success: boolean }>
+  getChatFontPreferences: () => Promise<ChatFontPreferences>
+  saveChatFontPreferences: (preferences: ChatFontPreferences) => Promise<{ success: boolean }>
   getMcpServers: () => Promise<MCPServerConfig[]>
   saveMcpServers: (servers: MCPServerConfig[]) => Promise<{ success: boolean }>
   getMcpState: () => Promise<MCPStateSnapshot>
@@ -1039,4 +1046,18 @@ interface ElectronAPI {
 
 interface Window {
   electronAPI?: ElectronAPI
+}
+
+// Local Font Access API — typed here because the bundled TS lib.dom.d.ts does
+// not yet ship these declarations. `queryLocalFonts` requires the `local-fonts`
+// permission; callers must handle rejection / empty results with a fallback.
+interface FontData {
+  readonly family: string
+  readonly fullName: string
+  readonly postscriptName: string
+  readonly style: string
+}
+
+interface Window {
+  queryLocalFonts?: (options?: { postscriptNames?: string[] }) => Promise<FontData[]>
 }

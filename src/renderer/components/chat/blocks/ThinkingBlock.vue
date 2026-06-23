@@ -441,13 +441,13 @@ onBeforeUnmount(() => {
 }
 
 .thinking-header-label {
-  font-size: 0.82rem;
+  font-size: 0.82em;
   font-weight: 600;
   color: var(--app-text-strong);
 }
 
 .thinking-char-count {
-  font-size: 0.75rem;
+  font-size: 0.75em;
   color: var(--app-text-muted);
   white-space: nowrap;
 }

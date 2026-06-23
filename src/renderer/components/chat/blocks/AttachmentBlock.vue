@@ -63,14 +63,14 @@ const props = defineProps<{
 }
 
 .attachment-card-detail {
-  font-size: 0.78rem;
+  font-size: 0.78em;
   color: var(--app-text-muted);
 }
 
 .attachment-card-preview {
   margin-top: 10px;
   color: var(--app-text-soft);
-  font-size: 0.86rem;
+  font-size: 0.86em;
   line-height: 1.6;
   word-break: break-word;
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { loadAIExecutionPreferences, persistAIExecutionPreferences } from '../../utils/ai-execution-preferences'
 import type { ThemePreference } from '../../utils/theme'
@@ -7,8 +7,20 @@ import { applyThemePreference, resolveThemePreference, watchSystemThemeChange } 
 import { setLocale } from '../../i18n'
 import { loadLocalePreference, persistLocalePreference } from '../../utils/locale'
 import type { LanguagePreference } from '../../../locales'
+import {
+  applyChatFontPreferences,
+  CHAT_FONT_SIZE_MAX,
+  CHAT_FONT_SIZE_MIN,
+  CHAT_FONT_SIZE_TICKS,
+  chatFontSizeToPercent,
+  loadChatFontPreferences,
+  loadSystemFonts,
+  persistChatFontPreferences,
+  resolveChatFontFamilyValue
+} from '../../utils/chat-font-preferences'
+import { DEFAULT_CHAT_FONT_SIZE } from '../../../shared/chat-font-preferences'
 
-type GeneralSectionId = 'appearance' | 'execution' | 'transfer' | 'language'
+type GeneralSectionId = 'appearance' | 'font' | 'execution' | 'transfer' | 'language'
 
 interface ThemeOption {
   id: ThemePreference
@@ -63,11 +75,47 @@ const executionPreferences = ref<AIExecutionPreferences>({
 const savingTheme = ref(false)
 const savingLanguage = ref(false)
 const savingExecution = ref(false)
+const savingFont = ref(false)
 const exporting = ref(false)
 const importing = ref(false)
 const feedback = ref('')
 
+const chatFontPreferences = ref<ChatFontPreferences>({
+  fontFamily: '',
+  fontSize: DEFAULT_CHAT_FONT_SIZE
+})
+const systemFonts = ref<string[]>([])
+const fontsLoading = ref(false)
+const fontsUnavailable = ref(false)
+const fontDropdownOpen = ref(false)
+const fontSearch = ref('')
+const fontTriggerRef = ref<HTMLButtonElement | null>(null)
+const fontPanelStyle = ref<Record<string, string>>({ display: 'none' })
+
 let stopThemeWatcher: (() => void) | null = null
+
+const fontSizeTicks = CHAT_FONT_SIZE_TICKS
+const fontSliderMin = CHAT_FONT_SIZE_MIN
+const fontSliderMax = CHAT_FONT_SIZE_MAX
+const fontSliderStyle = computed(() => ({
+  // Position the filled portion of the track and the thumb via a CSS var the
+  // webkit slider pseudo-elements read, so the track reflects the live value.
+  '--gs-font-slider-progress': `${chatFontSizeToPercent(chatFontPreferences.value.fontSize)}%`
+}))
+
+const filteredSystemFonts = computed(() => {
+  const query = fontSearch.value.trim().toLowerCase()
+  if (!query) return systemFonts.value
+  return systemFonts.value.filter(font => font.toLowerCase().includes(query))
+})
+
+const currentFontFamilyLabel = computed(() => {
+  return chatFontPreferences.value.fontFamily.trim()
+    ? chatFontPreferences.value.fontFamily.trim()
+    : t('settings.general.font.systemDefault')
+})
+
+const currentFontFamilyStyle = computed(() => resolveChatFontFamilyValue(chatFontPreferences.value.fontFamily))
 
 const currentThemeOption = computed(() => {
   return themeOptions.find(option => option.id === themePreference.value) || themeOptions[0]
@@ -84,6 +132,8 @@ const effectiveThemeLabel = computed(() => {
 
 const sections = computed<GeneralSection[]>(() => {
   const themeSummary = t('settings.general.appearance.summary', { label: currentThemeOption.value ? t(currentThemeOption.value.labelKey) : '' })
+  const fontSummary = currentFontFamilyLabel.value
+  const fontStatusKey = 'settings.general.font.sizeStatus'
   const executionSummary = executionPreferences.value.notifyOnTaskComplete
     ? t('settings.general.execution.summaryOn')
     : t('settings.general.execution.summaryOff')
@@ -103,6 +153,15 @@ const sections = computed<GeneralSection[]>(() => {
       status: effectiveThemeLabel.value,
       title: t('settings.general.appearance.title'),
       description: t('settings.general.appearance.description')
+    },
+    {
+      id: 'font',
+      icon: 'Aa',
+      label: t('settings.general.font.navLabel'),
+      summary: fontSummary,
+      status: t(fontStatusKey),
+      title: t('settings.general.font.title'),
+      description: t('settings.general.font.description')
     },
     {
       id: 'execution',
@@ -159,7 +218,135 @@ async function loadSettings () {
 
   languagePreference.value = await loadLocalePreference()
 
+  try {
+    chatFontPreferences.value = await loadChatFontPreferences()
+    applyChatFontPreferences(chatFontPreferences.value)
+  } catch {
+    // Keep CSS defaults on failure.
+  }
+
   applyThemePreference(themePreference.value)
+}
+
+async function ensureSystemFonts () {
+  if (systemFonts.value.length > 0 || fontsLoading.value) return
+  fontsLoading.value = true
+  try {
+    const fonts = await loadSystemFonts()
+    systemFonts.value = fonts
+    fontsUnavailable.value = fonts.length === 0
+  } catch {
+    fontsUnavailable.value = true
+  } finally {
+    fontsLoading.value = false
+  }
+}
+
+/** Live preview while dragging: update the value + CSS immediately, no IPC. */
+function onFontSizeInput (event: Event) {
+  const target = event.target as HTMLInputElement
+  const px = Number.parseInt(target.value, 10)
+  if (!Number.isFinite(px)) return
+  chatFontPreferences.value = { ...chatFontPreferences.value, fontSize: px }
+  applyChatFontPreferences(chatFontPreferences.value)
+}
+
+/** Persist on release (change fires once when the drag ends). */
+async function onFontSizeChange (event: Event) {
+  const target = event.target as HTMLInputElement
+  const px = Number.parseInt(target.value, 10)
+  if (!Number.isFinite(px) || savingFont.value) return
+
+  // Sync the source of truth in case the input rounded/clamped.
+  chatFontPreferences.value = { ...chatFontPreferences.value, fontSize: px }
+  applyChatFontPreferences(chatFontPreferences.value)
+
+  savingFont.value = true
+  feedback.value = ''
+
+  try {
+    await persistChatFontPreferences(chatFontPreferences.value)
+    setFeedback(t('common.saved'))
+  } catch (err) {
+    setFeedback(t('common.saveFailed', { message: (err as Error).message }))
+  } finally {
+    savingFont.value = false
+  }
+}
+
+async function selectFontFamily (family: string) {
+  if (savingFont.value) return
+
+  const previous = chatFontPreferences.value.fontFamily
+  const normalized = family.trim()
+  if (previous === normalized) {
+    fontDropdownOpen.value = false
+    return
+  }
+
+  chatFontPreferences.value = { ...chatFontPreferences.value, fontFamily: normalized }
+  applyChatFontPreferences(chatFontPreferences.value)
+  fontDropdownOpen.value = false
+
+  savingFont.value = true
+  feedback.value = ''
+
+  try {
+    await persistChatFontPreferences(chatFontPreferences.value)
+    setFeedback(t('common.saved'))
+  } catch (err) {
+    chatFontPreferences.value = { ...chatFontPreferences.value, fontFamily: previous }
+    applyChatFontPreferences(chatFontPreferences.value)
+    setFeedback(t('common.saveFailed', { message: (err as Error).message }))
+  } finally {
+    savingFont.value = false
+  }
+}
+
+function updateFontPanelPosition () {
+  if (!fontDropdownOpen.value || !fontTriggerRef.value) {
+    fontPanelStyle.value = { display: 'none' }
+    return
+  }
+  const rect = fontTriggerRef.value.getBoundingClientRect()
+  const spaceBelow = window.innerHeight - rect.bottom - 8
+  const spaceAbove = rect.top - 8
+  const estimatedHeight = 320
+  const placeAbove = spaceBelow < estimatedHeight && spaceAbove > spaceBelow
+  fontPanelStyle.value = {
+    position: 'fixed',
+    left: `${rect.left}px`,
+    width: `${Math.max(rect.width, 240)}px`,
+    ...(placeAbove
+      ? { bottom: `${window.innerHeight - rect.top + 6}px` }
+      : { top: `${rect.bottom + 6}px` })
+  }
+}
+
+async function toggleFontDropdown () {
+  if (savingFont.value) return
+  fontDropdownOpen.value = !fontDropdownOpen.value
+  if (fontDropdownOpen.value) {
+    fontSearch.value = ''
+    // Position immediately so the panel pops in (showing a loading state) while
+    // fonts enumerate in the background, rather than waiting for queryLocalFonts.
+    updateFontPanelPosition()
+    void ensureSystemFonts()
+    await nextTick(() => {
+      const searchEl = document.querySelector<HTMLInputElement>('.gs-font-search')
+      searchEl?.focus()
+    })
+  }
+}
+
+function closeFontDropdown () {
+  fontDropdownOpen.value = false
+}
+
+function handleFontSearchKeydown (event: KeyboardEvent) {
+  if (event.key !== 'Enter') return
+  const match = filteredSystemFonts.value[0]
+  if (match) void selectFontFamily(match)
 }
 
 async function selectTheme (nextPreference: ThemePreference) {
@@ -283,11 +470,19 @@ onMounted(async () => {
       applyThemePreference('system')
     }
   })
+  window.addEventListener('resize', handleFontReposition)
+  window.addEventListener('scroll', handleFontReposition, true)
 })
 
 onUnmounted(() => {
   stopThemeWatcher?.()
+  window.removeEventListener('resize', handleFontReposition)
+  window.removeEventListener('scroll', handleFontReposition, true)
 })
+
+function handleFontReposition () {
+  if (fontDropdownOpen.value) updateFontPanelPosition()
+}
 </script>
 
 <template>
@@ -333,6 +528,109 @@ onUnmounted(() => {
                 <span class="gs-theme-hint">{{ $t(option.descKey) }}</span>
               </div>
             </button>
+          </div>
+        </template>
+
+        <template v-else-if="activeSectionId === 'font'">
+          <section class="gs-control-card gs-font-family-card">
+            <div class="gs-control-copy">
+              <span class="gs-control-title">{{ $t('settings.general.font.familyTitle') }}</span>
+              <p class="gs-control-hint">{{ $t('settings.general.font.familyHint') }}</p>
+            </div>
+            <div class="gs-font-picker">
+              <button
+                ref="fontTriggerRef"
+                type="button"
+                class="gs-font-trigger"
+                :disabled="savingFont"
+                @click="toggleFontDropdown"
+              >
+                <span class="gs-font-trigger-name" :style="{ fontFamily: currentFontFamilyStyle }">{{ currentFontFamilyLabel }}</span>
+                <span class="gs-font-trigger-caret" aria-hidden="true">▾</span>
+              </button>
+              <Teleport to="body">
+                <template v-if="fontDropdownOpen">
+                  <div class="gs-font-backdrop" @click="closeFontDropdown" />
+                  <div class="gs-font-panel" :style="fontPanelStyle" @click.stop>
+                    <input
+                      v-model="fontSearch"
+                      class="gs-font-search"
+                      type="text"
+                      :placeholder="$t('settings.general.font.searchPlaceholder')"
+                      @keydown.esc.prevent="closeFontDropdown"
+                      @keydown="handleFontSearchKeydown"
+                    />
+                    <div v-if="fontsLoading" class="gs-font-status">{{ $t('settings.general.font.loading') }}</div>
+                    <div v-else-if="fontsUnavailable" class="gs-font-status">{{ $t('settings.general.font.unavailable') }}</div>
+                    <div v-else class="gs-font-list">
+                      <button
+                        type="button"
+                        class="gs-font-item"
+                        :class="{ active: chatFontPreferences.fontFamily === '' }"
+                        @click="selectFontFamily('')"
+                      >
+                        <span class="gs-font-item-name gs-font-item-default">{{ $t('settings.general.font.systemDefault') }}</span>
+                      </button>
+                      <button
+                        v-for="font in filteredSystemFonts"
+                        :key="font"
+                        type="button"
+                        class="gs-font-item"
+                        :class="{ active: chatFontPreferences.fontFamily === font }"
+                        :style="{ fontFamily: resolveChatFontFamilyValue(font) }"
+                        @click="selectFontFamily(font)"
+                      >
+                        <span class="gs-font-item-name">{{ font }}</span>
+                      </button>
+                      <div v-if="filteredSystemFonts.length === 0" class="gs-font-status">{{ $t('settings.general.font.noMatch') }}</div>
+                    </div>
+                  </div>
+                </template>
+              </Teleport>
+            </div>
+          </section>
+
+          <section class="gs-control-card gs-font-size-card">
+            <div class="gs-control-copy">
+              <span class="gs-control-title">{{ $t('settings.general.font.sizeTitle') }}</span>
+              <p class="gs-control-hint">{{ $t('settings.general.font.sizeHint') }}</p>
+            </div>
+            <span class="gs-font-size-value">{{ chatFontPreferences.fontSize }}px</span>
+          </section>
+
+          <div class="gs-font-preview" :style="{ fontSize: `${chatFontPreferences.fontSize}px`, fontFamily: currentFontFamilyStyle }">
+            {{ $t('settings.general.font.previewSample') }}
+          </div>
+
+          <div class="gs-font-slider" :style="fontSliderStyle">
+            <input
+              class="gs-font-slider-input"
+              type="range"
+              :min="fontSliderMin"
+              :max="fontSliderMax"
+              step="1"
+              :value="chatFontPreferences.fontSize"
+              :disabled="savingFont"
+              :aria-label="$t('settings.general.font.sizeTitle')"
+              @input="onFontSizeInput"
+              @change="onFontSizeChange"
+            />
+            <div class="gs-font-slider-ticks" aria-hidden="true">
+              <span
+                v-for="tick in fontSizeTicks"
+                :key="tick.px"
+                class="gs-font-slider-tick"
+                :class="{ active: chatFontPreferences.fontSize === tick.px }"
+                :style="{ left: `${chatFontSizeToPercent(tick.px)}%` }"
+              >
+                <span class="gs-font-slider-tick-mark" />
+                <span class="gs-font-slider-tick-label">{{ $t(tick.labelKey) }}</span>
+              </span>
+            </div>
+            <div class="gs-font-slider-scale">
+              <span>{{ fontSliderMin }}</span>
+              <span>{{ fontSliderMax }}</span>
+            </div>
           </div>
         </template>
 
@@ -1084,5 +1382,297 @@ onUnmounted(() => {
     flex-direction: column;
     align-items: stretch;
   }
+}
+
+.gs-font-family-card {
+  align-items: center;
+}
+
+.gs-font-picker {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.gs-font-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 190px;
+  padding: 9px 12px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 12px;
+  background: var(--app-input-bg);
+  color: var(--app-text);
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.gs-font-trigger:hover:not(:disabled) {
+  border-color: var(--app-accent-glow);
+}
+
+.gs-font-trigger:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.gs-font-trigger-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9em;
+}
+
+.gs-font-trigger-caret {
+  color: var(--app-text-muted);
+  font-size: 0.8em;
+}
+
+.gs-font-size-card {
+  align-items: center;
+}
+
+.gs-font-size-value {
+  flex-shrink: 0;
+  min-width: 56px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.92em;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.gs-font-preview {
+  padding: 16px 18px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-panel-muted);
+  color: var(--app-text-strong);
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* font-size + font-family are bound inline so the preview reflects the live
+     slider value and chosen family in real time. */
+}
+
+/* Slider — macOS-style: a thin track with a filled portion, a circular thumb,
+   and labelled recommended ticks (小/中/大) at 14/16/18px. The input itself is
+   transparent; the track fill is drawn via ::-webkit-slider-runnable-track
+   reading --gs-font-slider-progress. */
+.gs-font-slider {
+  position: relative;
+  padding: 6px 0 0;
+}
+
+.gs-font-slider-input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 28px;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+}
+
+.gs-font-slider-input:focus {
+  outline: none;
+}
+
+.gs-font-slider-input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--app-accent) 0%,
+    var(--app-accent) var(--gs-font-slider-progress, 50%),
+    rgba(148, 163, 184, 0.28) var(--gs-font-slider-progress, 50%),
+    rgba(148, 163, 184, 0.28) 100%
+  );
+}
+
+.gs-font-slider-input::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.28);
+}
+
+.gs-font-slider-input::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--app-accent);
+}
+
+.gs-font-slider-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -7px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
+  transition: transform 0.12s ease;
+}
+
+.gs-font-slider-input:hover::-webkit-slider-thumb {
+  transform: scale(1.08);
+}
+
+.gs-font-slider-input::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
+}
+
+.gs-font-slider-input:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Tick marks sit on the track; labels hang below. Only the recommended points
+   (14/16/18) get a label. */
+.gs-font-slider-ticks {
+  position: relative;
+  height: 0;
+  margin-top: 2px;
+}
+
+.gs-font-slider-tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.gs-font-slider-tick-mark {
+  width: 2px;
+  height: 7px;
+  border-radius: 1px;
+  background: rgba(148, 163, 184, 0.5);
+  transition: background 0.12s ease;
+}
+
+.gs-font-slider-tick.active .gs-font-slider-tick-mark {
+  background: var(--app-accent);
+}
+
+.gs-font-slider-tick-label {
+  font-size: 0.74em;
+  color: var(--app-text-muted);
+  white-space: nowrap;
+}
+
+.gs-font-slider-tick.active .gs-font-slider-tick-label {
+  color: var(--app-accent);
+  font-weight: 600;
+}
+
+.gs-font-slider-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 22px;
+  font-size: 0.72em;
+  color: var(--app-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+</style>
+
+<!-- Non-scoped: the font dropdown is Teleport-ed to <body>, so these rules must
+     not be scoped or they would not match the teleported nodes. Class names are
+     prefixed (gs-font-*) to avoid collisions. -->
+<style>
+.gs-font-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--multi-select-panel-z-index, 10000) - 1);
+}
+
+.gs-font-panel {
+  z-index: var(--multi-select-panel-z-index, 10000);
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow: hidden;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 14px;
+  background: var(--app-panel-strong);
+  box-shadow: var(--app-shadow);
+}
+
+.gs-font-search {
+  margin: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-input-border);
+  border-radius: 10px;
+  background: var(--app-input-bg);
+  color: var(--app-text);
+  font-size: 0.88em;
+  outline: none;
+}
+
+.gs-font-search:focus {
+  border-color: var(--app-accent-glow);
+}
+
+.gs-font-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 8px;
+  overflow-y: auto;
+}
+
+.gs-font-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--app-text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.gs-font-item:hover {
+  background: var(--app-panel-muted);
+}
+
+.gs-font-item.active {
+  background: rgba(94, 123, 255, 0.16);
+}
+
+.gs-font-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9em;
+}
+
+.gs-font-item-default {
+  color: var(--app-text-muted);
+  font-style: italic;
+}
+
+.gs-font-status {
+  padding: 12px;
+  color: var(--app-text-muted);
+  font-size: 0.84em;
+  text-align: center;
 }
 </style>

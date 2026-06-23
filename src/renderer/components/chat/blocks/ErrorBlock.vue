@@ -28,14 +28,14 @@ const props = defineProps<{
 }
 
 .error-title {
-  font-size: 0.84rem;
+  font-size: 0.84em;
   font-weight: 700;
   color: #b91c1c;
 }
 
 .error-message {
   margin-top: 6px;
-  font-size: 0.78rem;
+  font-size: 0.78em;
   line-height: 1.55;
   color: #7f1d1d;
   white-space: pre-wrap;

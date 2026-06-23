@@ -96,13 +96,13 @@ function getQuoteSnippets (): string[] {
 }
 
 .web-fetch-label {
-  font-size: 0.84rem;
+  font-size: 0.84em;
   font-weight: 700;
   color: var(--app-text-strong);
 }
 
 .web-fetch-query {
-  font-size: 0.74rem;
+  font-size: 0.74em;
   color: var(--app-accent-strong);
   background: var(--app-accent-soft);
   border: 1px solid var(--app-accent-glow);
@@ -115,7 +115,7 @@ function getQuoteSnippets (): string[] {
 }
 
 .web-fetch-status {
-  font-size: 0.74rem;
+  font-size: 0.74em;
   color: var(--app-text-muted);
 }
 
@@ -124,7 +124,7 @@ function getQuoteSnippets (): string[] {
   margin-top: 10px;
   color: var(--app-accent-strong);
   text-decoration: none;
-  font-size: 0.92rem;
+  font-size: 0.92em;
   font-weight: 600;
   line-height: 1.45;
 }
@@ -139,14 +139,14 @@ function getQuoteSnippets (): string[] {
   flex-wrap: wrap;
   gap: 10px;
   color: var(--app-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.75em;
 }
 
 .web-fetch-summary,
 .web-fetch-error {
   margin: 10px 0 0;
   color: var(--app-text-soft);
-  font-size: 0.82rem;
+  font-size: 0.82em;
   line-height: 1.58;
 }
 
@@ -168,7 +168,7 @@ function getQuoteSnippets (): string[] {
   border-radius: 0 12px 12px 0;
   background: var(--app-panel-strong);
   color: var(--app-text);
-  font-size: 0.8rem;
+  font-size: 0.8em;
   line-height: 1.58;
 }
 </style>

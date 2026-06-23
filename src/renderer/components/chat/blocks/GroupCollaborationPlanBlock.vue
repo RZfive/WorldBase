@@ -111,7 +111,7 @@ function getParticipantKey (agentId: string, index: number): string {
   display: inline-flex;
   align-items: center;
   color: var(--app-accent-strong);
-  font-size: 0.72rem;
+  font-size: 0.72em;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -119,7 +119,7 @@ function getParticipantKey (agentId: string, index: number): string {
 
 .collaboration-plan-title {
   margin: 6px 0 0;
-  font-size: 0.98rem;
+  font-size: 0.98em;
   color: var(--app-text-strong);
 }
 
@@ -129,7 +129,7 @@ function getParticipantKey (agentId: string, index: number): string {
   flex-wrap: wrap;
   gap: 8px;
   color: var(--app-text-muted);
-  font-size: 0.76rem;
+  font-size: 0.76em;
 }
 
 .collaboration-plan-reason {
@@ -156,7 +156,7 @@ function getParticipantKey (agentId: string, index: number): string {
 
 .collaboration-plan-request-title,
 .collaboration-plan-section-title {
-  font-size: 0.76rem;
+  font-size: 0.76em;
   font-weight: 700;
   color: var(--app-text-strong);
 }
@@ -185,7 +185,7 @@ function getParticipantKey (agentId: string, index: number): string {
   align-items: center;
   padding: 3px 9px;
   border-radius: 999px;
-  font-size: 0.74rem;
+  font-size: 0.74em;
   font-weight: 700;
   border: 1px solid var(--app-border);
   background: transparent;
@@ -207,7 +207,7 @@ function getParticipantKey (agentId: string, index: number): string {
 .collaboration-plan-empty {
   margin: 10px 0 0;
   color: var(--app-text-muted);
-  font-size: 0.78rem;
+  font-size: 0.78em;
   line-height: 1.5;
 }
 </style>
