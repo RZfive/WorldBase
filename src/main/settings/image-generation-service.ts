@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { OpenAIProvider } from '../ai-engine/providers/openai-provider.js'
+import { t } from '../i18n/main-i18n.js'
 import type { AIProvidersConfig } from './settings-store.js'
 import type { ImageLibraryStore } from './image-library-store.js'
 import type {
@@ -167,14 +168,14 @@ export async function runImageStudioRequest (
     const providersConfig = deps.getProvidersConfig()
     const provider = providersConfig.providers.find(p => p.id === req.providerId)
     if (!provider) {
-      throw new Error('未找到所选供应商')
+      throw new Error(t('mainDialog.providerNotFound'))
     }
     if (!provider.apiKey) {
-      throw new Error('所选供应商未配置 API Key')
+      throw new Error(t('mainDialog.providerApiKeyMissing'))
     }
     const model = provider.models.includes(req.model) ? req.model : provider.activeModel
     if (!model) {
-      throw new Error('该供应商未配置可用模型')
+      throw new Error(t('mainDialog.providerNoModels'))
     }
 
     const aiProvider = new OpenAIProvider()
@@ -201,7 +202,7 @@ export async function runImageStudioRequest (
         })
 
     if (!result.images.length) {
-      throw new Error('模型未返回任何图片')
+      throw new Error(t('mainDialog.imageModelNoImages'))
     }
 
     const createdAt = new Date().toISOString()
@@ -225,6 +226,6 @@ export async function runImageStudioRequest (
 
     return { ok: true, entries }
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : '图片生成失败' }
+    return { ok: false, error: error instanceof Error ? error.message : t('mainDialog.imageGenerationFailed') }
   }
 }

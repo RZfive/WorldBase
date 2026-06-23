@@ -345,7 +345,7 @@ async function onFilesSelected (event: Event) {
     if (inputImages.value.length >= MAX_INPUT_IMAGES) break
     if (!file.type.startsWith('image/')) continue
     try {
-      inputImages.value = [...inputImages.value, await fileToDataUrl(file)]
+      inputImages.value = [...inputImages.value, await fileToDataUrl(file, t('studioUi.readFileFailed'))]
     } catch {
       // skip unreadable file
     }

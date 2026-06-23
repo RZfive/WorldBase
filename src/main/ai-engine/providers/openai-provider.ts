@@ -1,5 +1,6 @@
 import { normalizeAbortReason } from '../abort-utils.js'
 import type { AILogSessionLogger } from '../../settings/ai-log-store.js'
+import { t } from '../../i18n/main-i18n.js'
 
 export interface ChatContentTextPart {
   type: 'text'
@@ -590,13 +591,13 @@ export class OpenAIProvider {
 
   private validateConfig (): void {
     if (!this.apiKey.trim()) {
-      throw new Error('当前供应商未配置 API Key')
+      throw new Error(t('mainDialog.providerCurrentApiKeyMissing'))
     }
     if (!this.baseUrl.trim()) {
-      throw new Error('当前供应商未配置 API 地址')
+      throw new Error(t('mainDialog.providerCurrentBaseUrlMissing'))
     }
     if (!this.model.trim()) {
-      throw new Error('当前供应商未选择模型')
+      throw new Error(t('mainDialog.providerCurrentModelMissing'))
     }
   }
 
@@ -846,7 +847,7 @@ export class OpenAIProvider {
     if (!this.supportsImageEditing()) {
       const hasImageInput = normalizedMessages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url' && Boolean(part.image_url?.url)))
       if (hasImageInput) {
-        throw new Error('当前模型未开启图片编辑支持，请先在设置中为该模型开启“图片编辑”')
+        throw new Error(t('mainDialog.providerImageEditingDisabled'))
       }
     }
 
@@ -1299,7 +1300,7 @@ export class OpenAIProvider {
     this.validateConfig()
 
     if (!opts.images.length) {
-      throw new Error('图片编辑模式需要至少一张输入图片')
+      throw new Error(t('mainDialog.providerImageEditNeedsInput'))
     }
 
     const prompt = opts.prompt.trim() || 'Edit the image'
@@ -1359,7 +1360,7 @@ export class OpenAIProvider {
   private dataUrlToBlob (dataUrl: string): { blob: Blob; ext: string } {
     const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
     if (!match) {
-      throw new Error('不支持的图片数据格式，请使用 base64 data URL')
+      throw new Error(t('mainDialog.providerUnsupportedImageDataBase64'))
     }
     const mimeType = match[1]
     const bytes = Buffer.from(match[2], 'base64')

@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { AuthRequestPayload } from '../panel/types'
+import { translateAuthDetail, translateAuthTitle } from '../auth-i18n'
 
 const props = defineProps<{
   request: AuthRequestPayload
@@ -12,6 +14,9 @@ const emit = defineEmits<{
 }>()
 
 const collapsed = ref(false)
+const { t } = useI18n()
+const translatedTitle = computed(() => translateAuthTitle(props.request.title, t))
+const translatedDetail = computed(() => translateAuthDetail(props.request.detail, t))
 
 // Reset to expanded whenever a brand-new request takes the foreground so the user
 // always sees the action they need to approve without an extra click.
@@ -47,8 +52,8 @@ function toggleCollapsed (): void {
             <span v-else>{{ $t('chatUi.waitingAuth') }}</span>
           </div>
 
-          <div class="auth-detail-title">{{ props.request.title }}</div>
-          <pre class="auth-detail-body">{{ props.request.detail }}</pre>
+          <div class="auth-detail-title">{{ translatedTitle }}</div>
+          <pre class="auth-detail-body">{{ translatedDetail }}</pre>
 
           <div class="auth-actions">
             <button class="auth-btn deny" type="button" @click="deny">
@@ -75,7 +80,7 @@ function toggleCollapsed (): void {
         @click="toggleCollapsed"
       >
         <span class="auth-strip-status">{{ $t('chatUi.waitingAuth') }}</span>
-        <span class="auth-strip-title">{{ props.request.title }}</span>
+        <span class="auth-strip-title">{{ translatedTitle }}</span>
         <span v-if="props.pendingCount > 1" class="auth-strip-count">{{ props.pendingCount }}</span>
         <span class="auth-toggle" :class="{ collapsed }" aria-hidden="true">
           <svg

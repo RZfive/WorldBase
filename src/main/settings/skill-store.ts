@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
+import { t } from '../i18n/main-i18n.js'
 
 export interface SkillFile {
   /** Relative path within the skill package */
@@ -285,7 +286,7 @@ export class SkillStore {
       .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
 
     if (entries.length === 0) {
-      throw new Error('压缩包中未找到任何文件')
+      throw new Error(t('mainDialog.skillArchiveEmpty'))
     }
 
     // Strip common root folder prefix

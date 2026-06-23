@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { t } from '../i18n/main-i18n.js'
 import type { AppUpdateAssetInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateNotes, AppUpdateProgress, AppUpdateState, AppUpdateStatus, AppUpdateWebsiteLinks } from '../../shared/app-update-types.js'
 
 export interface AISettings {
@@ -243,7 +244,7 @@ function normalizeLaunchpadLayout (value: unknown): LaunchpadLayout {
         if (!id) return null
         const name = typeof record.name === 'string' && record.name.trim()
           ? record.name.trim()
-          : '新文件夹'
+          : t('mainDialog.defaultLaunchpadFolderName')
         const seenProjectIds = new Set<string>()
         const projectIds = Array.isArray(record.projectIds)
           ? record.projectIds

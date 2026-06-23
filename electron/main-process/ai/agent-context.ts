@@ -2,6 +2,7 @@ import { Notification } from 'electron'
 import type { AIExecutionPreferences, AIProvidersConfig } from '../../../src/main/settings/settings-store.js'
 import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
 import type { AgentDefinition, AgentGroupDefinition, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
+import { t } from '../../../src/main/i18n/main-i18n.js'
 import { mainState } from '../state.js'
 import { broadcastToAppWindows } from '../windows.js'
 import { getLastUserMessageText, getTaskLabelFromMessages } from '../chat-message-utils.js'
@@ -119,18 +120,18 @@ export function notifyAiTaskStatus (
   if (!preferences.notifyOnTaskComplete || !Notification.isSupported()) return
 
   const taskLabel = getTaskLabelFromMessages(messages)
-  let title = 'AI 任务已完成'
-  let statusLabel = '已完成'
+  let title = t('mainDialog.aiTaskCompletedTitle')
+  let statusLabel = t('mainDialog.aiTaskStatusCompleted')
   if (status === 'failed') {
-    title = 'AI 任务执行失败'
-    statusLabel = '失败'
+    title = t('mainDialog.aiTaskFailedTitle')
+    statusLabel = t('mainDialog.aiTaskStatusFailed')
   } else if (status === 'stopped') {
-    title = 'AI 任务已停止'
-    statusLabel = '已停止'
+    title = t('mainDialog.aiTaskStoppedTitle')
+    statusLabel = t('mainDialog.aiTaskStatusStopped')
   }
   const body = detail
-    ? `任务：${taskLabel}\n状态：${statusLabel}\n详情：${detail}`
-    : `任务：${taskLabel}\n状态：${statusLabel}`
+    ? t('mainDialog.aiTaskNotificationBodyWithDetail', { task: taskLabel, status: statusLabel, detail })
+    : t('mainDialog.aiTaskNotificationBody', { task: taskLabel, status: statusLabel })
 
   const notification = new Notification({ title, body })
   notification.once('click', () => {

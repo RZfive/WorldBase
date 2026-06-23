@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, 
 import { Router, type Request, type Response } from 'express'
 import type { ChannelBinding, ChannelEvent, ConnectorType } from '../../shared/agent-workspace-types.js'
 import type { ChannelBindingStore } from './channel-binding-store.js'
+import { t } from '../i18n/main-i18n.js'
 
 type RawRequest = Request & { rawBody?: Buffer }
 
@@ -114,14 +115,14 @@ function buildWeChatTextReply (event: ChannelEvent, text: string): string {
 
 function getWeChatAesKey (binding: ChannelBinding): Buffer {
   if (!binding.encryptKey) {
-    throw new Error('缺少 EncodingAESKey')
+    throw new Error(t('mainDialog.imMissingEncodingAesKey'))
   }
   const normalizedKey = binding.encryptKey.length === 43
     ? `${binding.encryptKey}=`
     : binding.encryptKey
   const aesKey = Buffer.from(normalizedKey, 'base64')
   if (aesKey.length !== 32) {
-    throw new Error('EncodingAESKey 无效')
+    throw new Error(t('mainDialog.imInvalidEncodingAesKey'))
   }
   return aesKey
 }
@@ -152,7 +153,7 @@ function encryptWeChatPayload (binding: ChannelBinding, xml: string): string {
 
 function buildEncryptedWeChatReply (binding: ChannelBinding, event: ChannelEvent, text: string, nonce?: string): string {
   if (!binding.verificationToken) {
-    throw new Error('加密回包需要配置 Token')
+    throw new Error(t('mainDialog.imEncryptedReplyRequiresToken'))
   }
   const encrypted = encryptWeChatPayload(binding, buildWeChatTextReply(event, text))
   const timestamp = Math.floor(Date.now() / 1000).toString()
@@ -189,7 +190,7 @@ function decryptWeComPayload (binding: ChannelBinding, encrypted: string): strin
 
 function decryptFeishuPayload (binding: ChannelBinding, encrypted: string): Record<string, unknown> {
   if (!binding.encryptKey) {
-    throw new Error('飞书加密回调需要配置 Encrypt Key')
+    throw new Error(t('mainDialog.imFeishuEncryptedCallbackRequiresEncryptKey'))
   }
   const aesKey = createHash('sha256').update(binding.encryptKey).digest()
   const decipher = createDecipheriv('aes-256-cbc', aesKey, aesKey.subarray(0, 16))
@@ -360,7 +361,7 @@ export class ImGatewayService {
       if (body.type !== 'url_verification') return { handled: false }
       const binding = this.resolveRouteBinding('slack', bindingId)
       if (binding?.incomingSecret && !verifySlackSignature(req, binding)) {
-        throw new Error('Slack 签名校验失败')
+        throw new Error(t('mainDialog.imSlackSignatureInvalid'))
       }
       return { handled: true, body: { challenge: body.challenge || '' } }
     }
@@ -369,10 +370,10 @@ export class ImGatewayService {
     const binding = this.resolveRouteBinding('feishu', bindingId)
     if (body.encrypt) {
       if (!binding) {
-        throw new Error('飞书加密 URL 校验需要在回调地址中包含 bindingId')
+        throw new Error(t('mainDialog.imFeishuEncryptedUrlVerificationRequiresBindingId'))
       }
       if (!verifyFeishuSignature(req, binding)) {
-        throw new Error('飞书签名校验失败')
+        throw new Error(t('mainDialog.imFeishuSignatureInvalid'))
       }
       body = decryptFeishuPayload(binding, getString(body.encrypt))
     }
@@ -380,7 +381,7 @@ export class ImGatewayService {
 
     const token = getString(body.token)
     if (binding?.verificationToken && !safeCompare(binding.verificationToken, token)) {
-      throw new Error('飞书 Verification Token 不匹配')
+      throw new Error(t('mainDialog.imFeishuVerificationTokenMismatch'))
     }
     return { handled: true, body: { challenge: body.challenge || '' } }
   }
@@ -445,10 +446,10 @@ export class ImGatewayService {
       const bindingId = typeof req.params.bindingId === 'string' ? req.params.bindingId : undefined
       const binding = this.resolveRouteBinding('feishu', bindingId)
       if (!binding) {
-        throw new Error('飞书加密事件需要在回调地址中包含 bindingId')
+        throw new Error(t('mainDialog.imFeishuEncryptedEventRequiresBindingId'))
       }
       if (!verifyFeishuSignature(req, binding)) {
-        throw new Error('飞书签名校验失败')
+        throw new Error(t('mainDialog.imFeishuSignatureInvalid'))
       }
       body = decryptFeishuPayload(binding, encrypted)
     }
@@ -499,7 +500,7 @@ export class ImGatewayService {
     const bindingId = typeof req.params.bindingId === 'string' ? req.params.bindingId : undefined
     const binding = bindingId ? this.config.bindingStore.get(bindingId) : null
     if (binding && encrypted && !verifyWeComSignature(binding, timestamp, nonce, encrypted, signature)) {
-      throw new Error('企业微信签名校验失败')
+      throw new Error(t('mainDialog.imWeComSignatureInvalid'))
     }
     const xml = binding && encrypted ? decryptWeComPayload(binding, encrypted) : rawXml
     const text = parseXmlTag(xml, 'Content')
@@ -529,10 +530,10 @@ export class ImGatewayService {
     const bindingId = typeof req.params.bindingId === 'string' ? req.params.bindingId : undefined
     const binding = bindingId ? this.config.bindingStore.get(bindingId) : null
     if (binding && encrypted && !verifyWeComSignature(binding, timestamp, nonce, encrypted, msgSignature)) {
-      throw new Error('微信签名校验失败')
+      throw new Error(t('mainDialog.imWeChatSignatureInvalid'))
     }
     if (binding && !encrypted && !verifyWeChatPlainSignature(binding, timestamp, nonce, signature)) {
-      throw new Error('微信签名校验失败')
+      throw new Error(t('mainDialog.imWeChatSignatureInvalid'))
     }
     const xml = binding && encrypted ? decryptWeComPayload(binding, encrypted) : rawXml
     const text = parseXmlTag(xml, 'Content')

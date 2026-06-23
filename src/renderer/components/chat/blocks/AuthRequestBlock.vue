@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ChatMessageBlock } from '../types'
+import { translateAuthDetail, translateAuthTitle } from '../auth-i18n'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'auth_request' }>
@@ -12,6 +13,9 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+const translatedTitle = computed(() => translateAuthTitle(props.block.title, t))
+const translatedDetail = computed(() => translateAuthDetail(props.block.detail, t))
 
 const statusText = computed(() => {
   if (props.block.status === 'approved') return `✓ ${t('chatUi.allowed')}`
@@ -47,8 +51,8 @@ const statusText = computed(() => {
         </span>
       </div>
     </div>
-    <div class="auth-request-title">{{ props.block.title }}</div>
-    <pre class="auth-request-detail">{{ props.block.detail }}</pre>
+    <div class="auth-request-title">{{ translatedTitle }}</div>
+    <pre class="auth-request-detail">{{ translatedDetail }}</pre>
     <div v-if="props.block.status === 'pending'" class="auth-request-actions">
       <button class="auth-request-btn deny" type="button" @click="emit('respondAuth', props.block.requestId, false)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">

@@ -16,12 +16,14 @@ import type {
   AppUpdateWebsiteKind,
   AppUpdateWebsiteLinks
 } from '../../shared/app-update-types.js'
+import { t } from '../i18n/main-i18n.js'
 import type { SettingsStore } from '../settings/settings-store.js'
 
 const APP_ID = 'com.theworld.app'
 const CHECK_TIMEOUT_MS = 15000
 const DOWNLOADS_SUBDIR = 'updates'
 const PROGRESS_EMIT_INTERVAL_MS = 120
+const UPDATE_CONFIG_ERROR_KEY = 'mainDialog.updateConfigRequired'
 
 interface RemoteUpdateResponse {
   status?: string
@@ -201,7 +203,7 @@ export class UpdateService extends EventEmitter {
     this.config = this.settingsStore.getAppUpdateConfig()
     this.refreshResolvedConfig()
 
-    const shouldResetConfigFailure = this.state.status === 'failed' && (this.state.error?.includes('更新配置') ?? false)
+    const shouldResetConfigFailure = this.state.status === 'failed' && this.state.error === t(UPDATE_CONFIG_ERROR_KEY)
     this.updateState({
       website: { ...this.website },
       ...(shouldResetConfigFailure
@@ -234,7 +236,7 @@ export class UpdateService extends EventEmitter {
   async checkForUpdates (channel = inferChannelFromVersion(app.getVersion())): Promise<AppUpdateState> {
     if (this.disposed) return this.getState()
     if (!isValidHttpUrl(this.updateApiUrl)) {
-      return this.fail('请先在关于与更新中保存更新配置后再检查更新。')
+      return this.fail(t(UPDATE_CONFIG_ERROR_KEY))
     }
     if (this.state.status === 'downloading') {
       return this.getState()
@@ -268,7 +270,7 @@ export class UpdateService extends EventEmitter {
 
       if (!response.ok) {
         const body = await response.text().catch(() => '')
-        throw new Error(body || `官网更新接口返回 ${response.status}`)
+        throw new Error(body || t('mainDialog.updateApiHttpStatus', { status: response.status }))
       }
 
       const payload = await response.json() as RemoteUpdateResponse
@@ -339,8 +341,8 @@ export class UpdateService extends EventEmitter {
       return this.getState()
     } catch (error) {
       const message = timeoutController.signal.aborted
-        ? '官网更新接口请求超时'
-        : ((error as Error).message || '检查更新失败')
+        ? t('mainDialog.updateCheckTimeout')
+        : ((error as Error).message || t('mainDialog.updateCheckFailed'))
       return this.fail(message)
     } finally {
       clearTimeout(timeout)
@@ -350,10 +352,10 @@ export class UpdateService extends EventEmitter {
   async downloadUpdate (): Promise<AppUpdateState> {
     if (this.disposed) return this.getState()
     if (!this.state.asset || !this.state.latestVersion) {
-      return this.fail('当前没有可下载的更新包，请先检查更新。')
+      return this.fail(t('mainDialog.updateNoDownloadableAsset'))
     }
     if (process.platform !== 'win32') {
-      return this.fail('当前平台暂不支持应用内下载安装，请前往官网获取最新版本。')
+      return this.fail(t('mainDialog.updateDownloadUnsupportedPlatform'))
     }
 
     const asset = this.state.asset
@@ -401,7 +403,7 @@ export class UpdateService extends EventEmitter {
       })
 
       if (!response.ok || !response.body) {
-        throw new Error(`更新包下载失败 (${response.status})`)
+        throw new Error(t('mainDialog.updatePackageDownloadFailed', { status: response.status }))
       }
 
       const totalBytesHeader = Number.parseInt(response.headers.get('content-length') || '', 10)
@@ -457,11 +459,11 @@ export class UpdateService extends EventEmitter {
       const actualSha512 = sha512?.digest('base64')
 
       if (asset.sha256 && actualSha256 !== asset.sha256) {
-        throw new Error('更新包 SHA256 校验失败，请重试下载。')
+        throw new Error(t('mainDialog.updateSha256Failed'))
       }
 
       if (asset.sha512 && actualSha512 !== asset.sha512) {
-        throw new Error('更新包 SHA512 校验失败，请重试下载。')
+        throw new Error(t('mainDialog.updateSha512Failed'))
       }
 
       await fsp.rename(tempPath, targetPath)
@@ -475,7 +477,7 @@ export class UpdateService extends EventEmitter {
       return this.getState()
     } catch (error) {
       await ensureDeleted(tempPath)
-      return this.fail((error as Error).message || '下载更新失败')
+      return this.fail((error as Error).message || t('mainDialog.updateDownloadFailed'))
     } finally {
       this.activeDownloadAbortController = null
     }
@@ -483,12 +485,12 @@ export class UpdateService extends EventEmitter {
 
   async installDownloadedUpdate (): Promise<{ success: boolean; state: AppUpdateState; error?: string }> {
     if (process.platform !== 'win32') {
-      const state = this.fail('当前平台暂不支持应用内安装，请前往官网获取最新版本。')
+      const state = this.fail(t('mainDialog.updateInstallUnsupportedPlatform'))
       return { success: false, state, error: state.error || undefined }
     }
 
     if (!this.state.downloadedFilePath || !fs.existsSync(this.state.downloadedFilePath)) {
-      const state = this.fail('尚未找到可安装的更新包，请先下载更新。')
+      const state = this.fail(t('mainDialog.updateInstallerMissing'))
       return { success: false, state, error: state.error || undefined }
     }
 
@@ -512,7 +514,7 @@ export class UpdateService extends EventEmitter {
   async openWebsitePage (kind: AppUpdateWebsiteKind): Promise<{ success: boolean; error?: string }> {
     const url = kind === 'downloads' ? this.website.downloadsUrl : this.website.updatesUrl
     if (!isValidHttpUrl(url)) {
-      return { success: false, error: '官网地址尚未配置。' }
+      return { success: false, error: t('mainDialog.updateWebsiteNotConfigured') }
     }
 
     await shell.openExternal(url)

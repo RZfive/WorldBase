@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { t } from '../i18n/main-i18n.js'
 import type { AgentGroupDefinition } from '../../shared/agent-workspace-types.js'
 
 function sanitizeId (value: string): string {
@@ -38,7 +39,7 @@ function normalizeGroup (value: Partial<AgentGroupDefinition>, existing?: AgentG
 
   return {
     id: sanitizeId(value.id || existing?.id || createGroupId(value.name || 'group')),
-    name: typeof value.name === 'string' && value.name.trim() ? value.name.trim() : (existing?.name || '未命名群组'),
+    name: typeof value.name === 'string' && value.name.trim() ? value.name.trim() : (existing?.name || t('mainDialog.untitledAgentGroup')),
     icon: typeof value.icon === 'string' && value.icon.trim() ? value.icon.trim() : existing?.icon,
     description: typeof value.description === 'string' ? value.description.trim() : (existing?.description || ''),
     coordinatorAgentId: typeof value.coordinatorAgentId === 'string' ? value.coordinatorAgentId.trim() : (existing?.coordinatorAgentId || ''),

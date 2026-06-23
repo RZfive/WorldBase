@@ -1,4 +1,5 @@
 import type { MessageContent } from '../../src/main/ai-engine/providers/openai-provider.js'
+import { t } from '../../src/main/i18n/main-i18n.js'
 
 export function getMessageText (content: MessageContent): string {
   if (typeof content === 'string') return content
@@ -20,7 +21,7 @@ export function serializeMessageContentForDisplay (content: MessageContent): str
         return part.text || ''
       }
       if (part.type === 'image_url' && part.image_url?.url) {
-        return `![内部讨论图片 ${index + 1}](<${encodeURI(part.image_url.url)}>)`
+        return `![${t('mainDialog.internalDiscussionImageAlt', { index: index + 1 })}](<${encodeURI(part.image_url.url)}>)`
       }
       return ''
     })
@@ -31,7 +32,7 @@ export function serializeMessageContentForDisplay (content: MessageContent): str
 
 export function getTaskLabelFromMessages (messages: Array<{ role: string; content: MessageContent }>): string {
   if (messages.length === 0) {
-    return '未命名任务'
+    return t('mainDialog.untitledTask')
   }
 
   for (let idx = messages.length - 1; idx >= 0; idx--) {
@@ -42,14 +43,14 @@ export function getTaskLabelFromMessages (messages: Array<{ role: string; conten
       return text.length > 40 ? `${text.slice(0, 40)}…` : text
     }
   }
-  return '未命名任务'
+  return t('mainDialog.untitledTask')
 }
 
 export function getConversationTitleFromMessages (messages: Array<{ role: string; content: MessageContent }>): string {
   const firstUserMessage = messages.find(message => message.role === 'user')
-  if (!firstUserMessage) return '新对话'
+  if (!firstUserMessage) return t('mainDialog.newConversation')
   const text = getMessageText(firstUserMessage.content)
-  if (!text) return '新对话'
+  if (!text) return t('mainDialog.newConversation')
   return text.length > 40 ? `${text.slice(0, 40)}...` : text
 }
 

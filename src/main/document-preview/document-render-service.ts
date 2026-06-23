@@ -8,6 +8,7 @@ import type {
   DocumentRenderAsset,
   DocumentRenderPreview
 } from '../ai-engine/agent/tools/document-types.js'
+import { getMainLocale, t } from '../i18n/main-i18n.js'
 
 const RENDER_CACHE_DIRNAME = 'document-render-cache'
 
@@ -77,7 +78,7 @@ async function buildWordHtmlPreview (filePath: string): Promise<string> {
   const stat = await fs.stat(filePath)
   const cacheKey = buildCacheKey(filePath, stat.size, stat.mtimeMs)
   const cacheDir = path.join(getRenderCacheRoot(), cacheKey)
-  const outputPath = path.join(cacheDir, `${path.parse(filePath).name}.preview.html`)
+  const outputPath = path.join(cacheDir, `${path.parse(filePath).name}.${getMainLocale()}.preview.html`)
 
   if (await fileExists(outputPath)) {
     return outputPath
@@ -86,7 +87,7 @@ async function buildWordHtmlPreview (filePath: string): Promise<string> {
   await ensureDirectory(cacheDir)
 
   const htmlResult = await mammoth.convertToHtml({ path: filePath })
-  const htmlBody = sanitizePreviewHtml(htmlResult.value || '') || '<p>文档没有可显示的文本内容。</p>'
+  const htmlBody = sanitizePreviewHtml(htmlResult.value || '') || t('mainDialog.emptyDocumentPreviewText')
   await fs.writeFile(outputPath, buildHtmlDocument(path.basename(filePath), htmlBody), 'utf8')
   return outputPath
 }
@@ -121,7 +122,7 @@ export async function buildDocumentRenderPreview (filePath: string, fileType: Do
         kind: 'structured',
         source: 'fallback',
         status: 'unavailable',
-        error: `Word HTML 预览生成失败，已回退到结构化视图: ${(error as Error).message || String(error)}`,
+        error: t('mainDialog.wordPreviewFallbackError', { message: (error as Error).message || String(error) }),
         generatedAt
       }
     }
@@ -140,7 +141,7 @@ export async function buildDocumentRenderPreview (filePath: string, fileType: Do
     kind: 'structured',
     source: 'fallback',
     status: 'unavailable',
-    error: `当前格式暂不支持真实预览: ${fileType}`,
+    error: t('mainDialog.unsupportedRealPreviewFormat', { fileType }),
     generatedAt
   }
 }

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { parseDocument, parseDocumentBuffer, isSupportedDocument } from '../../../src/main/ai-engine/agent/tools/document-parser.js'
+import { t } from '../../../src/main/i18n/main-i18n.js'
 import {
   MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES,
   MAX_UPLOADED_OFFICE_CONTENT_LENGTH,
@@ -73,11 +74,11 @@ export async function readUploadedAttachmentFromBuffer (
 ): Promise<UploadedAttachmentResult> {
   const fileName = path.basename(options.fileName || '').trim()
   if (!fileName) {
-    throw new Error('附件缺少文件名')
+    throw new Error(t('mainDialog.attachmentMissingFileName'))
   }
 
   if (buffer.byteLength > MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
-    throw new Error(`文件过大 (${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB)，最大支持 10 MB`)
+    throw new Error(t('mainDialog.fileTooLargeTenMb', { size: (buffer.byteLength / 1024 / 1024).toFixed(1) }))
   }
 
   if (isSupportedDocument(fileName)) {
@@ -95,7 +96,7 @@ export async function readUploadedAttachmentFromBuffer (
   }
 
   if (!isSupportedTextAttachment(fileName) && !isLikelyTextAttachmentMimeType(options.fileType) && !looksLikeTextBuffer(buffer)) {
-    throw new Error(`暂不支持的附件格式: ${path.extname(fileName) || 'unknown'}`)
+    throw new Error(t('mainDialog.unsupportedAttachmentFormat', { extension: path.extname(fileName) || 'unknown' }))
   }
 
   return {
@@ -112,7 +113,7 @@ export async function readUploadedAttachmentFromPath (filePath: string): Promise
   const stat = await fs.stat(resolvedPath)
 
   if (!stat.isFile()) {
-    throw new Error(`路径不是一个文件: ${resolvedPath}`)
+    throw new Error(t('mainDialog.notAFile', { path: resolvedPath }))
   }
 
   if (isSupportedDocument(resolvedPath)) {

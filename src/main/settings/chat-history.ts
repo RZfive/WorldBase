@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { t } from '../i18n/main-i18n.js'
 import type { AIExecutionAuthMode } from './settings-store.js'
 import type { AgentGroupProgressSnapshot, AgentGroupTranscript, AgentSidechatSession } from '../../shared/agent-workspace-types.js'
 import type { ConversationFolderWorkspaceState } from '../../shared/folder-workspace-types.js'
@@ -294,7 +295,7 @@ export class ChatHistoryStore {
    */
   static generateTitle (messages: ChatMessage[]): string {
     const firstUser = messages.find(m => m.role === 'user')
-    if (!firstUser) return '新对话'
+    if (!firstUser) return t('mainDialog.newConversation')
     const text = typeof firstUser.content === 'string'
       ? firstUser.content.trim()
       : firstUser.content
@@ -302,7 +303,7 @@ export class ChatHistoryStore {
         .map(part => part.text || '')
         .join(' ')
         .trim()
-    if (!text) return '新对话'
+    if (!text) return t('mainDialog.newConversation')
     return text.length > 40 ? text.substring(0, 40) + '...' : text
   }
 }

@@ -165,6 +165,84 @@ function formatMemoryCompactionResult (result: MemoryCompactionResult): string {
   })
 }
 
+const MEMORY_COMPACTION_TEXT_KEYS: Record<string, string> = {
+  '空闲': 'mainDialog.memoryCompactionIdle',
+  Idle: 'mainDialog.memoryCompactionIdle',
+  '准备整理': 'mainDialog.memoryCompactionPreparing',
+  'Preparing compaction': 'mainDialog.memoryCompactionPreparing',
+  'AI 分析记忆': 'mainDialog.memoryCompactionAnalyzing',
+  'AI analyzing memory': 'mainDialog.memoryCompactionAnalyzing',
+  '扫描记忆': 'mainDialog.memoryCompactionScanning',
+  'Scanning memory': 'mainDialog.memoryCompactionScanning',
+  '正在读取当前所有记忆': 'mainDialog.memoryCompactionReadingAll',
+  'Reading all current memories': 'mainDialog.memoryCompactionReadingAll',
+  '无需整理': 'mainDialog.memoryCompactionNoop',
+  'No compaction needed': 'mainDialog.memoryCompactionNoop',
+  '当前没有可整理的记忆': 'mainDialog.memoryCompactionNoEntries',
+  'There are no memories to compact': 'mainDialog.memoryCompactionNoEntries',
+  '应用整理结果': 'mainDialog.memoryCompactionApplying',
+  'Applying compaction result': 'mainDialog.memoryCompactionApplying',
+  '正在删除、合并和更新记忆': 'mainDialog.memoryCompactionApplyingDetail',
+  'Deleting, merging, and updating memories': 'mainDialog.memoryCompactionApplyingDetail',
+  '整理完成': 'mainDialog.memoryCompactionDone',
+  'Compaction complete': 'mainDialog.memoryCompactionDone',
+  '整理失败': 'mainDialog.memoryCompactionFailedStage',
+  'Compaction failed': 'mainDialog.memoryCompactionFailedStage'
+}
+
+function translateMemoryCompactionText (text?: string): string {
+  if (!text) return ''
+
+  const directKey = MEMORY_COMPACTION_TEXT_KEYS[text]
+  if (directKey) return t(directKey)
+
+  const batchCountMatch = text.match(/^共 (\d+) 批记忆$/)
+  if (batchCountMatch) return t('mainDialog.memoryCompactionBatchCount', { count: batchCountMatch[1] })
+
+  const englishBatchCountMatch = text.match(/^(\d+) memory batches$/)
+  if (englishBatchCountMatch) return t('mainDialog.memoryCompactionBatchCount', { count: englishBatchCountMatch[1] })
+
+  const analyzingBatchMatch = text.match(/^正在整理第 (\d+)\/(\d+) 批$/)
+  if (analyzingBatchMatch) return t('mainDialog.memoryCompactionAnalyzingBatch', { current: analyzingBatchMatch[1], total: analyzingBatchMatch[2] })
+
+  const englishAnalyzingBatchMatch = text.match(/^Compacting batch (\d+)\/(\d+)$/)
+  if (englishAnalyzingBatchMatch) return t('mainDialog.memoryCompactionAnalyzingBatch', { current: englishAnalyzingBatchMatch[1], total: englishAnalyzingBatchMatch[2] })
+
+  const batchDoneMatch = text.match(/^已完成 (\d+)\/(\d+) 批$/)
+  if (batchDoneMatch) return t('mainDialog.memoryCompactionBatchDone', { current: batchDoneMatch[1], total: batchDoneMatch[2] })
+
+  const englishBatchDoneMatch = text.match(/^Completed (\d+)\/(\d+) batches$/)
+  if (englishBatchDoneMatch) return t('mainDialog.memoryCompactionBatchDone', { current: englishBatchDoneMatch[1], total: englishBatchDoneMatch[2] })
+
+  const scannedMatch = text.match(/^已扫描 (\d+) 条记忆$/)
+  if (scannedMatch) return t('mainDialog.memoryCompactionScannedCount', { count: scannedMatch[1] })
+
+  const englishScannedMatch = text.match(/^Scanned (\d+) memories$/)
+  if (englishScannedMatch) return t('mainDialog.memoryCompactionScannedCount', { count: englishScannedMatch[1] })
+
+  const doneDetailMatch = text.match(/^扫描 (\d+) 条，删除 (\d+) 条，合并 (\d+) 条，更新 (\d+) 条$/)
+  if (doneDetailMatch) {
+    return t('mainDialog.memoryCompactionDoneDetail', {
+      scanned: doneDetailMatch[1],
+      removed: doneDetailMatch[2],
+      merged: doneDetailMatch[3],
+      updated: doneDetailMatch[4]
+    })
+  }
+
+  const englishDoneDetailMatch = text.match(/^Scanned (\d+), deleted (\d+), merged (\d+), updated (\d+)$/)
+  if (englishDoneDetailMatch) {
+    return t('mainDialog.memoryCompactionDoneDetail', {
+      scanned: englishDoneDetailMatch[1],
+      removed: englishDoneDetailMatch[2],
+      merged: englishDoneDetailMatch[3],
+      updated: englishDoneDetailMatch[4]
+    })
+  }
+
+  return text
+}
+
 const hasMemoryScopeFilter = computed(() => memoryScopeId.value.trim().length > 0)
 
 const memoryScopeFilterText = computed(() => {
@@ -177,8 +255,10 @@ function formatMemoryCompactionStatus (status: MemoryCompactionStatus): string {
     const batchText = status.totalChunks > 0
       ? t('settings.agentWorkspace.memoryBatchProgressWrapped', { completed: status.completedChunks, total: status.totalChunks })
       : ''
-    const detail = status.detail ? t('settings.agentWorkspace.colonDetail', { detail: status.detail }) : ''
-    return t('settings.agentWorkspace.memoryCompactionRunning', { stage: status.stage, batch: batchText, detail })
+    const stage = translateMemoryCompactionText(status.stage)
+    const translatedDetail = translateMemoryCompactionText(status.detail)
+    const detail = translatedDetail ? t('settings.agentWorkspace.colonDetail', { detail: translatedDetail }) : ''
+    return t('settings.agentWorkspace.memoryCompactionRunning', { stage, batch: batchText, detail })
   }
 
   if (status.status === 'completed' && status.result) {
@@ -186,7 +266,7 @@ function formatMemoryCompactionStatus (status: MemoryCompactionStatus): string {
   }
 
   if (status.status === 'failed') {
-    return t('settings.agentWorkspace.memoryCompactionFailed', { message: status.error || status.detail || t('common.unknown') })
+    return t('settings.agentWorkspace.memoryCompactionFailed', { message: status.error || translateMemoryCompactionText(status.detail) || t('common.unknown') })
   }
 
   return ''
@@ -210,9 +290,11 @@ const memoryCompactionProgressText = computed(() => {
   const batchText = status.totalChunks > 0
     ? t('settings.agentWorkspace.memoryBatchProgress', { completed: status.completedChunks, total: status.totalChunks })
     : t('settings.agentWorkspace.preparing')
-  return status.detail
-    ? `${batchText} · ${status.stage} · ${status.detail}`
-    : `${batchText} · ${status.stage}`
+  const stage = translateMemoryCompactionText(status.stage)
+  const detail = translateMemoryCompactionText(status.detail)
+  return detail
+    ? `${batchText} · ${stage} · ${detail}`
+    : `${batchText} · ${stage}`
 })
 
 function toggleStringValue<T extends string> (collection: T[], value: T): T[] {

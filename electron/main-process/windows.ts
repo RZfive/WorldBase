@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PROJECT_PACKAGE_EXTENSION } from '../../src/main/project-fs/project-package-service.js'
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
+import { t } from '../../src/main/i18n/main-i18n.js'
 import type { ActivePageAutomationContext, PageAutomationRendererRequest, PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
 import {
   ALLOWED_WEBVIEW_POPUP_PROTOCOLS,
@@ -301,14 +302,14 @@ export function runWithAiRequestWindow<T> (win: BrowserWindow | null, task: () =
 export async function requestPageAutomationFromRenderer<T extends PageAutomationRendererResult> (request: PageAutomationRendererRequest): Promise<T> {
   const targetWindow = getActiveAiRequestWindow()
   if (!targetWindow || targetWindow.isDestroyed() || targetWindow.webContents.isDestroyed()) {
-    throw new Error('当前没有可用的应用窗口来执行网页操作。')
+    throw new Error(t('mainDialog.pageAutomationNoWindow'))
   }
 
   return await new Promise<T>((resolve, reject) => {
     const requestId = randomUUID()
     const timeout = setTimeout(() => {
       pendingPageAutomationRequests.delete(requestId)
-      reject(new Error('等待页面操作响应超时，请确认当前网页仍处于活动状态。'))
+      reject(new Error(t('mainDialog.pageAutomationTimeout')))
     }, PAGE_AUTOMATION_REQUEST_TIMEOUT_MS)
 
     pendingPageAutomationRequests.set(requestId, {
@@ -370,7 +371,7 @@ export async function resolveImageBuffer (imageUrl: string): Promise<{ buffer: B
   if (imageUrl.startsWith('data:')) {
     const match = imageUrl.match(/^data:([^;]+);base64,(.+)$/)
     if (!match) {
-      throw new Error('不支持的图片数据格式')
+      throw new Error(t('mainDialog.unsupportedImageData'))
     }
 
     return {
@@ -381,7 +382,7 @@ export async function resolveImageBuffer (imageUrl: string): Promise<{ buffer: B
 
   const response = await fetch(imageUrl)
   if (!response.ok) {
-    throw new Error(`下载图片失败 (${response.status})`)
+    throw new Error(t('mainDialog.imageDownloadFailed', { status: response.status }))
   }
 
   const mimeType = response.headers.get('content-type') || 'image/png'
