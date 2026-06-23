@@ -1102,10 +1102,10 @@ function onDocClickGlobal () { hideDockCtx() }
 
 onMounted(async () => {
   // Keep the global titlebar-height token in sync with the platform-specific TitleBar height
-  // (46px on macOS, 40px on Windows). Overlays anchored below the titlebar read this token.
+  // (38px on macOS, 34px on Windows). Overlays anchored below the titlebar read this token.
   const platform = (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform || navigator.platform || navigator.userAgent
   if (/win/i.test(platform)) {
-    document.documentElement.style.setProperty('--app-titlebar-height', '40px')
+    document.documentElement.style.setProperty('--app-titlebar-height', '34px')
   }
 
   const savedThemePreference = await window.electronAPI?.getThemePreference?.().catch(() => 'system' as const)
@@ -1372,7 +1372,7 @@ onUnmounted(() => {
   --dock-accent: var(--app-accent);
   --dock-accent-soft: var(--app-accent-soft);
   --dock-accent-glow: var(--app-accent-glow);
-  --dock-width: 70px;
+  --dock-width: 56px;
   --app-frame-corner-radius: 16px;
   display: flex;
   flex-direction: column;
@@ -1421,8 +1421,8 @@ onUnmounted(() => {
   overflow: hidden;
   position: relative;
   background: var(--app-main-surface);
-  border-top: 1px solid var(--app-border);
-  border-left: 1px solid var(--app-border);
+  border-top: 1px solid var(--app-border-strong);
+  border-left: 1px solid var(--app-border-strong);
   border-top-left-radius: var(--app-frame-corner-radius);
 }
 

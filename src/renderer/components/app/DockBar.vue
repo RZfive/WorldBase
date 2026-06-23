@@ -177,9 +177,9 @@ function appTitle (app: RunningApp): string {
 
 <style scoped>
 .dock-bar {
-  --dock-slot-size: 60px;
-  --dock-surface-size: 56px;
-  --dock-icon-size: 30px;
+  --dock-slot-size: 46px;
+  --dock-surface-size: 42px;
+  --dock-icon-size: 22px;
   --dock-accent: var(--app-accent);
   --dock-accent-soft: var(--app-accent-soft);
   --dock-accent-glow: var(--app-accent-glow);
@@ -189,8 +189,8 @@ function appTitle (app: RunningApp): string {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 8px calc((var(--dock-width) - var(--dock-slot-size)) / 2) 7px;
+  gap: 6px;
+  padding: 6px calc((var(--dock-width) - var(--dock-slot-size)) / 2) 6px;
   background: linear-gradient(180deg, var(--app-panel), var(--app-panel-strong) 55%, var(--app-panel));
 }
 
@@ -205,16 +205,16 @@ function appTitle (app: RunningApp): string {
 
 .dock-apps {
   flex: 1;
-  gap: 8px;
-  padding: 8px 0;
+  gap: 6px;
+  padding: 6px 0;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
 .dock-apps::-webkit-scrollbar { width: 0; }
 
-.dock-bottom { gap: 8px; }
-.dock-top { gap: 8px; }
+.dock-bottom { gap: 6px; }
+.dock-top { gap: 6px; }
 
 .dock-item {
   position: relative;
@@ -252,7 +252,7 @@ function appTitle (app: RunningApp): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 20px;
+  border-radius: 14px;
   border: 1px solid transparent;
   background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -301,8 +301,8 @@ function appTitle (app: RunningApp): string {
 .dock-item.dock-active .dock-item-surface::after {
   content: '';
   position: absolute;
-  inset: 6px;
-  border-radius: 15px;
+  inset: 5px;
+  border-radius: 11px;
   background: radial-gradient(circle at 50% 12%, var(--dock-accent-glow), transparent 68%);
   opacity: 0.9;
   pointer-events: none;
@@ -346,7 +346,7 @@ function appTitle (app: RunningApp): string {
 .dock-item-icon {
   position: relative;
   z-index: 1;
-  font-size: 1.65em;
+  font-size: 1.35em;
   line-height: 1;
   transition: transform 0.18s ease, filter 0.18s ease;
   filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.22));
@@ -375,13 +375,13 @@ function appTitle (app: RunningApp): string {
 
 .dock-window-badge {
   position: absolute;
-  top: 5px;
-  right: 5px;
+  top: 4px;
+  right: 4px;
   font-size: 0.58em;
   background: var(--dock-accent);
   color: var(--app-text-strong);
-  width: 15px;
-  height: 15px;
+  width: 13px;
+  height: 13px;
   border-radius: 999px;
   display: flex;
   align-items: center;
@@ -392,10 +392,10 @@ function appTitle (app: RunningApp): string {
 
 .dock-close-btn {
   position: absolute;
-  top: 5px;
-  right: 5px;
-  width: 17px;
-  height: 17px;
+  top: 4px;
+  right: 4px;
+  width: 15px;
+  height: 15px;
   padding: 0;
   border: none;
   border-radius: 999px;
@@ -424,30 +424,30 @@ function appTitle (app: RunningApp): string {
 
 .dock-running-dot {
   position: absolute;
-  bottom: 7px;
-  width: 6px;
-  height: 6px;
+  bottom: 5px;
+  width: 5px;
+  height: 5px;
   border-radius: 999px;
   background: var(--app-success);
   box-shadow: 0 0 8px rgba(34, 197, 94, 0.36);
 }
 
 .dock-divider {
-  width: 34px;
+  width: 26px;
   height: 1px;
   flex-shrink: 0;
   background: var(--app-border-strong);
-  opacity: 0.45;
+  opacity: 0.7;
 }
 
 .dock-divider-inline {
-  margin: 4px 0;
+  margin: 3px 0;
 }
 
 .dock-pin-badge {
   position: absolute;
-  top: 4px;
-  left: 4px;
+  top: 3px;
+  left: 3px;
   font-size: 0.5em;
   line-height: 1;
   opacity: 0.5;

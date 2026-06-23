@@ -115,7 +115,7 @@ watch(() => props.task?.id, () => {
 
 <style scoped>
 .detail-overlay {
-  --detail-top-offset: var(--app-titlebar-height, 46px);
+  --detail-top-offset: var(--app-titlebar-height, 38px);
   position: fixed;
   inset: var(--detail-top-offset) 0 0 0;
   z-index: 10200;
