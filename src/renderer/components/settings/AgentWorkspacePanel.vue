@@ -1282,7 +1282,7 @@ watch(activeTab, (nextTab, previousTab) => {
           </select>
         </label>
         <label>
-          <span>Scope ID</span>
+          <span>{{ $t('settings.agentWorkspace.scopeId') }}</span>
           <input v-model="memoryScopeId" class="input memory-scope-id" placeholder="local-user / agent_xxx / project_xxx" @keyup.enter="loadMemory">
         </label>
         <button class="ghost-btn" type="button" :disabled="!hasMemoryScopeFilter" @click="clearMemoryScopeFilter">{{ $t('settings.agentWorkspace.all') }}</button>
@@ -1307,7 +1307,7 @@ watch(activeTab, (nextTab, previousTab) => {
             </select>
           </label>
           <label>
-            <span>Scope ID</span>
+            <span>{{ $t('settings.agentWorkspace.scopeId') }}</span>
             <input v-model="draftMemory.scopeId" class="input" placeholder="local-user / agent_xxx / project_xxx">
           </label>
           <label class="memory-create-summary">

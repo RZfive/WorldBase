@@ -679,6 +679,7 @@ watch(
         :active-file-path="folderWorkspaceActiveFilePath"
         :workspace-width="folderWorkspaceWidth"
         @close="closeFolderWorkspace"
+        @insert-selection-tag="insertDocumentTag"
         @update-workspace="updateFolderWorkspaceState"
       />
     </div>

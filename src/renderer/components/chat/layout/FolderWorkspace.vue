@@ -12,6 +12,11 @@ interface FlatWorkspaceEntry extends WorkspaceEntry {
   depth: number
 }
 
+interface CodeLine {
+  number: number
+  html: string
+}
+
 const props = withDefaults(defineProps<{
   visible: boolean
   rootPath?: string | null
@@ -27,10 +32,15 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
+  (e: 'insertSelectionTag', tag: string): void
   (e: 'updateWorkspace', state: WorkspaceState | null): void
 }>()
 
 const workspaceRoot = ref<HTMLElement | null>(null)
+const treeListRef = ref<HTMLElement | null>(null)
+const fileSearchInputRef = ref<HTMLInputElement | null>(null)
+const codePreviewRef = ref<HTMLElement | null>(null)
+const codeScrollRef = ref<HTMLElement | null>(null)
 const workspaceWidth = ref(props.workspaceWidth)
 const currentRootPath = ref<string | null>(props.rootPath || null)
 const currentRootName = ref<string | null>(props.rootName || null)
@@ -38,6 +48,10 @@ const currentActiveFilePath = ref<string | null>(props.activeFilePath || null)
 const fileTree = ref<WorkspaceEntry[]>([])
 const expandedDirs = ref<Set<string>>(new Set())
 const selectedFile = ref<WorkspaceReadResult | null>(null)
+const fileSearchQuery = ref('')
+const activeSearchIndex = ref(0)
+const codeSelectionStart = ref<number | null>(null)
+const codeSelectionEnd = ref<number | null>(null)
 const isPickingFolder = ref(false)
 const isLoadingTree = ref(false)
 const isLoadingFile = ref(false)
@@ -58,20 +72,64 @@ let resizeStartX = 0
 let resizeStartWidth = 0
 let resizing = false
 let layoutObserver: ResizeObserver | null = null
+let workspaceShortcutsBound = false
 
 const flatFileTree = computed(() => flattenFileTree(fileTree.value))
+const allFileEntries = computed(() => flattenAllFileTree(fileTree.value))
 const selectedPath = computed(() => currentActiveFilePath.value || selectedFile.value?.filePath || null)
 const lineCount = computed(() => selectedFile.value?.lineCount || 0)
 const renderedMarkdown = computed(() => selectedFile.value?.isMarkdown ? renderMarkdown(selectedFile.value.content) : '')
-const highlightedCode = computed(() => {
+const normalizedFileSearchQuery = computed(() => fileSearchQuery.value.trim().toLowerCase())
+const searchResults = computed(() => {
+  const query = normalizedFileSearchQuery.value
+  if (!query) return []
+
+  return allFileEntries.value
+    .filter(item => item.type === 'file')
+    .map(item => ({ item, score: getFileSearchScore(item, query) }))
+    .filter(result => result.score > 0)
+    .sort((a, b) => b.score - a.score || a.item.path.localeCompare(b.item.path))
+    .slice(0, 80)
+    .map(result => result.item)
+})
+const hasFileSearch = computed(() => normalizedFileSearchQuery.value.length > 0)
+const normalizedCodeSelection = computed(() => {
+  const start = codeSelectionStart.value
+  const end = codeSelectionEnd.value
+  if (!start) return null
+  const safeEnd = end || start
+  return {
+    start: Math.min(start, safeEnd),
+    end: Math.max(start, safeEnd),
+    isComplete: end !== null
+  }
+})
+const codeSelectionLabel = computed(() => {
+  const selection = normalizedCodeSelection.value
+  if (!selection || !selectedFile.value) return ''
+  const linePart = selection.start === selection.end
+    ? `L${selection.start}`
+    : `L${selection.start}-L${selection.end}`
+  return `${selectedFile.value.filePath}#${linePart}`
+})
+const codeLines = computed<CodeLine[]>(() => {
   const file = selectedFile.value
-  if (!file) return ''
+  if (!file || file.isMarkdown) return []
+  if (file.content === '') return []
+
+  return file.content.split('\n').map((line, index) => ({
+    number: index + 1,
+    html: highlightCodeLine(line, file)
+  }))
+})
+
+function highlightCodeLine (line: string, file: WorkspaceReadResult): string {
   const language = file.language?.trim().toLowerCase()
   if (language && hljs.getLanguage(language)) {
-    return hljs.highlight(file.content, { language, ignoreIllegals: true }).value
+    return hljs.highlight(line, { language, ignoreIllegals: true }).value
   }
-  return escapeHtml(file.content)
-})
+  return escapeHtml(line)
+}
 
 function escapeHtml (value: string): string {
   return value
@@ -91,6 +149,17 @@ function flattenFileTree (items: WorkspaceEntry[], depth = 0): FlatWorkspaceEntr
   return flat
 }
 
+function flattenAllFileTree (items: WorkspaceEntry[], depth = 0): FlatWorkspaceEntry[] {
+  const flat: FlatWorkspaceEntry[] = []
+  for (const item of items) {
+    flat.push({ ...item, depth })
+    if (item.children?.length) {
+      flat.push(...flattenAllFileTree(item.children, depth + 1))
+    }
+  }
+  return flat
+}
+
 function findEntry (items: WorkspaceEntry[], filePath: string | null): WorkspaceEntry | null {
   if (!filePath) return null
   for (const item of items) {
@@ -103,6 +172,21 @@ function findEntry (items: WorkspaceEntry[], filePath: string | null): Workspace
   return null
 }
 
+function getFileSearchScore (item: WorkspaceEntry, query: string): number {
+  const pathValue = item.path.toLowerCase()
+  const nameValue = item.name.toLowerCase()
+  if (nameValue === query) return 100
+  if (pathValue === query) return 95
+  if (nameValue.startsWith(query)) return 80
+  if (pathValue.startsWith(query)) return 70
+  if (nameValue.includes(query)) return 56
+  if (pathValue.includes(query)) return 42
+
+  const queryParts = query.split(/\s+/).filter(Boolean)
+  if (queryParts.length > 1 && queryParts.every(part => pathValue.includes(part))) return 34
+  return 0
+}
+
 function findFirstPreviewableFile (items: WorkspaceEntry[]): WorkspaceEntry | null {
   for (const item of items) {
     if (item.type === 'file' && item.kind !== 'binary') return item
@@ -112,6 +196,16 @@ function findFirstPreviewableFile (items: WorkspaceEntry[]): WorkspaceEntry | nu
     }
   }
   return null
+}
+
+function expandAncestorsForPath (filePath: string): void {
+  if (!filePath.includes('/')) return
+  const next = new Set(expandedDirs.value)
+  const parts = filePath.split('/')
+  for (let index = 1; index < parts.length; index += 1) {
+    next.add(parts.slice(0, index).join('/'))
+  }
+  expandedDirs.value = next
 }
 
 function expandTopLevelDirectories (): void {
@@ -145,6 +239,67 @@ function getFileBadge (item: WorkspaceEntry): string {
   return 'TXT'
 }
 
+function getFileIcon (item: WorkspaceEntry): string {
+  if (item.type === 'directory') return expandedDirs.value.has(item.path) ? '▾' : '▸'
+  if (item.kind === 'markdown') return 'MD'
+  if (item.kind === 'binary') return 'BIN'
+  return item.language?.slice(0, 2).toUpperCase() || 'F'
+}
+
+function clearFileSearch (): void {
+  fileSearchQuery.value = ''
+  activeSearchIndex.value = 0
+}
+
+function focusFileSearch (): void {
+  fileSearchInputRef.value?.focus()
+  fileSearchInputRef.value?.select()
+}
+
+async function openSearchResult (item: WorkspaceEntry): Promise<void> {
+  expandAncestorsForPath(item.path)
+  await openFile(item)
+  clearFileSearch()
+}
+
+function handleSearchKeydown (event: KeyboardEvent): void {
+  if (!hasFileSearch.value) return
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    activeSearchIndex.value = searchResults.value.length > 0
+      ? (activeSearchIndex.value + 1) % searchResults.value.length
+      : 0
+    return
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    activeSearchIndex.value = searchResults.value.length > 0
+      ? (activeSearchIndex.value - 1 + searchResults.value.length) % searchResults.value.length
+      : 0
+    return
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    const item = searchResults.value[activeSearchIndex.value] || searchResults.value[0]
+    if (item) void openSearchResult(item)
+    return
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    clearFileSearch()
+  }
+}
+
+function handleWorkspaceKeydown (event: KeyboardEvent): void {
+  const target = event.target as HTMLElement | null
+  const isTyping = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable
+  if (isTyping) return
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'p') {
+    event.preventDefault()
+    focusFileSearch()
+  }
+}
+
 function getChatPanelWidth (): number {
   return workspaceRoot.value?.parentElement?.clientWidth || Math.max(0, window.innerWidth - CONVERSATION_SIDEBAR_WIDTH)
 }
@@ -172,6 +327,91 @@ function emitWorkspaceState (): void {
     activeFilePath: currentActiveFilePath.value || undefined,
     width: workspaceWidth.value
   })
+}
+
+function buildCodeSelectionTag (): string {
+  const selection = normalizedCodeSelection.value
+  const file = selectedFile.value
+  if (!selection || !file) return ''
+  const linePart = selection.start === selection.end
+    ? `L${selection.start}`
+    : `L${selection.start}-L${selection.end}`
+  return `[[code:${file.filePath}#${linePart}]]`
+}
+
+function resetCodeSelection (): void {
+  codeSelectionStart.value = null
+  codeSelectionEnd.value = null
+}
+
+function selectCodeLine (lineNumber: number): void {
+  if (!codeSelectionStart.value || codeSelectionEnd.value) {
+    codeSelectionStart.value = lineNumber
+    codeSelectionEnd.value = null
+    return
+  }
+  codeSelectionEnd.value = lineNumber
+}
+
+function isCodeLineSelected (lineNumber: number): boolean {
+  const selection = normalizedCodeSelection.value
+  if (!selection) return false
+  return lineNumber >= selection.start && lineNumber <= selection.end
+}
+
+function getLineNumberFromElement (element: Element | null): number | null {
+  if (!element) return null
+  const rawLineNumber = element.getAttribute('data-line-number')
+  if (!rawLineNumber) return null
+  const lineNumber = Number.parseInt(rawLineNumber, 10)
+  return Number.isFinite(lineNumber) ? lineNumber : null
+}
+
+function getCodeLineElementFromNode (node: Node | null): HTMLElement | null {
+  const preview = codePreviewRef.value
+  if (!node || !preview) return null
+  const element = node instanceof Element ? node : node.parentElement
+  const lineElement = element?.closest<HTMLElement>('.code-line') || null
+  if (!lineElement || !preview.contains(lineElement)) return null
+  return lineElement
+}
+
+function handleCodeTextSelection (): void {
+  const selection = window.getSelection()
+  const preview = codePreviewRef.value
+  const scroll = codeScrollRef.value
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !preview || !scroll) return
+  if (!preview.contains(selection.anchorNode) && !preview.contains(selection.focusNode)) return
+
+  const range = selection.getRangeAt(0)
+  const selectedLines: number[] = []
+  for (const lineElement of Array.from(scroll.querySelectorAll<HTMLElement>('.code-line'))) {
+    try {
+      if (!range.intersectsNode(lineElement)) continue
+    } catch {
+      continue
+    }
+    const lineNumber = getLineNumberFromElement(lineElement)
+    if (lineNumber) selectedLines.push(lineNumber)
+  }
+
+  if (selectedLines.length > 0) {
+    codeSelectionStart.value = Math.min(...selectedLines)
+    codeSelectionEnd.value = Math.max(...selectedLines)
+    return
+  }
+
+  const anchorLine = getLineNumberFromElement(getCodeLineElementFromNode(selection.anchorNode))
+  const focusLine = getLineNumberFromElement(getCodeLineElementFromNode(selection.focusNode))
+  if (!anchorLine || !focusLine) return
+  codeSelectionStart.value = anchorLine
+  codeSelectionEnd.value = focusLine
+}
+
+function insertCodeSelectionTag (): void {
+  const tag = buildCodeSelectionTag()
+  if (!tag) return
+  emit('insertSelectionTag', tag)
 }
 
 function startResize (event: MouseEvent): void {
@@ -286,6 +526,7 @@ async function openFile (item: WorkspaceEntry, options?: { persist?: boolean }):
   if (item.kind === 'binary') {
     selectedFile.value = null
     currentActiveFilePath.value = item.path
+    resetCodeSelection()
     fileError.value = 'Binary file preview is unavailable.'
     if (options?.persist !== false) emitWorkspaceState()
     return
@@ -294,6 +535,7 @@ async function openFile (item: WorkspaceEntry, options?: { persist?: boolean }):
   isLoadingFile.value = true
   fileError.value = ''
   currentActiveFilePath.value = item.path
+  resetCodeSelection()
   try {
     selectedFile.value = await window.electronAPI.readFolderWorkspaceFile(currentRootPath.value, item.path)
     if (options?.persist !== false) emitWorkspaceState()
@@ -323,11 +565,19 @@ watch(
     if (!visible) {
       promptedForOpen.value = false
       stopResize()
+      if (workspaceShortcutsBound) {
+        document.removeEventListener('keydown', handleWorkspaceKeydown)
+        workspaceShortcutsBound = false
+      }
       layoutObserver?.disconnect()
       layoutObserver = null
       return
     }
 
+    if (!workspaceShortcutsBound) {
+      document.addEventListener('keydown', handleWorkspaceKeydown)
+      workspaceShortcutsBound = true
+    }
     await nextTick()
     bindLayoutObserver()
     await syncWorkspaceWidthToLayout(props.workspaceWidth)
@@ -343,17 +593,31 @@ watch(
   () => [props.rootPath, props.rootName, props.activeFilePath] as const,
   async ([rootPath, rootName, activeFilePath], previous) => {
     const previousRootPath = previous?.[0]
+    const previousActiveFilePath = previous?.[2]
     currentRootPath.value = rootPath || null
     currentRootName.value = rootName || null
     currentActiveFilePath.value = activeFilePath || null
     if (!props.visible || !currentRootPath.value) return
     if (rootPath !== previousRootPath) {
       expandedDirs.value = new Set()
+      await loadWorkspaceTree(activeFilePath || null)
+      return
     }
-    await loadWorkspaceTree(activeFilePath || null)
+    if (activeFilePath && activeFilePath !== previousActiveFilePath && selectedFile.value?.filePath !== activeFilePath) {
+      const entry = findEntry(fileTree.value, activeFilePath)
+      if (entry?.type === 'file') {
+        await openFile(entry, { persist: false })
+      }
+    }
   },
   { immediate: true }
 )
+
+watch(searchResults, (results) => {
+  if (activeSearchIndex.value >= results.length) {
+    activeSearchIndex.value = 0
+  }
+})
 
 onMounted(() => {
   if (!props.visible) return
@@ -363,6 +627,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopResize()
+  if (workspaceShortcutsBound) {
+    document.removeEventListener('keydown', handleWorkspaceKeydown)
+    workspaceShortcutsBound = false
+  }
   layoutObserver?.disconnect()
   layoutObserver = null
 })
@@ -413,9 +681,38 @@ onBeforeUnmount(() => {
       <div v-else class="workspace-body">
         <aside class="workspace-tree">
           <div class="tree-root" :title="currentRootPath || undefined">{{ currentRootName }}</div>
+          <div class="file-search">
+            <input
+              ref="fileSearchInputRef"
+              v-model="fileSearchQuery"
+              class="file-search-input"
+              type="search"
+              :placeholder="$t('chatUi.searchFilesPlaceholder')"
+              @keydown="handleSearchKeydown"
+            >
+            <button v-if="fileSearchQuery" class="file-search-clear" type="button" :title="$t('common.clear')" @click="clearFileSearch">×</button>
+          </div>
+          <div v-if="hasFileSearch" class="file-search-results">
+            <button
+              v-for="(item, index) in searchResults"
+              :key="item.path"
+              class="file-search-result"
+              :class="{ active: index === activeSearchIndex }"
+              type="button"
+              :title="item.path"
+              @mousedown.prevent="openSearchResult(item)"
+            >
+              <span class="file-search-result-icon">{{ getFileIcon(item) }}</span>
+              <span class="file-search-result-copy">
+                <strong>{{ item.name }}</strong>
+                <small>{{ item.path }}</small>
+              </span>
+            </button>
+            <div v-if="searchResults.length === 0" class="file-search-empty">{{ $t('chatUi.noFileSearchMatches') }}</div>
+          </div>
           <div v-if="workspaceError" class="workspace-error inline">{{ workspaceError }}</div>
           <div v-if="isLoadingTree" class="tree-loading">{{ $t('chatUi.loadingPlain') }}</div>
-          <div v-else class="tree-list">
+          <div v-else ref="treeListRef" class="tree-list">
             <button
               v-for="item in flatFileTree"
               :key="item.path"
@@ -447,12 +744,41 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div v-if="selectedFile.isMarkdown" class="markdown-preview markdown-body" v-html="renderedMarkdown"></div>
-            <div v-else class="code-preview">
-              <div class="line-numbers" aria-hidden="true">
-                <span v-for="n in lineCount" :key="n">{{ n }}</span>
+            <div v-if="normalizedCodeSelection && !selectedFile.isMarkdown" class="code-selection-bar">
+              <span>{{ $t('chatUi.codeSelectionReady', { range: codeSelectionLabel }) }}</span>
+              <div class="code-selection-actions">
+                <button type="button" @click="insertCodeSelectionTag">{{ $t('chatUi.insertCodeSelectionTag') }}</button>
+                <button type="button" @click="resetCodeSelection">{{ $t('common.cancel') }}</button>
               </div>
-              <pre class="code-scroll"><code class="hljs" v-html="highlightedCode"></code></pre>
+            </div>
+
+            <div v-if="selectedFile.isMarkdown" class="markdown-preview markdown-body" v-html="renderedMarkdown"></div>
+            <div
+              v-else
+              ref="codePreviewRef"
+              class="code-preview"
+              @mouseup="handleCodeTextSelection"
+              @touchend="handleCodeTextSelection"
+            >
+              <div ref="codeScrollRef" class="code-scroll">
+                <div
+                  v-for="line in codeLines"
+                  :key="line.number"
+                  class="code-line"
+                  :class="{ selected: isCodeLineSelected(line.number), pending: codeSelectionStart === line.number && codeSelectionEnd === null }"
+                  :data-line-number="line.number"
+                >
+                  <button
+                    class="line-number"
+                    type="button"
+                    :title="$t('chatUi.selectCodeLine', { line: line.number })"
+                    @click="selectCodeLine(line.number)"
+                  >
+                    {{ line.number }}
+                  </button>
+                  <code class="code-line-content hljs" v-html="line.html || '&nbsp;'"></code>
+                </div>
+              </div>
             </div>
           </template>
 
@@ -641,11 +967,150 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.file-search {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 8px 8px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
+}
+
+.file-search-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 30px 0 10px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 76%, transparent);
+  border-radius: 9px;
+  outline: none;
+  background: color-mix(in srgb, var(--app-input-bg) 88%, transparent);
+  color: var(--app-text);
+  font-size: 0.76rem;
+}
+
+.file-search-input:focus {
+  border-color: color-mix(in srgb, var(--app-accent) 42%, var(--app-border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent-soft) 48%, transparent);
+}
+
+.file-search-clear {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+}
+
+.file-search-clear:hover {
+  background: var(--app-panel-muted);
+  color: var(--app-text-strong);
+}
+
+.file-search-results {
+  flex: 0 0 auto;
+  max-height: 270px;
+  overflow: auto;
+  padding: 4px 6px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--app-accent-soft) 20%, transparent), transparent 45%),
+    color-mix(in srgb, var(--app-panel-strong) 92%, transparent);
+}
+
+.file-search-result {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--app-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-search-result:hover,
+.file-search-result.active {
+  background: color-mix(in srgb, var(--app-accent-soft) 56%, transparent);
+}
+
+.file-search-result-icon {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--app-panel-muted) 84%, transparent);
+  color: var(--app-text-muted);
+  font-size: 0.58rem;
+  font-weight: 900;
+}
+
+.file-search-result-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.file-search-result-copy strong,
+.file-search-result-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-search-result-copy strong {
+  color: var(--app-text-strong);
+  font-size: 0.74rem;
+}
+
+.file-search-result-copy small {
+  color: var(--app-text-muted);
+  font-size: 0.64rem;
+}
+
+.file-search-empty {
+  padding: 12px 8px 6px;
+  color: var(--app-text-muted);
+  font-size: 0.74rem;
+  text-align: center;
+}
+
 .tree-list {
   flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 6px;
+}
+
+.tree-list::-webkit-scrollbar,
+.file-search-results::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.tree-list::-webkit-scrollbar-thumb,
+.file-search-results::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-scrollbar) 78%, transparent);
+  background-clip: padding-box;
+}
+
+.tree-list::-webkit-scrollbar-thumb:hover,
+.file-search-results::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--app-scrollbar-hover) 88%, transparent);
+  background-clip: padding-box;
 }
 
 .tree-item {
@@ -770,38 +1235,91 @@ onBeforeUnmount(() => {
   font-size: 0.7rem;
 }
 
+.code-selection-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.18);
+  background:
+    linear-gradient(90deg, rgba(14, 165, 233, 0.18), rgba(34, 197, 94, 0.08)),
+    rgba(8, 13, 22, 0.96);
+  color: #c7d2fe;
+  font-size: 0.72rem;
+}
+
+.code-selection-bar > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-selection-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.code-selection-actions button {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e2e8f0;
+  font-size: 0.68rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.code-selection-actions button:hover {
+  border-color: rgba(56, 189, 248, 0.44);
+  background: rgba(14, 165, 233, 0.18);
+}
+
 .code-preview {
   flex: 1;
+  width: 100%;
+  max-width: 100%;
   min-height: 0;
-  display: flex;
+  min-width: 0;
   overflow: auto;
+  background: #0b0f16;
+  scrollbar-color: rgba(71, 85, 105, 0.86) rgba(15, 23, 42, 0.86);
+  scrollbar-width: auto;
 }
 
-.line-numbers {
-  flex: 0 0 auto;
-  min-width: 48px;
-  padding: 12px 8px;
-  border-right: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(15, 23, 42, 0.74);
-  color: #64748b;
-  text-align: right;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  user-select: none;
+.code-preview::-webkit-scrollbar {
+  width: 15px;
+  height: 15px;
 }
 
-.line-numbers span {
-  display: block;
-  height: 18.6px;
+.code-preview::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.86);
+}
+
+.code-preview::-webkit-scrollbar-thumb {
+  border: 3px solid rgba(15, 23, 42, 0.86);
+  border-radius: 999px;
+  background: rgba(71, 85, 105, 0.9);
+  background-clip: padding-box;
+}
+
+.code-preview::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.96);
+  background-clip: padding-box;
 }
 
 .code-scroll {
-  flex: 1;
-  min-width: 0;
+  display: inline-block;
+  width: max-content;
+  min-width: 100%;
   margin: 0;
-  padding: 12px 14px;
-  overflow: visible;
+  padding: 10px 0 16px;
   color: #e2e8f0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
@@ -809,9 +1327,71 @@ onBeforeUnmount(() => {
   white-space: pre;
 }
 
-.code-scroll code {
+.code-line {
+  display: flex;
+  width: max-content;
+  min-width: 100%;
+}
+
+.code-line:hover {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.code-line.selected {
+  background: rgba(14, 165, 233, 0.16);
+}
+
+.code-line.pending {
+  background: rgba(245, 158, 11, 0.16);
+}
+
+.line-number {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 58px;
+  min-height: 18.6px;
+  padding: 0 10px 0 8px;
+  border: none;
+  border-right: 1px solid rgba(148, 163, 184, 0.16);
+  background:
+    linear-gradient(90deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.92));
+  color: #64748b;
+  text-align: right;
+  font: inherit;
+  line-height: inherit;
+  user-select: none;
+  cursor: crosshair;
+}
+
+.code-line:hover .line-number {
+  color: #93c5fd;
+  background:
+    linear-gradient(90deg, rgba(20, 30, 48, 1), rgba(20, 30, 48, 0.96));
+}
+
+.code-line.selected .line-number {
+  color: #dbeafe;
+  background:
+    linear-gradient(90deg, rgba(3, 105, 161, 0.96), rgba(14, 116, 144, 0.88));
+}
+
+.code-line.pending .line-number {
+  color: #fef3c7;
+  background:
+    linear-gradient(90deg, rgba(146, 64, 14, 0.96), rgba(133, 77, 14, 0.88));
+}
+
+.code-line-content {
+  flex: 0 0 auto;
+  min-width: max-content;
+  min-height: 18.6px;
+  display: block;
+  padding: 0 18px 0 12px;
   background: transparent;
-  padding: 0;
+  font: inherit;
+  line-height: inherit;
+  white-space: pre;
 }
 
 .markdown-preview {

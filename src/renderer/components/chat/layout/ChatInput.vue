@@ -22,6 +22,12 @@ interface ProjectTagChip {
   raw: string
 }
 
+interface CodeTagChip {
+  id: string
+  label: string
+  raw: string
+}
+
 type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
 type AIExecutionAuthMode = 'strict' | 'auto'
 
@@ -88,6 +94,7 @@ const { t } = useI18n()
 
 const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
 const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
+const CODE_TAG_PATTERN = /\[\[code:([^\]#|]+)#L(\d+)(?:-L?(\d+))?(?:\|([^\]]*))?\]\]/g
 
 const inputFocused = ref(false)
 const dragDepth = ref(0)
@@ -183,10 +190,32 @@ const documentTags = computed<DocumentTagChip[]>(() => {
 
   return tags
 })
+const codeTags = computed<CodeTagChip[]>(() => {
+  const seenIds = new Set<string>()
+  const tags: CodeTagChip[] = []
+
+  for (const match of props.modelValue.matchAll(CODE_TAG_PATTERN)) {
+    const filePath = match[1]?.trim()
+    const startLine = match[2]
+    const endLine = match[3] || startLine
+    if (!filePath || !startLine) continue
+    const id = `${filePath}#L${startLine}${endLine !== startLine ? `-L${endLine}` : ''}`
+    if (seenIds.has(id)) continue
+    seenIds.add(id)
+    tags.push({
+      id,
+      label: match[4]?.trim() || id,
+      raw: match[0]
+    })
+  }
+
+  return tags
+})
 const plainDraftText = computed(() => {
   return props.modelValue
     .replace(PROJECT_TAG_PATTERN, '')
     .replace(DOCUMENT_TAG_PATTERN, '')
+    .replace(CODE_TAG_PATTERN, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n[ \t]+/g, '\n')
     .replace(/[ \t]{2,}/g, ' ')
@@ -319,7 +348,10 @@ watch(() => props.modelValue, () => {
 })
 
 function buildDraftValue (tags: DocumentTagChip[], text: string): string {
-  const tagSegment = tags.map(tag => tag.raw).join(' ')
+  const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
+  const docSegment = tags.map(tag => tag.raw).join(' ')
+  const codeSegment = codeTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment].filter(Boolean).join(' ')
   if (tagSegment && text) return `${tagSegment}\n${text}`
   return tagSegment || text
 }
@@ -327,7 +359,8 @@ function buildDraftValue (tags: DocumentTagChip[], text: string): string {
 function buildTaggedDraftValue (text: string): string {
   const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
   const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment].filter(Boolean).join(' ')
+  const codeSegment = codeTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment].filter(Boolean).join(' ')
   if (tagSegment && text) return `${tagSegment}\n${text}`
   return tagSegment || text
 }
@@ -470,7 +503,8 @@ function removeProjectTag (projectId: string) {
   const remaining = projectTags.value.filter(t => t.projectId !== projectId)
   const projectSegment = remaining.map(t => t.raw).join(' ')
   const docSegment = documentTags.value.map(t => t.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment].filter(Boolean).join(' ')
+  const codeSegment = codeTags.value.map(t => t.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment].filter(Boolean).join(' ')
   const text = plainDraftText.value
   if (tagSegment && text) { emit('update:modelValue', `${tagSegment}\n${text}`); return }
   emit('update:modelValue', tagSegment || text)
@@ -485,6 +519,16 @@ function handleTextInput (e: Event) {
 function removeDocumentTag (regionId: string) {
   const remainingTags = documentTags.value.filter(tag => tag.regionId !== regionId)
   emit('update:modelValue', buildDraftValue(remainingTags, plainDraftText.value))
+}
+
+function removeCodeTag (id: string) {
+  const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
+  const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
+  const codeSegment = codeTags.value.filter(tag => tag.id !== id).map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment].filter(Boolean).join(' ')
+  const text = plainDraftText.value
+  if (tagSegment && text) { emit('update:modelValue', `${tagSegment}\n${text}`); return }
+  emit('update:modelValue', tagSegment || text)
 }
 
 function handleKeydown (e: KeyboardEvent) {
@@ -516,6 +560,11 @@ function handleKeydown (e: KeyboardEvent) {
     if (documentTags.value.length > 0) {
       e.preventDefault()
       removeDocumentTag(documentTags.value[documentTags.value.length - 1].regionId)
+      return
+    }
+    if (codeTags.value.length > 0) {
+      e.preventDefault()
+      removeCodeTag(codeTags.value[codeTags.value.length - 1].id)
       return
     }
     if (projectTags.value.length > 0) {
@@ -659,6 +708,13 @@ function handleTextareaBlur () {
           <span class="document-tag-chip-prefix">#</span>
           <span class="document-tag-chip-label">{{ tag.label }}</span>
           <button class="document-tag-chip-remove" @click="removeDocumentTag(tag.regionId)" :title="$t('chatUi.removeDocumentTag')">×</button>
+        </div>
+      </div>
+      <div v-if="codeTags.length > 0" class="code-tag-bar">
+        <div v-for="tag in codeTags" :key="tag.id" class="code-tag-chip">
+          <span class="code-tag-chip-prefix">&lt;/&gt;</span>
+          <span class="code-tag-chip-label">{{ tag.label }}</span>
+          <button class="code-tag-chip-remove" @click="removeCodeTag(tag.id)" :title="$t('chatUi.removeCodeTag')">×</button>
         </div>
       </div>
       <div class="textarea-shell">
@@ -1143,6 +1199,13 @@ function handleTextareaBlur () {
   padding: 10px 12px 0;
 }
 
+.code-tag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
 .document-tag-chip {
   display: inline-flex;
   align-items: center;
@@ -1181,6 +1244,51 @@ function handleTextareaBlur () {
 }
 
 .document-tag-chip-remove:hover {
+  background: var(--chat-input-chip-remove-hover);
+  color: var(--app-danger);
+}
+
+.code-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #22c55e 38%, transparent);
+  background: color-mix(in srgb, #22c55e 13%, transparent);
+  color: var(--app-text-soft);
+}
+
+.code-tag-chip-prefix {
+  color: #22c55e;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72em;
+  font-weight: 900;
+}
+
+.code-tag-chip-label {
+  max-width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.76em;
+  font-weight: 700;
+}
+
+.code-tag-chip-remove {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+}
+
+.code-tag-chip-remove:hover {
   background: var(--chat-input-chip-remove-hover);
   color: var(--app-danger);
 }

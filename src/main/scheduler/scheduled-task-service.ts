@@ -1,7 +1,8 @@
 import crypto from 'node:crypto'
-import { Notification, type BrowserWindow } from 'electron'
+import { type BrowserWindow } from 'electron'
 import { AIEngine, type AIConfigInput, type ProgressEvent } from '../ai-engine/ai-engine.js'
 import { t } from '../i18n/main-i18n.js'
+import { focusMainWindow, isNotificationSupported, showAppNotification } from '../notifications.js'
 import type { SkillStore } from '../settings/skill-store.js'
 import {
   ScheduledTaskStore,
@@ -670,7 +671,7 @@ export class ScheduledTaskService {
   }
 
   private notifyCompletion (report: ScheduledTaskRunReport): void {
-    if (!this.options.getNotificationPreference?.() || !Notification.isSupported()) {
+    if (!this.options.getNotificationPreference?.() || !isNotificationSupported()) {
       return
     }
 
@@ -681,19 +682,10 @@ export class ScheduledTaskService {
       ? buildSummary(report.summary, t('mainDialog.scheduledTaskViewReport'))
       : buildSummary(report.error || report.summary, t('mainDialog.scheduledTaskViewFailure'))
 
-    const notification = new Notification({ title, body })
-    notification.once('click', () => {
-      const mainWindow = this.options.getMainWindow?.()
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        if (mainWindow.isMinimized()) {
-          mainWindow.restore()
-        }
-        mainWindow.show()
-        mainWindow.focus()
-      }
+    showAppNotification(title, body, () => {
+      focusMainWindow(this.options.getMainWindow?.())
       this.options.onReportNotificationClick?.(clone(report))
     })
-    notification.show()
   }
 
   private persistTasks (): void {

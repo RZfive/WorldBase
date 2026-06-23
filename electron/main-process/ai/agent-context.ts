@@ -1,10 +1,10 @@
-import { Notification } from 'electron'
 import type { AIExecutionPreferences, AIProvidersConfig } from '../../../src/main/settings/settings-store.js'
 import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
 import type { AgentDefinition, AgentGroupDefinition, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
 import { mainState } from '../state.js'
 import { broadcastToAppWindows } from '../windows.js'
+import { focusMainWindow, isNotificationSupported, showAppNotification } from '../../../src/main/notifications.js'
 import { getLastUserMessageText, getTaskLabelFromMessages } from '../chat-message-utils.js'
 
 export interface ResolvedAgentRuntimeContext {
@@ -117,7 +117,7 @@ export function notifyAiTaskStatus (
   status: 'completed' | 'failed' | 'stopped',
   detail?: string
 ): void {
-  if (!preferences.notifyOnTaskComplete || !Notification.isSupported()) return
+  if (!preferences.notifyOnTaskComplete || !isNotificationSupported()) return
 
   const taskLabel = getTaskLabelFromMessages(messages)
   let title = t('mainDialog.aiTaskCompletedTitle')
@@ -133,17 +133,9 @@ export function notifyAiTaskStatus (
     ? t('mainDialog.aiTaskNotificationBodyWithDetail', { task: taskLabel, status: statusLabel, detail })
     : t('mainDialog.aiTaskNotificationBody', { task: taskLabel, status: statusLabel })
 
-  const notification = new Notification({ title, body })
-  notification.once('click', () => {
-    if (mainState.mainWindow && !mainState.mainWindow.isDestroyed()) {
-      if (mainState.mainWindow.isMinimized()) {
-        mainState.mainWindow.restore()
-      }
-      mainState.mainWindow.show()
-      mainState.mainWindow.focus()
-    }
+  showAppNotification(title, body, () => {
+    focusMainWindow(mainState.mainWindow)
   })
-  notification.show()
 }
 
 export function applyActiveProviderToAiEngine (): AIProvidersConfig {

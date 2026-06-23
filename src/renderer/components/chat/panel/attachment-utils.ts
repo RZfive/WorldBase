@@ -83,3 +83,13 @@ export function extractProjectTagRefs (text: string, pattern: RegExp): { project
   }).replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n')
   return { projectId, normalizedText }
 }
+
+export function extractCodeTagRefs (text: string, pattern: RegExp): { normalizedText: string } {
+  const normalizedText = text.replace(pattern, (_match, filePath: string, startLine: string, endLine?: string, rawLabel?: string) => {
+    const range = endLine && endLine !== startLine ? `L${startLine}-L${endLine}` : `L${startLine}`
+    const label = rawLabel?.trim() || `${filePath}#${range}`
+    return `代码引用「${label}」`
+  }).replace(/\n{3,}/g, '\n\n')
+
+  return { normalizedText }
+}

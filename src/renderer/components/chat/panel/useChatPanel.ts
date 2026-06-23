@@ -4,6 +4,7 @@ import { emitAuthResolution, onAuthResolution, type AuthResolutionPayload } from
 import {
   MAX_IMAGE_ATTACHMENT_SIZE_BYTES,
   buildUploadedFilesPrompt,
+  extractCodeTagRefs,
   extractDocumentTagRefs,
   extractProjectTagRefs,
   formatFileSize,
@@ -244,6 +245,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const folderWorkspaceWidth = sharedFolderWorkspaceWidth
   const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
   const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
+  const CODE_TAG_PATTERN = /\[\[code:([^\]#|]+)#L(\d+)(?:-L?(\d+))?(?:\|([^\]]*))?\]\]/g
 
   const streamingConvIds = sharedStreamingConvIds
   const pendingAuthRequestsByConversation = sharedPendingAuthRequestsByConversation
@@ -1718,7 +1720,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       targetProjectId.value = taggedProjectId
       setConversationTarget(currentConversationId.value || '', taggedProjectId)
     }
-    const { regionIds: referencedDocumentRegionIds, normalizedText } = extractDocumentTagRefs(textAfterProject, DOCUMENT_TAG_PATTERN)
+    const { regionIds: referencedDocumentRegionIds, normalizedText: textAfterDocuments } = extractDocumentTagRefs(textAfterProject, DOCUMENT_TAG_PATTERN)
+    const { normalizedText } = extractCodeTagRefs(textAfterDocuments, CODE_TAG_PATTERN)
 
     let docSelectionsPrompt = ''
     if (referencedDocumentRegionIds.length > 0 && window.electronAPI?.buildDocumentSelectionsPrompt) {
