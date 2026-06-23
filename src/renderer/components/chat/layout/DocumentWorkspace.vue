@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import DocumentRenderHost from '../blocks/DocumentRenderHost.vue'
 
 type DocumentNode = DocumentNodeDTO
@@ -43,6 +44,8 @@ const emit = defineEmits<{
   (e: 'insertSelectionTag', tag: string): void
   (e: 'updateWorkspace', state: DocumentWorkspaceState): void
 }>()
+
+const { t, locale } = useI18n()
 
 const workspaceDocuments = ref<WorkspaceDocumentItem[]>([])
 const activeFilePath = ref<string | null>(null)
@@ -140,10 +143,10 @@ function formatFileSize (bytes: number): string {
 }
 
 function formatDateTime (value?: string): string {
-  if (!value) return '未记录'
+  if (!value) return t('chatUi.notRecorded')
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(locale.value, {
     hour12: false,
     year: 'numeric',
     month: '2-digit',
@@ -159,8 +162,8 @@ function getTypeLabel (type: string): string {
     xlsx: 'Excel',
     docx: 'Word',
     pptx: 'PPT',
-    missing: '文件丢失',
-    error: '异常'
+    missing: t('chatUi.fileMissing'),
+    error: t('chatUi.exception')
   }
   return labels[type] || type.toUpperCase()
 }
@@ -178,9 +181,9 @@ function getTypeEmoji (type: string): string {
 }
 
 function getStatusLabel (status: WorkspaceDocumentItem['status']): string {
-  if (status === 'ready') return '已就绪'
-  if (status === 'missing') return '文件丢失'
-  return '加载失败'
+  if (status === 'ready') return t('chatUi.ready')
+  if (status === 'missing') return t('chatUi.fileMissing')
+  return t('chatUi.loadFailed')
 }
 
 function isMissingFileError (message: string): boolean {
@@ -393,7 +396,7 @@ async function syncWorkspaceDocuments (
       await window.electronAPI.importDocument(documentRef.filePath)
       shouldReloadDocuments = true
     } catch (error) {
-      const message = (error as Error).message || '导入失败'
+      const message = (error as Error).message || t('chatUi.importFailed')
       failedImports.set(fileKey, {
         artifactId: null,
         filePath: documentRef.filePath,
@@ -403,7 +406,7 @@ async function syncWorkspaceDocuments (
         selectionCount: 0,
         status: isMissingFileError(message) ? 'missing' : 'error',
         error: isMissingFileError(message)
-          ? '源文件已丢失，请删除该记录后重新添加。'
+          ? t('chatUi.sourceFileMissingReadd')
           : message
       })
     }
@@ -438,7 +441,7 @@ async function syncWorkspaceDocuments (
       fileSize: 0,
       selectionCount: 0,
       status: 'missing' as const,
-      error: '源文件已丢失，请删除该记录后重新添加。'
+      error: t('chatUi.sourceFileMissingReadd')
     }
   })
 
@@ -476,7 +479,7 @@ async function handleImportClick (): Promise<void> {
     const state = await syncWorkspaceDocuments(nextReferences, lastImportedFilePath)
     emitWorkspaceStateFrom(state.documents, state.activeFilePath)
   } catch (error) {
-    importError.value = `打开文件选择器失败: ${(error as Error).message}`
+    importError.value = t('chatUi.openFilePickerFailed', { message: (error as Error).message })
   } finally {
     isImporting.value = false
   }
@@ -504,7 +507,7 @@ function toggleSidebarCollapsed (): void {
 
 function formatSelectionLabel (text: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim()
-  if (!normalized) return `选区 ${activeSelections.value.length + 1}`
+  if (!normalized) return t('chatUi.selectionLabel', { index: activeSelections.value.length + 1 })
   return normalized.length > 24 ? `${normalized.slice(0, 24)}…` : normalized
 }
 
@@ -582,7 +585,7 @@ function hasSameNodeSelection (nodeIds: string[], excerpt: string): boolean {
 }
 
 function buildSelectionTag (selection: SelectionRegion): string {
-  const safeLabel = selection.label.replace(/\]\]/g, '').trim() || '文档标签'
+  const safeLabel = selection.label.replace(/\]\]/g, '').trim() || t('chatUi.documentTagFallback')
   return `[[doc:${selection.id}|${safeLabel}]]`
 }
 
@@ -622,7 +625,7 @@ async function openOriginalFile (): Promise<void> {
   importError.value = ''
   const result = await window.electronAPI.openDocumentOriginal(activeArtifact.value.id)
   if (!result.success) {
-    importError.value = `打开原文件失败: ${result.error || 'unknown error'}`
+    importError.value = t('chatUi.openOriginalFileFailed', { message: result.error || 'unknown error' })
   }
 }
 
@@ -682,11 +685,11 @@ watch(
     <div class="workspace-shell">
       <div class="workspace-header">
         <div>
-          <h3 class="workspace-title">文档工作区</h3>
-          <p class="workspace-subtitle">右侧独立查看文档，不打断主对话。</p>
+          <h3 class="workspace-title">{{ $t('chatUi.documentWorkspace') }}</h3>
+          <p class="workspace-subtitle">{{ $t('chatUi.documentWorkspaceSubtitle') }}</p>
         </div>
         <div class="workspace-header-actions">
-          <button class="workspace-close" type="button" title="关闭文档工作区" @click="emit('close')">×</button>
+          <button class="workspace-close" type="button" :title="$t('chatUi.closeDocumentWorkspace')" @click="emit('close')">×</button>
         </div>
       </div>
 
@@ -695,9 +698,9 @@ watch(
           <div class="rail-actions">
             <button class="import-btn" :class="{ disabled: isImporting, compact: sidebarCollapsed }" :disabled="isImporting" type="button" @click="handleImportClick">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              <span v-if="!sidebarCollapsed">导入当前会话文档</span>
+              <span v-if="!sidebarCollapsed">{{ $t('chatUi.importCurrentConversationDocs') }}</span>
             </button>
-            <div v-if="!sidebarCollapsed" class="import-hint">仅记录文件路径。下次打开对话时会按路径恢复，找不到文件则标记为丢失。</div>
+            <div v-if="!sidebarCollapsed" class="import-hint">{{ $t('chatUi.documentImportPathHint') }}</div>
             <div v-if="importError && !sidebarCollapsed" class="import-error">{{ importError }}</div>
           </div>
 
@@ -716,47 +719,47 @@ watch(
                 <div class="doc-detail">
                   {{ getTypeLabel(doc.fileType) }}
                   <span v-if="doc.status === 'ready'">· {{ formatFileSize(doc.fileSize) }}</span>
-                  <span v-if="doc.selectionCount > 0">· {{ doc.selectionCount }} 标签</span>
+                  <span v-if="doc.selectionCount > 0">· {{ $t('chatUi.tagCount', { count: doc.selectionCount }) }}</span>
                 </div>
                 <div v-if="doc.status !== 'ready'" class="doc-problem">{{ doc.error }}</div>
               </div>
-              <button v-if="!sidebarCollapsed" class="doc-remove" type="button" title="从当前对话移除" @click.stop="removeLinkedDocument(doc.filePath)">×</button>
+              <button v-if="!sidebarCollapsed" class="doc-remove" type="button" :title="$t('chatUi.removeFromCurrentConversation')" @click.stop="removeLinkedDocument(doc.filePath)">×</button>
             </div>
 
-            <div v-if="workspaceDocuments.length === 0" class="doc-empty">{{ sidebarCollapsed ? '无' : '当前对话暂无文档' }}</div>
+            <div v-if="workspaceDocuments.length === 0" class="doc-empty">{{ sidebarCollapsed ? $t('chatUi.none') : $t('chatUi.noCurrentConversationDocs') }}</div>
           </div>
 
           <div v-if="!sidebarCollapsed" class="detail-card" :class="{ empty: !selectedDocument }">
             <template v-if="selectedDocument">
               <div class="detail-card-header">
-                <span class="detail-card-title">文档详情</span>
+                <span class="detail-card-title">{{ $t('chatUi.documentDetails') }}</span>
                 <span :class="['detail-status', `status-${selectedDocument.status}`]">{{ getStatusLabel(selectedDocument.status) }}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">名称</span>
+                <span class="detail-label">{{ $t('chatUi.name') }}</span>
                 <span class="detail-value" :title="selectedDocument.fileName">{{ selectedDocument.fileName }}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">类型</span>
+                <span class="detail-label">{{ $t('chatUi.type') }}</span>
                 <span class="detail-value">{{ getTypeLabel(selectedDocument.fileType) }}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">大小</span>
-                <span class="detail-value">{{ selectedDocument.fileSize > 0 ? formatFileSize(selectedDocument.fileSize) : '未读取' }}</span>
+                <span class="detail-label">{{ $t('chatUi.size') }}</span>
+                <span class="detail-value">{{ selectedDocument.fileSize > 0 ? formatFileSize(selectedDocument.fileSize) : $t('chatUi.notRead') }}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">标签</span>
-                <span class="detail-value">{{ selectedDocument.selectionCount }} 个</span>
+                <span class="detail-label">{{ $t('chatUi.tags') }}</span>
+                <span class="detail-value">{{ $t('chatUi.tagCountValue', { count: selectedDocument.selectionCount }) }}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">导入时间</span>
+                <span class="detail-label">{{ $t('chatUi.importTime') }}</span>
                 <span class="detail-value">{{ formatDateTime(selectedDocument.importedAt) }}</span>
               </div>
               <div class="detail-path" :title="selectedDocument.filePath">{{ selectedDocument.filePath }}</div>
             </template>
             <template v-else>
-              <div class="detail-card-title">文档详情</div>
-              <div class="detail-empty-text">选中文档后，这里会显示路径、状态和标签数。</div>
+              <div class="detail-card-title">{{ $t('chatUi.documentDetails') }}</div>
+              <div class="detail-empty-text">{{ $t('chatUi.documentDetailsEmpty') }}</div>
             </template>
           </div>
         </aside>
@@ -765,8 +768,8 @@ watch(
           class="workspace-list-toggle"
           type="button"
           :style="{ left: `${sidebarWidth}px` }"
-          :title="sidebarCollapsed ? '展开文档列表' : '收起文档列表'"
-          :aria-label="sidebarCollapsed ? '展开文档列表' : '收起文档列表'"
+          :title="sidebarCollapsed ? $t('chatUi.expandDocumentList') : $t('chatUi.collapseDocumentList')"
+          :aria-label="sidebarCollapsed ? $t('chatUi.expandDocumentList') : $t('chatUi.collapseDocumentList')"
           @click="toggleSidebarCollapsed"
         >
           <svg v-if="sidebarCollapsed" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -782,9 +785,9 @@ watch(
             <div class="preview-toolbar">
               <button class="toolbar-btn" type="button" :disabled="!activeArtifact" @click="openOriginalFile">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg>
-                打开原文件
+                {{ $t('chatUi.openOriginalFile') }}
               </button>
-              <span class="preview-hint">高亮文档内容会自动生成标签。点击标签会插入聊天输入框。</span>
+              <span class="preview-hint">{{ $t('chatUi.documentPreviewHint') }}</span>
             </div>
 
             <div v-if="activeSelections.length > 0" class="selection-tags">
@@ -798,14 +801,14 @@ watch(
                   <span class="tag-dot"></span>
                   <span class="tag-label">#{{ selection.label }}</span>
                 </button>
-                <button class="tag-remove" type="button" title="删除标签" @click.stop="removeSelection(selection.id)">×</button>
+                <button class="tag-remove" type="button" :title="$t('chatUi.deleteTag')" @click.stop="removeSelection(selection.id)">×</button>
               </div>
             </div>
 
             <div class="preview-scroll" :class="{ 'pdf-active': selectedDocument.fileType === 'pdf' }">
               <div v-if="previewLoading" class="preview-state-card">
-                <div class="preview-state-title">正在准备文档预览</div>
-                <div class="preview-state-detail">首次打开会生成预览资源，较大的 PDF 或 Office 文档可能稍慢。</div>
+                <div class="preview-state-title">{{ $t('chatUi.preparingDocumentPreview') }}</div>
+                <div class="preview-state-detail">{{ $t('chatUi.preparingDocumentPreviewDetail') }}</div>
               </div>
 
               <DocumentRenderHost
@@ -816,14 +819,14 @@ watch(
               />
 
               <div v-else-if="selectedDocument.status === 'missing'" class="preview-state-card warning">
-                <div class="preview-state-title">文档文件已丢失</div>
+                <div class="preview-state-title">{{ $t('chatUi.documentFileMissing') }}</div>
                 <div class="preview-state-detail">{{ selectedDocument.error }}</div>
                 <div class="preview-state-path">{{ selectedDocument.filePath }}</div>
               </div>
 
               <div v-else class="preview-state-card warning">
-                <div class="preview-state-title">文档暂时无法显示</div>
-                <div class="preview-state-detail">{{ selectedDocument.error || '请删除后重新添加该文档。' }}</div>
+                <div class="preview-state-title">{{ $t('chatUi.documentUnavailable') }}</div>
+                <div class="preview-state-detail">{{ selectedDocument.error || $t('chatUi.deleteAndReaddDocument') }}</div>
                 <div class="preview-state-path">{{ selectedDocument.filePath }}</div>
               </div>
             </div>
@@ -831,8 +834,8 @@ watch(
 
           <div v-else class="preview-empty">
             <div class="empty-icon">📂</div>
-            <div class="empty-title">当前对话还没有绑定文档</div>
-            <div class="empty-detail">从左侧导入 PDF、Excel、Word 或 PowerPoint，文档会只绑定到当前会话。</div>
+            <div class="empty-title">{{ $t('chatUi.noBoundDocuments') }}</div>
+            <div class="empty-detail">{{ $t('chatUi.noBoundDocumentsHint') }}</div>
           </div>
         </section>
       </div>

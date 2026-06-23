@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { ChatMessageBlock } from '../types'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'group_progress' }>
 }>()
 
+const { t, locale } = useI18n()
 const snapshot = computed(() => props.block.snapshot)
 
 const orderedItems = computed(() => {
@@ -19,15 +21,15 @@ const orderedItems = computed(() => {
   return [...snapshot.value.items].sort((left, right) => {
     const statusDelta = rank[left.status] - rank[right.status]
     if (statusDelta !== 0) return statusDelta
-    return left.agentName.localeCompare(right.agentName, 'zh-Hans-CN')
+    return left.agentName.localeCompare(right.agentName, locale.value)
   })
 })
 
 function getStatusLabel (status: typeof snapshot.value.status | typeof snapshot.value.items[number]['status']): string {
-  if (status === 'running') return '进行中'
-  if (status === 'queued') return '排队中'
-  if (status === 'failed') return '失败'
-  return '已完成'
+  if (status === 'running') return t('chatUi.groupStatusRunning')
+  if (status === 'queued') return t('chatUi.groupStatusQueued')
+  if (status === 'failed') return t('chatUi.groupStatusFailed')
+  return t('chatUi.groupStatusCompleted')
 }
 
 function getProgressPercent (item: typeof snapshot.value.items[number]): number {
@@ -51,25 +53,25 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
   <section class="group-progress-card">
     <div class="group-progress-header">
       <div class="group-progress-header-main">
-        <span class="group-progress-label">子 Agent 进度</span>
+        <span class="group-progress-label">{{ $t('chatUi.groupProgressLabel') }}</span>
         <h4 class="group-progress-title">{{ snapshot.groupName }}</h4>
         <div class="group-progress-meta">
-          <span>状态：{{ getStatusLabel(snapshot.status) }}</span>
-          <span>轮次 {{ Math.max(snapshot.activeRound, snapshot.status === 'running' ? 1 : snapshot.totalRounds) }}/{{ snapshot.totalRounds }}</span>
-          <span>并发上限 {{ snapshot.maxParallelWorkers }}</span>
-          <span>{{ snapshot.items.length }} 个子 Agent</span>
+          <span>{{ $t('chatUi.groupStatusMeta', { status: getStatusLabel(snapshot.status) }) }}</span>
+          <span>{{ $t('chatUi.groupRoundMeta', { current: Math.max(snapshot.activeRound, snapshot.status === 'running' ? 1 : snapshot.totalRounds), total: snapshot.totalRounds }) }}</span>
+          <span>{{ $t('chatUi.groupMaxParallelMeta', { count: snapshot.maxParallelWorkers }) }}</span>
+          <span>{{ $t('chatUi.groupSubAgentCount', { count: snapshot.items.length }) }}</span>
         </div>
         <div v-if="snapshot.request" class="group-progress-request">
-          <span class="group-progress-request-label">讨论内容</span>
+          <span class="group-progress-request-label">{{ $t('chatUi.groupDiscussionContent') }}</span>
           <p>{{ snapshot.request }}</p>
         </div>
       </div>
 
       <div class="group-progress-counters">
-        <span class="group-progress-counter running">进行中 {{ snapshot.runningCount }}</span>
-        <span class="group-progress-counter queued">排队 {{ snapshot.queuedCount }}</span>
-        <span class="group-progress-counter completed">完成 {{ snapshot.completedCount }}</span>
-        <span class="group-progress-counter failed">失败 {{ snapshot.failedCount }}</span>
+        <span class="group-progress-counter running">{{ $t('chatUi.groupCounterRunning', { count: snapshot.runningCount }) }}</span>
+        <span class="group-progress-counter queued">{{ $t('chatUi.groupCounterQueued', { count: snapshot.queuedCount }) }}</span>
+        <span class="group-progress-counter completed">{{ $t('chatUi.groupCounterCompleted', { count: snapshot.completedCount }) }}</span>
+        <span class="group-progress-counter failed">{{ $t('chatUi.groupCounterFailed', { count: snapshot.failedCount }) }}</span>
       </div>
     </div>
 
@@ -84,7 +86,7 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
           <div class="group-progress-item-copy">
             <div class="group-progress-item-name">{{ item.agentName }}</div>
             <div class="group-progress-item-meta">
-              第 {{ item.currentRound || 0 }}/{{ item.totalRounds }} 轮 · 已完成 {{ item.completedRounds }} 轮
+              {{ $t('chatUi.groupItemRoundMeta', { current: item.currentRound || 0, total: item.totalRounds, completed: item.completedRounds }) }}
             </div>
           </div>
 

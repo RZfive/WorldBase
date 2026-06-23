@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { ImageLibraryItem } from '../../../shared/image-studio-types'
 import ImagePreview from './ImagePreview.vue'
 
@@ -24,6 +25,8 @@ const emit = defineEmits<{
   (e: 'renameFolder', oldName: string, newName: string): void
   (e: 'deleteFolder', name: string): void
 }>()
+
+const { t, locale } = useI18n()
 
 /** Current folder being browsed; null = root (folders + unfiled images). */
 const currentFolder = ref<string | null>(null)
@@ -446,7 +449,7 @@ function dropOnFolder (folder: string | undefined) {
 
 /* ---- Folder operations ---- */
 
-function uniqueFolderName (base = '新建文件夹'): string {
+function uniqueFolderName (base = t('launchpad.newFolder')): string {
   const names = new Set(allFolderNames.value)
   if (!names.has(base)) return base
   let i = 2
@@ -503,7 +506,7 @@ function cancelFolderEdit () {
 }
 
 function deleteFolder (name: string) {
-  if (window.confirm(`删除文件夹「${name}」？组内图片会移到未分组，不会被删除。`)) {
+  if (window.confirm(t('studioUi.deleteFolderConfirm', { name }))) {
     emit('deleteFolder', name)
     if (currentFolder.value === name) currentFolder.value = null
   }
@@ -639,7 +642,7 @@ function cancelEditTags () {
 
 function formatTime (iso: string): string {
   try {
-    return new Date(iso).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    return new Date(iso).toLocaleString(locale.value, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   } catch {
     return iso
   }
@@ -710,24 +713,24 @@ onUnmounted(() => {
   <section class="lib">
     <header class="lib-header">
       <div class="lib-title">
-        <button v-if="currentFolder !== null" class="lib-back" type="button" title="返回" @click="goRoot">←</button>
-        <span>🖼️ 图片库</span>
+        <button v-if="currentFolder !== null" class="lib-back" type="button" :title="$t('common.back')" @click="goRoot">←</button>
+        <span>🖼️ {{ $t('studioUi.imageLibrary') }}</span>
         <span class="lib-count">{{ visibleEntries.length }}</span>
       </div>
       <div class="lib-actions">
-        <input v-model="searchQuery" class="lib-search" type="text" placeholder="搜索提示词 / 标签…" />
+        <input v-model="searchQuery" class="lib-search" type="text" :placeholder="$t('studioUi.librarySearchPlaceholder')" />
         <button
           class="lib-btn"
           type="button"
           :disabled="visibleEntries.length === 0"
-          :title="allVisibleSelected ? '取消全选' : '全选当前视图（⌘/Ctrl+A）'"
+          :title="allVisibleSelected ? $t('studioUi.cancelSelectAll') : $t('studioUi.selectAllCurrentView')"
           @click="toggleSelectAll"
         >
-          {{ allVisibleSelected ? '✕ 取消全选' : '☑ 全选' }}
+          {{ allVisibleSelected ? $t('studioUi.cancelSelectAllWithIcon') : $t('studioUi.selectAllWithIcon') }}
           <span v-if="selectedCount" class="lib-sel-count">{{ selectedCount }}</span>
         </button>
-        <button class="lib-btn" type="button" @click="startCreateFolder">＋ 新建文件夹</button>
-        <button class="lib-btn" type="button" :disabled="props.loading" @click="emit('refresh')">↻ 刷新</button>
+        <button class="lib-btn" type="button" @click="startCreateFolder">＋ {{ $t('launchpad.newFolder') }}</button>
+        <button class="lib-btn" type="button" :disabled="props.loading" @click="emit('refresh')">↻ {{ $t('launchpad.refresh') }}</button>
       </div>
     </header>
 
@@ -741,10 +744,10 @@ onUnmounted(() => {
         @dragover.prevent="onFolderDragOver('')"
         @dragleave="onFolderDragLeave('')"
         @drop.prevent="dropOnFolder(undefined)"
-      >📂 全部图片</button>
+      >📂 {{ $t('studioUi.allImages') }}</button>
       <template v-if="isSearching">
         <span class="lib-crumb-sep">/</span>
-        <span class="lib-crumb-current">搜索结果</span>
+        <span class="lib-crumb-current">{{ $t('studioUi.searchResults') }}</span>
       </template>
       <template v-else-if="currentFolder !== null">
         <span class="lib-crumb-sep">/</span>
@@ -779,7 +782,7 @@ onUnmounted(() => {
                   class="lib-folder-name-input"
                   type="text"
                   maxlength="40"
-                  placeholder="文件夹名称"
+                  :placeholder="$t('studioUi.folderNamePlaceholder')"
                   @click.stop
                   @keydown.enter.stop.prevent="commitFolderEdit"
                   @keydown.esc.stop.prevent="cancelFolderEdit"
@@ -814,7 +817,7 @@ onUnmounted(() => {
                   class="lib-folder-name-input"
                   type="text"
                   maxlength="40"
-                  placeholder="文件夹名称"
+                  :placeholder="$t('studioUi.folderNamePlaceholder')"
                   @click.stop
                   @keydown.enter.stop.prevent="commitFolderEdit"
                   @keydown.esc.stop.prevent="cancelFolderEdit"
@@ -839,19 +842,19 @@ onUnmounted(() => {
             @dragend="onImageDragEnd"
           >
             <img :src="pc.cell.entry!.thumbUrl" :alt="pc.cell.entry!.prompt" class="lib-thumb" decoding="async" draggable="false" />
-            <span class="lib-badge">{{ pc.cell.entry!.mode === 'edit' ? '编辑' : '生成' }}</span>
+            <span class="lib-badge">{{ pc.cell.entry!.mode === 'edit' ? $t('studioUi.editModeShort') : $t('studioUi.generateModeShort') }}</span>
             <span v-if="pc.cell.entry!.folder && isSearching" class="lib-folder-badge">📁 {{ pc.cell.entry!.folder }}</span>
             <button
               class="lib-check"
               :class="{ on: selectedIds.has(pc.cell.entry!.id) }"
               type="button"
-              :title="selectedIds.has(pc.cell.entry!.id) ? '取消选择' : '选择'"
+              :title="selectedIds.has(pc.cell.entry!.id) ? $t('studioUi.cancelSelection') : $t('studioUi.select')"
               @click.stop="onCheckClick(pc.cell.entry!)"
               @dblclick.stop
             >✓</button>
             <div class="lib-card-caption">
               <span v-if="pc.cell.entry!.tags?.length" class="lib-card-tags">{{ pc.cell.entry!.tags!.join(' · ') }}</span>
-              <span v-else>{{ pc.cell.entry!.prompt || '（无提示词）' }}</span>
+              <span v-else>{{ pc.cell.entry!.prompt || $t('studioUi.noPrompt') }}</span>
             </div>
           </div>
         </template>
@@ -867,16 +870,16 @@ onUnmounted(() => {
       <!-- Empty state -->
       <div v-if="gridCells.length === 0" class="lib-empty">
         <template v-if="props.entries.length === 0">
-          <p>还没有生成任何图片</p>
-          <span>在工作台输入提示词并生成，结果会自动保存到这里</span>
+          <p>{{ $t('studioUi.libraryEmptyTitle') }}</p>
+          <span>{{ $t('studioUi.libraryEmptyHint') }}</span>
         </template>
         <template v-else-if="isSearching">
-          <p>没有匹配的图片</p>
-          <span>尝试修改搜索条件</span>
+          <p>{{ $t('studioUi.noMatchingImages') }}</p>
+          <span>{{ $t('studioUi.adjustSearchHint') }}</span>
         </template>
         <template v-else>
-          <p>这里还没有图片</p>
-          <span>把图片拖进来，或右键粘贴已剪切的图片</span>
+          <p>{{ $t('studioUi.folderEmptyTitle') }}</p>
+          <span>{{ $t('studioUi.folderEmptyHint') }}</span>
         </template>
       </div>
     </div>
@@ -892,36 +895,36 @@ onUnmounted(() => {
       >
         <!-- Image menu -->
         <template v-if="contextMenu.kind === 'image'">
-          <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="openLightbox(menuSingleEntry!); closeContextMenu()">🔍 查看</button>
-          <button class="lib-menu-item" type="button" @click="cutSelection(menuIds)">✂ 剪切</button>
+          <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="openLightbox(menuSingleEntry!); closeContextMenu()">🔍 {{ $t('studioUi.view') }}</button>
+          <button class="lib-menu-item" type="button" @click="cutSelection(menuIds)">✂ {{ $t('studioUi.cut') }}</button>
           <div class="lib-menu-sub">
-            <button class="lib-menu-item" type="button">➦ 移动到 ▸</button>
+            <button class="lib-menu-item" type="button">➦ {{ $t('studioUi.moveTo') }} ▸</button>
             <div class="lib-menu-flyout">
-              <button v-if="currentFolder !== null" class="lib-menu-item" type="button" @click="moveTo(menuIds, undefined)">📂 全部图片（移出）</button>
+              <button v-if="currentFolder !== null" class="lib-menu-item" type="button" @click="moveTo(menuIds, undefined)">📂 {{ $t('studioUi.allImagesMoveOut') }}</button>
               <button v-for="name in moveTargets" :key="name" class="lib-menu-item" type="button" @click="moveTo(menuIds, name)">📁 {{ name }}</button>
-              <span v-if="moveTargets.length === 0 && currentFolder === null" class="lib-menu-hint">暂无其他文件夹</span>
+              <span v-if="moveTargets.length === 0 && currentFolder === null" class="lib-menu-hint">{{ $t('studioUi.noOtherFolders') }}</span>
             </div>
           </div>
-          <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="emit('useAsInput', menuSingleEntry!); closeContextMenu()">⇲ 作为编辑输入</button>
-          <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="emit('saveToFile', menuSingleEntry!); closeContextMenu()">⤓ 保存到文件</button>
+          <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="emit('useAsInput', menuSingleEntry!); closeContextMenu()">⇲ {{ $t('studioUi.useAsInput') }}</button>
+          <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="emit('saveToFile', menuSingleEntry!); closeContextMenu()">⤓ {{ $t('studioUi.saveToFile') }}</button>
           <div class="lib-menu-divider"></div>
-          <button class="lib-menu-item danger" type="button" @click="deleteImages(menuIds)">🗑 删除{{ selectedCount > 1 ? `（${selectedCount}）` : '' }}</button>
+          <button class="lib-menu-item danger" type="button" @click="deleteImages(menuIds)">🗑 {{ selectedCount > 1 ? $t('studioUi.deleteCount', { count: selectedCount }) : $t('common.delete') }}</button>
         </template>
 
         <!-- Folder menu -->
         <template v-else-if="contextMenu.kind === 'folder'">
-          <button class="lib-menu-item" type="button" @click="openFolder(contextMenu.folderName!)">📂 打开</button>
-          <button class="lib-menu-item" type="button" @click="startRenameFolder(contextMenu.folderName!)">✎ 重命名</button>
-          <button class="lib-menu-item" type="button" @click="exportFolder(contextMenu.folderName!)">⤓ 导出为 ZIP</button>
+          <button class="lib-menu-item" type="button" @click="openFolder(contextMenu.folderName!)">📂 {{ $t('common.open') }}</button>
+          <button class="lib-menu-item" type="button" @click="startRenameFolder(contextMenu.folderName!)">✎ {{ $t('common.rename') }}</button>
+          <button class="lib-menu-item" type="button" @click="exportFolder(contextMenu.folderName!)">⤓ {{ $t('studioUi.exportZip') }}</button>
           <div class="lib-menu-divider"></div>
-          <button class="lib-menu-item danger" type="button" @click="deleteFolder(contextMenu.folderName!)">🗑 删除文件夹</button>
+          <button class="lib-menu-item danger" type="button" @click="deleteFolder(contextMenu.folderName!)">🗑 {{ $t('launchpad.deleteFolder') }}</button>
         </template>
 
         <!-- Blank menu -->
         <template v-else>
-          <button class="lib-menu-item" type="button" @click="startCreateFolder">📁 新建文件夹</button>
-          <button class="lib-menu-item" type="button" :disabled="!canPaste" @click="paste">📋 粘贴{{ canPaste ? `（${clipboard.length}）` : '' }}</button>
-          <button class="lib-menu-item" type="button" @click="emit('refresh'); closeContextMenu()">↻ 刷新</button>
+          <button class="lib-menu-item" type="button" @click="startCreateFolder">📁 {{ $t('launchpad.newFolder') }}</button>
+          <button class="lib-menu-item" type="button" :disabled="!canPaste" @click="paste">📋 {{ canPaste ? $t('studioUi.pasteCount', { count: clipboard.length }) : $t('studioUi.paste') }}</button>
+          <button class="lib-menu-item" type="button" @click="emit('refresh'); closeContextMenu()">↻ {{ $t('launchpad.refresh') }}</button>
         </template>
       </div>
     </Teleport>
@@ -932,14 +935,14 @@ onUnmounted(() => {
         <div class="lib-lightbox" @click.stop>
           <header class="lib-lightbox-header">
             <div class="lib-lightbox-heading">
-              <span class="lib-lightbox-title">图片详情</span>
+              <span class="lib-lightbox-title">{{ $t('studioUi.imageDetails') }}</span>
               <span class="lib-lightbox-subtitle">
                 <span v-if="lightboxIndex >= 0" class="lib-lightbox-pos">{{ lightboxIndex + 1 }} / {{ visibleEntries.length }}</span>
                 {{ lightbox.size }}<template v-if="lightbox.aspectRatio"> · {{ lightbox.aspectRatio }}</template>
               </span>
             </div>
             <div class="lib-lightbox-toolbar">
-              <button class="lib-lightbox-close" type="button" @click="closeLightbox">关闭</button>
+              <button class="lib-lightbox-close" type="button" @click="closeLightbox">{{ $t('common.close') }}</button>
             </div>
           </header>
           <div class="lib-lightbox-body">
@@ -949,61 +952,61 @@ onUnmounted(() => {
                 v-if="hasPrevImage"
                 class="lib-lightbox-nav prev"
                 type="button"
-                title="上一张 (←)"
+                :title="$t('studioUi.previousImageShortcut')"
                 @click.stop="showPrevImage"
               >‹</button>
               <button
                 v-if="hasNextImage"
                 class="lib-lightbox-nav next"
                 type="button"
-                title="下一张 (→)"
+                :title="$t('studioUi.nextImageShortcut')"
                 @click.stop="showNextImage"
               >›</button>
             </div>
             <div class="lib-meta">
-              <div class="lib-meta-row"><span class="lib-meta-key">模式</span><span>{{ lightbox.mode === 'edit' ? '图片编辑' : '文生图' }}</span></div>
-              <div class="lib-meta-row"><span class="lib-meta-key">模型</span><span>{{ lightbox.model }}</span></div>
-              <div class="lib-meta-row"><span class="lib-meta-key">尺寸</span><span>{{ lightbox.size }}<template v-if="lightbox.aspectRatio"> · {{ lightbox.aspectRatio }}</template></span></div>
-              <div class="lib-meta-row"><span class="lib-meta-key">时间</span><span>{{ formatTime(lightbox.createdAt) }}</span></div>
-              <div v-if="lightbox.folder" class="lib-meta-row"><span class="lib-meta-key">分组</span><span>📁 {{ lightbox.folder }}</span></div>
+              <div class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.mode') }}</span><span>{{ lightbox.mode === 'edit' ? $t('studioUi.imageEdit') : $t('studioUi.textToImage') }}</span></div>
+              <div class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.model') }}</span><span>{{ lightbox.model }}</span></div>
+              <div class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.size') }}</span><span>{{ lightbox.size }}<template v-if="lightbox.aspectRatio"> · {{ lightbox.aspectRatio }}</template></span></div>
+              <div class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.time') }}</span><span>{{ formatTime(lightbox.createdAt) }}</span></div>
+              <div v-if="lightbox.folder" class="lib-meta-row"><span class="lib-meta-key">{{ $t('studioUi.folder') }}</span><span>📁 {{ lightbox.folder }}</span></div>
               <div class="lib-meta-block">
-                <span class="lib-meta-key">提示词</span>
-                <p class="lib-meta-text">{{ lightbox.prompt || '（无）' }}</p>
+                <span class="lib-meta-key">{{ $t('studioUi.prompt') }}</span>
+                <p class="lib-meta-text">{{ lightbox.prompt || $t('studioUi.none') }}</p>
               </div>
               <div v-if="lightbox.negativePrompt" class="lib-meta-block">
-                <span class="lib-meta-key">负向提示词</span>
+                <span class="lib-meta-key">{{ $t('studioUi.negativePrompt') }}</span>
                 <p class="lib-meta-text">{{ lightbox.negativePrompt }}</p>
               </div>
               <div class="lib-meta-block">
                 <span class="lib-meta-key">
-                  标签
+                  {{ $t('studioUi.tags') }}
                   <button v-if="!editingTags" class="lib-tag-edit-btn" type="button" @click="startEditTags">✎</button>
                 </span>
                 <div v-if="editingTags" class="lib-tag-editor">
-                  <input v-model="tagInput" class="lib-tag-input" type="text" placeholder="逗号分隔多个标签…" @keydown.enter="saveTags" />
+                  <input v-model="tagInput" class="lib-tag-input" type="text" :placeholder="$t('studioUi.tagInputPlaceholder')" @keydown.enter="saveTags" />
                   <div class="lib-tag-editor-actions">
-                    <button class="lib-btn" type="button" @click="saveTags">保存</button>
-                    <button class="lib-btn" type="button" @click="cancelEditTags">取消</button>
+                    <button class="lib-btn" type="button" @click="saveTags">{{ $t('common.save') }}</button>
+                    <button class="lib-btn" type="button" @click="cancelEditTags">{{ $t('common.cancel') }}</button>
                   </div>
                 </div>
                 <div v-else class="lib-tags-display">
                   <template v-if="lightbox.tags?.length">
                     <span v-for="tag in lightbox.tags" :key="tag" class="lib-tag-chip">{{ tag }}</span>
                   </template>
-                  <span v-else class="lib-tag-empty">无标签，点击 ✎ 添加</span>
+                  <span v-else class="lib-tag-empty">{{ $t('studioUi.noTagsAddHint') }}</span>
                 </div>
               </div>
               <div v-if="lightboxSources.length" class="lib-meta-block">
-                <span class="lib-meta-key">编辑输入图</span>
+                <span class="lib-meta-key">{{ $t('studioUi.editInputImages') }}</span>
                 <div class="lib-source-row">
                   <img v-for="(src, i) in lightboxSources" :key="i" :src="src" class="lib-source-thumb" alt="" />
                 </div>
               </div>
               <div class="lib-lightbox-actions">
-                <button class="lib-btn" type="button" @click="emit('regenerate', lightbox!); closeLightbox()">↻ 重新生成</button>
-                <button class="lib-btn" type="button" @click="emit('load', lightbox!); closeLightbox()">✎ 载入参数</button>
-                <button class="lib-btn" type="button" @click="emit('useAsInput', lightbox!); closeLightbox()">⇲ 作为编辑输入</button>
-                <button class="lib-btn" type="button" @click="emit('saveToFile', lightbox!)">⤓ 保存到文件</button>
+                <button class="lib-btn" type="button" @click="emit('regenerate', lightbox!); closeLightbox()">↻ {{ $t('studioUi.regenerate') }}</button>
+                <button class="lib-btn" type="button" @click="emit('load', lightbox!); closeLightbox()">✎ {{ $t('studioUi.loadParams') }}</button>
+                <button class="lib-btn" type="button" @click="emit('useAsInput', lightbox!); closeLightbox()">⇲ {{ $t('studioUi.useAsInput') }}</button>
+                <button class="lib-btn" type="button" @click="emit('saveToFile', lightbox!)">⤓ {{ $t('studioUi.saveToFile') }}</button>
               </div>
             </div>
           </div>

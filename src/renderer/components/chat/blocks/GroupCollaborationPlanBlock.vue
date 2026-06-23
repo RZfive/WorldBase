@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../markdown'
 import type { ChatMessageBlock } from '../types'
 
@@ -7,22 +8,23 @@ const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'group_collaboration_plan' }>
 }>()
 
+const { t } = useI18n()
 const plan = computed(() => props.block.plan)
-const originalRequestHtml = computed(() => renderMarkdown(plan.value.originalRequest || '(无请求内容)'))
-const normalizedRequestHtml = computed(() => renderMarkdown(plan.value.normalizedRequest || '(无执行摘要)'))
+const originalRequestHtml = computed(() => renderMarkdown(plan.value.originalRequest || t('chatUi.agentSidechatNoRequest')))
+const normalizedRequestHtml = computed(() => renderMarkdown(plan.value.normalizedRequest || t('chatUi.collaborationPlanNoSummary')))
 
 function getPhaseLabel (phase: typeof plan.value.phase): string {
-  if (phase === 'planning') return '协作规划中'
-  if (phase === 'executing') return '协作执行中'
-  return '协作已完成'
+  if (phase === 'planning') return t('chatUi.collaborationPhasePlanning')
+  if (phase === 'executing') return t('chatUi.collaborationPhaseExecuting')
+  return t('chatUi.collaborationPhaseCompleted')
 }
 
 function getModeLabel (mode: typeof plan.value.mode): string {
-  if (mode === 'coordinator_only') return '协调者独立处理'
-  if (mode === 'coordinator_decides') return '主 Agent 决定是否拉群'
-  if (mode === 'mentioned_agent_decides') return '被点名成员决定是否拉人'
-  if (mode === 'discussion') return '群组讨论'
-  return '定向回复'
+  if (mode === 'coordinator_only') return t('chatUi.collaborationModeCoordinatorOnly')
+  if (mode === 'coordinator_decides') return t('chatUi.collaborationModeCoordinatorDecides')
+  if (mode === 'mentioned_agent_decides') return t('chatUi.collaborationModeMentionedDecides')
+  if (mode === 'discussion') return t('chatUi.collaborationModeDiscussion')
+  return t('chatUi.collaborationModeTargeted')
 }
 
 function getParticipantKey (agentId: string, index: number): string {
@@ -34,14 +36,14 @@ function getParticipantKey (agentId: string, index: number): string {
   <section class="collaboration-plan-card">
     <div class="collaboration-plan-header">
       <div class="collaboration-plan-header-main">
-        <span class="collaboration-plan-label">协作计划</span>
+        <span class="collaboration-plan-label">{{ $t('chatUi.collaborationPlanLabel') }}</span>
         <h4 class="collaboration-plan-title">{{ plan.groupName }}</h4>
         <div class="collaboration-plan-meta">
           <span>{{ getModeLabel(plan.mode) }}</span>
           <span>{{ getPhaseLabel(plan.phase) }}</span>
-          <span>决策人：{{ plan.planner.agentName }}</span>
-          <span>汇总到：{{ plan.reportToName }}</span>
-          <span v-if="plan.round">第 {{ plan.round }} 轮</span>
+          <span>{{ $t('chatUi.collaborationPlannerMeta', { name: plan.planner.agentName }) }}</span>
+          <span>{{ $t('chatUi.collaborationReportToMeta', { name: plan.reportToName }) }}</span>
+          <span v-if="plan.round">{{ $t('chatUi.groupRoundTitle', { round: plan.round }) }}</span>
         </div>
       </div>
     </div>
@@ -50,45 +52,45 @@ function getParticipantKey (agentId: string, index: number): string {
 
     <div class="collaboration-plan-requests">
       <section class="collaboration-plan-request-card">
-        <div class="collaboration-plan-request-title">原始请求</div>
+        <div class="collaboration-plan-request-title">{{ $t('chatUi.collaborationOriginalRequest') }}</div>
         <div class="markdown-body" v-html="originalRequestHtml" />
       </section>
 
       <section v-if="plan.normalizedRequest && plan.normalizedRequest !== plan.originalRequest" class="collaboration-plan-request-card normalized">
-        <div class="collaboration-plan-request-title">执行摘要</div>
+        <div class="collaboration-plan-request-title">{{ $t('chatUi.collaborationExecutionSummary') }}</div>
         <div class="markdown-body" v-html="normalizedRequestHtml" />
       </section>
     </div>
 
     <div class="collaboration-plan-sections">
       <section class="collaboration-plan-section">
-        <div class="collaboration-plan-section-title">用户点名</div>
+        <div class="collaboration-plan-section-title">{{ $t('chatUi.collaborationMentionedUsers') }}</div>
         <div v-if="plan.mentionedParticipants.length > 0" class="collaboration-plan-chip-list">
           <span v-for="(participant, index) in plan.mentionedParticipants" :key="getParticipantKey(participant.agentId, index)" class="collaboration-plan-chip mention">
             {{ participant.agentName }}
           </span>
         </div>
-        <p v-else class="collaboration-plan-empty">未点名具体成员，按群组规则决定范围。</p>
+        <p v-else class="collaboration-plan-empty">{{ $t('chatUi.collaborationNoMentioned') }}</p>
       </section>
 
       <section class="collaboration-plan-section">
-        <div class="collaboration-plan-section-title">候选协作者</div>
+        <div class="collaboration-plan-section-title">{{ $t('chatUi.collaborationCandidates') }}</div>
         <div v-if="plan.candidateParticipants.length > 0" class="collaboration-plan-chip-list">
           <span v-for="(participant, index) in plan.candidateParticipants" :key="getParticipantKey(participant.agentId, index)" class="collaboration-plan-chip candidate">
             {{ participant.agentName }}
           </span>
         </div>
-        <p v-else class="collaboration-plan-empty">当前没有额外候选协作者。</p>
+        <p v-else class="collaboration-plan-empty">{{ $t('chatUi.collaborationNoCandidates') }}</p>
       </section>
 
       <section class="collaboration-plan-section">
-        <div class="collaboration-plan-section-title">当前邀请</div>
+        <div class="collaboration-plan-section-title">{{ $t('chatUi.collaborationCurrentInvites') }}</div>
         <div v-if="plan.invitedParticipants.length > 0" class="collaboration-plan-chip-list">
           <span v-for="(participant, index) in plan.invitedParticipants" :key="getParticipantKey(participant.agentId, index)" class="collaboration-plan-chip invited">
             {{ participant.agentName }}
           </span>
         </div>
-        <p v-else class="collaboration-plan-empty">暂未扩群，先由 {{ plan.planner.agentName }} 判断是否需要其他成员加入。</p>
+        <p v-else class="collaboration-plan-empty">{{ $t('chatUi.collaborationNoInvites', { name: plan.planner.agentName }) }}</p>
       </section>
     </div>
   </section>

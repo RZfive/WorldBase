@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 const props = withDefaults(defineProps<{
   title?: string
@@ -19,6 +20,8 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
+const { t } = useI18n()
+
 type NavigatorWithUserAgentData = Navigator & {
   userAgentData?: {
     platform?: string
@@ -30,18 +33,20 @@ const isWindows = computed(() => {
   const platform = (navigator as NavigatorWithUserAgentData).userAgentData?.platform || navigator.platform || navigator.userAgent
   return /win/i.test(platform)
 })
+
+const maximizeLabel = computed(() => props.isMaximized ? t('appShell.restore') : t('appShell.maximize'))
 </script>
 
 <template>
   <div class="titlebar" :class="{ windows: isWindows }">
     <div v-if="!isWindows" class="titlebar-controls traffic-controls">
-      <button class="titlebar-traffic close" @click="emit('close')" title="关闭">
+      <button class="titlebar-traffic close" @click="emit('close')" :title="$t('common.close')">
         <span class="titlebar-traffic-glyph">×</span>
       </button>
-      <button class="titlebar-traffic minimize" @click="emit('minimize')" title="最小化">
+      <button class="titlebar-traffic minimize" @click="emit('minimize')" :title="$t('appShell.minimize')">
         <span class="titlebar-traffic-glyph">−</span>
       </button>
-      <button class="titlebar-traffic maximize" @click="emit('maximize')" :title="props.isMaximized ? '还原' : '最大化'">
+      <button class="titlebar-traffic maximize" @click="emit('maximize')" :title="maximizeLabel">
         <span class="titlebar-traffic-glyph">{{ props.isMaximized ? '▣' : '+' }}</span>
       </button>
     </div>
@@ -59,13 +64,13 @@ const isWindows = computed(() => {
     <div v-if="!isWindows" class="titlebar-balance"></div>
 
     <div v-else class="titlebar-controls windows-controls">
-      <button class="titlebar-win-button" @click="emit('minimize')" title="最小化" aria-label="最小化">
+      <button class="titlebar-win-button" @click="emit('minimize')" :title="$t('appShell.minimize')" :aria-label="$t('appShell.minimize')">
         <span class="titlebar-win-glyph minimize"></span>
       </button>
-      <button class="titlebar-win-button" @click="emit('maximize')" :title="props.isMaximized ? '还原' : '最大化'" :aria-label="props.isMaximized ? '还原' : '最大化'">
+      <button class="titlebar-win-button" @click="emit('maximize')" :title="maximizeLabel" :aria-label="maximizeLabel">
         <span class="titlebar-win-glyph" :class="props.isMaximized ? 'restore' : 'maximize'"></span>
       </button>
-      <button class="titlebar-win-button close" @click="emit('close')" title="关闭" aria-label="关闭">
+      <button class="titlebar-win-button close" @click="emit('close')" :title="$t('common.close')" :aria-label="$t('common.close')">
         <span class="titlebar-win-close">×</span>
       </button>
     </div>

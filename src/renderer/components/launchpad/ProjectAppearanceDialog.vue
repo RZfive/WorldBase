@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import 'emoji-picker-element'
 import { resolveProjectIcon } from '../../utils/project-icon'
 import type { Project } from './types'
@@ -21,6 +22,7 @@ const emit = defineEmits<{
 const draftName = ref('')
 const draftIcon = ref('')
 const emojiPickerHost = ref<HTMLElement | null>(null)
+const { t, locale } = useI18n()
 let emojiPickerEl: HTMLElement | null = null
 
 watch(
@@ -55,7 +57,7 @@ function mountEmojiPicker () {
 
   const picker = document.createElement('emoji-picker') as HTMLElement
   picker.className = 'appearance-emoji-picker'
-  picker.setAttribute('locale', 'zh-Hans')
+  picker.setAttribute('locale', locale.value === 'zh-CN' ? 'zh-Hans' : 'en')
   picker.setAttribute('preview-position', 'none')
   picker.addEventListener('emoji-click', handleEmojiClick as EventListener)
 
@@ -91,10 +93,10 @@ function save () {
         <div class="appearance-dialog">
           <div class="appearance-header">
             <div class="appearance-copy">
-              <div class="appearance-kicker">应用外观</div>
-              <h3>修改名称与图标</h3>
+              <div class="appearance-kicker">{{ $t('launchpad.appAppearance') }}</div>
+              <h3>{{ $t('launchpad.editNameIcon') }}</h3>
             </div>
-            <button class="appearance-close" @click="emit('cancel')">✕</button>
+            <button class="appearance-close" @click="emit('cancel')" :title="$t('common.close')">✕</button>
           </div>
 
           <div class="appearance-preview">
@@ -104,33 +106,33 @@ function save () {
             </div>
             <div class="appearance-preview-meta">
               <div class="appearance-preview-name">{{ draftName || project.id }}</div>
-              <div class="appearance-preview-type">{{ project.type || '应用' }}</div>
+              <div class="appearance-preview-type">{{ project.type || $t('launchpad.app') }}</div>
             </div>
           </div>
 
           <label class="appearance-field">
-            <span>应用名称</span>
+            <span>{{ $t('launchpad.appName') }}</span>
             <input
               v-model="draftName"
               type="text"
               class="appearance-input"
-              placeholder="输入应用名称"
+              :placeholder="$t('launchpad.appNamePlaceholder')"
               maxlength="60"
             />
           </label>
 
           <label class="appearance-field">
-            <span>图标</span>
+            <span>{{ $t('launchpad.icon') }}</span>
             <div class="appearance-icon-row">
               <input
                 v-model="draftIcon"
                 type="text"
                 class="appearance-input appearance-input-icon"
-                placeholder="支持任意 Emoji 或图片地址，留空则按类型自动选择"
+                :placeholder="$t('launchpad.iconPlaceholder')"
               />
-              <button class="appearance-reset" type="button" @click="draftIcon = ''">恢复默认</button>
+              <button class="appearance-reset" type="button" @click="draftIcon = ''">{{ $t('launchpad.restoreDefault') }}</button>
             </div>
-            <div class="appearance-hint">支持完整 Emoji 集合。可直接输入、粘贴，或在下方搜索选择。</div>
+            <div class="appearance-hint">{{ $t('launchpad.iconHint') }}</div>
           </label>
 
           <div class="appearance-picker-shell">
@@ -138,8 +140,8 @@ function save () {
           </div>
 
           <div class="appearance-actions">
-            <button class="appearance-btn appearance-btn-secondary" type="button" @click="emit('cancel')">取消</button>
-            <button class="appearance-btn appearance-btn-primary" type="button" @click="save">保存</button>
+            <button class="appearance-btn appearance-btn-secondary" type="button" @click="emit('cancel')">{{ $t('common.cancel') }}</button>
+            <button class="appearance-btn appearance-btn-primary" type="button" @click="save">{{ $t('launchpad.save') }}</button>
           </div>
         </div>
       </div>

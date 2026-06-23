@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { ChatMessageBlock } from '../types'
 
 const props = defineProps<{
@@ -8,6 +10,14 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'respondAuth', requestId: string, approved: boolean): void
 }>()
+
+const { t } = useI18n()
+
+const statusText = computed(() => {
+  if (props.block.status === 'approved') return `✓ ${t('chatUi.allowed')}`
+  if (props.block.status === 'denied') return `✕ ${t('chatUi.denied')}`
+  return `⏳ ${t('chatUi.waitingAuth')}`
+})
 </script>
 
 <template>
@@ -31,9 +41,9 @@ const emit = defineEmits<{
         </svg>
       </div>
       <div class="auth-request-label-group">
-        <span class="auth-request-badge">操作授权</span>
+        <span class="auth-request-badge">{{ $t('chatUi.operationAuth') }}</span>
         <span class="auth-request-status" :class="props.block.status">
-          {{ props.block.status === 'approved' ? '✓ 已允许' : (props.block.status === 'denied' ? '✕ 已拒绝' : '⏳ 等待授权') }}
+          {{ statusText }}
         </span>
       </div>
     </div>
@@ -45,13 +55,13 @@ const emit = defineEmits<{
           <line x1="18" y1="6" x2="6" y2="18"/>
           <line x1="6" y1="6" x2="18" y2="18"/>
         </svg>
-        拒绝
+        {{ $t('chatUi.deny') }}
       </button>
       <button class="auth-request-btn allow" type="button" @click="emit('respondAuth', props.block.requestId, true)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="20 6 9 17 4 12"/>
         </svg>
-        允许执行
+        {{ $t('chatUi.allowExecution') }}
       </button>
     </div>
   </div>

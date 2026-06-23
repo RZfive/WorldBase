@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 import { resolveProjectIcon } from '../../utils/project-icon'
 
 interface RunningApp {
@@ -34,12 +35,18 @@ const emit = defineEmits<{
   (e: 'contextMenu', event: MouseEvent, app: RunningApp): void
 }>()
 
+const { t } = useI18n()
+
 function handleContextMenu (event: MouseEvent, app: RunningApp): void {
   emit('contextMenu', event, app)
 }
 
 function resolveIcon (app: RunningApp) {
   return resolveProjectIcon(app.type, app.icon)
+}
+
+function appTitle (app: RunningApp): string {
+  return app.name + (app.isWindow ? t('appShell.independentWindowSuffix') : '')
 }
 </script>
 
@@ -48,26 +55,26 @@ function resolveIcon (app: RunningApp) {
     <div class="dock-top">
       <div
         :class="['dock-item', { 'dock-active': props.currentView === 'chat' && !props.showLaunchpad }]"
-        title="AI 对话"
-        data-tip="对话"
+        :title="$t('appShell.aiChatTitle')"
+        :data-tip="$t('appShell.chat')"
         @click="emit('openChat')"
       >
         <span class="dock-item-surface">
           <span class="dock-item-icon">💬</span>
         </span>
-        <span class="dock-tooltip">对话</span>
+        <span class="dock-tooltip">{{ $t('appShell.chat') }}</span>
       </div>
 
       <div
         :class="['dock-item', { 'dock-active': props.currentView === 'studio' && !props.showLaunchpad }]"
-        title="绘制工作台"
-        data-tip="绘制"
+        :title="$t('appShell.studioTitle')"
+        :data-tip="$t('appShell.studio')"
         @click="emit('openStudio')"
       >
         <span class="dock-item-surface">
           <span class="dock-item-icon">🎨</span>
         </span>
-        <span class="dock-tooltip">绘制</span>
+        <span class="dock-tooltip">{{ $t('appShell.studio') }}</span>
       </div>
     </div>
 
@@ -79,7 +86,7 @@ function resolveIcon (app: RunningApp) {
           v-for="app in props.pinnedApps"
           :key="'pin-' + app.id"
           :class="['dock-item', 'dock-app', 'dock-pinned', { 'dock-active': props.currentView === 'app' && props.embeddedProjectId === app.id, 'dock-windowed': app.isWindow }]"
-          :title="app.name + (app.isWindow ? ' (独立窗口)' : '')"
+          :title="appTitle(app)"
           :data-tip="app.name"
           @click="emit('switchToApp', app)"
           @contextmenu="handleContextMenu($event, app)"
@@ -89,13 +96,13 @@ function resolveIcon (app: RunningApp) {
               <img v-if="resolveIcon(app).kind === 'image'" :src="resolveIcon(app).value" alt="" class="dock-item-icon dock-item-icon-image" />
               <span v-else class="dock-item-icon">{{ resolveIcon(app).value }}</span>
             </span>
-            <span class="dock-pin-badge" title="已固定到 Dock">📌</span>
+            <span class="dock-pin-badge" :title="$t('appShell.pinnedToDock')">📌</span>
             <span v-if="app.isWindow" class="dock-window-badge">↗</span>
             <button
               v-if="app.closable && app.isRunning"
               class="dock-close-btn"
               type="button"
-              title="关闭"
+              :title="$t('common.close')"
               @click.stop="emit('closeApp', app.id)"
             >
               ×
@@ -112,7 +119,7 @@ function resolveIcon (app: RunningApp) {
         v-for="[appId, app] in props.runningApps"
         :key="appId"
         :class="['dock-item', 'dock-app', { 'dock-active': props.currentView === 'app' && props.embeddedProjectId === appId, 'dock-windowed': app.isWindow }]"
-        :title="app.name + (app.isWindow ? ' (独立窗口)' : '')"
+        :title="appTitle(app)"
         :data-tip="app.name"
         @click="emit('switchToApp', app)"
         @contextmenu="handleContextMenu($event, app)"
@@ -127,7 +134,7 @@ function resolveIcon (app: RunningApp) {
             v-if="app.closable"
             class="dock-close-btn"
             type="button"
-            title="关闭"
+            :title="$t('common.close')"
             @click.stop="emit('closeApp', app.id)"
           >
             ×
@@ -143,26 +150,26 @@ function resolveIcon (app: RunningApp) {
     <div class="dock-bottom">
       <div
         :class="['dock-item', { 'dock-active': props.showLaunchpad }]"
-        title="启动台"
-        data-tip="启动台"
+        :title="$t('appShell.launchpad')"
+        :data-tip="$t('appShell.launchpad')"
         @click="emit('toggleLaunchpad')"
       >
         <span class="dock-item-surface">
           <span class="dock-item-icon">🚀</span>
         </span>
-        <span class="dock-tooltip">启动台</span>
+        <span class="dock-tooltip">{{ $t('appShell.launchpad') }}</span>
       </div>
 
       <div
         :class="['dock-item', { 'dock-active': props.currentView === 'settings' && !props.showLaunchpad }]"
-        title="设置"
-        data-tip="设置"
+        :title="$t('appShell.settings')"
+        :data-tip="$t('appShell.settings')"
         @click="emit('openSettings')"
       >
         <span class="dock-item-surface">
           <span class="dock-item-icon">⚙️</span>
         </span>
-        <span class="dock-tooltip">设置</span>
+        <span class="dock-tooltip">{{ $t('appShell.settings') }}</span>
       </div>
     </div>
   </aside>

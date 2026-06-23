@@ -22,8 +22,9 @@ interface LanguageOption {
   labelKey: string
   descKey: string
   mark: string
+  sample: string
   badge: string
-  tone: 'zh' | 'en' | 'system'
+  tone: 'zh' | 'en' | 'auto'
 }
 
 interface GeneralSection {
@@ -46,9 +47,9 @@ const themeOptions: ThemeOption[] = [
 ]
 
 const languageOptions: LanguageOption[] = [
-  { id: 'zh-CN', labelKey: 'settings.general.language.zhCN', descKey: 'settings.general.language.zhCNDesc', mark: '中', badge: '简体', tone: 'zh' },
-  { id: 'en-US', labelKey: 'settings.general.language.enUS', descKey: 'settings.general.language.enUSDesc', mark: 'EN', badge: 'US', tone: 'en' },
-  { id: 'system', labelKey: 'settings.general.language.system', descKey: 'settings.general.language.systemDesc', mark: 'A/文', badge: 'Auto', tone: 'system' }
+  { id: 'zh-CN', labelKey: 'settings.general.language.zhCN', descKey: 'settings.general.language.zhCNDesc', mark: '中', sample: '简体中文', badge: 'ZH-CN', tone: 'zh' },
+  { id: 'en-US', labelKey: 'settings.general.language.enUS', descKey: 'settings.general.language.enUSDesc', mark: 'EN', sample: 'English', badge: 'EN-US', tone: 'en' },
+  { id: 'system', labelKey: 'settings.general.language.system', descKey: 'settings.general.language.systemDesc', mark: 'AUTO', sample: '中 / EN', badge: 'SYSTEM', tone: 'auto' }
 ]
 
 const activeSectionId = ref<GeneralSectionId>('appearance')
@@ -113,7 +114,7 @@ const sections = computed<GeneralSection[]>(() => {
     },
     {
       id: 'language',
-      icon: '⌘',
+      icon: '文/A',
       label: t('settings.general.language.navLabel'),
       summary: languageSummary,
       status: t('settings.general.language.status'),
@@ -357,24 +358,25 @@ onUnmounted(() => {
         </template>
 
         <template v-else-if="activeSectionId === 'language'">
-          <div class="gs-theme-grid">
+          <div class="gs-language-grid">
             <button
               v-for="option in languageOptions"
               :key="option.id"
-              :class="['gs-theme-card', 'tone-system', { active: languagePreference === option.id }]"
+              :class="['gs-language-card', `lang-card-${option.tone}`, { active: languagePreference === option.id }]"
               :disabled="savingLanguage"
               @click="selectLanguage(option.id)"
             >
-              <div class="gs-theme-card-top">
+              <div class="gs-language-card-top">
                 <div :class="['gs-language-visual', `lang-${option.tone}`]" aria-hidden="true">
                   <span class="gs-language-mark">{{ option.mark }}</span>
+                  <span class="gs-language-sample">{{ option.sample }}</span>
                   <span class="gs-language-submark">{{ option.badge }}</span>
                 </div>
-                <span v-if="languagePreference === option.id" class="gs-theme-badge">{{ $t('common.current') }}</span>
+                <span v-if="languagePreference === option.id" class="gs-language-badge">{{ $t('common.current') }}</span>
               </div>
-              <div class="gs-theme-card-body">
-                <span class="gs-theme-label">{{ $t(option.labelKey) }}</span>
-                <span class="gs-theme-hint">{{ $t(option.descKey) }}</span>
+              <div class="gs-language-card-body">
+                <span class="gs-language-label">{{ $t(option.labelKey) }}</span>
+                <span class="gs-language-hint">{{ $t(option.descKey) }}</span>
               </div>
             </button>
           </div>
@@ -468,6 +470,7 @@ onUnmounted(() => {
 .gs-nav-summary,
 .gs-overview-text,
 .gs-theme-hint,
+.gs-language-hint,
 .gs-control-hint,
 .gs-note-card p,
 .gs-note-panel p,
@@ -537,6 +540,7 @@ onUnmounted(() => {
 
 .gs-nav-label,
 .gs-theme-label,
+.gs-language-label,
 .gs-control-title,
 .gs-note-title,
 .gs-transfer-title,
@@ -623,7 +627,8 @@ onUnmounted(() => {
 .gs-overview-grid,
 .gs-transfer-grid,
 .gs-note-grid,
-.gs-theme-grid {
+.gs-theme-grid,
+.gs-language-grid {
   display: grid;
   gap: 14px;
 }
@@ -674,11 +679,13 @@ onUnmounted(() => {
   font-size: 0.82em;
 }
 
-.gs-theme-grid {
+.gs-theme-grid,
+.gs-language-grid {
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
 }
 
-.gs-theme-card {
+.gs-theme-card,
+.gs-language-card {
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -692,20 +699,60 @@ onUnmounted(() => {
   transition: border-color 0.14s ease, transform 0.14s ease, box-shadow 0.14s ease;
 }
 
-.gs-theme-card:hover {
+.gs-theme-card:hover,
+.gs-language-card:hover {
   transform: translateY(-2px);
 }
 
-.gs-theme-card.active {
+.gs-theme-card.active,
+.gs-language-card.active {
   border-color: rgba(94, 123, 255, 0.42);
   box-shadow: 0 14px 28px rgba(24, 28, 48, 0.18);
 }
 
-.gs-theme-card-top {
+.gs-theme-card-top,
+.gs-language-card-top {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.gs-language-card {
+  min-height: 172px;
+  overflow: hidden;
+  position: relative;
+}
+
+.gs-language-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.62;
+  pointer-events: none;
+}
+
+.lang-card-zh::before {
+  background:
+    radial-gradient(circle at 18% 12%, rgba(255, 187, 104, 0.28), transparent 36%),
+    radial-gradient(circle at 82% 10%, rgba(255, 91, 91, 0.12), transparent 34%);
+}
+
+.lang-card-en::before {
+  background:
+    radial-gradient(circle at 20% 10%, rgba(111, 165, 255, 0.22), transparent 38%),
+    radial-gradient(circle at 86% 22%, rgba(78, 215, 183, 0.1), transparent 34%);
+}
+
+.lang-card-auto::before {
+  background:
+    radial-gradient(circle at 18% 12%, rgba(255, 184, 105, 0.22), transparent 36%),
+    radial-gradient(circle at 82% 16%, rgba(111, 165, 255, 0.18), transparent 36%),
+    radial-gradient(circle at 52% 88%, rgba(78, 215, 183, 0.12), transparent 30%);
+}
+
+.gs-language-card > * {
+  position: relative;
 }
 
 .gs-theme-visual {
@@ -720,54 +767,76 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  width: 72px;
-  height: 72px;
-  padding: 12px;
-  border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  width: 88px;
+  height: 88px;
+  padding: 12px 13px;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 16px 28px rgba(16, 24, 40, 0.16);
 }
 
 .lang-zh {
-  background: linear-gradient(135deg, #fff4e8, #ffb76c);
-  color: #6a2d00;
+  background:
+    linear-gradient(135deg, rgba(255, 246, 229, 0.98), rgba(255, 197, 104, 0.96)),
+    #ffc568;
+  color: #6a2400;
 }
 
 .lang-en {
-  background: linear-gradient(135deg, #eef4ff, #8db9ff);
+  background:
+    linear-gradient(135deg, rgba(238, 247, 255, 0.98), rgba(119, 184, 255, 0.92)),
+    #77b8ff;
   color: #10294f;
 }
 
-.lang-system {
-  background: linear-gradient(135deg, #eef4fb 0%, #d9e6f6 48%, #10192a 52%, #1a2940 100%);
-  color: #f5f8ff;
+.lang-auto {
+  background:
+    linear-gradient(135deg, rgba(255, 248, 225, 0.98), rgba(232, 243, 255, 0.96) 52%, rgba(224, 255, 244, 0.92)),
+    #eef7ff;
+  color: #1d2c44;
 }
 
 .gs-language-mark {
-  font-size: 1.5em;
+  font-size: 1.68em;
   line-height: 1;
   font-weight: 700;
   letter-spacing: -0.04em;
 }
 
-.lang-system .gs-language-mark {
-  font-size: 1.16em;
-  letter-spacing: -0.03em;
+.lang-auto .gs-language-mark {
+  font-size: 1.02em;
+  letter-spacing: 0.08em;
+  color: #1d2c44;
+}
+
+.gs-language-sample {
+  margin-top: auto;
+  font-size: 0.86em;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.lang-auto .gs-language-sample {
+  color: #1d2c44;
 }
 
 .gs-language-submark {
   align-self: flex-start;
+  margin-top: 7px;
   padding: 4px 8px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.42);
-  font-size: 0.72em;
+  background: rgba(255, 255, 255, 0.5);
+  font-size: 0.68em;
   line-height: 1;
   font-weight: 700;
 }
 
-.lang-system .gs-language-submark {
-  background: rgba(255, 255, 255, 0.16);
-  color: #f5f8ff;
+.lang-auto .gs-language-submark {
+  background: rgba(29, 44, 68, 0.1);
+  color: #1d2c44;
 }
 
 .tone-light .gs-theme-visual {
@@ -813,7 +882,8 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.3);
 }
 
-.gs-theme-badge {
+.gs-theme-badge,
+.gs-language-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -825,18 +895,21 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-.gs-theme-card-body {
+.gs-theme-card-body,
+.gs-language-card-body {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.gs-theme-label {
+.gs-theme-label,
+.gs-language-label {
   font-size: 0.96em;
   font-weight: 600;
 }
 
-.gs-theme-hint {
+.gs-theme-hint,
+.gs-language-hint {
   font-size: 0.8em;
 }
 

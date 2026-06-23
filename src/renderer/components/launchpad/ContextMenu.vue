@@ -105,46 +105,46 @@ function asFolder (target: Project | LaunchFolder | null): LaunchFolder {
     >
       <template v-if="props.kind === 'project' && props.target">
         <template v-if="asProject(props.target).kind === 'web'">
-          <div class="ctx-item" @click="emit('openProject', asProject(props.target)); emit('hide')">🌐 打开网页</div>
+          <div class="ctx-item" @click="emit('openProject', asProject(props.target)); emit('hide')">🌐 {{ $t('launchpad.openWeb') }}</div>
           <div v-if="props.folders.length > 0" class="ctx-divider"></div>
           <div v-for="folder in props.folders" :key="folder.id" class="ctx-item" @click="emit('moveToFolder', asProject(props.target).id, folder.id); emit('hide')">
-            📁 移入「{{ folder.name }}」
+            📁 {{ $t('launchpad.moveToFolder', { name: folder.name }) }}
           </div>
-          <div v-if="props.folderedIds.has(asProject(props.target).id)" class="ctx-item" @click="emit('removeFromFolder', asProject(props.target).id); emit('hide')">📤 移出文件夹</div>
+          <div v-if="props.folderedIds.has(asProject(props.target).id)" class="ctx-item" @click="emit('removeFromFolder', asProject(props.target).id); emit('hide')">📤 {{ $t('launchpad.removeFromFolder') }}</div>
           <div class="ctx-divider"></div>
-          <div class="ctx-item ctx-danger" @click="emit('deleteWebApp', asProject(props.target).id); emit('hide')">🗑️ 从启动台移除</div>
+          <div class="ctx-item ctx-danger" @click="emit('deleteWebApp', asProject(props.target).id); emit('hide')">🗑️ {{ $t('launchpad.removeFromLaunchpad') }}</div>
         </template>
 
         <template v-else>
-          <div class="ctx-item" @click="emit('openProject', asProject(props.target)); emit('hide')">🪄 打开应用</div>
-          <div class="ctx-item" @click="emit('editProject', asProject(props.target)); emit('hide')">✏️ 修改名称与图标</div>
-          <div class="ctx-item" @click="emit('viewSource', asProject(props.target)); emit('hide')">💻 查看源码</div>
-          <div class="ctx-item" @click="emit('exportProject', asProject(props.target)); emit('hide')">📦 导出应用</div>
-          <div class="ctx-item" @click="emit('openInWindow', asProject(props.target)); emit('hide')">↗️ 独立窗口运行</div>
+          <div class="ctx-item" @click="emit('openProject', asProject(props.target)); emit('hide')">🪄 {{ $t('launchpad.openApp') }}</div>
+          <div class="ctx-item" @click="emit('editProject', asProject(props.target)); emit('hide')">✏️ {{ $t('launchpad.editNameIcon') }}</div>
+          <div class="ctx-item" @click="emit('viewSource', asProject(props.target)); emit('hide')">💻 {{ $t('launchpad.viewSource') }}</div>
+          <div class="ctx-item" @click="emit('exportProject', asProject(props.target)); emit('hide')">📦 {{ $t('launchpad.exportApp') }}</div>
+          <div class="ctx-item" @click="emit('openInWindow', asProject(props.target)); emit('hide')">↗️ {{ $t('launchpad.openInWindow') }}</div>
           <div class="ctx-divider"></div>
-          <div v-if="asProject(props.target).runtime?.status !== 'running'" class="ctx-item" @click="emit('startProject', asProject(props.target)); emit('hide')">▶️ 启动</div>
-          <div v-if="asProject(props.target).runtime?.status === 'running'" class="ctx-item" @click="emit('stopProject', asProject(props.target)); emit('hide')">⏹️ 停止</div>
+          <div v-if="asProject(props.target).runtime?.status !== 'running'" class="ctx-item" @click="emit('startProject', asProject(props.target)); emit('hide')">▶️ {{ $t('launchpad.start') }}</div>
+          <div v-if="asProject(props.target).runtime?.status === 'running'" class="ctx-item" @click="emit('stopProject', asProject(props.target)); emit('hide')">⏹️ {{ $t('launchpad.stop') }}</div>
           <div class="ctx-divider"></div>
-          <div class="ctx-item" @click="emit('optimizeInChat', asProject(props.target)); emit('hide')">💬 继续优化</div>
+          <div class="ctx-item" @click="emit('optimizeInChat', asProject(props.target)); emit('hide')">💬 {{ $t('launchpad.continueOptimize') }}</div>
           <div v-if="props.folders.length > 0" class="ctx-divider"></div>
           <div v-for="folder in props.folders" :key="folder.id" class="ctx-item" @click="emit('moveToFolder', asProject(props.target).id, folder.id); emit('hide')">
-            📁 移入「{{ folder.name }}」
+            📁 {{ $t('launchpad.moveToFolder', { name: folder.name }) }}
           </div>
-          <div v-if="props.folderedIds.has(asProject(props.target).id)" class="ctx-item" @click="emit('removeFromFolder', asProject(props.target).id); emit('hide')">📤 移出文件夹</div>
+          <div v-if="props.folderedIds.has(asProject(props.target).id)" class="ctx-item" @click="emit('removeFromFolder', asProject(props.target).id); emit('hide')">📤 {{ $t('launchpad.removeFromFolder') }}</div>
           <div class="ctx-divider"></div>
-          <div class="ctx-item ctx-danger" @click="emit('deleteProject', asProject(props.target)); emit('hide')">🗑️ 删除项目</div>
+          <div class="ctx-item ctx-danger" @click="emit('deleteProject', asProject(props.target)); emit('hide')">🗑️ {{ $t('launchpad.deleteProject') }}</div>
         </template>
       </template>
 
       <template v-if="props.kind === 'folder' && props.target">
-        <div class="ctx-item" @click="emit('renameFolder', asFolder(props.target)); emit('hide')">✏️ 重命名</div>
-        <div class="ctx-item ctx-danger" @click="emit('deleteFolder', asFolder(props.target).id); emit('hide')">🗑️ 删除文件夹</div>
+        <div class="ctx-item" @click="emit('renameFolder', asFolder(props.target)); emit('hide')">✏️ {{ $t('common.rename') }}</div>
+        <div class="ctx-item ctx-danger" @click="emit('deleteFolder', asFolder(props.target).id); emit('hide')">🗑️ {{ $t('launchpad.deleteFolder') }}</div>
       </template>
 
       <template v-if="props.kind === 'blank'">
-        <div class="ctx-item" @click="emit('createFolder'); emit('hide')">📁 新建文件夹</div>
-        <div class="ctx-item" @click="emit('importPackage'); emit('hide')">📥 导入应用</div>
-        <div class="ctx-item" @click="emit('refresh'); emit('hide')">🔄 刷新</div>
+        <div class="ctx-item" @click="emit('createFolder'); emit('hide')">📁 {{ $t('launchpad.newFolder') }}</div>
+        <div class="ctx-item" @click="emit('importPackage'); emit('hide')">📥 {{ $t('launchpad.importApp') }}</div>
+        <div class="ctx-item" @click="emit('refresh'); emit('hide')">🔄 {{ $t('launchpad.refresh') }}</div>
       </template>
     </div>
   </Teleport>

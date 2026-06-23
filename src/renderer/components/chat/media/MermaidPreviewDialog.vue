@@ -104,15 +104,15 @@ onUnmounted(() => {
     <div class="mermaid-preview-dialog">
       <div class="mermaid-preview-toolbar">
         <div class="mermaid-preview-meta">
-          <span class="mermaid-preview-title">Mermaid 图表预览</span>
-          <span class="mermaid-preview-hint">滚轮缩放，按住拖拽查看细节</span>
+          <span class="mermaid-preview-title">{{ $t('chatUi.mermaidPreview') }}</span>
+          <span class="mermaid-preview-hint">{{ $t('chatUi.mermaidPreviewHint') }}</span>
         </div>
         <div class="mermaid-preview-actions">
           <span class="mermaid-preview-zoom">{{ zoomPercent }}</span>
-          <button class="mermaid-preview-btn secondary" type="button" :disabled="zoom <= MIN_ZOOM" @click="zoomOut">缩小</button>
-          <button class="mermaid-preview-btn secondary" type="button" @click="resetView">重置</button>
-          <button class="mermaid-preview-btn secondary" type="button" :disabled="zoom >= MAX_ZOOM" @click="zoomIn">放大</button>
-          <button class="mermaid-preview-btn" type="button" @click="closeDialog">关闭</button>
+          <button class="mermaid-preview-btn secondary" type="button" :disabled="zoom <= MIN_ZOOM" @click="zoomOut">{{ $t('chatUi.zoomOut') }}</button>
+          <button class="mermaid-preview-btn secondary" type="button" @click="resetView">{{ $t('chatUi.reset') }}</button>
+          <button class="mermaid-preview-btn secondary" type="button" :disabled="zoom >= MAX_ZOOM" @click="zoomIn">{{ $t('chatUi.zoomIn') }}</button>
+          <button class="mermaid-preview-btn" type="button" @click="closeDialog">{{ $t('common.close') }}</button>
         </div>
       </div>
 

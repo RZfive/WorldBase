@@ -45,17 +45,17 @@ function toggleCollapsed (): void {
 </script>
 
 <template>
-  <section class="sudo-shell" aria-label="待授权的 sudo 命令">
+  <section class="sudo-shell" :aria-label="$t('chatUi.sudoPendingAria')">
     <div class="sudo-float" :class="{ expanded: !collapsed }">
       <Transition name="sudo-expand">
         <div v-if="!collapsed" class="sudo-detail">
           <div class="sudo-detail-head">
-            <span>sudo 密码</span>
-            <span v-if="props.pendingCount > 1">{{ props.pendingCount }} 项排队</span>
-            <span v-else>等待输入</span>
+            <span>{{ $t('chatUi.sudoPassword') }}</span>
+            <span v-if="props.pendingCount > 1">{{ $t('chatUi.sudoPendingQueue', { count: props.pendingCount }) }}</span>
+            <span v-else>{{ $t('chatUi.sudoWaitingInput') }}</span>
           </div>
 
-          <div class="sudo-detail-title">执行命令需要 sudo 权限</div>
+          <div class="sudo-detail-title">{{ $t('chatUi.sudoCommandRequiresPermission') }}</div>
           <pre class="sudo-detail-body">{{ truncate(props.request.command) }}</pre>
 
           <div class="sudo-input-row">
@@ -63,7 +63,7 @@ function toggleCollapsed (): void {
               v-model="passwordInput"
               class="sudo-password-input"
               type="password"
-              placeholder="输入 sudo 密码…"
+              :placeholder="$t('chatUi.sudoPasswordPlaceholderEllipsis')"
               autocomplete="current-password"
               @keydown.enter="confirm"
               @keydown.esc="cancel"
@@ -76,7 +76,7 @@ function toggleCollapsed (): void {
                 <line x1="18" y1="6" x2="6" y2="18"/>
                 <line x1="6" y1="6" x2="18" y2="18"/>
               </svg>
-              取消
+              {{ $t('common.cancel') }}
             </button>
             <button
               class="sudo-btn confirm"
@@ -87,7 +87,7 @@ function toggleCollapsed (): void {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="20 6 9 17 4 12"/>
               </svg>
-              确认
+              {{ $t('common.confirm') }}
             </button>
           </div>
         </div>
@@ -99,7 +99,7 @@ function toggleCollapsed (): void {
         :aria-expanded="!collapsed"
         @click="toggleCollapsed"
       >
-        <span class="sudo-strip-status">sudo 密码</span>
+        <span class="sudo-strip-status">{{ $t('chatUi.sudoPassword') }}</span>
         <span class="sudo-strip-title">{{ truncate(props.request.command, 60) }}</span>
         <span v-if="props.pendingCount > 1" class="sudo-strip-count">{{ props.pendingCount }}</span>
         <span class="sudo-toggle" :class="{ collapsed }" aria-hidden="true">

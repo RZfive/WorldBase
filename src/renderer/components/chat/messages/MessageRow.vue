@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { buildMessageBlocks, getContentText, hasRenderableContent } from '../message-utils'
 import type { ChatMessage, ChatMessageBlock, FilePreviewState } from '../types'
 import ThinkingBlock from '../blocks/ThinkingBlock.vue'
@@ -27,6 +28,8 @@ const props = defineProps<{
   assistantIcon?: string
   assistantName?: string
 }>()
+
+const { t } = useI18n()
 
 const emit = defineEmits<{
   (e: 'respondAuth', requestId: string, approved: boolean): void
@@ -62,7 +65,7 @@ function hasRenderableBlock (block: ChatMessageBlock): boolean {
 }
 
 function getMessageAuthor (): string {
-  return props.msg.role === 'assistant' ? (props.msg.speakerName || props.assistantName || 'The World AI') : '你'
+  return props.msg.role === 'assistant' ? (props.msg.speakerName || props.assistantName || 'The World AI') : t('chatUi.you')
 }
 
 function getAssistantIcon (): string {
@@ -93,9 +96,9 @@ const messageText = computed(() => getMessageText())
           <span class="message-model-chip">{{ getModelLabel() }}</span>
         </template>
         <template v-else>
-          <span class="message-role-label user">用户</span>
-          <span class="message-author">你</span>
-          <span class="message-user-avatar" aria-hidden="true">你</span>
+          <span class="message-role-label user">{{ $t('chatUi.user') }}</span>
+          <span class="message-author">{{ $t('chatUi.you') }}</span>
+          <span class="message-user-avatar" aria-hidden="true">{{ $t('chatUi.you') }}</span>
         </template>
       </div>
 

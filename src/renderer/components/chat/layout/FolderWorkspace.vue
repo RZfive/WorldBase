@@ -382,30 +382,30 @@ onBeforeUnmount(() => {
     <div class="workspace-shell">
       <header class="workspace-header">
         <div class="workspace-heading">
-          <h3 class="workspace-title">代码工作区</h3>
-          <p class="workspace-subtitle" :title="currentRootPath || undefined">{{ currentRootName || '未选择文件夹' }}</p>
+          <h3 class="workspace-title">{{ $t('chatUi.codeWorkspace') }}</h3>
+          <p class="workspace-subtitle" :title="currentRootPath || undefined">{{ currentRootName || $t('chatUi.noFolderSelected') }}</p>
         </div>
         <div class="workspace-header-actions">
-          <button class="workspace-icon-btn" type="button" title="选择文件夹" @click="chooseFolder">
+          <button class="workspace-icon-btn" type="button" :title="$t('chatUi.chooseFolder')" @click="chooseFolder">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path d="M3.5 6.5A2.5 2.5 0 0 1 6 4h4l2 2h6A2.5 2.5 0 0 1 20.5 8.5v8A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5v-10Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
               <path d="M12 10v5M9.5 12.5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
             </svg>
           </button>
-          <button class="workspace-icon-btn" type="button" title="刷新" :disabled="!currentRootPath || isLoadingTree" @click="refreshWorkspace">
+          <button class="workspace-icon-btn" type="button" :title="$t('chatUi.refresh')" :disabled="!currentRootPath || isLoadingTree" @click="refreshWorkspace">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path d="M20 12a8 8 0 0 1-13.66 5.66M4 12A8 8 0 0 1 17.66 6.34" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
               <path d="M17 3.5h2.8V6.3M7 20.5H4.2V17.7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </button>
-          <button class="workspace-close" type="button" title="关闭代码工作区" @click="emit('close')">×</button>
+          <button class="workspace-close" type="button" :title="$t('chatUi.closeCodeWorkspace')" @click="emit('close')">×</button>
         </div>
       </header>
 
       <div v-if="!currentRootPath" class="workspace-empty">
-        <div class="workspace-empty-title">未选择工作区</div>
+        <div class="workspace-empty-title">{{ $t('chatUi.noWorkspaceSelected') }}</div>
         <button class="choose-folder-btn" type="button" :disabled="isPickingFolder" @click="chooseFolder">
-          {{ isPickingFolder ? '打开中...' : '选择文件夹' }}
+          {{ isPickingFolder ? $t('chatUi.opening') : $t('chatUi.chooseFolder') }}
         </button>
         <div v-if="workspaceError" class="workspace-error">{{ workspaceError }}</div>
       </div>
@@ -414,7 +414,7 @@ onBeforeUnmount(() => {
         <aside class="workspace-tree">
           <div class="tree-root" :title="currentRootPath || undefined">{{ currentRootName }}</div>
           <div v-if="workspaceError" class="workspace-error inline">{{ workspaceError }}</div>
-          <div v-if="isLoadingTree" class="tree-loading">加载中...</div>
+          <div v-if="isLoadingTree" class="tree-loading">{{ $t('chatUi.loadingPlain') }}</div>
           <div v-else class="tree-list">
             <button
               v-for="item in flatFileTree"
@@ -432,7 +432,7 @@ onBeforeUnmount(() => {
               <span class="tree-name">{{ item.name }}</span>
               <span class="tree-badge">{{ getFileBadge(item) }}</span>
             </button>
-            <div v-if="flatFileTree.length === 0" class="tree-empty">暂无可预览文件</div>
+            <div v-if="flatFileTree.length === 0" class="tree-empty">{{ $t('chatUi.noPreviewableFiles') }}</div>
           </div>
         </aside>
 
@@ -442,8 +442,8 @@ onBeforeUnmount(() => {
               <div class="preview-path" :title="selectedFile.filePath">{{ selectedFile.filePath }}</div>
               <div class="preview-meta">
                 <span>{{ formatFileSize(selectedFile.size) }}</span>
-                <span v-if="lineCount > 0">{{ lineCount }} 行</span>
-                <span v-if="selectedFile.truncated">已截断</span>
+                <span v-if="lineCount > 0">{{ $t('chatUi.lineCount', { count: lineCount }) }}</span>
+                <span v-if="selectedFile.truncated">{{ $t('chatUi.contentTruncated') }}</span>
               </div>
             </div>
 
@@ -456,9 +456,9 @@ onBeforeUnmount(() => {
             </div>
           </template>
 
-          <div v-else-if="isLoadingFile" class="preview-placeholder">读取中...</div>
+          <div v-else-if="isLoadingFile" class="preview-placeholder">{{ $t('chatUi.readingPlain') }}</div>
           <div v-else-if="fileError" class="preview-error">{{ fileError }}</div>
-          <div v-else class="preview-placeholder">选择文件查看预览</div>
+          <div v-else class="preview-placeholder">{{ $t('chatUi.selectFileToPreview') }}</div>
         </main>
       </div>
     </div>

@@ -105,12 +105,12 @@ function toggleCollapsed () {
 </script>
 
 <template>
-  <section class="ask-shell" aria-label="待用户回答的问题">
+  <section class="ask-shell" :aria-label="$t('chatUi.askPendingAria')">
     <div class="ask-float" :class="{ expanded: !collapsed }">
       <Transition name="ask-expand">
         <div v-if="!collapsed" class="ask-detail">
           <div class="ask-detail-head">
-            <span>需要你的回答</span>
+            <span>{{ $t('chatUi.askNeedAnswer') }}</span>
             <span>{{ answeredCount }}/{{ props.request.questions.length }}</span>
           </div>
 
@@ -140,12 +140,12 @@ function toggleCollapsed () {
               </div>
 
               <div class="ask-custom-row">
-                <span class="ask-custom-label">其他</span>
+                <span class="ask-custom-label">{{ $t('chatUi.askOther') }}</span>
                 <input
                   :value="drafts[q.id]?.customAnswer || ''"
                   class="ask-custom-input"
                   type="text"
-                  placeholder="或直接输入你的回答…"
+                  :placeholder="$t('chatUi.askCustomPlaceholder')"
                   @input="onCustomInput(q.id, ($event.target as HTMLInputElement).value)"
                   @keydown.enter.prevent="submit"
                 />
@@ -154,14 +154,14 @@ function toggleCollapsed () {
           </div>
 
           <div class="ask-actions">
-            <button class="ask-cancel-btn" type="button" @click="cancel">取消</button>
+            <button class="ask-cancel-btn" type="button" @click="cancel">{{ $t('common.cancel') }}</button>
             <button
               class="ask-submit-btn"
               type="button"
               :disabled="!allAnswered"
               @click="submit"
             >
-              提交回答
+              {{ $t('chatUi.askSubmitAnswer') }}
             </button>
           </div>
         </div>
@@ -173,8 +173,8 @@ function toggleCollapsed () {
         :aria-expanded="!collapsed"
         @click="toggleCollapsed"
       >
-        <span class="ask-strip-status">需要回答</span>
-        <span class="ask-strip-title">{{ props.request.questions.length === 1 ? props.request.questions[0].question : `${props.request.questions.length} 个问题待回答` }}</span>
+        <span class="ask-strip-status">{{ $t('chatUi.askNeedAnswerShort') }}</span>
+        <span class="ask-strip-title">{{ props.request.questions.length === 1 ? props.request.questions[0].question : $t('chatUi.askQuestionsPending', { count: props.request.questions.length }) }}</span>
         <span class="ask-strip-count">{{ answeredCount }}/{{ props.request.questions.length }}</span>
         <span class="ask-toggle" :class="{ collapsed }" aria-hidden="true">
           <svg

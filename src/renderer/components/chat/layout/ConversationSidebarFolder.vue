@@ -88,10 +88,10 @@ const emit = defineEmits<{
                 <span
                   v-else
                   class="conv-title conv-folder-title"
-                  title="双击重命名文件夹"
+                  :title="$t('chatUi.doubleClickRenameFolder')"
                   @dblclick.stop="emit('startRename')"
                 >{{ entry.folder.name }}</span>
-                <span class="conv-folder-meta">{{ entry.items.length }} 个对话</span>
+                <span class="conv-folder-meta">{{ $t('chatUi.conversationCount', { count: entry.items.length }) }}</span>
               </div>
             </div>
           </div>
@@ -101,8 +101,8 @@ const emit = defineEmits<{
         class="conv-folder-pin-btn"
         :class="{ active: entry.isPinned }"
         type="button"
-        :title="entry.isPinned ? '取消置顶' : '置顶文件夹'"
-        :aria-label="entry.isPinned ? '取消置顶' : '置顶文件夹'"
+        :title="entry.isPinned ? $t('chatUi.unpin') : $t('chatUi.pinFolder')"
+        :aria-label="entry.isPinned ? $t('chatUi.unpin') : $t('chatUi.pinFolder')"
         @click.stop="emit('togglePin')"
       >
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -110,13 +110,13 @@ const emit = defineEmits<{
         </svg>
       </button>
       <div class="conv-folder-actions">
-        <button class="conv-folder-action-btn" type="button" title="解散文件夹（对话保留）" @click.stop="emit('ungroup')">
+        <button class="conv-folder-action-btn" type="button" :title="$t('chatUi.ungroupFolderKeepConversations')" @click.stop="emit('ungroup')">
           <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M3 4h10M5 4V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1M6.5 7v4M9.5 7v4M4 4l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L12 4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </button>
       </div>
-      <button class="conv-folder-caret-btn" type="button" title="展开/收起" @click.stop="emit('toggle')">
+      <button class="conv-folder-caret-btn" type="button" :title="$t('chatUi.expandCollapse')" @click.stop="emit('toggle')">
         <span class="conv-folder-caret-shell" aria-hidden="true">
           <svg class="conv-folder-caret" viewBox="0 0 16 16" fill="none">
             <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
@@ -135,7 +135,7 @@ const emit = defineEmits<{
       <div
         v-if="entry.visibleItems.length === 0"
         class="conv-folder-empty"
-      >空文件夹，拖拽对话到这里</div>
+      >{{ $t('chatUi.emptyFolderDropHint') }}</div>
       <ConversationSidebarItemCard
         v-for="item in entry.visibleItems"
         :key="`${entry.folder.id}-${item.id}`"
@@ -149,7 +149,7 @@ const emit = defineEmits<{
         :rename-input="conversationRenameInput"
         nested
         show-delete
-        delete-title="删除"
+        :delete-title="$t('common.delete')"
         @click="emit('selectConversation', item.id)"
         @contextmenu.prevent="emit('startRenameConversation', item)"
         @update:rename-input="emit('update:conversationRenameInput', $event)"

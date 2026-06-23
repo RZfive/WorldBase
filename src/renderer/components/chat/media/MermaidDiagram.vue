@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { getCachedMermaid, renderMermaid, type MermaidRender } from "../mermaid";
 
 // Each rendered SVG carries internal ids (markers, gradients, scoped <style>) derived
@@ -32,6 +33,7 @@ const emit = defineEmits<{
 const svgMarkup = ref("");
 const renderError = ref("");
 const isRendering = ref(false);
+const { t } = useI18n();
 
 async function renderDiagram() {
   const code = props.code.trim();
@@ -40,7 +42,7 @@ async function renderDiagram() {
   if (!code) {
     svgMarkup.value = "";
     isRendering.value = false;
-    renderError.value = "Mermaid 内容为空";
+    renderError.value = t("chatUi.mermaidEmpty");
     return;
   }
 
@@ -62,7 +64,7 @@ async function renderDiagram() {
   } catch (error) {
     if (props.code.trim() !== code) return;
     renderError.value =
-      error instanceof Error ? error.message : "Mermaid 图表渲染失败";
+      error instanceof Error ? error.message : t("chatUi.mermaidRenderFailed");
   } finally {
     if (props.code.trim() === code) isRendering.value = false;
   }
@@ -82,7 +84,7 @@ watch(
     <div class="mermaid-diagram-header" v-if="props.mode === 'inline'">
       <div class="mermaid-diagram-meta">
         <span class="mermaid-diagram-badge">Mermaid</span>
-        <span class="mermaid-diagram-hint">点击展开查看大图</span>
+        <span class="mermaid-diagram-hint">{{ $t('chatUi.clickToExpand') }}</span>
       </div>
       <button
         v-if="props.previewable && props.mode === 'inline'"
@@ -91,7 +93,7 @@ watch(
         type="button"
         @click="emit('openPreview')"
       >
-        展开放大
+        {{ $t('chatUi.expand') }}
       </button>
     </div>
 
@@ -105,10 +107,10 @@ watch(
         v-html="svgMarkup"
       ></div>
       <div v-else-if="isRendering" class="mermaid-diagram-placeholder">
-        正在生成图表…
+        {{ $t('chatUi.generatingDiagram') }}
       </div>
       <div v-else class="mermaid-diagram-error">
-        <strong>图表渲染失败</strong>
+        <strong>{{ $t('chatUi.diagramRenderFailed') }}</strong>
         <span>{{ renderError }}</span>
         <pre>{{ props.code }}</pre>
       </div>

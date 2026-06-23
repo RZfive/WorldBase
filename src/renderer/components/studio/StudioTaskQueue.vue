@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { ImageStudioTask } from '../../../shared/image-studio-types'
 
 const props = defineProps<{
@@ -14,23 +15,26 @@ const emit = defineEmits<{
 }>()
 
 const hasFinished = computed(() => props.tasks.some(t => t.status === 'success' || t.status === 'error'))
+const { t } = useI18n()
 
-const STATUS_LABELS: Record<ImageStudioTask['status'], string> = {
-  queued: '排队中',
-  running: '生成中',
-  success: '完成',
-  error: '失败'
+function statusLabel (status: ImageStudioTask['status']): string {
+  switch (status) {
+    case 'queued': return t('studioUi.statusQueued')
+    case 'running': return t('studioUi.statusRunning')
+    case 'success': return t('studioUi.statusSuccess')
+    case 'error': return t('studioUi.statusError')
+  }
 }
 </script>
 
 <template>
   <div class="queue">
     <header class="queue-header">
-      <span class="queue-title">任务队列</span>
-      <button v-if="hasFinished" class="queue-clear" type="button" @click="emit('clearFinished')">清除已完成</button>
+      <span class="queue-title">{{ $t('studioUi.taskQueue') }}</span>
+      <button v-if="hasFinished" class="queue-clear" type="button" @click="emit('clearFinished')">{{ $t('studioUi.clearFinished') }}</button>
     </header>
 
-    <p v-if="tasks.length === 0" class="queue-empty">暂无任务，去工作台生成或编辑图片吧</p>
+    <p v-if="tasks.length === 0" class="queue-empty">{{ $t('studioUi.emptyQueue') }}</p>
 
     <ul v-else class="queue-list">
       <li
@@ -45,11 +49,11 @@ const STATUS_LABELS: Record<ImageStudioTask['status'], string> = {
         <span v-else class="queue-thumb queue-thumb-placeholder">{{ task.request.mode === 'edit' ? '✎' : '🎨' }}</span>
 
         <div class="queue-body">
-          <span class="queue-label" :title="task.label">{{ task.label || '（无提示词）' }}</span>
+          <span class="queue-label" :title="task.label">{{ task.label || $t('studioUi.noPrompt') }}</span>
           <span class="queue-status" :class="`status-${task.status}`">
-            <span v-if="task.createdByAgent" class="queue-agent-tag" title="由 AI 发起">AI</span>
+            <span v-if="task.createdByAgent" class="queue-agent-tag" :title="$t('studioUi.createdByAi')">AI</span>
             <span v-if="task.status === 'running'" class="queue-spinner">⏳</span>
-            {{ task.request.mode === 'edit' ? '编辑' : '生成' }} · {{ STATUS_LABELS[task.status] }}
+            {{ task.request.mode === 'edit' ? $t('studioUi.editModeShort') : $t('studioUi.generateModeShort') }} · {{ statusLabel(task.status) }}
           </span>
         </div>
 
@@ -57,14 +61,14 @@ const STATUS_LABELS: Record<ImageStudioTask['status'], string> = {
           v-if="task.status === 'error'"
           class="queue-icon-btn"
           type="button"
-          title="重试"
+          :title="$t('common.retry')"
           @click.stop="emit('retry', task.id)"
         >↻</button>
         <button
           v-if="task.status !== 'running'"
           class="queue-icon-btn"
           type="button"
-          title="移除"
+          :title="$t('studioUi.remove')"
           @click.stop="emit('remove', task.id)"
         >✕</button>
       </li>

@@ -1,4 +1,4 @@
-import type { MessageContent, ChatContentPart, ToolRun, ChatMessage, ChatMessageBlock, FilePreviewState } from './types'
+import type { MessageContent, ChatContentPart, ChatMessage, ChatMessageBlock, FilePreviewState } from './types'
 
 export function getContentParts (content: MessageContent): ChatContentPart[] {
   if (typeof content === 'string') {
@@ -27,12 +27,6 @@ export function hasRenderableContent (content: MessageContent): boolean {
 
 export function collapseWhitespace (text: string): string {
   return text.replace(/\s+/g, ' ').trim()
-}
-
-export function getToolRunStatusLabel (status: ToolRun['status']): string {
-  if (status === 'completed') return '已完成'
-  if (status === 'failed') return '失败'
-  return '执行中'
 }
 
 /**

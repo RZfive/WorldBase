@@ -26,7 +26,8 @@ export function getGroupIcon (group?: Pick<AgentGroupDefinition, 'icon'> | null)
 export function getAgentModelSelection (
   agent: AgentDefinition | null | undefined,
   providersById: Map<string, ProviderOption>,
-  activeProviderId: string
+  activeProviderId: string,
+  fallbackProviderName = ''
 ): {
   providerName: string
   modelId: string
@@ -39,7 +40,7 @@ export function getAgentModelSelection (
   const modelId = agent?.modelId || provider?.activeModel || modelOptions[0] || ''
 
   return {
-    providerName: provider?.name || '未配置供应商',
+    providerName: provider?.name || fallbackProviderName,
     modelId,
     modelOptions
   }
@@ -61,9 +62,9 @@ export function resolveConversationIcon (
   return '💬'
 }
 
-export function formatConversationSubtitle (updatedAt: string): string {
+export function formatConversationSubtitle (updatedAt: string, locale: string): string {
   try {
-    return new Date(updatedAt).toLocaleString('zh-CN', {
+    return new Date(updatedAt).toLocaleString(locale, {
       month: 'numeric',
       day: 'numeric',
       hour: '2-digit',

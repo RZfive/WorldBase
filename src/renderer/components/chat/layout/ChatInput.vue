@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch, type CSSProperties } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ProviderDropdown from './ProviderDropdown.vue'
 
 interface PendingAttachment {
@@ -83,6 +84,8 @@ const emit = defineEmits<{
   (e: 'update:selected-agent-id', id: string): void
 }>()
 
+const { t } = useI18n()
+
 const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
 const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 
@@ -95,11 +98,11 @@ const activeMentionIndex = ref(0)
 const pendingSelection = ref<{ start: number; end: number } | null>(null)
 const MAX_MENTION_DROPDOWN_HEIGHT = 320
 const MIN_MENTION_DROPDOWN_HEIGHT = 120
-const reasoningLevels: Array<{ value: ReasoningStrength; label: string }> = [
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-  { value: 'max', label: '最高' }
+const reasoningLevels: Array<{ value: ReasoningStrength; labelKey: string }> = [
+  { value: 'low', labelKey: 'chatUi.reasoningLow' },
+  { value: 'medium', labelKey: 'chatUi.reasoningMedium' },
+  { value: 'high', labelKey: 'chatUi.reasoningHigh' },
+  { value: 'max', labelKey: 'chatUi.reasoningMax' }
 ]
 const ADVANCED_SLIDER_THUMB_SIZE = 12
 function sliderFillToThumbCenter (ratio: number): string {
@@ -114,13 +117,14 @@ const currentReasoningIndex = computed(() => {
   return index >= 0 ? index : reasoningLevels.length - 1
 })
 const currentReasoningLabel = computed(() => {
-  return reasoningLevels[currentReasoningIndex.value]?.label || '最高'
+  const level = reasoningLevels[currentReasoningIndex.value]
+  return level ? t(level.labelKey) : t('chatUi.reasoningMax')
 })
 const reasoningSliderFill = computed(() => {
   return sliderFillToThumbCenter(currentReasoningIndex.value / Math.max(reasoningLevels.length - 1, 1))
 })
 const groupReasoningTitle = computed(() => {
-  return `群聊中此处不单独调节思考强度，当前会沿用群内各 Agent 自身的思考强度配置（当前界面值：${currentReasoningLabel.value}）。`
+  return t('chatUi.groupReasoningTitle', { value: currentReasoningLabel.value })
 })
 const TEMPERATURE_MIN = 0
 const TEMPERATURE_MAX = 2
@@ -172,7 +176,7 @@ const documentTags = computed<DocumentTagChip[]>(() => {
     seenRegionIds.add(regionId)
     tags.push({
       regionId,
-      label: match[2]?.trim() || '文档标签',
+      label: match[2]?.trim() || t('chatUi.documentTagFallback'),
       raw: match[0]
     })
   }
@@ -198,10 +202,12 @@ const runtimeStatusLabel = computed(() => {
   }
 
   if ((props.pendingAuthCount || 0) > 0) {
-    return props.pendingAuthCount === 1 ? '等待授权以继续执行' : `等待 ${props.pendingAuthCount} 项授权以继续执行`
+    return props.pendingAuthCount === 1
+      ? t('chatUi.waitingSingleAuth')
+      : t('chatUi.waitingMultipleAuth', { count: props.pendingAuthCount })
   }
 
-  return '执行中，请稍候'
+  return t('chatUi.runningWait')
 })
 const mentionOptions = computed<GroupMentionHint[]>(() => {
   const mention = activeMention.value
@@ -645,14 +651,14 @@ function handleTextareaBlur () {
         <div v-for="tag in projectTags" :key="tag.projectId" class="project-tag-chip">
           <span class="project-tag-chip-prefix">📦</span>
           <span class="project-tag-chip-label">{{ tag.name }}</span>
-          <button class="project-tag-chip-remove" @click="removeProjectTag(tag.projectId)" title="移除项目标签">×</button>
+          <button class="project-tag-chip-remove" @click="removeProjectTag(tag.projectId)" :title="$t('chatUi.removeProjectTag')">×</button>
         </div>
       </div>
       <div v-if="documentTags.length > 0" class="document-tag-bar">
         <div v-for="tag in documentTags" :key="tag.regionId" class="document-tag-chip">
           <span class="document-tag-chip-prefix">#</span>
           <span class="document-tag-chip-label">{{ tag.label }}</span>
-          <button class="document-tag-chip-remove" @click="removeDocumentTag(tag.regionId)" title="移除文档标签">×</button>
+          <button class="document-tag-chip-remove" @click="removeDocumentTag(tag.regionId)" :title="$t('chatUi.removeDocumentTag')">×</button>
         </div>
       </div>
       <div class="textarea-shell">
@@ -660,7 +666,7 @@ function handleTextareaBlur () {
           ref="textareaRef"
           :value="plainDraftText"
           :class="{ busy: props.isLoading }"
-          placeholder="输入消息… (Enter 发送, Shift+Enter 换行)"
+          :placeholder="$t('chatUi.messagePlaceholder')"
           :aria-busy="props.isLoading ? 'true' : 'false'"
           @input="handleTextInput"
           @keydown="handleKeydown"
@@ -700,7 +706,7 @@ function handleTextareaBlur () {
                 class="action-btn advanced-btn"
                 :class="{ active: showAdvancedPanel }"
                 type="button"
-                aria-label="高级设置"
+                :aria-label="$t('chatUi.advancedSettings')"
                 @click="toggleAdvancedPanel"
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -708,13 +714,13 @@ function handleTextareaBlur () {
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                 </svg>
               </button>
-              <span v-if="!showAdvancedPanel" class="tooltip-text">高级设置</span>
+              <span v-if="!showAdvancedPanel" class="tooltip-text">{{ $t('chatUi.advancedSettings') }}</span>
             </div>
             <Transition name="advanced-drawer">
               <div v-if="showAdvancedPanel" class="advanced-panel">
                 <div class="advanced-setting advanced-reasoning-setting">
                   <span class="advanced-setting-name" :title="props.isGroupConversation ? groupReasoningTitle : ''">
-                    思考强度 <span class="advanced-setting-value">({{ currentReasoningLabel }})</span>
+                    {{ $t('chatUi.reasoningStrength') }} <span class="advanced-setting-value">({{ currentReasoningLabel }})</span>
                   </span>
                   <input
                     class="advanced-slider advanced-reasoning-slider"
@@ -730,7 +736,7 @@ function handleTextareaBlur () {
                 </div>
                 <div class="advanced-setting advanced-temperature-setting">
                   <span class="advanced-setting-name">
-                    模型温度 <span class="advanced-setting-value">({{ effectiveTemperature.toFixed(1) }})</span>
+                    {{ $t('chatUi.modelTemperature') }} <span class="advanced-setting-value">({{ effectiveTemperature.toFixed(1) }})</span>
                   </span>
                   <input
                     class="advanced-slider"
@@ -749,8 +755,8 @@ function handleTextareaBlur () {
           <ProviderDropdown
             v-if="props.isNewConversation && props.availableAgents && props.availableAgents.length > 0"
             :model-value="props.selectedAgentId || ''"
-            :options="[{ value: '', label: '默认 Agent' }, ...props.availableAgents.map(a => ({ value: a.id, label: (a.icon ? a.icon + ' ' : '') + a.name }))]"
-            title="选择 Agent"
+            :options="[{ value: '', label: $t('chatUi.defaultAgent') }, ...props.availableAgents.map(a => ({ value: a.id, label: (a.icon ? a.icon + ' ' : '') + a.name }))]"
+            :title="$t('chatUi.selectAgent')"
             @update:model-value="emit('update:selected-agent-id', $event)"
           />
         </div>
@@ -770,7 +776,7 @@ function handleTextareaBlur () {
               <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>
             </svg>
           </button>
-          <span class="tooltip-text">{{ props.authMode === 'strict' ? '严格授权 — 执行前需人工确认' : '自动执行 — 无需人工确认' }}</span>
+          <span class="tooltip-text">{{ props.authMode === 'strict' ? $t('chatUi.strictAuthTooltip') : $t('chatUi.autoAuthTooltip') }}</span>
           </div>
           <!-- Plan mode: icon toggle -->
           <div class="tooltip-container">
@@ -785,13 +791,13 @@ function handleTextareaBlur () {
                 <polyline points="3 6 4 7 6 5"/><polyline points="3 12 4 13 6 11"/><polyline points="3 18 4 19 6 17"/>
               </svg>
             </button>
-            <span class="tooltip-text">{{ props.planModeActive ? '退出规划模式' : '进入规划模式' }}</span>
+            <span class="tooltip-text">{{ props.planModeActive ? $t('chatUi.exitPlanMode') : $t('chatUi.enterPlanMode') }}</span>
           </div>
           <div class="tooltip-container">
             <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" type="button" @click="emit('toggleDocumentDock')">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
             </button>
-            <span class="tooltip-text">文档中心</span>
+            <span class="tooltip-text">{{ $t('chatUi.documentCenter') }}</span>
           </div>
           <div class="tooltip-container">
             <button class="action-btn folder-btn" :class="{ active: props.folderWorkspaceVisible }" type="button" @click="emit('toggleFolderWorkspace')">
@@ -801,14 +807,14 @@ function handleTextareaBlur () {
                 <path d="m14 12 2 2-2 2"/>
               </svg>
             </button>
-            <span class="tooltip-text">代码工作区</span>
+            <span class="tooltip-text">{{ $t('chatUi.codeWorkspace') }}</span>
           </div>
           <div class="tooltip-container">
             <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
               <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
             </label>
-            <span class="tooltip-text">添加附件</span>
+            <span class="tooltip-text">{{ $t('chatUi.addAttachment') }}</span>
           </div>
           <button
             class="action-btn send-btn"
@@ -816,7 +822,7 @@ function handleTextareaBlur () {
             type="button"
             @click="props.isLoading ? emit('stop') : emit('send')"
             :disabled="isSendDisabled"
-            :title="props.isUploadingFiles ? '文件处理中...' : (props.isLoading ? '停止生成' : '发送')"
+            :title="props.isUploadingFiles ? $t('chatUi.processingFiles') : (props.isLoading ? $t('chatUi.stopGenerating') : $t('chatUi.send'))"
           >
             <svg v-if="!props.isLoading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>

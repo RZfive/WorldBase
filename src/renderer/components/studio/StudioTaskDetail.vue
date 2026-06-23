@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { ImageLibraryEntry, ImageStudioTask } from '../../../shared/image-studio-types'
 import ImagePreview from './ImagePreview.vue'
 
@@ -15,12 +16,15 @@ const emit = defineEmits<{
 }>()
 
 const activeResultIndex = ref(0)
+const { t } = useI18n()
 
-const STATUS_LABELS: Record<ImageStudioTask['status'], string> = {
-  queued: '排队中',
-  running: '生成中',
-  success: '完成',
-  error: '失败'
+function statusLabel (status: ImageStudioTask['status']): string {
+  switch (status) {
+    case 'queued': return t('studioUi.statusQueued')
+    case 'running': return t('studioUi.statusRunning')
+    case 'success': return t('studioUi.statusSuccess')
+    case 'error': return t('studioUi.statusError')
+  }
 }
 
 const activeEntry = computed<ImageLibraryEntry | null>(() => {
@@ -40,10 +44,10 @@ watch(() => props.task?.id, () => {
       <div class="detail">
         <header class="detail-header">
           <div class="detail-heading">
-            <span class="detail-title">{{ task.request.mode === 'edit' ? '图片编辑任务' : '文生图任务' }}</span>
-            <span class="detail-status" :class="`status-${task.status}`">{{ STATUS_LABELS[task.status] }}</span>
+            <span class="detail-title">{{ task.request.mode === 'edit' ? $t('studioUi.imageEditTask') : $t('studioUi.textToImageTask') }}</span>
+            <span class="detail-status" :class="`status-${task.status}`">{{ statusLabel(task.status) }}</span>
           </div>
-          <button class="detail-close" type="button" @click="emit('close')">关闭</button>
+          <button class="detail-close" type="button" @click="emit('close')">{{ $t('common.close') }}</button>
         </header>
 
         <div class="detail-body">
@@ -53,13 +57,13 @@ watch(() => props.task?.id, () => {
               <ImagePreview class="detail-preview" :src="activeEntry.dataUrl" :alt="activeEntry.prompt" />
             </div>
             <div v-else-if="task.status === 'error'" class="detail-state detail-state-error">
-              <p>生成失败</p>
+              <p>{{ $t('studioUi.generationFailed') }}</p>
               <span>{{ task.error }}</span>
-              <button class="detail-btn" type="button" @click="emit('retry', task.id)">↻ 重试</button>
+              <button class="detail-btn" type="button" @click="emit('retry', task.id)">↻ {{ $t('common.retry') }}</button>
             </div>
             <div v-else class="detail-state">
               <span class="detail-spinner">⏳</span>
-              <p>{{ task.status === 'running' ? '正在生成…' : '等待空闲槽位…' }}</p>
+              <p>{{ task.status === 'running' ? $t('studioUi.generating') : $t('studioUi.waitingSlot') }}</p>
             </div>
 
             <!-- Result thumbnails when multiple images -->
@@ -77,27 +81,27 @@ watch(() => props.task?.id, () => {
             </div>
 
             <div v-if="task.status === 'success' && activeEntry" class="detail-actions">
-              <button class="detail-btn" type="button" @click="emit('saveToFile', activeEntry!)">⤓ 保存到文件</button>
-              <button class="detail-btn" type="button" @click="emit('useAsInput', activeEntry!)">⇲ 作为编辑输入</button>
+              <button class="detail-btn" type="button" @click="emit('saveToFile', activeEntry!)">⤓ {{ $t('studioUi.saveToFile') }}</button>
+              <button class="detail-btn" type="button" @click="emit('useAsInput', activeEntry!)">⇲ {{ $t('studioUi.useAsInput') }}</button>
             </div>
           </div>
 
           <!-- Parameters -->
           <div class="detail-meta">
-            <div class="detail-row"><span class="detail-key">模式</span><span>{{ task.request.mode === 'edit' ? '图片编辑' : '文生图' }}</span></div>
-            <div class="detail-row"><span class="detail-key">模型</span><span>{{ task.request.model }}</span></div>
-            <div class="detail-row"><span class="detail-key">尺寸</span><span>{{ task.request.size }}<template v-if="task.request.aspectRatio"> · {{ task.request.aspectRatio }}</template></span></div>
-            <div class="detail-row"><span class="detail-key">数量</span><span>{{ task.request.n ?? 1 }}</span></div>
+            <div class="detail-row"><span class="detail-key">{{ $t('studioUi.mode') }}</span><span>{{ task.request.mode === 'edit' ? $t('studioUi.imageEdit') : $t('studioUi.textToImage') }}</span></div>
+            <div class="detail-row"><span class="detail-key">{{ $t('studioUi.model') }}</span><span>{{ task.request.model }}</span></div>
+            <div class="detail-row"><span class="detail-key">{{ $t('studioUi.size') }}</span><span>{{ task.request.size }}<template v-if="task.request.aspectRatio"> · {{ task.request.aspectRatio }}</template></span></div>
+            <div class="detail-row"><span class="detail-key">{{ $t('studioUi.count') }}</span><span>{{ task.request.n ?? 1 }}</span></div>
             <div class="detail-block">
-              <span class="detail-key">提示词</span>
-              <p class="detail-text">{{ task.request.prompt || '（无）' }}</p>
+              <span class="detail-key">{{ $t('studioUi.prompt') }}</span>
+              <p class="detail-text">{{ task.request.prompt || $t('studioUi.none') }}</p>
             </div>
             <div v-if="task.request.negativePrompt" class="detail-block">
-              <span class="detail-key">负向提示词</span>
+              <span class="detail-key">{{ $t('studioUi.negativePrompt') }}</span>
               <p class="detail-text">{{ task.request.negativePrompt }}</p>
             </div>
             <div v-if="task.request.inputImages?.length" class="detail-block">
-              <span class="detail-key">输入图</span>
+              <span class="detail-key">{{ $t('studioUi.inputImages') }}</span>
               <div class="detail-source-row">
                 <img v-for="(src, i) in task.request.inputImages" :key="i" :src="src" class="detail-source-thumb" alt="" />
               </div>
