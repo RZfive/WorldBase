@@ -347,11 +347,11 @@ onBeforeUnmount(() => {
         <span v-else class="thinking-status-dot" aria-hidden="true" />
         <span class="thinking-header-label">{{ props.isStreaming ? $t('chatUi.thinkingStreaming') : $t('chatUi.thinkingProcess') }}</span>
         <span v-if="!props.isStreaming" class="thinking-char-count">{{ thinkingCharacterCount }}</span>
-      </span>
-      <span class="thinking-chevron" :class="{ expanded: !props.isCollapsed }" aria-hidden="true">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="6 9 12 15 18 9"/>
-        </svg>
+        <span class="thinking-chevron" :class="{ expanded: !props.isCollapsed }" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </span>
       </span>
     </button>
     <div class="thinking-body-wrapper" :class="{ collapsed: props.isCollapsed }">
@@ -418,6 +418,12 @@ onBeforeUnmount(() => {
   color: var(--app-text);
 }
 
+.thinking-header:hover .thinking-chevron,
+.thinking-header:focus-visible .thinking-chevron,
+.thinking-chevron.expanded {
+  opacity: 1;
+}
+
 .thinking-header-left {
   display: flex;
   align-items: center;
@@ -453,11 +459,12 @@ onBeforeUnmount(() => {
 }
 
 .thinking-chevron {
-  margin-left: auto;
+  margin-left: 1px;
   color: color-mix(in srgb, var(--app-text-muted) 65%, transparent);
   flex-shrink: 0;
+  opacity: 0;
   transform: rotate(-90deg);
-  transition: transform 140ms ease;
+  transition: opacity 120ms ease, transform 140ms ease;
   display: flex;
   align-items: center;
 }
