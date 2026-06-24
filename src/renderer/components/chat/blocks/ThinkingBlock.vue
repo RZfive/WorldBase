@@ -336,7 +336,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="thinking-card message-event-card">
+  <div class="thinking-inline">
     <button class="thinking-header" type="button" @click="emit('toggle')">
       <span class="thinking-header-left">
         <span v-if="props.isStreaming" class="thinking-dot-icon" aria-hidden="true">
@@ -344,9 +344,7 @@ onBeforeUnmount(() => {
           <span class="thinking-dot"></span>
           <span class="thinking-dot"></span>
         </span>
-        <svg v-else class="thinking-brain-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 2a5 5 0 0 1 5 5c0 1.07-.34 2.06-.9 2.88A4 4 0 0 1 20 14a4 4 0 0 1-4 4h-1v2a1 1 0 0 1-2 0v-2H8a4 4 0 0 1-4-4 4 4 0 0 1 3.9-3.12A5 5 0 0 1 7 7a5 5 0 0 1 5-5z"/>
-        </svg>
+        <span v-else class="thinking-status-dot" aria-hidden="true" />
         <span class="thinking-header-label">{{ props.isStreaming ? $t('chatUi.thinkingStreaming') : $t('chatUi.thinkingProcess') }}</span>
         <span v-if="!props.isStreaming" class="thinking-char-count">{{ thinkingCharacterCount }}</span>
       </span>
@@ -394,19 +392,9 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* Base event card styles */
-.message-event-card {
+.thinking-inline {
   width: min(100%, var(--chat-event-card-max, 1080px));
-  border: 1px solid var(--app-border-strong);
-  border-radius: 18px;
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
-  overflow: hidden;
-}
-
-.thinking-card {
-  border-color: rgba(139, 92, 246, 0.2);
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
+  color: var(--app-text-muted);
 }
 
 .thinking-header {
@@ -414,18 +402,20 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 11px 16px;
+  padding: 3px 0;
   border: none;
   background: transparent;
   cursor: pointer;
   text-align: left;
-  gap: 10px;
-  transition: background 0.15s ease;
-  border-radius: 18px;
+  gap: 8px;
+  color: inherit;
+  font: inherit;
+  font-size: 0.78em;
+  line-height: 1.45;
 }
 
-.thinking-header:hover {
-  background: var(--app-panel-muted);
+.thinking-header:hover .thinking-header-label {
+  color: var(--app-text);
 }
 
 .thinking-header-left {
@@ -435,28 +425,39 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-.thinking-brain-icon {
-  color: rgba(139, 92, 246, 0.7);
+.thinking-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-text-muted) 60%, transparent);
   flex-shrink: 0;
 }
 
 .thinking-header-label {
-  font-size: 0.82em;
-  font-weight: 600;
-  color: var(--app-text-strong);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--app-text-muted);
 }
 
 .thinking-char-count {
-  font-size: 0.75em;
-  color: var(--app-text-muted);
+  color: color-mix(in srgb, var(--app-text-muted) 74%, transparent);
   white-space: nowrap;
 }
 
+.thinking-char-count::before {
+  content: "·";
+  margin-right: 7px;
+}
+
 .thinking-chevron {
-  color: var(--app-text-muted);
+  margin-left: auto;
+  color: color-mix(in srgb, var(--app-text-muted) 65%, transparent);
   flex-shrink: 0;
   transform: rotate(-90deg);
-  transition: transform 0.22s ease;
+  transition: transform 140ms ease;
   display: flex;
   align-items: center;
 }
@@ -482,7 +483,9 @@ onBeforeUnmount(() => {
 }
 
 .thinking-body-inner {
-  border-top: 1px solid var(--app-border);
+  margin-top: 6px;
+  padding: 10px 0 12px 13px;
+  border-left: 1px solid var(--app-border);
 }
 
 .thinking-segment-viewport {
@@ -504,7 +507,7 @@ onBeforeUnmount(() => {
 }
 
 .message-event-body {
-  padding: 14px 16px 16px;
+  padding: 0;
   color: var(--app-text-muted);
   line-height: 1.68;
 }
@@ -521,7 +524,7 @@ onBeforeUnmount(() => {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: rgba(139, 92, 246, 0.7);
+  background: var(--app-accent);
   animation: thinking-bounce 1.2s ease-in-out infinite;
 }
 
