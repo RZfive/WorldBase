@@ -87,6 +87,12 @@ watch(
   color: var(--app-text);
 }
 
+.execution-summary:hover:not(:disabled) .execution-chevron,
+.execution-summary:focus-visible:not(:disabled) .execution-chevron,
+.execution-disclosure.expanded .execution-chevron {
+  opacity: 1;
+}
+
 .execution-dot {
   width: 6px;
   height: 6px;
@@ -129,7 +135,9 @@ watch(
 }
 
 .execution-detail {
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 58%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -137,12 +145,13 @@ watch(
 }
 
 .execution-chevron {
-  margin-left: auto;
+  margin-left: 1px;
   flex: 0 0 auto;
   color: color-mix(in srgb, var(--app-text-muted) 65%, transparent);
   font-size: 1.18em;
+  opacity: 0;
   transform: rotate(0deg);
-  transition: transform 140ms ease;
+  transition: opacity 120ms ease, transform 140ms ease;
 }
 
 .execution-disclosure.expanded .execution-chevron {
