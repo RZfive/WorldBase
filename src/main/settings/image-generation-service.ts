@@ -251,25 +251,28 @@ export async function runImageStudioRequest (
     }
 
     const createdAt = new Date().toISOString()
-    const entries: ImageLibraryEntry[] = await Promise.all(result.images.map(imageUrl => deps.imageLibraryStore.save(
-      {
-        id: randomUUID(),
-        createdAt,
-        mode: req.mode,
-        providerId: req.providerId,
-        model,
-        prompt: req.prompt,
-        negativePrompt: req.negativePrompt || undefined,
-        aspectRatio: req.aspectRatio || undefined,
-        size: req.size,
-        quality: req.quality,
-        outputFormat: req.outputFormat,
-        folder: req.folder?.trim() || undefined,
-        tags: req.tags?.length ? req.tags : undefined
-      },
-      imageUrl,
-      req.mode === 'edit' ? req.inputImages : undefined
-    )))
+    const entries: ImageLibraryEntry[] = []
+    for (const imageUrl of result.images) {
+      entries.push(await deps.imageLibraryStore.save(
+        {
+          id: randomUUID(),
+          createdAt,
+          mode: req.mode,
+          providerId: req.providerId,
+          model,
+          prompt: req.prompt,
+          negativePrompt: req.negativePrompt || undefined,
+          aspectRatio: req.aspectRatio || undefined,
+          size: req.size,
+          quality: req.quality,
+          outputFormat: req.outputFormat,
+          folder: req.folder?.trim() || undefined,
+          tags: req.tags?.length ? req.tags : undefined
+        },
+        imageUrl,
+        req.mode === 'edit' ? req.inputImages : undefined
+      ))
+    }
 
     return { ok: true, entries }
   } catch (error) {

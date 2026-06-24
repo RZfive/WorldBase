@@ -134,6 +134,50 @@ const latestSuccessEntry = computed<ImageLibraryEntry | null>(() => {
 const QUALITY_OPTIONS: ImageStudioImageQuality[] = ['high', 'auto', 'medium', 'low']
 const OUTPUT_FORMAT_OPTIONS: ImageStudioOutputFormat[] = ['png', 'webp', 'jpeg']
 
+function entryFullSrc (entry: ImageLibraryEntry): string {
+  return entry.fullUrl || entry.dataUrl || ''
+}
+
+function entryThumbSrc (entry: ImageLibraryEntry): string {
+  return entry.thumbUrl || entry.fullUrl || entry.dataUrl || ''
+}
+
+function entryToLibraryItem (entry: ImageLibraryEntry): ImageLibraryItem | null {
+  if (!entry.thumbUrl || !entry.fullUrl) return null
+  return {
+    id: entry.id,
+    createdAt: entry.createdAt,
+    mode: entry.mode,
+    providerId: entry.providerId,
+    model: entry.model,
+    prompt: entry.prompt,
+    negativePrompt: entry.negativePrompt,
+    aspectRatio: entry.aspectRatio,
+    size: entry.size,
+    quality: entry.quality,
+    outputFormat: entry.outputFormat,
+    folder: entry.folder,
+    tags: entry.tags,
+    width: entry.width,
+    height: entry.height,
+    thumbUrl: entry.thumbUrl,
+    fullUrl: entry.fullUrl
+  }
+}
+
+function prependLibraryEntries (entries: ImageLibraryEntry[]) {
+  const nextItems = entries
+    .map(entryToLibraryItem)
+    .filter((item): item is ImageLibraryItem => Boolean(item))
+  if (nextItems.length === 0) return
+
+  const incoming = new Set(nextItems.map(item => item.id))
+  libraryEntries.value = [
+    ...nextItems,
+    ...libraryEntries.value.filter(item => !incoming.has(item.id))
+  ]
+}
+
 // Reset the selection when a different task becomes the latest result, or when the
 // current selection falls out of range (e.g. an image was deleted).
 watch(() => latestSuccessTask.value?.id, () => {
@@ -248,7 +292,8 @@ async function executeTask (task: ImageStudioTask) {
     if (response.ok) {
       task.status = 'success'
       task.entries = response.entries
-      await loadLibrary()
+      prependLibraryEntries(response.entries)
+      await loadFolders()
     } else {
       task.status = 'error'
       task.error = response.error
@@ -811,7 +856,7 @@ onUnmounted(() => {
                 <button class="lib-like-btn" type="button" @click="handleUseAsInput(latestSuccessEntry!)">⇲ {{ $t('studioUi.useAsInput') }}</button>
               </div>
             </div>
-            <ImagePreview class="workbench-preview" :src="latestSuccessEntry.dataUrl" :alt="latestSuccessEntry.prompt" />
+            <ImagePreview class="workbench-preview" :src="entryFullSrc(latestSuccessEntry!)" :alt="latestSuccessEntry.prompt" />
             <!-- Thumbnail strip to switch between multiple generated images -->
             <div v-if="latestSuccessEntries.length > 1" class="workbench-thumbs">
               <button
@@ -823,7 +868,7 @@ onUnmounted(() => {
                 :title="$t('studioUi.imageIndexTitle', { index: i + 1 })"
                 @click="workbenchResultIndex = i"
               >
-                <img :src="entry.dataUrl" alt="" />
+                <img :src="entryThumbSrc(entry)" alt="" />
               </button>
             </div>
           </div>

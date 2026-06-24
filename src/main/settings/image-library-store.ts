@@ -1,4 +1,4 @@
-import fs from 'node:fs'
+import fs, { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import type {
   ImageLibraryData,
@@ -11,7 +11,7 @@ import type {
 } from '../../shared/image-studio-types.js'
 import { t } from '../i18n/main-i18n.js'
 import { ImageIndex, type ImageIndexRow } from './image-index.js'
-import { generateThumbnail, readImageDimensions } from './image-thumbnailer.js'
+import { generateThumbnailFromFile, readImageDimensionsFromFile } from './image-thumbnailer.js'
 
 export type {
   ImageLibraryEntry,
@@ -69,6 +69,17 @@ function guessExtensionFromMime (mimeType: string): string {
   return 'png'
 }
 
+function parseImageDataUrl (dataUrl: string): { mimeType: string; base64: string } | null {
+  if (!dataUrl.startsWith('data:')) return null
+  const marker = ';base64,'
+  const markerIndex = dataUrl.indexOf(marker)
+  if (markerIndex <= 'data:'.length) return null
+  return {
+    mimeType: dataUrl.slice('data:'.length, markerIndex),
+    base64: dataUrl.slice(markerIndex + marker.length)
+  }
+}
+
 /** Build a studio-img:// URL addressing an image by id + variant. */
 export function buildStudioImageUrl (id: string, variant: ImageVariant): string {
   return `${STUDIO_IMAGE_SCHEME}://i/${id}/${variant}`
@@ -114,14 +125,14 @@ export class ImageLibraryStore {
     return path.join(this.dir, path.basename(fileName))
   }
 
-  private writeImage (id: string, dataUrl: string, suffix = ''): string {
-    const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/)
-    if (!match) {
+  private async writeImage (id: string, dataUrl: string, suffix = ''): Promise<string> {
+    const parsed = parseImageDataUrl(dataUrl)
+    if (!parsed) {
       throw new Error(t('mainDialog.unsupportedImageData'))
     }
-    const ext = guessExtensionFromMime(match[1])
+    const ext = guessExtensionFromMime(parsed.mimeType)
     const fileName = `${this.sanitizeId(id)}${suffix}.${ext}`
-    fs.writeFileSync(path.join(this.dir, fileName), Buffer.from(match[2], 'base64'))
+    await fsp.writeFile(path.join(this.dir, fileName), parsed.base64, 'base64')
     return fileName
   }
 
@@ -142,10 +153,10 @@ export class ImageLibraryStore {
     const originalPath = this.resolveFilePath(originalFileName)
     if (!fs.existsSync(originalPath)) return null
     try {
-      const result = await generateThumbnail(fs.readFileSync(originalPath))
+      const result = await generateThumbnailFromFile(originalPath)
       if (!result) return null
       const name = `${this.sanitizeId(id)}.thumb.webp`
-      fs.writeFileSync(this.resolveFilePath(name), result.buffer)
+      await fsp.writeFile(this.resolveFilePath(name), result.buffer)
       return { name, width: result.width, height: result.height }
     } catch {
       return null
@@ -251,17 +262,17 @@ export class ImageLibraryStore {
     sourceDataUrls?: string[]
   ): Promise<ImageLibraryEntry> {
     const id = this.sanitizeId(record.id)
-    const fileName = this.writeImage(id, imageDataUrl)
+    const fileName = await this.writeImage(id, imageDataUrl)
 
     const sourceImageFileNames: string[] = []
     if (sourceDataUrls?.length) {
-      sourceDataUrls.forEach((dataUrl, index) => {
+      for (const [index, dataUrl] of sourceDataUrls.entries()) {
         try {
-          sourceImageFileNames.push(this.writeImage(id, dataUrl, `-src${index}`))
+          sourceImageFileNames.push(await this.writeImage(id, dataUrl, `-src${index}`))
         } catch {
           // skip unreadable source image
         }
-      })
+      }
     }
 
     const thumb = await this.writeThumbnail(id, fileName)
@@ -286,8 +297,6 @@ export class ImageLibraryStore {
 
     return {
       ...fullRecord,
-      dataUrl: imageDataUrl,
-      sourceDataUrls: sourceDataUrls?.length ? sourceDataUrls : undefined,
       thumbUrl: buildStudioImageUrl(id, 'thumb'),
       fullUrl: buildStudioImageUrl(id, 'full')
     }
@@ -302,9 +311,9 @@ export class ImageLibraryStore {
   }
 
   private async readDimsFromOriginal (fileName: string): Promise<{ width?: number; height?: number } | undefined> {
-    const buf = this.safeReadFile(fileName)
-    if (buf.length === 0) return undefined
-    return readImageDimensions(buf)
+    const fp = this.resolveFilePath(fileName)
+    if (!fs.existsSync(fp)) return undefined
+    return readImageDimensionsFromFile(fp)
   }
 
   /* ---- Query (paginated, metadata-only) ---- */

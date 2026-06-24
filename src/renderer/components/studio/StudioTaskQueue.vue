@@ -25,6 +25,11 @@ function statusLabel (status: ImageStudioTask['status']): string {
     case 'error': return t('studioUi.statusError')
   }
 }
+
+function taskEntryThumbSrc (task: ImageStudioTask): string {
+  const entry = task.entries[0]
+  return entry?.thumbUrl || entry?.fullUrl || entry?.dataUrl || ''
+}
 </script>
 
 <template>
@@ -45,7 +50,7 @@ function statusLabel (status: ImageStudioTask['status']): string {
         @click="emit('open', task)"
       >
         <img v-if="task.inputPreview" :src="task.inputPreview" class="queue-thumb" alt="" />
-        <img v-else-if="task.entries[0]" :src="task.entries[0].dataUrl" class="queue-thumb" alt="" />
+        <img v-else-if="task.entries[0]" :src="taskEntryThumbSrc(task)" class="queue-thumb" alt="" />
         <span v-else class="queue-thumb queue-thumb-placeholder">{{ task.request.mode === 'edit' ? '✎' : '🎨' }}</span>
 
         <div class="queue-body">

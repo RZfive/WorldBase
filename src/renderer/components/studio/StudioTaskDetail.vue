@@ -32,6 +32,14 @@ const activeEntry = computed<ImageLibraryEntry | null>(() => {
   return entries[activeResultIndex.value] ?? entries[0] ?? null
 })
 
+function entryFullSrc (entry: ImageLibraryEntry): string {
+  return entry.fullUrl || entry.dataUrl || ''
+}
+
+function entryThumbSrc (entry: ImageLibraryEntry): string {
+  return entry.thumbUrl || entry.fullUrl || entry.dataUrl || ''
+}
+
 // Reset the selected result whenever a different task is opened.
 watch(() => props.task?.id, () => {
   activeResultIndex.value = 0
@@ -54,7 +62,7 @@ watch(() => props.task?.id, () => {
           <!-- Preview / state -->
           <div class="detail-preview-col">
             <div v-if="task.status === 'success' && activeEntry" class="detail-preview-wrap">
-              <ImagePreview class="detail-preview" :src="activeEntry.dataUrl" :alt="activeEntry.prompt" />
+              <ImagePreview class="detail-preview" :src="entryFullSrc(activeEntry)" :alt="activeEntry.prompt" />
             </div>
             <div v-else-if="task.status === 'error'" class="detail-state detail-state-error">
               <p>{{ $t('studioUi.generationFailed') }}</p>
@@ -76,7 +84,7 @@ watch(() => props.task?.id, () => {
                 :class="{ active: i === activeResultIndex }"
                 @click="activeResultIndex = i"
               >
-                <img :src="entry.dataUrl" alt="" />
+                <img :src="entryThumbSrc(entry)" alt="" />
               </button>
             </div>
 
