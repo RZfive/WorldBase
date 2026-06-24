@@ -29,7 +29,7 @@ export interface ImageStudioGenerateRequest {
   tags?: string[]
 }
 
-/** A persisted library record enriched with inline data URLs for rendering. */
+/** A persisted library record returned after generation/editing. */
 export interface ImageLibraryEntry {
   id: string
   createdAt: string
@@ -44,9 +44,15 @@ export interface ImageLibraryEntry {
   outputFormat?: ImageStudioOutputFormat
   fileName: string
   sourceImageFileNames?: string[]
-  /** Generated image as a data URL. */
-  dataUrl: string
-  /** Source images (edit mode) as data URLs. */
+  width?: number
+  height?: number
+  /**
+   * Generated image as a data URL. Optional for new records: the studio prefers
+   * `fullUrl`/`thumbUrl` so large PNG bytes are streamed on demand instead of
+   * being retained in renderer state.
+   */
+  dataUrl?: string
+  /** Source images (edit mode) as data URLs, fetched only when needed. */
   sourceDataUrls?: string[]
   /** Folder/group name for organizing images. */
   folder?: string

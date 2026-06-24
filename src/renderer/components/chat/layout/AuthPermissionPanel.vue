@@ -103,6 +103,7 @@ function toggleCollapsed (): void {
 
 <style scoped>
 .auth-shell {
+  --auth-panel-max-width: 560px;
   position: relative;
   z-index: 11;
   height: 0;
@@ -118,11 +119,17 @@ function toggleCollapsed (): void {
   position: absolute;
   left: 50%;
   bottom: max(0px, calc(var(--chat-input-overlap, 56px) - 10px));
-  width: min(560px, calc(100% - 32px));
+  width: min(
+    var(--auth-panel-max-width),
+    var(--chat-message-track-max, 980px),
+    calc(100% - var(--chat-message-gutter, 28px) - var(--chat-message-gutter, 28px))
+  );
+  max-width: calc(100% - 16px);
   display: flex;
   flex-direction: column;
   gap: 6px;
   align-items: stretch;
+  box-sizing: border-box;
   pointer-events: auto;
   transform: translateX(-50%);
 }
@@ -332,13 +339,4 @@ function toggleCollapsed (): void {
   transform: translateY(8px) scale(0.98);
 }
 
-@media (max-width: 860px) {
-  .auth-shell {
-    padding: 0 16px;
-  }
-
-  .auth-float {
-    width: calc(100% - 16px);
-  }
-}
 </style>

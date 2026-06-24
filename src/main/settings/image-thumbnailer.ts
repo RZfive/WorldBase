@@ -11,10 +11,11 @@
 // don't depend on default-import interop, and resolve the callable at runtime.
 type SharpInstance = import('sharp').Sharp
 type SharpOptions = import('sharp').SharpOptions
-type SharpFactory = (input?: Buffer, options?: SharpOptions) => SharpInstance
+type SharpInput = Buffer | string
+type SharpFactory = (input?: SharpInput, options?: SharpOptions) => SharpInstance
 
 /** Long-edge size of generated thumbnails (square-bounded, never upscaled). */
-export const THUMB_MAX_DIMENSION = 384
+export const THUMB_MAX_DIMENSION = 320
 
 let sharpLoader: Promise<SharpFactory | null> | null = null
 
@@ -32,11 +33,6 @@ function loadSharp (): Promise<SharpFactory | null> {
   return loader
 }
 
-/** Whether sharp is usable in this runtime. */
-export async function isThumbnailerAvailable (): Promise<boolean> {
-  return (await loadSharp()) !== null
-}
-
 export interface ThumbnailResult {
   /** WebP-encoded thumbnail bytes. */
   buffer: Buffer
@@ -45,11 +41,12 @@ export interface ThumbnailResult {
   height?: number
 }
 
-/**
- * Generate a WebP thumbnail (long edge ≤ THUMB_MAX_DIMENSION) from original
- * image bytes. Returns null when sharp is unavailable or the input is undecodable.
- */
-export async function generateThumbnail (input: Buffer): Promise<ThumbnailResult | null> {
+/** Whether sharp is usable in this runtime. */
+export async function isThumbnailerAvailable (): Promise<boolean> {
+  return (await loadSharp()) !== null
+}
+
+async function generateThumbnailFromInput (input: SharpInput): Promise<ThumbnailResult | null> {
   const sharp = await loadSharp()
   if (!sharp) return null
 
@@ -64,7 +61,7 @@ export async function generateThumbnail (input: Buffer): Promise<ThumbnailResult
         fit: 'inside',
         withoutEnlargement: true
       })
-      .webp({ quality: 72 })
+      .webp({ quality: 68, effort: 2 })
       .toBuffer()
     return { buffer, width: meta.width, height: meta.height }
   } catch (err) {
@@ -73,14 +70,40 @@ export async function generateThumbnail (input: Buffer): Promise<ThumbnailResult
   }
 }
 
-/** Read original image dimensions without producing a thumbnail. */
-export async function readImageDimensions (input: Buffer): Promise<{ width?: number; height?: number }> {
+/**
+ * Generate a WebP thumbnail (long edge ≤ THUMB_MAX_DIMENSION) from original
+ * image bytes. Returns null when sharp is unavailable or the input is undecodable.
+ */
+export async function generateThumbnail (input: Buffer): Promise<ThumbnailResult | null> {
+  return generateThumbnailFromInput(input)
+}
+
+/**
+ * Generate a thumbnail directly from a file path. This avoids reading large PNG
+ * originals into the main-process JS heap before handing them to sharp.
+ */
+export async function generateThumbnailFromFile (filePath: string): Promise<ThumbnailResult | null> {
+  return generateThumbnailFromInput(filePath)
+}
+
+async function readImageDimensionsFromInput (input: SharpInput): Promise<{ width?: number; height?: number }> {
   const sharp = await loadSharp()
   if (!sharp) return {}
+
   try {
     const meta = await sharp(input, { failOn: 'none' }).metadata()
     return { width: meta.width, height: meta.height }
   } catch {
     return {}
   }
+}
+
+/** Read original image dimensions without producing a thumbnail. */
+export async function readImageDimensions (input: Buffer): Promise<{ width?: number; height?: number }> {
+  return readImageDimensionsFromInput(input)
+}
+
+/** Read original image dimensions directly from a file path. */
+export async function readImageDimensionsFromFile (filePath: string): Promise<{ width?: number; height?: number }> {
+  return readImageDimensionsFromInput(filePath)
 }

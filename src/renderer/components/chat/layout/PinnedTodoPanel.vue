@@ -137,6 +137,7 @@ function toggleCollapsed(): void {
 
 <style scoped>
 .todo-shell {
+  --todo-panel-max-width: 520px;
   position: relative;
   z-index: 9;
   height: 0;
@@ -152,11 +153,17 @@ function toggleCollapsed(): void {
   position: absolute;
   left: 50%;
   bottom: max(0px, calc(var(--chat-input-overlap, 56px) - 10px));
-  width: min(520px, calc(100% - 32px));
+  width: min(
+    var(--todo-panel-max-width),
+    var(--chat-message-track-max, 980px),
+    calc(100% - var(--chat-message-gutter, 28px) - var(--chat-message-gutter, 28px))
+  );
+  max-width: calc(100% - 16px);
   display: flex;
   flex-direction: column;
   gap: 6px;
   align-items: stretch;
+  box-sizing: border-box;
   pointer-events: auto;
   transform: translateX(-50%);
 }
@@ -409,14 +416,6 @@ function toggleCollapsed(): void {
 }
 
 @media (max-width: 860px) {
-  .todo-shell {
-    padding: 0 16px;
-  }
-
-  .todo-float {
-    width: calc(100% - 16px);
-  }
-
   .todo-strip {
     grid-template-columns: auto minmax(0, 1fr) auto auto;
   }
