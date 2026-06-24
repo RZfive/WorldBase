@@ -5,6 +5,7 @@ import { renderMarkdown } from '../markdown'
 import type { AgentSidechatSession } from '../../../../shared/agent-workspace-types.js'
 import type { ChatMessageBlock } from '../types'
 import { formatProgressEntry } from '../progress-i18n'
+import ExecutionDisclosure from './ExecutionDisclosure.vue'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'agent_sidechat' }>
@@ -22,6 +23,11 @@ function getStatusLabel (status: AgentSidechatSession['status']): string {
   return t('chatUi.groupStatusCompleted')
 }
 
+function getSummaryStatusLabel (status: AgentSidechatSession['status']): string {
+  if (status === 'completed') return ''
+  return getStatusLabel(status)
+}
+
 function getModeLabel (mode: AgentSidechatSession['mode']): string {
   if (mode === 'group_deliberation') return t('chatUi.agentSidechatModeGroup')
   if (mode === 'coordinator_assigned') return t('chatUi.agentSidechatModeCoordinator')
@@ -31,13 +37,26 @@ function getModeLabel (mode: AgentSidechatSession['mode']): string {
 function getProgressText (step: AgentSidechatSession['progress'][number]): string {
   return formatProgressEntry(step, t, t('chatUi.progressDotSeparator'))
 }
+
+const summaryText = computed(() => {
+  const latest = recentProgress.value[recentProgress.value.length - 1]
+  if (session.value.error) return session.value.error
+  if (latest) return getProgressText(latest)
+  return `${session.value.initiatedByName} -> ${session.value.agentName} -> ${session.value.reportToName}`
+})
 </script>
 
 <template>
-  <section class="sidechat-card" :class="session.status">
+  <ExecutionDisclosure
+    :title="`${$t('chatUi.agentSidechatLabel')}: ${session.agentName}`"
+    :meta="getSummaryStatusLabel(session.status)"
+    :detail="summaryText"
+    :status="session.status"
+    :default-expanded="session.status === 'failed'"
+  >
+    <section class="sidechat-card" :class="session.status">
     <div class="sidechat-header">
       <div class="sidechat-copy">
-        <span class="sidechat-label">{{ $t('chatUi.agentSidechatLabel') }}</span>
         <h4 class="sidechat-title">{{ session.agentName }}</h4>
         <div class="sidechat-meta">
           <span>{{ getModeLabel(session.mode) }}</span>
@@ -68,12 +87,12 @@ function getProgressText (step: AgentSidechatSession['progress'][number]): strin
       <div v-if="session.error" class="sidechat-error">{{ session.error }}</div>
     </div>
   </section>
+  </ExecutionDisclosure>
 </template>
 
 <style scoped>
 .sidechat-card {
   width: 100%;
-  padding: 2px 0 0;
   color: var(--app-text);
 }
 
@@ -92,19 +111,9 @@ function getProgressText (step: AgentSidechatSession['progress'][number]): strin
   min-width: 0;
 }
 
-.sidechat-label {
-  display: inline-flex;
-  align-items: center;
-  color: var(--app-accent-strong);
-  font-size: 0.72em;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .sidechat-title {
-  margin: 6px 0 0;
-  font-size: 0.98em;
+  margin: 0;
+  font-size: 0.9em;
   color: var(--app-text-strong);
 }
 

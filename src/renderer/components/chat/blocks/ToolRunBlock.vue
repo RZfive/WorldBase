@@ -2,6 +2,7 @@
 import { useI18n } from 'vue-i18n'
 import type { ChatMessageBlock, ToolRun } from '../types'
 import { translateProgressEntry } from '../progress-i18n'
+import ExecutionDisclosure from './ExecutionDisclosure.vue'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'tool' }>
@@ -15,6 +16,11 @@ function getToolRunStatusLabel (status: ToolRun['status']): string {
   return t('chatUi.toolStatusRunning')
 }
 
+function getToolRunSummaryStatusLabel (status: ToolRun['status']): string {
+  if (status === 'completed') return ''
+  return getToolRunStatusLabel(status)
+}
+
 function getProgressStage (step: ToolRun['progress'][number]): string {
   return translateProgressEntry(step, t).stage
 }
@@ -22,12 +28,22 @@ function getProgressStage (step: ToolRun['progress'][number]): string {
 function getProgressDetail (step: ToolRun['progress'][number]): string | undefined {
   return translateProgressEntry(step, t).detail
 }
+
+function getLatestProgressText (): string {
+  const latest = props.block.toolRun.progress[props.block.toolRun.progress.length - 1]
+  if (!latest) return ''
+  const translated = translateProgressEntry(latest, t)
+  return translated.detail ? `${translated.stage}: ${translated.detail}` : translated.stage
+}
 </script>
 
 <template>
-  <div
-    class="message-event-card tool-event-card"
-    :class="props.block.toolRun.status"
+  <ExecutionDisclosure
+    :title="props.block.toolRun.name"
+    :meta="getToolRunSummaryStatusLabel(props.block.toolRun.status)"
+    :detail="getLatestProgressText()"
+    :status="props.block.toolRun.status"
+    :default-expanded="props.block.toolRun.status === 'failed'"
   >
     <div class="tool-run-header">
       <div class="tool-run-name">{{ props.block.toolRun.name }}</div>
@@ -49,35 +65,10 @@ function getProgressDetail (step: ToolRun['progress'][number]): string | undefin
         </div>
       </div>
     </div>
-  </div>
+  </ExecutionDisclosure>
 </template>
 
 <style scoped>
-.message-event-card {
-  width: min(100%, var(--chat-event-card-max, 1080px));
-  border: 1px solid var(--app-border-strong);
-  border-radius: 18px;
-  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
-  overflow: hidden;
-}
-
-.tool-event-card {
-  padding: 14px 16px;
-}
-
-.tool-event-card.running {
-  border-color: var(--app-accent-glow);
-}
-
-.tool-event-card.completed {
-  border-color: rgba(34, 197, 94, 0.22);
-}
-
-.tool-event-card.failed {
-  border-color: rgba(239, 68, 68, 0.22);
-}
-
 .tool-run-header {
   display: flex;
   align-items: center;
@@ -86,7 +77,7 @@ function getProgressDetail (step: ToolRun['progress'][number]): string | undefin
 }
 
 .tool-run-name {
-  font-size: 0.84em;
+  font-size: 0.8em;
   font-weight: 600;
   color: var(--app-text-strong);
 }
@@ -94,12 +85,12 @@ function getProgressDetail (step: ToolRun['progress'][number]): string | undefin
 .tool-run-status {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
+  padding: 2px 8px;
   border-radius: 999px;
-  font-size: 0.74em;
-  border: 1px solid var(--app-border-strong);
+  font-size: 0.7em;
+  border: 1px solid var(--app-border);
   color: var(--app-text-muted);
-  background: var(--app-panel-strong);
+  background: transparent;
 }
 
 .tool-run-status.running {
@@ -121,30 +112,30 @@ function getProgressDetail (step: ToolRun['progress'][number]): string | undefin
 }
 
 .tool-run-steps {
-  margin-top: 12px;
+  margin-top: 10px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .tool-run-step {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: flex-start;
 }
 
 .tool-run-step-index {
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: var(--app-panel-strong);
-  border: 1px solid var(--app-border-strong);
+  background: transparent;
+  border: 1px solid var(--app-border);
   color: var(--app-text-muted);
-  font-size: 0.72em;
+  font-size: 0.68em;
 }
 
 .tool-run-step-body {
@@ -152,13 +143,13 @@ function getProgressDetail (step: ToolRun['progress'][number]): string | undefin
 }
 
 .tool-run-step-stage {
-  font-size: 0.82em;
+  font-size: 0.78em;
   color: var(--app-text);
 }
 
 .tool-run-step-detail {
   margin-top: 3px;
-  font-size: 0.76em;
+  font-size: 0.74em;
   color: var(--app-text-muted);
   word-break: break-word;
 }

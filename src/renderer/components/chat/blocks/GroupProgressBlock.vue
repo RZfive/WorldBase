@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ChatMessageBlock } from '../types'
 import { formatProgressEntry } from '../progress-i18n'
+import ExecutionDisclosure from './ExecutionDisclosure.vue'
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'group_progress' }>
@@ -33,6 +34,11 @@ function getStatusLabel (status: typeof snapshot.value.status | typeof snapshot.
   return t('chatUi.groupStatusCompleted')
 }
 
+function getSummaryStatusLabel (status: typeof snapshot.value.status): string {
+  if (status === 'completed') return ''
+  return getStatusLabel(status)
+}
+
 function getProgressPercent (item: typeof snapshot.value.items[number]): number {
   if (item.totalRounds <= 0) return 0
   const completed = Math.min(item.completedRounds, item.totalRounds)
@@ -52,13 +58,27 @@ function getRecentProgressText (item: typeof snapshot.value.items[number]): stri
 function getItemProgressText (item: typeof snapshot.value.items[number]): string {
   return formatProgressEntry(item, t, t('chatUi.progressDotSeparator'))
 }
+
+const summaryText = computed(() => {
+  return [
+    t('chatUi.groupCounterRunning', { count: snapshot.value.runningCount }),
+    t('chatUi.groupCounterQueued', { count: snapshot.value.queuedCount }),
+    t('chatUi.groupCounterFailed', { count: snapshot.value.failedCount })
+  ].join(t('chatUi.progressSlashSeparator'))
+})
 </script>
 
 <template>
-  <section class="group-progress-card">
+  <ExecutionDisclosure
+    :title="$t('chatUi.groupProgressLabel')"
+    :meta="getSummaryStatusLabel(snapshot.status)"
+    :detail="`${snapshot.groupName} · ${summaryText}`"
+    :status="snapshot.status === 'failed' ? 'failed' : snapshot.status === 'running' ? 'running' : 'completed'"
+    :default-expanded="snapshot.status === 'failed'"
+  >
+    <section class="group-progress-card">
     <div class="group-progress-header">
       <div class="group-progress-header-main">
-        <span class="group-progress-label">{{ $t('chatUi.groupProgressLabel') }}</span>
         <h4 class="group-progress-title">{{ snapshot.groupName }}</h4>
         <div class="group-progress-meta">
           <span>{{ $t('chatUi.groupStatusMeta', { status: getStatusLabel(snapshot.status) }) }}</span>
@@ -111,12 +131,12 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
       </article>
     </div>
   </section>
+  </ExecutionDisclosure>
 </template>
 
 <style scoped>
 .group-progress-card {
   width: 100%;
-  padding: 2px 0 0;
   color: var(--app-text);
 }
 
@@ -131,19 +151,9 @@ function getItemProgressText (item: typeof snapshot.value.items[number]): string
   min-width: 0;
 }
 
-.group-progress-label {
-  display: inline-flex;
-  align-items: center;
-  color: #0369a1;
-  font-size: 0.72em;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .group-progress-title {
-  margin: 6px 0 0;
-  font-size: 0.98em;
+  margin: 0;
+  font-size: 0.9em;
   color: var(--app-text-strong);
 }
 
