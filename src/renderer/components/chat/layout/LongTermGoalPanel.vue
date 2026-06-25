@@ -58,7 +58,6 @@ const createProviderId = ref('')
 const createModelId = ref('')
 
 const providers = computed(() => props.providers || [])
-const activities = computed(() => props.snapshot?.activities || [])
 const reviews = computed(() => props.snapshot?.reviews || [])
 const runs = computed(() => props.snapshot?.runs || [])
 const memories = computed(() => props.snapshot?.memories || [])
@@ -83,13 +82,6 @@ const currentModelId = computed(() => {
   if (props.goal?.modelId && provider?.models.includes(props.goal.modelId)) return props.goal.modelId
   if (props.selectedModel && provider?.models.includes(props.selectedModel)) return props.selectedModel
   return provider?.activeModel || provider?.models[0] || ''
-})
-
-const latestReportText = computed(() => {
-  return latestRun.value?.resultText ||
-    latestReview.value?.progressSummary ||
-    props.goal?.progressSummary ||
-    t('chatUi.longTermGoalNoProgress')
 })
 
 const reportPreview = computed(() => {
@@ -201,13 +193,6 @@ function priorityLabel (priority: InterventionPriority): string {
   return t('chatUi.priorityLow')
 }
 
-function runStatusLabel (status: LongTermGoalRun['status']): string {
-  if (status === 'running') return t('chatUi.longTermGoalRunning')
-  if (status === 'reviewing') return t('chatUi.dailyReview')
-  if (status === 'failed') return t('chatUi.toolStatusFailed')
-  return t('chatUi.toolStatusCompleted')
-}
-
 function runTitle (run: LongTermGoalRun): string {
   if (run.status === 'running') return t('chatUi.longTermGoalRunning')
   if (run.status === 'failed') return t('chatUi.executionFailed')
@@ -221,10 +206,6 @@ function runSummary (run: LongTermGoalRun): string {
     : (run.progressSummary || run.error || t('chatUi.longTermGoalNoProgress'))
 }
 
-function getRunActivities (run: LongTermGoalRun): LongTermGoalActivityEvent[] {
-  return activities.value.filter(event => event.runId === run.id || event.runId === run.scheduledReportId)
-}
-
 function normalizeToolRuns (run: LongTermGoalRun): ToolRun[] {
   return (run.toolRuns || []).map(toolRun => ({
     id: toolRun.id,
@@ -234,24 +215,11 @@ function normalizeToolRuns (run: LongTermGoalRun): ToolRun[] {
   }))
 }
 
-function buildRunContent (run: LongTermGoalRun): string {
-  const runActivities = getRunActivities(run)
-  const progressLines = (run.progress || [])
-    .filter(entry => entry.kind !== 'thinking' && entry.kind !== 'tool_start' && entry.kind !== 'tool_end')
-    .map(entry => `- ${formatTime(entry.at)} · ${[entry.stage, entry.detail].filter(Boolean).join(': ')}`)
-  const activityLines = runActivities.map(event => `- ${formatTime(event.createdAt)} · ${event.title}: ${event.summary}`)
-  const sections = [
-    `# ${runTitle(run)}`,
-    `_${formatTime(run.startedAt)}${run.finishedAt ? ` - ${formatTime(run.finishedAt)}` : ''}_`,
-    `**${runStatusLabel(run.status)}**`,
-    run.progressSummary ? `## ${t('chatUi.progressToday')}\n${run.progressSummary}` : '',
-    run.gapToGoal ? `## ${t('chatUi.gapToGoal')}\n${run.gapToGoal}` : '',
-    run.error ? `## ${t('chatUi.executionError')}\n${run.error}` : '',
-    run.resultText ? `## ${t('chatUi.latestTaskReport')}\n${run.resultText}` : '',
-    progressLines.length > 0 ? `## ${t('chatUi.executionProgress')}\n${progressLines.join('\n')}` : '',
-    activityLines.length > 0 ? `## ${t('chatUi.viewTrace')}\n${activityLines.join('\n')}` : ''
-  ].filter(Boolean)
-  return sections.join('\n\n')
+function getRunContent (run: LongTermGoalRun): string {
+  return run.resultText?.trim() ||
+    run.error?.trim() ||
+    run.progressSummary ||
+    t('chatUi.longTermGoalNoProgress')
 }
 
 function closeDialog (): void {
@@ -307,7 +275,7 @@ function asRunMessage (run: LongTermGoalRun): ChatMessage {
       toolRun
     })
   }
-  const content = buildRunContent(run)
+  const content = getRunContent(run)
   blocks.push({
     id: `goal_run_content_${run.id}`,
     kind: 'content',
@@ -324,16 +292,13 @@ function asRunMessage (run: LongTermGoalRun): ChatMessage {
 }
 
 const reportMessages = computed<ChatMessage[]>(() => {
-  const review = latestReview.value
-  const sections = [
-    `# ${t('chatUi.latestTaskReport')}`,
-    latestRun.value?.resultText || props.goal?.progressSummary || '',
-    review ? `## ${t('chatUi.progressToday')}\n${review.progressSummary}` : '',
-    review ? `## ${t('chatUi.gapToGoal')}\n${review.gapAnalysis}` : '',
-    review && review.nextPlan.length > 0 ? `## ${t('chatUi.nextTaskQueue')}\n${review.nextPlan.map((item, index) => `${index + 1}. ${item}`).join('\n')}` : '',
-    review && review.blockers.length > 0 ? `## ${t('chatUi.blockers')}\n${review.blockers.map(item => `- ${item}`).join('\n')}` : ''
-  ].filter(Boolean).join('\n\n')
-  return [asAssistantMessage(sections || latestReportText.value)]
+  return [asAssistantMessage(
+    latestRun.value?.resultText?.trim() ||
+    latestRun.value?.error?.trim() ||
+    latestReview.value?.progressSummary ||
+    props.goal?.progressSummary ||
+    t('chatUi.longTermGoalNoProgress')
+  )]
 })
 
 const runMessages = computed<ChatMessage[]>(() => {

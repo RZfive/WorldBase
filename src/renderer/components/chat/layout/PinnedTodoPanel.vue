@@ -137,14 +137,14 @@ function toggleCollapsed(): void {
 
 <style scoped>
 .todo-shell {
-  --todo-panel-max-width: 520px;
+  --todo-panel-max-width: 480px;
   position: relative;
   z-index: 9;
   height: 0;
   width: 100%;
-  max-width: var(--chat-message-track-max, 980px);
+  max-width: calc(var(--chat-message-track-max, 980px) - 32px);
   margin: 0 auto;
-  padding: 0 var(--chat-message-gutter, 28px);
+  padding: 0 calc(var(--chat-message-gutter, 28px) + 10px);
   box-sizing: border-box;
   pointer-events: none;
 }
@@ -156,9 +156,9 @@ function toggleCollapsed(): void {
   width: min(
     var(--todo-panel-max-width),
     var(--chat-message-track-max, 980px),
-    calc(100% - var(--chat-message-gutter, 28px) - var(--chat-message-gutter, 28px))
+    calc(100% - var(--chat-message-gutter, 28px) - var(--chat-message-gutter, 28px) - 24px)
   );
-  max-width: calc(100% - 16px);
+  max-width: calc(100% - 32px);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -180,7 +180,7 @@ function toggleCollapsed(): void {
   border: 1px solid
     color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
   border-bottom: 0;
-  border-radius: 10px 10px 0 0;
+  border-radius: 8px 8px 0 0;
   background: color-mix(in srgb, var(--app-panel) 96%, transparent);
   box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.16);
   color: var(--app-text);
