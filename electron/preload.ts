@@ -190,6 +190,8 @@ interface ScheduledTaskProgressEntry {
   at: string
   stage: string
   detail?: string
+  kind?: 'progress' | 'thinking' | 'tool_start' | 'tool_end' | 'todo' | 'file' | 'web'
+  toolName?: string
 }
 
 interface ScheduledTaskRetryPolicy {
@@ -255,6 +257,7 @@ interface ScheduledTaskRunReport {
   prompt: string
   summary: string
   resultText?: string
+  thinkingText?: string
   error?: string
   progress: ScheduledTaskProgressEntry[]
   providerId?: string | null

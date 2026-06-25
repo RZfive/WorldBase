@@ -29,6 +29,8 @@ type LongTermGoalSnapshot = import('./shared/long-term-goal-types.js').LongTermG
 type LongTermGoalChangeSet = import('./shared/long-term-goal-types.js').LongTermGoalChangeSet
 type LongTermGoalIntervention = import('./shared/long-term-goal-types.js').LongTermGoalIntervention
 type LongTermGoalMessageResult = import('./shared/long-term-goal-types.js').LongTermGoalMessageResult
+type LongTermGoalRun = import('./shared/long-term-goal-types.js').LongTermGoalRun
+type LongTermGoalActivityEvent = import('./shared/long-term-goal-types.js').LongTermGoalActivityEvent
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -713,6 +715,8 @@ interface ScheduledTaskProgressEntry {
   at: string
   stage: string
   detail?: string
+  kind?: 'progress' | 'thinking' | 'tool_start' | 'tool_end' | 'todo' | 'file' | 'web'
+  toolName?: string
 }
 
 interface ScheduledTaskRetryPolicy {
@@ -778,6 +782,7 @@ interface ScheduledTaskRunReport {
   prompt: string
   summary: string
   resultText?: string
+  thinkingText?: string
   error?: string
   progress: ScheduledTaskProgressEntry[]
   providerId?: string | null

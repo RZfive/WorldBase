@@ -12,7 +12,9 @@ import type {
   LongTermGoalMemoryEntry,
   LongTermGoalNextTask,
   LongTermGoalRun,
+  LongTermGoalRunProgressEntry,
   LongTermGoalRunStatus,
+  LongTermGoalRunToolRun,
   LongTermGoalSchedule,
   LongTermGoalSnapshot,
   LongTermGoalStatus
@@ -322,6 +324,56 @@ function normalizeReview (value: unknown): LongTermGoalDailyReview | null {
   }
 }
 
+function normalizeRunProgressEntry (value: unknown): LongTermGoalRunProgressEntry | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const stage = normalizeString(record.stage)
+  if (!stage) return null
+  const kind = record.kind === 'thinking' ||
+    record.kind === 'tool_start' ||
+    record.kind === 'tool_end' ||
+    record.kind === 'todo' ||
+    record.kind === 'file' ||
+    record.kind === 'web'
+    ? record.kind
+    : 'progress'
+  return {
+    at: normalizeIsoDate(record.at) || new Date().toISOString(),
+    stage,
+    detail: normalizeString(record.detail) || undefined,
+    kind,
+    toolName: normalizeString(record.toolName) || undefined
+  }
+}
+
+function normalizeToolRunProgressEntry (value: unknown): LongTermGoalRunToolRun['progress'][number] | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const stage = normalizeString(record.stage)
+  if (!stage) return null
+  return {
+    stage,
+    detail: normalizeString(record.detail) || undefined
+  }
+}
+
+function normalizeRunToolRun (value: unknown): LongTermGoalRunToolRun | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const id = normalizeString(record.id)
+  const name = normalizeString(record.name)
+  if (!id || !name) return null
+  const status = record.status === 'completed' || record.status === 'failed' ? record.status : 'running'
+  return {
+    id,
+    name,
+    status,
+    progress: Array.isArray(record.progress)
+      ? record.progress.map(normalizeToolRunProgressEntry).filter((item): item is LongTermGoalRunToolRun['progress'][number] => Boolean(item))
+      : []
+  }
+}
+
 function normalizeRun (value: unknown): LongTermGoalRun | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const record = value as Record<string, unknown>
@@ -340,6 +392,13 @@ function normalizeRun (value: unknown): LongTermGoalRun | null {
     progressSummary: normalizeString(record.progressSummary),
     gapToGoal: normalizeString(record.gapToGoal),
     resultText: normalizeString(record.resultText) || undefined,
+    thinkingText: normalizeString(record.thinkingText) || undefined,
+    progress: Array.isArray(record.progress)
+      ? record.progress.map(normalizeRunProgressEntry).filter((item): item is LongTermGoalRunProgressEntry => Boolean(item))
+      : [],
+    toolRuns: Array.isArray(record.toolRuns)
+      ? record.toolRuns.map(normalizeRunToolRun).filter((item): item is LongTermGoalRunToolRun => Boolean(item))
+      : [],
     error: normalizeString(record.error) || undefined,
     notificationLevel: record.notificationLevel === 'notify' || record.notificationLevel === 'badge' ? record.notificationLevel : 'silent',
     createdAt,

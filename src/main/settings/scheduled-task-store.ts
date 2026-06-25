@@ -9,6 +9,8 @@ export interface ScheduledTaskProgressEntry {
   at: string
   stage: string
   detail?: string
+  kind?: 'progress' | 'thinking' | 'tool_start' | 'tool_end' | 'todo' | 'file' | 'web'
+  toolName?: string
 }
 
 export interface ScheduledTaskRetryPolicy {
@@ -84,6 +86,7 @@ export interface ScheduledTaskRunReport {
   prompt: string
   summary: string
   resultText?: string
+  thinkingText?: string
   error?: string
   progress: ScheduledTaskProgressEntry[]
   providerId?: string | null
@@ -279,10 +282,21 @@ function normalizeProgressEntry (value: unknown): ScheduledTaskProgressEntry | n
   const stage = normalizeString(record.stage)
   if (!stage) return null
 
+  const kind = record.kind === 'thinking' ||
+    record.kind === 'tool_start' ||
+    record.kind === 'tool_end' ||
+    record.kind === 'todo' ||
+    record.kind === 'file' ||
+    record.kind === 'web'
+    ? record.kind
+    : 'progress'
+
   return {
     at: normalizeIsoDate(record.at) || new Date().toISOString(),
     stage,
-    detail: normalizeString(record.detail) || undefined
+    detail: normalizeString(record.detail) || undefined,
+    kind,
+    toolName: normalizeString(record.toolName) || undefined
   }
 }
 
@@ -318,6 +332,7 @@ function normalizeReport (value: unknown): ScheduledTaskRunReport | null {
     prompt,
     summary,
     resultText: normalizeString(record.resultText) || undefined,
+    thinkingText: normalizeString(record.thinkingText) || undefined,
     error: normalizeString(record.error) || undefined,
     progress: Array.isArray(record.progress)
       ? record.progress
