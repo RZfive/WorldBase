@@ -95,7 +95,7 @@ export function toolRunCommand (services: ToolServices): Tool {
   return {
     definition: {
       name: 'run_project_command',
-      description: 'Run a short-lived command inside the project directory: install dependencies, build, run tests / linters / type-checks, or quick diagnostics. Allowed commands include npm / npx / pnpm / yarn / bun / node / tsx, the tsc / eslint / prettier / vitest / jest / playwright runners, read-only git (status, diff, log, show, branch), and read-only shell utilities. Prefer dedicated tools (read_project_file, grep_search, list_project_files) over cat / grep / ls. Run ONE command per call; chaining with && | ; or redirects requires developer command mode (THE_WORLD_DEV_COMMANDS=1). Do NOT start long-lived dev servers here — use start_project_server. If the foreground wait times out the command keeps running in the background and returns a command_id; poll it with get_project_command_status instead of retrying.',
+      description: 'Run a short-lived command inside the project directory for diagnostics: type-check, lint, tests, or quick one-off commands (e.g. "npx tsc --noEmit", "npm test", "npx eslint ."). Do NOT use this tool to run `npm run build`, `npm install`, `npm start`, or `npm run dev` for project install/build/serve — those have dedicated tools: create_project (auto install + build + start on creation), rebuild_project (atomic install + build + restart, preserves caches), and start_project_server / restart_project_server (long-lived servers). Only fall back to a manual `npm install` / `npm run build` here when those dedicated tools are unavailable or have explicitly failed. Allowed commands include npm / npx / pnpm / yarn / bun / node / tsx, the tsc / eslint / prettier / vitest / jest / playwright runners, read-only git (status, diff, log, show, branch), and read-only shell utilities. Prefer dedicated tools (read_project_file, grep_search, list_project_files) over cat / grep / ls. Run ONE command per call; chaining with && | ; or redirects requires developer command mode (THE_WORLD_DEV_COMMANDS=1). If the foreground wait times out the command keeps running in the background and returns a command_id; poll it with get_project_command_status instead of retrying.',
       parameters: {
         type: 'object',
         properties: {
@@ -105,7 +105,7 @@ export function toolRunCommand (services: ToolServices): Tool {
           },
           command: {
             type: 'string',
-            description: 'The command to run, e.g. "npm install", "npm test", "npx tsc --noEmit". A single command unless developer command mode is enabled.'
+            description: 'The command to run, e.g. "npm test", "npx tsc --noEmit", "npx eslint .". A single command unless developer command mode is enabled.'
           },
           cwd: {
             type: 'string',

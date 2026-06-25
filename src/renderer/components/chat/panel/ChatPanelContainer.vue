@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ConversationSidebar from '../layout/ConversationSidebar.vue'
 import MessageList from '../messages/MessageList.vue'
 import ChatInput from '../layout/ChatInput.vue'
@@ -10,11 +11,13 @@ import PinnedTodoPanel from '../layout/PinnedTodoPanel.vue'
 import AskUserPanel from '../layout/AskUserPanel.vue'
 import AuthPermissionPanel from '../layout/AuthPermissionPanel.vue'
 import SudoPasswordPanel from '../layout/SudoPasswordPanel.vue'
+import LongTermGoalPanel from '../layout/LongTermGoalPanel.vue'
 import { useChatPanel } from './useChatPanel'
 import type { ChatPanelEmit, ChatPanelProps } from './types'
 
 const props = defineProps<ChatPanelProps>()
 const emit = defineEmits<ChatPanelEmit>()
+const { t } = useI18n()
 
 const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
 const CONVERSATION_SIDEBAR_WIDTH = 280
@@ -37,6 +40,7 @@ const {
   availableSkills,
   conversationsLoaded,
   conversationSidebarItems,
+  createLongTermGoal,
   currentAuthMode,
   currentAskUserRequest,
   currentAssistantIcon,
@@ -44,11 +48,13 @@ const {
   currentContextDetail,
   currentContextLabel,
   currentConversationId,
+  currentLongTermGoal,
   currentPendingAuthCount,
   currentPendingAuthRequest,
   currentPendingSudoPasswordCount,
   currentSudoPasswordRequest,
   deleteConversation,
+  deleteLongTermGoal,
   documentDockVisible,
   documentWorkspaceActiveFilePath,
   documentWorkspaceDocuments,
@@ -61,6 +67,8 @@ const {
   filePreview,
   groupMentionHints,
   groupSidebarItems,
+  longTermGoalSidebarItems,
+  longTermGoalSnapshot,
   handleAgentSelectionChange,
   handleAuthModeChange,
   handleChannelBindingSelectionChange,
@@ -74,11 +82,13 @@ const {
   isLoading,
   isUploadingFiles,
   loadConversation,
+  openLongTermGoal,
   messages,
   newConversation,
   nonDefaultAgents,
   openAgentWorkspaceConversation,
   openGroupWorkspaceConversation,
+  pauseLongTermGoal,
   pendingFiles,
   pendingImages,
   planModeActive,
@@ -89,6 +99,10 @@ const {
   renameConversation,
   removeFile,
   removeImage,
+  resumeLongTermGoal,
+  runLongTermGoalNow,
+  archiveLongTermGoal,
+  saveLongTermGoalPatch,
   respondToAuthRequest,
   respondToSudoPasswordRequest,
   respondToAskUserRequest,
@@ -96,6 +110,10 @@ const {
   selectedModel,
   selectAllSkills,
   sendMessage,
+  sendLongTermGoalMessage,
+  applyLongTermGoalChangeSet,
+  cancelLongTermGoalChangeSet,
+  answerLongTermGoalIntervention,
   shouldUseConversationProviderOverride,
   showSkillPicker,
   stopCurrentStream,
@@ -169,6 +187,7 @@ const conversationSidebarWidth = computed(() => conversationSidebarCollapsed.val
 )
 const collapsedAgentActive = computed(() => agentSidebarItems.value.some(item => item.isActive))
 const collapsedGroupActive = computed(() => groupSidebarItems.value.some(item => item.isActive))
+const collapsedLongTermGoalActive = computed(() => longTermGoalSidebarItems.value.some(item => item.isActive))
 const collapsedConversationActive = computed(() => conversationSidebarItems.value.some(item => item.isActive))
 
 function toggleConversationSidebar (): void {
@@ -185,6 +204,15 @@ function openFirstCollapsedGroup (): void {
   if (item) openGroupWorkspaceConversation(item.id)
 }
 
+function openFirstCollapsedLongTermGoal (): void {
+  const item = longTermGoalSidebarItems.value.find(entry => entry.isActive) || longTermGoalSidebarItems.value[0]
+  if (item) {
+    void openLongTermGoal(item.id)
+    return
+  }
+  void createLongTermGoal()
+}
+
 function openFirstCollapsedConversation (): void {
   const item = conversationSidebarItems.value.find(entry => entry.isActive) || conversationSidebarItems.value[0]
   if (item) loadConversation(item.id)
@@ -196,6 +224,20 @@ function openCollapsedSidebarAgent (item: typeof agentSidebarItems.value[number]
 
 function openCollapsedSidebarGroup (item: typeof groupSidebarItems.value[number]): void {
   openGroupWorkspaceConversation(item.id)
+}
+
+function openCollapsedSidebarLongTermGoal (item: typeof longTermGoalSidebarItems.value[number]): void {
+  void openLongTermGoal(item.id)
+}
+
+function deleteLongTermGoalById (goalId: string): void {
+  const goal = currentLongTermGoal.value?.id === goalId
+    ? currentLongTermGoal.value
+    : longTermGoalSnapshot.value?.goals.find(item => item.id === goalId) || null
+  const title = goal?.title || longTermGoalSidebarItems.value.find(item => item.id === goalId)?.title || goalId
+  const ok = window.confirm(t('chatUi.deleteLongTermGoalConfirm', { title }))
+  if (!ok) return
+  void deleteLongTermGoal(goal || goalId)
 }
 
 function openCollapsedSidebarConversation (item: typeof conversationSidebarItems.value[number]): void {
@@ -417,13 +459,17 @@ watch(
         <ConversationSidebar
           :agent-items="agentSidebarItems"
           :group-items="groupSidebarItems"
+          :long-term-goal-items="longTermGoalSidebarItems"
           :conversation-items="conversationSidebarItems"
           :conversation-list-loaded="conversationsLoaded"
           @new-conversation="newConversation"
+          @new-long-term-goal="createLongTermGoal"
           @toggle-collapse="toggleConversationSidebar"
           @select-conversation="loadConversation"
           @open-agent="openAgentWorkspaceConversation"
           @open-group="openGroupWorkspaceConversation"
+          @open-long-term-goal="openLongTermGoal"
+          @delete-long-term-goal="deleteLongTermGoalById"
           @delete-conversation="deleteConversation"
           @rename-conversation="renameConversation"
         />
@@ -526,6 +572,47 @@ watch(
           <div class="conversation-sidebar-rail-group">
             <button
               class="conversation-sidebar-rail-section"
+              :class="{ active: collapsedLongTermGoalActive }"
+              type="button"
+              :title="$t('chatUi.longTermGoals')"
+              :aria-label="$t('chatUi.longTermGoals')"
+              @click="openFirstCollapsedLongTermGoal"
+            >
+              <span class="conversation-sidebar-rail-icon">◎</span>
+              <span class="conversation-sidebar-rail-count">{{ longTermGoalSidebarItems.length }}</span>
+            </button>
+            <div class="conversation-sidebar-popover">
+              <div class="conversation-sidebar-popover-head">
+                <span>{{ $t('chatUi.longTermGoals') }}</span>
+                <span>{{ longTermGoalSidebarItems.length }}</span>
+              </div>
+              <button
+                v-for="item in longTermGoalSidebarItems"
+                :key="`rail-goal-${item.id}`"
+                class="conversation-sidebar-popover-item"
+                :class="{ active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }"
+                type="button"
+                @click="openCollapsedSidebarLongTermGoal(item)"
+              >
+                <span class="conversation-sidebar-popover-icon">{{ item.icon }}</span>
+                <span class="conversation-sidebar-popover-copy">
+                  <span class="conversation-sidebar-popover-title">{{ item.title }}</span>
+                  <span class="conversation-sidebar-popover-subtitle">{{ item.subtitle }}</span>
+                </span>
+              </button>
+              <button v-if="longTermGoalSidebarItems.length === 0" class="conversation-sidebar-popover-item" type="button" @click="() => createLongTermGoal()">
+                <span class="conversation-sidebar-popover-icon">＋</span>
+                <span class="conversation-sidebar-popover-copy">
+                  <span class="conversation-sidebar-popover-title">{{ $t('chatUi.newLongTermGoal') }}</span>
+                  <span class="conversation-sidebar-popover-subtitle">{{ $t('chatUi.longTermGoalSectionHint') }}</span>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div class="conversation-sidebar-rail-group">
+            <button
+              class="conversation-sidebar-rail-section"
               :class="{ active: collapsedConversationActive }"
               type="button"
               :title="$t('chatUi.conversations')"
@@ -566,100 +653,125 @@ watch(
       :style="{ '--chat-main-protected-min-width': `${MIN_CHAT_MAIN_WIDTH}px` }"
     >
       <div class="chat-main" :style="{ '--chat-header-height': `${chatHeaderHeight}px` }">
-        <ChatHeader
-          ref="chatHeaderRef"
-          :context-label="currentContextLabel"
-          :context-detail="currentContextDetail"
-          :available-channel-bindings="availableChannelBindings"
-          :selected-channel-binding-id="selectedChannelBindingId"
-          :available-skills="availableSkills"
-          :active-skill-ids="activeSkillIds"
-          :show-skill-picker="showSkillPicker"
+        <LongTermGoalPanel
+          v-if="currentLongTermGoal"
+          :goal="currentLongTermGoal"
+          :snapshot="longTermGoalSnapshot"
           :providers="providers"
           :active-provider-id="activeProviderId"
           :selected-model="selectedModel"
-          :show-provider-selector="shouldUseConversationProviderOverride"
-          @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
-          @update:active-provider-id="handleProviderSelectionChange"
-          @update:selected-model="handleModelSelectionChange"
-          @toggle-skill-picker="showSkillPicker = !showSkillPicker"
-          @select-all-skills="selectAllSkills"
-          @clear-skills="clearSkills"
-          @toggle-skill="toggleSkill"
-        />
-
-        <MessageList
-          :key="currentConversationId || 'draft'"
-          :messages="messages"
-          :is-loading="isLoading"
-          :file-preview="filePreview"
-          :assistant-icon="currentAssistantIcon"
-          :assistant-name="currentAssistantName"
-          @respond-auth="respondToAuthRequest"
-          @respond-sudo-password="respondToSudoPasswordRequest"
-          @open-link="(url) => emit('openWebLink', url)"
-        />
-
-        <PinnedTodoPanel
-          v-if="activeTodoItems.length > 0"
-          :items="activeTodoItems"
-          :is-loading="isLoading"
-        />
-
-        <AskUserPanel
-          v-if="currentAskUserRequest"
-          :request="currentAskUserRequest"
-          @submit="(requestId, answers) => respondToAskUserRequest(requestId, answers)"
-          @cancel="(requestId) => respondToAskUserRequest(requestId, null)"
-        />
-
-        <AuthPermissionPanel
-          v-if="currentPendingAuthRequest"
-          :request="currentPendingAuthRequest"
-          :pending-count="currentPendingAuthCount"
-          @respond="respondToAuthRequest"
-        />
-
-        <SudoPasswordPanel
-          v-if="currentSudoPasswordRequest"
-          :request="currentSudoPasswordRequest"
-          :pending-count="currentPendingSudoPasswordCount"
-          @respond="respondToSudoPasswordRequest"
-        />
-
-        <ChatInput
-          v-model="inputText"
-          :is-loading="isLoading"
-          :pending-auth-count="currentPendingAuthCount"
-          :pending-images="pendingImages"
-          :pending-files="pendingFiles"
-          :is-uploading-files="isUploadingFiles"
-          :upload-feedback="uploadFeedback"
-          :document-dock-visible="documentDockVisible"
-          :folder-workspace-visible="folderWorkspaceVisible"
-          :reasoning-strength="reasoningStrength"
-          :temperature="conversationTemperature"
-          :provider-default-temperature="providerDefaultTemperature"
-          :auth-mode="currentAuthMode"
-          :plan-mode-active="planModeActive"
           :available-agents="nonDefaultAgents"
           :selected-agent-id="agentSelectorValue"
-          :group-mention-hints="groupMentionHints"
-          :is-group-conversation="isGroupConversation"
-          :is-new-conversation="!currentConversationId"
-          @send="sendMessage"
-          @stop="stopCurrentStream"
-          @add-attachments="addAttachments"
-          @remove-image="removeImage"
-          @remove-file="removeFile"
-          @update:reasoning-strength="handleReasoningStrengthChange"
-          @update:temperature="handleTemperatureChange"
-          @toggle-document-dock="toggleDocumentWorkspace"
-          @toggle-folder-workspace="toggleFolderWorkspace"
-          @update:auth-mode="handleAuthModeChange"
-          @toggle-plan-mode="togglePlanMode"
+          @create="createLongTermGoal"
+          @run-now="runLongTermGoalNow"
+          @pause="pauseLongTermGoal"
+          @resume="resumeLongTermGoal"
+          @archive="archiveLongTermGoal"
+          @delete-goal="deleteLongTermGoal"
+          @save-goal="saveLongTermGoalPatch"
+          @send-message="sendLongTermGoalMessage"
+          @apply-change-set="applyLongTermGoalChangeSet"
+          @cancel-change-set="cancelLongTermGoalChangeSet"
+          @answer-intervention="answerLongTermGoalIntervention"
           @update:selected-agent-id="handleAgentSelectionChange"
         />
+
+        <template v-else>
+          <ChatHeader
+            ref="chatHeaderRef"
+            :context-label="currentContextLabel"
+            :context-detail="currentContextDetail"
+            :available-channel-bindings="availableChannelBindings"
+            :selected-channel-binding-id="selectedChannelBindingId"
+            :available-skills="availableSkills"
+            :active-skill-ids="activeSkillIds"
+            :show-skill-picker="showSkillPicker"
+            :providers="providers"
+            :active-provider-id="activeProviderId"
+            :selected-model="selectedModel"
+            :show-provider-selector="shouldUseConversationProviderOverride"
+            @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
+            @update:active-provider-id="handleProviderSelectionChange"
+            @update:selected-model="handleModelSelectionChange"
+            @toggle-skill-picker="showSkillPicker = !showSkillPicker"
+            @select-all-skills="selectAllSkills"
+            @clear-skills="clearSkills"
+            @toggle-skill="toggleSkill"
+          />
+
+          <MessageList
+            :key="currentConversationId || 'draft'"
+            :messages="messages"
+            :is-loading="isLoading"
+            :file-preview="filePreview"
+            :assistant-icon="currentAssistantIcon"
+            :assistant-name="currentAssistantName"
+            @respond-auth="respondToAuthRequest"
+            @respond-sudo-password="respondToSudoPasswordRequest"
+            @open-link="(url) => emit('openWebLink', url)"
+          />
+
+          <PinnedTodoPanel
+            v-if="activeTodoItems.length > 0"
+            :items="activeTodoItems"
+            :is-loading="isLoading"
+          />
+
+          <AskUserPanel
+            v-if="currentAskUserRequest"
+            :request="currentAskUserRequest"
+            @submit="(requestId, answers) => respondToAskUserRequest(requestId, answers)"
+            @cancel="(requestId) => respondToAskUserRequest(requestId, null)"
+          />
+
+          <AuthPermissionPanel
+            v-if="currentPendingAuthRequest"
+            :request="currentPendingAuthRequest"
+            :pending-count="currentPendingAuthCount"
+            @respond="respondToAuthRequest"
+          />
+
+          <SudoPasswordPanel
+            v-if="currentSudoPasswordRequest"
+            :request="currentSudoPasswordRequest"
+            :pending-count="currentPendingSudoPasswordCount"
+            @respond="respondToSudoPasswordRequest"
+          />
+
+          <ChatInput
+            v-model="inputText"
+            :is-loading="isLoading"
+            :pending-auth-count="currentPendingAuthCount"
+            :pending-images="pendingImages"
+            :pending-files="pendingFiles"
+            :is-uploading-files="isUploadingFiles"
+            :upload-feedback="uploadFeedback"
+            :document-dock-visible="documentDockVisible"
+            :folder-workspace-visible="folderWorkspaceVisible"
+            :reasoning-strength="reasoningStrength"
+            :temperature="conversationTemperature"
+            :provider-default-temperature="providerDefaultTemperature"
+            :auth-mode="currentAuthMode"
+            :plan-mode-active="planModeActive"
+            :available-agents="nonDefaultAgents"
+            :selected-agent-id="agentSelectorValue"
+            :group-mention-hints="groupMentionHints"
+            :is-group-conversation="isGroupConversation"
+            :is-new-conversation="!currentConversationId"
+            @send="sendMessage"
+            @stop="stopCurrentStream"
+            @add-attachments="addAttachments"
+            @remove-image="removeImage"
+            @remove-file="removeFile"
+            @update:reasoning-strength="handleReasoningStrengthChange"
+            @update:temperature="handleTemperatureChange"
+            @toggle-document-dock="toggleDocumentWorkspace"
+            @toggle-folder-workspace="toggleFolderWorkspace"
+            @update:auth-mode="handleAuthModeChange"
+            @toggle-plan-mode="togglePlanMode"
+            @update:selected-agent-id="handleAgentSelectionChange"
+          />
+        </template>
       </div>
 
       <DocumentWorkspace

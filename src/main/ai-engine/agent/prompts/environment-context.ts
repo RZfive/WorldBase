@@ -38,7 +38,7 @@ export function getEnvironmentContext (): string {
     '### Project command-tool limits',
     '- The rules below apply when the corresponding project/local command tools are visible in the current tool list.',
     `- run_project_command allows only: ${PROJECT_COMMAND_WHITELIST.join(', ')}`,
-    '- Use npm / npx by default for dependency installs and scripts inside generated projects; do not assume pnpm / yarn is available at runtime',
+    '- When you run npm / npx directly (diagnostics, or a fallback install/build), use npm / npx by default inside generated projects; do not assume pnpm / yarn is available at runtime. For project install / build / serve prefer the dedicated tools (create_project, rebuild_project, start_project_server) over manual npm commands.',
     '- Use list_project_files for project exploration and read_project_file for file contents; do not use run_project_command as a substitute for ls/find/dir',
     '- Use get_project_status first for runtime debugging and inspect last_error_summary / last_error_excerpt / recommended_next_debug_step before falling back to get_project_logs for raw stderr tails; after app edits, use rebuild_project directly and do not use start_async_task/get_task_status for builds',
     '- Use start_project_server or restart_project_server for long-lived servers instead of run_project_command; call_project_api can wake a stopped project automatically',

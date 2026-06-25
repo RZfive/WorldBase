@@ -40,6 +40,21 @@ export interface ConversationSidebarItem {
   isPinned?: boolean
 }
 
+export interface LongTermGoalSidebarItem {
+  id: string
+  title: string
+  subtitle: string
+  searchText: string
+  icon: string
+  status: LongTermGoalDefinition['status']
+  isRunning: boolean
+  needsUserInput: boolean
+  isStreaming: boolean
+  pendingAuthCount: number
+  unreadCount: number
+  isActive: boolean
+}
+
 export interface ConversationFolderLayout {
   id: string
   name: string
@@ -78,4 +93,4 @@ export type ConversationSidebarEntry =
     previewItems: ConversationSidebarItem[]
   }
 
-export type ConversationSidebarSectionKey = 'agents' | 'groups' | 'conversations'
+export type ConversationSidebarSectionKey = 'agents' | 'groups' | 'longTermGoals' | 'conversations'

@@ -23,6 +23,12 @@ type FolderWorkspaceFileEntry = import('./shared/folder-workspace-types.js').Fol
 type FolderWorkspaceListResult = import('./shared/folder-workspace-types.js').FolderWorkspaceListResult
 type FolderWorkspacePickResult = import('./shared/folder-workspace-types.js').FolderWorkspacePickResult
 type FolderWorkspaceReadResult = import('./shared/folder-workspace-types.js').FolderWorkspaceReadResult
+type LongTermGoalDefinition = import('./shared/long-term-goal-types.js').LongTermGoalDefinition
+type LongTermGoalSaveInput = import('./shared/long-term-goal-types.js').LongTermGoalSaveInput
+type LongTermGoalSnapshot = import('./shared/long-term-goal-types.js').LongTermGoalSnapshot
+type LongTermGoalChangeSet = import('./shared/long-term-goal-types.js').LongTermGoalChangeSet
+type LongTermGoalIntervention = import('./shared/long-term-goal-types.js').LongTermGoalIntervention
+type LongTermGoalMessageResult = import('./shared/long-term-goal-types.js').LongTermGoalMessageResult
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -745,6 +751,8 @@ interface ScheduledTaskDefinition {
   createdBy: 'manual' | 'ai'
   prompt: string
   schedule: ScheduledTaskSchedule
+  providerId?: string | null
+  modelId?: string | null
   selectedSkillIds: string[]
   selectedMcpServerIds: string[]
   retryPolicy: ScheduledTaskRetryPolicy
@@ -772,6 +780,8 @@ interface ScheduledTaskRunReport {
   resultText?: string
   error?: string
   progress: ScheduledTaskProgressEntry[]
+  providerId?: string | null
+  modelId?: string | null
   selectedSkillIds: string[]
   selectedMcpServerIds: string[]
   retryScheduledAt?: string | null
@@ -993,6 +1003,18 @@ interface ElectronAPI {
   onScheduledTasksChanged: (callback: (tasks: ScheduledTaskDefinition[]) => void) => () => void
   onScheduledTaskReportsChanged: (callback: (reports: ScheduledTaskRunReport[]) => void) => () => void
   onScheduledTaskReportRequested: (callback: (report: ScheduledTaskRunReport) => void) => () => void
+  listLongTermGoals: () => Promise<LongTermGoalDefinition[]>
+  getLongTermGoalSnapshot: (goalId?: string) => Promise<LongTermGoalSnapshot>
+  saveLongTermGoal: (goal: LongTermGoalSaveInput) => Promise<LongTermGoalDefinition>
+  deleteLongTermGoal: (goalId: string) => Promise<boolean>
+  runLongTermGoalNow: (goalId: string) => Promise<ScheduledTaskRunReport>
+  sendLongTermGoalMessage: (goalId: string, content: string) => Promise<LongTermGoalMessageResult>
+  applyLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
+  cancelLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
+  answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => Promise<LongTermGoalDefinition>
+  onLongTermGoalsChanged: (callback: (goals: LongTermGoalDefinition[]) => void) => () => void
+  onLongTermGoalSnapshotChanged: (callback: (snapshot: LongTermGoalSnapshot) => void) => () => void
+  onLongTermGoalInterventionRequested: (callback: (intervention: LongTermGoalIntervention) => void) => () => void
 
   // Skills
   listSkills: () => Promise<SkillInfo[]>
