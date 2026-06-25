@@ -21,6 +21,7 @@ import type { SkillStore } from '../../src/main/settings/skill-store.js'
 import type { AgentStore } from '../../src/main/settings/agent-store.js'
 import type { AgentGroupStore } from '../../src/main/settings/agent-group-store.js'
 import type { ScheduledTaskStore } from '../../src/main/settings/scheduled-task-store.js'
+import type { LongTermGoalStore } from '../../src/main/settings/long-term-goal-store.js'
 import type { ChannelBindingStore } from '../../src/main/im/channel-binding-store.js'
 import type { ImGatewayService } from '../../src/main/im/im-gateway-service.js'
 import type { MemoryStore } from '../../src/main/ai-engine/memory/memory-store.js'
@@ -29,6 +30,7 @@ import type { AsyncTaskManager } from '../../src/main/ai-engine/agent/tools/asyn
 import type { DocumentStore } from '../../src/main/ai-engine/agent/tools/document-store.js'
 import type { MCPService } from '../../src/main/mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
+import type { LongTermGoalService } from '../../src/main/long-term-goals/long-term-goal-service.js'
 import type { MemoryCompactionResult, MemoryCompactionStatus } from '../../src/shared/agent-workspace-types.js'
 import type { PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
 import { t } from '../../src/main/i18n/main-i18n.js'
@@ -99,6 +101,8 @@ export const mainState = {
   } as MemoryCompactionStatus,
   scheduledTaskStore: null as ScheduledTaskStore | null,
   scheduledTaskService: null as ScheduledTaskService | null,
+  longTermGoalStore: null as LongTermGoalStore | null,
+  longTermGoalService: null as LongTermGoalService | null,
   documentStore: null as DocumentStore | null,
   imageLibraryStore: null as ImageLibraryStore | null,
   pendingStudioImageTasks: [] as ImageStudioGenerateRequest[],

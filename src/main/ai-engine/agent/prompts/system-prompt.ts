@@ -86,7 +86,7 @@ function getRoleAndCoreRulesSection (ctx: ToolPromptContext): string {
 - Continue from existing context after interruptions instead of restarting.
 ${todoRule}
 - Never create more than one new project in a single conversation.
-- Use npm / npx for project dependency and script commands unless the user explicitly requires something else.
+- 构建、安装依赖、启动或重启服务一律优先用专门 tool（见「构建与运行操作的路由」段），不要用 run_project_command 自己跑 npm run build / npm install / npm start / npm run dev 来代替。依赖与脚本默认用 npm / npx，除非用户明确要求其它包管理器。
 - When the user asks for any diagram, flow, architecture, sequence, state, ER, gantt, or mind map, output Mermaid code blocks first unless the user explicitly asks for another format.`
 }
 
@@ -306,13 +306,7 @@ function getToolUsagePrioritiesSection (ctx: ToolPromptContext): string | null {
   }
 
   if (hasTool(ctx, 'run_project_command')) {
-    lines.push('- Use run_project_command only for install, build, test, lint, type-check, or short diagnostics.')
-    if (hasAnyTool(ctx, ['start_project_server', 'restart_project_server'])) {
-      lines.push('- Do not use run_project_command to start long-lived servers. Use start_project_server or restart_project_server for runtime starts/restarts.')
-    }
-    if (hasTool(ctx, 'get_project_command_status')) {
-      lines.push('- If run_project_command returns reason=timeout with status=running, the command is still running in the background. Use get_project_command_status before retrying.')
-    }
+    lines.push('- run_project_command is for short-lived diagnostics only: type-check, lint, tests, and quick one-off commands. Use the dedicated tools (create_project, rebuild_project, start_project_server) for install/build/serve instead of running `npm run build` / `npm install` / `npm start` here.')
   }
 
   if (hasTool(ctx, 'open_project_app')) {
@@ -323,15 +317,55 @@ function getToolUsagePrioritiesSection (ctx: ToolPromptContext): string | null {
     lines.push('- Prefer targeted edits over whole-file rewrites when changing a few sections of a large file. This saves tokens and reduces errors.')
   }
 
-  if (hasTool(ctx, 'rebuild_project')) {
-    lines.push(`- Use rebuild_project for normal iterative builds.${hasTool(ctx, 'finalize_project') ? ' Use finalize_project only for end-of-project rebuild + cleanup after the implementation is finished.' : ''}`)
-  }
-
   if (hasTool(ctx, 'query_project_database')) {
     lines.push('- query_project_database must stay read-only and use SELECT statements only.')
   }
 
   if (lines.length === 1) return null
+  return lines.join('\n')
+}
+
+/**
+ * Authoritative routing for build / install / serve actions. Keeps the model
+ * from reaching for `npm run build` / `npm install` via run_project_command when
+ * dedicated tools (create_project, rebuild_project, finalize_project, the
+ * server tools) handle install + build + restart atomically, sync platform
+ * build state, preserve caches, and will not block on a foreground timeout.
+ * Emitted only when at least one of those dedicated tools is visible.
+ */
+function getBuildAndRuntimeRoutingSection (ctx: ToolPromptContext): string | null {
+  if (!hasAnyTool(ctx, ['create_project', 'rebuild_project', 'finalize_project', 'start_project_server', 'restart_project_server'])) return null
+
+  const lines = [
+    '## 构建与运行操作的路由（重要）',
+    '在本平台创建或迭代项目时，构建、安装依赖、启动或重启服务一律优先用专门 tool，不要用 run_project_command 自己跑 npm run build / npm install / npm start / npm run dev 来代替：专门 tool 会原子地完成「装依赖→构建→（重启）」、同步平台构建状态、保留依赖与缓存、且不会因前台超时被阻塞；手动跑这些命令容易超时、漏掉重启、导致平台状态与磁盘不一致。',
+    '按场景选择：'
+  ]
+
+  if (hasTool(ctx, 'create_project')) {
+    lines.push('- 新建项目首建首启：用 create_project。非 development_mode 时它默认已自动 install + build + start，无需再手动构建或安装依赖。')
+  }
+  if (hasTool(ctx, 'rebuild_project')) {
+    lines.push('- development_mode 下继续迭代，或改了源码/配置后需要重建并重启：用 rebuild_project（一条命令完成 install → build → restart，默认保留依赖与缓存）。')
+  }
+  if (hasAnyTool(ctx, ['start_project_server', 'restart_project_server'])) {
+    const serverTools = [
+      hasTool(ctx, 'restart_project_server') ? 'restart_project_server' : null,
+      hasTool(ctx, 'start_project_server') ? 'start_project_server' : null
+    ].filter(Boolean).join(' / ')
+    lines.push(`- 已构建、只想启动或重启服务：用 ${serverTools}，不要用 run_project_command 跑 npm run dev / npm start。`)
+  }
+  if (hasTool(ctx, 'finalize_project')) {
+    lines.push('- 全部完成、交付并回收磁盘空间：用 finalize_project（收尾重建 + 清理），不要再用 rebuild_project 后手动删 node_modules。')
+  }
+  if (hasTool(ctx, 'get_project_status')) {
+    lines.push('- 不确定当前该做什么：先 get_project_status，按 recommended_prepare_action / recommended_next_debug_step 行动，而不是凭猜测直接构建。')
+  }
+  if (hasTool(ctx, 'run_project_command')) {
+    lines.push('- run_project_command 的主要用途是短期诊断命令：类型检查、lint、测试（如 npx tsc --noEmit、npm test、npx eslint .）；install / build / serve 不要走它。')
+  }
+  lines.push('- 仅当 rebuild_project 等专门 tool 确实不可用或明确失败（例如 Windows 上 spawn EINVAL）时，才回退到 run_project_command 跑 npm install + npm run build 兜底，并随后用 clear_project_build_flag（若可用）同步平台状态。')
+
   return lines.join('\n')
 }
 
@@ -514,7 +548,7 @@ function getProjectGenerationSection (ctx: ToolPromptContext): string | null {
 - app/layout.js or app/layout.tsx may only return native <html> and <body> tags. Do not use next/document with App Router.
 - app/layout.(js|tsx) must import app/globals.css, and app/globals.css must provide base tokens/reset/responsive styles so the app never launches unstyled.
 - Do not keep duplicate JS and TS files for the same route.
-- Before finishing, ensure npm run build succeeds and .next/standalone/server.js is produced.
+- Before finishing, ensure the project builds successfully and .next/standalone/server.js is produced — use rebuild_project to build rather than running 'npm run build' manually.
 ${[presentationRule, finalizationRule].filter(Boolean).join('\n')}
 
 ## Built-in Next.js starter template
@@ -560,6 +594,7 @@ export function getSystemPrompt (options?: SystemPromptOptions): string {
     getSubagentSection(toolContext),
     getEditingExistingProjectSection(toolContext),
     getToolUsagePrioritiesSection(toolContext),
+    getBuildAndRuntimeRoutingSection(toolContext),
     getRuntimeGotchasSection(toolContext),
     getAvoidingLoopsSection(toolContext),
     getProjectDataRuntimeSection(toolContext)

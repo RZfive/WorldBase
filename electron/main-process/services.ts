@@ -23,6 +23,7 @@ import { SkillStore } from '../../src/main/settings/skill-store.js'
 import { AgentStore } from '../../src/main/settings/agent-store.js'
 import { AgentGroupStore } from '../../src/main/settings/agent-group-store.js'
 import { ScheduledTaskStore, type ScheduledTaskDefinition, type ScheduledTaskRunReport } from '../../src/main/settings/scheduled-task-store.js'
+import { LongTermGoalStore } from '../../src/main/settings/long-term-goal-store.js'
 import { ChannelBindingStore } from '../../src/main/im/channel-binding-store.js'
 import { ImGatewayService } from '../../src/main/im/im-gateway-service.js'
 import { MemoryStore } from '../../src/main/ai-engine/memory/memory-store.js'
@@ -31,6 +32,7 @@ import { AsyncTaskManager } from '../../src/main/ai-engine/agent/tools/async-tas
 import { DocumentStore } from '../../src/main/ai-engine/agent/tools/document-store.js'
 import { MCPService, type MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
 import { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
+import { LongTermGoalService } from '../../src/main/long-term-goals/long-term-goal-service.js'
 import type { AppUpdateState } from '../../src/shared/app-update-types.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../src/shared/page-automation-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
@@ -150,6 +152,7 @@ export async function initializeServices (): Promise<void> {
   mainState.memoryStore = new MemoryStore(userDataPath)
   mainState.memoryEngine = new MemoryEngine(mainState.memoryStore)
   mainState.scheduledTaskStore = new ScheduledTaskStore(userDataPath)
+  mainState.longTermGoalStore = new LongTermGoalStore(userDataPath)
   mainState.imageLibraryStore = new ImageLibraryStore(userDataPath)
   mainState.mcpService = new MCPService()
   mainState.mcpService.on('stateChanged', (state: MCPStateSnapshot) => {
@@ -215,13 +218,16 @@ export async function initializeServices (): Promise<void> {
     aiEngine: mainState.aiEngine!,
     skillStore: mainState.skillStore!,
     getMainWindow: () => mainState.mainWindow,
-    resolveProviderConfig: () => resolveProviderConfig(),
+    resolveProviderConfig: (task) => resolveProviderConfig(task?.providerId || undefined, task?.modelId || undefined),
     getNotificationPreference: () => mainState.settingsStore?.getAIExecutionPreferences().notifyOnTaskComplete ?? true,
+    resolveTaskPrompt: (task) => mainState.longTermGoalService?.resolveScheduledTaskPrompt(task),
+    shouldNotifyReport: (report) => mainState.longTermGoalService?.shouldNotifyScheduledReport(report),
     onTasksChanged: (tasks: ScheduledTaskDefinition[]) => {
       broadcastToAppWindows('scheduler:tasksChanged', tasks)
     },
     onReportsChanged: (reports: ScheduledTaskRunReport[]) => {
       broadcastToAppWindows('scheduler:reportsChanged', reports)
+      mainState.longTermGoalService?.reconcileScheduledReports(reports)
     },
     onReportNotificationClick: (report: ScheduledTaskRunReport) => {
       broadcastToAppWindows('scheduler:reportRequested', report)
@@ -229,6 +235,21 @@ export async function initializeServices (): Promise<void> {
   })
   mainState.aiEngine.setScheduledTaskService(mainState.scheduledTaskService)
   mainState.scheduledTaskService.start()
+
+  mainState.longTermGoalService = new LongTermGoalService({
+    store: mainState.longTermGoalStore,
+    scheduledTaskService: mainState.scheduledTaskService,
+    onGoalsChanged: (goals) => {
+      broadcastToAppWindows('longTermGoals:goalsChanged', goals)
+    },
+    onSnapshotChanged: (snapshot) => {
+      broadcastToAppWindows('longTermGoals:snapshotChanged', snapshot)
+    },
+    onInterventionRequested: (_goal, intervention) => {
+      broadcastToAppWindows('longTermGoals:interventionRequested', intervention)
+    }
+  })
+  mainState.longTermGoalService.start()
 
   // Apply saved AI settings on startup
   const providersConfig = applyActiveProviderToAiEngine()

@@ -7,13 +7,15 @@ import {
   type AgentSidebarItem,
   type ConversationSidebarSectionKey,
   type ConversationSidebarItem,
-  type GroupSidebarItem
+  type GroupSidebarItem,
+  type LongTermGoalSidebarItem
 } from './ConversationSidebar.types'
 import { useConversationSidebarFolders } from './useConversationSidebarFolders'
 
 const props = defineProps<{
   agentItems: AgentSidebarItem[]
   groupItems: GroupSidebarItem[]
+  longTermGoalItems: LongTermGoalSidebarItem[]
   conversationItems: ConversationSidebarItem[]
   conversationListLoaded: boolean
 }>()
@@ -24,6 +26,9 @@ const emit = defineEmits<{
   (e: 'selectConversation', id: string): void
   (e: 'openAgent', agentId: string): void
   (e: 'openGroup', groupId: string): void
+  (e: 'openLongTermGoal', goalId: string): void
+  (e: 'newLongTermGoal'): void
+  (e: 'deleteLongTermGoal', goalId: string): void
   (e: 'deleteConversation', id: string): void
   (e: 'renameConversation', id: string, title: string): void
   (e: 'pinConversation', id: string): void
@@ -41,6 +46,7 @@ function loadCollapsedSections (): Record<ConversationSidebarSectionKey, boolean
   const fallback: Record<ConversationSidebarSectionKey, boolean> = {
     agents: false,
     groups: false,
+    longTermGoals: false,
     conversations: false
   }
   if (typeof window === 'undefined') return fallback
@@ -52,6 +58,7 @@ function loadCollapsedSections (): Record<ConversationSidebarSectionKey, boolean
     return {
       agents: parsed.agents === true,
       groups: parsed.groups === true,
+      longTermGoals: parsed.longTermGoals === true,
       conversations: parsed.conversations === true
     }
   } catch {
@@ -68,6 +75,7 @@ watch(collapsedSections, () => {
     window.localStorage.setItem(SECTION_COLLAPSE_STORAGE_KEY, JSON.stringify({
       agents: collapsedSections.agents,
       groups: collapsedSections.groups,
+      longTermGoals: collapsedSections.longTermGoals,
       conversations: collapsedSections.conversations
     }))
   } catch {
@@ -96,6 +104,7 @@ function filterItems<T extends { title: string; subtitle: string; searchText: st
 
 const filteredAgentItems = computed(() => filterItems(props.agentItems))
 const filteredGroupItems = computed(() => filterItems(props.groupItems))
+const filteredLongTermGoalItems = computed(() => filterItems(props.longTermGoalItems))
 
 const {
   conversationEntries,
@@ -138,7 +147,7 @@ const {
 )
 
 const hasVisibleItems = computed(() => {
-  return filteredAgentItems.value.length > 0 || filteredGroupItems.value.length > 0 || conversationEntries.value.length > 0
+  return filteredAgentItems.value.length > 0 || filteredGroupItems.value.length > 0 || filteredLongTermGoalItems.value.length > 0 || conversationEntries.value.length > 0
 })
 
 function toggleSection (key: ConversationSidebarSectionKey) {
@@ -281,6 +290,67 @@ function cancelRenameConversation () {
               @click="emit('openGroup', item.id)"
               @delete="item.conversationId && emit('deleteConversation', item.conversationId)"
             />
+          </div>
+        </div>
+      </section>
+
+      <section class="conv-section">
+        <div class="conv-section-toggle-shell">
+          <button
+            class="conv-section-toggle conv-section-toggle-embedded"
+            :class="{ collapsed: !isSectionExpanded('longTermGoals', filteredLongTermGoalItems.length) }"
+            type="button"
+            @click="toggleSection('longTermGoals')"
+          >
+            <span class="conv-section-toggle-copy">
+              <span class="conv-section-title">{{ $t('chatUi.longTermGoals') }}</span>
+              <span class="conv-section-hint">{{ $t('chatUi.longTermGoalSectionHint') }}</span>
+            </span>
+            <span class="conv-section-meta">{{ filteredLongTermGoalItems.length }}/{{ props.longTermGoalItems.length }}</span>
+          </button>
+          <button class="conv-folder-add-btn" type="button" :title="$t('chatUi.newLongTermGoal')" @click.stop="emit('newLongTermGoal')">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M8 2.5v11M2.5 8h11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+          </button>
+          <button
+            class="conv-section-caret-btn"
+            :class="{ collapsed: !isSectionExpanded('longTermGoals', filteredLongTermGoalItems.length) }"
+            type="button"
+            aria-hidden="true"
+            @click="toggleSection('longTermGoals')"
+          >
+            <span class="conv-section-caret-shell">
+              <svg class="conv-section-caret" viewBox="0 0 16 16" fill="none">
+                <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
+          </button>
+        </div>
+        <div
+          class="conv-section-body"
+          :class="{ collapsed: !isSectionExpanded('longTermGoals', filteredLongTermGoalItems.length) }"
+        >
+          <div class="conv-section-body-inner">
+            <ConversationSidebarItemCard
+              v-for="item in filteredLongTermGoalItems"
+              :key="`goal-${item.id}`"
+              :item="item"
+              variant="conversation"
+              compact
+              show-delete
+              :delete-title="$t('chatUi.deleteLongTermGoal')"
+              @click="emit('openLongTermGoal', item.id)"
+              @delete="emit('deleteLongTermGoal', item.id)"
+            />
+            <button
+              v-if="props.longTermGoalItems.length === 0"
+              class="conv-empty-action"
+              type="button"
+              @click="emit('newLongTermGoal')"
+            >
+              {{ $t('chatUi.createFirstLongTermGoal') }}
+            </button>
           </div>
         </div>
       </section>
@@ -765,6 +835,22 @@ function cancelRenameConversation () {
   border: 1px dashed color-mix(in srgb, var(--app-border) 68%, transparent);
   border-radius: 10px;
   background: color-mix(in srgb, var(--app-panel-muted) 42%, transparent);
+}
+
+.conv-empty-action {
+  width: 100%;
+  min-height: 38px;
+  border-radius: 8px;
+  border: 1px dashed color-mix(in srgb, var(--app-accent) 36%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 24%, transparent);
+  color: var(--app-text);
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.conv-empty-action:hover {
+  border-style: solid;
+  background: color-mix(in srgb, var(--app-accent-soft) 42%, transparent);
 }
 
 @media (max-width: 880px) {

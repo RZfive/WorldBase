@@ -57,6 +57,8 @@ export interface ScheduledTaskDefinition {
   createdBy: 'manual' | 'ai'
   prompt: string
   schedule: ScheduledTaskSchedule
+  providerId?: string | null
+  modelId?: string | null
   selectedSkillIds: string[]
   selectedMcpServerIds: string[]
   retryPolicy: ScheduledTaskRetryPolicy
@@ -84,6 +86,8 @@ export interface ScheduledTaskRunReport {
   resultText?: string
   error?: string
   progress: ScheduledTaskProgressEntry[]
+  providerId?: string | null
+  modelId?: string | null
   selectedSkillIds: string[]
   selectedMcpServerIds: string[]
   retryScheduledAt?: string | null
@@ -253,6 +257,8 @@ function normalizeTask (value: unknown): ScheduledTaskDefinition | null {
     createdBy: record.createdBy === 'ai' ? 'ai' : 'manual',
     prompt,
     schedule,
+    providerId: normalizeString(record.providerId) || null,
+    modelId: normalizeString(record.modelId) || null,
     selectedSkillIds: normalizeStringArray(record.selectedSkillIds),
     selectedMcpServerIds: normalizeStringArray(record.selectedMcpServerIds),
     retryPolicy: normalizeRetryPolicy(record.retryPolicy),
@@ -318,6 +324,8 @@ function normalizeReport (value: unknown): ScheduledTaskRunReport | null {
         .map(normalizeProgressEntry)
         .filter((entry): entry is ScheduledTaskProgressEntry => Boolean(entry))
       : [],
+    providerId: normalizeString(record.providerId) || null,
+    modelId: normalizeString(record.modelId) || null,
     selectedSkillIds: normalizeStringArray(record.selectedSkillIds),
     selectedMcpServerIds: normalizeStringArray(record.selectedMcpServerIds),
     retryScheduledAt: normalizeIsoDate(record.retryScheduledAt),

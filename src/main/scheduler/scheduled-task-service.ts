@@ -18,8 +18,10 @@ interface ScheduledTaskServiceOptions {
   aiEngine: AIEngine
   skillStore?: SkillStore
   getMainWindow?: () => BrowserWindow | null
-  resolveProviderConfig?: () => AIConfigInput | undefined
+  resolveProviderConfig?: (task?: ScheduledTaskDefinition) => AIConfigInput | undefined
   getNotificationPreference?: () => boolean
+  resolveTaskPrompt?: (task: ScheduledTaskDefinition) => string | undefined
+  shouldNotifyReport?: (report: ScheduledTaskRunReport) => boolean | undefined
   onTasksChanged?: (tasks: ScheduledTaskDefinition[]) => void
   onReportsChanged?: (reports: ScheduledTaskRunReport[]) => void
   onReportNotificationClick?: (report: ScheduledTaskRunReport) => void
@@ -211,6 +213,8 @@ export class ScheduledTaskService {
       createdBy: input.createdBy === 'ai' ? 'ai' : 'manual',
       prompt: normalizeString(input.prompt),
       schedule: input.schedule,
+      providerId: normalizeString(input.providerId) || null,
+      modelId: normalizeString(input.modelId) || null,
       selectedSkillIds: Array.isArray(input.selectedSkillIds) ? input.selectedSkillIds : [],
       selectedMcpServerIds: Array.isArray(input.selectedMcpServerIds) ? input.selectedMcpServerIds : [],
       retryPolicy: input.retryPolicy,
@@ -451,6 +455,8 @@ export class ScheduledTaskService {
       summary: context.attempt > 1 ? t('mainDialog.scheduledTaskRetryingSummary') : t('mainDialog.scheduledTaskRunningSummary'),
       resultText: '',
       progress: [],
+      providerId: task.providerId || null,
+      modelId: task.modelId || null,
       selectedSkillIds: [...task.selectedSkillIds],
       selectedMcpServerIds: [...task.selectedMcpServerIds],
       retryScheduledAt: null,
@@ -560,10 +566,11 @@ export class ScheduledTaskService {
         .map(skillId => this.options.skillStore?.get(skillId)?.content || '')
         .filter(Boolean)
 
+      const executionPrompt = this.options.resolveTaskPrompt?.(task) || task.prompt
       for await (const event of this.options.aiEngine.chatStream([
-        { role: 'user', content: task.prompt }
+        { role: 'user', content: executionPrompt }
       ], onProgress, {
-        providerConfig: this.options.resolveProviderConfig?.(),
+        providerConfig: this.options.resolveProviderConfig?.(task),
         authMode: 'auto',
         activeSkillContents,
         allowedMcpServerIds: task.selectedMcpServerIds
@@ -671,6 +678,10 @@ export class ScheduledTaskService {
   }
 
   private notifyCompletion (report: ScheduledTaskRunReport): void {
+    const shouldNotify = this.options.shouldNotifyReport?.(report)
+    if (shouldNotify === false) {
+      return
+    }
     if (!this.options.getNotificationPreference?.() || !isNotificationSupported()) {
       return
     }

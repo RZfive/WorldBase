@@ -19,6 +19,7 @@ import type { ImageLibraryData, ImageLibraryEntry, ImageLibraryFolderCard, Image
 import type { ImageStudioGenerateRequest } from '../../src/shared/image-studio-types.js'
 import type { Skill } from '../../src/main/settings/skill-store.js'
 import type { ScheduledTaskDefinition } from '../../src/main/settings/scheduled-task-store.js'
+import type { LongTermGoalSaveInput } from '../../src/shared/long-term-goal-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '../../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
@@ -108,6 +109,7 @@ export function setupIPC (): void {
   const memoryStore = mainState.memoryStore!
   const memoryEngine = mainState.memoryEngine!
   const scheduledTaskService = mainState.scheduledTaskService!
+  const longTermGoalService = mainState.longTermGoalService!
   const documentStore = mainState.documentStore!
   const imageLibraryStore = mainState.imageLibraryStore
   const mcpService = mainState.mcpService!
@@ -1774,6 +1776,42 @@ export function setupIPC (): void {
 
   ipcMain.handle('scheduler:getReport', async (_event: IpcMainInvokeEvent, reportId: string) => {
     return scheduledTaskService!.getReport(reportId)
+  })
+
+  ipcMain.handle('longTermGoals:list', async () => {
+    return longTermGoalService!.listGoals()
+  })
+
+  ipcMain.handle('longTermGoals:getSnapshot', async (_event: IpcMainInvokeEvent, goalId?: string) => {
+    return longTermGoalService!.getSnapshot(goalId)
+  })
+
+  ipcMain.handle('longTermGoals:save', async (_event: IpcMainInvokeEvent, goal: LongTermGoalSaveInput) => {
+    return longTermGoalService!.saveGoal(goal)
+  })
+
+  ipcMain.handle('longTermGoals:delete', async (_event: IpcMainInvokeEvent, goalId: string) => {
+    return longTermGoalService!.deleteGoal(goalId)
+  })
+
+  ipcMain.handle('longTermGoals:runNow', async (_event: IpcMainInvokeEvent, goalId: string) => {
+    return longTermGoalService!.runGoalNow(goalId)
+  })
+
+  ipcMain.handle('longTermGoals:message', async (_event: IpcMainInvokeEvent, goalId: string, content: string) => {
+    return longTermGoalService!.appendGoalMessage(goalId, content)
+  })
+
+  ipcMain.handle('longTermGoals:applyChangeSet', async (_event: IpcMainInvokeEvent, changeSetId: string) => {
+    return longTermGoalService!.applyChangeSet(changeSetId)
+  })
+
+  ipcMain.handle('longTermGoals:cancelChangeSet', async (_event: IpcMainInvokeEvent, changeSetId: string) => {
+    return longTermGoalService!.cancelChangeSet(changeSetId)
+  })
+
+  ipcMain.handle('longTermGoals:answerIntervention', async (_event: IpcMainInvokeEvent, goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => {
+    return longTermGoalService!.answerIntervention(goalId, interventionId, answers)
   })
 
   // --- Open project in standalone window ---

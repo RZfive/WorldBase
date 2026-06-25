@@ -3,13 +3,14 @@ import { computed, nextTick, ref, watch } from 'vue'
 import type {
   AgentSidebarItem,
   ConversationSidebarItem,
-  GroupSidebarItem
+  GroupSidebarItem,
+  LongTermGoalSidebarItem
 } from './ConversationSidebar.types'
 
 type SidebarCardVariant = 'agent' | 'group' | 'conversation'
 
 const props = withDefaults(defineProps<{
-  item: AgentSidebarItem | GroupSidebarItem | ConversationSidebarItem
+  item: AgentSidebarItem | GroupSidebarItem | ConversationSidebarItem | LongTermGoalSidebarItem
   variant: SidebarCardVariant
   draggable?: boolean
   isDragging?: boolean

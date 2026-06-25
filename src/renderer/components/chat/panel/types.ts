@@ -121,6 +121,21 @@ export interface SidebarConversationItem {
   isActive: boolean
 }
 
+export interface SidebarLongTermGoalItem {
+  id: string
+  title: string
+  subtitle: string
+  searchText: string
+  icon: string
+  status: LongTermGoalDefinition['status']
+  isRunning: boolean
+  needsUserInput: boolean
+  isStreaming: boolean
+  pendingAuthCount: number
+  unreadCount: number
+  isActive: boolean
+}
+
 export interface GroupMentionHint {
   token: string
   label: string
