@@ -508,11 +508,19 @@ export class ScheduledTaskService {
     }))
 
     const progress: ScheduledTaskProgressEntry[] = []
-    const appendProgress = (stage: string, detail?: string) => {
+    const activeToolNames: string[] = []
+    const appendProgress = (
+      stage: string,
+      detail?: string,
+      kind: ScheduledTaskProgressEntry['kind'] = 'progress',
+      toolName?: string
+    ) => {
       const entry: ScheduledTaskProgressEntry = {
         at: new Date().toISOString(),
         stage,
-        detail: detail || undefined
+        detail: detail || undefined,
+        kind,
+        toolName: toolName || undefined
       }
       progress.push(entry)
       this.updateReport(reportId, (report) => {
@@ -538,27 +546,31 @@ export class ScheduledTaskService {
           t('mainDialog.scheduledTaskTodoStage'),
           inProgress
             ? t('mainDialog.scheduledTaskTodoDetailWithCurrent', { total: stageOrEvent.items.length, completed, title: inProgress.title })
-            : t('mainDialog.scheduledTaskTodoDetail', { total: stageOrEvent.items.length, completed })
+            : t('mainDialog.scheduledTaskTodoDetail', { total: stageOrEvent.items.length, completed }),
+          'todo',
+          activeToolNames.length === 1 ? activeToolNames[0] : undefined
         )
         return
       }
 
       if (stageOrEvent.type === 'file_preview_start') {
-        appendProgress(t('mainDialog.scheduledTaskFilePreviewStage'), stageOrEvent.filePath)
+        appendProgress(t('mainDialog.scheduledTaskFilePreviewStage'), stageOrEvent.filePath, 'file', activeToolNames.length === 1 ? activeToolNames[0] : undefined)
         return
       }
 
       if (stageOrEvent.type === 'web_search_result') {
-        appendProgress(t('mainDialog.scheduledTaskWebSearchStage'), t('mainDialog.scheduledTaskWebSearchDetail', { query: stageOrEvent.query, count: stageOrEvent.results.length }))
+        appendProgress(t('mainDialog.scheduledTaskWebSearchStage'), t('mainDialog.scheduledTaskWebSearchDetail', { query: stageOrEvent.query, count: stageOrEvent.results.length }), 'web', activeToolNames.length === 1 ? activeToolNames[0] : undefined)
         return
       }
 
       if (stageOrEvent.type === 'web_fetch_result') {
-        appendProgress(t('mainDialog.scheduledTaskWebFetchStage'), stageOrEvent.result.url)
+        appendProgress(t('mainDialog.scheduledTaskWebFetchStage'), stageOrEvent.result.url, 'web', activeToolNames.length === 1 ? activeToolNames[0] : undefined)
       }
     }
 
     let resultText = ''
+    let thinkingText = ''
+    let hasThinkingProgress = false
     let finalTaskStatus: ScheduledTaskStatus = 'completed'
 
     try {
@@ -575,8 +587,32 @@ export class ScheduledTaskService {
         activeSkillContents,
         allowedMcpServerIds: task.selectedMcpServerIds
       })) {
+        if (event.type === 'thinking' && event.content) {
+          thinkingText += event.content
+          if (!hasThinkingProgress) {
+            hasThinkingProgress = true
+            appendProgress(t('mainDialog.scheduledTaskThinkingStage'), undefined, 'thinking')
+          }
+          this.updateReport(reportId, (report) => {
+            report.thinkingText = thinkingText
+          })
+        }
+        if (event.type === 'tool_start' && event.name) {
+          activeToolNames.push(event.name)
+          appendProgress(t('mainDialog.scheduledTaskToolStartStage'), event.name, 'tool_start', event.name)
+        }
+        if (event.type === 'tool_end' && event.name) {
+          const activeIndex = activeToolNames.lastIndexOf(event.name)
+          if (activeIndex >= 0) {
+            activeToolNames.splice(activeIndex, 1)
+          }
+          appendProgress(t('mainDialog.scheduledTaskToolEndStage'), event.name, 'tool_end', event.name)
+        }
         if (event.type === 'done') {
           resultText = toPlainText(event.message?.content)
+          if (event.thinking && !thinkingText) {
+            thinkingText = event.thinking
+          }
         }
       }
 
@@ -588,6 +624,7 @@ export class ScheduledTaskService {
         report.retryScheduledAt = null
         report.summary = summary
         report.resultText = resultText
+        report.thinkingText = thinkingText || undefined
       })
 
       const updatedTask = this.updateTask(taskId, (currentTask) => {
@@ -622,6 +659,7 @@ export class ScheduledTaskService {
           report.error = errorMessage
           report.retryScheduledAt = retryAt
           report.summary = t('mainDialog.scheduledTaskRetrySummary', { minutes: taskForRetry.retryPolicy.retryDelayMinutes })
+          report.thinkingText = thinkingText || undefined
         })
 
         const retryTask = this.updateTask(taskId, (currentTask) => ({
@@ -645,6 +683,7 @@ export class ScheduledTaskService {
           report.retryScheduledAt = null
           report.summary = summary
           report.resultText = resultText
+          report.thinkingText = thinkingText || undefined
         })
 
         const updatedTask = this.updateTask(taskId, (currentTask) => {

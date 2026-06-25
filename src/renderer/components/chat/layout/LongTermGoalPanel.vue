@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import GoalConversationDialog from './GoalConversationDialog.vue'
 import ProviderModelDropdown from './ProviderModelDropdown.vue'
-import type { ChatMessage } from '../types'
+import type { ChatMessage, ChatMessageBlock, ToolRun } from '../types'
 
 interface ProviderItem {
   id: string
@@ -40,20 +40,20 @@ const emit = defineEmits<{
 
 const { t, locale } = useI18n()
 
-type DialogKind = 'report' | 'activity' | 'intervention' | 'adjust' | 'memory' | 'create' | null
+type DialogKind = 'report' | 'run' | 'intervention' | 'adjust' | 'memory' | 'create' | null
 type InterventionPriority = 'urgent' | 'high' | 'medium' | 'low'
 
-const ACTIVITY_PAGE_SIZE = 8
+const RUN_PAGE_SIZE = 8
 
 const activeDialog = ref<DialogKind>(null)
-const activeActivityId = ref<string | null>(null)
+const activeRunId = ref<string | null>(null)
 const activeInterventionId = ref<string | null>(null)
 const selectedAnswers = ref<Record<string, string>>({})
 const customAnswers = ref<Record<string, string>>({})
 const titleDraft = ref('')
 const editingTitle = ref(false)
-const activityDateFilter = ref('')
-const activityPage = ref(1)
+const runDateFilter = ref('')
+const runPage = ref(1)
 const createProviderId = ref('')
 const createModelId = ref('')
 
@@ -66,10 +66,9 @@ const conversations = computed(() => props.snapshot?.conversations || [])
 const draftChangeSets = computed(() => (props.snapshot?.changeSets || []).filter(item => item.status === 'draft'))
 const latestReview = computed(() => reviews.value[0] || null)
 const latestRun = computed(() => runs.value[0] || null)
-const latestActivity = computed(() => activities.value[0] || null)
 const openInterventions = computed(() => (props.goal?.openInterventions || []).filter(item => item.status === 'open'))
 const selectedIntervention = computed(() => openInterventions.value.find(item => item.id === activeInterventionId.value) || openInterventions.value[0] || null)
-const activeActivity = computed(() => activities.value.find(item => item.id === activeActivityId.value) || null)
+const activeRun = computed(() => runs.value.find(item => item.id === activeRunId.value) || null)
 const nextTasks = computed(() => props.goal?.nextTasks.filter(item => item.status !== 'done' && item.status !== 'skipped').slice(0, 8) || [])
 
 const currentProviderId = computed(() => {
@@ -84,13 +83,6 @@ const currentModelId = computed(() => {
   if (props.goal?.modelId && provider?.models.includes(props.goal.modelId)) return props.goal.modelId
   if (props.selectedModel && provider?.models.includes(props.selectedModel)) return props.selectedModel
   return provider?.activeModel || provider?.models[0] || ''
-})
-
-const currentDoingText = computed(() => {
-  const goal = props.goal
-  if (!goal) return t('chatUi.longTermGoalNoProgress')
-  if (goal.lastRunStatus === 'running') return goal.currentPhase || t('chatUi.longTermGoalRunningNow')
-  return goal.todayFocus || goal.currentPhase || latestActivity.value?.summary || t('chatUi.longTermGoalAutoAdvancing')
 })
 
 const latestReportText = computed(() => {
@@ -109,23 +101,23 @@ const reportPreview = computed(() => {
 
 const allDateKeys = computed(() => {
   const dates = new Set<string>()
-  for (const event of activities.value) {
-    const key = toDateInputValue(event.createdAt)
+  for (const run of runs.value) {
+    const key = toDateInputValue(run.startedAt || run.createdAt)
     if (key) dates.add(key)
   }
   return Array.from(dates).sort((left, right) => right.localeCompare(left))
 })
 
-const filteredActivities = computed(() => {
-  if (!activityDateFilter.value) return activities.value
-  return activities.value.filter(event => toDateInputValue(event.createdAt) === activityDateFilter.value)
+const filteredRuns = computed(() => {
+  if (!runDateFilter.value) return runs.value
+  return runs.value.filter(run => toDateInputValue(run.startedAt || run.createdAt) === runDateFilter.value)
 })
 
-const activityPageCount = computed(() => Math.max(1, Math.ceil(filteredActivities.value.length / ACTIVITY_PAGE_SIZE)))
-const pagedActivities = computed(() => {
-  const page = Math.min(activityPage.value, activityPageCount.value)
-  const start = (page - 1) * ACTIVITY_PAGE_SIZE
-  return filteredActivities.value.slice(start, start + ACTIVITY_PAGE_SIZE)
+const runPageCount = computed(() => Math.max(1, Math.ceil(filteredRuns.value.length / RUN_PAGE_SIZE)))
+const pagedRuns = computed(() => {
+  const page = Math.min(runPage.value, runPageCount.value)
+  const start = (page - 1) * RUN_PAGE_SIZE
+  return filteredRuns.value.slice(start, start + RUN_PAGE_SIZE)
 })
 
 watch(
@@ -133,8 +125,8 @@ watch(
   () => {
     titleDraft.value = props.goal?.title || ''
     closeDialog()
-    activityPage.value = 1
-    activityDateFilter.value = ''
+    runPage.value = 1
+    runDateFilter.value = ''
   },
   { immediate: true }
 )
@@ -147,9 +139,9 @@ watch(
 )
 
 watch(
-  () => [activityDateFilter.value, filteredActivities.value.length],
+  () => [runDateFilter.value, filteredRuns.value.length],
   () => {
-    activityPage.value = Math.min(activityPage.value, activityPageCount.value)
+    runPage.value = Math.min(runPage.value, runPageCount.value)
   }
 )
 
@@ -209,17 +201,70 @@ function priorityLabel (priority: InterventionPriority): string {
   return t('chatUi.priorityLow')
 }
 
+function runStatusLabel (status: LongTermGoalRun['status']): string {
+  if (status === 'running') return t('chatUi.longTermGoalRunning')
+  if (status === 'reviewing') return t('chatUi.dailyReview')
+  if (status === 'failed') return t('chatUi.toolStatusFailed')
+  return t('chatUi.toolStatusCompleted')
+}
+
+function runTitle (run: LongTermGoalRun): string {
+  if (run.status === 'running') return t('chatUi.longTermGoalRunning')
+  if (run.status === 'failed') return t('chatUi.executionFailed')
+  if (run.status === 'reviewing') return t('chatUi.dailyReview')
+  return t('chatUi.executionCompleted')
+}
+
+function runSummary (run: LongTermGoalRun): string {
+  return run.status === 'running'
+    ? (run.progressSummary || t('chatUi.longTermGoalRunningNow'))
+    : (run.progressSummary || run.error || t('chatUi.longTermGoalNoProgress'))
+}
+
+function getRunActivities (run: LongTermGoalRun): LongTermGoalActivityEvent[] {
+  return activities.value.filter(event => event.runId === run.id || event.runId === run.scheduledReportId)
+}
+
+function normalizeToolRuns (run: LongTermGoalRun): ToolRun[] {
+  return (run.toolRuns || []).map(toolRun => ({
+    id: toolRun.id,
+    name: toolRun.name,
+    status: toolRun.status,
+    progress: toolRun.progress.map(step => ({ ...step }))
+  }))
+}
+
+function buildRunContent (run: LongTermGoalRun): string {
+  const runActivities = getRunActivities(run)
+  const progressLines = (run.progress || [])
+    .filter(entry => entry.kind !== 'thinking' && entry.kind !== 'tool_start' && entry.kind !== 'tool_end')
+    .map(entry => `- ${formatTime(entry.at)} · ${[entry.stage, entry.detail].filter(Boolean).join(': ')}`)
+  const activityLines = runActivities.map(event => `- ${formatTime(event.createdAt)} · ${event.title}: ${event.summary}`)
+  const sections = [
+    `# ${runTitle(run)}`,
+    `_${formatTime(run.startedAt)}${run.finishedAt ? ` - ${formatTime(run.finishedAt)}` : ''}_`,
+    `**${runStatusLabel(run.status)}**`,
+    run.progressSummary ? `## ${t('chatUi.progressToday')}\n${run.progressSummary}` : '',
+    run.gapToGoal ? `## ${t('chatUi.gapToGoal')}\n${run.gapToGoal}` : '',
+    run.error ? `## ${t('chatUi.executionError')}\n${run.error}` : '',
+    run.resultText ? `## ${t('chatUi.latestTaskReport')}\n${run.resultText}` : '',
+    progressLines.length > 0 ? `## ${t('chatUi.executionProgress')}\n${progressLines.join('\n')}` : '',
+    activityLines.length > 0 ? `## ${t('chatUi.viewTrace')}\n${activityLines.join('\n')}` : ''
+  ].filter(Boolean)
+  return sections.join('\n\n')
+}
+
 function closeDialog (): void {
   activeDialog.value = null
-  activeActivityId.value = null
+  activeRunId.value = null
   activeInterventionId.value = null
   selectedAnswers.value = {}
   customAnswers.value = {}
 }
 
-function openActivity (activityId: string): void {
-  activeActivityId.value = activityId
-  activeDialog.value = 'activity'
+function openRun (runId: string): void {
+  activeRunId.value = runId
+  activeDialog.value = 'run'
 }
 
 function openInterventionDialog (interventionId: string): void {
@@ -246,6 +291,38 @@ function asUserMessage (content: string): ChatMessage {
   }
 }
 
+function asRunMessage (run: LongTermGoalRun): ChatMessage {
+  const blocks: ChatMessageBlock[] = []
+  if (run.thinkingText?.trim()) {
+    blocks.push({
+      id: `goal_run_thinking_${run.id}`,
+      kind: 'thinking',
+      text: run.thinkingText
+    })
+  }
+  for (const toolRun of normalizeToolRuns(run)) {
+    blocks.push({
+      id: `goal_run_tool_${toolRun.id}`,
+      kind: 'tool',
+      toolRun
+    })
+  }
+  const content = buildRunContent(run)
+  blocks.push({
+    id: `goal_run_content_${run.id}`,
+    kind: 'content',
+    content
+  })
+  return {
+    role: 'assistant',
+    content,
+    speakerName: props.goal?.title || 'Long-Term Goal',
+    toolRuns: normalizeToolRuns(run),
+    thinking: run.thinkingText,
+    blocks
+  }
+}
+
 const reportMessages = computed<ChatMessage[]>(() => {
   const review = latestReview.value
   const sections = [
@@ -259,19 +336,10 @@ const reportMessages = computed<ChatMessage[]>(() => {
   return [asAssistantMessage(sections || latestReportText.value)]
 })
 
-const activityMessages = computed<ChatMessage[]>(() => {
-  const event = activeActivity.value
-  if (!event) return []
-  const content = [
-    `# ${event.title}`,
-    `_${formatTime(event.createdAt)}_`,
-    event.summary,
-    event.details ? `## ${t('chatUi.viewTrace')}\n${event.details}` : '',
-    event.artifacts.length > 0
-      ? `## Artifacts\n${event.artifacts.map(item => `- ${item.title} (${item.kind}): ${item.ref}`).join('\n')}`
-      : ''
-  ].filter(Boolean).join('\n\n')
-  return [asAssistantMessage(content)]
+const runMessages = computed<ChatMessage[]>(() => {
+  const run = activeRun.value
+  if (!run) return []
+  return [asRunMessage(run)]
 })
 
 const interventionMessages = computed<ChatMessage[]>(() => {
@@ -468,14 +536,6 @@ function submitIntervention (): void {
             <p>{{ reportPreview }}</p>
           </button>
 
-          <button type="button" class="goal-summary-card" @click="latestActivity ? openActivity(latestActivity.id) : activeDialog = 'report'">
-            <div class="goal-section-head">
-              <h2>{{ $t('chatUi.doingNow') }}</h2>
-              <span>{{ goal.lastRunStatus === 'running' ? $t('chatUi.longTermGoalRunning') : $t('chatUi.longTermGoalAutoAdvancing') }}</span>
-            </div>
-            <p>{{ currentDoingText }}</p>
-          </button>
-
           <section class="goal-summary-card goal-next-card">
             <div class="goal-section-head">
               <h2>{{ $t('chatUi.nextTaskQueue') }}</h2>
@@ -515,13 +575,13 @@ function submitIntervention (): void {
           <div class="goal-section-head goal-activity-head">
             <div>
               <h2>{{ $t('chatUi.goalActivity') }}</h2>
-              <span>{{ filteredActivities.length }} / {{ activities.length }}</span>
+              <span>{{ filteredRuns.length }} / {{ runs.length }}</span>
             </div>
             <div class="goal-activity-tools">
-              <button type="button" class="goal-ghost-btn compact" @click="activityDateFilter = ''">{{ $t('chatUi.activityFilterAll') }}</button>
-              <button type="button" class="goal-ghost-btn compact" @click="activityDateFilter = todayKey()">{{ $t('chatUi.activityFilterToday') }}</button>
+              <button type="button" class="goal-ghost-btn compact" @click="runDateFilter = ''">{{ $t('chatUi.activityFilterAll') }}</button>
+              <button type="button" class="goal-ghost-btn compact" @click="runDateFilter = todayKey()">{{ $t('chatUi.activityFilterToday') }}</button>
               <input
-                v-model="activityDateFilter"
+                v-model="runDateFilter"
                 class="goal-date-input"
                 type="date"
                 :list="allDateKeys.length > 0 ? 'goal-activity-dates' : undefined"
@@ -531,29 +591,25 @@ function submitIntervention (): void {
               </datalist>
             </div>
           </div>
-          <div v-if="activities.length === 0" class="goal-muted">{{ $t('chatUi.noGoalActivity') }}</div>
-          <div v-else-if="filteredActivities.length === 0" class="goal-muted">{{ $t('chatUi.noGoalActivityForDate') }}</div>
+          <div v-if="runs.length === 0" class="goal-muted">{{ $t('chatUi.noGoalActivity') }}</div>
+          <div v-else-if="filteredRuns.length === 0" class="goal-muted">{{ $t('chatUi.noGoalActivityForDate') }}</div>
           <div v-else class="goal-activity-list">
             <button
-              v-if="goal.lastRunStatus === 'running'"
+              v-for="run in pagedRuns"
+              :key="run.id"
               type="button"
-              class="running"
-              @click="activeDialog = 'report'"
+              :class="{ running: run.status === 'running', failed: run.status === 'failed' }"
+              @click="openRun(run.id)"
             >
-              <time>{{ $t('chatUi.longTermGoalRunning') }}</time>
-              <strong>{{ currentDoingText }}</strong>
-              <span>{{ $t('chatUi.openConversation') }}</span>
-            </button>
-            <button v-for="event in pagedActivities" :key="event.id" type="button" @click="openActivity(event.id)">
-              <time>{{ formatTime(event.createdAt) }}</time>
-              <strong>{{ event.title }}</strong>
-              <span>{{ event.summary }}</span>
+              <time>{{ formatTime(run.startedAt) }}</time>
+              <strong>{{ runTitle(run) }}</strong>
+              <span>{{ runSummary(run) }}</span>
             </button>
           </div>
-          <div v-if="filteredActivities.length > ACTIVITY_PAGE_SIZE" class="goal-pagination">
-            <button type="button" class="goal-ghost-btn compact" :disabled="activityPage <= 1" @click="activityPage -= 1">{{ $t('chatUi.previousPage') }}</button>
-            <span>{{ activityPage }} / {{ activityPageCount }}</span>
-            <button type="button" class="goal-ghost-btn compact" :disabled="activityPage >= activityPageCount" @click="activityPage += 1">{{ $t('chatUi.nextPage') }}</button>
+          <div v-if="filteredRuns.length > RUN_PAGE_SIZE" class="goal-pagination">
+            <button type="button" class="goal-ghost-btn compact" :disabled="runPage <= 1" @click="runPage -= 1">{{ $t('chatUi.previousPage') }}</button>
+            <span>{{ runPage }} / {{ runPageCount }}</span>
+            <button type="button" class="goal-ghost-btn compact" :disabled="runPage >= runPageCount" @click="runPage += 1">{{ $t('chatUi.nextPage') }}</button>
           </div>
         </section>
 
@@ -581,10 +637,10 @@ function submitIntervention (): void {
       />
 
       <GoalConversationDialog
-        :open="activeDialog === 'activity'"
-        :title="activeActivity?.title || $t('chatUi.goalActivity')"
-        :subtitle="activeActivity ? formatTime(activeActivity.createdAt) : goal.title"
-        :messages="activityMessages"
+        :open="activeDialog === 'run'"
+        :title="activeRun ? runTitle(activeRun) : $t('chatUi.goalActivity')"
+        :subtitle="activeRun ? formatTime(activeRun.startedAt) : goal.title"
+        :messages="runMessages"
         @close="closeDialog"
       />
 
@@ -749,6 +805,11 @@ function submitIntervention (): void {
   font-size: 0.78rem;
 }
 
+.goal-next-list small {
+  font-size: 0.71rem;
+  line-height: 1.25;
+}
+
 .goal-kicker {
   display: flex;
   flex-wrap: wrap;
@@ -791,8 +852,8 @@ function submitIntervention (): void {
 
 .goal-overview-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .goal-summary-card,
@@ -801,7 +862,7 @@ function submitIntervention (): void {
   border: 1px solid var(--app-border);
   border-radius: 8px;
   background: color-mix(in srgb, var(--app-panel) 92%, transparent);
-  padding: 12px;
+  padding: 10px;
 }
 
 button.goal-summary-card {
@@ -820,11 +881,12 @@ button.goal-summary-card:hover,
 .goal-change p {
   margin: 0;
   color: var(--app-text-muted);
-  line-height: 1.5;
+  line-height: 1.38;
   display: -webkit-box;
-  -webkit-line-clamp: 5;
+  -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  font-size: 0.8rem;
 }
 
 .goal-section-head {
@@ -843,21 +905,23 @@ button.goal-summary-card:hover,
 
 .goal-next-list {
   margin: 0;
-  padding-left: 18px;
+  padding-left: 16px;
 }
 
 .goal-next-list li {
-  margin: 6px 0;
+  margin: 4px 0;
 }
 
 .goal-next-list span {
   display: block;
+  font-size: 0.82rem;
+  line-height: 1.35;
 }
 
 .goal-intervention-list {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 5px;
 }
 
 .goal-intervention-item {
@@ -867,7 +931,7 @@ button.goal-summary-card:hover,
   background: var(--app-panel-muted);
   color: var(--app-text);
   text-align: left;
-  padding: 8px;
+  padding: 6px 8px;
   cursor: pointer;
 }
 
@@ -878,10 +942,15 @@ button.goal-summary-card:hover,
 }
 
 .goal-intervention-item span {
-  margin-top: 4px;
+  margin-top: 3px;
   color: var(--app-text-muted);
-  font-size: 0.78rem;
-  line-height: 1.4;
+  font-size: 0.72rem;
+  line-height: 1.3;
+}
+
+.goal-intervention-item strong {
+  font-size: 0.82rem;
+  line-height: 1.3;
 }
 
 .goal-intervention-item.priority-urgent {
@@ -952,6 +1021,11 @@ button.goal-summary-card:hover,
   background: color-mix(in srgb, #2563eb 8%, var(--app-panel-muted));
 }
 
+.goal-activity-list button.failed {
+  border-color: color-mix(in srgb, #dc2626 36%, var(--app-border));
+  background: color-mix(in srgb, #dc2626 7%, var(--app-panel-muted));
+}
+
 .goal-activity-list span {
   color: var(--app-text-muted);
   overflow: hidden;
@@ -964,7 +1038,7 @@ button.goal-summary-card:hover,
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .goal-primary-btn,

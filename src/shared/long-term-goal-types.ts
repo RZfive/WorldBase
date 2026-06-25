@@ -158,6 +158,24 @@ export interface LongTermGoalDailyReview {
   updatedAt: string
 }
 
+export interface LongTermGoalRunProgressEntry {
+  at: string
+  stage: string
+  detail?: string
+  kind?: 'progress' | 'thinking' | 'tool_start' | 'tool_end' | 'todo' | 'file' | 'web'
+  toolName?: string
+}
+
+export interface LongTermGoalRunToolRun {
+  id: string
+  name: string
+  status: 'running' | 'completed' | 'failed'
+  progress: Array<{
+    stage: string
+    detail?: string
+  }>
+}
+
 export interface LongTermGoalRun {
   id: string
   goalId: string
@@ -168,6 +186,9 @@ export interface LongTermGoalRun {
   progressSummary: string
   gapToGoal: string
   resultText?: string
+  thinkingText?: string
+  progress: LongTermGoalRunProgressEntry[]
+  toolRuns: LongTermGoalRunToolRun[]
   error?: string
   notificationLevel: LongTermGoalNotificationLevel
   createdAt: string

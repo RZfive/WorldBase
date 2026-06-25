@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import type { LongTermGoalStore } from '../settings/long-term-goal-store.js'
-import type { ScheduledTaskDefinition, ScheduledTaskRunReport } from '../settings/scheduled-task-store.js'
+import type { ScheduledTaskDefinition, ScheduledTaskProgressEntry, ScheduledTaskRunReport } from '../settings/scheduled-task-store.js'
 import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.js'
 import type {
   LongTermGoalActivityEvent,
@@ -13,6 +13,7 @@ import type {
   LongTermGoalMessageResult,
   LongTermGoalNextTask,
   LongTermGoalRun,
+  LongTermGoalRunToolRun,
   LongTermGoalSaveInput,
   LongTermGoalSchedule,
   LongTermGoalSnapshot
@@ -266,6 +267,74 @@ function extractJsonObject (text: string): Record<string, unknown> | null {
     }
   }
   return null
+}
+
+function progressToText (entry: ScheduledTaskProgressEntry): string {
+  return [entry.stage, entry.detail].filter(Boolean).join(': ')
+}
+
+function shouldAttachProgressToTool (entry: ScheduledTaskProgressEntry): boolean {
+  return entry.kind === 'progress' ||
+    entry.kind === 'todo' ||
+    entry.kind === 'file' ||
+    entry.kind === 'web'
+}
+
+function reportProgressSummary (report: ScheduledTaskRunReport): string {
+  const latest = [...(report.progress || [])]
+    .reverse()
+    .find(entry => entry.kind !== 'thinking')
+  if (latest) return progressToText(latest)
+  return report.summary || '正在执行长期目标。'
+}
+
+function buildRunToolRuns (report: ScheduledTaskRunReport): LongTermGoalRunToolRun[] {
+  const toolRuns: LongTermGoalRunToolRun[] = []
+  let activeTool: LongTermGoalRunToolRun | null = null
+
+  for (const entry of report.progress || []) {
+    if (entry.kind === 'tool_start') {
+      activeTool = {
+        id: `${report.id}_${toolRuns.length + 1}`,
+        name: entry.toolName || entry.detail || entry.stage,
+        status: 'running',
+        progress: []
+      }
+      toolRuns.push(activeTool)
+      continue
+    }
+
+    if (entry.kind === 'tool_end') {
+      const target = [...toolRuns].reverse().find(item => item.status === 'running' && item.name === (entry.toolName || entry.detail || item.name)) ||
+        activeTool ||
+        toolRuns[toolRuns.length - 1] ||
+        null
+      if (target) {
+        target.status = 'completed'
+        if (entry.detail && !target.progress.some(step => step.stage === entry.stage && step.detail === entry.detail)) {
+          target.progress.push({ stage: entry.stage, detail: entry.detail })
+        }
+      }
+      activeTool = [...toolRuns].reverse().find(item => item.status === 'running') || null
+      continue
+    }
+
+    if (shouldAttachProgressToTool(entry)) {
+      if (activeTool) {
+        activeTool.progress.push({ stage: entry.stage, detail: entry.detail })
+      }
+    }
+  }
+
+  if (report.status === 'completed' || report.status === 'failed') {
+    for (const toolRun of toolRuns) {
+      if (toolRun.status === 'running') {
+        toolRun.status = report.status === 'failed' ? 'failed' : 'completed'
+      }
+    }
+  }
+
+  return toolRuns
 }
 
 function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedGoalRunResult {
@@ -656,35 +725,41 @@ export class LongTermGoalService {
       if (existingRun?.status === 'completed' || existingRun?.status === 'failed') continue
 
       if (report.status === 'running' || report.status === 'retrying') {
+        const runId = existingRun?.id || generateId('goal_run')
+        this.upsertRun({
+          id: runId,
+          goalId: goal.id,
+          scheduledReportId: report.id,
+          status: 'running',
+          startedAt: report.startedAt,
+          finishedAt: null,
+          progressSummary: reportProgressSummary(report),
+          gapToGoal: existingRun?.gapToGoal || '',
+          resultText: report.resultText || existingRun?.resultText,
+          thinkingText: report.thinkingText || existingRun?.thinkingText,
+          progress: report.progress || [],
+          toolRuns: buildRunToolRuns(report),
+          notificationLevel: 'silent',
+          createdAt: existingRun?.createdAt || report.startedAt,
+          updatedAt: report.updatedAt || nowIso()
+        })
         if (!existingRun) {
-          this.snapshot.runs.unshift({
-            id: generateId('goal_run'),
-            goalId: goal.id,
-            scheduledReportId: report.id,
-            status: 'running',
-            startedAt: report.startedAt,
-            finishedAt: null,
-            progressSummary: '正在执行长期目标。',
-            gapToGoal: '',
-            notificationLevel: 'silent',
-            createdAt: report.startedAt,
-            updatedAt: nowIso()
-          })
           this.addActivity({
             goalId: goal.id,
-            runId: report.id,
+            runId,
             actor: 'system',
             type: 'run_started',
             title: '自动执行开始',
             summary: report.trigger === 'manual' ? '用户手动启动了长期目标。' : '长期目标按计划自动开始执行。'
           })
-          this.upsertGoal({
-            ...goal,
-            lastRunStatus: 'running',
-            updatedAt: nowIso()
-          })
-          changed = true
         }
+        this.upsertGoal({
+          ...goal,
+          lastRunStatus: 'running',
+          currentPhase: reportProgressSummary(report),
+          updatedAt: nowIso()
+        })
+        changed = true
         continue
       }
 
@@ -722,6 +797,9 @@ export class LongTermGoalService {
       progressSummary: parsed.progressSummary,
       gapToGoal: parsed.gapToGoal,
       resultText: report.resultText || report.summary,
+      thinkingText: report.thinkingText || existingRun?.thinkingText,
+      progress: report.progress || existingRun?.progress || [],
+      toolRuns: buildRunToolRuns(report),
       notificationLevel: parsed.notificationLevel,
       createdAt: existingRun?.createdAt || report.startedAt,
       updatedAt: nowIso()
@@ -854,6 +932,9 @@ export class LongTermGoalService {
       progressSummary: summary,
       gapToGoal: '执行失败，需要处理失败原因后继续。',
       resultText: report.resultText,
+      thinkingText: report.thinkingText || existingRun?.thinkingText,
+      progress: report.progress || existingRun?.progress || [],
+      toolRuns: buildRunToolRuns(report),
       error: report.error || report.summary,
       notificationLevel: 'notify',
       createdAt: existingRun?.createdAt || report.startedAt,
