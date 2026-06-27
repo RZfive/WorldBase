@@ -34,6 +34,10 @@ interface ScheduledTaskExecutionContext {
   scheduledFor?: string | null
 }
 
+interface ScheduledTaskListOptions {
+  includeHidden?: boolean
+}
+
 const MAX_REPORT_HISTORY = 200
 const REPORT_SUMMARY_MAX_LENGTH = 180
 
@@ -180,15 +184,23 @@ export class ScheduledTaskService {
     this.runningTaskIds.clear()
   }
 
-  listTasks (): ScheduledTaskDefinition[] {
-    return clone(sortTasks(this.tasks))
+  listTasks (options: ScheduledTaskListOptions = {}): ScheduledTaskDefinition[] {
+    const tasks = options.includeHidden ? this.tasks : this.tasks.filter(task => task.hidden !== true)
+    return clone(sortTasks(tasks))
   }
 
-  listReports (taskId?: string): ScheduledTaskRunReport[] {
+  listReports (taskId?: string, options: ScheduledTaskListOptions = {}): ScheduledTaskRunReport[] {
+    const visibleTaskIds = options.includeHidden
+      ? null
+      : new Set(this.tasks.filter(task => task.hidden !== true).map(task => task.id))
     const filtered = taskId
       ? this.reports.filter(report => report.taskId === taskId)
-      : this.reports
+      : this.reports.filter(report => visibleTaskIds?.has(report.taskId) ?? true)
     return clone(sortReports(filtered))
+  }
+
+  listAllReports (): ScheduledTaskRunReport[] {
+    return this.listReports(undefined, { includeHidden: true })
   }
 
   getReport (reportId: string): ScheduledTaskRunReport | null {
@@ -210,6 +222,7 @@ export class ScheduledTaskService {
       id,
       title: normalizeString(input.title),
       enabled: input.enabled !== false,
+      hidden: input.hidden === true,
       createdBy: input.createdBy === 'ai' ? 'ai' : 'manual',
       prompt: normalizeString(input.prompt),
       schedule: input.schedule,

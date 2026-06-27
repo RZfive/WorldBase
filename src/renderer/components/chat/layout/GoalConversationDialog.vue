@@ -23,6 +23,7 @@ const props = withDefaults(defineProps<{
   selectedModel?: string
   availableAgents?: Array<{ id: string; name: string; icon?: string }>
   selectedAgentId?: string
+  isLoading?: boolean
 }>(), {
   subtitle: '',
   allowInput: false,
@@ -31,7 +32,8 @@ const props = withDefaults(defineProps<{
   activeProviderId: '',
   selectedModel: '',
   availableAgents: () => [],
-  selectedAgentId: ''
+  selectedAgentId: '',
+  isLoading: false
 })
 
 const emit = defineEmits<{
@@ -163,7 +165,7 @@ function buildAttachmentPrompt (): string {
         <div class="goal-dialog-messages">
           <MessageList
             :messages="messages"
-            :is-loading="false"
+            :is-loading="isLoading"
             :file-preview="filePreview"
             assistant-icon="◎"
             assistant-name="Long-Term Goal"
@@ -175,7 +177,7 @@ function buildAttachmentPrompt (): string {
         <ChatInput
           v-if="allowInput"
           v-model="inputText"
-          :is-loading="false"
+          :is-loading="isLoading"
           :pending-auth-count="0"
           :pending-images="pendingImages"
           :pending-files="pendingFiles"

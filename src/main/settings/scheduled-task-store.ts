@@ -56,6 +56,7 @@ export interface ScheduledTaskDefinition {
   id: string
   title: string
   enabled: boolean
+  hidden?: boolean
   createdBy: 'manual' | 'ai'
   prompt: string
   schedule: ScheduledTaskSchedule
@@ -257,6 +258,7 @@ function normalizeTask (value: unknown): ScheduledTaskDefinition | null {
     id,
     title,
     enabled: record.enabled !== false,
+    hidden: record.hidden === true,
     createdBy: record.createdBy === 'ai' ? 'ai' : 'manual',
     prompt,
     schedule,

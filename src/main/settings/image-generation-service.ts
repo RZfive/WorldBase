@@ -219,6 +219,15 @@ export async function runImageStudioRequest (
       throw new Error(t('mainDialog.providerNoModels'))
     }
 
+    // Surface the capability-mismatch early with an actionable message instead of
+    // letting the call reach the provider and fail with a generic API error.
+    const capability = req.mode === 'edit' ? 'imageEditing' : 'imageGeneration'
+    const capabilityOn = provider.modelCapabilities?.[model]?.[capability] === true
+    if (!capabilityOn) {
+      const capabilityLabel = req.mode === 'edit' ? t('mainDialog.imageEditingCapability') : t('mainDialog.imageGenerationCapability')
+      throw new Error(t('mainDialog.imageModelCapabilityMissing', { model, capability: capabilityLabel }))
+    }
+
     const aiProvider = new OpenAIProvider()
     aiProvider.setApiKey(provider.apiKey)
     aiProvider.setBaseUrl(provider.baseUrl)
@@ -276,6 +285,19 @@ export async function runImageStudioRequest (
 
     return { ok: true, entries }
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : t('mainDialog.imageGenerationFailed') }
+    // Keep the full provider error (which already includes HTTP status + response
+    // body from fetchWithRetry) and prefix it with provider/model context so the
+    // studio detail popup can show exactly why the call failed.
+    const rawMessage = error instanceof Error ? error.message : t('mainDialog.imageGenerationFailed')
+    const providerLabel = req.providerId || t('mainDialog.unknownProvider')
+    const modelLabel = req.model || t('mainDialog.unknownModel')
+    return {
+      ok: false,
+      error: t('mainDialog.imageGenerationFailedWithContext', {
+        provider: providerLabel,
+        model: modelLabel,
+        reason: rawMessage
+      })
+    }
   }
 }

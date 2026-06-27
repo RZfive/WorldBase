@@ -114,6 +114,12 @@ const {
   applyLongTermGoalChangeSet,
   cancelLongTermGoalChangeSet,
   answerLongTermGoalIntervention,
+  streamingAdjust,
+  streamingCreate,
+  streamingRun,
+  createConversationHistory,
+  goalAutoOpenRunId,
+  clearGoalAutoOpenRunId,
   shouldUseConversationProviderOverride,
   showSkillPicker,
   stopCurrentStream,
@@ -662,6 +668,11 @@ watch(
           :selected-model="selectedModel"
           :available-agents="nonDefaultAgents"
           :selected-agent-id="agentSelectorValue"
+          :streaming-adjust="streamingAdjust"
+          :streaming-create="streamingCreate"
+          :streaming-run="streamingRun"
+          :create-conversation-history="createConversationHistory"
+          :goal-auto-open-run-id="goalAutoOpenRunId"
           @create="createLongTermGoal"
           @run-now="runLongTermGoalNow"
           @pause="pauseLongTermGoal"
@@ -674,6 +685,7 @@ watch(
           @cancel-change-set="cancelLongTermGoalChangeSet"
           @answer-intervention="answerLongTermGoalIntervention"
           @update:selected-agent-id="handleAgentSelectionChange"
+          @clear-auto-open-run="clearGoalAutoOpenRunId"
         />
 
         <template v-else>

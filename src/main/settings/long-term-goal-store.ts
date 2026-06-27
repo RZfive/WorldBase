@@ -418,6 +418,10 @@ function normalizeConversationTurn (value: unknown): LongTermGoalConversationTur
     goalId,
     role: record.role === 'assistant' ? 'assistant' : 'user',
     content,
+    thinking: normalizeString(record.thinking) || undefined,
+    toolRuns: Array.isArray(record.toolRuns)
+      ? record.toolRuns.map(normalizeRunToolRun).filter((item): item is LongTermGoalRunToolRun => Boolean(item))
+      : undefined,
     createdAt: normalizeIsoDate(record.createdAt) || new Date().toISOString(),
     appliedChangeId: normalizeString(record.appliedChangeId) || null
   }

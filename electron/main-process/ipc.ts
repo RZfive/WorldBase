@@ -19,7 +19,7 @@ import type { ImageLibraryData, ImageLibraryEntry, ImageLibraryFolderCard, Image
 import type { ImageStudioGenerateRequest } from '../../src/shared/image-studio-types.js'
 import type { Skill } from '../../src/main/settings/skill-store.js'
 import type { ScheduledTaskDefinition } from '../../src/main/settings/scheduled-task-store.js'
-import type { LongTermGoalSaveInput } from '../../src/shared/long-term-goal-types.js'
+import type { LongTermGoalSaveInput, LongTermGoalStreamEvent } from '../../src/shared/long-term-goal-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '../../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
@@ -1790,6 +1790,14 @@ export function setupIPC (): void {
     return longTermGoalService!.saveGoal(goal)
   })
 
+  ipcMain.handle('longTermGoals:rename', async (_event: IpcMainInvokeEvent, goalId: string, title: string) => {
+    return longTermGoalService!.renameGoal(goalId, title)
+  })
+
+  ipcMain.handle('longTermGoals:setStatus', async (_event: IpcMainInvokeEvent, goalId: string, status: LongTermGoalSaveInput['status']) => {
+    return longTermGoalService!.setGoalStatus(goalId, status || 'active')
+  })
+
   ipcMain.handle('longTermGoals:delete', async (_event: IpcMainInvokeEvent, goalId: string) => {
     return longTermGoalService!.deleteGoal(goalId)
   })
@@ -1800,6 +1808,34 @@ export function setupIPC (): void {
 
   ipcMain.handle('longTermGoals:message', async (_event: IpcMainInvokeEvent, goalId: string, content: string) => {
     return longTermGoalService!.appendGoalMessage(goalId, content)
+  })
+
+  ipcMain.handle('longTermGoals:streamMessage', async (event: IpcMainInvokeEvent, goalId: string, content: string, streamId: string) => {
+    const sender = event.sender
+    const channel = `longTermGoals:stream-event:${streamId}`
+    const onEvent = (goalStreamEvent: LongTermGoalStreamEvent) => {
+      if (sender.isDestroyed()) return
+      try {
+        sender.send(channel, goalStreamEvent)
+      } catch (sendErr) {
+        console.error('[longTermGoals:streamMessage] Failed to forward stream event:', sendErr)
+      }
+    }
+    return await longTermGoalService!.appendGoalMessage(goalId, content, onEvent)
+  })
+
+  ipcMain.handle('longTermGoals:streamCreate', async (event: IpcMainInvokeEvent, content: string, options: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] } | undefined, streamId: string) => {
+    const sender = event.sender
+    const channel = `longTermGoals:stream-event:${streamId}`
+    const onEvent = (goalStreamEvent: LongTermGoalStreamEvent) => {
+      if (sender.isDestroyed()) return
+      try {
+        sender.send(channel, goalStreamEvent)
+      } catch (sendErr) {
+        console.error('[longTermGoals:streamCreate] Failed to forward stream event:', sendErr)
+      }
+    }
+    return await longTermGoalService!.createGoalViaConversation(content, options, onEvent)
   })
 
   ipcMain.handle('longTermGoals:applyChangeSet', async (_event: IpcMainInvokeEvent, changeSetId: string) => {

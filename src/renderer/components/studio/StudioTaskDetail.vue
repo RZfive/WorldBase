@@ -66,7 +66,7 @@ watch(() => props.task?.id, () => {
             </div>
             <div v-else-if="task.status === 'error'" class="detail-state detail-state-error">
               <p>{{ $t('studioUi.generationFailed') }}</p>
-              <span>{{ task.error }}</span>
+              <pre v-if="task.error" class="detail-error-text">{{ task.error }}</pre>
               <button class="detail-btn" type="button" @click="emit('retry', task.id)">↻ {{ $t('common.retry') }}</button>
             </div>
             <div v-else class="detail-state">
@@ -236,7 +236,26 @@ watch(() => props.task?.id, () => {
 
 .detail-state p { margin: 0; font-size: 0.9em; }
 .detail-state span { font-size: 0.8em; color: var(--app-text-faint); max-width: 80%; text-align: center; }
-.detail-state-error p { color: var(--app-danger); }
+.detail-state-error { align-items: stretch; }
+.detail-state-error p { color: var(--app-danger); margin: 0 0 8px; text-align: center; }
+.detail-error-text {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  max-width: 100%;
+  max-height: 60vh;
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel);
+  color: var(--app-danger);
+  font-family: var(--app-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.8em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: left;
+}
+.detail-state-error .detail-btn { align-self: center; }
 .detail-spinner { display: inline-block; font-size: 1.6em; animation: detail-spin 1.2s linear infinite; }
 @keyframes detail-spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
 

@@ -31,6 +31,7 @@ type LongTermGoalIntervention = import('./shared/long-term-goal-types.js').LongT
 type LongTermGoalMessageResult = import('./shared/long-term-goal-types.js').LongTermGoalMessageResult
 type LongTermGoalRun = import('./shared/long-term-goal-types.js').LongTermGoalRun
 type LongTermGoalActivityEvent = import('./shared/long-term-goal-types.js').LongTermGoalActivityEvent
+type LongTermGoalStreamEvent = import('./shared/long-term-goal-types.js').LongTermGoalStreamEvent
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -752,6 +753,7 @@ interface ScheduledTaskDefinition {
   id: string
   title: string
   enabled: boolean
+  hidden?: boolean
   createdBy: 'manual' | 'ai'
   prompt: string
   schedule: ScheduledTaskSchedule
@@ -1011,15 +1013,21 @@ interface ElectronAPI {
   listLongTermGoals: () => Promise<LongTermGoalDefinition[]>
   getLongTermGoalSnapshot: (goalId?: string) => Promise<LongTermGoalSnapshot>
   saveLongTermGoal: (goal: LongTermGoalSaveInput) => Promise<LongTermGoalDefinition>
+  renameLongTermGoal: (goalId: string, title: string) => Promise<LongTermGoalDefinition>
+  setLongTermGoalStatus: (goalId: string, status: LongTermGoalDefinition['status']) => Promise<LongTermGoalDefinition>
   deleteLongTermGoal: (goalId: string) => Promise<boolean>
   runLongTermGoalNow: (goalId: string) => Promise<ScheduledTaskRunReport>
   sendLongTermGoalMessage: (goalId: string, content: string) => Promise<LongTermGoalMessageResult>
+  streamLongTermGoalMessage: (goalId: string, content: string, streamId: string) => Promise<LongTermGoalMessageResult>
+  streamLongTermGoalCreate: (content: string, options: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] } | undefined, streamId: string) => Promise<LongTermGoalMessageResult>
   applyLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
   cancelLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
   answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => Promise<LongTermGoalDefinition>
   onLongTermGoalsChanged: (callback: (goals: LongTermGoalDefinition[]) => void) => () => void
   onLongTermGoalSnapshotChanged: (callback: (snapshot: LongTermGoalSnapshot) => void) => () => void
   onLongTermGoalInterventionRequested: (callback: (intervention: LongTermGoalIntervention) => void) => () => void
+  onLongTermGoalStreamEvent: (streamId: string, callback: (event: LongTermGoalStreamEvent) => void) => () => void
+  onLongTermGoalRunProgress: (callback: (payload: { goalId: string; run: LongTermGoalRun }) => void) => () => void
 
   // Skills
   listSkills: () => Promise<SkillInfo[]>
