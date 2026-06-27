@@ -60,6 +60,12 @@ function taskEntryThumbSrc (task: ImageStudioTask): string {
             <span v-if="task.status === 'running'" class="queue-spinner">⏳</span>
             {{ task.request.mode === 'edit' ? $t('studioUi.editModeShort') : $t('studioUi.generateModeShort') }} · {{ statusLabel(task.status) }}
           </span>
+          <span
+            v-if="task.status === 'error' && task.error"
+            class="queue-error"
+            :title="task.error"
+            @click.stop="emit('open', task)"
+          >{{ task.error }}</span>
         </div>
 
         <button
@@ -179,6 +185,23 @@ function taskEntryThumbSrc (task: ImageStudioTask): string {
 .queue-status.status-success { color: var(--app-success); }
 .queue-status.status-error { color: var(--app-danger); }
 .queue-status.status-running { color: var(--app-accent); }
+
+.queue-error {
+  margin-top: 2px;
+  font-size: 0.72em;
+  line-height: 1.35;
+  color: var(--app-danger);
+  cursor: pointer;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.queue-error:hover { text-decoration: underline; }
 
 .queue-agent-tag {
   flex-shrink: 0;

@@ -4,7 +4,7 @@ import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, A
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse } from '../src/shared/image-studio-types.js'
 import type { ConversationFolderWorkspaceState, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
-import type { LongTermGoalChangeSet, LongTermGoalDefinition, LongTermGoalIntervention, LongTermGoalMessageResult, LongTermGoalSaveInput, LongTermGoalSnapshot } from '../src/shared/long-term-goal-types.js'
+import type { LongTermGoalChangeSet, LongTermGoalDefinition, LongTermGoalIntervention, LongTermGoalMessageResult, LongTermGoalRun, LongTermGoalSaveInput, LongTermGoalSnapshot, LongTermGoalStreamEvent } from '../src/shared/long-term-goal-types.js'
 
 interface ChatMessage {
   role: string
@@ -227,6 +227,7 @@ interface ScheduledTaskDefinition {
   id: string
   title: string
   enabled: boolean
+  hidden?: boolean
   createdBy: 'manual' | 'ai'
   prompt: string
   schedule: ScheduledTaskSchedule
@@ -646,15 +647,21 @@ export interface ElectronAPI {
   listLongTermGoals: () => Promise<LongTermGoalDefinition[]>
   getLongTermGoalSnapshot: (goalId?: string) => Promise<LongTermGoalSnapshot>
   saveLongTermGoal: (goal: LongTermGoalSaveInput) => Promise<LongTermGoalDefinition>
+  renameLongTermGoal: (goalId: string, title: string) => Promise<LongTermGoalDefinition>
+  setLongTermGoalStatus: (goalId: string, status: LongTermGoalDefinition['status']) => Promise<LongTermGoalDefinition>
   deleteLongTermGoal: (goalId: string) => Promise<boolean>
   runLongTermGoalNow: (goalId: string) => Promise<ScheduledTaskRunReport>
   sendLongTermGoalMessage: (goalId: string, content: string) => Promise<LongTermGoalMessageResult>
+  streamLongTermGoalMessage: (goalId: string, content: string, streamId: string) => Promise<LongTermGoalMessageResult>
+  streamLongTermGoalCreate: (content: string, options: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] } | undefined, streamId: string) => Promise<LongTermGoalMessageResult>
   applyLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
   cancelLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
   answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => Promise<LongTermGoalDefinition>
   onLongTermGoalsChanged: (callback: (goals: LongTermGoalDefinition[]) => void) => () => void
   onLongTermGoalSnapshotChanged: (callback: (snapshot: LongTermGoalSnapshot) => void) => () => void
   onLongTermGoalInterventionRequested: (callback: (intervention: LongTermGoalIntervention) => void) => () => void
+  onLongTermGoalStreamEvent: (streamId: string, callback: (event: LongTermGoalStreamEvent) => void) => () => void
+  onLongTermGoalRunProgress: (callback: (payload: { goalId: string; run: LongTermGoalRun }) => void) => () => void
 
   // Skills
   listSkills: () => Promise<Array<{ id: string; name: string; description: string; fileCount: number; files: Array<{ relativePath: string; type: string; size: number }>; scripts: Array<{ relativePath: string; language: string }>; tools: string[]; createdAt: string; updatedAt: string }>>
@@ -928,9 +935,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listLongTermGoals: () => ipcRenderer.invoke('longTermGoals:list'),
   getLongTermGoalSnapshot: (goalId?: string) => ipcRenderer.invoke('longTermGoals:getSnapshot', goalId),
   saveLongTermGoal: (goal: LongTermGoalSaveInput) => ipcRenderer.invoke('longTermGoals:save', goal),
+  renameLongTermGoal: (goalId: string, title: string) => ipcRenderer.invoke('longTermGoals:rename', goalId, title),
+  setLongTermGoalStatus: (goalId: string, status: LongTermGoalDefinition['status']) => ipcRenderer.invoke('longTermGoals:setStatus', goalId, status),
   deleteLongTermGoal: (goalId: string) => ipcRenderer.invoke('longTermGoals:delete', goalId),
   runLongTermGoalNow: (goalId: string) => ipcRenderer.invoke('longTermGoals:runNow', goalId),
   sendLongTermGoalMessage: (goalId: string, content: string) => ipcRenderer.invoke('longTermGoals:message', goalId, content),
+  streamLongTermGoalMessage: (goalId: string, content: string, streamId: string) => ipcRenderer.invoke('longTermGoals:streamMessage', goalId, content, streamId),
+  streamLongTermGoalCreate: (content: string, options: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] } | undefined, streamId: string) => ipcRenderer.invoke('longTermGoals:streamCreate', content, options, streamId),
   applyLongTermGoalChangeSet: (changeSetId: string) => ipcRenderer.invoke('longTermGoals:applyChangeSet', changeSetId),
   cancelLongTermGoalChangeSet: (changeSetId: string) => ipcRenderer.invoke('longTermGoals:cancelChangeSet', changeSetId),
   answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => ipcRenderer.invoke('longTermGoals:answerIntervention', goalId, interventionId, answers),
@@ -948,6 +959,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_e: Electron.IpcRendererEvent, intervention: LongTermGoalIntervention) => callback(intervention)
     ipcRenderer.on('longTermGoals:interventionRequested', handler)
     return () => { ipcRenderer.removeListener('longTermGoals:interventionRequested', handler) }
+  },
+  onLongTermGoalStreamEvent: (streamId: string, callback: (event: LongTermGoalStreamEvent) => void) => {
+    const channel = `longTermGoals:stream-event:${streamId}`
+    const handler = (_e: Electron.IpcRendererEvent, event: LongTermGoalStreamEvent) => callback(event)
+    ipcRenderer.on(channel, handler)
+    return () => { ipcRenderer.removeListener(channel, handler) }
+  },
+  onLongTermGoalRunProgress: (callback: (payload: { goalId: string; run: LongTermGoalRun }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { goalId: string; run: LongTermGoalRun }) => callback(payload)
+    ipcRenderer.on('longTermGoals:runProgress', handler)
+    return () => { ipcRenderer.removeListener('longTermGoals:runProgress', handler) }
   },
 
   // Plan Mode

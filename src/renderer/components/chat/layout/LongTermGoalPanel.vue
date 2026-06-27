@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import GoalConversationDialog from './GoalConversationDialog.vue'
 import ProviderModelDropdown from './ProviderModelDropdown.vue'
 import type { ChatMessage, ChatMessageBlock, ToolRun } from '../types'
+import type { LongTermGoalConversationTurn, LongTermGoalMessageResult } from '../../../../shared/long-term-goal-types'
 
 interface ProviderItem {
   id: string
@@ -21,6 +22,11 @@ const props = defineProps<{
   selectedModel?: string
   availableAgents?: Array<{ id: string; name: string; icon?: string }>
   selectedAgentId?: string
+  streamingAdjust?: { userContent: string; message: ChatMessage } | null
+  streamingCreate?: { userContent: string; message: ChatMessage } | null
+  streamingRun?: { goalId: string; run: LongTermGoalRun } | null
+  createConversationHistory?: ChatMessage[]
+  goalAutoOpenRunId?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -36,18 +42,22 @@ const emit = defineEmits<{
   (e: 'cancelChangeSet', changeSetId: string): void
   (e: 'answerIntervention', goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }>): void
   (e: 'update:selected-agent-id', id: string): void
+  (e: 'clear-auto-open-run'): void
 }>()
 
 const { t, locale } = useI18n()
 
 type DialogKind = 'report' | 'run' | 'intervention' | 'adjust' | 'memory' | 'create' | null
 type InterventionPriority = 'urgent' | 'high' | 'medium' | 'low'
+type GoalAdjustmentPhase = 'idle' | 'clarifying' | 'proposal'
 
 const RUN_PAGE_SIZE = 8
 
 const activeDialog = ref<DialogKind>(null)
 const activeRunId = ref<string | null>(null)
 const activeInterventionId = ref<string | null>(null)
+const adjustmentPhase = ref<GoalAdjustmentPhase>('idle')
+const adjustmentProposal = ref<null | LongTermGoalMessageResult['proposal']>(null)
 const selectedAnswers = ref<Record<string, string>>({})
 const customAnswers = ref<Record<string, string>>({})
 const titleDraft = ref('')
@@ -56,6 +66,7 @@ const runDateFilter = ref('')
 const runPage = ref(1)
 const createProviderId = ref('')
 const createModelId = ref('')
+const GOAL_ADJUSTMENT_METADATA_LABEL = 'LONG_TERM_GOAL_ADJUSTMENT_METADATA'
 
 const providers = computed(() => props.providers || [])
 const reviews = computed(() => props.snapshot?.reviews || [])
@@ -150,6 +161,16 @@ watch(
   { immediate: true }
 )
 
+watch(
+  () => props.goalAutoOpenRunId,
+  (runId) => {
+    if (runId) {
+      openRun(runId)
+      emit('clear-auto-open-run')
+    }
+  }
+)
+
 function formatTime (value?: string | null): string {
   if (!value) return t('chatUi.notScheduled')
   const date = new Date(value)
@@ -172,12 +193,12 @@ function todayKey (): string {
 }
 
 function statusLabel (goal: LongTermGoalDefinition): string {
+  if (goal.status === 'paused') return t('chatUi.longTermGoalPaused')
   if (goal.openInterventions.length > 0) return t('chatUi.longTermGoalNeedsInput')
   if (goal.lastRunStatus === 'running') return t('chatUi.longTermGoalRunning')
-  if (goal.status === 'paused') return t('chatUi.longTermGoalPaused')
   if (goal.status === 'completed') return t('chatUi.longTermGoalCompleted')
   if (goal.status === 'archived') return t('chatUi.longTermGoalArchived')
-  return t('chatUi.longTermGoalActive')
+  return goal.nextRunAt ? t('chatUi.longTermGoalReady') : t('chatUi.longTermGoalActive')
 }
 
 function priorityForIntervention (intervention: LongTermGoalIntervention): InterventionPriority {
@@ -215,17 +236,34 @@ function normalizeToolRuns (run: LongTermGoalRun): ToolRun[] {
   }))
 }
 
+function normalizeConversationToolRuns (turn: LongTermGoalConversationTurn): ToolRun[] {
+  return (turn.toolRuns || []).map(toolRun => ({
+    id: toolRun.id,
+    name: toolRun.name,
+    status: toolRun.status,
+    progress: toolRun.progress.map(step => ({ ...step }))
+  }))
+}
+
 function getRunContent (run: LongTermGoalRun): string {
-  return run.resultText?.trim() ||
+  return stripGoalRunMetadataForDisplay(run.resultText || '').trim() ||
     run.error?.trim() ||
     run.progressSummary ||
     t('chatUi.longTermGoalNoProgress')
+}
+
+function stripGoalRunMetadataForDisplay (text: string): string {
+  return text
+    .replace(new RegExp(`<!--\\s*LONG_TERM_GOAL_RUN_METADATA\\s*[\\s\\S]*?\\s*-->`, 'gi'), '')
+    .trim()
 }
 
 function closeDialog (): void {
   activeDialog.value = null
   activeRunId.value = null
   activeInterventionId.value = null
+  adjustmentPhase.value = 'idle'
+  adjustmentProposal.value = null
   selectedAnswers.value = {}
   customAnswers.value = {}
 }
@@ -291,9 +329,41 @@ function asRunMessage (run: LongTermGoalRun): ChatMessage {
   }
 }
 
+function asConversationTurnMessage (turn: LongTermGoalConversationTurn): ChatMessage {
+  const blocks: ChatMessageBlock[] = []
+  const toolRuns = normalizeConversationToolRuns(turn)
+  if (turn.thinking?.trim()) {
+    blocks.push({
+      id: `goal_turn_thinking_${turn.id}`,
+      kind: 'thinking',
+      text: turn.thinking
+    })
+  }
+  for (const toolRun of toolRuns) {
+    blocks.push({
+      id: `goal_turn_tool_${toolRun.id}`,
+      kind: 'tool',
+      toolRun
+    })
+  }
+  blocks.push({
+    id: `goal_turn_content_${turn.id}`,
+    kind: 'content',
+    content: turn.content
+  })
+  return {
+    role: 'assistant',
+    content: turn.content,
+    speakerName: props.goal?.title || 'Long-Term Goal',
+    toolRuns,
+    thinking: turn.thinking,
+    blocks
+  }
+}
+
 const reportMessages = computed<ChatMessage[]>(() => {
   return [asAssistantMessage(
-    latestRun.value?.resultText?.trim() ||
+    stripGoalRunMetadataForDisplay(latestRun.value?.resultText || '') ||
     latestRun.value?.error?.trim() ||
     latestReview.value?.progressSummary ||
     props.goal?.progressSummary ||
@@ -302,6 +372,9 @@ const reportMessages = computed<ChatMessage[]>(() => {
 })
 
 const runMessages = computed<ChatMessage[]>(() => {
+  if (props.streamingRun) {
+    return [asRunMessage(props.streamingRun.run)]
+  }
   const run = activeRun.value
   if (!run) return []
   return [asRunMessage(run)]
@@ -335,14 +408,24 @@ const memoryMessages = computed<ChatMessage[]>(() => {
 })
 
 const adjustMessages = computed<ChatMessage[]>(() => {
-  const turns = [...conversations.value].reverse().map(turn => turn.role === 'user' ? asUserMessage(turn.content) : asAssistantMessage(turn.content))
+  const turns = [...conversations.value]
+    .filter(turn => turn.goalId === props.goal?.id)
+    .reverse()
+    .map(turn => turn.role === 'user' ? asUserMessage(turn.content) : asConversationTurnMessage(turn))
+  if (props.streamingAdjust) {
+    return [...turns, asUserMessage(props.streamingAdjust.userContent), props.streamingAdjust.message]
+  }
   if (turns.length > 0) return turns
   return [asAssistantMessage(t('chatUi.quickAdjustDialogIntro'))]
 })
 
-const createMessages = computed<ChatMessage[]>(() => [
-  asAssistantMessage(t('chatUi.createGoalDialogIntro'))
-])
+const createMessages = computed<ChatMessage[]>(() => {
+  const base = [asAssistantMessage(t('chatUi.createGoalDialogIntro')), ...(props.createConversationHistory || [])]
+  if (props.streamingCreate) {
+    return [...base, asUserMessage(props.streamingCreate.userContent), props.streamingCreate.message]
+  }
+  return base
+})
 
 function sendDialogMessage (text: string): void {
   const goal = props.goal
@@ -355,6 +438,11 @@ function sendDialogMessage (text: string): void {
     return
   }
   if (!goal) return
+  if (activeDialog.value === 'adjust') {
+    adjustmentPhase.value = 'clarifying'
+    emit('sendMessage', goal.id, text)
+    return
+  }
   emit('sendMessage', goal.id, text)
 }
 
@@ -439,6 +527,24 @@ function submitIntervention (): void {
   emit('answerIntervention', goal.id, intervention.id, answers)
   closeDialog()
 }
+
+watch(
+  () => props.snapshot?.changeSets || [],
+  (changeSets) => {
+    const latestDraft = [...changeSets].find(item => item.status === 'draft')
+    if (!latestDraft) return
+    adjustmentPhase.value = 'proposal'
+    adjustmentProposal.value = {
+      title: props.goal?.title || '',
+      objective: props.goal?.objective || '',
+      summary: latestDraft.summary,
+      before: latestDraft.before,
+      after: latestDraft.after,
+      questions: []
+    }
+  },
+  { immediate: true }
+)
 </script>
 
 <template>
@@ -484,8 +590,8 @@ function submitIntervention (): void {
           />
           <button type="button" class="goal-ghost-btn" @click="activeDialog = 'adjust'">{{ $t('chatUi.quickAdjustGoal') }}</button>
           <button type="button" class="goal-ghost-btn" @click="activeDialog = 'memory'">{{ $t('chatUi.goalMemory') }}</button>
-          <button type="button" class="goal-ghost-btn" @click="emit('runNow', goal.id)">{{ $t('chatUi.runNow') }}</button>
-          <button v-if="goal.status === 'paused'" type="button" class="goal-ghost-btn" @click="emit('resume', goal)">{{ $t('chatUi.resumeGoal') }}</button>
+          <button type="button" class="goal-ghost-btn" @click="emit('runNow', goal.id)">{{ $t('chatUi.runNowOnce') }}</button>
+          <button v-if="goal.status === 'paused'" type="button" class="goal-ghost-btn" @click="emit('resume', goal)">{{ $t('chatUi.resumeContinuousGoal') }}</button>
           <button v-else type="button" class="goal-ghost-btn" @click="emit('pause', goal)">{{ $t('chatUi.pauseGoal') }}</button>
           <button type="button" class="goal-danger-btn" @click="confirmDeleteGoal">{{ $t('chatUi.deleteLongTermGoal') }}</button>
         </div>
@@ -622,6 +728,7 @@ function submitIntervention (): void {
         :title="$t('chatUi.quickAdjustGoal')"
         :subtitle="goal.title"
         :messages="adjustMessages"
+        :is-loading="!!streamingAdjust"
         allow-input
         :providers="providers"
         :active-provider-id="currentProviderId"
@@ -682,6 +789,7 @@ function submitIntervention (): void {
       :open="activeDialog === 'create'"
       :title="$t('chatUi.newLongTermGoal')"
       :messages="createMessages"
+      :is-loading="!!streamingCreate"
       allow-input
       :providers="providers"
       :active-provider-id="createProviderId"
@@ -819,6 +927,7 @@ function submitIntervention (): void {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+  align-items: stretch;
 }
 
 .goal-summary-card,
@@ -828,6 +937,13 @@ function submitIntervention (): void {
   border-radius: 8px;
   background: color-mix(in srgb, var(--app-panel) 92%, transparent);
   padding: 10px;
+}
+
+.goal-summary-card {
+  height: 168px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 button.goal-summary-card {
@@ -846,12 +962,13 @@ button.goal-summary-card:hover,
 .goal-change p {
   margin: 0;
   color: var(--app-text-muted);
-  line-height: 1.38;
+  line-height: 1.42;
+  flex: 1;
   display: -webkit-box;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 6;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  font-size: 0.8rem;
+  font-size: 0.79rem;
 }
 
 .goal-section-head {
@@ -871,15 +988,18 @@ button.goal-summary-card:hover,
 .goal-next-list {
   margin: 0;
   padding-left: 16px;
+  overflow: auto;
+  min-height: 0;
+  max-height: 118px;
 }
 
 .goal-next-list li {
-  margin: 4px 0;
+  margin: 3px 0;
 }
 
 .goal-next-list span {
   display: block;
-  font-size: 0.82rem;
+  font-size: 0.76rem;
   line-height: 1.35;
 }
 
@@ -887,6 +1007,9 @@ button.goal-summary-card:hover,
   display: flex;
   flex-direction: column;
   gap: 5px;
+  overflow: auto;
+  min-height: 0;
+  max-height: 118px;
 }
 
 .goal-intervention-item {

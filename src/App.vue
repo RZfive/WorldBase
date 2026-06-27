@@ -866,8 +866,17 @@ async function dockStopApp (app: RunningApp) {
   await refreshRunningApps()
 }
 
-function closeDockApp (appId: string) {
+async function closeDockApp (appId: string) {
+  // Project apps back a dev server (a detached child process). Just clearing
+  // the UI here would leave that server running forever — it accumulates as an
+  // orphan across restarts and eventually starves new 3D apps of resources.
+  // Stop the backing process first; browser (webview) apps have no server.
+  const app = runningApps.value.get(appId) ?? embeddedApps.value.get(appId)
+  if (app?.kind === 'project') {
+    await window.electronAPI?.stopProject(appId)
+  }
   clearEmbeddedApp(appId)
+  await refreshRunningApps()
 }
 
 async function saveBrowserAppToLaunchpad (app: RunningApp) {

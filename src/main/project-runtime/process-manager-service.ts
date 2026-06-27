@@ -159,8 +159,14 @@ export class ProcessManagerService {
         .filter(p => p.pid)
         .map(p => p.pid!)
     )
-    // Also exclude the host process itself
+    // Also exclude the host process itself, plus its entire descendant tree
+    // (renderer, gpu, network helpers). Without this, Electron helper
+    // processes whose command line happens to contain "the-world" would be
+    // misclassified as orphaned project servers.
     managedPids.add(process.pid)
+    for (const descendantPid of await this._collectDescendantPids(process.pid)) {
+      managedPids.add(descendantPid)
+    }
 
     try {
       if (process.platform === 'win32') {
@@ -174,10 +180,12 @@ export class ProcessManagerService {
   }
 
   private async _findOrphansWindows (managedPids: Set<number>): Promise<OrphanProcessInfo[]> {
-    // Get node processes with memory info
+    // Project servers may run as `node` (node server.js), `next-server`,
+    // or the bundled Electron binary (Electron server.js). Query all of them;
+    // _looksLikeProjectProcess filters out Electron's own helper processes.
     const output = await this._execCommand('wmic', [
       'process', 'where',
-      "name like '%node%'",
+      "name like '%node%' or name like '%electron%' or name like '%next%'",
       'get', 'ProcessId,Name,CommandLine,WorkingSetSize',
       '/format:csv'
     ])
@@ -229,7 +237,17 @@ export class ProcessManagerService {
       const args = match[4]
 
       if (!pid || managedPids.has(pid)) continue
-      if (!comm.includes('node')) continue
+      // Project servers run as `node` (node server.js), `next-server`, or the
+      // bundled Electron binary (Electron server.js). Electron's own helper
+      // processes (renderer/gpu/network) share that binary name, but they are
+      // already excluded via the process-tree filter in _findOrphanProcesses,
+      // so any surviving Electron-named process is a project server that
+      // outlived its parent. VSCode's `Code Helper` etc. don't match and are
+      // correctly skipped here.
+      const lowerComm = comm.toLowerCase()
+      if (!lowerComm.includes('node') &&
+          !lowerComm.includes('electron') &&
+          !lowerComm.includes('next-server')) continue
       if (!this._looksLikeProjectProcess(args)) continue
 
       orphans.push({
@@ -248,16 +266,68 @@ export class ProcessManagerService {
    */
   private _looksLikeProjectProcess (commandLine: string): boolean {
     const lower = commandLine.toLowerCase()
+    // Exclude Chromium/Electron helper processes (renderer, gpu, network
+    // service, crashpad) that share the Electron binary — they are not servers.
+    if (lower.includes('--type=') || lower.includes('crashpad') || lower.includes('zygote')) {
+      return false
+    }
     return (
       lower.includes('the_world') ||
-      lower.includes('the-world') ||
+      // The World's own install/userData path contains "the-world"; only match
+      // the project directory so the host and its helpers aren't flagged.
+      lower.includes('the-world/projects') ||
       lower.includes('server.js') ||
-      lower.includes('next') ||
+      lower.includes('next-server') ||
       lower.includes('http-server') ||
+      /\bnext\s+(dev|start|build)/i.test(commandLine) ||
       // Port range used by our PortManager (3100-3999)
       /\bport[=\s]*3[1-9]\d{2}\b/i.test(commandLine) ||
       /\b-p\s*3[1-9]\d{2}\b/i.test(commandLine)
     )
+  }
+
+  /**
+   * Collect every PID in the descendant tree of `rootPid` (non-recursive BFS
+   * over the process table). Used to exclude the host's own renderer/gpu/
+   * network helpers from orphan detection. Best-effort: returns an empty set
+   * on any failure.
+   */
+  private async _collectDescendantPids (rootPid: number): Promise<Set<number>> {
+    const descendants = new Set<number>()
+    const pidToPpid = new Map<number, number>()
+    try {
+      if (process.platform === 'win32') {
+        const output = await this._execCommand('wmic', [
+          'process', 'get', 'ParentProcessId,ProcessId', '/format:csv'
+        ])
+        for (const line of output.split('\n').filter(l => l.trim())) {
+          const parts = line.split(',').map(s => s.trim())
+          if (parts.length < 2) continue
+          const ppid = parseInt(parts[parts.length - 2], 10)
+          const pid = parseInt(parts[parts.length - 1], 10)
+          if (pid && !Number.isNaN(ppid)) pidToPpid.set(pid, ppid)
+        }
+      } else {
+        const output = await this._execCommand('ps', ['ax', '-o', 'pid,ppid'])
+        for (const line of output.split('\n').slice(1).filter(l => l.trim())) {
+          const m = line.trim().match(/^(\d+)\s+(\d+)$/)
+          if (m) pidToPpid.set(parseInt(m[1], 10), parseInt(m[2], 10))
+        }
+      }
+      const queue = [rootPid]
+      while (queue.length > 0) {
+        const current = queue.shift() as number
+        for (const [pid, ppid] of pidToPpid) {
+          if (ppid === current && !descendants.has(pid)) {
+            descendants.add(pid)
+            queue.push(pid)
+          }
+        }
+      }
+    } catch {
+      // Non-fatal — orphan detection simply won't exclude host helpers.
+    }
+    return descendants
   }
 
   /**

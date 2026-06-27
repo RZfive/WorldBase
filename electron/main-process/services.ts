@@ -227,7 +227,9 @@ export async function initializeServices (): Promise<void> {
     },
     onReportsChanged: (reports: ScheduledTaskRunReport[]) => {
       broadcastToAppWindows('scheduler:reportsChanged', reports)
-      mainState.longTermGoalService?.reconcileScheduledReports(reports)
+      setTimeout(() => {
+        mainState.longTermGoalService?.reconcileScheduledReports(mainState.scheduledTaskService?.listAllReports() || [])
+      }, 0)
     },
     onReportNotificationClick: (report: ScheduledTaskRunReport) => {
       broadcastToAppWindows('scheduler:reportRequested', report)
@@ -239,6 +241,8 @@ export async function initializeServices (): Promise<void> {
   mainState.longTermGoalService = new LongTermGoalService({
     store: mainState.longTermGoalStore,
     scheduledTaskService: mainState.scheduledTaskService,
+    aiEngine: mainState.aiEngine!,
+    resolveProviderConfig: (providerId, modelId, reasoningEffort, temperature) => resolveProviderConfig(providerId || undefined, modelId || undefined, reasoningEffort, temperature),
     onGoalsChanged: (goals) => {
       broadcastToAppWindows('longTermGoals:goalsChanged', goals)
     },
@@ -247,6 +251,9 @@ export async function initializeServices (): Promise<void> {
     },
     onInterventionRequested: (_goal, intervention) => {
       broadcastToAppWindows('longTermGoals:interventionRequested', intervention)
+    },
+    onRunProgress: (goalId, run) => {
+      broadcastToAppWindows('longTermGoals:runProgress', { goalId, run })
     }
   })
   mainState.longTermGoalService.start()

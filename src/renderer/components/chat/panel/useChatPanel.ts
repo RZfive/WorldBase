@@ -132,6 +132,8 @@ const sharedAvailableChannelBindings = ref<ChannelBinding[]>([])
 const sharedLongTermGoals = ref<LongTermGoalDefinition[]>([])
 const sharedLongTermGoalSnapshot = ref<LongTermGoalSnapshot | null>(null)
 const sharedSelectedLongTermGoalId = ref<string | null>(null)
+const pendingGoalTitleOverrides = new Map<string, string>()
+const pendingGoalStatusOverrides = new Map<string, LongTermGoalDefinition['status']>()
 const sharedSelectedAgentId = ref('')
 const sharedSelectedGroupId = ref('')
 const sharedSelectedChannelBindingId = ref('')
@@ -170,6 +172,7 @@ let sharedAgentWorkspaceChangeCleanup: (() => void) | null = null
 let sharedLongTermGoalsCleanup: (() => void) | null = null
 let sharedLongTermGoalSnapshotCleanup: (() => void) | null = null
 let sharedLongTermGoalInterventionCleanup: (() => void) | null = null
+let sharedLongTermGoalRunProgressCleanup: (() => void) | null = null
 let sharedLifecycleBindingsReady = false
 let sharedBeforeUnloadCleanupRegistered = false
 
@@ -199,6 +202,8 @@ function cleanupSharedChatPanelResources (): void {
   sharedLongTermGoalSnapshotCleanup = null
   sharedLongTermGoalInterventionCleanup?.()
   sharedLongTermGoalInterventionCleanup = null
+  sharedLongTermGoalRunProgressCleanup?.()
+  sharedLongTermGoalRunProgressCleanup = null
   sharedAuthResponseCleanup?.()
   sharedAuthResponseCleanup = null
   sharedLifecycleBindingsReady = false
@@ -243,6 +248,19 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const availableChannelBindings = sharedAvailableChannelBindings
   const longTermGoals = sharedLongTermGoals
   const longTermGoalSnapshot = sharedLongTermGoalSnapshot
+  const streamingAdjust = ref<{ userContent: string; message: ChatMessage } | null>(null)
+  const streamingCreate = ref<{ userContent: string; message: ChatMessage } | null>(null)
+  const streamingRun = ref<{ goalId: string; run: LongTermGoalRun } | null>(null)
+  const createConversationHistory = ref<ChatMessage[]>([])
+  const goalAutoOpenRunId = ref<string | null>(null)
+
+  watch(sharedSelectedLongTermGoalId, () => {
+    // 切换目标时丢弃上一个目标的流式状态，避免旧消息串到新目标的对话框。
+    streamingAdjust.value = null
+    streamingRun.value = null
+    streamingCreate.value = null
+    createConversationHistory.value = []
+  })
   const selectedLongTermGoalId = sharedSelectedLongTermGoalId
   const selectedAgentId = sharedSelectedAgentId
   const selectedGroupId = sharedSelectedGroupId
@@ -396,6 +414,16 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     return new Map(providersConfig.value.providers.map(provider => [provider.id, provider]))
   })
 
+  function mergeGoalTitleState (incomingGoal: LongTermGoalDefinition, existingGoal?: LongTermGoalDefinition): LongTermGoalDefinition {
+    const pendingStatus = pendingGoalStatusOverrides.get(incomingGoal.id)
+    const pendingTitle = pendingGoalTitleOverrides.get(incomingGoal.id)
+    const mergedGoal = pendingStatus ? { ...incomingGoal, status: pendingStatus } : { ...incomingGoal }
+    if (pendingTitle) {
+      mergedGoal.title = pendingTitle
+    }
+    return mergedGoal
+  }
+
   const agentsById = computed(() => {
     return new Map(availableAgents.value.map(agent => [agent.id, agent]))
   })
@@ -481,6 +509,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   })
 
   function formatGoalSubtitle (goal: LongTermGoalDefinition): string {
+    if (goal.status === 'paused') {
+      return t('chatUi.longTermGoalPaused')
+    }
     if (goal.openInterventions.length > 0) {
       return t('chatUi.goalSidebarNeedsInput', { count: goal.openInterventions.length })
     }
@@ -490,9 +521,10 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     const nextRun = goal.nextRunAt
       ? formatConversationSubtitle(goal.nextRunAt, locale.value)
       : t('chatUi.notScheduled')
+    const statusPrefix = goal.nextRunAt ? t('chatUi.longTermGoalReady') : t('chatUi.longTermGoalActive')
     return goal.progressSummary
-      ? `${nextRun} · ${goal.progressSummary}`
-      : nextRun
+      ? `${statusPrefix} · ${nextRun} · ${goal.progressSummary}`
+      : `${statusPrefix} · ${nextRun}`
   }
 
   const currentLongTermGoal = computed(() => {
@@ -503,7 +535,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const longTermGoalSidebarItems = computed<SidebarLongTermGoalItem[]>(() => {
     return longTermGoals.value.map((goal) => {
       const needsUserInput = goal.openInterventions.some(item => item.status === 'open')
-      const isRunningGoal = goal.lastRunStatus === 'running'
+      const isPausedGoal = goal.status === 'paused'
+      const isRunningGoal = !isPausedGoal && goal.lastRunStatus === 'running'
       return {
         id: goal.id,
         title: goal.title,
@@ -515,7 +548,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
           goal.gapSummary,
           goal.currentPhase
         ]),
-        icon: needsUserInput ? '▲' : isRunningGoal ? '⏳' : goal.status === 'paused' ? 'Ⅱ' : '◎',
+        icon: isPausedGoal ? 'Ⅱ' : needsUserInput ? '▲' : isRunningGoal ? '⏳' : '◎',
         status: goal.status,
         isRunning: isRunningGoal,
         needsUserInput,
@@ -620,9 +653,12 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   const currentContextDetail = computed(() => {
     if (currentLongTermGoal.value) {
+      if (currentLongTermGoal.value.status === 'paused') return t('chatUi.longTermGoalPaused')
       if (currentLongTermGoal.value.openInterventions.length > 0) return t('chatUi.longTermGoalNeedsInput')
       if (currentLongTermGoal.value.lastRunStatus === 'running') return t('chatUi.longTermGoalRunning')
-      return currentLongTermGoal.value.progressSummary || t('chatUi.longTermGoalAutoAdvancing')
+      return currentLongTermGoal.value.nextRunAt
+        ? t('chatUi.longTermGoalReady')
+        : (currentLongTermGoal.value.progressSummary || t('chatUi.longTermGoalAutoAdvancing'))
     }
 
     if (currentGroupDefinition.value) {
@@ -1546,22 +1582,52 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   }
 
   async function createLongTermGoal (seed?: string, options?: { providerId?: string | null; modelId?: string | null }): Promise<void> {
-    if (!window.electronAPI?.saveLongTermGoal) return
+    if (!window.electronAPI?.streamLongTermGoalCreate) return
     const normalizedSeed = typeof seed === 'string' ? seed.trim() : ''
-    const goal = await window.electronAPI.saveLongTermGoal({
-      title: normalizedSeed ? (normalizedSeed.length > 24 ? `${normalizedSeed.slice(0, 24)}...` : normalizedSeed) : t('chatUi.defaultLongTermGoalTitle'),
-      objective: normalizedSeed || t('chatUi.defaultLongTermGoalObjective'),
-      status: normalizedSeed ? 'active' : 'paused',
+    if (!normalizedSeed) return
+
+    const streamId = generateId()
+    const message: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      speakerName: 'Long-Term Goal',
+      blocks: [createContentBlock('')]
+    }
+    streamingCreate.value = { userContent: normalizedSeed, message }
+    const result = await streamGoalConversation(message, streamId, () => window.electronAPI!.streamLongTermGoalCreate!(normalizedSeed, {
       providerId: options?.providerId || activeProviderId.value || null,
-      modelId: options?.modelId || selectedModel.value || null,
-      notificationPolicy: 'minimal'
-    })
-    await loadLongTermGoals()
-    await openLongTermGoal(goal.id)
+      modelId: options?.modelId || selectedModel.value || null
+    }, streamId))
+    streamingCreate.value = null
+    if (!result) return
+
+    if (result.goal.id.startsWith('goal_draft')) {
+      // AI 仍在收敛目标，保留本轮用户提问与 AI 回复作为对话历史，等待用户继续补充。
+      const finalContent = result.assistantTurn?.content || (typeof message.content === 'string' ? message.content : '')
+      createConversationHistory.value = [...createConversationHistory.value, {
+        role: 'user',
+        content: normalizedSeed,
+        blocks: [{ id: `goal_create_user_${generateId()}`, kind: 'content', content: normalizedSeed }]
+      }, {
+        role: 'assistant',
+        content: finalContent,
+        speakerName: 'Long-Term Goal',
+        blocks: [{ id: `goal_create_asst_${generateId()}`, kind: 'content', content: finalContent }]
+      }]
+    } else {
+      // 已建库，打开目标并重置创建对话历史。
+      createConversationHistory.value = []
+      await loadLongTermGoals()
+      await openLongTermGoal(result.goal.id)
+    }
   }
 
   async function saveLongTermGoalPatch (goal: LongTermGoalDefinition, patch: Partial<LongTermGoalDefinition>): Promise<void> {
     if (!window.electronAPI?.saveLongTermGoal) return
+    if (typeof patch.title === 'string' && patch.title.trim() && patch.title.trim() !== goal.title && Object.keys(patch).length === 1) {
+      await renameLongTermGoal(goal, patch.title)
+      return
+    }
     const saved = await window.electronAPI.saveLongTermGoal({
       ...goal,
       ...patch,
@@ -1569,21 +1635,120 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       objective: patch.objective || goal.objective,
       schedule: patch.schedule || goal.schedule
     })
-    longTermGoals.value = longTermGoals.value.map(item => item.id === saved.id ? saved : item)
+    longTermGoals.value = longTermGoals.value.map(item => item.id === saved.id ? mergeGoalTitleState(saved, item) : item)
+    if (!longTermGoals.value.some(item => item.id === saved.id)) {
+      longTermGoals.value = [saved, ...longTermGoals.value]
+    }
+    if (longTermGoalSnapshot.value?.goals.some(item => item.id === saved.id)) {
+      longTermGoalSnapshot.value = {
+        ...longTermGoalSnapshot.value,
+        goals: longTermGoalSnapshot.value.goals.map(item => item.id === saved.id ? mergeGoalTitleState(saved, item) : item)
+      }
+    }
     selectedLongTermGoalId.value = saved.id
     await loadLongTermGoalSnapshot(saved.id)
   }
 
+  async function renameLongTermGoal (goal: LongTermGoalDefinition, titleInput: string): Promise<void> {
+    const title = titleInput.trim()
+    if (!title || title === goal.title) return
+    const optimisticGoal: LongTermGoalDefinition = {
+      ...goal,
+      title,
+      updatedAt: new Date().toISOString()
+    }
+    longTermGoals.value = longTermGoals.value.map(item => item.id === goal.id ? optimisticGoal : item)
+    pendingGoalTitleOverrides.set(goal.id, title)
+    if (longTermGoalSnapshot.value?.goals.some(item => item.id === goal.id)) {
+      longTermGoalSnapshot.value = {
+        ...longTermGoalSnapshot.value,
+        goals: longTermGoalSnapshot.value.goals.map(item => item.id === goal.id ? optimisticGoal : item)
+      }
+    }
+    selectedLongTermGoalId.value = goal.id
+    if (!window.electronAPI?.renameLongTermGoal) {
+      pendingGoalTitleOverrides.delete(goal.id)
+      await loadLongTermGoals()
+      return
+    }
+    let saved: LongTermGoalDefinition
+    try {
+      saved = await window.electronAPI.renameLongTermGoal(goal.id, title)
+    } catch (error) {
+      pendingGoalTitleOverrides.delete(goal.id)
+      await loadLongTermGoals()
+      await loadLongTermGoalSnapshot(goal.id)
+      throw error
+    }
+    pendingGoalTitleOverrides.delete(goal.id)
+    longTermGoals.value = longTermGoals.value.map(item => item.id === saved.id ? mergeGoalTitleState(saved, item) : item)
+    if (!longTermGoals.value.some(item => item.id === saved.id)) {
+      longTermGoals.value = [saved, ...longTermGoals.value]
+    }
+    if (longTermGoalSnapshot.value?.goals.some(item => item.id === saved.id)) {
+      longTermGoalSnapshot.value = {
+        ...longTermGoalSnapshot.value,
+        goals: longTermGoalSnapshot.value.goals.map(item => item.id === saved.id ? mergeGoalTitleState(saved, item) : item)
+      }
+    }
+    await loadLongTermGoalSnapshot(saved.id)
+  }
+
   async function pauseLongTermGoal (goal: LongTermGoalDefinition): Promise<void> {
-    await saveLongTermGoalPatch(goal, { status: 'paused' })
+    await setLongTermGoalStatus(goal, 'paused')
   }
 
   async function resumeLongTermGoal (goal: LongTermGoalDefinition): Promise<void> {
-    await saveLongTermGoalPatch(goal, { status: 'active' })
+    await setLongTermGoalStatus(goal, 'active')
   }
 
   async function archiveLongTermGoal (goal: LongTermGoalDefinition): Promise<void> {
-    await saveLongTermGoalPatch(goal, { status: 'archived' })
+    await setLongTermGoalStatus(goal, 'archived')
+  }
+
+  async function setLongTermGoalStatus (goal: LongTermGoalDefinition, status: LongTermGoalDefinition['status']): Promise<void> {
+    const optimisticGoal: LongTermGoalDefinition = {
+      ...goal,
+      status,
+      currentPhase: status === 'active'
+        ? (goal.currentPhase === '已暂停' ? '持续推进' : goal.currentPhase)
+        : status === 'paused'
+          ? '已暂停'
+          : goal.currentPhase,
+      updatedAt: new Date().toISOString()
+    }
+    pendingGoalStatusOverrides.set(goal.id, status)
+    longTermGoals.value = longTermGoals.value.map(item => item.id === goal.id ? optimisticGoal : item)
+    if (longTermGoalSnapshot.value?.goals.some(item => item.id === goal.id)) {
+      longTermGoalSnapshot.value = {
+        ...longTermGoalSnapshot.value,
+        goals: longTermGoalSnapshot.value.goals.map(item => item.id === goal.id ? optimisticGoal : item)
+      }
+    }
+    selectedLongTermGoalId.value = goal.id
+    if (!window.electronAPI?.setLongTermGoalStatus) {
+      pendingGoalStatusOverrides.delete(goal.id)
+      await saveLongTermGoalPatch(optimisticGoal, { status })
+      return
+    }
+    let saved: LongTermGoalDefinition
+    try {
+      saved = await window.electronAPI.setLongTermGoalStatus(goal.id, status)
+    } catch (error) {
+      pendingGoalStatusOverrides.delete(goal.id)
+      await loadLongTermGoals()
+      await loadLongTermGoalSnapshot(goal.id)
+      throw error
+    }
+    pendingGoalStatusOverrides.delete(goal.id)
+    longTermGoals.value = longTermGoals.value.map(item => item.id === saved.id ? mergeGoalTitleState(saved, item) : item)
+    if (longTermGoalSnapshot.value?.goals.some(item => item.id === saved.id)) {
+      longTermGoalSnapshot.value = {
+        ...longTermGoalSnapshot.value,
+        goals: longTermGoalSnapshot.value.goals.map(item => item.id === saved.id ? mergeGoalTitleState(saved, item) : item)
+      }
+    }
+    await loadLongTermGoalSnapshot(saved.id)
   }
 
   async function deleteLongTermGoal (goalOrId: LongTermGoalDefinition | string): Promise<void> {
@@ -1608,12 +1773,166 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     await window.electronAPI.runLongTermGoalNow(goalId)
     await loadLongTermGoals()
     await loadLongTermGoalSnapshot(goalId)
+    // 自动打开运行对话框，展示实时执行流；运行进度通过 onLongTermGoalRunProgress 持续更新。
+    const snapshot = longTermGoalSnapshot.value
+    const runningRun = snapshot?.runs.find(run => run.goalId === goalId && run.status === 'running')
+    if (runningRun) {
+      streamingRun.value = { goalId, run: runningRun }
+      goalAutoOpenRunId.value = runningRun.id
+    }
+  }
+
+  function clearGoalAutoOpenRunId (): void {
+    goalAutoOpenRunId.value = null
+  }
+
+  async function streamGoalConversation (
+    message: ChatMessage,
+    streamId: string,
+    invoke: () => Promise<LongTermGoalMessageResult>
+  ): Promise<LongTermGoalMessageResult | null> {
+    if (!window.electronAPI?.onLongTermGoalStreamEvent) {
+      return invoke()
+    }
+    const toolRuns: ToolRun[] = []
+    let thinkingAccum = ''
+    let contentAccum = ''
+    let pendingThinkingText = ''
+    let pendingContentText = ''
+    let flushTimer: number | null = null
+    let hadToolSinceLastThinking = false
+
+    const syncToolRuns = () => syncLegacyToolRuns(message, toolRuns)
+    const clearTimer = () => {
+      if (flushTimer != null) {
+        window.clearTimeout(flushTimer)
+        flushTimer = null
+      }
+    }
+    const flush = () => {
+      clearTimer()
+      if (pendingThinkingText) {
+        if (hadToolSinceLastThinking) {
+          thinkingAccum = ''
+          hadToolSinceLastThinking = false
+        }
+        thinkingAccum += pendingThinkingText
+        message.thinking = thinkingAccum
+        ensureThinkingBlock(message).text = thinkingAccum
+        pendingThinkingText = ''
+      }
+      if (pendingContentText) {
+        contentAccum += pendingContentText
+        message.content = contentAccum
+        const contentBlock = ensureStreamingContentBlock(message)
+        const existing = typeof contentBlock.content === 'string' ? contentBlock.content : ''
+        contentBlock.content = existing + pendingContentText
+        pendingContentText = ''
+      }
+    }
+    const scheduleFlush = () => {
+      if (flushTimer != null) return
+      flushTimer = window.setTimeout(() => {
+        flushTimer = null
+        flush()
+      }, STREAM_RENDER_FLUSH_INTERVAL_MS)
+    }
+    const ensureActiveToolRun = (name?: string) => {
+      const existing = findLastRunningToolRun(toolRuns, name) || findLastRunningToolRun(toolRuns)
+      if (existing) return existing
+      const created = createToolRun(name || t('chatUi.toolStageRunning'))
+      toolRuns.push(created)
+      syncToolRuns()
+      return created
+    }
+
+    const cleanup = window.electronAPI.onLongTermGoalStreamEvent(streamId, (event) => {
+      try {
+        if (event.type === 'thinking' && event.content) {
+          pendingThinkingText += event.content
+          scheduleFlush()
+        } else if (event.type === 'token' && event.content) {
+          pendingContentText += event.content
+          scheduleFlush()
+        } else if (event.type === 'tool_start' && event.name) {
+          flush()
+          hadToolSinceLastThinking = true
+          const toolRun = createToolRun(event.name)
+          toolRuns.push(toolRun)
+          ensureBlocks(message).push(createToolBlock(toolRun))
+          syncToolRuns()
+        } else if (event.type === 'tool_end') {
+          flush()
+          const toolRun = findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
+          if (toolRun) {
+            toolRun.status = 'completed'
+            syncToolRuns()
+          }
+        } else if (event.type === 'progress' && event.stage) {
+          flush()
+          const toolRun = ensureActiveToolRun()
+          toolRun.progress.push({ stage: event.stage, detail: event.detail })
+          syncToolRuns()
+        } else if (event.type === 'web_search_result' && event.query) {
+          flush()
+          ensureBlocks(message).push(createWebSearchBlock(event.query, event.engine || 'web', Array.isArray(event.results) ? event.results : []))
+        } else if (event.type === 'web_fetch_result' && event.result) {
+          flush()
+          ensureBlocks(message).push(createWebFetchBlock(event.result as unknown as WebFetchResultEntry, event.query))
+        } else if (event.type === 'done') {
+          flush()
+          for (const toolRun of toolRuns) {
+            if (toolRun.status === 'running') toolRun.status = 'completed'
+          }
+          syncToolRuns()
+          // service 在 done 里转发了剥离 JSON 元数据后的最终正文，直接覆盖流式累积的原始文本。
+          if (event.message?.content) {
+            contentAccum = event.message.content
+            message.content = contentAccum
+            appendFinalContentBlock(message, event.message.content)
+          }
+        } else if (event.type === 'error') {
+          flush()
+          const toolRun = findLastRunningToolRun(toolRuns)
+          if (toolRun) {
+            toolRun.status = 'failed'
+            toolRun.progress.push({ stage: t('chatUi.toolStageError'), detail: event.error })
+            syncToolRuns()
+          }
+          setAssistantErrorState(message, event.error || t('chatUi.streamFailedUnknown'), getMessageTextContent)
+        }
+      } catch (err) {
+        flush()
+        console.error('[longTermGoal] stream event failed:', event, err)
+      }
+    })
+
+    try {
+      const result = await invoke()
+      cleanup()
+      return result
+    } catch (err) {
+      cleanup()
+      setAssistantErrorState(message, (err as Error).message, getMessageTextContent)
+      return null
+    }
   }
 
   async function sendLongTermGoalMessage (goalId: string, content: string): Promise<void> {
-    if (!window.electronAPI?.sendLongTermGoalMessage) return
-    const result = await window.electronAPI.sendLongTermGoalMessage(goalId, content)
-    longTermGoals.value = longTermGoals.value.map(item => item.id === result.goal.id ? result.goal : item)
+    if (!window.electronAPI?.streamLongTermGoalMessage) return
+    const streamId = generateId()
+    const message: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      speakerName: 'Long-Term Goal',
+      blocks: [createContentBlock('')]
+    }
+    streamingAdjust.value = { userContent: content, message }
+    const result = await streamGoalConversation(message, streamId, () => window.electronAPI!.streamLongTermGoalMessage!(goalId, content, streamId))
+    if (result) {
+      longTermGoals.value = longTermGoals.value.map(item => item.id === result.goal.id ? mergeGoalTitleState(result.goal, item) : item)
+    }
+    streamingAdjust.value = null
     await loadLongTermGoalSnapshot(goalId)
   }
 
@@ -1633,7 +1952,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   async function answerLongTermGoalIntervention (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }>): Promise<void> {
     if (!window.electronAPI?.answerLongTermGoalIntervention) return
     const goal = await window.electronAPI.answerLongTermGoalIntervention(goalId, interventionId, answers)
-    longTermGoals.value = longTermGoals.value.map(item => item.id === goal.id ? goal : item)
+    longTermGoals.value = longTermGoals.value.map(item => item.id === goal.id ? mergeGoalTitleState(goal, item) : item)
     await loadLongTermGoalSnapshot(goalId)
   }
 
@@ -2357,13 +2676,26 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
       if (window.electronAPI?.onLongTermGoalsChanged) {
         sharedLongTermGoalsCleanup = window.electronAPI.onLongTermGoalsChanged((goals) => {
-          longTermGoals.value = goals
+          const existingGoalMap = new Map(longTermGoals.value.map(goal => [goal.id, goal]))
+          longTermGoals.value = goals.map(goal => mergeGoalTitleState(goal, existingGoalMap.get(goal.id)))
         })
       }
 
       if (window.electronAPI?.onLongTermGoalSnapshotChanged) {
         sharedLongTermGoalSnapshotCleanup = window.electronAPI.onLongTermGoalSnapshotChanged((snapshot) => {
           if (!selectedLongTermGoalId.value || snapshot.goals.some(goal => goal.id === selectedLongTermGoalId.value)) {
+            if (snapshot.goals.length > 0) {
+              const snapshotGoalMap = new Map(snapshot.goals.map(goal => [goal.id, goal]))
+              longTermGoals.value = longTermGoals.value.map(goal => {
+                const incomingGoal = snapshotGoalMap.get(goal.id)
+                return incomingGoal ? mergeGoalTitleState(incomingGoal, goal) : goal
+              })
+              for (const goal of snapshot.goals) {
+                if (!longTermGoals.value.some(item => item.id === goal.id)) {
+                  longTermGoals.value = [mergeGoalTitleState(goal), ...longTermGoals.value]
+                }
+              }
+            }
             longTermGoalSnapshot.value = selectedLongTermGoalId.value
               ? {
                   ...snapshot,
@@ -2386,6 +2718,20 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
             void loadLongTermGoalSnapshot(intervention.goalId)
           }
           void loadLongTermGoals()
+        })
+      }
+
+      if (window.electronAPI?.onLongTermGoalRunProgress) {
+        sharedLongTermGoalRunProgressCleanup = window.electronAPI.onLongTermGoalRunProgress(({ goalId, run }) => {
+          // 仅更新当前选中目标的运行流；其他目标的进度等下次打开快照时自然刷新。
+          if (selectedLongTermGoalId.value !== goalId) return
+          streamingRun.value = { goalId, run }
+          // 运行结束后清空流式消息，让快照里的最终 run 接管显示。
+          if (run.status === 'completed' || run.status === 'failed') {
+            void loadLongTermGoalSnapshot(goalId).then(() => {
+              streamingRun.value = null
+            })
+          }
         })
       }
 
@@ -2454,6 +2800,11 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     groupSidebarItems,
     longTermGoalSidebarItems,
     longTermGoalSnapshot,
+    streamingAdjust,
+    streamingCreate,
+    streamingRun,
+    createConversationHistory,
+    goalAutoOpenRunId,
     handleAgentSelectionChange,
     handleAuthModeChange,
     handleChannelBindingSelectionChange,
@@ -2486,6 +2837,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     removeImage,
     resumeLongTermGoal,
     runLongTermGoalNow,
+    clearGoalAutoOpenRunId,
     archiveLongTermGoal,
     saveLongTermGoalPatch,
     respondToAuthRequest,

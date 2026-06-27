@@ -1,4 +1,6 @@
 import crypto from 'node:crypto'
+import type { AIConfigInput, AIEngine } from '../ai-engine/ai-engine.js'
+import type { ChatMessage } from '../ai-engine/providers/openai-provider.js'
 import type { LongTermGoalStore } from '../settings/long-term-goal-store.js'
 import type { ScheduledTaskDefinition, ScheduledTaskProgressEntry, ScheduledTaskRunReport } from '../settings/scheduled-task-store.js'
 import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.js'
@@ -16,15 +18,44 @@ import type {
   LongTermGoalRunToolRun,
   LongTermGoalSaveInput,
   LongTermGoalSchedule,
-  LongTermGoalSnapshot
+  LongTermGoalSnapshot,
+  LongTermGoalStreamEvent
 } from '../../shared/long-term-goal-types.js'
 
 interface LongTermGoalServiceOptions {
   store: LongTermGoalStore
   scheduledTaskService: ScheduledTaskService
+  aiEngine: AIEngine
+  resolveProviderConfig?: (providerId?: string | null, modelId?: string | null, reasoningEffort?: 'low' | 'medium' | 'high' | 'max', temperature?: number) => AIConfigInput | undefined
   onGoalsChanged?: (goals: LongTermGoalDefinition[]) => void
   onSnapshotChanged?: (snapshot: LongTermGoalSnapshot) => void
   onInterventionRequested?: (goal: LongTermGoalDefinition, intervention: LongTermGoalIntervention) => void
+  onRunProgress?: (goalId: string, run: LongTermGoalRun) => void
+}
+
+interface GoalConversationSession {
+  phase: 'clarifying' | 'proposal'
+  contextTurns: LongTermGoalConversationTurn[]
+  lastAssistantTurnId: string | null
+  proposal?: GoalAdjustmentProposal | null
+}
+
+interface GoalAdjustmentProposal {
+  title: string
+  objective: string
+  summary: string
+  before: Partial<LongTermGoalDefinition>
+  after: Partial<LongTermGoalDefinition>
+  questions: Array<{ id: string; question: string; options: string[]; reason?: string }>
+}
+
+interface GoalAdjustmentReply {
+  content: string
+  changeSet: LongTermGoalChangeSet | null
+  proposal: GoalAdjustmentProposal | null
+  phase: 'clarifying' | 'proposal'
+  thinking?: string
+  toolRuns?: LongTermGoalRunToolRun[]
 }
 
 interface ParsedGoalRunResult {
@@ -35,6 +66,7 @@ interface ParsedGoalRunResult {
   importantAchievements: string[]
   learnedSkills: string[]
   blockers: string[]
+  nextRunAt: string | null
   needsUserInput: boolean
   userQuestions: Array<{ id?: string; question: string; options?: string[]; reason?: string }>
   notificationLevel: 'silent' | 'badge' | 'notify'
@@ -50,6 +82,51 @@ const RECENT_CONTEXT_LIMIT = 8
 const EXECUTION_BRIEF_TITLE = '长期目标执行记忆包'
 const LONG_TERM_GOAL_TASK_MARKER = '[LongTermGoal]'
 const LONG_TERM_GOAL_REVIEW_MARKER = '[LongTermGoalReview]'
+const GOAL_RUN_METADATA_LABEL = 'LONG_TERM_GOAL_RUN_METADATA'
+const GOAL_ADJUSTMENT_METADATA_LABEL = 'LONG_TERM_GOAL_ADJUSTMENT_METADATA'
+const GOAL_ADJUSTMENT_SAFE_TOOL_NAME_PATTERNS: RegExp[] = [
+  /^list_/i,
+  /^read_/i,
+  /^grep_/i,
+  /^glob_/i,
+  /^get_/i,
+  /^query_/i,
+  /^analyze_/i,
+  /^mcp__/i,
+  /^web_search$/i,
+  /^fetch_webpage$/i,
+  /^read_current_page$/i,
+  /^list_documents$/i,
+  /^read_document$/i,
+  /^mcp_list_/i,
+  /^mcp_read_resource$/i,
+  /^mcp_get_prompt$/i
+]
+const GOAL_ADJUSTMENT_BLOCKED_TOOL_NAME_PATTERNS: RegExp[] = [
+  /(?:^|_)(write|create|edit|patch|delete|remove|update|run|execute|install|restart|start|stop|build|rebuild|finalize|spawn|interact|commit|push|pull)(?:_|$)/i
+]
+
+function isGoalAdjustmentToolDefinition (tool: { name: string; description?: string }): boolean {
+  const name = tool.name.trim()
+  if (!name) return false
+
+  if (GOAL_ADJUSTMENT_BLOCKED_TOOL_NAME_PATTERNS.some(pattern => pattern.test(name))) {
+    return false
+  }
+
+  if (GOAL_ADJUSTMENT_SAFE_TOOL_NAME_PATTERNS.some(pattern => pattern.test(name))) {
+    return true
+  }
+
+  const description = (tool.description || '').toLowerCase()
+  if (!description) return false
+
+  if (/(?:write|create|edit|patch|delete|remove|update|run|execute|install|restart|start|stop|build|rebuild|finalize|spawn|interact|commit|push|pull)/i.test(description)) {
+    return false
+  }
+
+  return /(?:read|list|get|query|search|fetch|resource|prompt)/i.test(description)
+}
 
 function clone<T> (value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
@@ -92,8 +169,54 @@ function dateKeyFromIso (value?: string | null): string {
   return date.toISOString().slice(0, 10)
 }
 
-function toScheduledSchedule (schedule: LongTermGoalSchedule): ScheduledTaskDefinition['schedule'] {
-  return clone(schedule) as ScheduledTaskDefinition['schedule']
+function normalizeIsoDate (value?: string | null): string | null {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return null
+  return new Date(timestamp).toISOString()
+}
+
+function normalizeFutureIsoDate (value?: string | null, minDelayMinutes = 10): string | null {
+  const normalized = normalizeIsoDate(value)
+  if (!normalized) return null
+  const minimum = Date.now() + minDelayMinutes * 60 * 1000
+  if (Date.parse(normalized) < minimum) return new Date(minimum).toISOString()
+  return normalized
+}
+
+function fallbackNextRunAtFromSchedule (schedule: LongTermGoalSchedule): string {
+  if (schedule.kind === 'once') return normalizeFutureIsoDate(schedule.runAt) || new Date(Date.now() + 60 * 60 * 1000).toISOString()
+  if (schedule.kind === 'interval') {
+    const startAt = normalizeFutureIsoDate(schedule.startAt)
+    if (startAt) return startAt
+    return new Date(Date.now() + Math.max(5, schedule.everyMinutes) * 60 * 1000).toISOString()
+  }
+  if (schedule.kind === 'daily') {
+    const candidate = dateAtTime(new Date(), schedule.timeOfDay)
+    return Date.parse(candidate) > Date.now()
+      ? candidate
+      : dateAtTime(new Date(Date.now() + 24 * 60 * 60 * 1000), schedule.timeOfDay)
+  }
+  if (schedule.kind === 'weekly') {
+    const allowed = new Set(schedule.weekdays)
+    for (let offset = 0; offset <= 7; offset += 1) {
+      const candidate = new Date()
+      candidate.setDate(candidate.getDate() + offset)
+      const weekday = candidate.getDay() === 0 ? 7 : candidate.getDay()
+      const atTime = dateAtTime(candidate, schedule.timeOfDay)
+      if (allowed.has(weekday) && Date.parse(atTime) > Date.now()) return atTime
+    }
+  }
+  if (schedule.kind === 'dates') {
+    const date = schedule.dates.map(date => normalizeFutureIsoDate(date)).find(Boolean)
+    if (date) return date
+  }
+  return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+}
+
+function toGoalScheduledSchedule (goal: LongTermGoalDefinition): ScheduledTaskDefinition['schedule'] {
+  const runAt = normalizeFutureIsoDate(goal.nextRunAt) || fallbackNextRunAtFromSchedule(goal.schedule)
+  return { kind: 'once', runAt }
 }
 
 function scheduleSummary (schedule: LongTermGoalSchedule): string {
@@ -269,6 +392,96 @@ function extractJsonObject (text: string): Record<string, unknown> | null {
   return null
 }
 
+function extractGoalMetadata (text: string): Record<string, unknown> | null {
+  const metadataPattern = new RegExp(`<!--\\s*${GOAL_RUN_METADATA_LABEL}\\s*([\\s\\S]*?)\\s*-->`, 'i')
+  const commentMatch = text.match(metadataPattern)
+  if (commentMatch?.[1]) {
+    const parsed = extractJsonObject(commentMatch[1])
+    if (parsed) return parsed
+  }
+
+  return extractJsonObject(text)
+}
+
+function parseJsonRecord (value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value.trim()) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {
+    // Not JSON.
+  }
+  return null
+}
+
+function stripJsonBlocksForDisplay (text: string): string {
+  return text.replace(/```(?:json)?\s*([\s\S]*?)```/gi, (block, body: string) => {
+    return parseJsonRecord(body) ? '' : block
+  })
+}
+
+function stripTrailingJsonObjectForDisplay (text: string): string {
+  const trimmed = text.trim()
+  for (let index = trimmed.lastIndexOf('{'); index >= 0; index = trimmed.lastIndexOf('{', index - 1)) {
+    const parsed = parseJsonRecord(trimmed.slice(index))
+    if (parsed) {
+      return trimmed.slice(0, index).trim()
+    }
+  }
+  return trimmed
+}
+
+function stripGoalMetadataForDisplay (text: string): string {
+  const parsed = extractGoalMetadata(text)
+  const withoutMetadata = text
+    .replace(new RegExp(`<!--\\s*${GOAL_RUN_METADATA_LABEL}\\s*[\\s\\S]*?\\s*-->`, 'gi'), '')
+    .trim()
+  const withoutJsonBlocks = stripJsonBlocksForDisplay(withoutMetadata)
+  const displayText = stripTrailingJsonObjectForDisplay(withoutJsonBlocks).trim()
+  if (displayText && !parseJsonRecord(displayText)) return displayText
+  if (parsed) return formatParsedGoalRunMarkdown(parsed, text)
+  return ''
+}
+
+function stripGoalAdjustmentMetadataForDisplay (text: string): string {
+  return stripTrailingJsonObjectForDisplay(
+    stripJsonBlocksForDisplay(
+      text.replace(new RegExp(`<!--\\s*${GOAL_ADJUSTMENT_METADATA_LABEL}\\s*[\\s\\S]*?\\s*-->`, 'gi'), '')
+    )
+  ).trim()
+}
+
+function extractGoalAdjustmentMetadata (text: string): Record<string, unknown> | null {
+  const metadataPattern = new RegExp(`<!--\\s*${GOAL_ADJUSTMENT_METADATA_LABEL}\\s*([\\s\\S]*?)\\s*-->`, 'i')
+  const commentMatch = text.match(metadataPattern)
+  if (commentMatch?.[1]) {
+    const parsed = extractJsonObject(commentMatch[1])
+    if (parsed) return parsed
+  }
+
+  return extractJsonObject(text)
+}
+
+function formatParsedGoalRunMarkdown (parsed: Record<string, unknown>, fallbackText: string): string {
+  const progressSummary = normalizeString(parsed.progressSummary) || compactText(fallbackText, 360) || '本次执行已结束。'
+  const gapToGoal = normalizeString(parsed.gapToGoal) || normalizeString(parsed.gapAnalysis)
+  const nextPlan = normalizeStringArray(parsed.nextPlan)
+  const completedItems = normalizeStringArray(parsed.completedItems)
+  const blockers = normalizeStringArray(parsed.blockers)
+
+  return [
+    '# 最新任务报告',
+    '',
+    progressSummary,
+    '',
+    completedItems.length > 0 ? `## 已完成\n${completedItems.map(item => `- ${item}`).join('\n')}` : '',
+    gapToGoal ? `## 距离目标的差距\n${gapToGoal}` : '',
+    nextPlan.length > 0 ? `## 下一步\n${nextPlan.map(item => `- ${item}`).join('\n')}` : '',
+    blockers.length > 0 ? `## 阻塞\n${blockers.map(item => `- ${item}`).join('\n')}` : ''
+  ].filter(Boolean).join('\n\n')
+}
+
 function progressToText (entry: ScheduledTaskProgressEntry): string {
   return [entry.stage, entry.detail].filter(Boolean).join(': ')
 }
@@ -338,7 +551,7 @@ function buildRunToolRuns (report: ScheduledTaskRunReport): LongTermGoalRunToolR
 }
 
 function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedGoalRunResult {
-  const parsed = extractJsonObject(resultText)
+  const parsed = extractGoalMetadata(resultText)
   if (!parsed) {
     const summary = compactText(resultText || fallbackTitle, 360)
     return {
@@ -349,6 +562,7 @@ function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedG
       importantAchievements: summary ? [summary] : [],
       learnedSkills: [],
       blockers: [],
+      nextRunAt: null,
       needsUserInput: false,
       userQuestions: [],
       notificationLevel: 'silent',
@@ -404,10 +618,106 @@ function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedG
     importantAchievements: normalizeStringArray(parsed.importantAchievements),
     learnedSkills: normalizeStringArray(parsed.learnedSkills),
     blockers: normalizeStringArray(parsed.blockers),
+    nextRunAt: normalizeFutureIsoDate(normalizeString(parsed.nextRunAt), 5),
     needsUserInput: parsed.needsUserInput === true,
     userQuestions,
     notificationLevel,
     memoryUpdates: parsedMemoryUpdates
+  }
+}
+
+function stripAssistantJson(text: string): string {
+  return stripTrailingJsonObjectForDisplay(stripJsonBlocksForDisplay(text)).trim()
+}
+
+function formatGoalAdjustmentConversationTurn (turn: LongTermGoalConversationTurn): string {
+  const lines = [turn.role === 'user' ? `用户：${turn.content}` : `AI：${turn.content}`]
+
+  if (turn.thinking?.trim()) {
+    lines.push(`思考：${compactText(turn.thinking, 1200)}`)
+  }
+
+  if (turn.toolRuns && turn.toolRuns.length > 0) {
+    const toolLines = turn.toolRuns.map(toolRun => {
+      const progress = toolRun.progress
+        .map(step => compactText([step.stage, step.detail].filter(Boolean).join(': '), 160))
+        .filter(Boolean)
+      return `- ${toolRun.name} [${toolRun.status}]${progress.length > 0 ? `\n  ${progress.join('\n  ')}` : ''}`
+    })
+    lines.push(`工具：\n${toolLines.join('\n')}`)
+  }
+
+  return lines.join('\n')
+}
+
+function parseGoalAdjustmentProposal (text: string): GoalAdjustmentProposal | null {
+  const parsed = extractGoalAdjustmentMetadata(text)
+  if (!parsed) return null
+  const title = normalizeString(parsed.title)
+  const objective = normalizeString(parsed.objective)
+  const summary = normalizeString(parsed.summary)
+  if (!title || !objective || !summary) return null
+  return {
+    title,
+    objective,
+    summary,
+    before: (parsed.before && typeof parsed.before === 'object' && !Array.isArray(parsed.before)) ? parsed.before as Partial<LongTermGoalDefinition> : {},
+    after: (parsed.after && typeof parsed.after === 'object' && !Array.isArray(parsed.after)) ? parsed.after as Partial<LongTermGoalDefinition> : {},
+    questions: Array.isArray(parsed.questions)
+      ? parsed.questions
+          .map(item => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+            const record = item as Record<string, unknown>
+            const question = normalizeString(record.question)
+            if (!question) return null
+            return {
+              id: normalizeString(record.id) || generateId('goal_question'),
+              question,
+              options: normalizeStringArray(record.options),
+              reason: normalizeString(record.reason) || undefined
+            }
+          })
+          .filter((item): item is NonNullable<typeof item> => Boolean(item))
+      : []
+  }
+}
+
+function formatGoalAdjustmentAssistantText (text: string): string {
+  const cleaned = stripGoalAdjustmentMetadataForDisplay(text)
+  if (cleaned) return cleaned
+  const parsed = parseGoalAdjustmentProposal(text)
+  if (!parsed) return '我还需要更多信息来继续把目标收敛成更好的版本。'
+  return [
+    '# 目标调整提案',
+    '',
+    parsed.summary,
+    '',
+    `## 建议目标`,
+    `- 标题：${parsed.title}`,
+    `- 最终目标：${parsed.objective}`,
+    '',
+    parsed.questions.length > 0 ? `## 还需要确认\n${parsed.questions.map(question => `- ${question.question}`).join('\n')}` : '',
+    '',
+    '如果你确认这版更好，我再把它正式应用到长期目标里。'
+  ].filter(Boolean).join('\n')
+}
+
+function buildGoalAdjustmentChangeSet (
+  goal: LongTermGoalDefinition,
+  proposal: GoalAdjustmentProposal,
+  sourceTurnId: string
+): LongTermGoalChangeSet {
+  return {
+    id: generateId('goal_change'),
+    goalId: goal.id,
+    sourceTurnId,
+    summary: proposal.summary,
+    before: proposal.before,
+    after: proposal.after,
+    requiresConfirmation: true,
+    status: 'draft',
+    createdAt: nowIso(),
+    appliedAt: null
   }
 }
 
@@ -421,6 +731,8 @@ export class LongTermGoalService {
     conversations: [],
     changeSets: []
   }
+  private readonly adjustmentSessions = new Map<string, GoalConversationSession>()
+  private readonly creationSessions = new Map<string, GoalConversationSession>()
 
   constructor (private readonly options: LongTermGoalServiceOptions) {}
 
@@ -428,7 +740,7 @@ export class LongTermGoalService {
     this.snapshot = this.options.store.getSnapshot()
     this.snapshot.goals = this.snapshot.goals.map(goal => this.ensureScheduledTask(this.syncGoalScheduleState(goal)))
     this.persistAndEmit()
-    this.reconcileScheduledReports(this.options.scheduledTaskService.listReports())
+    this.reconcileScheduledReports(this.options.scheduledTaskService.listAllReports())
   }
 
   listGoals (): LongTermGoalDefinition[] {
@@ -512,6 +824,82 @@ export class LongTermGoalService {
     return clone(savedGoal)
   }
 
+  renameGoal (goalId: string, titleInput: string): LongTermGoalDefinition {
+    const goal = this.getGoalOrThrow(goalId)
+    const title = normalizeString(titleInput)
+    if (!title) throw new Error('目标名称不能为空')
+    if (title === goal.title) return clone(goal)
+
+    const now = nowIso()
+    const nextGoal: LongTermGoalDefinition = {
+      ...goal,
+      title,
+      updatedAt: now
+    }
+    this.upsertGoal(nextGoal)
+    this.addActivity({
+      goalId,
+      actor: 'user',
+      type: 'goal_changed',
+      title: '目标标题已更新',
+      summary: `${goal.title} → ${title}`
+    })
+    this.writeMemory(goalId, {
+      kind: 'goal_profile',
+      title: '目标标题',
+      content: title,
+      importance: 0.9
+    })
+    this.refreshExecutionBrief(goalId)
+    const scheduledGoal = this.ensureScheduledTask(nextGoal)
+    this.upsertGoal({
+      ...scheduledGoal,
+      title,
+      updatedAt: nowIso()
+    })
+    this.persistAndEmit()
+    return this.getGoal(goalId)!
+  }
+
+  setGoalStatus (goalId: string, status: LongTermGoalDefinition['status']): LongTermGoalDefinition {
+    const goal = this.getGoalOrThrow(goalId)
+    if (status !== 'active' && status !== 'paused' && status !== 'completed' && status !== 'archived') {
+      throw new Error('目标状态无效')
+    }
+    if (status === goal.status) return clone(goal)
+
+    const now = nowIso()
+    const nextGoal: LongTermGoalDefinition = {
+      ...goal,
+      status,
+      nextRunAt: status === 'active'
+        ? (normalizeFutureIsoDate(goal.nextRunAt) || fallbackNextRunAtFromSchedule(goal.schedule))
+        : goal.nextRunAt || null,
+      currentPhase: status === 'active'
+        ? (goal.currentPhase === '已暂停' ? '持续推进' : goal.currentPhase || '持续推进')
+        : status === 'paused'
+          ? '已暂停'
+          : goal.currentPhase,
+      updatedAt: now
+    }
+    const scheduledGoal = this.ensureScheduledTask(nextGoal)
+    const savedGoal = this.upsertGoal({
+      ...scheduledGoal,
+      status,
+      updatedAt: nowIso()
+    })
+    this.addActivity({
+      goalId,
+      actor: 'user',
+      type: 'goal_changed',
+      title: status === 'active' ? '目标已恢复持续执行' : status === 'paused' ? '目标已暂停' : '目标状态已更新',
+      summary: status
+    })
+    this.refreshExecutionBrief(goalId)
+    this.persistAndEmit()
+    return clone(savedGoal)
+  }
+
   deleteGoal (goalId: string): boolean {
     const goal = this.snapshot.goals.find(item => item.id === goalId)
     if (!goal) return false
@@ -549,14 +937,103 @@ export class LongTermGoalService {
     return this.options.scheduledTaskService.runNow(scheduledGoal.scheduleTaskId)
   }
 
-  appendGoalMessage (goalId: string, content: string): LongTermGoalMessageResult {
+  async appendGoalMessage (goalId: string, content: string, onEvent?: (event: LongTermGoalStreamEvent) => void): Promise<LongTermGoalMessageResult> {
     const goal = this.getGoalOrThrow(goalId)
     const text = normalizeString(content)
     if (!text) throw new Error('请输入要调整的内容')
+    return this.handleGoalConversation(goal, text, this.adjustmentSessions, '请输入要调整的内容', onEvent)
+  }
+
+  async createGoalViaConversation (content: string, options?: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] }, onEvent?: (event: LongTermGoalStreamEvent) => void): Promise<LongTermGoalMessageResult> {
+    const text = normalizeString(content)
+    if (!text) throw new Error('请输入要创建的目标')
+
+    const draftGoal: LongTermGoalDefinition = {
+      id: generateId('goal_draft'),
+      title: '新长期目标',
+      objective: text,
+      status: 'paused',
+      providerId: normalizeString(options?.providerId) || null,
+      modelId: normalizeString(options?.modelId) || null,
+      schedule: inferGoalSchedule(text),
+      selectedSkillIds: [],
+      selectedMcpServerIds: Array.isArray(options?.selectedMcpServerIds) ? options.selectedMcpServerIds : [],
+      notificationPolicy: 'minimal',
+      currentPhase: '目标定义中',
+      progressSummary: '等待 AI 共同整理初始目标。',
+      gapSummary: '尚未开始执行。',
+      nextTasks: [],
+      openInterventions: [],
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    }
+
+    const result = await this.handleGoalConversation(draftGoal, text, this.creationSessions, '请输入想创建的长期目标', onEvent)
+    if (!result.proposal) {
+      return result
+    }
+
+    const savedGoal = this.saveGoal({
+      title: result.proposal.title,
+      objective: result.proposal.objective,
+      providerId: result.proposal.after.providerId ?? draftGoal.providerId,
+      modelId: result.proposal.after.modelId ?? draftGoal.modelId,
+      schedule: (result.proposal.after.schedule as LongTermGoalSchedule) || draftGoal.schedule,
+      selectedSkillIds: Array.isArray(result.proposal.after.selectedSkillIds) ? result.proposal.after.selectedSkillIds as string[] : [],
+      selectedMcpServerIds: Array.isArray(result.proposal.after.selectedMcpServerIds) ? result.proposal.after.selectedMcpServerIds as string[] : draftGoal.selectedMcpServerIds,
+      notificationPolicy: (result.proposal.after.notificationPolicy as LongTermGoalDefinition['notificationPolicy']) || 'minimal',
+      currentPhase: result.proposal.after.currentPhase || '持续推进',
+      progressSummary: result.proposal.after.progressSummary || '目标已创建，等待首次自动推进。',
+      gapSummary: result.proposal.after.gapSummary || '等待首次总结后生成差距分析。',
+      todayFocus: result.proposal.after.todayFocus || undefined,
+      nextTasks: Array.isArray(result.proposal.after.nextTasks) ? result.proposal.after.nextTasks as LongTermGoalNextTask[] : [],
+      openInterventions: Array.isArray(result.proposal.after.openInterventions) ? result.proposal.after.openInterventions as LongTermGoalIntervention[] : []
+    })
+
+    const adjustedGoal = this.getGoal(savedGoal.id)!
+    const assistantTurn = {
+      ...result.assistantTurn,
+      goalId: adjustedGoal.id,
+      appliedChangeId: null
+    }
+    this.snapshot.conversations = this.snapshot.conversations.map(turn => {
+      if (turn.id !== result.assistantTurn.id) return turn
+      return {
+        ...assistantTurn,
+        createdAt: turn.createdAt
+      }
+    })
+    this.adjustmentSessions.delete(draftGoal.id)
+    this.creationSessions.delete(draftGoal.id)
+    this.refreshExecutionBrief(adjustedGoal.id)
+    this.persistAndEmit()
+
+    return {
+      ...result,
+      goal: adjustedGoal,
+      proposal: result.proposal ? {
+        ...result.proposal,
+        after: {
+          ...result.proposal.after,
+          ...adjustedGoal
+        }
+      } : null
+    }
+  }
+
+  private async handleGoalConversation (
+    goal: LongTermGoalDefinition,
+    latestUserText: string,
+    sessions: Map<string, GoalConversationSession>,
+    emptyHint: string,
+    onEvent?: (event: LongTermGoalStreamEvent) => void
+  ): Promise<LongTermGoalMessageResult> {
+    const text = normalizeString(latestUserText)
+    if (!text) throw new Error(emptyHint)
 
     const userTurn: LongTermGoalConversationTurn = {
       id: generateId('goal_turn'),
-      goalId,
+      goalId: goal.id,
       role: 'user',
       content: text,
       createdAt: nowIso(),
@@ -564,47 +1041,272 @@ export class LongTermGoalService {
     }
     this.snapshot.conversations.unshift(userTurn)
 
-    const changeSet = this.buildHeuristicChangeSet(goal, userTurn)
-    if (changeSet) {
-      this.snapshot.changeSets.unshift(changeSet)
-    } else {
-      this.writeMemory(goalId, {
-        kind: 'decision',
-        title: '用户补充',
-        content: text,
-        importance: 0.7
-      })
-      this.addActivity({
-        goalId,
-        actor: 'user',
-        type: 'user_decision',
-        title: '用户补充了目标上下文',
-        summary: compactText(text, 180),
-        details: text
-      })
+    const session = sessions.get(goal.id) || {
+      phase: 'clarifying',
+      contextTurns: [],
+      lastAssistantTurnId: null,
+      proposal: null
     }
+    session.contextTurns.push(userTurn)
 
-    const assistantContent = changeSet
-      ? `我整理了一个变更预览：${changeSet.summary}。确认后会应用到这个长期目标。`
-      : '收到，我会把这条补充作为后续推进和每日总结的上下文。'
+    const assistantResult = await this.generateGoalAdjustmentReply(goal, session, text, onEvent)
+    if (assistantResult.proposal) {
+      session.phase = 'proposal'
+      session.proposal = assistantResult.proposal
+    } else {
+      session.phase = 'clarifying'
+      session.proposal = null
+    }
+    sessions.set(goal.id, session)
+
     const assistantTurn: LongTermGoalConversationTurn = {
       id: generateId('goal_turn'),
-      goalId,
+      goalId: goal.id,
       role: 'assistant',
-      content: assistantContent,
+      content: assistantResult.content,
+      thinking: assistantResult.thinking,
+      toolRuns: assistantResult.toolRuns,
       createdAt: nowIso(),
-      appliedChangeId: changeSet?.id || null
+      appliedChangeId: assistantResult.changeSet?.id || null
     }
     this.snapshot.conversations.unshift(assistantTurn)
-    this.refreshExecutionBrief(goalId)
+    session.lastAssistantTurnId = assistantTurn.id
+    session.contextTurns.push(assistantTurn)
+
+    if (assistantResult.changeSet) {
+      this.snapshot.changeSets.unshift(assistantResult.changeSet)
+    }
+
+    if (!goal.id.startsWith('goal_draft')) {
+      this.refreshExecutionBrief(goal.id)
+    }
     this.trimCollections()
     this.persistAndEmit()
 
     return {
       turn: clone(userTurn),
       assistantTurn: clone(assistantTurn),
-      changeSet: changeSet ? clone(changeSet) : null,
-      goal: this.getGoal(goalId)!
+      changeSet: assistantResult.changeSet ? clone(assistantResult.changeSet) : null,
+      goal: goal.id.startsWith('goal_draft') && assistantResult.proposal
+        ? this.buildDraftGoalFromProposal(goal, assistantResult.proposal)
+        : this.getGoal(goal.id)!,
+      phase: assistantResult.phase,
+      proposal: assistantResult.proposal ? clone(assistantResult.proposal) : null
+    }
+  }
+
+  private buildDraftGoalFromProposal (
+    draftGoal: LongTermGoalDefinition,
+    proposal: GoalAdjustmentProposal
+  ): LongTermGoalDefinition {
+    const after = proposal.after || {}
+    return {
+      ...draftGoal,
+      ...after,
+      id: draftGoal.id,
+      title: proposal.title || after.title || draftGoal.title,
+      objective: proposal.objective || after.objective || draftGoal.objective,
+      status: draftGoal.status,
+      schedule: (after.schedule as LongTermGoalSchedule | undefined) || draftGoal.schedule,
+      selectedSkillIds: Array.isArray(after.selectedSkillIds) ? after.selectedSkillIds : draftGoal.selectedSkillIds,
+      selectedMcpServerIds: Array.isArray(after.selectedMcpServerIds) ? after.selectedMcpServerIds : draftGoal.selectedMcpServerIds,
+      nextTasks: Array.isArray(after.nextTasks) ? after.nextTasks as LongTermGoalNextTask[] : draftGoal.nextTasks,
+      openInterventions: draftGoal.openInterventions,
+      currentPhase: after.currentPhase || draftGoal.currentPhase,
+      progressSummary: after.progressSummary || draftGoal.progressSummary,
+      gapSummary: after.gapSummary || draftGoal.gapSummary,
+      todayFocus: after.todayFocus || draftGoal.todayFocus,
+      notificationPolicy: (after.notificationPolicy as LongTermGoalDefinition['notificationPolicy'] | undefined) || draftGoal.notificationPolicy,
+      updatedAt: nowIso()
+    }
+  }
+
+  private async generateGoalAdjustmentReply (
+    goal: LongTermGoalDefinition,
+    session: GoalConversationSession,
+    latestUserText: string,
+    onEvent?: (event: LongTermGoalStreamEvent) => void
+  ): Promise<GoalAdjustmentReply> {
+    const availableTools = this.options.aiEngine
+      .getAvailableTools()
+      .filter(isGoalAdjustmentToolDefinition)
+    const allowedToolNames = availableTools.map(tool => tool.name)
+    const allowedMcpServerIds = goal.selectedMcpServerIds.length > 0 ? goal.selectedMcpServerIds : undefined
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: [
+          '你正在帮助用户调整一个长期目标。你的工作不是执行代码，而是通过多轮对话把目标收敛成更清晰、更可执行、更少打扰用户的新版本。',
+          '你可以使用系统暴露的只读、检索、查询、分析类工具来理解当前环境、文件、文档、网页、数据库或上下文。',
+          '不能使用任何写入、执行、创建、删除、修改、启动、重启、构建、安装类工具。',
+          '如果信息不够，就继续追问；如果信息足够，就输出一个最终提案，并明确让用户确认后再应用。',
+          '不要把原始 JSON 直接展示给用户。你可以在正文后附加 HTML 注释 JSON 元数据，供系统解析。',
+          '正文应自然、简洁、像在和用户正常对话。',
+          '需要时先思考，再调用工具，再给出结论。'
+        ].join('\n')
+      },
+      {
+        role: 'system',
+        content: [
+          '## 当前长期目标',
+          `标题：${goal.title}`,
+          `最终目标：${goal.objective}`,
+          `状态：${goal.status}`,
+          `执行供应商：${goal.providerId || '跟随全局'}`,
+          `执行模型：${goal.modelId || '跟随供应商默认'}`,
+          `当前阶段：${goal.currentPhase || '持续推进'}`,
+          `当前进展：${goal.progressSummary || '暂无'}`,
+          `当前差距：${goal.gapSummary || '暂无'}`,
+          `节奏：${scheduleSummary(goal.schedule)}`,
+          `今日重点：${goal.todayFocus || '未设置'}`
+        ].join('\n')
+      },
+      {
+        role: 'system',
+        content: [
+          '## 已有调整上下文',
+          ...(session.contextTurns.slice(-6).map(turn => formatGoalAdjustmentConversationTurn(turn)))
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: latestUserText
+      }
+    ]
+
+    const thinkingParts: string[] = []
+    const contentParts: string[] = []
+    const toolRuns: LongTermGoalRunToolRun[] = []
+    let activeToolRun: LongTermGoalRunToolRun | null = null
+
+    try {
+    for await (const event of this.options.aiEngine.chatStream(messages, undefined, {
+      providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'max'),
+      allowedToolNames: allowedToolNames.length > 0 ? allowedToolNames : undefined,
+      allowedMcpServerIds,
+      systemPromptSections: [
+        [
+          '## Long-term goal adjustment mode',
+          '- Think before you answer.',
+          '- Use tools only when they help you verify or understand the goal.',
+          '- Keep the visible answer as markdown.',
+          '- Hide internal JSON in an HTML comment for system parsing.'
+        ].join('\n')
+      ]
+    })) {
+      // done 事件单独在下方转发剥离 JSON 后的最终正文，避免把原始元数据注释推给前端。
+      if (event.type !== 'done') {
+        onEvent?.(event as LongTermGoalStreamEvent)
+      }
+
+      if (event.type === 'thinking' && event.content) {
+        thinkingParts.push(event.content)
+        continue
+      }
+
+      if (event.type === 'token' && event.content) {
+        contentParts.push(event.content)
+        continue
+      }
+
+      if (event.type === 'tool_start' && event.name) {
+        activeToolRun = {
+          id: generateId('goal_tool'),
+          name: event.name,
+          status: 'running',
+          progress: []
+        }
+        toolRuns.push(activeToolRun)
+        continue
+      }
+
+      if (event.type === 'tool_end' && event.name) {
+        const target = [...toolRuns].reverse().find(item => item.status === 'running' && item.name === event.name) ||
+          activeToolRun ||
+          toolRuns[toolRuns.length - 1] ||
+          null
+        if (target) {
+          target.status = 'completed'
+        }
+        activeToolRun = [...toolRuns].reverse().find(item => item.status === 'running') || null
+        continue
+      }
+
+      if (event.type === 'progress' && event.stage) {
+        if (activeToolRun) {
+          activeToolRun.progress.push({ stage: event.stage, detail: event.detail })
+        }
+        continue
+      }
+
+      if (event.type === 'web_search_result' && activeToolRun) {
+        activeToolRun.progress.push({
+          stage: 'web_search_result',
+          detail: `${event.query} (${event.results.length} 条结果)`
+        })
+        continue
+      }
+
+      if (event.type === 'web_fetch_result' && activeToolRun) {
+        activeToolRun.progress.push({
+          stage: 'web_fetch_result',
+          detail: event.result.title || event.result.url
+        })
+        continue
+      }
+
+      if (event.type === 'done') {
+        if (event.thinking) {
+          thinkingParts.push(event.thinking)
+        }
+
+        const rawText = typeof event.message.content === 'string'
+          ? event.message.content
+          : contentParts.join('')
+        const content = formatGoalAdjustmentAssistantText(rawText)
+        const proposal = parseGoalAdjustmentProposal(rawText)
+        const changeSet = proposal ? buildGoalAdjustmentChangeSet(goal, proposal, session.lastAssistantTurnId || generateId('goal_turn')) : null
+
+        onEvent?.({
+          type: 'done',
+          message: { role: 'assistant', content },
+          thinking: thinkingParts.join('') || undefined
+        })
+
+        return {
+          content,
+          changeSet,
+          proposal,
+          phase: proposal ? 'proposal' : 'clarifying',
+          thinking: thinkingParts.join('') || undefined,
+          toolRuns: toolRuns.length > 0 ? clone(toolRuns) : undefined
+        }
+      }
+    }
+    } catch (err) {
+      const errorMessage = (err as Error)?.message || '目标调整失败，请稍后重试。'
+      onEvent?.({ type: 'error', error: errorMessage })
+      return {
+        content: errorMessage,
+        changeSet: null,
+        proposal: null,
+        phase: 'clarifying',
+        thinking: thinkingParts.join('') || undefined,
+        toolRuns: toolRuns.length > 0 ? clone(toolRuns) : undefined
+      }
+    }
+
+    const rawText = contentParts.join('')
+    const content = formatGoalAdjustmentAssistantText(rawText)
+    const proposal = parseGoalAdjustmentProposal(rawText)
+    const changeSet = proposal ? buildGoalAdjustmentChangeSet(goal, proposal, session.lastAssistantTurnId || generateId('goal_turn')) : null
+    return {
+      content,
+      changeSet,
+      proposal,
+      phase: proposal ? 'proposal' : 'clarifying',
+      thinking: thinkingParts.join('') || undefined,
+      toolRuns: toolRuns.length > 0 ? clone(toolRuns) : undefined
     }
   }
 
@@ -759,18 +1461,30 @@ export class LongTermGoalService {
           currentPhase: reportProgressSummary(report),
           updatedAt: nowIso()
         })
+        const progressedRun = this.snapshot.runs.find(item => item.id === runId)
+        if (progressedRun) {
+          this.options.onRunProgress?.(goal.id, progressedRun)
+        }
         changed = true
         continue
       }
 
       if (report.status === 'completed') {
         this.finishCompletedReport(goal, report, existingRun)
+        const finishedRun = this.snapshot.runs.find(item => item.scheduledReportId === report.id)
+        if (finishedRun) {
+          this.options.onRunProgress?.(goal.id, finishedRun)
+        }
         changed = true
         continue
       }
 
       if (report.status === 'failed') {
         this.finishFailedReport(goal, report, existingRun)
+        const failedRun = this.snapshot.runs.find(item => item.scheduledReportId === report.id)
+        if (failedRun) {
+          this.options.onRunProgress?.(goal.id, failedRun)
+        }
         changed = true
       }
     }
@@ -785,6 +1499,7 @@ export class LongTermGoalService {
 
   private finishCompletedReport (goal: LongTermGoalDefinition, report: ScheduledTaskRunReport, existingRun?: LongTermGoalRun): void {
     const parsed = parseGoalRunResult(report.resultText || report.summary, goal.title)
+    const displayResultText = stripGoalMetadataForDisplay(report.resultText || report.summary)
     const finishedAt = report.finishedAt || nowIso()
     const runId = existingRun?.id || generateId('goal_run')
     const run: LongTermGoalRun = {
@@ -796,7 +1511,7 @@ export class LongTermGoalService {
       finishedAt,
       progressSummary: parsed.progressSummary,
       gapToGoal: parsed.gapToGoal,
-      resultText: report.resultText || report.summary,
+      resultText: displayResultText || report.summary,
       thinkingText: report.thinkingText || existingRun?.thinkingText,
       progress: report.progress || existingRun?.progress || [],
       toolRuns: buildRunToolRuns(report),
@@ -808,7 +1523,8 @@ export class LongTermGoalService {
 
     const nextTasks = this.buildNextTasks(goal, parsed.nextPlan)
     const intervention = this.buildIntervention(goal.id, parsed)
-    const updatedGoal: LongTermGoalDefinition = this.syncGoalScheduleState({
+    const nextRunAt = parsed.nextRunAt || fallbackNextRunAtFromSchedule(goal.schedule)
+    const updatedGoal: LongTermGoalDefinition = {
       ...goal,
       lastRunAt: finishedAt,
       lastReviewAt: finishedAt,
@@ -817,12 +1533,14 @@ export class LongTermGoalService {
       gapSummary: parsed.gapToGoal,
       currentPhase: parsed.blockers.length > 0 ? '等待处理阻塞' : (goal.currentPhase || '持续推进'),
       nextTasks,
+      nextRunAt,
       openInterventions: intervention
         ? [intervention, ...goal.openInterventions.filter(item => item.status === 'open')]
         : goal.openInterventions,
       updatedAt: nowIso()
-    })
-    this.upsertGoal(updatedGoal)
+    }
+    const scheduledGoal = this.ensureScheduledTask(updatedGoal)
+    this.upsertGoal(scheduledGoal)
 
     const review: LongTermGoalDailyReview = {
       id: generateId('goal_review'),
@@ -847,7 +1565,7 @@ export class LongTermGoalService {
       type: 'task_completed',
       title: '本次执行完成',
       summary: parsed.progressSummary,
-      details: report.resultText || report.summary,
+      details: displayResultText || report.summary,
       artifacts: [{ kind: 'report', title: report.taskTitle, ref: report.id }]
     })
     this.addActivity({
@@ -912,7 +1630,7 @@ export class LongTermGoalService {
       sourceRunId: runId
     })
     if (intervention) {
-      this.options.onInterventionRequested?.(updatedGoal, intervention)
+      this.options.onInterventionRequested?.(scheduledGoal, intervention)
     }
     this.refreshExecutionBrief(goal.id)
     this.compactGoalMemory(goal.id)
@@ -951,15 +1669,17 @@ export class LongTermGoalService {
         reason: '连续失败会阻断后续自动推进。'
       }]
     })
-    this.upsertGoal(this.syncGoalScheduleState({
+    const updatedGoal: LongTermGoalDefinition = {
       ...goal,
       lastRunAt: finishedAt,
       lastRunStatus: 'failed',
       currentPhase: '遇到阻塞',
       gapSummary: summary,
+      nextRunAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       openInterventions: [intervention, ...goal.openInterventions],
       updatedAt: nowIso()
-    }))
+    }
+    this.upsertGoal(this.ensureScheduledTask(updatedGoal))
     this.addActivity({
       goalId: goal.id,
       runId,
@@ -1045,10 +1765,12 @@ export class LongTermGoalService {
       '- 完成后总结今天干了什么、正在推进什么、接下来要做什么。',
       '- 把本次产生的关键成果写入 importantAchievements；把可复用方法、工具使用经验、项目约束、踩坑结论写入 learnedSkills。',
       '- 明确指出距离目标还有哪些差距。',
+      '- 自己决定下一次持续推进应该在什么时候运行，把 ISO 时间写入 nextRunAt。不要让用户手动设置频率；如果目标需要更密集推进就安排更近，如果等待外部条件就安排更远。',
       '- 只有需要用户决定、授权、补信息、或遇到阻塞时，才把 needsUserInput 设为 true 或 notificationLevel 设为 notify。',
-      '- 输出必须是严格 JSON，不要包裹 Markdown 代码块。',
+      '- 正文输出给用户看的 Markdown 报告，重点写本次真实推进过程、结论、差距和下一步，不要把 JSON 直接展示给用户。',
+      `- 在正文末尾附加一个 HTML 注释：<!-- ${GOAL_RUN_METADATA_LABEL} { ... } -->，注释内只能放一段合法 JSON，供系统更新长期记忆和下次执行时间。`,
       '',
-      'JSON schema:',
+      '元数据 JSON schema:',
       JSON.stringify({
         progressSummary: '今天完成了什么和当前状态，一两句话',
         gapToGoal: '距离目标仍缺什么，以及为什么重要',
@@ -1057,6 +1779,7 @@ export class LongTermGoalService {
         importantAchievements: ['对后续有复用价值的重要成果'],
         learnedSkills: ['本次学到的技能、方法、工具经验、项目约束或踩坑结论'],
         blockers: ['阻塞点，没有则空数组'],
+        nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
         needsUserInput: false,
         userQuestions: [{ id: 'q1', question: '需要用户决定的问题', options: ['选项 A', '选项 B'], reason: '为什么需要用户' }],
         notificationLevel: 'silent',
@@ -1113,7 +1836,9 @@ export class LongTermGoalService {
       '## 长期记忆',
       memories || '暂无长期记忆。',
       '',
-      '输出严格 JSON，不要 Markdown。请根据今天进展刷新关键成果、技能方法和下一步计划，避免重复推进已经完成的事：',
+      '请输出给用户看的 Markdown 每日复盘，不要把 JSON 直接展示给用户。正文之后附加 HTML 注释元数据，格式为：',
+      `<!-- ${GOAL_RUN_METADATA_LABEL} { ... } -->`,
+      '请根据今天进展刷新关键成果、技能方法和下一步计划，避免重复推进已经完成的事，并自行决定下一次推进时间 nextRunAt：',
       JSON.stringify({
         progressSummary: '今天整体进展和当前状态',
         gapToGoal: '距离目标仍缺什么，以及为什么重要',
@@ -1122,6 +1847,7 @@ export class LongTermGoalService {
         importantAchievements: ['今天沉淀的重要成果'],
         learnedSkills: ['今天学到的技能、方法、工具经验、项目约束或踩坑结论'],
         blockers: ['阻塞点，没有则空数组'],
+        nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
         needsUserInput: false,
         userQuestions: [{ id: 'q1', question: '需要用户决定的问题', options: ['选项 A', '选项 B'], reason: '为什么需要用户' }],
         notificationLevel: 'silent',
@@ -1133,7 +1859,7 @@ export class LongTermGoalService {
   private ensureScheduledTask (goal: LongTermGoalDefinition): LongTermGoalDefinition {
     const now = nowIso()
     const enabled = goal.status === 'active'
-    const tasks = this.options.scheduledTaskService.listTasks()
+    const tasks = this.options.scheduledTaskService.listTasks({ includeHidden: true })
     const existingTask = goal.scheduleTaskId
       ? tasks.find(task => task.id === goal.scheduleTaskId)
       : null
@@ -1144,9 +1870,10 @@ export class LongTermGoalService {
       id: existingTask?.id || goal.scheduleTaskId || generateId('task_goal'),
       title: `${LONG_TERM_GOAL_TASK_MARKER} ${goal.title}`,
       enabled,
+      hidden: true,
       createdBy: 'ai',
       prompt: this.buildExecutionPrompt(goal),
-      schedule: toScheduledSchedule(goal.schedule),
+      schedule: toGoalScheduledSchedule(goal),
       providerId: goal.providerId || null,
       modelId: goal.modelId || null,
       selectedSkillIds: [...goal.selectedSkillIds],
@@ -1154,17 +1881,25 @@ export class LongTermGoalService {
       retryPolicy: existingTask?.retryPolicy || { maxRetries: 1, retryDelayMinutes: 10 },
       createdAt: existingTask?.createdAt || goal.createdAt || now,
       updatedAt: now,
-      nextRunAt: existingTask?.nextRunAt || null,
+      nextRunAt: normalizeFutureIsoDate(goal.nextRunAt) || null,
       retryScheduledAt: existingTask?.retryScheduledAt || null,
       lastRunAt: existingTask?.lastRunAt || null,
       lastStatus: existingTask?.lastStatus || 'idle',
       lastReportId: existingTask?.lastReportId || null
     }
-    const savedTask = this.options.scheduledTaskService.saveTask(task)
+    let savedTask: ScheduledTaskDefinition
+    try {
+      savedTask = this.options.scheduledTaskService.saveTask(task)
+    } catch (error) {
+      if (!existingTask) throw error
+      console.warn('[long-term-goal-service] Failed to update running backing task:', (error as Error).message)
+      savedTask = existingTask
+    }
     const reviewTask: ScheduledTaskDefinition = {
       id: existingReviewTask?.id || goal.reviewScheduleTaskId || generateId('task_goal_review'),
       title: `${LONG_TERM_GOAL_REVIEW_MARKER} ${goal.title}`,
       enabled,
+      hidden: true,
       createdBy: 'ai',
       prompt: this.buildDailyReviewPrompt(goal),
       schedule: {
@@ -1184,7 +1919,14 @@ export class LongTermGoalService {
       lastStatus: existingReviewTask?.lastStatus || 'idle',
       lastReportId: existingReviewTask?.lastReportId || null
     }
-    const savedReviewTask = this.options.scheduledTaskService.saveTask(reviewTask)
+    let savedReviewTask: ScheduledTaskDefinition
+    try {
+      savedReviewTask = this.options.scheduledTaskService.saveTask(reviewTask)
+    } catch (error) {
+      if (!existingReviewTask) throw error
+      console.warn('[long-term-goal-service] Failed to update running backing review task:', (error as Error).message)
+      savedReviewTask = existingReviewTask
+    }
     return this.syncGoalScheduleState({
       ...goal,
       scheduleTaskId: savedTask.id,
@@ -1203,7 +1945,7 @@ export class LongTermGoalService {
   }
 
   private syncGoalScheduleState (goal: LongTermGoalDefinition): LongTermGoalDefinition {
-    const tasks = this.options.scheduledTaskService.listTasks()
+    const tasks = this.options.scheduledTaskService.listTasks({ includeHidden: true })
     const task = goal.scheduleTaskId ? tasks.find(item => item.id === goal.scheduleTaskId) : null
     const reviewTask = goal.reviewScheduleTaskId ? tasks.find(item => item.id === goal.reviewScheduleTaskId) : null
     if (!task && !reviewTask) return goal

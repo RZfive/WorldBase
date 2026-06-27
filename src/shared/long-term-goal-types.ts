@@ -200,6 +200,8 @@ export interface LongTermGoalConversationTurn {
   goalId: string
   role: 'user' | 'assistant'
   content: string
+  thinking?: string
+  toolRuns?: LongTermGoalRunToolRun[]
   createdAt: string
   appliedChangeId?: string | null
 }
@@ -238,4 +240,30 @@ export interface LongTermGoalMessageResult {
   assistantTurn: LongTermGoalConversationTurn
   changeSet?: LongTermGoalChangeSet | null
   goal: LongTermGoalDefinition
+  phase?: 'clarifying' | 'proposal'
+  thinking?: string
+  toolRuns?: LongTermGoalRunToolRun[]
+  proposal?: {
+    title: string
+    objective: string
+    summary: string
+    before: Partial<LongTermGoalDefinition>
+    after: Partial<LongTermGoalDefinition>
+    questions: Array<{ id: string; question: string; options: string[]; reason?: string }>
+  } | null
+}
+
+export interface LongTermGoalStreamEvent {
+  type: 'thinking' | 'token' | 'tool_start' | 'tool_end' | 'progress' | 'web_search_result' | 'web_fetch_result' | 'done' | 'error'
+  content?: string
+  name?: string
+  message?: { role?: string; content?: string }
+  thinking?: string
+  error?: string
+  stage?: string
+  detail?: string
+  query?: string
+  engine?: string
+  results?: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }>
+  result?: { url: string; title?: string; [key: string]: unknown }
 }
