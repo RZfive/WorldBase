@@ -10,8 +10,9 @@ import LogCenterPanel from './LogCenterPanel.vue'
 import MCPSettingsPanel from './MCPSettingsPanel.vue'
 import ProcessManagerPanel from './ProcessManagerPanel.vue'
 import ScheduledTasksPanel from './ScheduledTasksPanel.vue'
+import UsagePanel from './UsagePanel.vue'
 
-type CategoryId = 'general' | 'about' | 'providers' | 'mcp' | 'skills' | 'agent-workspace' | 'scheduler' | 'logs' | 'database' | 'processes'
+type CategoryId = 'general' | 'about' | 'providers' | 'mcp' | 'skills' | 'agent-workspace' | 'scheduler' | 'logs' | 'database' | 'processes' | 'usage'
 
 interface Category {
   id: CategoryId
@@ -22,6 +23,7 @@ interface Category {
 const categories: Category[] = [
   { id: 'general', icon: '⚙️', labelKey: 'settings.nav.general' },
   { id: 'providers', icon: '🤖', labelKey: 'settings.nav.providers' },
+  { id: 'usage', icon: '📈', labelKey: 'settings.nav.usage' },
   { id: 'mcp', icon: '🔌', labelKey: 'settings.nav.mcp' },
   { id: 'skills', icon: '✦', labelKey: 'settings.nav.skills' },
   { id: 'agent-workspace', icon: '🧠', labelKey: 'settings.nav.agentWorkspace' },
@@ -55,6 +57,7 @@ const activeCategoryId = ref<CategoryId>('general')
       <GeneralSettingsPanel v-if="activeCategoryId === 'general'" />
       <AboutUpdatesPanel v-else-if="activeCategoryId === 'about'" :active="activeCategoryId === 'about'" />
       <ProviderPanel v-else-if="activeCategoryId === 'providers'" />
+      <UsagePanel v-else-if="activeCategoryId === 'usage'" />
       <MCPSettingsPanel v-else-if="activeCategoryId === 'mcp'" />
       <SkillManager v-else-if="activeCategoryId === 'skills'" />
       <AgentWorkspacePanel v-else-if="activeCategoryId === 'agent-workspace'" />

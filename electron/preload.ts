@@ -3,6 +3,7 @@ import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot,
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../src/shared/image-studio-types.js'
+import type { UsageRecord, UsageSummary } from '../src/main/settings/usage-store.js'
 import type { ConversationFolderWorkspaceState, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
 import type { LongTermGoalChangeSet, LongTermGoalDefinition, LongTermGoalIntervention, LongTermGoalMessageResult, LongTermGoalRun, LongTermGoalSaveInput, LongTermGoalSnapshot, LongTermGoalStreamEvent } from '../src/shared/long-term-goal-types.js'
 
@@ -548,6 +549,9 @@ export interface ElectronAPI {
   drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
   loadStudioImageTasks: () => Promise<ImageStudioTask[]>
   saveStudioImageTasks: (tasks: ImageStudioTask[]) => Promise<void>
+  getUsageDaily: (from?: string, to?: string) => Promise<UsageRecord[]>
+  getUsageSummary: (from?: string, to?: string) => Promise<UsageSummary[]>
+  clearUsage: (beforeDate?: string) => Promise<{ removed: number }>
   onStudioImageTasksAdded: (callback: (payload: { count: number }) => void) => () => void
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
@@ -805,6 +809,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   drainPendingStudioImageTasks: (): Promise<ImageStudioGenerateRequest[]> => ipcRenderer.invoke('image:studio:drainPendingTasks'),
   loadStudioImageTasks: (): Promise<ImageStudioTask[]> => ipcRenderer.invoke('image:studio:loadTasks'),
   saveStudioImageTasks: (tasks: ImageStudioTask[]) => ipcRenderer.invoke('image:studio:saveTasks', tasks),
+  getUsageDaily: (from?: string, to?: string) => ipcRenderer.invoke('usage:getDaily', from, to),
+  getUsageSummary: (from?: string, to?: string) => ipcRenderer.invoke('usage:getSummary', from, to),
+  clearUsage: (beforeDate?: string) => ipcRenderer.invoke('usage:clear', beforeDate),
   onStudioImageTasksAdded: (callback: (payload: { count: number }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, payload: { count: number }) => callback(payload)
     ipcRenderer.on('image:studio:tasksAdded', handler)

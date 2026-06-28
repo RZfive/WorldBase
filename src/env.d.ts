@@ -11,6 +11,8 @@ type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js'
 type ImageStudioGenerateRequest = import('./shared/image-studio-types.js').ImageStudioGenerateRequest
 type ImageStudioGenerateResponse = import('./shared/image-studio-types.js').ImageStudioGenerateResponse
 type ImageStudioTask = import('./shared/image-studio-types.js').ImageStudioTask
+type UsageRecord = import('./main/settings/usage-store.js').UsageRecord
+type UsageSummary = import('./main/settings/usage-store.js').UsageSummary
 type ImageLibraryEntry = import('./shared/image-studio-types.js').ImageLibraryEntry
 type ImageLibraryItem = import('./shared/image-studio-types.js').ImageLibraryItem
 type ImageLibraryPage = import('./shared/image-studio-types.js').ImageLibraryPage
@@ -920,6 +922,9 @@ interface ElectronAPI {
   drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
   loadStudioImageTasks: () => Promise<ImageStudioTask[]>
   saveStudioImageTasks: (tasks: ImageStudioTask[]) => Promise<void>
+  getUsageDaily: (from?: string, to?: string) => Promise<UsageRecord[]>
+  getUsageSummary: (from?: string, to?: string) => Promise<UsageSummary[]>
+  clearUsage: (beforeDate?: string) => Promise<{ removed: number }>
   onStudioImageTasksAdded: (callback: (payload: { count: number }) => void) => () => void
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
