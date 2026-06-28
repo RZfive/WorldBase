@@ -302,6 +302,10 @@ async function executeTask (task: ImageStudioTask) {
     task.status = 'error'
     task.error = error instanceof Error ? error.message : t('studioUi.imageGenerationFailed')
   } finally {
+    // Both success and error change what should be persisted: success drops the
+    // task from the checkpoint (its images already landed in the library), error
+    // adds the failure reason so it survives a restart.
+    void persistTasks()
     runScheduler()
   }
 }
@@ -324,6 +328,7 @@ function enqueueTask (req: ImageStudioGenerateRequest, opts?: { createdByAgent?:
   }
   // Newest task on top of the queue panel.
   tasks.value = [task, ...tasks.value]
+  void persistTasks()
   runScheduler()
 }
 
@@ -347,6 +352,7 @@ async function drainAgentTasks () {
 
 function removeTask (id: string) {
   tasks.value = tasks.value.filter(t => t.id !== id || t.status === 'running')
+  void persistTasks()
 }
 
 function retryTask (id: string) {
@@ -355,11 +361,86 @@ function retryTask (id: string) {
   task.status = 'queued'
   task.error = undefined
   task.entries = []
+  void persistTasks()
   runScheduler()
 }
 
 function clearFinishedTasks () {
   tasks.value = tasks.value.filter(t => t.status === 'queued' || t.status === 'running')
+  void persistTasks()
+}
+
+/**
+ * Retry every errored task in the queue at once. Re-arms them as queued and lets
+ * the scheduler pick them up subject to the concurrency cap.
+ */
+function retryAllFailedTasks () {
+  let touched = false
+  for (const task of tasks.value) {
+    if (task.status === 'error') {
+      task.status = 'queued'
+      task.error = undefined
+      task.entries = []
+      touched = true
+    }
+  }
+  if (touched) {
+    void persistTasks()
+    runScheduler()
+  }
+}
+
+/**
+ * Persist the queue so failed/queued tasks survive an app restart. Only those two
+ * states are worth saving — `success` results already live in the image library,
+ * and `running` is transient. Fire-and-forget: a missed checkpoint just means the
+ * in-memory queue is the source of truth until the next state change.
+ */
+let persistInFlight = false
+let persistPending = false
+async function persistTasks (): Promise<void> {
+  if (!window.electronAPI?.saveStudioImageTasks) return
+  // Coalesce concurrent calls: if a save is already in flight, flag a follow-up
+  // and let the in-flight one re-check when it finishes. This avoids N parallel
+  // IPC writes when several tasks transition in the same tick.
+  if (persistInFlight) {
+    persistPending = true
+    return
+  }
+  persistInFlight = true
+  try {
+    do {
+      persistPending = false
+      const snapshot = tasks.value
+        .filter(t => t.status === 'queued' || t.status === 'error')
+        .map(t => ({ ...t, entries: [] }))
+      await window.electronAPI.saveStudioImageTasks(snapshot)
+    } while (persistPending)
+  } catch {
+    // Non-fatal — the queue stays in memory; next change retries the checkpoint.
+  } finally {
+    persistInFlight = false
+  }
+}
+
+/** Reload any failed/queued tasks left over from a previous session. */
+async function loadPersistedTasks () {
+  if (!window.electronAPI?.loadStudioImageTasks) return
+  try {
+    const persisted = await window.electronAPI.loadStudioImageTasks()
+    if (!persisted.length) return
+    // Drop any whose id already matches a task we already have (e.g. an
+    // agent-queued task drained before this resolved) to avoid duplicates.
+    const existing = new Set(tasks.value.map(t => t.id))
+    const fresh = persisted.filter(t => !existing.has(t.id))
+    if (!fresh.length) return
+    // tasks render newest-first; persisted tasks are oldest-first, so prepend in
+    // reverse so the oldest ends up at the bottom of the visible list.
+    tasks.value = [...fresh.reverse(), ...tasks.value]
+    runScheduler()
+  } catch {
+    // Non-fatal — start with an empty queue.
+  }
 }
 
 function buildRequestFromForm (): ImageStudioGenerateRequest | null {
@@ -635,6 +716,9 @@ onMounted(() => {
   document.addEventListener('click', onDocumentClick)
   // Live drain when the agent queues tasks while the studio is already open.
   unsubscribeAgentTasks = window.electronAPI?.onStudioImageTasksAdded?.(() => { void drainAgentTasks() }) ?? null
+  // Restore any failed/queued tasks left over from the last session so the user
+  // can retry or dismiss them.
+  void loadPersistedTasks()
 })
 
 onUnmounted(() => {
@@ -665,6 +749,7 @@ onUnmounted(() => {
               @open="openTaskDetail"
               @remove="removeTask"
               @retry="retryTask"
+              @retry-all-failed="retryAllFailedTasks"
               @clear-finished="clearFinishedTasks"
             />
           </div>

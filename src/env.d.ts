@@ -10,6 +10,7 @@ type PageAutomationRequestEnvelope = import('./shared/page-automation-types.js')
 type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js').PageAutomationResponseEnvelope
 type ImageStudioGenerateRequest = import('./shared/image-studio-types.js').ImageStudioGenerateRequest
 type ImageStudioGenerateResponse = import('./shared/image-studio-types.js').ImageStudioGenerateResponse
+type ImageStudioTask = import('./shared/image-studio-types.js').ImageStudioTask
 type ImageLibraryEntry = import('./shared/image-studio-types.js').ImageLibraryEntry
 type ImageLibraryItem = import('./shared/image-studio-types.js').ImageLibraryItem
 type ImageLibraryPage = import('./shared/image-studio-types.js').ImageLibraryPage
@@ -917,6 +918,8 @@ interface ElectronAPI {
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
   drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
+  loadStudioImageTasks: () => Promise<ImageStudioTask[]>
+  saveStudioImageTasks: (tasks: ImageStudioTask[]) => Promise<void>
   onStudioImageTasksAdded: (callback: (payload: { count: number }) => void) => () => void
   readUploadedAttachmentFile: (filePath: string) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>
   readUploadedAttachmentBuffer: (payload: { fileName: string; fileType?: string; bytes: Uint8Array }) => Promise<{ filePath: string; fileName: string; size: number; fileType: string; content: string }>

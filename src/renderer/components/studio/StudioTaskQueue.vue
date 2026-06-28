@@ -11,10 +11,12 @@ const emit = defineEmits<{
   (e: 'open', task: ImageStudioTask): void
   (e: 'remove', id: string): void
   (e: 'retry', id: string): void
+  (e: 'retryAllFailed'): void
   (e: 'clearFinished'): void
 }>()
 
 const hasFinished = computed(() => props.tasks.some(t => t.status === 'success' || t.status === 'error'))
+const failedCount = computed(() => props.tasks.filter(t => t.status === 'error').length)
 const { t } = useI18n()
 
 function statusLabel (status: ImageStudioTask['status']): string {
@@ -36,7 +38,16 @@ function taskEntryThumbSrc (task: ImageStudioTask): string {
   <div class="queue">
     <header class="queue-header">
       <span class="queue-title">{{ $t('studioUi.taskQueue') }}</span>
-      <button v-if="hasFinished" class="queue-clear" type="button" @click="emit('clearFinished')">{{ $t('studioUi.clearFinished') }}</button>
+      <div class="queue-header-actions">
+        <button
+          v-if="failedCount > 0"
+          class="queue-clear"
+          type="button"
+          :title="$t('studioUi.retryAllFailedTitle', { count: failedCount })"
+          @click="emit('retryAllFailed')"
+        >↻ {{ $t('studioUi.retryAllFailed') }} ({{ failedCount }})</button>
+        <button v-if="hasFinished" class="queue-clear" type="button" @click="emit('clearFinished')">{{ $t('studioUi.clearFinished') }}</button>
+      </div>
     </header>
 
     <p v-if="tasks.length === 0" class="queue-empty">{{ $t('studioUi.emptyQueue') }}</p>
@@ -96,6 +107,8 @@ function taskEntryThumbSrc (task: ImageStudioTask): string {
   justify-content: space-between;
   gap: 12px;
 }
+
+.queue-header-actions { display: flex; gap: 6px; }
 
 .queue-title { font-size: 0.84rem; font-weight: 600; color: var(--app-text-strong); }
 

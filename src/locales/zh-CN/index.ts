@@ -859,6 +859,8 @@ const zhCN = {
     clickToReset: '点击复位',
     taskQueue: '任务队列',
     clearFinished: '清除已完成',
+    retryAllFailed: '重试全部失败',
+    retryAllFailedTitle: '重试 {count} 个失败任务',
     emptyQueue: '暂无任务，去工作台生成或编辑图片吧',
     noPrompt: '（无提示词）',
     createdByAi: '由 AI 发起',
