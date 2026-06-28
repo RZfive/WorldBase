@@ -105,10 +105,26 @@ const GOAL_ADJUSTMENT_SAFE_TOOL_NAME_PATTERNS: RegExp[] = [
 const GOAL_ADJUSTMENT_BLOCKED_TOOL_NAME_PATTERNS: RegExp[] = [
   /(?:^|_)(write|create|edit|patch|delete|remove|update|run|execute|install|restart|start|stop|build|rebuild|finalize|spawn|interact|commit|push|pull)(?:_|$)/i
 ]
+/**
+ * 当长目标已绑定项目时，调整对话额外放行的项目读写/构建工具。
+ * create_project 不放行——避免对话中误建项目；新建项目走定时执行或手动绑定。
+ */
+const GOAL_ADJUSTMENT_PROJECT_TOOLS = new Set([
+  'write_project_file',
+  'patch_project_file',
+  'read_project_file',
+  'list_project_files',
+  'rebuild_project',
+  'read_file'
+])
 
-function isGoalAdjustmentToolDefinition (tool: { name: string; description?: string }): boolean {
+function isGoalAdjustmentToolDefinition (tool: { name: string; description?: string }, goal?: { targetProjectIds?: string[] }): boolean {
   const name = tool.name.trim()
   if (!name) return false
+  // 已绑定项目时，放行项目读写/构建工具（create_project 仍被黑名单拦截）。
+  if (goal?.targetProjectIds && goal.targetProjectIds.length > 0 && GOAL_ADJUSTMENT_PROJECT_TOOLS.has(name)) {
+    return true
+  }
 
   if (GOAL_ADJUSTMENT_BLOCKED_TOOL_NAME_PATTERNS.some(pattern => pattern.test(name))) {
     return false
@@ -784,6 +800,7 @@ export class LongTermGoalService {
       dailyReviewTimeOfDay: normalizeString(input.dailyReviewTimeOfDay) || existing?.dailyReviewTimeOfDay || inferTimeOfDay(`${title}\n${objective}`, '21:30'),
       selectedSkillIds: Array.isArray(input.selectedSkillIds) ? input.selectedSkillIds : (existing?.selectedSkillIds || []),
       selectedMcpServerIds: Array.isArray(input.selectedMcpServerIds) ? input.selectedMcpServerIds : (existing?.selectedMcpServerIds || []),
+      targetProjectIds: Array.isArray(input.targetProjectIds) ? input.targetProjectIds : (existing?.targetProjectIds || []),
       notificationPolicy: input.notificationPolicy || existing?.notificationPolicy || 'minimal',
       currentPhase: normalizeString(input.currentPhase) || existing?.currentPhase || '启动',
       progressSummary: normalizeString(input.progressSummary) || existing?.progressSummary || '目标已创建，等待首次自动推进。',
@@ -958,6 +975,7 @@ export class LongTermGoalService {
       schedule: inferGoalSchedule(text),
       selectedSkillIds: [],
       selectedMcpServerIds: Array.isArray(options?.selectedMcpServerIds) ? options.selectedMcpServerIds : [],
+      targetProjectIds: [],
       notificationPolicy: 'minimal',
       currentPhase: '目标定义中',
       progressSummary: '等待 AI 共同整理初始目标。',
@@ -981,6 +999,7 @@ export class LongTermGoalService {
       schedule: (result.proposal.after.schedule as LongTermGoalSchedule) || draftGoal.schedule,
       selectedSkillIds: Array.isArray(result.proposal.after.selectedSkillIds) ? result.proposal.after.selectedSkillIds as string[] : [],
       selectedMcpServerIds: Array.isArray(result.proposal.after.selectedMcpServerIds) ? result.proposal.after.selectedMcpServerIds as string[] : draftGoal.selectedMcpServerIds,
+      targetProjectIds: Array.isArray(result.proposal.after.targetProjectIds) ? result.proposal.after.targetProjectIds as string[] : draftGoal.targetProjectIds,
       notificationPolicy: (result.proposal.after.notificationPolicy as LongTermGoalDefinition['notificationPolicy']) || 'minimal',
       currentPhase: result.proposal.after.currentPhase || '持续推进',
       progressSummary: result.proposal.after.progressSummary || '目标已创建，等待首次自动推进。',
@@ -1110,6 +1129,7 @@ export class LongTermGoalService {
       schedule: (after.schedule as LongTermGoalSchedule | undefined) || draftGoal.schedule,
       selectedSkillIds: Array.isArray(after.selectedSkillIds) ? after.selectedSkillIds : draftGoal.selectedSkillIds,
       selectedMcpServerIds: Array.isArray(after.selectedMcpServerIds) ? after.selectedMcpServerIds : draftGoal.selectedMcpServerIds,
+      targetProjectIds: Array.isArray(after.targetProjectIds) ? after.targetProjectIds as string[] : draftGoal.targetProjectIds,
       nextTasks: Array.isArray(after.nextTasks) ? after.nextTasks as LongTermGoalNextTask[] : draftGoal.nextTasks,
       openInterventions: draftGoal.openInterventions,
       currentPhase: after.currentPhase || draftGoal.currentPhase,
@@ -1129,16 +1149,18 @@ export class LongTermGoalService {
   ): Promise<GoalAdjustmentReply> {
     const availableTools = this.options.aiEngine
       .getAvailableTools()
-      .filter(isGoalAdjustmentToolDefinition)
+      .filter(tool => isGoalAdjustmentToolDefinition(tool, goal))
     const allowedToolNames = availableTools.map(tool => tool.name)
     const allowedMcpServerIds = goal.selectedMcpServerIds.length > 0 ? goal.selectedMcpServerIds : undefined
     const messages: ChatMessage[] = [
       {
         role: 'system',
         content: [
-          '你正在帮助用户调整一个长期目标。你的工作不是执行代码，而是通过多轮对话把目标收敛成更清晰、更可执行、更少打扰用户的新版本。',
-          '你可以使用系统暴露的只读、检索、查询、分析类工具来理解当前环境、文件、文档、网页、数据库或上下文。',
-          '不能使用任何写入、执行、创建、删除、修改、启动、重启、构建、安装类工具。',
+          '你正在帮助用户调整一个长期目标。你的工作是通过多轮对话把目标收敛成更清晰、更可执行、更少打扰用户的新版本。',
+          '你可以使用只读、检索、查询、分析类工具来理解当前环境、文件、文档、网页、数据库或上下文。',
+          goal.targetProjectIds.length > 0
+            ? `本目标已绑定项目，你可以用 write_project_file / patch_project_file / read_project_file / list_project_files / rebuild_project 修改这些绑定项目（project_id 传绑定的 id）：${goal.targetProjectIds.join(', ')}。但不要新建项目。`
+            : '不能使用任何写入、执行、创建、删除、修改、启动、重启、构建、安装类工具（本目标未绑定项目）。',
           '如果信息不够，就继续追问；如果信息足够，就输出一个最终提案，并明确让用户确认后再应用。',
           '不要把原始 JSON 直接展示给用户。你可以在正文后附加 HTML 注释 JSON 元数据，供系统解析。',
           '正文应自然、简洁、像在和用户正常对话。',
@@ -1407,6 +1429,15 @@ export class LongTermGoalService {
     const goal = this.snapshot.goals.find(item => item.scheduleTaskId === task.id || item.reviewScheduleTaskId === task.id)
     if (!goal) return undefined
     return task.id === goal.reviewScheduleTaskId ? this.buildDailyReviewPrompt(goal) : this.buildExecutionPrompt(goal)
+  }
+
+  /** 定时执行时把 goal 绑定的首个项目作为 targetProjectId 传给 AI，使 write_project_file
+   *  等工具定向到绑定项目而非新建项目。每日复盘任务不需绑定（只总结不写代码）。 */
+  resolveScheduledTaskOptions (task: ScheduledTaskDefinition): { targetProjectId?: string | null; workspaceRoot?: string | null } | undefined {
+    const goal = this.snapshot.goals.find(item => item.scheduleTaskId === task.id)
+    if (!goal || task.id !== goal.scheduleTaskId) return undefined
+    const targetProjectId = goal.targetProjectIds[0]
+    return targetProjectId ? { targetProjectId, workspaceRoot: null } : undefined
   }
 
   shouldNotifyScheduledReport (report: ScheduledTaskRunReport): boolean | undefined {
@@ -1758,6 +1789,11 @@ export class LongTermGoalService {
       '',
       '## 用户最近的快速调整/对话',
       recentConversation || '暂无用户补充。',
+      '',
+      '## 绑定项目',
+      goal.targetProjectIds.length > 0
+        ? `本目标已绑定以下项目，优先用 write_project_file / patch_project_file 持续修改它们（project_id 传绑定的 id），用 read_project_file / list_project_files 查看现状；需要重建时用 rebuild_project：\n${goal.targetProjectIds.map(id => `- ${id}`).join('\n')}`
+        : '本目标未绑定项目。若推进目标需要代码项目，可用 create_project 新建（建后建议让用户在目标里绑定以便后续持续修改）。',
       '',
       '## 本次要求',
       '- 先判断离目标最近的有效下一步，然后推进实际任务。',

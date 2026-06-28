@@ -21,6 +21,9 @@ interface ScheduledTaskServiceOptions {
   resolveProviderConfig?: (task?: ScheduledTaskDefinition) => AIConfigInput | undefined
   getNotificationPreference?: () => boolean
   resolveTaskPrompt?: (task: ScheduledTaskDefinition) => string | undefined
+  /** Resolve target project / workspace for the task's AI run (e.g. the bound
+      project of a long-term goal), so write_project_file etc. target it. */
+  resolveTaskOptions?: (task: ScheduledTaskDefinition) => { targetProjectId?: string | null; workspaceRoot?: string | null } | undefined
   shouldNotifyReport?: (report: ScheduledTaskRunReport) => boolean | undefined
   onTasksChanged?: (tasks: ScheduledTaskDefinition[]) => void
   onReportsChanged?: (reports: ScheduledTaskRunReport[]) => void
@@ -592,13 +595,16 @@ export class ScheduledTaskService {
         .filter(Boolean)
 
       const executionPrompt = this.options.resolveTaskPrompt?.(task) || task.prompt
+      const taskOptions = this.options.resolveTaskOptions?.(task)
       for await (const event of this.options.aiEngine.chatStream([
         { role: 'user', content: executionPrompt }
       ], onProgress, {
         providerConfig: this.options.resolveProviderConfig?.(task),
         authMode: 'auto',
         activeSkillContents,
-        allowedMcpServerIds: task.selectedMcpServerIds
+        allowedMcpServerIds: task.selectedMcpServerIds,
+        targetProjectId: taskOptions?.targetProjectId ?? null,
+        workspaceRoot: taskOptions?.workspaceRoot ?? null
       })) {
         if (event.type === 'thinking' && event.content) {
           thinkingText += event.content

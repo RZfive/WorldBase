@@ -47,7 +47,7 @@ const emit = defineEmits<{
 
 const { t, locale } = useI18n()
 
-type DialogKind = 'report' | 'run' | 'intervention' | 'adjust' | 'memory' | 'create' | null
+type DialogKind = 'report' | 'run' | 'intervention' | 'adjust' | 'memory' | 'create' | 'projects' | null
 type InterventionPriority = 'urgent' | 'high' | 'medium' | 'low'
 type GoalAdjustmentPhase = 'idle' | 'clarifying' | 'proposal'
 
@@ -66,6 +66,11 @@ const runDateFilter = ref('')
 const runPage = ref(1)
 const createProviderId = ref('')
 const createModelId = ref('')
+/** 可绑定项目列表 + 当前选中集合（projects 弹窗用）。 */
+interface BindableProject { id: string; name: string }
+const availableProjects = ref<BindableProject[]>([])
+const selectedProjectIds = ref<Set<string>>(new Set())
+const projectsLoading = ref(false)
 const GOAL_ADJUSTMENT_METADATA_LABEL = 'LONG_TERM_GOAL_ADJUSTMENT_METADATA'
 
 const providers = computed(() => props.providers || [])
@@ -466,6 +471,46 @@ function sendDialogMessage (text: string): void {
   emit('sendMessage', goal.id, text)
 }
 
+/** 打开绑定项目弹窗：拉项目列表 + 初始化选中集合为当前绑定。 */
+async function openProjectsDialog (): Promise<void> {
+  if (!props.goal) return
+  selectedProjectIds.value = new Set(props.goal.targetProjectIds || [])
+  activeDialog.value = 'projects'
+  if (availableProjects.value.length === 0) {
+    projectsLoading.value = true
+    try {
+      const list = await window.electronAPI?.listProjects?.()
+      availableProjects.value = (list || []).map((p) => {
+        const record = p as Record<string, unknown>
+        return {
+          id: String(record.id || ''),
+          name: String(record.name || record.id || '')
+        }
+      })
+    } catch {
+      availableProjects.value = []
+    } finally {
+      projectsLoading.value = false
+    }
+  }
+}
+
+function toggleProjectBinding (projectId: string): void {
+  const next = new Set(selectedProjectIds.value)
+  if (next.has(projectId)) next.delete(projectId)
+  else next.add(projectId)
+  selectedProjectIds.value = next
+}
+
+/** 保存绑定项目到当前 goal。 */
+async function saveProjectBindings (): Promise<void> {
+  const goal = props.goal
+  if (!goal) return
+  const targetProjectIds = [...selectedProjectIds.value]
+  emit('save-goal', goal, { targetProjectIds })
+  closeDialog()
+}
+
 function startTitleEdit (): void {
   titleDraft.value = props.goal?.title || ''
   editingTitle.value = true
@@ -610,6 +655,7 @@ watch(
           />
           <button type="button" class="goal-ghost-btn" @click="activeDialog = 'adjust'">{{ $t('chatUi.quickAdjustGoal') }}</button>
           <button type="button" class="goal-ghost-btn" @click="activeDialog = 'memory'">{{ $t('chatUi.goalMemory') }}</button>
+          <button type="button" class="goal-ghost-btn" @click="openProjectsDialog()">{{ $t('chatUi.bindProjects') }}<span v-if="(goal.targetProjectIds || []).length" class="goal-btn-badge">{{ (goal.targetProjectIds || []).length }}</span></button>
           <button type="button" class="goal-ghost-btn" @click="emit('runNow', goal.id)">{{ $t('chatUi.runNowOnce') }}</button>
           <button v-if="goal.status === 'paused'" type="button" class="goal-ghost-btn" @click="emit('resume', goal)">{{ $t('chatUi.resumeContinuousGoal') }}</button>
           <button v-else type="button" class="goal-ghost-btn" @click="emit('pause', goal)">{{ $t('chatUi.pauseGoal') }}</button>
@@ -804,6 +850,43 @@ watch(
         </div>
       </GoalConversationDialog>
     </template>
+
+    <!-- Bind projects dialog (multi-select) -->
+    <Teleport to="body">
+      <div v-if="activeDialog === 'projects'" class="goal-dialog-backdrop" @click.self="closeDialog">
+        <section class="goal-dialog goal-projects-dialog" role="dialog" aria-modal="true">
+          <header class="goal-dialog-head">
+            <div>
+              <h2>{{ $t('chatUi.bindProjects') }}</h2>
+              <p>{{ $t('chatUi.bindProjectsHint') }}</p>
+            </div>
+            <button type="button" class="goal-dialog-close" @click="closeDialog">×</button>
+          </header>
+          <div class="goal-projects-list">
+            <div v-if="projectsLoading" class="goal-projects-empty">{{ $t('common.loading') }}</div>
+            <div v-else-if="availableProjects.length === 0" class="goal-projects-empty">{{ $t('chatUi.noProjectsToBind') }}</div>
+            <label
+              v-for="p in availableProjects"
+              :key="p.id"
+              class="goal-project-item"
+              :class="{ active: selectedProjectIds.has(p.id) }"
+            >
+              <input
+                type="checkbox"
+                :checked="selectedProjectIds.has(p.id)"
+                @change="toggleProjectBinding(p.id)"
+              >
+              <span class="goal-project-name">{{ p.name }}</span>
+              <span class="goal-project-id">{{ p.id }}</span>
+            </label>
+          </div>
+          <footer class="goal-projects-foot">
+            <button type="button" class="goal-ghost-btn" @click="closeDialog">{{ $t('common.cancel') }}</button>
+            <button type="button" class="goal-primary-btn" @click="saveProjectBindings">{{ $t('common.save') }}</button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
 
     <GoalConversationDialog
       :open="activeDialog === 'create'"
@@ -1285,5 +1368,96 @@ button.goal-summary-card:hover,
   .goal-activity-tools {
     justify-content: flex-start;
   }
+}
+
+/* ── Bind projects dialog ── */
+.goal-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.42);
+}
+.goal-projects-dialog {
+  width: min(560px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-chat-canvas);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.36);
+}
+.goal-projects-dialog .goal-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--app-border);
+}
+.goal-projects-dialog .goal-dialog-head h2 { margin: 0; font-size: 1.02rem; }
+.goal-projects-dialog .goal-dialog-head p { margin: 4px 0 0; color: var(--app-text-muted); font-size: 0.82rem; }
+.goal-dialog-close {
+  width: 32px; height: 32px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-panel-muted);
+  color: var(--app-text);
+  cursor: pointer;
+}
+.goal-projects-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.goal-projects-empty { padding: 24px 8px; text-align: center; color: var(--app-text-muted); }
+.goal-project-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.goal-project-item:hover { background: var(--app-panel-muted); }
+.goal-project-item.active { border-color: var(--app-accent); background: var(--app-accent-soft, var(--app-panel-muted)); }
+.goal-project-item input { flex-shrink: 0; }
+.goal-project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal-project-id { font-size: 0.74em; color: var(--app-text-faint); font-family: var(--app-font-mono, monospace); }
+.goal-projects-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--app-border);
+}
+.goal-primary-btn {
+  padding: 7px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--app-accent);
+  color: #fff;
+  font-size: 0.86em;
+  cursor: pointer;
+}
+.goal-primary-btn:hover { filter: brightness(1.08); }
+.goal-btn-badge {
+  margin-left: 5px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--app-accent-soft, var(--app-panel-muted));
+  color: var(--app-accent);
+  font-size: 0.82em;
+  font-weight: 600;
 }
 </style>
