@@ -226,6 +226,7 @@ export async function initializeServices (): Promise<void> {
     resolveProviderConfig: (task) => resolveProviderConfig(task?.providerId || undefined, task?.modelId || undefined),
     getNotificationPreference: () => mainState.settingsStore?.getAIExecutionPreferences().notifyOnTaskComplete ?? true,
     resolveTaskPrompt: (task) => mainState.longTermGoalService?.resolveScheduledTaskPrompt(task),
+    resolveTaskOptions: (task) => mainState.longTermGoalService?.resolveScheduledTaskOptions(task),
     shouldNotifyReport: (report) => mainState.longTermGoalService?.shouldNotifyScheduledReport(report),
     onTasksChanged: (tasks: ScheduledTaskDefinition[]) => {
       broadcastToAppWindows('scheduler:tasksChanged', tasks)

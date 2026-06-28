@@ -214,6 +214,7 @@ function normalizeGoal (value: unknown): LongTermGoalDefinition | null {
     dailyReviewTimeOfDay: normalizeTimeOfDay(record.dailyReviewTimeOfDay) || '21:30',
     selectedSkillIds: normalizeStringArray(record.selectedSkillIds),
     selectedMcpServerIds: normalizeStringArray(record.selectedMcpServerIds),
+    targetProjectIds: normalizeStringArray(record.targetProjectIds),
     notificationPolicy,
     currentPhase: normalizeString(record.currentPhase) || undefined,
     progressSummary: normalizeString(record.progressSummary) || undefined,

@@ -95,6 +95,8 @@ export interface LongTermGoalDefinition {
   dailyReviewTimeOfDay?: string
   selectedSkillIds: string[]
   selectedMcpServerIds: string[]
+  /** 绑定的项目 id 列表（可多个）。定时执行与调整对话都会限定在这些项目上操作。 */
+  targetProjectIds: string[]
   notificationPolicy: 'minimal' | 'normal'
   currentPhase?: string
   progressSummary?: string
