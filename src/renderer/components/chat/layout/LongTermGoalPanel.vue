@@ -280,85 +280,105 @@ function openInterventionDialog (interventionId: string): void {
   activeDialog.value = 'intervention'
 }
 
+/**
+ * MessageStudio memo: the goal dialogs rebuild their message arrays from
+ * `computed`s (conversations, runs, …) on every snapshot change. Without
+ * memoization each re-evaluation produces brand-new ChatMessage objects, so
+ * MessageList's WeakMap (keyed by object identity) misses, assigns a new v-for
+ * key, and tears down/rebuilds every MessageRow — which destroys ThinkingBlock
+ * mid-toggle, making the expand/collapse feel stuck or snap-back.
+ *
+ * Cache each message by a stable key + content signature so the same data
+ * returns the same object reference until something that affects rendering
+ * actually changes. Streaming messages are held by the parent (useChatPanel)
+ * and passed through verbatim, so they never hit this cache.
+ */
+const messageCache = new Map<string, { sig: string; msg: ChatMessage }>()
+
+function memoizeMessage (key: string, sig: string, build: () => ChatMessage): ChatMessage {
+  const cached = messageCache.get(key)
+  if (cached && cached.sig === sig) return cached.msg
+  const msg = build()
+  messageCache.set(key, { sig, msg })
+  return msg
+}
+
 function asAssistantMessage (content: string, speakerName = 'Long-Term Goal'): ChatMessage {
-  return {
-    role: 'assistant',
+  return memoizeMessage(
+    `assistant:${speakerName}`,
     content,
-    speakerName,
-    blocks: [{ id: `goal_content_${Math.random().toString(36).slice(2)}`, kind: 'content', content }]
-  }
+    () => ({
+      role: 'assistant',
+      content,
+      speakerName,
+      // Stable block id (derived from content) so ThinkingBlock/tool blocks keep
+      // their identity across re-renders instead of regenerating Math.random ids.
+      blocks: [{ id: `goal_content_${hashStr(content)}`, kind: 'content', content }]
+    })
+  )
 }
 
 function asUserMessage (content: string): ChatMessage {
-  return {
-    role: 'user',
+  return memoizeMessage(
+    `user:${content}`,
     content,
-    blocks: [{ id: `goal_user_${Math.random().toString(36).slice(2)}`, kind: 'content', content }]
-  }
+    () => ({
+      role: 'user',
+      content,
+      blocks: [{ id: `goal_user_${hashStr(content)}`, kind: 'content', content }]
+    })
+  )
+}
+
+/** Tiny stable hash for deriving block ids from content (display-only, not security). */
+function hashStr (value: string): string {
+  let h = 5381
+  for (let i = 0; i < value.length; i++) h = ((h << 5) + h + value.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
 }
 
 function asRunMessage (run: LongTermGoalRun): ChatMessage {
-  const blocks: ChatMessageBlock[] = []
-  if (run.thinkingText?.trim()) {
-    blocks.push({
-      id: `goal_run_thinking_${run.id}`,
-      kind: 'thinking',
-      text: run.thinkingText
-    })
-  }
-  for (const toolRun of normalizeToolRuns(run)) {
-    blocks.push({
-      id: `goal_run_tool_${toolRun.id}`,
-      kind: 'tool',
-      toolRun
-    })
-  }
+  const toolRuns = normalizeToolRuns(run)
   const content = getRunContent(run)
-  blocks.push({
-    id: `goal_run_content_${run.id}`,
-    kind: 'content',
-    content
+  const thinking = run.thinkingText?.trim() || ''
+  const speakerName = props.goal?.title || 'Long-Term Goal'
+  // Signature covers every field that affects rendering; if nothing changed we
+  // reuse the cached message object so MessageList's WeakMap key stays stable.
+  const sig = [run.id, thinking, content, speakerName,
+    toolRuns.map(t => `${t.id}:${t.status}:${t.progress.map(p => `${p.stage}:${p.detail || ''}`).join('>')}`).join('|')
+  ].join('::')
+  return memoizeMessage(`run:${run.id}`, sig, () => {
+    const blocks: ChatMessageBlock[] = []
+    if (thinking) {
+      blocks.push({ id: `goal_run_thinking_${run.id}`, kind: 'thinking', text: thinking })
+    }
+    for (const toolRun of toolRuns) {
+      blocks.push({ id: `goal_run_tool_${toolRun.id}`, kind: 'tool', toolRun })
+    }
+    blocks.push({ id: `goal_run_content_${run.id}`, kind: 'content', content })
+    return { role: 'assistant', content, speakerName, toolRuns, thinking, blocks }
   })
-  return {
-    role: 'assistant',
-    content,
-    speakerName: props.goal?.title || 'Long-Term Goal',
-    toolRuns: normalizeToolRuns(run),
-    thinking: run.thinkingText,
-    blocks
-  }
 }
 
 function asConversationTurnMessage (turn: LongTermGoalConversationTurn): ChatMessage {
-  const blocks: ChatMessageBlock[] = []
   const toolRuns = normalizeConversationToolRuns(turn)
-  if (turn.thinking?.trim()) {
-    blocks.push({
-      id: `goal_turn_thinking_${turn.id}`,
-      kind: 'thinking',
-      text: turn.thinking
-    })
-  }
-  for (const toolRun of toolRuns) {
-    blocks.push({
-      id: `goal_turn_tool_${toolRun.id}`,
-      kind: 'tool',
-      toolRun
-    })
-  }
-  blocks.push({
-    id: `goal_turn_content_${turn.id}`,
-    kind: 'content',
-    content: turn.content
+  const thinking = turn.thinking?.trim() || ''
+  const content = turn.content
+  const speakerName = props.goal?.title || 'Long-Term Goal'
+  const sig = [turn.id, thinking, content, speakerName,
+    toolRuns.map(t => `${t.id}:${t.status}:${t.progress.map(p => `${p.stage}:${p.detail || ''}`).join('>')}`).join('|')
+  ].join('::')
+  return memoizeMessage(`turn:${turn.id}`, sig, () => {
+    const blocks: ChatMessageBlock[] = []
+    if (thinking) {
+      blocks.push({ id: `goal_turn_thinking_${turn.id}`, kind: 'thinking', text: thinking })
+    }
+    for (const toolRun of toolRuns) {
+      blocks.push({ id: `goal_turn_tool_${toolRun.id}`, kind: 'tool', toolRun })
+    }
+    blocks.push({ id: `goal_turn_content_${turn.id}`, kind: 'content', content })
+    return { role: 'assistant', content, speakerName, toolRuns, thinking, blocks }
   })
-  return {
-    role: 'assistant',
-    content: turn.content,
-    speakerName: props.goal?.title || 'Long-Term Goal',
-    toolRuns,
-    thinking: turn.thinking,
-    blocks
-  }
 }
 
 const reportMessages = computed<ChatMessage[]>(() => {

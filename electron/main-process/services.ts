@@ -19,6 +19,7 @@ import { SettingsStore } from '../../src/main/settings/settings-store.js'
 import { ChatHistoryStore } from '../../src/main/settings/chat-history.js'
 import { AILogStore } from '../../src/main/settings/ai-log-store.js'
 import { ImageLibraryStore } from '../../src/main/settings/image-library-store.js'
+import { StudioTaskStore } from '../../src/main/settings/studio-task-store.js'
 import { SkillStore } from '../../src/main/settings/skill-store.js'
 import { AgentStore } from '../../src/main/settings/agent-store.js'
 import { AgentGroupStore } from '../../src/main/settings/agent-group-store.js'
@@ -154,6 +155,7 @@ export async function initializeServices (): Promise<void> {
   mainState.scheduledTaskStore = new ScheduledTaskStore(userDataPath)
   mainState.longTermGoalStore = new LongTermGoalStore(userDataPath)
   mainState.imageLibraryStore = new ImageLibraryStore(userDataPath)
+  mainState.studioTaskStore = new StudioTaskStore(userDataPath)
   mainState.mcpService = new MCPService()
   mainState.mcpService.on('stateChanged', (state: MCPStateSnapshot) => {
     broadcastToAppWindows('settings:mcpStateChanged', state)

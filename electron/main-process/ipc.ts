@@ -16,7 +16,7 @@ import type { AIExecutionAuthMode, AIExecutionPreferences, AIProvidersConfig, Ch
 import { setMainLocale, t } from '../../src/main/i18n/main-i18n.js'
 import type { Conversation } from '../../src/main/settings/chat-history.js'
 import type { ImageLibraryData, ImageLibraryEntry, ImageLibraryFolderCard, ImageLibraryPage, ImageLibraryQuery, ImageStudioMode } from '../../src/main/settings/image-library-store.js'
-import type { ImageStudioGenerateRequest } from '../../src/shared/image-studio-types.js'
+import type { ImageStudioGenerateRequest, ImageStudioTask } from '../../src/shared/image-studio-types.js'
 import type { Skill } from '../../src/main/settings/skill-store.js'
 import type { ScheduledTaskDefinition } from '../../src/main/settings/scheduled-task-store.js'
 import type { LongTermGoalSaveInput, LongTermGoalStreamEvent } from '../../src/shared/long-term-goal-types.js'
@@ -112,6 +112,7 @@ export function setupIPC (): void {
   const longTermGoalService = mainState.longTermGoalService!
   const documentStore = mainState.documentStore!
   const imageLibraryStore = mainState.imageLibraryStore
+  const studioTaskStore = mainState.studioTaskStore
   const mcpService = mainState.mcpService!
   ipcMain.on('pageAutomation:response', (_event, payload: PageAutomationResponseEnvelope) => {
     const pending = pendingPageAutomationRequests.get(payload.requestId)
@@ -788,6 +789,16 @@ export function setupIPC (): void {
   // buffer atomically, so two concurrent drains never double-enqueue.
   ipcMain.handle('image:studio:drainPendingTasks', async (): Promise<ImageStudioGenerateRequest[]> => {
     return drainPendingStudioImageTasks()
+  })
+
+  // Persist the studio task queue across app restarts so failed/queued tasks are
+  // still there (and retryable) the next time the studio opens.
+  ipcMain.handle('image:studio:loadTasks', async (): Promise<ImageStudioTask[]> => {
+    return studioTaskStore?.load() ?? []
+  })
+
+  ipcMain.handle('image:studio:saveTasks', async (_event: IpcMainInvokeEvent, tasks: ImageStudioTask[]): Promise<void> => {
+    studioTaskStore?.save(Array.isArray(tasks) ? tasks : [])
   })
 
   ipcMain.handle('image:library:getData', async (_event: IpcMainInvokeEvent, id: string): Promise<ImageLibraryData | null> => {

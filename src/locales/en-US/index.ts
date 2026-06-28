@@ -858,6 +858,8 @@ const enUS: MessageSchema = {
     clickToReset: 'Click to reset',
     taskQueue: 'Task Queue',
     clearFinished: 'Clear finished',
+    retryAllFailed: 'Retry all failed',
+    retryAllFailedTitle: 'Retry {count} failed task(s)',
     emptyQueue: 'No tasks yet. Generate or edit an image in the workbench.',
     noPrompt: '(No prompt)',
     createdByAi: 'Started by AI',
