@@ -19,6 +19,7 @@ import type { ImageLibraryData, ImageLibraryEntry, ImageLibraryFolderCard, Image
 import type { ImageStudioGenerateRequest, ImageStudioTask } from '../../src/shared/image-studio-types.js'
 import type { Skill } from '../../src/main/settings/skill-store.js'
 import type { ScheduledTaskDefinition } from '../../src/main/settings/scheduled-task-store.js'
+import type { UsageRecord, UsageSummary } from '../../src/main/settings/usage-store.js'
 import type { LongTermGoalSaveInput, LongTermGoalStreamEvent } from '../../src/shared/long-term-goal-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '../../src/shared/app-update-types.js'
@@ -113,6 +114,7 @@ export function setupIPC (): void {
   const documentStore = mainState.documentStore!
   const imageLibraryStore = mainState.imageLibraryStore
   const studioTaskStore = mainState.studioTaskStore
+  const usageStore = mainState.usageStore
   const mcpService = mainState.mcpService!
   ipcMain.on('pageAutomation:response', (_event, payload: PageAutomationResponseEnvelope) => {
     const pending = pendingPageAutomationRequests.get(payload.requestId)
@@ -799,6 +801,19 @@ export function setupIPC (): void {
 
   ipcMain.handle('image:studio:saveTasks', async (_event: IpcMainInvokeEvent, tasks: ImageStudioTask[]): Promise<void> => {
     studioTaskStore?.save(Array.isArray(tasks) ? tasks : [])
+  })
+
+  // --- Usage statistics (token usage per provider/model/day) ---
+  ipcMain.handle('usage:getDaily', async (_event: IpcMainInvokeEvent, from?: string, to?: string): Promise<UsageRecord[]> => {
+    return usageStore?.getDaily(from, to) ?? []
+  })
+
+  ipcMain.handle('usage:getSummary', async (_event: IpcMainInvokeEvent, from?: string, to?: string): Promise<UsageSummary[]> => {
+    return usageStore?.getSummary(from, to) ?? []
+  })
+
+  ipcMain.handle('usage:clear', async (_event: IpcMainInvokeEvent, beforeDate?: string): Promise<{ removed: number }> => {
+    return { removed: usageStore?.clear(beforeDate) ?? 0 }
   })
 
   ipcMain.handle('image:library:getData', async (_event: IpcMainInvokeEvent, id: string): Promise<ImageLibraryData | null> => {

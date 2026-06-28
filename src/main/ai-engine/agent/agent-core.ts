@@ -9,6 +9,7 @@ import { PlanEngine, type Plan } from './plan-mode.js'
 import { LoopDetector } from './loop-detector.js'
 import { SkillEngine } from './skill-engine.js'
 import { CostTracker, type ApiUsage } from '../cost-tracker.js'
+import type { UsageStore } from '../../settings/usage-store.js'
 
 export type ProgressEvent =
   | { type: 'progress'; stage: string; detail?: string }
@@ -156,6 +157,10 @@ export class AgentCore {
   private loopDetector: LoopDetector
   private skillEngine: SkillEngine
   private costTracker: CostTracker
+  private usageStore?: UsageStore
+  /** 供应商 id/名称快照（由 createAgent 从 providerConfig 注入，用量统计分组用）。 */
+  private providerId?: string
+  private providerName?: string
   private currentAbortSignal?: AbortSignal
   private authModeResolver?: () => AIExecutionAuthMode
   /** Shared mutable state accessible by tool handlers within a session. */
@@ -170,11 +175,27 @@ export class AgentCore {
     this.loopDetector = new LoopDetector(this.maxDuplicateIterationFingerprints)
     this.skillEngine = new SkillEngine()
     this.costTracker = new CostTracker()
+    this.usageStore = services.usageStore as UsageStore | undefined
 
     // Wire cost tracking into provider usage callback
     this.provider.setOnUsage((usage) => {
       this.costTracker.record(this.provider.getModel(), usage)
+      // 持久化真实 token 用量（按天 × 供应商 × 模型聚合），用于设置页用量统计。
+      if (this.usageStore) {
+        this.usageStore.record({
+          providerId: this.providerId || 'unknown',
+          providerName: this.providerName || this.providerId || 'unknown',
+          model: this.provider.getModel(),
+          usage: usage as Record<string, unknown> | null
+        })
+      }
     })
+  }
+
+  /** Set the provider id/name snapshot for usage statistics grouping. */
+  setProviderIdentity (providerId?: string, providerName?: string): void {
+    this.providerId = providerId
+    this.providerName = providerName
   }
 
   /** Set skill contents to inject into the system prompt. */

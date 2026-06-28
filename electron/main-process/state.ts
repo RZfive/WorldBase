@@ -17,6 +17,7 @@ import type { ChatHistoryStore } from '../../src/main/settings/chat-history.js'
 import type { AILogStore } from '../../src/main/settings/ai-log-store.js'
 import type { ImageLibraryStore } from '../../src/main/settings/image-library-store.js'
 import type { StudioTaskStore } from '../../src/main/settings/studio-task-store.js'
+import type { UsageStore } from '../../src/main/settings/usage-store.js'
 import type { ImageStudioGenerateRequest } from '../../src/shared/image-studio-types.js'
 import type { SkillStore } from '../../src/main/settings/skill-store.js'
 import type { AgentStore } from '../../src/main/settings/agent-store.js'
@@ -107,6 +108,7 @@ export const mainState = {
   documentStore: null as DocumentStore | null,
   imageLibraryStore: null as ImageLibraryStore | null,
   studioTaskStore: null as StudioTaskStore | null,
+  usageStore: null as UsageStore | null,
   pendingStudioImageTasks: [] as ImageStudioGenerateRequest[],
   mcpService: null as MCPService | null,
   isClosingMainWindow: false,

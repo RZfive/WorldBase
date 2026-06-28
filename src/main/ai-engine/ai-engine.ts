@@ -19,6 +19,7 @@ import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.j
 import type { AgentStore } from '../settings/agent-store.js'
 import type { AgentGroupStore } from '../settings/agent-group-store.js'
 import type { ImageLibraryStore } from '../settings/image-library-store.js'
+import type { UsageStore } from '../settings/usage-store.js'
 import type { ImageStudioGenerateRequest } from '../../shared/image-studio-types.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../shared/page-automation-types.js'
 
@@ -46,12 +47,18 @@ export interface AIEngineServices {
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
   mcpService?: MCPService
   scheduledTaskService?: ScheduledTaskService
+  /** 持久化 token 用量统计；注入后每次 provider 调用会记录真实 token。 */
+  usageStore?: UsageStore
 }
 
 export interface AIConfigInput {
   apiKey?: string
   baseUrl?: string
   model?: string
+  /** 供应商 id（用于用量统计分组；不影响 provider 行为）。 */
+  providerId?: string
+  /** 供应商名称快照（用量统计展示用）。 */
+  providerName?: string
   imageGeneration?: boolean
   imageEditing?: boolean
   enableThinking?: boolean
@@ -257,6 +264,7 @@ export class AIEngine {
     agent.setSystemPromptSections(systemPromptSections)
     agent.setToolVisibilityFilters(options?.allowedToolNames, options?.deniedToolNames)
     agent.setTargetProjectId(options?.targetProjectId ?? this.defaultTargetProjectId ?? null)
+    agent.setProviderIdentity(options?.providerConfig?.providerId, options?.providerConfig?.providerName)
     agent.setAuthMode(options?.authMode ?? 'strict')
     agent.setLogger(options?.aiLogger)
     // Store conversation/session context in sessionState so the getSessionState closure

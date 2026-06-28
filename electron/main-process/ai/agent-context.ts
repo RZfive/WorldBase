@@ -180,6 +180,8 @@ export function resolveProviderConfig (requestedProviderId?: string, requestedMo
     apiKey: provider.apiKey,
     baseUrl: provider.baseUrl,
     model: resolvedModel,
+    providerId: provider.id,
+    providerName: provider.name,
     imageGeneration: provider.modelCapabilities?.[resolvedModel]?.imageGeneration === true,
     imageEditing: provider.modelCapabilities?.[resolvedModel]?.imageEditing === true,
     enableThinking: provider.enableThinking ?? false,
