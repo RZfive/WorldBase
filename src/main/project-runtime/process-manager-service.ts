@@ -122,6 +122,35 @@ export class ProcessManagerService {
     }
   }
 
+  /**
+   * Scan for orphaned project processes left over from a previous crashed or
+   * unclean exit and force-kill all of them. Called once on app startup so a
+   * stale instance holding a port / file locks can't race a fresh launch of
+   * the same internal app (which manifests as a crash-on-open).
+   */
+  async cleanupOrphanProcesses (): Promise<{ killed: OrphanProcessInfo[]; failed: { pid: number; error: string }[] }> {
+    const orphans = await this._findOrphanProcesses()
+    if (orphans.length === 0) {
+      console.log('[ProcessManager] No orphan project processes found on startup')
+      return { killed: [], failed: [] }
+    }
+    console.log(`[ProcessManager] Found ${orphans.length} orphan project process(es) on startup, cleaning up...`)
+    const killed: OrphanProcessInfo[] = []
+    const failed: { pid: number; error: string }[] = []
+    for (const orphan of orphans) {
+      const result = await this.killOrphanProcess(orphan.pid)
+      if (result.success) {
+        killed.push(orphan)
+        console.log(`[ProcessManager] Killed orphan PID ${orphan.pid} (${orphan.commandLine.slice(0, 120)})`)
+      } else {
+        failed.push({ pid: orphan.pid, error: result.error || 'unknown' })
+        console.warn(`[ProcessManager] Failed to kill orphan PID ${orphan.pid}: ${result.error}`)
+      }
+    }
+    console.log(`[ProcessManager] Orphan cleanup done: ${killed.length} killed, ${failed.length} failed`)
+    return { killed, failed }
+  }
+
   // ── Private ──
 
   private async _getManagedProcesses (): Promise<ManagedProcessInfo[]> {
