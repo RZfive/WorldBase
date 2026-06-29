@@ -66,6 +66,16 @@ app.whenReady().then(async () => {
     }
   })
 
+  // Scan and kill leftover project processes from a previous crashed or unclean
+  // exit before any window opens, so launching an internal app doesn't race
+  // with a stale instance still holding its port / file locks — that race is
+  // what caused the internal-app crash-on-open.
+  try {
+    await mainState.processManagerService!.cleanupOrphanProcesses()
+  } catch (err) {
+    console.warn('[main] Orphan process cleanup failed on startup:', (err as Error).message)
+  }
+
   createWindow()
 
   app.on('activate', () => {
