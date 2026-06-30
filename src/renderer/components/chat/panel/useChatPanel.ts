@@ -1966,6 +1966,11 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     createConversationHistory.value = []
   }
 
+  function resetLongTermGoalCreation (): void {
+    pendingCreationConfirm.value = null
+    createConversationHistory.value = []
+  }
+
   async function answerLongTermGoalIntervention (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }>): Promise<void> {
     if (!window.electronAPI?.answerLongTermGoalIntervention) return
     const goal = await window.electronAPI.answerLongTermGoalIntervention(goalId, interventionId, answers)
@@ -2870,6 +2875,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     cancelLongTermGoalChangeSet,
     applyLongTermGoalCreation,
     cancelLongTermGoalCreation,
+    resetLongTermGoalCreation,
     pendingCreationConfirm,
     answerLongTermGoalIntervention,
     shouldUseConversationProviderOverride,

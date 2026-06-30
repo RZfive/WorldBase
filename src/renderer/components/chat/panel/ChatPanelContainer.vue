@@ -115,6 +115,7 @@ const {
   cancelLongTermGoalChangeSet,
   applyLongTermGoalCreation,
   cancelLongTermGoalCreation,
+  resetLongTermGoalCreation,
   pendingCreationConfirm,
   answerLongTermGoalIntervention,
   streamingAdjust,
@@ -689,6 +690,7 @@ watch(
           @cancel-change-set="cancelLongTermGoalChangeSet"
           @confirm-creation="applyLongTermGoalCreation"
           @cancel-creation="cancelLongTermGoalCreation"
+          @reset-creation="resetLongTermGoalCreation"
           @answer-intervention="answerLongTermGoalIntervention"
           @update:selected-agent-id="handleAgentSelectionChange"
           @clear-auto-open-run="clearGoalAutoOpenRunId"

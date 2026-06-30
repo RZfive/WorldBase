@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import GoalConversationDialog from './GoalConversationDialog.vue'
+import GoalCreationConfirmCard from './GoalCreationConfirmCard.vue'
 import ProviderModelDropdown from './ProviderModelDropdown.vue'
 import type { ChatMessage, ChatMessageBlock, ToolRun } from '../types'
 import type { LongTermGoalConversationTurn, LongTermGoalMessageResult } from '../../../../shared/long-term-goal-types'
@@ -43,6 +44,7 @@ const emit = defineEmits<{
   (e: 'cancelChangeSet', changeSetId: string): void
   (e: 'confirmCreation', changeSetId: string): void
   (e: 'cancelCreation', changeSetId: string): void
+  (e: 'resetCreation'): void
   (e: 'answerIntervention', goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }>): void
   (e: 'update:selected-agent-id', id: string): void
   (e: 'clear-auto-open-run'): void
@@ -276,6 +278,12 @@ function closeDialog (): void {
   customAnswers.value = {}
 }
 
+function openCreateDialog (): void {
+  // Drop any stale proposal/history from a previous abandoned creation attempt.
+  emit('resetCreation')
+  activeDialog.value = 'create'
+}
+
 function openRun (runId: string): void {
   activeRunId.value = runId
   activeDialog.value = 'run'
@@ -462,7 +470,7 @@ function sendDialogMessage (text: string): void {
       providerId: createProviderId.value || null,
       modelId: createModelId.value || null
     })
-    closeDialog()
+    // Keep the create dialog open: the AI response (and any proposal/confirmation card) streams in here.
     return
   }
   if (!goal) return
@@ -613,6 +621,18 @@ watch(
   },
   { immediate: true }
 )
+
+// Close the create dialog once a real goal has been opened (confirm-creation succeeded). The dialog
+// is opened from the empty state (goal === null), so a goal appearing means creation completed.
+// Cancel/adjust keep goal null, so the dialog stays open for another attempt.
+watch(
+  () => props.goal?.id ?? null,
+  (goalId, prevId) => {
+    if (goalId && !prevId && activeDialog.value === 'create') {
+      closeDialog()
+    }
+  }
+)
 </script>
 
 <template>
@@ -620,7 +640,7 @@ watch(
     <div v-if="!goal" class="goal-empty">
       <h2>{{ $t('chatUi.longTermGoals') }}</h2>
       <p>{{ $t('chatUi.longTermGoalEmptyDetail') }}</p>
-      <button type="button" class="goal-primary-btn" @click="activeDialog = 'create'">{{ $t('chatUi.newLongTermGoal') }}</button>
+      <button type="button" class="goal-primary-btn" @click="openCreateDialog">{{ $t('chatUi.newLongTermGoal') }}</button>
     </div>
 
     <template v-else>
@@ -907,7 +927,15 @@ watch(
       @update:selected-model="setCreateModel"
       @update:selected-agent-id="(id) => emit('update:selected-agent-id', id)"
       @close="closeDialog"
-    />
+    >
+      <GoalCreationConfirmCard
+        v-if="pendingCreationConfirm"
+        :proposal="pendingCreationConfirm.proposal"
+        @confirm="emit('confirmCreation', pendingCreationConfirm!.changeSet.id)"
+        @cancel="emit('cancelCreation', pendingCreationConfirm!.changeSet.id)"
+        @adjust="emit('resetCreation')"
+      />
+    </GoalConversationDialog>
   </section>
 </template>
 

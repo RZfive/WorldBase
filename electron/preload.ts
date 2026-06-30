@@ -662,6 +662,8 @@ export interface ElectronAPI {
   streamLongTermGoalCreate: (content: string, options: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] } | undefined, streamId: string) => Promise<LongTermGoalMessageResult>
   applyLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
   cancelLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
+  applyLongTermGoalCreation: (changeSetId: string) => Promise<LongTermGoalDefinition>
+  cancelLongTermGoalCreation: (changeSetId: string) => Promise<boolean>
   answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => Promise<LongTermGoalDefinition>
   onLongTermGoalsChanged: (callback: (goals: LongTermGoalDefinition[]) => void) => () => void
   onLongTermGoalSnapshotChanged: (callback: (snapshot: LongTermGoalSnapshot) => void) => () => void
