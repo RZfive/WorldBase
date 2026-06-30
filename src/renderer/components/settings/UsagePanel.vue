@@ -289,6 +289,59 @@ function shouldShowPointLabel (index: number): boolean {
   return index % step === 0 || index === n - 1
 }
 
+/** 悬浮十字准线 + 信息框：鼠标在图上移动时吸附到最近数据点，显示竖直虚线与各系列数值。 */
+const hoverIndex = ref<number | null>(null)
+
+function onChartMouseMove (event: MouseEvent): void {
+  const svg = event.currentTarget as SVGSVGElement
+  const rect = svg.getBoundingClientRect()
+  if (rect.width === 0 || rect.height === 0) return
+  const n = dailyChartData.value.length
+  if (n === 0) { hoverIndex.value = null; return }
+  // preserveAspectRatio="xMidYMid meet"：等比缩放后居中，需扣除两侧留白再换算到 viewBox 坐标。
+  const scale = Math.min(rect.width / LINE_CHART.width, rect.height / LINE_CHART.height)
+  const offsetX = (rect.width - LINE_CHART.width * scale) / 2
+  const viewBoxX = (event.clientX - rect.left - offsetX) / scale
+  let idx: number
+  if (n <= 1) idx = 0
+  else idx = Math.round(((viewBoxX - LINE_CHART.pad.l) / lineChartInnerW.value) * (n - 1))
+  hoverIndex.value = Math.max(0, Math.min(n - 1, idx))
+}
+function onChartMouseLeave (): void {
+  hoverIndex.value = null
+}
+
+/** 浮动信息框数据：最近点的 x 坐标、标签、各系列取值 + 该点缓存率。 */
+const tooltipRows = computed(() => {
+  const i = hoverIndex.value
+  if (i === null) return null
+  const point = dailyChartData.value[i]
+  if (!point) return null
+  const input = lineSeries.value.find(s => s.key === 'input')?.values[i] ?? 0
+  const cache = lineSeries.value.find(s => s.key === 'cache')?.values[i] ?? 0
+  return {
+    x: pointX(i),
+    label: chartPointLabel(point),
+    rows: lineSeries.value.map(s => ({ label: s.label, color: s.color, value: s.values[i] })),
+    cacheHitRate: input > 0 ? cache / input : 0
+  }
+})
+
+/** 信息框位置/尺寸：宽度固定，x 在边界内夹紧避免溢出。 */
+const TOOLTIP = { w: 158, padV: 7, headerH: 16, rowH: 15 }
+const tooltipBox = computed(() => {
+  const data = tooltipRows.value
+  if (!data) return null
+  // rows 为三条系列，外加底部一行缓存率汇总。
+  const h = TOOLTIP.padV * 2 + TOOLTIP.headerH + (data.rows.length + 1) * TOOLTIP.rowH
+  let x = data.x - TOOLTIP.w / 2
+  const minX = LINE_CHART.pad.l + 2
+  const maxX = LINE_CHART.width - LINE_CHART.pad.r - TOOLTIP.w - 2
+  x = Math.max(minX, Math.min(maxX, x))
+  // px = 真实数据点 x（十字准线/高亮点用），x = 信息框左上角（已夹紧防溢出）。
+  return { x, y: LINE_CHART.pad.t + 4, w: TOOLTIP.w, h, px: data.x, label: data.label, rows: data.rows, cacheHitRate: data.cacheHitRate }
+})
+
 /** 缓存率横向条形图常量。 */
 const RATE_CHART = { width: 720, barH: 24, gap: 10, pad: { l: 130, r: 56, t: 8, b: 8 } }
 const rateChartHeight = computed(() =>
@@ -398,7 +451,7 @@ onMounted(() => {
             </div>
           </div>
           <div v-if="dailyChartData.length === 0" class="chart-empty">{{ $t('settings.usage.chartEmpty') }}</div>
-          <svg v-else class="line-chart" :viewBox="`0 0 ${LINE_CHART.width} ${LINE_CHART.height}`" preserveAspectRatio="xMidYMid meet" role="img" :aria-label="$t('settings.usage.chartDaily')">
+          <svg v-else class="line-chart" :viewBox="`0 0 ${LINE_CHART.width} ${LINE_CHART.height}`" preserveAspectRatio="xMidYMid meet" role="img" :aria-label="$t('settings.usage.chartDaily')" @mousemove="onChartMouseMove" @mouseleave="onChartMouseLeave">
             <!-- Y axis gridlines -->
             <line v-for="i in 4" :key="`grid-${i}`" :x1="LINE_CHART.pad.l" :x2="LINE_CHART.width - LINE_CHART.pad.r" :y1="LINE_CHART.pad.t + (lineChartInnerH * i) / 4" :y2="LINE_CHART.pad.t + (lineChartInnerH * i) / 4" class="chart-grid" />
             <!-- Y axis labels -->
@@ -412,7 +465,7 @@ onMounted(() => {
               :style="{ stroke: s.color }"
               fill="none"
             />
-            <!-- Data points per series (hover shows value) -->
+            <!-- Data points per series -->
             <template v-for="s in lineSeries" :key="`pts-${s.key}`">
               <circle
                 v-for="(v, i) in s.values"
@@ -422,12 +475,36 @@ onMounted(() => {
                 r="2.5"
                 class="chart-point"
                 :style="{ fill: s.color }"
-              >
-                <title>{{ chartPointLabel(dailyChartData[i]) }} · {{ s.label }}: {{ fmtTokens(v) }}</title>
-              </circle>
+              />
+            </template>
+            <!-- Crosshair + emphasized points at hovered index -->
+            <template v-if="tooltipBox">
+              <line :x1="tooltipBox.px" :x2="tooltipBox.px" :y1="LINE_CHART.pad.t" :y2="LINE_CHART.height - LINE_CHART.pad.b" class="chart-crosshair" />
+              <circle
+                v-for="(row, ri) in tooltipBox.rows"
+                :key="`hpt-${ri}`"
+                :cx="tooltipBox.px"
+                :cy="pointY(row.value)"
+                r="4"
+                class="chart-point-hover"
+                :style="{ fill: row.color }"
+              />
+              <!-- Floating info box -->
+              <g class="chart-tooltip" :transform="`translate(${tooltipBox.x}, ${tooltipBox.y})`">
+                <rect :width="tooltipBox.w" :height="tooltipBox.h" rx="6" class="tooltip-bg" />
+                <text :x="10" :y="TOOLTIP.padV + 11" class="tooltip-header">{{ tooltipBox.label }}</text>
+                <template v-for="(row, ri) in tooltipBox.rows" :key="`trow-${ri}`">
+                  <rect :x="10" :y="TOOLTIP.padV + TOOLTIP.headerH + ri * TOOLTIP.rowH + 3" width="8" height="8" rx="1.5" :style="{ fill: row.color }" />
+                  <text :x="24" :y="TOOLTIP.padV + TOOLTIP.headerH + ri * TOOLTIP.rowH + 11" class="tooltip-row">{{ row.label }}: {{ fmtTokens(row.value) }}</text>
+                </template>
+                <!-- Cache hit rate summary row at the bottom of the tooltip. -->
+                <text :x="10" :y="TOOLTIP.padV + TOOLTIP.headerH + tooltipBox.rows.length * TOOLTIP.rowH + 11" class="tooltip-row tooltip-rate">{{ $t('settings.usage.cacheHitRate') }}: {{ fmtPercent(tooltipBox.cacheHitRate) }}</text>
+              </g>
             </template>
             <!-- X axis date labels (shared, derived from first series) -->
             <text v-for="(d, i) in dailyChartData" :key="`xlabel-${d.date}-${d.hourBucket}`" v-show="shouldShowPointLabel(i)" :x="pointX(i)" :y="LINE_CHART.height - LINE_CHART.pad.b + 14" class="chart-axis-label" text-anchor="middle">{{ chartPointLabel(d) }}</text>
+            <!-- Transparent overlay on top to catch mousemove across the whole chart area. -->
+            <rect x="0" y="0" :width="LINE_CHART.width" :height="LINE_CHART.height" class="chart-hit-overlay" />
           </svg>
           <p class="chart-range-label">{{ rangeLabel }}</p>
         </div>
@@ -654,7 +731,18 @@ onMounted(() => {
 /* stroke/fill come from inline style (per-series color); base sets geometry only. */
 .chart-line { stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .chart-point { stroke: var(--app-panel, #fff); stroke-width: 1.5; transition: r 0.12s ease; }
-.chart-point:hover { r: 4.5; }
+
+/* Transparent full-area hit target so mousemove fires even over empty chart regions. */
+.chart-hit-overlay { fill: transparent; pointer-events: all; }
+
+/* Hover crosshair + floating info box (pointer-events:none so they never swallow mouse). */
+.chart-crosshair { stroke: var(--app-text-muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.65; pointer-events: none; }
+.chart-point-hover { stroke: var(--app-panel-strong); stroke-width: 2; pointer-events: none; }
+.chart-tooltip { pointer-events: none; }
+.tooltip-bg { fill: var(--app-panel-strong); stroke: var(--app-border-strong); stroke-width: 1; }
+.tooltip-header { font-size: 10px; font-weight: 600; fill: var(--app-text-strong); }
+.tooltip-row { font-size: 10px; fill: var(--app-text-soft); }
+.tooltip-rate { font-weight: 600; fill: var(--app-success, #2faa5e); }
 
 .rate-track { fill: var(--app-panel-subtle); }
 .rate-bar { fill: var(--app-success, #2faa5e); transition: fill 0.12s ease; }
