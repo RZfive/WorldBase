@@ -45,17 +45,22 @@ const loading = ref(false)
 const error = ref('')
 const expandedProviders = ref<Set<string>>(new Set())
 
-type RangePreset = '7' | '30' | '90' | 'all'
+type RangePreset = 'today' | '7' | '30' | '90' | 'all'
 const rangePreset = ref<RangePreset>('7')
 
-/** 展示粒度：7 天范围按两小时桶画点，30/90/全部自动汇总为按天，避免点过密。 */
-const chartGranularity = computed<'hour' | 'day'>(() => rangePreset.value === '7' ? 'hour' : 'day')
+/** 展示粒度：今天按小时、7 天按两小时桶、30/90/全部按天，避免点过密。 */
+const chartGranularity = computed<'hour' | 'twoHour' | 'day'>(() => {
+  if (rangePreset.value === 'today') return 'hour'
+  if (rangePreset.value === '7') return 'twoHour'
+  return 'day'
+})
 
 /** 图表筛选：选中的供应商 id 集合，空集合=全部。 */
 const chartSelectedProviders = ref<Set<string>>(new Set())
 
 function rangeFrom (): string | undefined {
   if (rangePreset.value === 'all') return undefined
+  if (rangePreset.value === 'today') return formatDateKey(new Date())
   const days = Number(rangePreset.value)
   const d = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000)
   return formatDateKey(d)
@@ -69,14 +74,12 @@ function formatDateKey (d: Date): string {
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
 }
-/** 用量趋势图点标签：两小时桶粒度显示 M/D HH:00；按天粒度显示 M/D。 */
+/** 用量趋势图点标签：小时/两小时桶粒度显示 M/D HH:00；按天粒度显示 M/D。 */
 function chartPointLabel (point: { date: string; hourBucket: number }): string {
   const d = new Date(point.date + 'T00:00:00')
   const base = `${d.getMonth() + 1}/${d.getDate()}`
-  if (chartGranularity.value === 'hour') {
-    return `${base} ${String(point.hourBucket).padStart(2, '0')}:00`
-  }
-  return base
+  if (chartGranularity.value === 'day') return base
+  return `${base} ${String(point.hourBucket).padStart(2, '0')}:00`
 }
 
 async function loadUsage () {
@@ -163,6 +166,7 @@ const totals = computed(() => {
 
 const rangeLabel = computed(() => {
   if (rangePreset.value === 'all') return t('settings.usage.rangeAll')
+  if (rangePreset.value === 'today') return t('settings.usage.rangeToday')
   return t('settings.usage.rangeDays', { days: rangePreset.value })
 })
 
@@ -172,19 +176,21 @@ const filteredDaily = computed(() => {
   return daily.value.filter(r => chartSelectedProviders.value.has(r.providerId))
 })
 
-/** 按展示粒度聚合的多系列数据（输入/输出/缓存同图，不同色）。7 天按两小时桶，大范围按天。 */
+/** 按展示粒度聚合的多系列数据（输入/输出/缓存同图，不同色）。今天按小时，7 天按两小时桶，大范围按天。 */
 const dailyChartData = computed(() => {
   const granularity = chartGranularity.value
   const byBucket = new Map<string, { date: string; hourBucket: number; input: number; output: number; cache: number }>()
   for (const r of filteredDaily.value) {
-    const key = granularity === 'hour' ? `${r.date}#${r.hourBucket}` : r.date
+    // hour: 直接用记录小时(0-23)；twoHour: 聚合到 0/2/.../22；day: 不分小时。
+    const hour = granularity === 'hour'
+      ? r.hourBucket
+      : granularity === 'twoHour'
+        ? Math.floor(r.hourBucket / 2) * 2
+        : 0
+    const key = granularity === 'day' ? r.date : `${r.date}#${hour}`
     let bucket = byBucket.get(key)
     if (!bucket) {
-      bucket = {
-        date: r.date,
-        hourBucket: granularity === 'hour' ? r.hourBucket : 0,
-        input: 0, output: 0, cache: 0
-      }
+      bucket = { date: r.date, hourBucket: hour, input: 0, output: 0, cache: 0 }
       byBucket.set(key, bucket)
     }
     bucket.input += r.inputTokens
@@ -331,6 +337,7 @@ onMounted(() => {
       </div>
       <div class="usage-actions">
         <select v-model="rangePreset" class="usage-select">
+          <option value="today">{{ $t('settings.usage.rangeToday') }}</option>
           <option value="7">{{ $t('settings.usage.range7') }}</option>
           <option value="30">{{ $t('settings.usage.range30') }}</option>
           <option value="90">{{ $t('settings.usage.range90') }}</option>
@@ -554,6 +561,18 @@ onMounted(() => {
   color: var(--app-text);
   font-size: 0.82em;
   cursor: pointer;
+}
+/* select 用更实的输入框背景 + 主题强调色 focus，与 .pp-select 一致；原 .usage-panel-muted
+   几乎全透明(rgba 0.04)，在深色下看起来"没填色"。option 显式着色让弹出层跟随主题。 */
+.usage-select {
+  background: var(--app-input-bg);
+  border-color: var(--app-input-border);
+  outline: none;
+}
+.usage-select:focus { border-color: var(--app-accent); }
+.usage-select option {
+  background: var(--app-panel-strong);
+  color: var(--app-text);
 }
 .usage-btn:disabled { opacity: 0.5; cursor: default; }
 .usage-btn-danger:hover { background: rgba(220, 38, 38, 0.12); border-color: rgba(220, 38, 38, 0.4); }

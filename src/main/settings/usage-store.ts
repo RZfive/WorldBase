@@ -6,8 +6,8 @@ import path from 'node:path'
  *
  * 按 (date, hourBucket, providerId, model) 聚合记录每次 provider 调用消耗的真实 token
  * （取自 provider 返回的 usage 字段），用于设置页「用量统计」表格与时段折线图。hourBucket
- * 为 0/2/4/.../22 的两小时桶起始（本地时区），同键累加避免单次调用膨胀文件。自动只保留
- * 最近 MAX_RETENTION_DAYS 天的数据。
+ * 为 0-23 的小时桶（本地时区），同键累加避免单次调用膨胀文件；展示层再按范围聚合到
+ * 小时/两小时/天。自动只保留最近 MAX_RETENTION_DAYS 天的数据。
  *
  * 防崩溃：参照 scheduled-task-store / studio-task-store，逐字段 normalize，损坏
  * 文件不会让启动崩溃（这是历史上 long-term-goal 踩过的坑）。
@@ -17,7 +17,7 @@ const MAX_RETENTION_DAYS = 90
 
 export interface UsageRecord {
   date: string          // YYYY-MM-DD (本地时区)
-  hourBucket: number    // 两小时桶起始小时：0/2/4/.../22 (本地时区)
+  hourBucket: number    // 小时桶 0-23 (本地时区)
   providerId: string
   providerName: string  // 快照，provider 改名后历史仍可读
   model: string
@@ -113,10 +113,10 @@ function normalizeRecord (value: unknown): UsageRecord | null {
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
   }
 
-  // hourBucket 规范化为 0/2/4/.../22 偶数桶：缺失或非法 → 0，奇数/越界向下归整。
+  // hourBucket 规范化为 0-23 整数：缺失或非法 → 0，小数向下取整。
   const rawHour = typeof record.hourBucket === 'number' ? record.hourBucket : Number(record.hourBucket)
   const hourBucket = Number.isFinite(rawHour) && rawHour >= 0 && rawHour <= 23
-    ? Math.floor(rawHour / 2) * 2
+    ? Math.floor(rawHour)
     : 0
 
   return {
@@ -141,9 +141,9 @@ function dateKeyFromMs (ms: number): string {
   return `${y}-${m}-${day}`
 }
 
-/** 把 ms 映射到 0/2/4/.../22 的两小时桶起始（本地时区，与 dateKeyFromMs 同源）。 */
+/** 把 ms 映射到 0-23 的小时桶（本地时区，与 dateKeyFromMs 同源）。 */
 function hourBucketFromMs (ms: number): number {
-  return Math.floor(new Date(ms).getHours() / 2) * 2
+  return new Date(ms).getHours()
 }
 
 function isOlderThan (dateKey: string, maxDays: number): boolean {
