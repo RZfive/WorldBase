@@ -1872,6 +1872,15 @@ export function setupIPC (): void {
     return longTermGoalService!.cancelChangeSet(changeSetId)
   })
 
+  ipcMain.handle('longTermGoals:applyCreation', async (_event: IpcMainInvokeEvent, changeSetId: string) => {
+    return longTermGoalService!.applyGoalCreation(changeSetId)
+  })
+
+  ipcMain.handle('longTermGoals:cancelCreation', async (_event: IpcMainInvokeEvent, changeSetId: string) => {
+    longTermGoalService!.cancelGoalCreation(changeSetId)
+    return true
+  })
+
   ipcMain.handle('longTermGoals:answerIntervention', async (_event: IpcMainInvokeEvent, goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => {
     return longTermGoalService!.answerIntervention(goalId, interventionId, answers)
   })

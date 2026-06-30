@@ -4,9 +4,10 @@ import path from 'node:path'
 /**
  * UsageStore — 持久化的 token 用量统计
  *
- * 按 (date, providerId, model) 聚合记录每次 provider 调用消耗的真实 token（取自
- * provider 返回的 usage 字段），用于设置页「用量统计」表格。同键累加，避免单次
- * 调用膨胀文件。自动只保留最近 MAX_RETENTION_DAYS 天的数据。
+ * 按 (date, hourBucket, providerId, model) 聚合记录每次 provider 调用消耗的真实 token
+ * （取自 provider 返回的 usage 字段），用于设置页「用量统计」表格与时段折线图。hourBucket
+ * 为 0/2/4/.../22 的两小时桶起始（本地时区），同键累加避免单次调用膨胀文件。自动只保留
+ * 最近 MAX_RETENTION_DAYS 天的数据。
  *
  * 防崩溃：参照 scheduled-task-store / studio-task-store，逐字段 normalize，损坏
  * 文件不会让启动崩溃（这是历史上 long-term-goal 踩过的坑）。
@@ -16,6 +17,7 @@ const MAX_RETENTION_DAYS = 90
 
 export interface UsageRecord {
   date: string          // YYYY-MM-DD (本地时区)
+  hourBucket: number    // 两小时桶起始小时：0/2/4/.../22 (本地时区)
   providerId: string
   providerName: string  // 快照，provider 改名后历史仍可读
   model: string
@@ -111,8 +113,15 @@ function normalizeRecord (value: unknown): UsageRecord | null {
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
   }
 
+  // hourBucket 规范化为 0/2/4/.../22 偶数桶：缺失或非法 → 0，奇数/越界向下归整。
+  const rawHour = typeof record.hourBucket === 'number' ? record.hourBucket : Number(record.hourBucket)
+  const hourBucket = Number.isFinite(rawHour) && rawHour >= 0 && rawHour <= 23
+    ? Math.floor(rawHour / 2) * 2
+    : 0
+
   return {
     date,
+    hourBucket,
     providerId,
     providerName: normalizeString(record.providerName) || providerId,
     model,
@@ -130,6 +139,11 @@ function dateKeyFromMs (ms: number): string {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
+}
+
+/** 把 ms 映射到 0/2/4/.../22 的两小时桶起始（本地时区，与 dateKeyFromMs 同源）。 */
+function hourBucketFromMs (ms: number): number {
+  return Math.floor(new Date(ms).getHours() / 2) * 2
 }
 
 function isOlderThan (dateKey: string, maxDays: number): boolean {
@@ -180,7 +194,7 @@ export class UsageStore {
     }
   }
 
-  /** 记录一次 provider 调用的 token 消耗（同 date+provider+model 累加）。 */
+  /** 记录一次 provider 调用的 token 消耗（同 date+hourBucket+provider+model 累加）。 */
   record (input: UsageRecordInput): void {
     const parsed = parseUsage(input.usage)
     // 跳过空 usage（某些流式调用可能不返回 token）。
@@ -188,9 +202,11 @@ export class UsageStore {
       return
     }
     const records = this.load()
-    const date = dateKeyFromMs(Date.now())
+    const now = Date.now()
+    const date = dateKeyFromMs(now)
+    const hourBucket = hourBucketFromMs(now)
     const existing = records.find(r =>
-      r.date === date && r.providerId === input.providerId && r.model === input.model
+      r.date === date && r.hourBucket === hourBucket && r.providerId === input.providerId && r.model === input.model
     )
     if (existing) {
       existing.inputTokens += parsed.inputTokens
@@ -201,6 +217,7 @@ export class UsageStore {
     } else {
       records.push({
         date,
+        hourBucket,
         providerId: input.providerId,
         providerName: input.providerName || input.providerId,
         model: input.model,
@@ -214,12 +231,12 @@ export class UsageStore {
     this.persist()
   }
 
-  /** 获取日期范围内的明细记录（按日期升序）。 */
+  /** 获取日期范围内的明细记录（按日期升序，同日按时段升序）。 */
   getDaily (from?: string, to?: string): UsageRecord[] {
     const records = this.load()
     return records
       .filter(r => (!from || r.date >= from) && (!to || r.date <= to))
-      .sort((a, b) => a.date.localeCompare(b.date) || a.providerId.localeCompare(b.providerId) || a.model.localeCompare(b.model))
+      .sort((a, b) => a.date.localeCompare(b.date) || a.hourBucket - b.hourBucket || a.providerId.localeCompare(b.providerId) || a.model.localeCompare(b.model))
   }
 
   /** 按供应商聚合（含模型明细），用于表格分组展示。 */

@@ -38,6 +38,7 @@ interface GoalConversationSession {
   contextTurns: LongTermGoalConversationTurn[]
   lastAssistantTurnId: string | null
   proposal?: GoalAdjustmentProposal | null
+  draftGoal?: LongTermGoalDefinition
 }
 
 interface GoalAdjustmentProposal {
@@ -754,9 +755,33 @@ export class LongTermGoalService {
 
   start (): void {
     this.snapshot = this.options.store.getSnapshot()
+    // Detect active goals whose AI-specified nextRunAt was missed while the app was closed/asleep.
+    // Snapshot this BEFORE ensureScheduledTask re-derives nextRunAt from the (now-nulled) backing task.
+    const now = Date.now()
+    const missedGoalIds = this.snapshot.goals
+      .filter(goal => goal.status === 'active' && goal.nextRunAt && Date.parse(goal.nextRunAt) <= now)
+      .map(goal => goal.id)
     this.snapshot.goals = this.snapshot.goals.map(goal => this.ensureScheduledTask(this.syncGoalScheduleState(goal)))
     this.persistAndEmit()
     this.reconcileScheduledReports(this.options.scheduledTaskService.listAllReports())
+    // Catch-up: trigger a fresh planning run for each missed goal so the AI re-decides nextRunAt based
+    // on current state (user chose "skip + let AI re-decide"). Fire-and-forget; runNow guards against
+    // double-runs via runningTaskIds.
+    for (const goalId of missedGoalIds) {
+      try {
+        this.runGoalNow(goalId)
+        this.addActivity({
+          goalId,
+          runId: null,
+          actor: 'system',
+          type: 'run_started',
+          title: '错过执行，已触发重新规划',
+          summary: '长期目标的上次计划执行时间在 app 关闭期间错过，已自动触发一次重新规划。'
+        })
+      } catch (error) {
+        console.warn(`[long-term-goal-service] Failed to trigger catch-up run for goal ${goalId}:`, (error as Error).message)
+      }
+    }
   }
 
   listGoals (): LongTermGoalDefinition[] {
@@ -986,57 +1011,50 @@ export class LongTermGoalService {
       updatedAt: nowIso()
     }
 
+    // Stash the draft goal on the creation session so applyGoalCreation can reuse its inferred
+    // schedule/provider/model as fallback when the AI's proposal omits them.
+    const existingCreationSession = this.creationSessions.get(draftGoal.id)
+    if (existingCreationSession) {
+      existingCreationSession.draftGoal = draftGoal
+    } else {
+      this.creationSessions.set(draftGoal.id, {
+        phase: 'clarifying',
+        contextTurns: [],
+        lastAssistantTurnId: null,
+        proposal: null,
+        draftGoal
+      })
+    }
+
     const result = await this.handleGoalConversation(draftGoal, text, this.creationSessions, '请输入想创建的长期目标', onEvent)
     if (!result.proposal) {
       return result
     }
 
-    const savedGoal = this.saveGoal({
-      title: result.proposal.title,
-      objective: result.proposal.objective,
-      providerId: result.proposal.after.providerId ?? draftGoal.providerId,
-      modelId: result.proposal.after.modelId ?? draftGoal.modelId,
-      schedule: (result.proposal.after.schedule as LongTermGoalSchedule) || draftGoal.schedule,
-      selectedSkillIds: Array.isArray(result.proposal.after.selectedSkillIds) ? result.proposal.after.selectedSkillIds as string[] : [],
-      selectedMcpServerIds: Array.isArray(result.proposal.after.selectedMcpServerIds) ? result.proposal.after.selectedMcpServerIds as string[] : draftGoal.selectedMcpServerIds,
-      targetProjectIds: Array.isArray(result.proposal.after.targetProjectIds) ? result.proposal.after.targetProjectIds as string[] : draftGoal.targetProjectIds,
-      notificationPolicy: (result.proposal.after.notificationPolicy as LongTermGoalDefinition['notificationPolicy']) || 'minimal',
-      currentPhase: result.proposal.after.currentPhase || '持续推进',
-      progressSummary: result.proposal.after.progressSummary || '目标已创建，等待首次自动推进。',
-      gapSummary: result.proposal.after.gapSummary || '等待首次总结后生成差距分析。',
-      todayFocus: result.proposal.after.todayFocus || undefined,
-      nextTasks: Array.isArray(result.proposal.after.nextTasks) ? result.proposal.after.nextTasks as LongTermGoalNextTask[] : [],
-      openInterventions: Array.isArray(result.proposal.after.openInterventions) ? result.proposal.after.openInterventions as LongTermGoalIntervention[] : []
-    })
+    // Do NOT persist the goal yet — the proposal is surfaced as a draft changeSet (already pushed
+    // into snapshot.changeSets by handleGoalConversation) and requires user confirmation before
+    // saving/scheduling. See applyGoalCreation / cancelGoalCreation.
+    return result
+  }
 
-    const adjustedGoal = this.getGoal(savedGoal.id)!
-    const assistantTurn = {
-      ...result.assistantTurn,
-      goalId: adjustedGoal.id,
-      appliedChangeId: null
-    }
-    this.snapshot.conversations = this.snapshot.conversations.map(turn => {
-      if (turn.id !== result.assistantTurn.id) return turn
-      return {
-        ...assistantTurn,
-        createdAt: turn.createdAt
-      }
-    })
-    this.adjustmentSessions.delete(draftGoal.id)
-    this.creationSessions.delete(draftGoal.id)
-    this.refreshExecutionBrief(adjustedGoal.id)
-    this.persistAndEmit()
-
+  private buildSaveInputFromProposal (proposal: GoalAdjustmentProposal, fallback: LongTermGoalDefinition): LongTermGoalSaveInput {
+    const after = proposal.after || {}
     return {
-      ...result,
-      goal: adjustedGoal,
-      proposal: result.proposal ? {
-        ...result.proposal,
-        after: {
-          ...result.proposal.after,
-          ...adjustedGoal
-        }
-      } : null
+      title: proposal.title || after.title || fallback.title,
+      objective: proposal.objective || after.objective || fallback.objective,
+      providerId: after.providerId ?? fallback.providerId,
+      modelId: after.modelId ?? fallback.modelId,
+      schedule: (after.schedule as LongTermGoalSchedule) || fallback.schedule,
+      selectedSkillIds: Array.isArray(after.selectedSkillIds) ? after.selectedSkillIds as string[] : fallback.selectedSkillIds,
+      selectedMcpServerIds: Array.isArray(after.selectedMcpServerIds) ? after.selectedMcpServerIds as string[] : fallback.selectedMcpServerIds,
+      targetProjectIds: Array.isArray(after.targetProjectIds) ? after.targetProjectIds as string[] : fallback.targetProjectIds,
+      notificationPolicy: (after.notificationPolicy as LongTermGoalDefinition['notificationPolicy']) || 'minimal',
+      currentPhase: after.currentPhase || '持续推进',
+      progressSummary: after.progressSummary || '目标已创建，等待首次自动推进。',
+      gapSummary: after.gapSummary || '等待首次总结后生成差距分析。',
+      todayFocus: after.todayFocus || undefined,
+      nextTasks: Array.isArray(after.nextTasks) ? after.nextTasks as LongTermGoalNextTask[] : [],
+      openInterventions: Array.isArray(after.openInterventions) ? after.openInterventions as LongTermGoalIntervention[] : []
     }
   }
 
@@ -1093,6 +1111,13 @@ export class LongTermGoalService {
     session.contextTurns.push(assistantTurn)
 
     if (assistantResult.changeSet) {
+      // For the create flow, drop any prior orphaned draft changeSets (each turn produces a new
+      // draft goalId) so only the latest proposal awaits confirmation.
+      if (goal.id.startsWith('goal_draft')) {
+        this.snapshot.changeSets = this.snapshot.changeSets.filter(cs =>
+          !(cs.goalId.startsWith('goal_draft') && cs.status === 'draft')
+        )
+      }
       this.snapshot.changeSets.unshift(assistantResult.changeSet)
     }
 
@@ -1373,6 +1398,42 @@ export class LongTermGoalService {
     return clone(changeSet)
   }
 
+  applyGoalCreation (changeSetId: string): LongTermGoalDefinition {
+    const changeSet = this.snapshot.changeSets.find(item => item.id === changeSetId)
+    if (!changeSet) throw new Error('变更不存在')
+    if (changeSet.status !== 'draft') throw new Error('变更已处理')
+    const session = this.creationSessions.get(changeSet.goalId)
+    const proposal = session?.proposal
+    const draftGoal = session?.draftGoal
+    if (!proposal || !draftGoal) {
+      throw new Error('创建会话已过期，请重新发起目标创建')
+    }
+    // saveGoal defaults status to 'active' and schedules the first run via ensureScheduledTask.
+    const savedGoal = this.saveGoal(this.buildSaveInputFromProposal(proposal, draftGoal))
+    const now = nowIso()
+    // Re-parent the changeSet + conversation turns from the draft goalId to the saved goal id.
+    this.snapshot.changeSets = this.snapshot.changeSets.map(cs =>
+      cs.id === changeSetId ? { ...cs, goalId: savedGoal.id, status: 'applied', appliedAt: now } : cs
+    )
+    this.snapshot.conversations = this.snapshot.conversations.map(turn =>
+      turn.goalId === changeSet.goalId ? { ...turn, goalId: savedGoal.id } : turn
+    )
+    this.creationSessions.delete(changeSet.goalId)
+    this.adjustmentSessions.delete(changeSet.goalId)
+    this.refreshExecutionBrief(savedGoal.id)
+    this.persistAndEmit()
+    return clone(savedGoal)
+  }
+
+  cancelGoalCreation (changeSetId: string): void {
+    const changeSet = this.snapshot.changeSets.find(item => item.id === changeSetId)
+    if (!changeSet) return
+    this.snapshot.changeSets = this.snapshot.changeSets.filter(cs => cs.id !== changeSetId)
+    this.creationSessions.delete(changeSet.goalId)
+    this.adjustmentSessions.delete(changeSet.goalId)
+    this.persistAndEmit()
+  }
+
   answerIntervention (
     goalId: string,
     interventionId: string,
@@ -1554,6 +1615,9 @@ export class LongTermGoalService {
 
     const nextTasks = this.buildNextTasks(goal, parsed.nextPlan)
     const intervention = this.buildIntervention(goal.id, parsed)
+    if (!parsed.nextRunAt) {
+      console.warn(`[long-term-goal-service] Goal "${goal.title}" run did not emit nextRunAt metadata; falling back to schedule-derived time.`)
+    }
     const nextRunAt = parsed.nextRunAt || fallbackNextRunAtFromSchedule(goal.schedule)
     const updatedGoal: LongTermGoalDefinition = {
       ...goal,

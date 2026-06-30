@@ -23,9 +23,10 @@ interface ProviderGroup {
   cacheHitRate: number
   models: ModelRow[]
 }
-/** 单日用量（用于时段图表）。 */
+/** 单时段用量（用于用量趋势折线图）。 */
 interface DailyRecord {
   date: string
+  hourBucket: number
   providerId: string
   providerName: string
   model: string
@@ -47,6 +48,9 @@ const expandedProviders = ref<Set<string>>(new Set())
 type RangePreset = '7' | '30' | '90' | 'all'
 const rangePreset = ref<RangePreset>('7')
 
+/** 展示粒度：7 天范围按两小时桶画点，30/90/全部自动汇总为按天，避免点过密。 */
+const chartGranularity = computed<'hour' | 'day'>(() => rangePreset.value === '7' ? 'hour' : 'day')
+
 /** 图表筛选：选中的供应商 id 集合，空集合=全部。 */
 const chartSelectedProviders = ref<Set<string>>(new Set())
 
@@ -65,10 +69,14 @@ function formatDateKey (d: Date): string {
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
 }
-/** 短日期标签（M/D）。 */
-function shortDate (dateKey: string): string {
-  const d = new Date(dateKey + 'T00:00:00')
-  return `${d.getMonth() + 1}/${d.getDate()}`
+/** 用量趋势图点标签：两小时桶粒度显示 M/D HH:00；按天粒度显示 M/D。 */
+function chartPointLabel (point: { date: string; hourBucket: number }): string {
+  const d = new Date(point.date + 'T00:00:00')
+  const base = `${d.getMonth() + 1}/${d.getDate()}`
+  if (chartGranularity.value === 'hour') {
+    return `${base} ${String(point.hourBucket).padStart(2, '0')}:00`
+  }
+  return base
 }
 
 async function loadUsage () {
@@ -164,22 +172,27 @@ const filteredDaily = computed(() => {
   return daily.value.filter(r => chartSelectedProviders.value.has(r.providerId))
 })
 
-/** 按日期聚合的多系列数据（输入/输出/缓存同图，不同色）。 */
+/** 按展示粒度聚合的多系列数据（输入/输出/缓存同图，不同色）。7 天按两小时桶，大范围按天。 */
 const dailyChartData = computed(() => {
-  const byDate = new Map<string, { input: number; output: number; cache: number }>()
+  const granularity = chartGranularity.value
+  const byBucket = new Map<string, { date: string; hourBucket: number; input: number; output: number; cache: number }>()
   for (const r of filteredDaily.value) {
-    let bucket = byDate.get(r.date)
+    const key = granularity === 'hour' ? `${r.date}#${r.hourBucket}` : r.date
+    let bucket = byBucket.get(key)
     if (!bucket) {
-      bucket = { input: 0, output: 0, cache: 0 }
-      byDate.set(r.date, bucket)
+      bucket = {
+        date: r.date,
+        hourBucket: granularity === 'hour' ? r.hourBucket : 0,
+        input: 0, output: 0, cache: 0
+      }
+      byBucket.set(key, bucket)
     }
     bucket.input += r.inputTokens
     bucket.output += r.outputTokens
     bucket.cache += r.cacheReadTokens
   }
-  return [...byDate.entries()]
-    .map(([date, v]) => ({ date, input: v.input, output: v.output, cache: v.cache }))
-    .sort((a, b) => a.date.localeCompare(b.date))
+  return [...byBucket.values()]
+    .sort((a, b) => a.date.localeCompare(b.date) || a.hourBucket - b.hourBucket)
 })
 
 /** 缓存率对比图数据（按供应商，筛选后）。 */
@@ -403,11 +416,11 @@ onMounted(() => {
                 class="chart-point"
                 :style="{ fill: s.color }"
               >
-                <title>{{ shortDate(dailyChartData[i].date) }} · {{ s.label }}: {{ fmtTokens(v) }}</title>
+                <title>{{ chartPointLabel(dailyChartData[i]) }} · {{ s.label }}: {{ fmtTokens(v) }}</title>
               </circle>
             </template>
             <!-- X axis date labels (shared, derived from first series) -->
-            <text v-for="(d, i) in dailyChartData" :key="`xlabel-${d.date}`" v-show="shouldShowPointLabel(i)" :x="pointX(i)" :y="LINE_CHART.height - LINE_CHART.pad.b + 14" class="chart-axis-label" text-anchor="middle">{{ shortDate(d.date) }}</text>
+            <text v-for="(d, i) in dailyChartData" :key="`xlabel-${d.date}-${d.hourBucket}`" v-show="shouldShowPointLabel(i)" :x="pointX(i)" :y="LINE_CHART.height - LINE_CHART.pad.b + 14" class="chart-axis-label" text-anchor="middle">{{ chartPointLabel(d) }}</text>
           </svg>
           <p class="chart-range-label">{{ rangeLabel }}</p>
         </div>

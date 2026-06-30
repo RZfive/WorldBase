@@ -1022,7 +1022,7 @@ const zhCN = {
       colCacheRate: '缓存率',
       chartFilterProvider: '图表筛选',
       filterAll: '全部',
-      chartDaily: '每日用量',
+      chartDaily: '用量趋势',
       chartCacheRate: '缓存命中对比',
       cacheRateHint: '缓存率 = 缓存命中 token ÷ 输入 token，越高表示越多请求命中缓存、单价越低。',
       chartEmpty: '所选范围暂无数据'

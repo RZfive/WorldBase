@@ -252,6 +252,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const streamingCreate = ref<{ userContent: string; message: ChatMessage } | null>(null)
   const streamingRun = ref<{ goalId: string; run: LongTermGoalRun } | null>(null)
   const createConversationHistory = ref<ChatMessage[]>([])
+  const pendingCreationConfirm = ref<{ changeSet: LongTermGoalChangeSet; proposal: NonNullable<LongTermGoalMessageResult['proposal']> } | null>(null)
   const goalAutoOpenRunId = ref<string | null>(null)
 
   watch(sharedSelectedLongTermGoalId, () => {
@@ -260,6 +261,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     streamingRun.value = null
     streamingCreate.value = null
     createConversationHistory.value = []
+    pendingCreationConfirm.value = null
   })
   const selectedLongTermGoalId = sharedSelectedLongTermGoalId
   const selectedAgentId = sharedSelectedAgentId
@@ -1601,25 +1603,23 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     streamingCreate.value = null
     if (!result) return
 
-    if (result.goal.id.startsWith('goal_draft')) {
-      // AI 仍在收敛目标，保留本轮用户提问与 AI 回复作为对话历史，等待用户继续补充。
-      const finalContent = result.assistantTurn?.content || (typeof message.content === 'string' ? message.content : '')
-      createConversationHistory.value = [...createConversationHistory.value, {
-        role: 'user',
-        content: normalizedSeed,
-        blocks: [{ id: `goal_create_user_${generateId()}`, kind: 'content', content: normalizedSeed }]
-      }, {
-        role: 'assistant',
-        content: finalContent,
-        speakerName: 'Long-Term Goal',
-        blocks: [{ id: `goal_create_asst_${generateId()}`, kind: 'content', content: finalContent }]
-      }]
-    } else {
-      // 已建库，打开目标并重置创建对话历史。
-      createConversationHistory.value = []
-      await loadLongTermGoals()
-      await openLongTermGoal(result.goal.id)
-    }
+    // createGoalViaConversation no longer auto-saves — the goal stays a draft until the user
+    // confirms via the ask-style gate. Append this turn to the create conversation history.
+    const finalContent = result.assistantTurn?.content || (typeof message.content === 'string' ? message.content : '')
+    createConversationHistory.value = [...createConversationHistory.value, {
+      role: 'user',
+      content: normalizedSeed,
+      blocks: [{ id: `goal_create_user_${generateId()}`, kind: 'content', content: normalizedSeed }]
+    }, {
+      role: 'assistant',
+      content: finalContent,
+      speakerName: 'Long-Term Goal',
+      blocks: [{ id: `goal_create_asst_${generateId()}`, kind: 'content', content: finalContent }]
+    }]
+    // If the AI produced a proposal, surface the confirmation gate; otherwise stay open for more input.
+    pendingCreationConfirm.value = result.changeSet && result.proposal
+      ? { changeSet: result.changeSet, proposal: result.proposal }
+      : null
   }
 
   async function saveLongTermGoalPatch (goal: LongTermGoalDefinition, patch: Partial<LongTermGoalDefinition>): Promise<void> {
@@ -1947,6 +1947,23 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     if (!window.electronAPI?.cancelLongTermGoalChangeSet) return
     const change = await window.electronAPI.cancelLongTermGoalChangeSet(changeSetId)
     await loadLongTermGoalSnapshot(change.goalId)
+  }
+
+  async function applyLongTermGoalCreation (changeSetId: string): Promise<void> {
+    if (!window.electronAPI?.applyLongTermGoalCreation) return
+    const savedGoal = await window.electronAPI.applyLongTermGoalCreation(changeSetId)
+    pendingCreationConfirm.value = null
+    createConversationHistory.value = []
+    await loadLongTermGoals()
+    await openLongTermGoal(savedGoal.id)
+  }
+
+  async function cancelLongTermGoalCreation (changeSetId: string): Promise<void> {
+    if (!window.electronAPI?.cancelLongTermGoalCreation) return
+    await window.electronAPI.cancelLongTermGoalCreation(changeSetId)
+    pendingCreationConfirm.value = null
+    // Reset history to the intro so the user can start a fresh creation attempt.
+    createConversationHistory.value = []
   }
 
   async function answerLongTermGoalIntervention (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }>): Promise<void> {
@@ -2851,6 +2868,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     sendLongTermGoalMessage,
     applyLongTermGoalChangeSet,
     cancelLongTermGoalChangeSet,
+    applyLongTermGoalCreation,
+    cancelLongTermGoalCreation,
+    pendingCreationConfirm,
     answerLongTermGoalIntervention,
     shouldUseConversationProviderOverride,
     showSkillPicker,

@@ -955,6 +955,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   streamLongTermGoalCreate: (content: string, options: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] } | undefined, streamId: string) => ipcRenderer.invoke('longTermGoals:streamCreate', content, options, streamId),
   applyLongTermGoalChangeSet: (changeSetId: string) => ipcRenderer.invoke('longTermGoals:applyChangeSet', changeSetId),
   cancelLongTermGoalChangeSet: (changeSetId: string) => ipcRenderer.invoke('longTermGoals:cancelChangeSet', changeSetId),
+  applyLongTermGoalCreation: (changeSetId: string) => ipcRenderer.invoke('longTermGoals:applyCreation', changeSetId),
+  cancelLongTermGoalCreation: (changeSetId: string) => ipcRenderer.invoke('longTermGoals:cancelCreation', changeSetId),
   answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => ipcRenderer.invoke('longTermGoals:answerIntervention', goalId, interventionId, answers),
   onLongTermGoalsChanged: (callback: (goals: LongTermGoalDefinition[]) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, goals: LongTermGoalDefinition[]) => callback(goals)
