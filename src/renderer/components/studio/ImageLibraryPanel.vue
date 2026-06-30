@@ -46,6 +46,8 @@ type MenuKind = 'image' | 'folder' | 'blank'
 const contextMenu = ref<{ kind: MenuKind; x: number; y: number; folderName?: string } | null>(null)
 
 const lightbox = ref<ImageLibraryItem | null>(null)
+/** Whether the lightbox image is shown in the fullscreen maximize overlay. */
+const maximize = ref(false)
 /** Source/input images (edit mode) for the open lightbox, fetched on demand. */
 const lightboxSources = ref<string[]>([])
 const editingTags = ref(false)
@@ -602,6 +604,15 @@ function openLightbox (entry: ImageLibraryItem) {
 
 function closeLightbox () {
   lightbox.value = null
+  maximize.value = false
+}
+
+function openMaximize () {
+  if (lightbox.value) maximize.value = true
+}
+
+function closeMaximize () {
+  maximize.value = false
 }
 
 /* ---- Lightbox prev/next within the current view (same folder / search / unfiled) ---- */
@@ -656,6 +667,7 @@ function isPanelVisible (): boolean {
 function onWindowKeydown (event: KeyboardEvent) {
   if (event.key === 'Escape') {
     if (contextMenu.value) { closeContextMenu(); return }
+    if (maximize.value) { closeMaximize(); return }
     if (lightbox.value) { closeLightbox(); return }
     if (selectedIds.value.size) clearSelection()
     return
@@ -942,6 +954,20 @@ onUnmounted(() => {
               </span>
             </div>
             <div class="lib-lightbox-toolbar">
+              <button
+                class="lib-lightbox-icon-btn"
+                type="button"
+                :title="$t('studioUi.maximizeImage')"
+                :aria-label="$t('studioUi.maximizeImage')"
+                @click="openMaximize"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                  <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                  <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                  <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                </svg>
+              </button>
               <button class="lib-lightbox-close" type="button" @click="closeLightbox">{{ $t('common.close') }}</button>
             </div>
           </header>
@@ -1012,6 +1038,25 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+      </div>
+    </Teleport>
+
+    <!-- Fullscreen maximize preview -->
+    <Teleport to="body">
+      <div v-if="maximize && lightbox" class="lib-maximize-overlay" @click.self="closeMaximize">
+        <button
+          class="lib-maximize-close"
+          type="button"
+          :title="$t('studioUi.exitMaximize')"
+          :aria-label="$t('studioUi.exitMaximize')"
+          @click="closeMaximize"
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
+        <ImagePreview class="lib-maximize-preview" :src="lightbox.fullUrl" :alt="lightbox.prompt" />
       </div>
     </Teleport>
   </section>
@@ -1514,6 +1559,68 @@ onUnmounted(() => {
   background: var(--app-panel-subtle);
   color: var(--app-text-strong);
   cursor: pointer;
+}
+.lib-lightbox-icon-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 999px;
+  background: var(--app-panel-subtle);
+  color: var(--app-text-strong);
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+.lib-lightbox-icon-btn:hover {
+  background: var(--app-panel-muted);
+  border-color: var(--app-border-strong);
+}
+
+/* Fullscreen maximize preview overlay. */
+.lib-maximize-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.92);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.lib-maximize-close {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  z-index: 2;
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.5);
+  color: #fff;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+.lib-maximize-close:hover {
+  background: rgba(15, 23, 42, 0.78);
+  border-color: rgba(255, 255, 255, 0.4);
+  transform: scale(1.05);
+}
+.lib-maximize-preview {
+  width: calc(100vw - 96px);
+  height: calc(100vh - 96px);
+  max-width: none;
+  max-height: none;
+  border-radius: 12px;
+  overflow: hidden;
 }
 
 .lib-lightbox-body {
