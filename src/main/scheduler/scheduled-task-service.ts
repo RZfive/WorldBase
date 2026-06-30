@@ -315,6 +315,18 @@ export class ScheduledTaskService {
     if (nextRunAt && isFixedLocalTimeSchedule(task.schedule.kind) && Date.parse(nextRunAt) <= Date.now()) {
       nextRunAt = this.computeInitialNextRun(task)
     }
+    // Long-term-goal backing tasks are one-shot (`once`) whose runAt is the AI-specified nextRunAt.
+    // If that time was missed because the app was closed/asleep, do NOT fire it late at delay=0 on
+    // the next open — the goal service triggers a fresh planning run instead (see LongTermGoalService.start).
+    if (
+      nextRunAt &&
+      task.schedule.kind === 'once' &&
+      task.hidden === true &&
+      task.createdBy === 'ai' &&
+      Date.parse(nextRunAt) <= Date.now()
+    ) {
+      nextRunAt = null
+    }
     return {
       ...task,
       nextRunAt,

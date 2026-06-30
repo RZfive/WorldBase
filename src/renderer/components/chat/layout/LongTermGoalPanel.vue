@@ -26,6 +26,7 @@ const props = defineProps<{
   streamingCreate?: { userContent: string; message: ChatMessage } | null
   streamingRun?: { goalId: string; run: LongTermGoalRun } | null
   createConversationHistory?: ChatMessage[]
+  pendingCreationConfirm?: { changeSet: LongTermGoalChangeSet; proposal: NonNullable<LongTermGoalMessageResult['proposal']> } | null
   goalAutoOpenRunId?: string | null
 }>()
 
@@ -40,6 +41,8 @@ const emit = defineEmits<{
   (e: 'sendMessage', goalId: string, content: string): void
   (e: 'applyChangeSet', changeSetId: string): void
   (e: 'cancelChangeSet', changeSetId: string): void
+  (e: 'confirmCreation', changeSetId: string): void
+  (e: 'cancelCreation', changeSetId: string): void
   (e: 'answerIntervention', goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }>): void
   (e: 'update:selected-agent-id', id: string): void
   (e: 'clear-auto-open-run'): void

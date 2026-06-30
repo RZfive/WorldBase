@@ -1021,7 +1021,7 @@ const enUS: MessageSchema = {
       colCacheRate: 'Cache rate',
       chartFilterProvider: 'Chart filter',
       filterAll: 'All',
-      chartDaily: 'Daily usage',
+      chartDaily: 'Usage trend',
       chartCacheRate: 'Cache hit comparison',
       cacheRateHint: 'Cache rate = cache hit tokens ÷ input tokens. Higher means more requests hit the cache and cost less.',
       chartEmpty: 'No data for the selected range'

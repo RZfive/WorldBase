@@ -113,6 +113,9 @@ const {
   sendLongTermGoalMessage,
   applyLongTermGoalChangeSet,
   cancelLongTermGoalChangeSet,
+  applyLongTermGoalCreation,
+  cancelLongTermGoalCreation,
+  pendingCreationConfirm,
   answerLongTermGoalIntervention,
   streamingAdjust,
   streamingCreate,
@@ -672,6 +675,7 @@ watch(
           :streaming-create="streamingCreate"
           :streaming-run="streamingRun"
           :create-conversation-history="createConversationHistory"
+          :pending-creation-confirm="pendingCreationConfirm"
           :goal-auto-open-run-id="goalAutoOpenRunId"
           @create="createLongTermGoal"
           @run-now="runLongTermGoalNow"
@@ -683,6 +687,8 @@ watch(
           @send-message="sendLongTermGoalMessage"
           @apply-change-set="applyLongTermGoalChangeSet"
           @cancel-change-set="cancelLongTermGoalChangeSet"
+          @confirm-creation="applyLongTermGoalCreation"
+          @cancel-creation="cancelLongTermGoalCreation"
           @answer-intervention="answerLongTermGoalIntervention"
           @update:selected-agent-id="handleAgentSelectionChange"
           @clear-auto-open-run="clearGoalAutoOpenRunId"
