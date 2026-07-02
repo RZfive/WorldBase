@@ -42,6 +42,7 @@ const emit = defineEmits<{
   (e: 'addAttachments', files: File[]): void
   (e: 'update:active-provider-id', id: string): void
   (e: 'update:selected-model', model: string): void
+  (e: 'select', payload: { providerId: string; model: string }): void
   (e: 'update:selected-agent-id', id: string): void
 }>()
 
@@ -157,6 +158,7 @@ function buildAttachmentPrompt (): string {
               :title="$t('chatUi.executionProvider')"
               @update:active-provider-id="(id) => emit('update:active-provider-id', id)"
               @update:selected-model="(model) => emit('update:selected-model', model)"
+              @select="(payload) => emit('select', payload)"
             />
           </div>
           <button type="button" class="goal-dialog-close" @click="emit('close')">×</button>

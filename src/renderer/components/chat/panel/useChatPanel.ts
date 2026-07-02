@@ -1630,12 +1630,15 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       await renameLongTermGoal(goal, patch.title)
       return
     }
+    // IPC 用 structured clone 序列化，Vue reactive proxy 的嵌套对象/数组无法被克隆，
+    // 会抛 "An object could not be cloned."。这里深拷贝成纯对象再合并 patch。
+    const plainGoal = JSON.parse(JSON.stringify(goal)) as LongTermGoalDefinition
     const saved = await window.electronAPI.saveLongTermGoal({
-      ...goal,
+      ...plainGoal,
       ...patch,
-      title: patch.title || goal.title,
-      objective: patch.objective || goal.objective,
-      schedule: patch.schedule || goal.schedule
+      title: patch.title || plainGoal.title,
+      objective: patch.objective || plainGoal.objective,
+      schedule: patch.schedule || plainGoal.schedule
     })
     longTermGoals.value = longTermGoals.value.map(item => item.id === saved.id ? mergeGoalTitleState(saved, item) : item)
     if (!longTermGoals.value.some(item => item.id === saved.id)) {
