@@ -29,6 +29,7 @@ const props = defineProps<{
   createConversationHistory?: ChatMessage[]
   pendingCreationConfirm?: { changeSet: LongTermGoalChangeSet; proposal: NonNullable<LongTermGoalMessageResult['proposal']> } | null
   goalAutoOpenRunId?: string | null
+  streamingReplan?: { goalId: string; message: ChatMessage } | null
 }>()
 
 const emit = defineEmits<{
@@ -52,7 +53,7 @@ const emit = defineEmits<{
 
 const { t, locale } = useI18n()
 
-type DialogKind = 'report' | 'run' | 'intervention' | 'adjust' | 'memory' | 'create' | 'projects' | null
+type DialogKind = 'report' | 'run' | 'intervention' | 'adjust' | 'memory' | 'create' | 'projects' | 'skills' | null
 type InterventionPriority = 'urgent' | 'high' | 'medium' | 'low'
 type GoalAdjustmentPhase = 'idle' | 'clarifying' | 'proposal'
 
@@ -76,6 +77,11 @@ interface BindableProject { id: string; name: string }
 const availableProjects = ref<BindableProject[]>([])
 const selectedProjectIds = ref<Set<string>>(new Set())
 const projectsLoading = ref(false)
+/** 可绑定技能列表 + 当前选中集合（skills 弹窗用）。 */
+interface BindableSkill { id: string; name: string; description?: string }
+const availableSkills = ref<BindableSkill[]>([])
+const selectedSkillIds = ref<Set<string>>(new Set())
+const skillsLoading = ref(false)
 const GOAL_ADJUSTMENT_METADATA_LABEL = 'LONG_TERM_GOAL_ADJUSTMENT_METADATA'
 
 const providers = computed(() => props.providers || [])
@@ -90,6 +96,29 @@ const openInterventions = computed(() => (props.goal?.openInterventions || []).f
 const selectedIntervention = computed(() => openInterventions.value.find(item => item.id === activeInterventionId.value) || openInterventions.value[0] || null)
 const activeRun = computed(() => runs.value.find(item => item.id === activeRunId.value) || null)
 const nextTasks = computed(() => props.goal?.nextTasks.filter(item => item.status !== 'done' && item.status !== 'skipped').slice(0, 8) || [])
+
+/** 未来 24 小时执行时间表（按时间升序），来自 AI 输出 + nextTasks 补充。 */
+const upcoming24h = computed(() => {
+  const now = Date.now()
+  const horizon = now + 24 * 60 * 60 * 1000
+  return (props.goal?.upcomingSchedule || [])
+    .filter(slot => {
+      const ts = Date.parse(slot.at)
+      return Number.isFinite(ts) && ts >= now && ts <= horizon
+    })
+    .sort((a, b) => a.at.localeCompare(b.at))
+})
+
+function formatSlotTime (value?: string | null): string {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const month = `${date.getMonth() + 1}`.padStart(2, '0')
+  const day = `${date.getDate()}`.padStart(2, '0')
+  const hour = `${date.getHours()}`.padStart(2, '0')
+  const minute = `${date.getMinutes()}`.padStart(2, '0')
+  return `${month}-${day} ${hour}:${minute}`
+}
 
 const currentProviderId = computed(() => {
   const goalProvider = props.goal?.providerId || ''
@@ -522,6 +551,44 @@ async function saveProjectBindings (): Promise<void> {
   closeDialog()
 }
 
+/** 打开绑定技能弹窗：拉技能列表 + 初始化选中集合为当前绑定。 */
+async function openSkillsDialog (): Promise<void> {
+  if (!props.goal) return
+  selectedSkillIds.value = new Set(props.goal.selectedSkillIds || [])
+  activeDialog.value = 'skills'
+  if (availableSkills.value.length === 0) {
+    skillsLoading.value = true
+    try {
+      const list = await window.electronAPI?.listSkills?.()
+      availableSkills.value = (list || []).map((s) => ({
+        id: String(s.id || ''),
+        name: String(s.name || s.id || ''),
+        description: typeof s.description === 'string' && s.description ? s.description : undefined
+      }))
+    } catch {
+      availableSkills.value = []
+    } finally {
+      skillsLoading.value = false
+    }
+  }
+}
+
+function toggleSkillBinding (skillId: string): void {
+  const next = new Set(selectedSkillIds.value)
+  if (next.has(skillId)) next.delete(skillId)
+  else next.add(skillId)
+  selectedSkillIds.value = next
+}
+
+/** 保存绑定技能到当前 goal。 */
+async function saveSkillBindings (): Promise<void> {
+  const goal = props.goal
+  if (!goal) return
+  const selectedSkillIdsValue = [...selectedSkillIds.value]
+  emit('save-goal', goal, { selectedSkillIds: selectedSkillIdsValue })
+  closeDialog()
+}
+
 function startTitleEdit (): void {
   titleDraft.value = props.goal?.title || ''
   editingTitle.value = true
@@ -679,6 +746,7 @@ watch(
           <button type="button" class="goal-ghost-btn" @click="activeDialog = 'adjust'">{{ $t('chatUi.quickAdjustGoal') }}</button>
           <button type="button" class="goal-ghost-btn" @click="activeDialog = 'memory'">{{ $t('chatUi.goalMemory') }}</button>
           <button type="button" class="goal-ghost-btn" @click="openProjectsDialog()">{{ $t('chatUi.bindProjects') }}<span v-if="(goal.targetProjectIds || []).length" class="goal-btn-badge">{{ (goal.targetProjectIds || []).length }}</span></button>
+          <button type="button" class="goal-ghost-btn" @click="openSkillsDialog()">{{ $t('chatUi.bindSkills') }}<span v-if="(goal.selectedSkillIds || []).length" class="goal-btn-badge">{{ (goal.selectedSkillIds || []).length }}</span></button>
           <button type="button" class="goal-ghost-btn" @click="emit('runNow', goal.id)">{{ $t('chatUi.runNowOnce') }}</button>
           <button v-if="goal.status === 'paused'" type="button" class="goal-ghost-btn" @click="emit('resume', goal)">{{ $t('chatUi.resumeContinuousGoal') }}</button>
           <button v-else type="button" class="goal-ghost-btn" @click="emit('pause', goal)">{{ $t('chatUi.pauseGoal') }}</button>
@@ -731,7 +799,8 @@ watch(
           </section>
         </section>
 
-        <section class="goal-card">
+        <div class="goal-activity-row">
+        <section class="goal-card goal-activity-main">
           <div class="goal-section-head goal-activity-head">
             <div>
               <h2>{{ $t('chatUi.goalActivity') }}</h2>
@@ -772,6 +841,23 @@ watch(
             <button type="button" class="goal-ghost-btn compact" :disabled="runPage >= runPageCount" @click="runPage += 1">{{ $t('chatUi.nextPage') }}</button>
           </div>
         </section>
+
+        <aside class="goal-upcoming">
+          <div class="goal-section-head">
+            <h2>{{ $t('chatUi.upcoming24h') }}</h2>
+            <span>{{ upcoming24h.length }}</span>
+          </div>
+          <div v-if="streamingReplan && streamingReplan.goalId === goal.id" class="goal-upcoming-replan">{{ $t('chatUi.replanning') }}</div>
+          <div v-if="upcoming24h.length === 0" class="goal-muted">{{ $t('chatUi.noUpcomingSchedule') }}</div>
+          <ol v-else class="goal-upcoming-list">
+            <li v-for="slot in upcoming24h" :key="slot.id" :class="{ derived: slot.source === 'task' }">
+              <time>{{ formatSlotTime(slot.at) }}</time>
+              <strong>{{ slot.title }}</strong>
+              <small v-if="slot.reason">{{ slot.reason }}</small>
+            </li>
+          </ol>
+        </aside>
+        </div>
 
         <section v-if="draftChangeSets.length > 0" class="goal-card">
           <div class="goal-section-head">
@@ -906,6 +992,43 @@ watch(
           <footer class="goal-projects-foot">
             <button type="button" class="goal-ghost-btn" @click="closeDialog">{{ $t('common.cancel') }}</button>
             <button type="button" class="goal-primary-btn" @click="saveProjectBindings">{{ $t('common.save') }}</button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
+
+    <!-- Bind skills dialog (multi-select) -->
+    <Teleport to="body">
+      <div v-if="activeDialog === 'skills'" class="goal-dialog-backdrop" @click.self="closeDialog">
+        <section class="goal-dialog goal-projects-dialog" role="dialog" aria-modal="true">
+          <header class="goal-dialog-head">
+            <div>
+              <h2>{{ $t('chatUi.bindSkills') }}</h2>
+              <p>{{ $t('chatUi.bindSkillsHint') }}</p>
+            </div>
+            <button type="button" class="goal-dialog-close" @click="closeDialog">×</button>
+          </header>
+          <div class="goal-projects-list">
+            <div v-if="skillsLoading" class="goal-projects-empty">{{ $t('common.loading') }}</div>
+            <div v-else-if="availableSkills.length === 0" class="goal-projects-empty">{{ $t('chatUi.noSkillsToBind') }}</div>
+            <label
+              v-for="s in availableSkills"
+              :key="s.id"
+              class="goal-project-item"
+              :class="{ active: selectedSkillIds.has(s.id) }"
+            >
+              <input
+                type="checkbox"
+                :checked="selectedSkillIds.has(s.id)"
+                @change="toggleSkillBinding(s.id)"
+              >
+              <span class="goal-project-name">{{ s.name }}</span>
+              <span v-if="s.description" class="goal-project-id">{{ s.description }}</span>
+            </label>
+          </div>
+          <footer class="goal-projects-foot">
+            <button type="button" class="goal-ghost-btn" @click="closeDialog">{{ $t('common.cancel') }}</button>
+            <button type="button" class="goal-primary-btn" @click="saveSkillBindings">{{ $t('common.save') }}</button>
           </footer>
         </section>
       </div>
@@ -1396,6 +1519,10 @@ button.goal-summary-card:hover,
     grid-template-columns: 1fr;
   }
 
+  .goal-activity-row {
+    grid-template-columns: 1fr;
+  }
+
   .goal-activity-tools {
     justify-content: flex-start;
   }
@@ -1490,5 +1617,59 @@ button.goal-summary-card:hover,
   color: var(--app-accent);
   font-size: 0.82em;
   font-weight: 600;
+}
+
+/* ── Activity + 24h schedule row ── */
+.goal-activity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 12px;
+  align-items: stretch;
+}
+.goal-activity-main { min-width: 0; }
+.goal-upcoming {
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-panel) 92%, transparent);
+  padding: 10px;
+  min-width: 0;
+}
+.goal-upcoming-replan {
+  color: var(--app-accent);
+  font-size: 0.76rem;
+  margin-bottom: 6px;
+}
+.goal-upcoming-list {
+  margin: 0;
+  padding-left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow: auto;
+}
+.goal-upcoming-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-left: 3px solid var(--app-accent);
+  padding: 4px 0 4px 8px;
+}
+.goal-upcoming-list li.derived {
+  border-left-color: var(--app-border);
+}
+.goal-upcoming-list time {
+  color: var(--app-text-muted);
+  font-size: 0.72rem;
+}
+.goal-upcoming-list strong {
+  font-size: 0.78rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.goal-upcoming-list small {
+  color: var(--app-text-muted);
+  font-size: 0.7rem;
+  line-height: 1.25;
 }
 </style>

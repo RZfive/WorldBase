@@ -121,6 +121,7 @@ const {
   streamingAdjust,
   streamingCreate,
   streamingRun,
+  streamingReplan,
   createConversationHistory,
   goalAutoOpenRunId,
   clearGoalAutoOpenRunId,
@@ -675,6 +676,7 @@ watch(
           :streaming-adjust="streamingAdjust"
           :streaming-create="streamingCreate"
           :streaming-run="streamingRun"
+          :streaming-replan="streamingReplan"
           :create-conversation-history="createConversationHistory"
           :pending-creation-confirm="pendingCreationConfirm"
           :goal-auto-open-run-id="goalAutoOpenRunId"

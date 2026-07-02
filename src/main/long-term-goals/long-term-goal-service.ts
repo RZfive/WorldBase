@@ -4,6 +4,7 @@ import type { ChatMessage } from '../ai-engine/providers/openai-provider.js'
 import type { LongTermGoalStore } from '../settings/long-term-goal-store.js'
 import type { ScheduledTaskDefinition, ScheduledTaskProgressEntry, ScheduledTaskRunReport } from '../settings/scheduled-task-store.js'
 import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.js'
+import type { SkillStore } from '../settings/skill-store.js'
 import type {
   LongTermGoalActivityEvent,
   LongTermGoalChangeSet,
@@ -14,10 +15,12 @@ import type {
   LongTermGoalMemoryEntry,
   LongTermGoalMessageResult,
   LongTermGoalNextTask,
+  LongTermGoalReplanResult,
   LongTermGoalRun,
   LongTermGoalRunToolRun,
   LongTermGoalSaveInput,
   LongTermGoalSchedule,
+  LongTermGoalScheduleSlot,
   LongTermGoalSnapshot,
   LongTermGoalStreamEvent
 } from '../../shared/long-term-goal-types.js'
@@ -26,6 +29,8 @@ interface LongTermGoalServiceOptions {
   store: LongTermGoalStore
   scheduledTaskService: ScheduledTaskService
   aiEngine: AIEngine
+  skillStore?: SkillStore
+  projectFS?: { readFile: (projectId: string, relativePath: string) => Promise<string | null> }
   resolveProviderConfig?: (providerId?: string | null, modelId?: string | null, reasoningEffort?: 'low' | 'medium' | 'high' | 'max', temperature?: number) => AIConfigInput | undefined
   onGoalsChanged?: (goals: LongTermGoalDefinition[]) => void
   onSnapshotChanged?: (snapshot: LongTermGoalSnapshot) => void
@@ -68,11 +73,15 @@ interface ParsedGoalRunResult {
   learnedSkills: string[]
   blockers: string[]
   nextRunAt: string | null
+  upcomingSchedule: Array<{ at: string; title: string; reason?: string }>
+  bindProjectIds: string[]
   needsUserInput: boolean
   userQuestions: Array<{ id?: string; question: string; options?: string[]; reason?: string }>
   notificationLevel: 'silent' | 'badge' | 'notify'
   memoryUpdates: Array<{ kind?: LongTermGoalMemoryEntry['kind']; title: string; content: string; importance?: number }>
 }
+
+const GOAL_REPLAN_METADATA_LABEL = 'LONG_TERM_GOAL_REPLAN_METADATA'
 
 const MAX_RUN_HISTORY = 120
 const MAX_REVIEW_HISTORY = 180
@@ -108,9 +117,10 @@ const GOAL_ADJUSTMENT_BLOCKED_TOOL_NAME_PATTERNS: RegExp[] = [
 ]
 /**
  * 当长目标已绑定项目时，调整对话额外放行的项目读写/构建工具。
- * create_project 不放行——避免对话中误建项目；新建项目走定时执行或手动绑定。
+ * create_project 也放行——目标需要时可自建项目并自动绑定到 targetProjectIds。
  */
 const GOAL_ADJUSTMENT_PROJECT_TOOLS = new Set([
+  'create_project',
   'write_project_file',
   'patch_project_file',
   'read_project_file',
@@ -119,10 +129,15 @@ const GOAL_ADJUSTMENT_PROJECT_TOOLS = new Set([
   'read_file'
 ])
 
+/** 调整流里始终允许的工具（不受写入黑名单影响）。 */
+const GOAL_ADJUSTMENT_ALWAYS_ALLOWED_TOOLS = new Set(['create_project'])
+
 function isGoalAdjustmentToolDefinition (tool: { name: string; description?: string }, goal?: { targetProjectIds?: string[] }): boolean {
   const name = tool.name.trim()
   if (!name) return false
-  // 已绑定项目时，放行项目读写/构建工具（create_project 仍被黑名单拦截）。
+  // create_project 始终放行：目标可自建项目，建后自动绑定。
+  if (GOAL_ADJUSTMENT_ALWAYS_ALLOWED_TOOLS.has(name)) return true
+  // 已绑定项目时，放行项目读写/构建工具（create_project 已在上面放行）。
   if (goal?.targetProjectIds && goal.targetProjectIds.length > 0 && GOAL_ADJUSTMENT_PROJECT_TOOLS.has(name)) {
     return true
   }
@@ -453,6 +468,7 @@ function stripGoalMetadataForDisplay (text: string): string {
   const parsed = extractGoalMetadata(text)
   const withoutMetadata = text
     .replace(new RegExp(`<!--\\s*${GOAL_RUN_METADATA_LABEL}\\s*[\\s\\S]*?\\s*-->`, 'gi'), '')
+    .replace(new RegExp(`<!--\\s*${GOAL_REPLAN_METADATA_LABEL}\\s*[\\s\\S]*?\\s*-->`, 'gi'), '')
     .trim()
   const withoutJsonBlocks = stripJsonBlocksForDisplay(withoutMetadata)
   const displayText = stripTrailingJsonObjectForDisplay(withoutJsonBlocks).trim()
@@ -478,6 +494,38 @@ function extractGoalAdjustmentMetadata (text: string): Record<string, unknown> |
   }
 
   return extractJsonObject(text)
+}
+
+function extractReplanMetadata (text: string): Record<string, unknown> | null {
+  const metadataPattern = new RegExp(`<!--\\s*${GOAL_REPLAN_METADATA_LABEL}\\s*([\\s\\S]*?)\\s*-->`, 'i')
+  const commentMatch = text.match(metadataPattern)
+  if (commentMatch?.[1]) {
+    const parsed = extractJsonObject(commentMatch[1])
+    if (parsed) return parsed
+  }
+  return extractJsonObject(text)
+}
+
+function parseReplanResult (text: string): LongTermGoalReplanResult | null {
+  const parsed = extractReplanMetadata(text)
+  if (!parsed) return null
+  const summary = normalizeString(parsed.summary)
+  if (!summary) return null
+  const goalPatchRaw = parsed.goalPatch
+  const goalPatch = (goalPatchRaw && typeof goalPatchRaw === 'object' && !Array.isArray(goalPatchRaw))
+    ? goalPatchRaw as Record<string, unknown>
+    : {}
+  return {
+    summary,
+    nextRunAt: normalizeFutureIsoDate(normalizeString(parsed.nextRunAt), 1),
+    upcomingSchedule: normalizeUpcomingSchedule(parsed.upcomingSchedule),
+    nextTasks: normalizeStringArray(parsed.nextTasks),
+    goalPatch: {
+      objective: normalizeString(goalPatch.objective) || undefined,
+      todayFocus: normalizeString(goalPatch.todayFocus) || undefined,
+      currentPhase: normalizeString(goalPatch.currentPhase) || undefined
+    }
+  }
 }
 
 function formatParsedGoalRunMarkdown (parsed: Record<string, unknown>, fallbackText: string): string {
@@ -567,6 +615,20 @@ function buildRunToolRuns (report: ScheduledTaskRunReport): LongTermGoalRunToolR
   return toolRuns
 }
 
+function normalizeUpcomingSchedule (value: unknown): Array<{ at: string; title: string; reason?: string }> {
+  if (!Array.isArray(value)) return []
+  const result: Array<{ at: string; title: string; reason?: string }> = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const record = item as Record<string, unknown>
+    const title = normalizeString(record.title)
+    const at = normalizeFutureIsoDate(normalizeString(record.at), 1)
+    if (!title || !at) continue
+    result.push({ at, title, reason: normalizeString(record.reason) || undefined })
+  }
+  return result.slice(0, 12)
+}
+
 function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedGoalRunResult {
   const parsed = extractGoalMetadata(resultText)
   if (!parsed) {
@@ -580,6 +642,8 @@ function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedG
       learnedSkills: [],
       blockers: [],
       nextRunAt: null,
+      upcomingSchedule: [],
+      bindProjectIds: [],
       needsUserInput: false,
       userQuestions: [],
       notificationLevel: 'silent',
@@ -636,6 +700,8 @@ function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedG
     learnedSkills: normalizeStringArray(parsed.learnedSkills),
     blockers: normalizeStringArray(parsed.blockers),
     nextRunAt: normalizeFutureIsoDate(normalizeString(parsed.nextRunAt), 5),
+    upcomingSchedule: normalizeUpcomingSchedule(parsed.upcomingSchedule),
+    bindProjectIds: normalizeStringArray(parsed.bindProjectIds),
     needsUserInput: parsed.needsUserInput === true,
     userQuestions,
     notificationLevel,
@@ -750,6 +816,8 @@ export class LongTermGoalService {
   }
   private readonly adjustmentSessions = new Map<string, GoalConversationSession>()
   private readonly creationSessions = new Map<string, GoalConversationSession>()
+  /** 绑定项目 README.md 内容缓存，供执行/重规划 prompt 同步注入接口说明。 */
+  private readonly projectReadmeCache = new Map<string, string>()
 
   constructor (private readonly options: LongTermGoalServiceOptions) {}
 
@@ -762,6 +830,10 @@ export class LongTermGoalService {
       .filter(goal => goal.status === 'active' && goal.nextRunAt && Date.parse(goal.nextRunAt) <= now)
       .map(goal => goal.id)
     this.snapshot.goals = this.snapshot.goals.map(goal => this.ensureScheduledTask(this.syncGoalScheduleState(goal)))
+    // 预热所有绑定项目的 README 缓存。
+    for (const goal of this.snapshot.goals) {
+      void this.refreshProjectReadmeCache(goal)
+    }
     this.persistAndEmit()
     this.reconcileScheduledReports(this.options.scheduledTaskService.listAllReports())
     // Catch-up: trigger a fresh planning run for each missed goal so the AI re-decides nextRunAt based
@@ -837,6 +909,7 @@ export class LongTermGoalService {
       lastReviewAt: existing?.lastReviewAt || input.lastReviewAt || null,
       lastRunStatus: existing?.lastRunStatus || input.lastRunStatus || null,
       nextTasks: Array.isArray(input.nextTasks) ? input.nextTasks : (existing?.nextTasks || []),
+      upcomingSchedule: Array.isArray(input.upcomingSchedule) ? input.upcomingSchedule : (existing?.upcomingSchedule || []),
       openInterventions: Array.isArray(input.openInterventions) ? input.openInterventions : (existing?.openInterventions || []),
       memorySummary: normalizeString(input.memorySummary) || existing?.memorySummary || undefined,
       createdAt: existing?.createdAt || now,
@@ -1006,6 +1079,7 @@ export class LongTermGoalService {
       progressSummary: '等待 AI 共同整理初始目标。',
       gapSummary: '尚未开始执行。',
       nextTasks: [],
+      upcomingSchedule: [],
       openInterventions: [],
       createdAt: nowIso(),
       updatedAt: nowIso()
@@ -1054,6 +1128,7 @@ export class LongTermGoalService {
       gapSummary: after.gapSummary || '等待首次总结后生成差距分析。',
       todayFocus: after.todayFocus || undefined,
       nextTasks: Array.isArray(after.nextTasks) ? after.nextTasks as LongTermGoalNextTask[] : [],
+      upcomingSchedule: Array.isArray(after.upcomingSchedule) ? after.upcomingSchedule as LongTermGoalScheduleSlot[] : [],
       openInterventions: Array.isArray(after.openInterventions) ? after.openInterventions as LongTermGoalIntervention[] : []
     }
   }
@@ -1124,6 +1199,28 @@ export class LongTermGoalService {
     if (!goal.id.startsWith('goal_draft')) {
       this.refreshExecutionBrief(goal.id)
     }
+    // 调整对话里 AI 若新建了项目，立即自动绑定到目标（不依赖 changeSet 确认）。
+    if (!goal.id.startsWith('goal_draft') && assistantResult.toolRuns?.length) {
+      const createdIds = this.detectCreatedProjectIds(assistantResult.toolRuns, [])
+      if (createdIds.length > 0) {
+        const current = this.getGoal(goal.id)
+        if (current) {
+          const bound = this.bindCreatedProjects(current, createdIds)
+          if (bound) {
+            this.upsertGoal(bound)
+            for (const pid of createdIds) {
+              this.addActivity({
+                goalId: goal.id,
+                actor: 'ai',
+                type: 'project_bound',
+                title: '已自动绑定新项目',
+                summary: pid
+              })
+            }
+          }
+        }
+      }
+    }
     this.trimCollections()
     this.persistAndEmit()
 
@@ -1156,6 +1253,7 @@ export class LongTermGoalService {
       selectedMcpServerIds: Array.isArray(after.selectedMcpServerIds) ? after.selectedMcpServerIds : draftGoal.selectedMcpServerIds,
       targetProjectIds: Array.isArray(after.targetProjectIds) ? after.targetProjectIds as string[] : draftGoal.targetProjectIds,
       nextTasks: Array.isArray(after.nextTasks) ? after.nextTasks as LongTermGoalNextTask[] : draftGoal.nextTasks,
+      upcomingSchedule: Array.isArray(after.upcomingSchedule) ? after.upcomingSchedule as LongTermGoalScheduleSlot[] : draftGoal.upcomingSchedule,
       openInterventions: draftGoal.openInterventions,
       currentPhase: after.currentPhase || draftGoal.currentPhase,
       progressSummary: after.progressSummary || draftGoal.progressSummary,
@@ -1177,6 +1275,7 @@ export class LongTermGoalService {
       .filter(tool => isGoalAdjustmentToolDefinition(tool, goal))
     const allowedToolNames = availableTools.map(tool => tool.name)
     const allowedMcpServerIds = goal.selectedMcpServerIds.length > 0 ? goal.selectedMcpServerIds : undefined
+    const activeSkillContents = this.resolveSkillContents(goal)
     const messages: ChatMessage[] = [
       {
         role: 'system',
@@ -1184,8 +1283,10 @@ export class LongTermGoalService {
           '你正在帮助用户调整一个长期目标。你的工作是通过多轮对话把目标收敛成更清晰、更可执行、更少打扰用户的新版本。',
           '你可以使用只读、检索、查询、分析类工具来理解当前环境、文件、文档、网页、数据库或上下文。',
           goal.targetProjectIds.length > 0
-            ? `本目标已绑定项目，你可以用 write_project_file / patch_project_file / read_project_file / list_project_files / rebuild_project 修改这些绑定项目（project_id 传绑定的 id）：${goal.targetProjectIds.join(', ')}。但不要新建项目。`
-            : '不能使用任何写入、执行、创建、删除、修改、启动、重启、构建、安装类工具（本目标未绑定项目）。',
+            ? `本目标已绑定项目，你可以用 write_project_file / patch_project_file / read_project_file / list_project_files / rebuild_project 修改这些绑定项目（project_id 传绑定的 id）：${goal.targetProjectIds.join(', ')}。需要时也可用 create_project 新建项目，建后会自动绑定到本目标。`
+            : '本目标未绑定项目。若推进目标需要代码项目，可用 create_project 新建（建后会自动绑定）；除此之外不要使用其它写入、执行、删除、启动、重启、构建、安装类工具。',
+          '结构性重构绑定项目后，必须用 write_project_file 同步更新项目根的 README.md，描述架构与可被长期目标调用的数据接口（HTTP 路由 / DB 表 / 文件格式），方便长期目标执行时直接读用接口推数据而无需重建项目。',
+          '长期目标执行时只做数据填入/修改，不重构项目；项目重构只在用户对话中完成。',
           '如果信息不够，就继续追问；如果信息足够，就输出一个最终提案，并明确让用户确认后再应用。',
           '不要把原始 JSON 直接展示给用户。你可以在正文后附加 HTML 注释 JSON 元数据，供系统解析。',
           '正文应自然、简洁、像在和用户正常对话。',
@@ -1231,6 +1332,7 @@ export class LongTermGoalService {
       providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'max'),
       allowedToolNames: allowedToolNames.length > 0 ? allowedToolNames : undefined,
       allowedMcpServerIds,
+      activeSkillContents: activeSkillContents.length > 0 ? activeSkillContents : undefined,
       systemPromptSections: [
         [
           '## Long-term goal adjustment mode',
@@ -1437,7 +1539,8 @@ export class LongTermGoalService {
   answerIntervention (
     goalId: string,
     interventionId: string,
-    answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>
+    answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>,
+    onEvent?: (event: LongTermGoalStreamEvent) => void
   ): LongTermGoalDefinition {
     const goal = this.getGoalOrThrow(goalId)
     const intervention = goal.openInterventions.find(item => item.id === interventionId)
@@ -1483,7 +1586,157 @@ export class LongTermGoalService {
     }
     this.refreshExecutionBrief(goalId)
     this.persistAndEmit()
+    // 用户回答后立即触发轻量重规划（不执行工作），更新下次执行时间/时间表/目标。
+    void this.replanGoal(goalId, 'intervention_answered', onEvent)
     return this.getGoal(goalId)!
+  }
+
+  private buildReplanPrompt (goal: LongTermGoalDefinition, triggerReason: string): string {
+    const recentActivities = this.snapshot.activities
+      .filter(item => item.goalId === goal.id)
+      .slice(0, RECENT_CONTEXT_LIMIT)
+      .map(item => `- ${item.createdAt}: ${item.title} — ${item.summary}`)
+      .join('\n')
+    const recentConversation = this.snapshot.conversations
+      .filter(item => item.goalId === goal.id)
+      .slice(0, 6)
+      .reverse()
+      .map(item => `${item.role === 'user' ? '用户' : 'AI'}: ${item.content}`)
+      .join('\n')
+    const nextTasksText = goal.nextTasks
+      .filter(item => item.status !== 'done' && item.status !== 'skipped')
+      .slice(0, 8)
+      .map(item => `- ${item.title}${item.reason ? `（${item.reason}）` : ''}`)
+      .join('\n')
+    return [
+      `${LONG_TERM_GOAL_TASK_MARKER} ${goal.id}`,
+      '你正在对长期目标做一次轻量重规划。不要执行任何实际工作（不写代码、不调用写入/构建工具），只根据最新上下文重新决定执行安排。',
+      `触发原因：${triggerReason}`,
+      '',
+      '## 目标',
+      `名称：${goal.title}`,
+      `目标：${goal.objective}`,
+      `当前阶段：${goal.currentPhase || '持续推进'}`,
+      `今日重点：${goal.todayFocus || '未设置'}`,
+      `当前进展：${goal.progressSummary || '暂无'}`,
+      `当前差距：${goal.gapSummary || '暂无'}`,
+      `执行节奏：${scheduleSummary(goal.schedule)}`,
+      `当前下次执行时间：${goal.nextRunAt || '未安排'}`,
+      '',
+      '## 当前下一步任务',
+      nextTasksText || '暂无',
+      '',
+      '## 用户最近的对话/决定',
+      recentConversation || '暂无',
+      '',
+      '## 最近执行履历',
+      recentActivities || '暂无',
+      '',
+      '## 绑定项目接口说明（README.md）',
+      this.getProjectReadmeSection(goal) || '（暂无）',
+      '',
+      '## 要求',
+      '- 结合用户刚才的回答与最新进展，重新判断：下一次什么时候执行、未来 24h 怎么安排、下一步任务列表是否需要调整。',
+      '- 不要执行工作；只输出新的执行安排。',
+      '- 如果用户回答改变了目标方向或重点，可在 goalPatch 里更新 objective/todayFocus/currentPhase。',
+      '- 正文给用户看一句话总结（Markdown），不要展示 JSON。',
+      `- 在正文后附加 HTML 注释：<!-- ${GOAL_REPLAN_METADATA_LABEL} { ... } -->，注释内只能放一段合法 JSON。`,
+      '',
+      '元数据 JSON schema:',
+      JSON.stringify({
+        summary: '一句话告诉用户重规划后的安排',
+        nextRunAt: 'ISO 时间，下次执行时间',
+        upcomingSchedule: [{ at: 'ISO 时间', title: '执行项标题', reason: '为什么这时执行' }],
+        nextTasks: ['下一步任务 1', '下一步任务 2'],
+        goalPatch: { objective: '可选，更新后的目标', todayFocus: '可选，新的今日重点', currentPhase: '可选，新的阶段' }
+      }, null, 2)
+    ].join('\n')
+  }
+
+  /**
+   * 轻量重规划：用只读工具白名单 + 技能内容跑一次 AI，解析元数据后直接更新 goal 的
+   * nextRunAt/upcomingSchedule/nextTasks/可选 patch，并推 nextRunAt 到调度器。不执行实际工作。
+   */
+  async replanGoal (
+    goalId: string,
+    triggerReason: string,
+    onEvent?: (event: LongTermGoalStreamEvent) => void
+  ): Promise<LongTermGoalReplanResult | null> {
+    const goal = this.getGoalOrThrow(goalId)
+    const prompt = this.buildReplanPrompt(goal, triggerReason)
+    // 重规划只读：放行只读/检索/查询类工具 + 项目只读工具，排除 create_project 与写入/构建工具。
+    const replanReadOnlyTools = new Set(['read_project_file', 'list_project_files', 'read_file'])
+    const availableTools = this.options.aiEngine
+      .getAvailableTools()
+      .filter(tool => isGoalAdjustmentToolDefinition(tool, goal))
+      .filter(tool => tool.name !== 'create_project'
+        && !['write_project_file', 'patch_project_file', 'rebuild_project'].includes(tool.name)
+        && (!GOAL_ADJUSTMENT_PROJECT_TOOLS.has(tool.name) || replanReadOnlyTools.has(tool.name)))
+    const allowedToolNames = availableTools.map(tool => tool.name)
+    const activeSkillContents = this.resolveSkillContents(goal)
+    const contentParts: string[] = []
+    const thinkingParts: string[] = []
+    try {
+      for await (const event of this.options.aiEngine.chatStream([{ role: 'user', content: prompt }], undefined, {
+        providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'high'),
+        allowedToolNames: allowedToolNames.length > 0 ? allowedToolNames : undefined,
+        allowedMcpServerIds: goal.selectedMcpServerIds.length > 0 ? goal.selectedMcpServerIds : undefined,
+        activeSkillContents: activeSkillContents.length > 0 ? activeSkillContents : undefined,
+        systemPromptSections: [
+          [
+            '## Long-term goal replan mode',
+            '- 只读分析，不要执行写入/构建/创建类工具。',
+            '- 结合用户最新回答重新决定执行安排。',
+            '- 正文一句话总结，JSON 元数据放 HTML 注释里。'
+          ].join('\n')
+        ]
+      })) {
+        if (event.type !== 'done') onEvent?.(event as LongTermGoalStreamEvent)
+        if (event.type === 'thinking' && event.content) { thinkingParts.push(event.content); continue }
+        if (event.type === 'token' && event.content) { contentParts.push(event.content); continue }
+        if (event.type === 'done') {
+          const rawText = typeof event.message.content === 'string' ? event.message.content : contentParts.join('')
+          const result = parseReplanResult(rawText)
+          onEvent?.({ type: 'done', message: { role: 'assistant', content: stripGoalMetadataForDisplay(rawText) || result?.summary || '重规划完成。' } })
+          if (result) {
+            this.applyReplanResult(goalId, result)
+          }
+          return result
+        }
+      }
+    } catch (err) {
+      const errorMessage = (err as Error)?.message || '重规划失败。'
+      onEvent?.({ type: 'error', error: errorMessage })
+    }
+    return null
+  }
+
+  private applyReplanResult (goalId: string, result: LongTermGoalReplanResult): void {
+    const goal = this.getGoalOrThrow(goalId)
+    const nextTasks = this.buildNextTasks(goal, result.nextTasks)
+    const nextRunAt = result.nextRunAt || fallbackNextRunAtFromSchedule(goal.schedule)
+    const upcomingSchedule = this.buildUpcomingSchedule(result.upcomingSchedule, nextTasks, nextRunAt)
+    const patched: LongTermGoalDefinition = {
+      ...goal,
+      nextTasks,
+      upcomingSchedule,
+      nextRunAt,
+      objective: result.goalPatch?.objective || goal.objective,
+      todayFocus: result.goalPatch?.todayFocus || goal.todayFocus,
+      currentPhase: result.goalPatch?.currentPhase || goal.currentPhase,
+      updatedAt: nowIso()
+    }
+    const scheduled = this.ensureScheduledTask(patched)
+    this.upsertGoal(scheduled)
+    this.addActivity({
+      goalId,
+      actor: 'ai',
+      type: 'replan',
+      title: '已根据用户回答重规划',
+      summary: result.summary
+    })
+    this.refreshExecutionBrief(goalId)
+    this.persistAndEmit()
   }
 
   resolveScheduledTaskPrompt (task: ScheduledTaskDefinition): string | undefined {
@@ -1619,23 +1872,41 @@ export class LongTermGoalService {
       console.warn(`[long-term-goal-service] Goal "${goal.title}" run did not emit nextRunAt metadata; falling back to schedule-derived time.`)
     }
     const nextRunAt = parsed.nextRunAt || fallbackNextRunAtFromSchedule(goal.schedule)
+    const upcomingSchedule = this.buildUpcomingSchedule(parsed.upcomingSchedule, nextTasks, nextRunAt)
+    // 自动绑定本次新建的项目（执行流里 create_project 建后不自动绑定，这里补上）。
+    const createdProjectIds = this.detectCreatedProjectIds(buildRunToolRuns(report), parsed.bindProjectIds)
+    const withProjects = this.bindCreatedProjects(goal, createdProjectIds)
+    const baseGoal: LongTermGoalDefinition = withProjects ?? goal
     const updatedGoal: LongTermGoalDefinition = {
-      ...goal,
+      ...baseGoal,
       lastRunAt: finishedAt,
       lastReviewAt: finishedAt,
       lastRunStatus: 'completed',
       progressSummary: parsed.progressSummary,
       gapSummary: parsed.gapToGoal,
-      currentPhase: parsed.blockers.length > 0 ? '等待处理阻塞' : (goal.currentPhase || '持续推进'),
+      currentPhase: parsed.blockers.length > 0 ? '等待处理阻塞' : (baseGoal.currentPhase || '持续推进'),
       nextTasks,
+      upcomingSchedule,
       nextRunAt,
       openInterventions: intervention
-        ? [intervention, ...goal.openInterventions.filter(item => item.status === 'open')]
-        : goal.openInterventions,
+        ? [intervention, ...baseGoal.openInterventions.filter(item => item.status === 'open')]
+        : baseGoal.openInterventions,
       updatedAt: nowIso()
     }
     const scheduledGoal = this.ensureScheduledTask(updatedGoal)
     this.upsertGoal(scheduledGoal)
+    if (withProjects) {
+      for (const pid of createdProjectIds) {
+        this.addActivity({
+          goalId: goal.id,
+          runId,
+          actor: 'ai',
+          type: 'project_bound',
+          title: '已自动绑定新项目',
+          summary: pid
+        })
+      }
+    }
 
     const review: LongTermGoalDailyReview = {
       id: generateId('goal_review'),
@@ -1771,6 +2042,8 @@ export class LongTermGoalService {
       currentPhase: '遇到阻塞',
       gapSummary: summary,
       nextRunAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      // 失败时清空过期的 ai 时间表槽位，保留未来项。
+      upcomingSchedule: goal.upcomingSchedule.filter(slot => Date.parse(slot.at) > Date.now()),
       openInterventions: [intervention, ...goal.openInterventions],
       updatedAt: nowIso()
     }
@@ -1856,16 +2129,22 @@ export class LongTermGoalService {
       '',
       '## 绑定项目',
       goal.targetProjectIds.length > 0
-        ? `本目标已绑定以下项目，优先用 write_project_file / patch_project_file 持续修改它们（project_id 传绑定的 id），用 read_project_file / list_project_files 查看现状；需要重建时用 rebuild_project：\n${goal.targetProjectIds.map(id => `- ${id}`).join('\n')}`
-        : '本目标未绑定项目。若推进目标需要代码项目，可用 create_project 新建（建后建议让用户在目标里绑定以便后续持续修改）。',
+        ? `本目标已绑定以下项目，优先用 README 描述的接口推入/修改数据，不要重建项目（结构性重构只在用户对话中完成）。需要查看现状用 read_project_file / list_project_files，需要重建时用 rebuild_project：\n${goal.targetProjectIds.map(id => `- ${id}`).join('\n')}`
+        : '本目标未绑定项目。若推进目标需要代码项目，可用 create_project 新建（建后会自动绑定到本目标，便于后续持续修改）。',
+      '',
+      '## 绑定项目接口说明（README.md）',
+      this.getProjectReadmeSection(goal) || '（暂无；若已绑定项目，请在调整对话里用 write_project_file 写一份 README.md，描述架构与可调用的数据接口，方便执行时直接用接口推数据。）',
       '',
       '## 本次要求',
       '- 先判断离目标最近的有效下一步，然后推进实际任务。',
       '- 必须利用执行记忆包，避免重复做已经完成的工作，并沿用已验证有效的方法。',
+      '- 优先通过 README.md 描述的接口推入/修改数据，避免重建项目；只在接口确实不够时才用 rebuild_project。',
       '- 完成后总结今天干了什么、正在推进什么、接下来要做什么。',
       '- 把本次产生的关键成果写入 importantAchievements；把可复用方法、工具使用经验、项目约束、踩坑结论写入 learnedSkills。',
       '- 明确指出距离目标还有哪些差距。',
       '- 自己决定下一次持续推进应该在什么时候运行，把 ISO 时间写入 nextRunAt。不要让用户手动设置频率；如果目标需要更密集推进就安排更近，如果等待外部条件就安排更远。',
+      '- 给出未来 24 小时的执行时间表 upcomingSchedule（按时间顺序，每项含 at/title/reason），让用户能预览接下来的执行安排。',
+      '- 若本次新建了项目，把新建项目 id 写入 bindProjectIds，系统会自动绑定到本目标。',
       '- 只有需要用户决定、授权、补信息、或遇到阻塞时，才把 needsUserInput 设为 true 或 notificationLevel 设为 notify。',
       '- 正文输出给用户看的 Markdown 报告，重点写本次真实推进过程、结论、差距和下一步，不要把 JSON 直接展示给用户。',
       `- 在正文末尾附加一个 HTML 注释：<!-- ${GOAL_RUN_METADATA_LABEL} { ... } -->，注释内只能放一段合法 JSON，供系统更新长期记忆和下次执行时间。`,
@@ -1880,6 +2159,8 @@ export class LongTermGoalService {
         learnedSkills: ['本次学到的技能、方法、工具经验、项目约束或踩坑结论'],
         blockers: ['阻塞点，没有则空数组'],
         nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        upcomingSchedule: [{ at: 'ISO 时间', title: '执行项标题', reason: '为什么这时执行' }],
+        bindProjectIds: ['本次新建的项目 id，没有则空数组'],
         needsUserInput: false,
         userQuestions: [{ id: 'q1', question: '需要用户决定的问题', options: ['选项 A', '选项 B'], reason: '为什么需要用户' }],
         notificationLevel: 'silent',
@@ -1948,6 +2229,7 @@ export class LongTermGoalService {
         learnedSkills: ['今天学到的技能、方法、工具经验、项目约束或踩坑结论'],
         blockers: ['阻塞点，没有则空数组'],
         nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        upcomingSchedule: [{ at: 'ISO 时间', title: '执行项标题', reason: '为什么这时执行' }],
         needsUserInput: false,
         userQuestions: [{ id: 'q1', question: '需要用户决定的问题', options: ['选项 A', '选项 B'], reason: '为什么需要用户' }],
         notificationLevel: 'silent',
@@ -1959,6 +2241,8 @@ export class LongTermGoalService {
   private ensureScheduledTask (goal: LongTermGoalDefinition): LongTermGoalDefinition {
     const now = nowIso()
     const enabled = goal.status === 'active'
+    // 绑定项目变化时刷新 README 缓存（fire-and-forget），供下次执行 prompt 读取。
+    void this.refreshProjectReadmeCache(goal)
     const tasks = this.options.scheduledTaskService.listTasks({ includeHidden: true })
     const existingTask = goal.scheduleTaskId
       ? tasks.find(task => task.id === goal.scheduleTaskId)
@@ -2062,6 +2346,119 @@ export class LongTermGoalService {
             ? 'completed'
             : goal.lastRunStatus || null
     }
+  }
+
+  /** 解析目标绑定的技能为内容数组，供调整/重规划流注入 chatStream。 */
+  private resolveSkillContents (goal: LongTermGoalDefinition): string[] {
+    if (!this.options.skillStore || goal.selectedSkillIds.length === 0) return []
+    const contents: string[] = []
+    for (const skillId of goal.selectedSkillIds) {
+      const skill = this.options.skillStore.get(skillId)
+      if (skill?.content) contents.push(skill.content)
+    }
+    return contents
+  }
+
+  /** 刷新目标绑定项目的 README.md 缓存（异步，不阻塞调用方）。 */
+  private async refreshProjectReadmeCache (goal: LongTermGoalDefinition): Promise<void> {
+    if (!this.options.projectFS?.readFile || goal.targetProjectIds.length === 0) return
+    await Promise.all(goal.targetProjectIds.map(async (projectId) => {
+      const content = await this.readProjectReadme(projectId)
+      if (content) this.projectReadmeCache.set(projectId, content)
+      else this.projectReadmeCache.delete(projectId)
+    }))
+  }
+
+  /** 同步读取缓存里的项目 README，拼成 prompt 段落。 */
+  private getProjectReadmeSection (goal: LongTermGoalDefinition): string | null {
+    if (goal.targetProjectIds.length === 0) return null
+    const lines: string[] = []
+    for (const projectId of goal.targetProjectIds) {
+      const readme = this.projectReadmeCache.get(projectId)
+      if (!readme) continue
+      lines.push(`### ${projectId}\n${readme}`)
+    }
+    return lines.length > 0 ? lines.join('\n\n') : null
+  }
+
+  /** 读取绑定项目的 README.md（缺失返回 null），供执行/重规划 prompt 注入接口说明。 */
+  private async readProjectReadme (projectId: string): Promise<string | null> {
+    const projectFS = this.options.projectFS
+    if (!projectFS?.readFile) return null
+    try {
+      const content = await projectFS.readFile(projectId, 'README.md')
+      if (!content || !content.trim()) return null
+      return compactText(content, 4000)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 合并 AI 产出的时间表（source:'ai'）与 nextTasks 补齐（source:'task'），
+   * 只保留未来 24h 内的槽位。任务槽位按 nextRunAt 附近递增排布。
+   */
+  private buildUpcomingSchedule (
+    aiSlots: Array<{ at: string; title: string; reason?: string }>,
+    nextTasks: LongTermGoalNextTask[],
+    nextRunAt: string | null
+  ): LongTermGoalScheduleSlot[] {
+    const now = Date.now()
+    const horizon = now + 24 * 60 * 60 * 1000
+    const slots: LongTermGoalScheduleSlot[] = []
+    const seen = new Set<string>()
+    for (const slot of aiSlots) {
+      const at = normalizeFutureIsoDate(slot.at, 1)
+      if (!at) continue
+      const ts = Date.parse(at)
+      if (ts < now || ts > horizon) continue
+      const title = normalizeString(slot.title)
+      if (!title) continue
+      slots.push({ id: generateId('goal_slot'), at, title, reason: normalizeString(slot.reason) || undefined, source: 'ai' })
+    }
+    // 用 nextTasks 补齐，确保未来 24h 有可读安排；按 nextRunAt 附近递增排布。
+    const baseTs = nextRunAt ? Date.parse(nextRunAt) : now + 60 * 60 * 1000
+    const anchor = Number.isFinite(baseTs) && baseTs > now ? baseTs : now + 60 * 60 * 1000
+    nextTasks.slice(0, 6).forEach((task, index) => {
+      const atIso = new Date(anchor + index * 3 * 60 * 60 * 1000).toISOString()
+      const ts = Date.parse(atIso)
+      if (ts > horizon) return
+      const key = `${atIso}|${task.title}`
+      if (seen.has(key)) return
+      seen.add(key)
+      slots.push({ id: generateId('goal_slot'), at: atIso, title: task.title, reason: task.reason || undefined, source: 'task' })
+    })
+    return slots.sort((left, right) => left.at.localeCompare(right.at)).slice(0, 16)
+  }
+
+  /**
+   * 从本次工具调用里检测 create_project 新建的项目 id。
+   * create_project 工具结果通常含 projectId；元数据里的 bindProjectIds 作为兜底。
+   */
+  private detectCreatedProjectIds (toolRuns: LongTermGoalRunToolRun[], parsedBindIds: string[]): string[] {
+    const ids = new Set<string>()
+    for (const id of parsedBindIds) {
+      if (id) ids.add(id)
+    }
+    // toolRuns 本身不携带工具结果文本，但 create_project 的 progress.detail 里常带 projectId。
+    for (const run of toolRuns) {
+      if (run.name !== 'create_project') continue
+      for (const step of run.progress) {
+        const detail = step.detail || ''
+        const match = detail.match(/proj_[a-z0-9_]+/i)
+        if (match) ids.add(match[0])
+      }
+    }
+    return [...ids]
+  }
+
+  /** 把新建项目合并进 goal.targetProjectIds，返回是否有变化。 */
+  private bindCreatedProjects (goal: LongTermGoalDefinition, newProjectIds: string[]): LongTermGoalDefinition | null {
+    if (newProjectIds.length === 0) return null
+    const existing = new Set(goal.targetProjectIds)
+    const additions = newProjectIds.filter(id => !existing.has(id))
+    if (additions.length === 0) return null
+    return { ...goal, targetProjectIds: [...goal.targetProjectIds, ...additions], updatedAt: nowIso() }
   }
 
   private buildNextTasks (goal: LongTermGoalDefinition, nextPlan: string[]): LongTermGoalNextTask[] {

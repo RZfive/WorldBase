@@ -1881,8 +1881,20 @@ export function setupIPC (): void {
     return true
   })
 
-  ipcMain.handle('longTermGoals:answerIntervention', async (_event: IpcMainInvokeEvent, goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => {
-    return longTermGoalService!.answerIntervention(goalId, interventionId, answers)
+  ipcMain.handle('longTermGoals:answerIntervention', async (event: IpcMainInvokeEvent, goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>, streamId?: string) => {
+    const sender = event.sender
+    const channel = streamId ? `longTermGoals:stream-event:${streamId}` : null
+    const onEvent = channel
+      ? (goalStreamEvent: LongTermGoalStreamEvent) => {
+          if (sender.isDestroyed()) return
+          try {
+            sender.send(channel, goalStreamEvent)
+          } catch (sendErr) {
+            console.error('[longTermGoals:answerIntervention] Failed to forward stream event:', sendErr)
+          }
+        }
+      : undefined
+    return longTermGoalService!.answerIntervention(goalId, interventionId, answers, onEvent)
   })
 
   // --- Open project in standalone window ---

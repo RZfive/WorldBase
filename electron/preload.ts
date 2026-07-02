@@ -664,7 +664,7 @@ export interface ElectronAPI {
   cancelLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
   applyLongTermGoalCreation: (changeSetId: string) => Promise<LongTermGoalDefinition>
   cancelLongTermGoalCreation: (changeSetId: string) => Promise<boolean>
-  answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => Promise<LongTermGoalDefinition>
+  answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>, streamId?: string) => Promise<LongTermGoalDefinition>
   onLongTermGoalsChanged: (callback: (goals: LongTermGoalDefinition[]) => void) => () => void
   onLongTermGoalSnapshotChanged: (callback: (snapshot: LongTermGoalSnapshot) => void) => () => void
   onLongTermGoalInterventionRequested: (callback: (intervention: LongTermGoalIntervention) => void) => () => void
@@ -959,7 +959,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelLongTermGoalChangeSet: (changeSetId: string) => ipcRenderer.invoke('longTermGoals:cancelChangeSet', changeSetId),
   applyLongTermGoalCreation: (changeSetId: string) => ipcRenderer.invoke('longTermGoals:applyCreation', changeSetId),
   cancelLongTermGoalCreation: (changeSetId: string) => ipcRenderer.invoke('longTermGoals:cancelCreation', changeSetId),
-  answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => ipcRenderer.invoke('longTermGoals:answerIntervention', goalId, interventionId, answers),
+  answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>, streamId?: string) => ipcRenderer.invoke('longTermGoals:answerIntervention', goalId, interventionId, answers, streamId),
   onLongTermGoalsChanged: (callback: (goals: LongTermGoalDefinition[]) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, goals: LongTermGoalDefinition[]) => callback(goals)
     ipcRenderer.on('longTermGoals:goalsChanged', handler)

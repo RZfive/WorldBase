@@ -248,6 +248,8 @@ export async function initializeServices (): Promise<void> {
     store: mainState.longTermGoalStore,
     scheduledTaskService: mainState.scheduledTaskService,
     aiEngine: mainState.aiEngine!,
+    skillStore: mainState.skillStore!,
+    projectFS: mainState.projectFS!,
     resolveProviderConfig: (providerId, modelId, reasoningEffort, temperature) => resolveProviderConfig(providerId || undefined, modelId || undefined, reasoningEffort, temperature),
     onGoalsChanged: (goals) => {
       broadcastToAppWindows('longTermGoals:goalsChanged', goals)
