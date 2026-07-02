@@ -1032,7 +1032,7 @@ interface ElectronAPI {
   cancelLongTermGoalChangeSet: (changeSetId: string) => Promise<LongTermGoalChangeSet>
   applyLongTermGoalCreation: (changeSetId: string) => Promise<LongTermGoalDefinition>
   cancelLongTermGoalCreation: (changeSetId: string) => Promise<boolean>
-  answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>) => Promise<LongTermGoalDefinition>
+  answerLongTermGoalIntervention: (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption?: string | null; customAnswer?: string | null }>, streamId?: string) => Promise<LongTermGoalDefinition>
   onLongTermGoalsChanged: (callback: (goals: LongTermGoalDefinition[]) => void) => () => void
   onLongTermGoalSnapshotChanged: (callback: (snapshot: LongTermGoalSnapshot) => void) => () => void
   onLongTermGoalInterventionRequested: (callback: (intervention: LongTermGoalIntervention) => void) => () => void

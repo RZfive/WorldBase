@@ -251,6 +251,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const streamingAdjust = ref<{ userContent: string; message: ChatMessage } | null>(null)
   const streamingCreate = ref<{ userContent: string; message: ChatMessage } | null>(null)
   const streamingRun = ref<{ goalId: string; run: LongTermGoalRun } | null>(null)
+  const streamingReplan = ref<{ goalId: string; message: ChatMessage } | null>(null)
   const createConversationHistory = ref<ChatMessage[]>([])
   const pendingCreationConfirm = ref<{ changeSet: LongTermGoalChangeSet; proposal: NonNullable<LongTermGoalMessageResult['proposal']> } | null>(null)
   const goalAutoOpenRunId = ref<string | null>(null)
@@ -259,6 +260,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     // 切换目标时丢弃上一个目标的流式状态，避免旧消息串到新目标的对话框。
     streamingAdjust.value = null
     streamingRun.value = null
+    streamingReplan.value = null
     streamingCreate.value = null
     createConversationHistory.value = []
     pendingCreationConfirm.value = null
@@ -1973,9 +1975,63 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   async function answerLongTermGoalIntervention (goalId: string, interventionId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }>): Promise<void> {
     if (!window.electronAPI?.answerLongTermGoalIntervention) return
-    const goal = await window.electronAPI.answerLongTermGoalIntervention(goalId, interventionId, answers)
-    longTermGoals.value = longTermGoals.value.map(item => item.id === goal.id ? mergeGoalTitleState(goal, item) : item)
-    await loadLongTermGoalSnapshot(goalId)
+    const streamId = generateId()
+    const message: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      speakerName: 'Long-Term Goal',
+      blocks: [createContentBlock('')]
+    }
+    streamingReplan.value = { goalId, message }
+
+    let thinkingAccum = ''
+    let contentAccum = ''
+    let pendingThinking = ''
+    let pendingContent = ''
+    let flushTimer: number | null = null
+    const flush = () => {
+      if (flushTimer != null) { window.clearTimeout(flushTimer); flushTimer = null }
+      if (pendingThinking) {
+        thinkingAccum += pendingThinking
+        message.thinking = thinkingAccum
+        ensureThinkingBlock(message).text = thinkingAccum
+        pendingThinking = ''
+      }
+      if (pendingContent) {
+        contentAccum += pendingContent
+        message.content = contentAccum
+        const block = ensureStreamingContentBlock(message)
+        const existing = typeof block.content === 'string' ? block.content : ''
+        block.content = existing + pendingContent
+        pendingContent = ''
+      }
+    }
+    const scheduleFlush = () => {
+      if (flushTimer != null) return
+      flushTimer = window.setTimeout(flush, STREAM_RENDER_FLUSH_INTERVAL_MS)
+    }
+    const unsubscribe = window.electronAPI.onLongTermGoalStreamEvent?.(streamId, (event) => {
+      if (event.type === 'thinking' && event.content) { pendingThinking += event.content; scheduleFlush() }
+      else if (event.type === 'token' && event.content) { pendingContent += event.content; scheduleFlush() }
+      else if (event.type === 'done') {
+        flush()
+        const finalContent = typeof event.message?.content === 'string' ? event.message.content : contentAccum
+        if (finalContent) {
+          message.content = finalContent
+          ensureStreamingContentBlock(message).content = finalContent
+        }
+      }
+    })
+
+    try {
+      const goal = await window.electronAPI.answerLongTermGoalIntervention(goalId, interventionId, answers, streamId)
+      flush()
+      longTermGoals.value = longTermGoals.value.map(item => item.id === goal.id ? mergeGoalTitleState(goal, item) : item)
+      await loadLongTermGoalSnapshot(goalId)
+    } finally {
+      unsubscribe?.()
+      streamingReplan.value = null
+    }
   }
 
   async function doSaveConversation (
@@ -2825,6 +2881,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     streamingAdjust,
     streamingCreate,
     streamingRun,
+    streamingReplan,
     createConversationHistory,
     goalAutoOpenRunId,
     handleAgentSelectionChange,

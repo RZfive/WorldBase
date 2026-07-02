@@ -16,6 +16,7 @@ import type {
   LongTermGoalRunStatus,
   LongTermGoalRunToolRun,
   LongTermGoalSchedule,
+  LongTermGoalScheduleSlot,
   LongTermGoalSnapshot,
   LongTermGoalStatus
 } from '../../shared/long-term-goal-types.js'
@@ -142,6 +143,23 @@ function normalizeNextTask (value: unknown): LongTermGoalNextTask | null {
   }
 }
 
+function normalizeScheduleSlot (value: unknown): LongTermGoalScheduleSlot | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const id = normalizeString(record.id)
+  const title = normalizeString(record.title)
+  const at = normalizeIsoDate(record.at)
+  if (!id || !title || !at) return null
+  const source = record.source === 'ai' ? 'ai' : 'task'
+  return {
+    id,
+    at,
+    title,
+    reason: normalizeString(record.reason) || undefined,
+    source
+  }
+}
+
 function normalizeInterventionQuestion (value: unknown): LongTermGoalInterventionQuestion | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const record = value as Record<string, unknown>
@@ -227,6 +245,9 @@ function normalizeGoal (value: unknown): LongTermGoalDefinition | null {
     lastRunStatus: record.lastRunStatus ? normalizeRunStatus(record.lastRunStatus) : null,
     nextTasks: Array.isArray(record.nextTasks)
       ? record.nextTasks.map(normalizeNextTask).filter((item): item is LongTermGoalNextTask => Boolean(item)).slice(0, 30)
+      : [],
+    upcomingSchedule: Array.isArray(record.upcomingSchedule)
+      ? record.upcomingSchedule.map(normalizeScheduleSlot).filter((item): item is LongTermGoalScheduleSlot => Boolean(item)).slice(0, 40)
       : [],
     openInterventions: Array.isArray(record.openInterventions)
       ? record.openInterventions.map(normalizeIntervention).filter((item): item is LongTermGoalIntervention => Boolean(item)).filter(item => item.status === 'open')

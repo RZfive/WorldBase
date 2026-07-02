@@ -15,6 +15,8 @@ export type LongTermGoalActivityType =
   | 'blocked'
   | 'milestone_completed'
   | 'review_completed'
+  | 'project_bound'
+  | 'replan'
 
 export type LongTermGoalMemoryKind =
   | 'goal_profile'
@@ -63,6 +65,18 @@ export interface LongTermGoalNextTask {
   updatedAt: string
 }
 
+/**
+ * 未来执行时间表的一个槽位。`source:'ai'` 由 run/复盘/重规划直接产出，
+ * `source:'task'` 由 nextTasks 补齐以保证未来 24h 有可读安排。
+ */
+export interface LongTermGoalScheduleSlot {
+  id: string
+  at: string
+  title: string
+  reason?: string
+  source: 'ai' | 'task'
+}
+
 export interface LongTermGoalInterventionQuestion {
   id: string
   question: string
@@ -108,6 +122,7 @@ export interface LongTermGoalDefinition {
   lastReviewAt?: string | null
   lastRunStatus?: LongTermGoalRunStatus | null
   nextTasks: LongTermGoalNextTask[]
+  upcomingSchedule: LongTermGoalScheduleSlot[]
   openInterventions: LongTermGoalIntervention[]
   memorySummary?: string
   createdAt: string
@@ -268,4 +283,17 @@ export interface LongTermGoalStreamEvent {
   engine?: string
   results?: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }>
   result?: { url: string; title?: string; [key: string]: unknown }
+}
+
+/** 轻量重规划（replan）产出：不执行工作，只更新执行安排与可选目标 patch。 */
+export interface LongTermGoalReplanResult {
+  summary: string
+  nextRunAt?: string | null
+  upcomingSchedule: Array<{ at: string; title: string; reason?: string }>
+  nextTasks: string[]
+  goalPatch?: {
+    objective?: string
+    todayFocus?: string
+    currentPhase?: string
+  }
 }
