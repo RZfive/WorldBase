@@ -22,6 +22,11 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: 'update:active-provider-id', id: string): void
   (e: 'update:selected-model', model: string): void
+  /**
+   * 单次原子选择事件，携带 providerId + model 一起，避免父组件需要分别处理
+   * `update:active-provider-id` 与 `update:selected-model` 两个事件时的竞态。
+   */
+  (e: 'select', payload: { providerId: string; model: string }): void
 }>()
 
 const { t } = useI18n()
@@ -138,6 +143,7 @@ function handleProviderClick (provider: ProviderItem) {
   if (provider.models.length === 0) {
     emit('update:active-provider-id', provider.id)
     emit('update:selected-model', '')
+    emit('select', { providerId: provider.id, model: '' })
     open.value = false
   }
 }
@@ -145,6 +151,7 @@ function handleProviderClick (provider: ProviderItem) {
 function selectModel (providerId: string, model: string) {
   emit('update:active-provider-id', providerId)
   emit('update:selected-model', model)
+  emit('select', { providerId, model })
   open.value = false
 }
 

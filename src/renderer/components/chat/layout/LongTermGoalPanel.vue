@@ -619,6 +619,15 @@ function saveGoalProvider (providerId: string, modelId?: string): void {
   })
 }
 
+/**
+ * ProviderModelDropdown 的单次原子选择事件：一次拿到 providerId + model，
+ * 直接保存，避免分别处理两个 update: 事件时的竞态（旧实现第二次保存会用
+ * stale currentProviderId 覆盖第一次，导致跨供应商切换失败、UI 不更新）。
+ */
+function handleProviderModelSelect (payload: { providerId: string; model: string }): void {
+  saveGoalProvider(payload.providerId, payload.model || undefined)
+}
+
 function setCreateProvider (providerId: string): void {
   createProviderId.value = providerId
   const provider = providers.value.find(item => item.id === providerId)
@@ -740,8 +749,7 @@ watch(
             :active-provider-id="currentProviderId"
             :selected-model="currentModelId"
             :title="$t('chatUi.executionProvider')"
-            @update:active-provider-id="(id) => saveGoalProvider(id)"
-            @update:selected-model="(model) => saveGoalProvider(currentProviderId, model)"
+            @select="handleProviderModelSelect"
           />
           <button type="button" class="goal-ghost-btn" @click="activeDialog = 'adjust'">{{ $t('chatUi.quickAdjustGoal') }}</button>
           <button type="button" class="goal-ghost-btn" @click="activeDialog = 'memory'">{{ $t('chatUi.goalMemory') }}</button>
@@ -911,8 +919,7 @@ watch(
         :available-agents="availableAgents"
         :selected-agent-id="selectedAgentId"
         @send="sendDialogMessage"
-        @update:active-provider-id="(id) => saveGoalProvider(id)"
-        @update:selected-model="(model) => saveGoalProvider(currentProviderId, model)"
+        @select="handleProviderModelSelect"
         @update:selected-agent-id="(id) => emit('update:selected-agent-id', id)"
         @close="closeDialog"
       />
@@ -929,8 +936,7 @@ watch(
         :available-agents="availableAgents"
         :selected-agent-id="selectedAgentId"
         @send="sendDialogMessage"
-        @update:active-provider-id="(id) => saveGoalProvider(id)"
-        @update:selected-model="(model) => saveGoalProvider(currentProviderId, model)"
+        @select="handleProviderModelSelect"
         @update:selected-agent-id="(id) => emit('update:selected-agent-id', id)"
         @close="closeDialog"
       >
