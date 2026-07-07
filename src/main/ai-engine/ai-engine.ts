@@ -22,6 +22,7 @@ import type { ImageLibraryStore } from '../settings/image-library-store.js'
 import type { UsageStore } from '../settings/usage-store.js'
 import type { ImageStudioGenerateRequest } from '../../shared/image-studio-types.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../shared/page-automation-types.js'
+import type { FolderWorkspaceChangeEvent } from '../../shared/folder-workspace-types.js'
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
 
@@ -45,6 +46,7 @@ export interface AIEngineServices {
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
+  notifyFolderWorkspaceChanged?: (event: FolderWorkspaceChangeEvent) => void
   mcpService?: MCPService
   scheduledTaskService?: ScheduledTaskService
   /** 持久化 token 用量统计；注入后每次 provider 调用会记录真实 token。 */

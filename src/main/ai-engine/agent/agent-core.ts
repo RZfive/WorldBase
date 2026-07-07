@@ -87,8 +87,10 @@ export class AgentCore {
   // Keep summaries short enough to fit comfortably back into the prompt.
   private static readonly AUTO_CONTINUE_PREFIX = '[AUTO_CONTINUE]'
   private static readonly CONTEXT_SUMMARY_PREFIX = '[CONTEXT_SUMMARY]'
+  private static readonly CONTEXT_GOAL_ANCHOR_PREFIX = '[CONTEXT_GOAL_ANCHOR]'
   private static readonly CONTEXT_SUMMARY_CHAR_LIMIT = 1500
   private static readonly CONTEXT_SUMMARY_SOURCE_MAX_CHARS = 4000
+  private static readonly CONTEXT_GOAL_ANCHOR_MAX_CHARS = 2000
   private static readonly CONTEXT_HEADROOM_RATIO = 0.15
   private static readonly CONTEXT_MIN_HEADROOM_TOKENS = 2048
   private static readonly CONTEXT_MAX_HEADROOM_TOKENS = 8192
@@ -614,6 +616,15 @@ export class AgentCore {
     })
   }
 
+  private _findSystemMessageByPrefix (messages: ChatMessage[], prefix: string): ChatMessage | null {
+    return messages.find((message, index) => {
+      return index > 0 &&
+        message.role === 'system' &&
+        typeof message.content === 'string' &&
+        message.content.startsWith(prefix)
+    }) || null
+  }
+
   private _insertSystemDirective (messages: ChatMessage[], content: string): ChatMessage[] {
     const nextMessages = [...this._removeSystemMessagesByPrefix(messages, AgentCore.AUTO_CONTINUE_PREFIX)]
     const insertIndex = nextMessages.findIndex((message, index) => index > 0 && this._isExistingSummaryMessage(message))
@@ -715,6 +726,70 @@ export class AgentCore {
       .join('\n')
 
     return this._truncateString(rendered, AgentCore.CONTEXT_SUMMARY_SOURCE_MAX_CHARS)
+  }
+
+  private _serializeMessageContentForGoalAnchor (content: ChatMessage['content']): string {
+    const rendered = typeof content === 'string'
+      ? content
+      : content
+        .map(part => part.type === 'text' ? part.text : '[image omitted]')
+        .join('\n')
+    return this._truncateString(rendered.trim(), AgentCore.CONTEXT_GOAL_ANCHOR_MAX_CHARS)
+  }
+
+  private _extractGoalAnchorFieldFallback (content: string, label: string): string | null {
+    const marker = `${label}:\n`
+    const start = content.indexOf(marker)
+    if (start < 0) return null
+    const valueStart = start + marker.length
+    const valueEnd = content.indexOf('\n\n', valueStart)
+    const value = content.slice(valueStart, valueEnd >= 0 ? valueEnd : undefined).trim()
+    return value || null
+  }
+
+  private _parseGoalAnchorPayload (content: string): { originalUserRequest?: string; latestUserRequest?: string } | null {
+    const payloadText = content.slice(AgentCore.CONTEXT_GOAL_ANCHOR_PREFIX.length).trim()
+    if (!payloadText) return null
+
+    try {
+      const parsed = JSON.parse(payloadText) as Record<string, unknown>
+      return {
+        originalUserRequest: typeof parsed.originalUserRequest === 'string' ? parsed.originalUserRequest.trim() : undefined,
+        latestUserRequest: typeof parsed.latestUserRequest === 'string' ? parsed.latestUserRequest.trim() : undefined
+      }
+    } catch {
+      return {
+        originalUserRequest: this._extractGoalAnchorFieldFallback(content, 'Original user request sent to AI') || undefined,
+        latestUserRequest: this._extractGoalAnchorFieldFallback(content, 'Latest user request') || undefined
+      }
+    }
+  }
+
+  private _buildContextGoalAnchorMessage (messages: ChatMessage[], previousAnchor?: ChatMessage | null): ChatMessage | null {
+    const userMessages = messages
+      .filter(message => message.role === 'user')
+      .map(message => this._serializeMessageContentForGoalAnchor(message.content))
+      .filter(Boolean)
+
+    const previousAnchorContent = typeof previousAnchor?.content === 'string' ? previousAnchor.content : ''
+    const previousAnchorPayload = previousAnchorContent ? this._parseGoalAnchorPayload(previousAnchorContent) : null
+    const previousOriginalGoal = previousAnchorPayload?.originalUserRequest || null
+    const previousLatestGoal = previousAnchorPayload?.latestUserRequest || null
+    const originalGoal = previousOriginalGoal || userMessages[0]
+    const latestGoal = userMessages[userMessages.length - 1] || previousLatestGoal || originalGoal
+
+    if (!originalGoal && !latestGoal) return null
+
+    return {
+      role: 'system',
+      content: `${AgentCore.CONTEXT_GOAL_ANCHOR_PREFIX}\n${JSON.stringify({
+        instruction: 'Authoritative task anchor preserved across automatic context compression. This is not a new user request. If any generated summary conflicts with this anchor, follow this anchor.',
+        originalUserRequest: originalGoal || latestGoal || '',
+        latestUserRequest: latestGoal || originalGoal || '',
+        targetProjectId: this.sessionState.targetProjectId || undefined,
+        workspaceRoot: this.sessionState.workspaceRoot || undefined
+      }, null, 2)}`
+    }
   }
 
   private _getContextCompressionThreshold (contextWindow: number): number {
@@ -1106,13 +1181,12 @@ export class AgentCore {
 
     onProgress?.('🧠 Compressing context...', `${currentTokens}/${contextWindow}`)
 
-    const sanitizedMessages = this._removeSystemMessagesByPrefix(messages, AgentCore.AUTO_CONTINUE_PREFIX)
+    const withoutAutoContinue = this._removeSystemMessagesByPrefix(messages, AgentCore.AUTO_CONTINUE_PREFIX)
+    const previousGoalAnchor = this._findSystemMessageByPrefix(withoutAutoContinue, AgentCore.CONTEXT_GOAL_ANCHOR_PREFIX)
+    const sanitizedMessages = this._removeSystemMessagesByPrefix(withoutAutoContinue, AgentCore.CONTEXT_GOAL_ANCHOR_PREFIX)
     const systemMessage = sanitizedMessages[0]
-    const existingSummaryIndex = sanitizedMessages.findIndex((message, index) => {
-      return index > 0 && this._isExistingSummaryMessage(message)
-    })
-    const summaryStartIndex = existingSummaryIndex >= 0 ? existingSummaryIndex + 1 : 1
-    const summaryTarget = sanitizedMessages.slice(summaryStartIndex)
+    const summaryTarget = sanitizedMessages.slice(1)
+    const recentSourceMessages = summaryTarget.filter(message => !this._isExistingSummaryMessage(message))
 
     if (!systemMessage || summaryTarget.length === 0) {
       return sanitizedMessages
@@ -1126,16 +1200,20 @@ export class AgentCore {
       role: 'system',
       content: `${AgentCore.CONTEXT_SUMMARY_PREFIX}\n${typeof summaryResponse.content === 'string' ? summaryResponse.content : ''}`
     }
+    const goalAnchorMessage = this._buildContextGoalAnchorMessage(sanitizedMessages, previousGoalAnchor)
+    const compressedBase = goalAnchorMessage
+      ? [systemMessage, summaryMessage, goalAnchorMessage]
+      : [systemMessage, summaryMessage]
 
-    let compressed: ChatMessage[] = [systemMessage, summaryMessage]
+    let compressed: ChatMessage[] = compressedBase
 
     for (const keepCount of AgentCore.RECENT_MESSAGE_KEEP_OPTIONS) {
-      if (keepCount > summaryTarget.length) {
+      if (keepCount > recentSourceMessages.length) {
         continue
       }
 
-      const recentMessages = keepCount > 0 ? this._sliceRecentMessagesForCompression(summaryTarget, keepCount) : []
-      compressed = [systemMessage, summaryMessage, ...recentMessages]
+      const recentMessages = keepCount > 0 ? this._sliceRecentMessagesForCompression(recentSourceMessages, keepCount) : []
+      compressed = [...compressedBase, ...recentMessages]
 
       if (this._estimateTokens(compressed) <= warningThreshold || keepCount === 0) {
         onProgress?.('✅ Context compressed', `${this._estimateTokens(compressed)}/${contextWindow}`)
@@ -1181,7 +1259,7 @@ export class AgentCore {
     return [
       {
         role: 'system',
-        content: `You summarize long conversations for continued execution. Produce a concise but complete plain-text summary in English, ideally within ${AgentCore.CONTEXT_SUMMARY_CHAR_LIMIT} characters. Preserve the goal, completed work, failures, key file paths, project IDs, commands, ports, and next steps.`
+        content: `You summarize long conversations for continued execution. Produce a concise but complete plain-text summary in English, ideally within ${AgentCore.CONTEXT_SUMMARY_CHAR_LIMIT} characters. Preserve the original user goal, the latest user request, completed work, failures, key file paths, project IDs, commands, ports, and next steps. Do not replace the original goal with a recent "continue" or retry instruction.`
       },
       {
         role: 'user',

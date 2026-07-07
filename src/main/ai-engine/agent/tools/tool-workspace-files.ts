@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { ReadFileTracker } from './read-tracker.js'
+import type { FolderWorkspaceChangeEvent } from '../../../../shared/folder-workspace-types.js'
 import { streamFilePreview } from './file-preview-progress.js'
 import { PROJECT_COMMAND_WHITELIST, DANGEROUS_COMMAND_PATTERNS, isDeveloperCommandModeEnabled } from './command-capabilities.js'
 import { createBundledRuntimeEnv } from '../../../project-runtime/bundled-runtime.js'
@@ -20,6 +21,7 @@ import {
 
 interface ToolServices {
   workspaceRoot: string
+  notifyFolderWorkspaceChanged?: (event: FolderWorkspaceChangeEvent) => void
 }
 
 interface WorkspaceFileArgs {
@@ -178,6 +180,14 @@ let commandSequence = 0
 
 function workspaceTrackerId (root: string): string {
   return `workspace:${path.resolve(root)}`
+}
+
+function notifyWorkspaceChanged (services: ToolServices, action: FolderWorkspaceChangeEvent['action'], filePath: string): void {
+  services.notifyFolderWorkspaceChanged?.({
+    action,
+    rootPath: path.resolve(services.workspaceRoot),
+    filePath: normalizeWorkspaceRelativePath(filePath)
+  })
 }
 
 function renderWithLineNumbers (lines: string[], firstLineNumber: number): string {
@@ -391,8 +401,10 @@ export function toolWriteWorkspaceFile (services: ToolServices, readTracker?: Re
       await streamFilePreview(file_path, content, onProgress, previousContent)
       onProgress?.('Writing workspace file', file_path)
       await writeFolderWorkspaceFile(services.workspaceRoot, file_path, content)
-      readTracker?.markRead(workspaceTrackerId(services.workspaceRoot), normalizeWorkspaceRelativePath(file_path))
-      return { success: true, file_path: normalizeWorkspaceRelativePath(file_path) }
+      const normalized = normalizeWorkspaceRelativePath(file_path)
+      readTracker?.markRead(workspaceTrackerId(services.workspaceRoot), normalized)
+      notifyWorkspaceChanged(services, previousContent === undefined ? 'created' : 'updated', normalized)
+      return { success: true, file_path: normalized }
     }
   }
 }
@@ -441,6 +453,7 @@ export function toolEditWorkspaceFile (services: ToolServices, readTracker?: Rea
       await streamFilePreview(normalized, newContent, onProgress, originalContent)
       await writeFolderWorkspaceFile(services.workspaceRoot, normalized, newContent)
       readTracker?.markRead(workspaceTrackerId(services.workspaceRoot), normalized)
+      notifyWorkspaceChanged(services, 'updated', normalized)
       return { success: true, file_path: normalized, replacements: replace_all ? occurrences : 1 }
     }
   }
@@ -507,6 +520,7 @@ export function toolPatchWorkspaceFile (services: ToolServices, readTracker?: Re
       onProgress?.('Writing workspace file', `${patches.length} patches`)
       await writeFolderWorkspaceFile(services.workspaceRoot, normalized, newContent)
       readTracker?.markRead(workspaceTrackerId(services.workspaceRoot), normalized)
+      notifyWorkspaceChanged(services, 'updated', normalized)
       return { success: true, file_path: normalized, patches_applied: patches.length, original_lines: totalLines, new_lines: lines.length }
     }
   }
@@ -530,6 +544,7 @@ export function toolDeleteWorkspaceFile (services: ToolServices): Tool {
       const normalized = normalizeWorkspaceRelativePath(file_path)
       onProgress?.('Deleting workspace file', normalized)
       await deleteFolderWorkspaceFile(services.workspaceRoot, normalized)
+      notifyWorkspaceChanged(services, 'deleted', normalized)
       return { success: true, file_path: normalized }
     }
   }

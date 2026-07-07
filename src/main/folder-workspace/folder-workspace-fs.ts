@@ -7,8 +7,8 @@ import type {
   FolderWorkspaceReadResult
 } from '../../shared/folder-workspace-types.js'
 
-const MAX_TREE_ENTRIES = 1500
-const MAX_TREE_DEPTH = 8
+const MAX_TREE_ENTRIES = 5000
+const MAX_TREE_DEPTH = 12
 const MAX_PREVIEW_BYTES = 1024 * 1024
 
 const IGNORED_DIRS = new Set([
@@ -238,6 +238,7 @@ export async function listFolderWorkspaceFiles (rootPath: string): Promise<Folde
     })
 
     const entries: FolderWorkspaceFileEntry[] = []
+    const directoriesToWalk: Array<{ index: number; relativePath: string }> = []
     for (const entry of dirEntries) {
       if (truncated) break
       if (entry.name.startsWith('.') && entry.name !== '.env' && entry.name !== '.gitignore') {
@@ -257,8 +258,9 @@ export async function listFolderWorkspaceFiles (rootPath: string): Promise<Folde
           name: entry.name,
           path: relativePath,
           type: 'directory',
-          children: await walk(relativePath, depth + 1)
+          children: []
         })
+        directoriesToWalk.push({ index: entries.length - 1, relativePath })
         continue
       }
 
@@ -277,6 +279,13 @@ export async function listFolderWorkspaceFiles (rootPath: string): Promise<Folde
         kind: classification.kind,
         language: classification.language
       })
+    }
+
+    if (!truncated && depth < MAX_TREE_DEPTH) {
+      for (const directory of directoriesToWalk) {
+        if (truncated) break
+        entries[directory.index].children = await walk(directory.relativePath, depth + 1)
+      }
     }
 
     return entries
