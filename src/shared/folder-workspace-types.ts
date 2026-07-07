@@ -43,3 +43,9 @@ export interface FolderWorkspaceReadResult {
   lineCount: number
   truncated: boolean
 }
+
+export interface FolderWorkspaceChangeEvent {
+  action: 'created' | 'updated' | 'deleted'
+  rootPath: string
+  filePath: string
+}

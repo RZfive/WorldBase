@@ -4,7 +4,7 @@ import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, A
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../src/shared/image-studio-types.js'
 import type { UsageRecord, UsageSummary } from '../src/main/settings/usage-store.js'
-import type { ConversationFolderWorkspaceState, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
+import type { ConversationFolderWorkspaceState, FolderWorkspaceChangeEvent, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
 import type { LongTermGoalChangeSet, LongTermGoalDefinition, LongTermGoalIntervention, LongTermGoalMessageResult, LongTermGoalRun, LongTermGoalSaveInput, LongTermGoalSnapshot, LongTermGoalStreamEvent } from '../src/shared/long-term-goal-types.js'
 
 interface ChatMessage {
@@ -719,6 +719,7 @@ export interface ElectronAPI {
   pickFolderWorkspace: () => Promise<FolderWorkspacePickResult>
   listFolderWorkspaceFiles: (rootPath: string) => Promise<FolderWorkspaceListResult>
   readFolderWorkspaceFile: (rootPath: string, filePath: string) => Promise<FolderWorkspaceReadResult>
+  onFolderWorkspaceChanged: (callback: (event: FolderWorkspaceChangeEvent) => void) => () => void
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -1065,5 +1066,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Folder workspace preview
   pickFolderWorkspace: () => ipcRenderer.invoke('folderWorkspace:pickFolder'),
   listFolderWorkspaceFiles: (rootPath: string) => ipcRenderer.invoke('folderWorkspace:listFiles', rootPath),
-  readFolderWorkspaceFile: (rootPath: string, filePath: string) => ipcRenderer.invoke('folderWorkspace:readFile', rootPath, filePath)
+  readFolderWorkspaceFile: (rootPath: string, filePath: string) => ipcRenderer.invoke('folderWorkspace:readFile', rootPath, filePath),
+  onFolderWorkspaceChanged: (callback: (event: FolderWorkspaceChangeEvent) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: FolderWorkspaceChangeEvent) => callback(event)
+    ipcRenderer.on('folderWorkspace:changed', handler)
+    return () => { ipcRenderer.removeListener('folderWorkspace:changed', handler) }
+  }
 } satisfies ElectronAPI)

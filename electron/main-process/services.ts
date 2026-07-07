@@ -214,6 +214,9 @@ export async function initializeServices (): Promise<void> {
       broadcastToAppWindows('skills:changed', event)
     },
     notifyAgentWorkspaceChanged,
+    notifyFolderWorkspaceChanged: (event) => {
+      broadcastToAppWindows('folderWorkspace:changed', event)
+    },
     mcpService: mainState.mcpService!,
     scheduledTaskService: undefined
   })

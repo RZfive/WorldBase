@@ -69,6 +69,7 @@ import type { BrowserWindow } from 'electron'
 import type { SubagentService } from '../subagent-service.js'
 import { toolSpawnSubagents } from './tool-spawn-subagent.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
+import type { FolderWorkspaceChangeEvent } from '../../../../shared/folder-workspace-types.js'
 
 export interface ToolServices {
   projectFS: ProjectFS
@@ -90,6 +91,7 @@ export interface ToolServices {
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
+  notifyFolderWorkspaceChanged?: (event: FolderWorkspaceChangeEvent) => void
   mcpService?: MCPService
   scheduledTaskService?: ScheduledTaskService
   /** Optional subagent service — injects the spawn_subagents tool when provided. */
@@ -160,16 +162,20 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
   ]
 
   if (services.workspaceRoot) {
+    const workspaceServices = {
+      workspaceRoot: services.workspaceRoot,
+      notifyFolderWorkspaceChanged: services.notifyFolderWorkspaceChanged
+    }
     tools.push(
-      toolListWorkspaceFiles({ workspaceRoot: services.workspaceRoot }),
-      toolReadWorkspaceFile({ workspaceRoot: services.workspaceRoot }, readTracker),
-      toolWriteWorkspaceFile({ workspaceRoot: services.workspaceRoot }, readTracker),
-      toolEditWorkspaceFile({ workspaceRoot: services.workspaceRoot }, readTracker),
-      toolPatchWorkspaceFile({ workspaceRoot: services.workspaceRoot }, readTracker),
-      toolDeleteWorkspaceFile({ workspaceRoot: services.workspaceRoot }),
-      toolGlobWorkspace({ workspaceRoot: services.workspaceRoot }),
-      toolGrepWorkspace({ workspaceRoot: services.workspaceRoot }),
-      toolRunWorkspaceCommand({ workspaceRoot: services.workspaceRoot }),
+      toolListWorkspaceFiles(workspaceServices),
+      toolReadWorkspaceFile(workspaceServices, readTracker),
+      toolWriteWorkspaceFile(workspaceServices, readTracker),
+      toolEditWorkspaceFile(workspaceServices, readTracker),
+      toolPatchWorkspaceFile(workspaceServices, readTracker),
+      toolDeleteWorkspaceFile(workspaceServices),
+      toolGlobWorkspace(workspaceServices),
+      toolGrepWorkspace(workspaceServices),
+      toolRunWorkspaceCommand(workspaceServices),
       toolGetWorkspaceCommandStatus()
     )
   }

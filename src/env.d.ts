@@ -22,6 +22,7 @@ type ImageLibraryFolderCard = import('./shared/image-studio-types.js').ImageLibr
 type MemoryCompactionResult = import('./shared/agent-workspace-types.js').MemoryCompactionResult
 type MemoryCompactionStatus = import('./shared/agent-workspace-types.js').MemoryCompactionStatus
 type ConversationFolderWorkspaceState = import('./shared/folder-workspace-types.js').ConversationFolderWorkspaceState
+type FolderWorkspaceChangeEvent = import('./shared/folder-workspace-types.js').FolderWorkspaceChangeEvent
 type FolderWorkspaceFileEntry = import('./shared/folder-workspace-types.js').FolderWorkspaceFileEntry
 type FolderWorkspaceListResult = import('./shared/folder-workspace-types.js').FolderWorkspaceListResult
 type FolderWorkspacePickResult = import('./shared/folder-workspace-types.js').FolderWorkspacePickResult
@@ -1087,6 +1088,7 @@ interface ElectronAPI {
   pickFolderWorkspace: () => Promise<FolderWorkspacePickResult>
   listFolderWorkspaceFiles: (rootPath: string) => Promise<FolderWorkspaceListResult>
   readFolderWorkspaceFile: (rootPath: string, filePath: string) => Promise<FolderWorkspaceReadResult>
+  onFolderWorkspaceChanged: (callback: (event: FolderWorkspaceChangeEvent) => void) => () => void
 }
 
 interface Window {

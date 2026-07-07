@@ -81,6 +81,10 @@ let resizing = false
 let layoutObserver: ResizeObserver | null = null
 let workspaceShortcutsBound = false
 let toolbarPositionFrame: number | null = null
+let workspaceChangeCleanup: (() => void) | null = null
+let workspaceRefreshTimer: number | null = null
+let pendingWorkspaceRefreshFilePath: string | null = null
+let workspaceTreeDirty = false
 
 const SCRIPT_CLOSE_PREFIX = '<' + '/script'
 const SCRIPT_CLOSE_TAG = `${SCRIPT_CLOSE_PREFIX}>`
@@ -464,6 +468,52 @@ function emitWorkspaceState (): void {
   })
 }
 
+function normalizeRootPathKey (value?: string | null): string {
+  return (value || '').trim().replace(/\\/g, '/')
+}
+
+function isSameRootPath (left?: string | null, right?: string | null): boolean {
+  return normalizeRootPathKey(left) === normalizeRootPathKey(right)
+}
+
+function queueWorkspaceTreeRefresh (preferredFilePath?: string | null): void {
+  if (preferredFilePath) {
+    pendingWorkspaceRefreshFilePath = preferredFilePath
+  }
+  workspaceTreeDirty = false
+
+  if (workspaceRefreshTimer !== null) return
+  workspaceRefreshTimer = window.setTimeout(() => {
+    workspaceRefreshTimer = null
+    const nextPreferredFilePath = pendingWorkspaceRefreshFilePath || currentActiveFilePath.value
+    pendingWorkspaceRefreshFilePath = null
+    void loadWorkspaceTree(nextPreferredFilePath)
+  }, 80)
+}
+
+function handleFolderWorkspaceChanged (event: FolderWorkspaceChangeEvent): void {
+  if (!currentRootPath.value || !isSameRootPath(event.rootPath, currentRootPath.value)) return
+
+  const preferredFilePath = event.action === 'deleted'
+    ? currentActiveFilePath.value
+    : (currentActiveFilePath.value && currentActiveFilePath.value !== event.filePath ? currentActiveFilePath.value : event.filePath)
+
+  if (!props.visible) {
+    workspaceTreeDirty = true
+    if (preferredFilePath) {
+      pendingWorkspaceRefreshFilePath = preferredFilePath
+    }
+    return
+  }
+
+  queueWorkspaceTreeRefresh(preferredFilePath)
+}
+
+function bindWorkspaceChangeListener (): void {
+  if (workspaceChangeCleanup || !window.electronAPI?.onFolderWorkspaceChanged) return
+  workspaceChangeCleanup = window.electronAPI.onFolderWorkspaceChanged(handleFolderWorkspaceChanged)
+}
+
 function buildCodeSelectionTag (): string {
   const selection = normalizedCodeSelection.value
   const file = selectedFile.value
@@ -774,7 +824,14 @@ watch(
     }
     await nextTick()
     bindLayoutObserver()
+    bindWorkspaceChangeListener()
     await syncWorkspaceWidthToLayout(props.workspaceWidth)
+    if (currentRootPath.value && (workspaceTreeDirty || fileTree.value.length === 0)) {
+      workspaceTreeDirty = false
+      await loadWorkspaceTree(pendingWorkspaceRefreshFilePath || currentActiveFilePath.value)
+      pendingWorkspaceRefreshFilePath = null
+      return
+    }
     if (!currentRootPath.value && !promptedForOpen.value) {
       promptedForOpen.value = true
       await chooseFolder()
@@ -819,6 +876,7 @@ watch(normalizedCodeSelection, (selection) => {
 }, { flush: 'post' })
 
 onMounted(() => {
+  bindWorkspaceChangeListener()
   if (!props.visible) return
   bindLayoutObserver()
   void syncWorkspaceWidthToLayout(props.workspaceWidth)
@@ -826,10 +884,16 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopResize()
+  if (workspaceRefreshTimer !== null) {
+    window.clearTimeout(workspaceRefreshTimer)
+    workspaceRefreshTimer = null
+  }
   if (toolbarPositionFrame !== null) {
     window.cancelAnimationFrame(toolbarPositionFrame)
     toolbarPositionFrame = null
   }
+  workspaceChangeCleanup?.()
+  workspaceChangeCleanup = null
   if (workspaceShortcutsBound) {
     document.removeEventListener('keydown', handleWorkspaceKeydown)
     workspaceShortcutsBound = false
