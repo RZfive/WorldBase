@@ -35,18 +35,26 @@ function getLatestProgressText (): string {
   const translated = translateProgressEntry(latest, t)
   return translated.detail ? `${translated.stage}: ${translated.detail}` : translated.stage
 }
+
+function getToolRunDisplayName (name: string): string {
+  if (name === 'long_term_goal_propose_update') return '生成待确认目标变更'
+  if (name === 'long_term_goal_get_context') return '读取长期目标状态'
+  if (name === 'long_term_goal_update_schedule') return '更新长期目标排期'
+  if (name === 'long_term_goal_record_run_result') return '记录长期目标执行结果'
+  return name
+}
 </script>
 
 <template>
   <ExecutionDisclosure
-    :title="props.block.toolRun.name"
+    :title="getToolRunDisplayName(props.block.toolRun.name)"
     :meta="getToolRunSummaryStatusLabel(props.block.toolRun.status)"
     :detail="getLatestProgressText()"
     :status="props.block.toolRun.status"
     :default-expanded="props.block.toolRun.status === 'failed'"
   >
     <div class="tool-run-header">
-      <div class="tool-run-name">{{ props.block.toolRun.name }}</div>
+      <div class="tool-run-name">{{ getToolRunDisplayName(props.block.toolRun.name) }}</div>
       <span class="tool-run-status" :class="props.block.toolRun.status">
         {{ getToolRunStatusLabel(props.block.toolRun.status) }}
       </span>
