@@ -89,8 +89,12 @@ export class AgentCore {
   private static readonly CONTEXT_SUMMARY_PREFIX = '[CONTEXT_SUMMARY]'
   private static readonly CONTEXT_GOAL_ANCHOR_PREFIX = '[CONTEXT_GOAL_ANCHOR]'
   private static readonly CONTEXT_SUMMARY_CHAR_LIMIT = 1500
-  private static readonly CONTEXT_SUMMARY_SOURCE_MAX_CHARS = 4000
+  private static readonly CONTEXT_SUMMARY_SOURCE_MAX_CHARS = 2500
+  private static readonly CONTEXT_SUMMARY_MAX_SOURCE_MESSAGES = 48
   private static readonly CONTEXT_GOAL_ANCHOR_MAX_CHARS = 2000
+  private static readonly CONTEXT_RECENT_MESSAGE_MAX_CHARS = 3000
+  private static readonly CONTEXT_RECENT_TOOL_RESULT_MAX_CHARS = 2500
+  private static readonly CONTEXT_RECENT_TOOL_ARGUMENT_MAX_CHARS = 800
   private static readonly CONTEXT_HEADROOM_RATIO = 0.15
   private static readonly CONTEXT_MIN_HEADROOM_TOKENS = 2048
   private static readonly CONTEXT_MAX_HEADROOM_TOKENS = 8192
@@ -923,7 +927,7 @@ export class AgentCore {
         }
 
         const forceCompression = segmentIterations > 0 && segmentIterations % this.proactiveCompressionInterval === 0
-        messages = await this._compressContextIfNeeded(messages, forceCompression ? undefined : onProgress, abortSignal, forceCompression)
+        messages = await this._compressContextIfNeeded(messages, onProgress, abortSignal, forceCompression)
         segmentIterations++
         loopGuard.totalIterations++
 
@@ -1192,13 +1196,22 @@ export class AgentCore {
       return sanitizedMessages
     }
 
-    const summaryPrompt = this._buildContextSummaryPrompt(summaryTarget)
-    const summaryResponse = await this.provider.chatCompletion(summaryPrompt, [], abortSignal, {
-      timeoutMs: AgentCore.CONTEXT_COMPRESSION_TIMEOUT_MS
-    })
+    let summaryContent = ''
+    try {
+      const summaryPrompt = this._buildContextSummaryPrompt(summaryTarget)
+      const summaryResponse = await this.provider.chatCompletion(summaryPrompt, [], abortSignal, {
+        timeoutMs: AgentCore.CONTEXT_COMPRESSION_TIMEOUT_MS
+      })
+      summaryContent = typeof summaryResponse.content === 'string' ? summaryResponse.content : ''
+    } catch (error) {
+      this._throwIfAborted(abortSignal)
+      console.warn('[Agent] Context compression model summary failed, using deterministic fallback:', (error as Error).message)
+      onProgress?.('⚠️ Context compression fallback', (error as Error).message)
+      summaryContent = this._buildDeterministicContextSummary(summaryTarget)
+    }
     const summaryMessage: ChatMessage = {
       role: 'system',
-      content: `${AgentCore.CONTEXT_SUMMARY_PREFIX}\n${typeof summaryResponse.content === 'string' ? summaryResponse.content : ''}`
+      content: `${AgentCore.CONTEXT_SUMMARY_PREFIX}\n${summaryContent}`
     }
     const goalAnchorMessage = this._buildContextGoalAnchorMessage(sanitizedMessages, previousGoalAnchor)
     const compressedBase = goalAnchorMessage
@@ -1233,11 +1246,14 @@ export class AgentCore {
       startIndex++
     }
 
-    return candidateMessages.slice(startIndex)
+    return candidateMessages
+      .slice(startIndex)
+      .map(message => this._compactRecentMessageForCompression(message))
   }
 
   private _buildContextSummaryPrompt (messages: ChatMessage[]): ChatMessage[] {
-    const serializedMessages = messages
+    const sourceMessages = this._selectMessagesForSummaryPrompt(messages)
+    const serializedMessages = sourceMessages
       .map((message, index) => {
         const sections = [`#${index + 1} [${message.role}]`, this._serializeMessageContentForSummary(message.content)]
 
@@ -1268,12 +1284,105 @@ export class AgentCore {
     ]
   }
 
+  private _selectMessagesForSummaryPrompt (messages: ChatMessage[]): ChatMessage[] {
+    if (messages.length <= AgentCore.CONTEXT_SUMMARY_MAX_SOURCE_MESSAGES) {
+      return messages
+    }
+
+    const keepTailCount = AgentCore.CONTEXT_SUMMARY_MAX_SOURCE_MESSAGES - 2
+    const selected = new Set<ChatMessage>()
+    const result: ChatMessage[] = []
+    const add = (message: ChatMessage | undefined) => {
+      if (!message || selected.has(message)) return
+      selected.add(message)
+      result.push(message)
+    }
+
+    add(messages.find(message => this._isExistingSummaryMessage(message)))
+    add(messages.find(message => message.role === 'user'))
+
+    for (const message of messages.slice(-keepTailCount)) {
+      add(message)
+    }
+
+    return result
+  }
+
+  private _compactRecentMessageForCompression (message: ChatMessage): ChatMessage {
+    if (message.role === 'tool') {
+      return {
+        role: 'assistant',
+        content: [
+          `[compressed tool result: ${message.tool_call_id || 'unknown call'}]`,
+          this._truncateString(this._serializeMessageContentForSummary(message.content), AgentCore.CONTEXT_RECENT_TOOL_RESULT_MAX_CHARS)
+        ].join('\n')
+      }
+    }
+
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      const toolCalls = message.tool_calls
+        .map(toolCall => {
+          const args = this._truncateString(toolCall.function.arguments || '{}', AgentCore.CONTEXT_RECENT_TOOL_ARGUMENT_MAX_CHARS)
+          return `- ${toolCall.function.name}(${args})`
+        })
+        .join('\n')
+      const content = this._serializeMessageContentForSummary(message.content)
+      const parts = [
+        content ? this._truncateString(content, AgentCore.CONTEXT_RECENT_MESSAGE_MAX_CHARS) : '',
+        `[compressed previous tool calls]\n${toolCalls}`
+      ].filter(Boolean)
+      return {
+        role: message.role,
+        content: parts.join('\n\n')
+      }
+    }
+
+    const compacted: ChatMessage = {
+      role: message.role,
+      content: this._truncateString(this._serializeMessageContentForSummary(message.content), AgentCore.CONTEXT_RECENT_MESSAGE_MAX_CHARS)
+    }
+    if (message.reasoning_content) {
+      compacted.reasoning_content = this._truncateString(message.reasoning_content, AgentCore.CONTEXT_RECENT_MESSAGE_MAX_CHARS)
+    }
+    return compacted
+  }
+
+  private _buildDeterministicContextSummary (messages: ChatMessage[]): string {
+    const selected = this._selectMessagesForSummaryPrompt(messages)
+    const lines = [
+      'Deterministic fallback summary because model-based context compression failed.',
+      'Preserve the explicit CONTEXT_GOAL_ANCHOR if present; continue the same task without restarting.'
+    ]
+
+    for (const message of selected) {
+      const content = this._serializeMessageContentForSummary(message.content)
+      const toolCalls = message.tool_calls?.map(toolCall => toolCall.function.name).join(', ')
+      lines.push([
+        `[${message.role}]`,
+        content,
+        toolCalls ? `[tool calls: ${toolCalls}]` : ''
+      ].filter(Boolean).join('\n'))
+    }
+
+    return this._truncateString(lines.join('\n\n'), AgentCore.CONTEXT_SUMMARY_CHAR_LIMIT * 2)
+  }
+
   private _estimateTokens (messages: ChatMessage[]): number {
     return messages.reduce((total, message) => {
       const content = typeof message.content === 'string'
         ? message.content
         : JSON.stringify(message.content)
-      return total + Math.ceil(content.length / AgentCore.ESTIMATED_CHARS_PER_TOKEN) + AgentCore.ESTIMATED_MESSAGE_OVERHEAD_TOKENS
+      const toolCalls = message.tool_calls
+        ?.map(toolCall => `${toolCall.id}:${toolCall.function.name}:${toolCall.function.arguments}`)
+        .join('\n') || ''
+      const estimatedContent = [
+        message.role,
+        content,
+        message.tool_call_id || '',
+        message.reasoning_content || '',
+        toolCalls
+      ].filter(Boolean).join('\n')
+      return total + Math.ceil(estimatedContent.length / AgentCore.ESTIMATED_CHARS_PER_TOKEN) + AgentCore.ESTIMATED_MESSAGE_OVERHEAD_TOKENS
     }, 0)
   }
 

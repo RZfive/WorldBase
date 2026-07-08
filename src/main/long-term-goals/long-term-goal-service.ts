@@ -485,49 +485,6 @@ function stripGoalAdjustmentMetadataForDisplay (text: string): string {
   ).trim()
 }
 
-function extractGoalAdjustmentMetadata (text: string): Record<string, unknown> | null {
-  const metadataPattern = new RegExp(`<!--\\s*${GOAL_ADJUSTMENT_METADATA_LABEL}\\s*([\\s\\S]*?)\\s*-->`, 'i')
-  const commentMatch = text.match(metadataPattern)
-  if (commentMatch?.[1]) {
-    const parsed = extractJsonObject(commentMatch[1])
-    if (parsed) return parsed
-  }
-
-  return extractJsonObject(text)
-}
-
-function extractReplanMetadata (text: string): Record<string, unknown> | null {
-  const metadataPattern = new RegExp(`<!--\\s*${GOAL_REPLAN_METADATA_LABEL}\\s*([\\s\\S]*?)\\s*-->`, 'i')
-  const commentMatch = text.match(metadataPattern)
-  if (commentMatch?.[1]) {
-    const parsed = extractJsonObject(commentMatch[1])
-    if (parsed) return parsed
-  }
-  return extractJsonObject(text)
-}
-
-function parseReplanResult (text: string): LongTermGoalReplanResult | null {
-  const parsed = extractReplanMetadata(text)
-  if (!parsed) return null
-  const summary = normalizeString(parsed.summary)
-  if (!summary) return null
-  const goalPatchRaw = parsed.goalPatch
-  const goalPatch = (goalPatchRaw && typeof goalPatchRaw === 'object' && !Array.isArray(goalPatchRaw))
-    ? goalPatchRaw as Record<string, unknown>
-    : {}
-  return {
-    summary,
-    nextRunAt: normalizeFutureIsoDate(normalizeString(parsed.nextRunAt), 1),
-    upcomingSchedule: normalizeUpcomingSchedule(parsed.upcomingSchedule),
-    nextTasks: normalizeStringArray(parsed.nextTasks),
-    goalPatch: {
-      objective: normalizeString(goalPatch.objective) || undefined,
-      todayFocus: normalizeString(goalPatch.todayFocus) || undefined,
-      currentPhase: normalizeString(goalPatch.currentPhase) || undefined
-    }
-  }
-}
-
 function formatParsedGoalRunMarkdown (parsed: Record<string, unknown>, fallbackText: string): string {
   const progressSummary = normalizeString(parsed.progressSummary) || compactText(fallbackText, 360) || '本次执行已结束。'
   const gapToGoal = normalizeString(parsed.gapToGoal) || normalizeString(parsed.gapAnalysis)
@@ -708,13 +665,6 @@ function normalizeGoalRunResult (parsed: Record<string, unknown>, resultText: st
   }
 }
 
-function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedGoalRunResult {
-  const parsed = extractGoalMetadata(resultText)
-  return parsed
-    ? normalizeGoalRunResult(parsed, resultText, fallbackTitle)
-    : buildFallbackGoalRunResult(resultText, fallbackTitle)
-}
-
 function stripAssistantJson(text: string): string {
   return stripTrailingJsonObjectForDisplay(stripJsonBlocksForDisplay(text)).trim()
 }
@@ -737,12 +687,6 @@ function formatGoalAdjustmentConversationTurn (turn: LongTermGoalConversationTur
   }
 
   return lines.join('\n')
-}
-
-function parseGoalAdjustmentProposal (text: string): GoalAdjustmentProposal | null {
-  const parsed = extractGoalAdjustmentMetadata(text)
-  if (!parsed) return null
-  return normalizeGoalAdjustmentProposal(parsed)
 }
 
 function normalizeGoalAdjustmentQuestions (value: unknown): GoalAdjustmentProposal['questions'] {

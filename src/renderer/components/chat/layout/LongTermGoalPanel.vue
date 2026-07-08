@@ -82,8 +82,6 @@ interface BindableSkill { id: string; name: string; description?: string }
 const availableSkills = ref<BindableSkill[]>([])
 const selectedSkillIds = ref<Set<string>>(new Set())
 const skillsLoading = ref(false)
-const GOAL_ADJUSTMENT_METADATA_LABEL = 'LONG_TERM_GOAL_ADJUSTMENT_METADATA'
-
 const providers = computed(() => props.providers || [])
 const reviews = computed(() => props.snapshot?.reviews || [])
 const runs = computed(() => props.snapshot?.runs || [])
