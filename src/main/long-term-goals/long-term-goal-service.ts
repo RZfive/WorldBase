@@ -1440,6 +1440,24 @@ export class LongTermGoalService {
     return true
   }
 
+  deleteGoalMemory (goalId: string, memoryId: string): LongTermGoalSnapshot {
+    this.getGoalOrThrow(goalId)
+    const memory = this.snapshot.memories.find(item => item.id === memoryId && item.goalId === goalId)
+    if (!memory) return this.getSnapshot(goalId)
+    this.snapshot.memories = this.snapshot.memories.filter(item => item.id !== memoryId)
+    this.addActivity({
+      goalId,
+      actor: 'user',
+      type: 'memory_compacted',
+      title: '已手动删除长期记忆',
+      summary: memory.title || '用户删除了一条长期记忆。'
+    })
+    this.refreshExecutionBrief(goalId)
+    this.updateGoalMemorySummary(goalId)
+    this.persistAndEmit()
+    return this.getSnapshot(goalId)
+  }
+
   runGoalNow (goalId: string): ScheduledTaskRunReport {
     const goal = this.getGoalOrThrow(goalId)
     const scheduledGoal = this.ensureScheduledTask(goal)

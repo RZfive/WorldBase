@@ -221,10 +221,12 @@ const messageText = computed(() => getMessageText())
 
 .message-flow {
   width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 12px;
+  overflow-wrap: anywhere;
   /* Base typography for chat content blocks. Block components use em so their
      text and row heights scale with the user preference. The message meta
      (author/model label) above is intentionally stable chrome. */

@@ -112,6 +112,7 @@ const {
   sendMessage,
   sendLongTermGoalMessage,
   compactLongTermGoalMemory,
+  deleteLongTermGoalMemory,
   applyLongTermGoalChangeSet,
   cancelLongTermGoalChangeSet,
   applyLongTermGoalCreation,
@@ -692,6 +693,7 @@ watch(
           @save-goal="saveLongTermGoalPatch"
           @send-message="sendLongTermGoalMessage"
           @compact-memory="compactLongTermGoalMemory"
+          @delete-memory="deleteLongTermGoalMemory"
           @apply-change-set="applyLongTermGoalChangeSet"
           @cancel-change-set="cancelLongTermGoalChangeSet"
           @confirm-creation="applyLongTermGoalCreation"

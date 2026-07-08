@@ -694,6 +694,7 @@ const zhCN = {
     goalMemoryCompactionDone: '整理完成',
     goalMemoryCompactionDoneDetail: '长期记忆已更新，执行记忆包已刷新。',
     goalMemoryCompactionFailed: '整理失败',
+    deleteGoalMemoryConfirm: '确定删除这条记忆「{title}」吗？删除后会刷新执行记忆包。',
     noGoalMemoryContent: '这条记忆暂无可展示摘要',
     goalMemoryKindGoalProfile: '目标定义',
     goalMemoryKindExecutionBrief: '执行记忆包',

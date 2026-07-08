@@ -85,9 +85,11 @@ function getToolRunDisplayName (name: string): string {
 }
 
 .tool-run-name {
+  min-width: 0;
   font-size: 0.8em;
   font-weight: 600;
   color: var(--app-text-strong);
+  overflow-wrap: anywhere;
 }
 
 .tool-run-status {
@@ -148,17 +150,22 @@ function getToolRunDisplayName (name: string): string {
 
 .tool-run-step-body {
   min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .tool-run-step-stage {
   font-size: 0.78em;
   color: var(--app-text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .tool-run-step-detail {
   margin-top: 3px;
   font-size: 0.74em;
   color: var(--app-text-muted);
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 </style>

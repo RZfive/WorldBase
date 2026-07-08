@@ -57,7 +57,10 @@ watch(
 
 <style scoped>
 .execution-disclosure {
+  box-sizing: border-box;
   width: min(100%, var(--chat-event-card-max, 1080px));
+  max-width: 100%;
+  min-width: 0;
   color: var(--app-text-muted);
 }
 
@@ -162,6 +165,9 @@ watch(
   margin-top: 6px;
   padding: 10px 0 12px 13px;
   border-left: 1px solid var(--app-border);
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .execution-disclosure.failed .execution-title {
