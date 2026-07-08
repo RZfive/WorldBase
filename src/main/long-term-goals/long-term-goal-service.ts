@@ -1988,9 +1988,15 @@ export class LongTermGoalService {
     const goal = this.getGoalOrThrow(goalId)
     const editableMemories = this.snapshot.memories
       .filter(item => item.goalId === goalId && item.kind !== 'execution_brief')
+    onEvent?.({
+      type: 'progress',
+      stage: '准备整理记忆',
+      detail: `读取 ${editableMemories.length} 条长期记忆`
+    })
 
     if (editableMemories.length === 0) {
       this.refreshExecutionBrief(goalId)
+      this.pruneObsoleteMemoryActivityDetails(goalId)
       this.addActivity({
         goalId,
         actor: 'system',
@@ -1999,7 +2005,12 @@ export class LongTermGoalService {
         summary: '当前没有可合并或删除的长期记忆。'
       })
       this.persistAndEmit()
-      onEvent?.({ type: 'done', message: { role: 'assistant', content: '当前没有可合并或删除的长期记忆，执行记忆包已刷新。' } })
+      onEvent?.({
+        type: 'progress',
+        stage: '无需整理',
+        detail: '当前没有可合并或删除的长期记忆，执行记忆包已刷新。'
+      })
+      onEvent?.({ type: 'done' })
       return this.getSnapshot(goalId)
     }
 
@@ -2047,7 +2058,9 @@ export class LongTermGoalService {
           throw new Error('记忆整理结果为空，请提交至少一条有效记忆，或传入空 memories 表示全部无效。')
         }
         compactionState.plan = plan
-        onProgress?.('整理长期目标记忆', `保留 ${plan.memories.length} 条，原始 ${editableMemories.length} 条`)
+        const detail = `保留 ${plan.memories.length} 条，原始 ${editableMemories.length} 条`
+        onProgress?.('整理长期目标记忆', detail)
+        onEvent?.({ type: 'progress', stage: '生成整理结果', detail })
         return {
           success: true,
           tool: 'long_term_goal_apply_memory_compaction',
@@ -2059,10 +2072,12 @@ export class LongTermGoalService {
       }
     }]
 
-    const contentParts: string[] = []
-    const thinkingParts: string[] = []
-
     try {
+      onEvent?.({
+        type: 'progress',
+        stage: 'AI 分析记忆',
+        detail: '正在判断可删除、合并和保留的记忆条目。'
+      })
       for await (const event of this.options.aiEngine.chatStream(this.buildMemoryCompactionMessages(goal, editableMemories), undefined, {
         providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'high', 0.2),
         allowedToolNames: customTools.map(tool => tool.definition.name),
@@ -2078,21 +2093,11 @@ export class LongTermGoalService {
           ].join('\n')
         ]
       })) {
-        if (event.type !== 'done') {
-          onEvent?.(event as LongTermGoalStreamEvent)
-        }
-        if (event.type === 'thinking' && event.content) {
-          thinkingParts.push(event.content)
+        if (event.type === 'progress') {
+          onEvent?.({ type: 'progress', stage: event.stage, detail: event.detail })
           continue
         }
-        if (event.type === 'token' && event.content) {
-          contentParts.push(event.content)
-          continue
-        }
-        if (event.type === 'done') {
-          if (event.thinking) thinkingParts.push(event.thinking)
-          break
-        }
+        if (event.type === 'done') break
       }
     } catch (error) {
       const errorMessage = (error as Error)?.message || '长期记忆整理失败。'
@@ -2103,6 +2108,7 @@ export class LongTermGoalService {
     const plan = compactionState.plan
     if (!plan) {
       this.refreshExecutionBrief(goalId)
+      this.pruneObsoleteMemoryActivityDetails(goalId)
       this.addActivity({
         goalId,
         actor: 'system',
@@ -2111,28 +2117,31 @@ export class LongTermGoalService {
         summary: 'AI 没有调用长期目标记忆整理工具，未改动原始记忆。'
       })
       this.persistAndEmit()
-      const fallbackContent = 'AI 没有提交可应用的记忆整理结果，原始记忆保持不变。'
       onEvent?.({
-        type: 'done',
-        message: { role: 'assistant', content: fallbackContent },
-        thinking: thinkingParts.join('') || undefined
+        type: 'progress',
+        stage: '整理未应用',
+        detail: 'AI 没有提交可应用的记忆整理结果，原始记忆保持不变。'
       })
+      onEvent?.({ type: 'done' })
       return this.getSnapshot(goalId)
     }
 
+    onEvent?.({
+      type: 'progress',
+      stage: '应用整理结果',
+      detail: `从 ${editableMemories.length} 条记忆应用 AI 提交的 canonical memories。`
+    })
     this.applyGoalMemoryCompactionPlan(goalId, plan, editableMemories.length)
     this.persistAndEmit()
-    const keptCount = Math.min(
-      plan.memories.length + (plan.memories.some(memory => memory.kind === 'goal_profile') ? 0 : 1),
-      MAX_MEMORY_ENTRIES - 1
-    )
-    const finalContent = stripAssistantJson(contentParts.join('')) ||
-      `已整理长期记忆：从 ${editableMemories.length} 条收敛为 ${keptCount} 条，并刷新了执行记忆包。`
+    const keptCount = this.snapshot.memories
+      .filter(item => item.goalId === goalId && item.kind !== 'execution_brief')
+      .length
     onEvent?.({
-      type: 'done',
-      message: { role: 'assistant', content: finalContent },
-      thinking: thinkingParts.join('') || undefined
+      type: 'progress',
+      stage: '整理完成',
+      detail: `从 ${editableMemories.length} 条收敛为 ${keptCount} 条，并刷新了执行记忆包。`
     })
+    onEvent?.({ type: 'done' })
     return this.getSnapshot(goalId)
   }
 
@@ -3255,8 +3264,21 @@ export class LongTermGoalService {
           .map(memory => ({ title: memory.title, sourceMemoryIds: memory.sourceMemoryIds }))
       }, null, 2)
     })
+    this.pruneObsoleteMemoryActivityDetails(goalId)
     this.refreshExecutionBrief(goalId)
     this.updateGoalMemorySummary(goalId)
+  }
+
+  private pruneObsoleteMemoryActivityDetails (goalId: string): void {
+    this.snapshot.activities = this.snapshot.activities.map(activity => {
+      if (activity.goalId !== goalId) return activity
+      if (activity.type !== 'memory_written' && activity.type !== 'memory_compacted') return activity
+      if (!activity.details) return activity
+      return {
+        ...activity,
+        details: undefined
+      }
+    })
   }
 
   private writeMemory (goalId: string, input: {
@@ -3284,8 +3306,7 @@ export class LongTermGoalService {
       actor: 'ai',
       type: 'memory_written',
       title: '写入长期目标记忆',
-      summary: input.title,
-      details: input.content
+      summary: input.title
     })
   }
 
@@ -3395,8 +3416,7 @@ export class LongTermGoalService {
       actor: 'system',
       type: 'memory_compacted',
       title: '执行记忆包已刷新',
-      summary: '已压缩目标核心、重要成果、技能方法、关键决定和下一步任务，供后续执行优先读取。',
-      details: content
+      summary: '已压缩目标核心、重要成果、技能方法、关键决定和下一步任务，供后续执行优先读取。'
     })
     this.updateGoalMemorySummary(goalId)
   }
@@ -3438,8 +3458,7 @@ export class LongTermGoalService {
       actor: 'system',
       type: 'memory_compacted',
       title: '长期记忆已自动压缩',
-      summary: `已将 ${overflow.length} 条较旧记忆压缩为摘要。`,
-      details: summaryMemory.content
+      summary: `已将 ${overflow.length} 条较旧记忆压缩为摘要。`
     })
     this.updateGoalMemorySummary(goalId)
   }

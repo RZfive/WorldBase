@@ -168,13 +168,15 @@ function buildAttachmentPrompt (): string {
         </header>
 
         <div class="goal-dialog-messages">
-          <MessageList
-            :messages="messages"
-            :is-loading="isLoading"
-            :file-preview="filePreview"
-            assistant-icon="◎"
-            assistant-name="Long-Term Goal"
-          />
+          <slot name="messages">
+            <MessageList
+              :messages="messages"
+              :is-loading="isLoading"
+              :file-preview="filePreview"
+              assistant-icon="◎"
+              assistant-name="Long-Term Goal"
+            />
+          </slot>
         </div>
 
         <slot />
