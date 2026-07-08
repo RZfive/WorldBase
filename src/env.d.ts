@@ -1026,6 +1026,7 @@ interface ElectronAPI {
   setLongTermGoalStatus: (goalId: string, status: LongTermGoalDefinition['status']) => Promise<LongTermGoalDefinition>
   deleteLongTermGoal: (goalId: string) => Promise<boolean>
   runLongTermGoalNow: (goalId: string) => Promise<ScheduledTaskRunReport>
+  compactLongTermGoalMemory: (goalId: string, streamId?: string) => Promise<LongTermGoalSnapshot>
   sendLongTermGoalMessage: (goalId: string, content: string) => Promise<LongTermGoalMessageResult>
   streamLongTermGoalMessage: (goalId: string, content: string, streamId: string) => Promise<LongTermGoalMessageResult>
   streamLongTermGoalCreate: (content: string, options: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] } | undefined, streamId: string) => Promise<LongTermGoalMessageResult>

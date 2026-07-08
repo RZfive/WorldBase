@@ -252,6 +252,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const streamingCreate = ref<{ userContent: string; message: ChatMessage } | null>(null)
   const streamingRun = ref<{ goalId: string; run: LongTermGoalRun } | null>(null)
   const streamingReplan = ref<{ goalId: string; message: ChatMessage } | null>(null)
+  const streamingMemory = ref<{ goalId: string; message: ChatMessage } | null>(null)
   const createConversationHistory = ref<ChatMessage[]>([])
   const pendingCreationConfirm = ref<{ changeSet: LongTermGoalChangeSet; proposal: NonNullable<LongTermGoalMessageResult['proposal']> } | null>(null)
   const goalAutoOpenRunId = ref<string | null>(null)
@@ -261,6 +262,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     streamingAdjust.value = null
     streamingRun.value = null
     streamingReplan.value = null
+    streamingMemory.value = null
     streamingCreate.value = null
     createConversationHistory.value = []
     pendingCreationConfirm.value = null
@@ -1791,11 +1793,11 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     goalAutoOpenRunId.value = null
   }
 
-  async function streamGoalConversation (
+  async function streamGoalConversation<T = LongTermGoalMessageResult> (
     message: ChatMessage,
     streamId: string,
-    invoke: () => Promise<LongTermGoalMessageResult>
-  ): Promise<LongTermGoalMessageResult | null> {
+    invoke: () => Promise<T>
+  ): Promise<T | null> {
     if (!window.electronAPI?.onLongTermGoalStreamEvent) {
       return invoke()
     }
@@ -1920,6 +1922,32 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       cleanup()
       setAssistantErrorState(message, (err as Error).message, getMessageTextContent)
       return null
+    }
+  }
+
+  async function compactLongTermGoalMemory (goalId: string): Promise<void> {
+    if (!window.electronAPI?.compactLongTermGoalMemory) return
+    const streamId = generateId()
+    const message: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      speakerName: 'Long-Term Goal',
+      blocks: [createContentBlock('')]
+    }
+    streamingMemory.value = { goalId, message }
+    try {
+      const snapshot = await streamGoalConversation<LongTermGoalSnapshot>(
+        message,
+        streamId,
+        () => window.electronAPI!.compactLongTermGoalMemory!(goalId, streamId)
+      )
+      if (snapshot) {
+        longTermGoalSnapshot.value = snapshot
+      }
+      await loadLongTermGoals()
+      await loadLongTermGoalSnapshot(goalId)
+    } finally {
+      streamingMemory.value = null
     }
   }
 
@@ -2885,6 +2913,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     streamingCreate,
     streamingRun,
     streamingReplan,
+    streamingMemory,
     createConversationHistory,
     goalAutoOpenRunId,
     handleAgentSelectionChange,
@@ -2931,6 +2960,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     selectAllSkills,
     sendMessage,
     sendLongTermGoalMessage,
+    compactLongTermGoalMemory,
     applyLongTermGoalChangeSet,
     cancelLongTermGoalChangeSet,
     applyLongTermGoalCreation,

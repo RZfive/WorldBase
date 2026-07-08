@@ -488,7 +488,7 @@ function cancelRenameConversation () {
 }
 
 .conv-toolbar {
-  padding: 12px 12px 10px;
+  padding: 10px 10px 9px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -601,7 +601,7 @@ function cancelRenameConversation () {
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 8px 14px 12px 12px;
+  padding: 7px 9px 10px 8px;
   scrollbar-gutter: stable;
 }
 

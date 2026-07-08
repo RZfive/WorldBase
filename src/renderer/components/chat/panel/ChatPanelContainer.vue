@@ -20,7 +20,7 @@ const emit = defineEmits<ChatPanelEmit>()
 const { t } = useI18n()
 
 const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
-const CONVERSATION_SIDEBAR_WIDTH = 280
+const CONVERSATION_SIDEBAR_WIDTH = 252
 const CONVERSATION_SIDEBAR_COLLAPSED_WIDTH = 64
 const MIN_CHAT_MAIN_WIDTH = 640
 const DOCUMENT_WORKSPACE_LIST_WIDTH = 260
@@ -111,6 +111,7 @@ const {
   selectAllSkills,
   sendMessage,
   sendLongTermGoalMessage,
+  compactLongTermGoalMemory,
   applyLongTermGoalChangeSet,
   cancelLongTermGoalChangeSet,
   applyLongTermGoalCreation,
@@ -122,6 +123,7 @@ const {
   streamingCreate,
   streamingRun,
   streamingReplan,
+  streamingMemory,
   createConversationHistory,
   goalAutoOpenRunId,
   clearGoalAutoOpenRunId,
@@ -677,6 +679,7 @@ watch(
           :streaming-create="streamingCreate"
           :streaming-run="streamingRun"
           :streaming-replan="streamingReplan"
+          :streaming-memory="streamingMemory"
           :create-conversation-history="createConversationHistory"
           :pending-creation-confirm="pendingCreationConfirm"
           :goal-auto-open-run-id="goalAutoOpenRunId"
@@ -688,6 +691,7 @@ watch(
           @delete-goal="deleteLongTermGoal"
           @save-goal="saveLongTermGoalPatch"
           @send-message="sendLongTermGoalMessage"
+          @compact-memory="compactLongTermGoalMemory"
           @apply-change-set="applyLongTermGoalChangeSet"
           @cancel-change-set="cancelLongTermGoalChangeSet"
           @confirm-creation="applyLongTermGoalCreation"
@@ -829,8 +833,8 @@ watch(
 .conversation-sidebar-shell {
   position: relative;
   z-index: 20;
-  width: 280px;
-  flex: 0 0 280px;
+  width: 252px;
+  flex: 0 0 252px;
   min-width: 0;
   display: flex;
   transition: width 0.22s ease, flex-basis 0.22s ease;

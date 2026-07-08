@@ -26,6 +26,7 @@ const props = defineProps<{
   streamingAdjust?: { userContent: string; message: ChatMessage } | null
   streamingCreate?: { userContent: string; message: ChatMessage } | null
   streamingRun?: { goalId: string; run: LongTermGoalRun } | null
+  streamingMemory?: { goalId: string; message: ChatMessage } | null
   createConversationHistory?: ChatMessage[]
   pendingCreationConfirm?: { changeSet: LongTermGoalChangeSet; proposal: NonNullable<LongTermGoalMessageResult['proposal']> } | null
   goalAutoOpenRunId?: string | null
@@ -41,6 +42,7 @@ const emit = defineEmits<{
   (e: 'delete-goal', goal: LongTermGoalDefinition): void
   (e: 'save-goal', goal: LongTermGoalDefinition, patch: Partial<LongTermGoalDefinition>): void
   (e: 'sendMessage', goalId: string, content: string): void
+  (e: 'compactMemory', goalId: string): void
   (e: 'applyChangeSet', changeSetId: string): void
   (e: 'cancelChangeSet', changeSetId: string): void
   (e: 'confirmCreation', changeSetId: string): void
@@ -94,6 +96,7 @@ const openInterventions = computed(() => (props.goal?.openInterventions || []).f
 const selectedIntervention = computed(() => openInterventions.value.find(item => item.id === activeInterventionId.value) || openInterventions.value[0] || null)
 const activeRun = computed(() => runs.value.find(item => item.id === activeRunId.value) || null)
 const nextTasks = computed(() => props.goal?.nextTasks.filter(item => item.status !== 'done' && item.status !== 'skipped').slice(0, 8) || [])
+const memoryCompacting = computed(() => Boolean(props.goal?.id && props.streamingMemory?.goalId === props.goal.id))
 
 /** 未来 24 小时执行时间表（按时间升序），来自 AI 输出 + nextTasks 补充。 */
 const upcoming24h = computed(() => {
@@ -467,7 +470,11 @@ const memoryMessages = computed<ChatMessage[]>(() => {
       ? t('chatUi.noGoalMemory')
       : memories.value.map(memory => `## ${memory.title}\n\n\`${memory.kind}\` · ${memory.importance.toFixed(2)}\n\n${memory.content}`).join('\n\n')
   ].join('\n\n')
-  return [asAssistantMessage(content)]
+  const base = [asAssistantMessage(content)]
+  if (props.streamingMemory && props.streamingMemory.goalId === props.goal?.id) {
+    return [...base, props.streamingMemory.message]
+  }
+  return base
 })
 
 const adjustMessages = computed<ChatMessage[]>(() => {
@@ -507,6 +514,12 @@ function sendDialogMessage (text: string): void {
     return
   }
   emit('sendMessage', goal.id, text)
+}
+
+function compactMemory (): void {
+  const goal = props.goal
+  if (!goal || memoryCompacting.value) return
+  emit('compactMemory', goal.id)
 }
 
 /** 打开绑定项目弹窗：拉项目列表 + 初始化选中集合为当前绑定。 */
@@ -902,7 +915,18 @@ watch(
         :subtitle="goal.title"
         :messages="memoryMessages"
         @close="closeDialog"
-      />
+      >
+        <template #header-actions>
+          <button
+            type="button"
+            class="goal-ghost-btn compact goal-memory-compact-btn"
+            :disabled="memoryCompacting"
+            @click="compactMemory"
+          >
+            {{ memoryCompacting ? $t('chatUi.goalMemoryCompacting') : $t('chatUi.compactGoalMemory') }}
+          </button>
+        </template>
+      </GoalConversationDialog>
 
       <GoalConversationDialog
         :open="activeDialog === 'adjust'"
@@ -1432,9 +1456,15 @@ button.goal-summary-card:hover,
   font-size: 0.76rem;
 }
 
+.goal-primary-btn:disabled,
 .goal-ghost-btn:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+.goal-memory-compact-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .goal-danger-btn {

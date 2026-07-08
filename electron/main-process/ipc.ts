@@ -1832,6 +1832,22 @@ export function setupIPC (): void {
     return longTermGoalService!.runGoalNow(goalId)
   })
 
+  ipcMain.handle('longTermGoals:compactMemory', async (event: IpcMainInvokeEvent, goalId: string, streamId?: string) => {
+    const sender = event.sender
+    const channel = streamId ? `longTermGoals:stream-event:${streamId}` : null
+    const onEvent = channel
+      ? (goalStreamEvent: LongTermGoalStreamEvent) => {
+          if (sender.isDestroyed()) return
+          try {
+            sender.send(channel, goalStreamEvent)
+          } catch (sendErr) {
+            console.error('[longTermGoals:compactMemory] Failed to forward stream event:', sendErr)
+          }
+        }
+      : undefined
+    return await longTermGoalService!.compactGoalMemoryWithAI(goalId, onEvent)
+  })
+
   ipcMain.handle('longTermGoals:message', async (_event: IpcMainInvokeEvent, goalId: string, content: string) => {
     return longTermGoalService!.appendGoalMessage(goalId, content)
   })
