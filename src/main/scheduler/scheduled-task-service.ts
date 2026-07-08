@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import { type BrowserWindow } from 'electron'
-import { AIEngine, type AIConfigInput, type ProgressEvent } from '../ai-engine/ai-engine.js'
+import { AIEngine, type AIConfigInput, type CustomToolRegistration, type ProgressEvent } from '../ai-engine/ai-engine.js'
 import { t } from '../i18n/main-i18n.js'
 import { focusMainWindow, isNotificationSupported, showAppNotification } from '../notifications.js'
 import type { SkillStore } from '../settings/skill-store.js'
@@ -23,7 +23,7 @@ interface ScheduledTaskServiceOptions {
   resolveTaskPrompt?: (task: ScheduledTaskDefinition) => string | undefined
   /** Resolve target project / workspace for the task's AI run (e.g. the bound
       project of a long-term goal), so write_project_file etc. target it. */
-  resolveTaskOptions?: (task: ScheduledTaskDefinition) => { targetProjectId?: string | null; workspaceRoot?: string | null } | undefined
+  resolveTaskOptions?: (task: ScheduledTaskDefinition) => { targetProjectId?: string | null; workspaceRoot?: string | null; customTools?: CustomToolRegistration[]; systemPromptSections?: string[] } | undefined
   shouldNotifyReport?: (report: ScheduledTaskRunReport) => boolean | undefined
   onTasksChanged?: (tasks: ScheduledTaskDefinition[]) => void
   onReportsChanged?: (reports: ScheduledTaskRunReport[]) => void
@@ -163,6 +163,7 @@ export class ScheduledTaskService {
   private reports: ScheduledTaskRunReport[] = []
   private readonly timers = new Map<string, NodeJS.Timeout>()
   private readonly runningTaskIds = new Set<string>()
+  private readonly deferredTaskSaves = new Map<string, ScheduledTaskDefinition>()
 
   constructor (private readonly options: ScheduledTaskServiceOptions) {}
 
@@ -185,6 +186,7 @@ export class ScheduledTaskService {
     }
     this.timers.clear()
     this.runningTaskIds.clear()
+    this.deferredTaskSaves.clear()
   }
 
   listTasks (options: ScheduledTaskListOptions = {}): ScheduledTaskDefinition[] {
@@ -217,6 +219,40 @@ export class ScheduledTaskService {
       throw new Error(t('mainDialog.scheduledTaskRunningEditBlocked'))
     }
 
+    const { id, candidate, scheduleChanged, enabledChanged } = this.buildTaskSaveCandidate(input, existing)
+    const nextTasks = existing
+      ? this.tasks.map(task => task.id === existing.id ? candidate : task)
+      : [...this.tasks, candidate]
+
+    this.options.store.saveTasks(nextTasks)
+    const savedTask = this.options.store.getTasks().find(task => task.id === id)
+    if (!savedTask) {
+      throw new Error(t('mainDialog.scheduledTaskSaveInvalid'))
+    }
+
+    const resolvedTask = this.resolveSavedTask(savedTask, existing, scheduleChanged || enabledChanged)
+    this.tasks = sortTasks(this.options.store.getTasks().map(task => task.id === id ? resolvedTask : this.resolvePersistedTask(task)))
+    this.persistTasks()
+    this.emitTasksChanged()
+    this.scheduleTask(resolvedTask)
+    return clone(resolvedTask)
+  }
+
+  saveTaskWhenIdle (input: ScheduledTaskDefinition): ScheduledTaskDefinition {
+    const existing = this.tasks.find(task => task.id === input.id)
+    if (existing && this.runningTaskIds.has(existing.id)) {
+      const { candidate, scheduleChanged, enabledChanged } = this.buildTaskSaveCandidate(input, existing)
+      const previewTask = this.resolveSavedTask(candidate, existing, scheduleChanged || enabledChanged)
+      this.deferredTaskSaves.set(existing.id, clone(input))
+      return clone(previewTask)
+    }
+    return this.saveTask(input)
+  }
+
+  private buildTaskSaveCandidate (
+    input: ScheduledTaskDefinition,
+    existing?: ScheduledTaskDefinition
+  ): { id: string; candidate: ScheduledTaskDefinition; scheduleChanged: boolean; enabledChanged: boolean } {
     const now = new Date().toISOString()
     const scheduleChanged = existing ? JSON.stringify(existing.schedule) !== JSON.stringify(input.schedule) : true
     const enabledChanged = existing ? existing.enabled !== input.enabled : false
@@ -242,23 +278,7 @@ export class ScheduledTaskService {
       lastStatus: existing?.lastStatus || 'idle',
       lastReportId: existing?.lastReportId || null
     }
-
-    const nextTasks = existing
-      ? this.tasks.map(task => task.id === existing.id ? candidate : task)
-      : [...this.tasks, candidate]
-
-    this.options.store.saveTasks(nextTasks)
-    const savedTask = this.options.store.getTasks().find(task => task.id === id)
-    if (!savedTask) {
-      throw new Error(t('mainDialog.scheduledTaskSaveInvalid'))
-    }
-
-    const resolvedTask = this.resolveSavedTask(savedTask, existing, scheduleChanged || enabledChanged)
-    this.tasks = sortTasks(this.options.store.getTasks().map(task => task.id === id ? resolvedTask : this.resolvePersistedTask(task)))
-    this.persistTasks()
-    this.emitTasksChanged()
-    this.scheduleTask(resolvedTask)
-    return clone(resolvedTask)
+    return { id, candidate, scheduleChanged, enabledChanged }
   }
 
   deleteTask (taskId: string): boolean {
@@ -616,7 +636,9 @@ export class ScheduledTaskService {
         activeSkillContents,
         allowedMcpServerIds: task.selectedMcpServerIds,
         targetProjectId: taskOptions?.targetProjectId ?? null,
-        workspaceRoot: taskOptions?.workspaceRoot ?? null
+        workspaceRoot: taskOptions?.workspaceRoot ?? null,
+        customTools: taskOptions?.customTools,
+        systemPromptSections: taskOptions?.systemPromptSections
       })) {
         if (event.type === 'thinking' && event.content) {
           thinkingText += event.content
@@ -738,12 +760,30 @@ export class ScheduledTaskService {
       }
     } finally {
       this.runningTaskIds.delete(taskId)
+      const latestTask = this.tasks.find(item => item.id === taskId)
+      if (latestTask?.retryScheduledAt) {
+        this.deferredTaskSaves.delete(taskId)
+        return
+      }
+      const deferredTask = this.flushDeferredTaskSave(taskId)
+      if (deferredTask) return
       if (finalTaskStatus === 'completed' || finalTaskStatus === 'failed') {
-        const latestTask = this.tasks.find(item => item.id === taskId)
         if (latestTask && !latestTask.retryScheduledAt) {
           this.scheduleTask(latestTask)
         }
       }
+    }
+  }
+
+  private flushDeferredTaskSave (taskId: string): ScheduledTaskDefinition | null {
+    const deferredTask = this.deferredTaskSaves.get(taskId)
+    if (!deferredTask) return null
+    this.deferredTaskSaves.delete(taskId)
+    try {
+      return this.saveTask(deferredTask)
+    } catch (error) {
+      console.warn('[scheduled-task-service] Failed to apply deferred task save:', (error as Error).message)
+      return null
     }
   }
 

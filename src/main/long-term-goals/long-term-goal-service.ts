@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import type { AIConfigInput, AIEngine } from '../ai-engine/ai-engine.js'
+import type { AIConfigInput, AIEngine, CustomToolRegistration } from '../ai-engine/ai-engine.js'
 import type { ChatMessage } from '../ai-engine/providers/openai-provider.js'
 import type { LongTermGoalStore } from '../settings/long-term-goal-store.js'
 import type { ScheduledTaskDefinition, ScheduledTaskProgressEntry, ScheduledTaskRunReport } from '../settings/scheduled-task-store.js'
@@ -629,30 +629,29 @@ function normalizeUpcomingSchedule (value: unknown): Array<{ at: string; title: 
   return result.slice(0, 12)
 }
 
-function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedGoalRunResult {
-  const parsed = extractGoalMetadata(resultText)
-  if (!parsed) {
-    const summary = compactText(resultText || fallbackTitle, 360)
-    return {
-      progressSummary: summary || '本次执行已结束。',
-      gapToGoal: '尚未提取到结构化差距分析，请在下一次执行中继续归纳。',
-      nextPlan: [],
-      completedItems: summary ? [summary] : [],
-      importantAchievements: summary ? [summary] : [],
-      learnedSkills: [],
-      blockers: [],
-      nextRunAt: null,
-      upcomingSchedule: [],
-      bindProjectIds: [],
-      needsUserInput: false,
-      userQuestions: [],
-      notificationLevel: 'silent',
-      memoryUpdates: summary
-        ? [{ kind: 'progress_summary', title: '执行摘要', content: summary, importance: 0.55 }]
-        : []
-    }
+function buildFallbackGoalRunResult (resultText: string, fallbackTitle: string): ParsedGoalRunResult {
+  const summary = compactText(resultText || fallbackTitle, 360)
+  return {
+    progressSummary: summary || '本次执行已结束。',
+    gapToGoal: '本次未记录结构化差距分析，请在下一次执行中继续归纳。',
+    nextPlan: [],
+    completedItems: summary ? [summary] : [],
+    importantAchievements: summary ? [summary] : [],
+    learnedSkills: [],
+    blockers: [],
+    nextRunAt: null,
+    upcomingSchedule: [],
+    bindProjectIds: [],
+    needsUserInput: false,
+    userQuestions: [],
+    notificationLevel: 'silent',
+    memoryUpdates: summary
+      ? [{ kind: 'progress_summary', title: '执行摘要', content: summary, importance: 0.55 }]
+      : []
   }
+}
 
+function normalizeGoalRunResult (parsed: Record<string, unknown>, resultText: string, fallbackTitle: string): ParsedGoalRunResult {
   const notificationLevel = parsed.notificationLevel === 'notify' || parsed.notificationLevel === 'badge'
     ? parsed.notificationLevel
     : 'silent'
@@ -692,7 +691,7 @@ function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedG
   }
 
   return {
-    progressSummary: normalizeString(parsed.progressSummary) || compactText(resultText, 360) || '本次执行已结束。',
+    progressSummary: normalizeString(parsed.progressSummary) || compactText(resultText || fallbackTitle, 360) || '本次执行已结束。',
     gapToGoal: normalizeString(parsed.gapToGoal) || normalizeString(parsed.gapAnalysis) || '本次未发现新的关键差距。',
     nextPlan: normalizeStringArray(parsed.nextPlan),
     completedItems: normalizeStringArray(parsed.completedItems),
@@ -707,6 +706,13 @@ function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedG
     notificationLevel,
     memoryUpdates: parsedMemoryUpdates
   }
+}
+
+function parseGoalRunResult (resultText: string, fallbackTitle: string): ParsedGoalRunResult {
+  const parsed = extractGoalMetadata(resultText)
+  return parsed
+    ? normalizeGoalRunResult(parsed, resultText, fallbackTitle)
+    : buildFallbackGoalRunResult(resultText, fallbackTitle)
 }
 
 function stripAssistantJson(text: string): string {
@@ -736,39 +742,79 @@ function formatGoalAdjustmentConversationTurn (turn: LongTermGoalConversationTur
 function parseGoalAdjustmentProposal (text: string): GoalAdjustmentProposal | null {
   const parsed = extractGoalAdjustmentMetadata(text)
   if (!parsed) return null
-  const title = normalizeString(parsed.title)
-  const objective = normalizeString(parsed.objective)
-  const summary = normalizeString(parsed.summary)
+  return normalizeGoalAdjustmentProposal(parsed)
+}
+
+function normalizeGoalAdjustmentQuestions (value: unknown): GoalAdjustmentProposal['questions'] {
+  return Array.isArray(value)
+    ? value
+        .map(item => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+          const record = item as Record<string, unknown>
+          const question = normalizeString(record.question)
+          if (!question) return null
+          return {
+            id: normalizeString(record.id) || generateId('goal_question'),
+            question,
+            options: normalizeStringArray(record.options),
+            reason: normalizeString(record.reason) || undefined
+          }
+        })
+        .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    : []
+}
+
+function normalizeGoalPatch (value: unknown): Partial<LongTermGoalDefinition> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return clone(value) as Partial<LongTermGoalDefinition>
+}
+
+function deriveBeforePatch (goal: LongTermGoalDefinition, after: Partial<LongTermGoalDefinition>): Partial<LongTermGoalDefinition> {
+  const before: Record<string, unknown> = {}
+  const goalRecord = goal as unknown as Record<string, unknown>
+  for (const key of Object.keys(after as Record<string, unknown>)) {
+    if (key in goalRecord) {
+      const currentValue = goalRecord[key]
+      before[key] = currentValue === undefined ? undefined : clone(currentValue)
+    }
+  }
+  return before as Partial<LongTermGoalDefinition>
+}
+
+function normalizeGoalAdjustmentProposal (
+  value: Record<string, unknown>,
+  currentGoal?: LongTermGoalDefinition
+): GoalAdjustmentProposal | null {
+  const after = normalizeGoalPatch(value.after)
+  const afterRecord = after as Record<string, unknown>
+  const title = normalizeString(value.title) || normalizeString(afterRecord.title) || currentGoal?.title || ''
+  const objective = normalizeString(value.objective) || normalizeString(afterRecord.objective) || currentGoal?.objective || ''
+  const summary = normalizeString(value.summary)
   if (!title || !objective || !summary) return null
+
+  if (!normalizeString(afterRecord.title) && currentGoal && title !== currentGoal.title) {
+    afterRecord.title = title
+  }
+  if (!normalizeString(afterRecord.objective) && currentGoal && objective !== currentGoal.objective) {
+    afterRecord.objective = objective
+  }
+  const before = Object.keys(normalizeGoalPatch(value.before)).length > 0
+    ? normalizeGoalPatch(value.before)
+    : (currentGoal ? deriveBeforePatch(currentGoal, after) : {})
   return {
     title,
     objective,
     summary,
-    before: (parsed.before && typeof parsed.before === 'object' && !Array.isArray(parsed.before)) ? parsed.before as Partial<LongTermGoalDefinition> : {},
-    after: (parsed.after && typeof parsed.after === 'object' && !Array.isArray(parsed.after)) ? parsed.after as Partial<LongTermGoalDefinition> : {},
-    questions: Array.isArray(parsed.questions)
-      ? parsed.questions
-          .map(item => {
-            if (!item || typeof item !== 'object' || Array.isArray(item)) return null
-            const record = item as Record<string, unknown>
-            const question = normalizeString(record.question)
-            if (!question) return null
-            return {
-              id: normalizeString(record.id) || generateId('goal_question'),
-              question,
-              options: normalizeStringArray(record.options),
-              reason: normalizeString(record.reason) || undefined
-            }
-          })
-          .filter((item): item is NonNullable<typeof item> => Boolean(item))
-      : []
+    before,
+    after,
+    questions: normalizeGoalAdjustmentQuestions(value.questions)
   }
 }
 
-function formatGoalAdjustmentAssistantText (text: string): string {
+function formatGoalAdjustmentAssistantText (text: string, fallbackProposal?: GoalAdjustmentProposal | null): string {
   const cleaned = stripGoalAdjustmentMetadataForDisplay(text)
   if (cleaned) return cleaned
-  const parsed = parseGoalAdjustmentProposal(text)
+  const parsed = fallbackProposal || parseGoalAdjustmentProposal(text)
   if (!parsed) return '我还需要更多信息来继续把目标收敛成更好的版本。'
   return [
     '# 目标调整提案',
@@ -818,8 +864,353 @@ export class LongTermGoalService {
   private readonly creationSessions = new Map<string, GoalConversationSession>()
   /** 绑定项目 README.md 内容缓存，供执行/重规划 prompt 同步注入接口说明。 */
   private readonly projectReadmeCache = new Map<string, string>()
+  private readonly pendingRunResults = new Map<string, ParsedGoalRunResult>()
 
   constructor (private readonly options: LongTermGoalServiceOptions) {}
+
+  private createLongTermGoalTools (
+    goalInput: LongTermGoalDefinition | string,
+    options: {
+      allowMutation: boolean
+      allowProposal?: boolean
+      allowRunResult?: boolean
+      runResultKey?: string
+      onProposal?: (proposal: GoalAdjustmentProposal) => void
+      onScheduleUpdate?: (result: LongTermGoalReplanResult) => void
+    }
+  ): CustomToolRegistration[] {
+    const fallbackGoal = typeof goalInput === 'string' ? null : goalInput
+    const goalId = typeof goalInput === 'string' ? goalInput : goalInput.id
+    const resolveGoal = (): LongTermGoalDefinition => {
+      const current = this.getGoal(goalId)
+      if (current) return current
+      if (fallbackGoal) return fallbackGoal
+      return this.getGoalOrThrow(goalId)
+    }
+    const tools: CustomToolRegistration[] = [
+      {
+        definition: {
+          name: 'long_term_goal_get_context',
+          description: 'Long-term goal custom tool: read the current goal state, schedule, upcoming 24h plan, next tasks, bound projects, and recent progress memory.',
+          parameters: {
+            type: 'object',
+            properties: {
+              include_recent_activity: {
+                type: 'boolean',
+                description: 'Whether to include compact recent activity history. Defaults to true.'
+              }
+            }
+          }
+        },
+        handler: async (args) => {
+          const goal = resolveGoal()
+          const includeRecentActivity = args.include_recent_activity !== false
+          return {
+            kind: 'long_term_goal_context',
+            goal: {
+              id: goal.id,
+              title: goal.title,
+              objective: goal.objective,
+              status: goal.status,
+              schedule: goal.schedule,
+              nextRunAt: goal.nextRunAt,
+              nextReviewAt: goal.nextReviewAt,
+              currentPhase: goal.currentPhase,
+              todayFocus: goal.todayFocus,
+              progressSummary: goal.progressSummary,
+              gapSummary: goal.gapSummary,
+              targetProjectIds: goal.targetProjectIds,
+              nextTasks: goal.nextTasks,
+              upcomingSchedule: goal.upcomingSchedule
+            },
+            recentActivity: includeRecentActivity
+              ? this.snapshot.activities
+                .filter(item => item.goalId === goal.id)
+                .slice(0, 12)
+                .map(item => ({ at: item.createdAt, type: item.type, title: item.title, summary: item.summary }))
+              : undefined
+          }
+        }
+      }
+    ]
+
+    if (options.allowProposal) {
+      tools.push({
+        definition: {
+          name: 'long_term_goal_propose_update',
+          description: 'Long-term goal custom tool: create an explicit pending goal update proposal that requires user confirmation before any goal fields are changed. Use this whenever the user asks to modify, refine, or update the long-term goal itself.',
+          parameters: {
+            type: 'object',
+            properties: {
+              title: {
+                type: 'string',
+                description: 'The proposed goal title after confirmation.'
+              },
+              objective: {
+                type: 'string',
+                description: 'The proposed final objective after confirmation.'
+              },
+              summary: {
+                type: 'string',
+                description: 'Short human-readable summary of what will change and why.'
+              },
+              before: {
+                type: 'object',
+                description: 'Optional current values for fields that will change. Omit unknown fields; the system will derive them from the current goal when possible.'
+              },
+              after: {
+                type: 'object',
+                description: 'Only the fields to change after user confirmation, such as title, objective, schedule, targetProjectIds, selectedSkillIds, notificationPolicy, todayFocus, currentPhase, progressSummary, gapSummary, nextTasks, or upcomingSchedule.'
+              },
+              questions: {
+                type: 'array',
+                description: 'Optional final confirmation questions for the user.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    question: { type: 'string' },
+                    options: { type: 'array', items: { type: 'string' } },
+                    reason: { type: 'string' }
+                  },
+                  required: ['question']
+                }
+              }
+            },
+            required: ['title', 'objective', 'summary', 'after']
+          }
+        },
+        handler: async (args, onProgress) => {
+          const goal = resolveGoal()
+          const proposal = normalizeGoalAdjustmentProposal(args, goal)
+          if (!proposal) {
+            throw new Error('缺少可确认的目标变更提案，请提供 title、objective、summary 和 after。')
+          }
+          options.onProposal?.(proposal)
+          onProgress?.('生成待确认目标变更', proposal.summary)
+          return {
+            kind: 'long_term_goal_pending_update',
+            requiresConfirmation: true,
+            message: '目标变更已生成待确认提案，用户确认前不会应用。',
+            proposal
+          }
+        }
+      })
+    }
+
+    if (options.allowRunResult) {
+      tools.push({
+        definition: {
+          name: 'long_term_goal_record_run_result',
+          description: 'Long-term goal custom tool: record the structured result of an execution or daily review. Use this before the final user-facing markdown report; do not hide this data in JSON comments.',
+          parameters: {
+            type: 'object',
+            properties: {
+              progressSummary: { type: 'string', description: 'What was completed and the current state, in one or two sentences.' },
+              gapToGoal: { type: 'string', description: 'What is still missing to reach the goal and why it matters.' },
+              nextPlan: { type: 'array', items: { type: 'string' }, description: 'Ordered next task titles.' },
+              completedItems: { type: 'array', items: { type: 'string' }, description: 'Items completed in this run/review.' },
+              importantAchievements: { type: 'array', items: { type: 'string' }, description: 'Reusable achievements or durable outputs from this run.' },
+              learnedSkills: { type: 'array', items: { type: 'string' }, description: 'Reusable skills, methods, constraints, or lessons learned.' },
+              blockers: { type: 'array', items: { type: 'string' }, description: 'Current blockers. Empty if none.' },
+              nextRunAt: { type: 'string', description: 'ISO datetime for the next execution.' },
+              upcomingSchedule: {
+                type: 'array',
+                description: 'Future 24h schedule slots: { at, title, reason }.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    at: { type: 'string' },
+                    title: { type: 'string' },
+                    reason: { type: 'string' }
+                  },
+                  required: ['at', 'title']
+                }
+              },
+              bindProjectIds: { type: 'array', items: { type: 'string' }, description: 'Project ids created in this run that should be bound to the goal.' },
+              needsUserInput: { type: 'boolean', description: 'Whether the goal is blocked until the user answers.' },
+              userQuestions: {
+                type: 'array',
+                description: 'Questions requiring user input.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    question: { type: 'string' },
+                    options: { type: 'array', items: { type: 'string' } },
+                    reason: { type: 'string' }
+                  },
+                  required: ['question']
+                }
+              },
+              notificationLevel: { type: 'string', enum: ['silent', 'badge', 'notify'], description: 'How visible the completion should be.' },
+              memoryUpdates: {
+                type: 'array',
+                description: 'Long-term memory entries to write from this run.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    kind: { type: 'string' },
+                    title: { type: 'string' },
+                    content: { type: 'string' },
+                    importance: { type: 'number' }
+                  },
+                  required: ['title', 'content']
+                }
+              }
+            },
+            required: ['progressSummary', 'gapToGoal', 'nextPlan', 'nextRunAt', 'upcomingSchedule', 'notificationLevel']
+          }
+        },
+        handler: async (args, onProgress) => {
+          const goal = resolveGoal()
+          const result = normalizeGoalRunResult(args, normalizeString(args.progressSummary), goal.title)
+          const key = options.runResultKey || goal.id
+          this.pendingRunResults.set(key, result)
+          onProgress?.('记录长期目标执行结果', result.progressSummary)
+          return {
+            success: true,
+            tool: 'long_term_goal_record_run_result',
+            goalId: goal.id,
+            requiresHiddenJson: false,
+            progressSummary: result.progressSummary,
+            nextRunAt: result.nextRunAt,
+            notificationLevel: result.notificationLevel
+          }
+        }
+      })
+    }
+
+    if (!options.allowMutation) {
+      return tools
+    }
+
+    tools.push({
+      definition: {
+        name: 'long_term_goal_update_schedule',
+        description: 'Long-term goal custom tool: update the goal next run time, future 24h schedule preview, next tasks, and lightweight focus/phase fields. Use this instead of encoding scheduling changes only in prose.',
+        parameters: {
+          type: 'object',
+          properties: {
+            next_run_at: {
+              type: 'string',
+              description: 'ISO datetime for the next execution. Omit to keep the current next run time.'
+            },
+            upcoming_schedule: {
+              type: 'array',
+              description: 'Future 24h schedule slots: { at, title, reason }. Only future slots inside 24h are kept.',
+              items: {
+                type: 'object',
+                properties: {
+                  at: { type: 'string' },
+                  title: { type: 'string' },
+                  reason: { type: 'string' }
+                },
+                required: ['at', 'title']
+              }
+            },
+            next_tasks: {
+              type: 'array',
+              description: 'Ordered next task titles. These replace/create the visible next task queue while preserving still-running existing tasks.',
+              items: { type: 'string' }
+            },
+            objective: { type: 'string', description: 'Optional updated objective when a user decision changes the goal direction.' },
+            today_focus: { type: 'string', description: 'Optional updated focus for today.' },
+            current_phase: { type: 'string', description: 'Optional updated current phase.' },
+            progress_summary: { type: 'string', description: 'Optional updated progress summary.' },
+            gap_summary: { type: 'string', description: 'Optional updated gap summary.' },
+            summary: { type: 'string', description: 'Short reason for the schedule update.' }
+          }
+        }
+      },
+      handler: async (args, onProgress) => {
+        const goal = this.getGoalOrThrow(goalId)
+        const nextPlan = normalizeStringArray(args.next_tasks)
+        const nextTasks = nextPlan.length > 0 ? this.buildNextTasks(goal, nextPlan) : goal.nextTasks
+        const requestedNextRunAt = normalizeFutureIsoDate(normalizeString(args.next_run_at), 1)
+        const nextRunAt = requestedNextRunAt || goal.nextRunAt || fallbackNextRunAtFromSchedule(goal.schedule)
+        const upcomingSchedule = this.buildUpcomingSchedule(this.normalizeToolScheduleSlots(args.upcoming_schedule), nextTasks, nextRunAt)
+        const summary = normalizeString(args.summary) || 'AI 更新了长期目标执行安排。'
+        const patched: LongTermGoalDefinition = {
+          ...goal,
+          nextTasks,
+          upcomingSchedule,
+          nextRunAt,
+          objective: normalizeString(args.objective) || goal.objective,
+          todayFocus: normalizeString(args.today_focus) || goal.todayFocus,
+          currentPhase: normalizeString(args.current_phase) || goal.currentPhase,
+          progressSummary: normalizeString(args.progress_summary) || goal.progressSummary,
+          gapSummary: normalizeString(args.gap_summary) || goal.gapSummary,
+          updatedAt: nowIso()
+        }
+
+        let scheduled = patched
+        try {
+          scheduled = this.ensureScheduledTask(patched)
+        } catch (error) {
+          console.warn('[long-term-goal-service] Deferred backing schedule update from custom tool:', (error as Error).message)
+        }
+
+        this.upsertGoal(scheduled)
+        this.addActivity({
+          goalId: goal.id,
+          actor: 'tool',
+          type: 'plan_updated',
+          title: '长期目标工具更新了执行安排',
+          summary,
+          details: JSON.stringify({ nextRunAt, upcomingSchedule: scheduled.upcomingSchedule }, null, 2)
+        })
+        this.persistAndEmit()
+        onProgress?.('Long-term goal schedule updated', nextRunAt)
+        const goalPatch: NonNullable<LongTermGoalReplanResult['goalPatch']> = {}
+        const updatedObjective = normalizeString(args.objective)
+        const updatedTodayFocus = normalizeString(args.today_focus)
+        const updatedCurrentPhase = normalizeString(args.current_phase)
+        if (updatedObjective) goalPatch.objective = updatedObjective
+        if (updatedTodayFocus) goalPatch.todayFocus = updatedTodayFocus
+        if (updatedCurrentPhase) goalPatch.currentPhase = updatedCurrentPhase
+        const replanResult: LongTermGoalReplanResult = {
+          summary,
+          upcomingSchedule: scheduled.upcomingSchedule,
+          nextTasks: scheduled.nextTasks.map(item => item.title)
+        }
+        if (scheduled.nextRunAt !== undefined) replanResult.nextRunAt = scheduled.nextRunAt
+        if (Object.keys(goalPatch).length > 0) replanResult.goalPatch = goalPatch
+        options.onScheduleUpdate?.(replanResult)
+        return {
+          success: true,
+          tool: 'long_term_goal_update_schedule',
+          goalId: goal.id,
+          nextRunAt: scheduled.nextRunAt,
+          upcomingSchedule: scheduled.upcomingSchedule,
+          nextTasks: scheduled.nextTasks
+        }
+      }
+    })
+
+    return tools
+  }
+
+  private normalizeToolScheduleSlots (value: unknown): Array<{ at: string; title: string; reason?: string }> {
+    if (!Array.isArray(value)) return []
+    return value
+      .map(item => {
+        if (!item || typeof item !== 'object') return null
+        const record = item as Record<string, unknown>
+        const at = normalizeString(record.at)
+        const title = normalizeString(record.title)
+        if (!at || !title) return null
+        const slot: { at: string; title: string; reason?: string } = {
+          at,
+          title
+        }
+        const reason = normalizeString(record.reason)
+        if (reason) slot.reason = reason
+        return slot
+      })
+      .filter((item): item is { at: string; title: string; reason?: string } => Boolean(item))
+      .slice(0, 16)
+  }
 
   start (): void {
     this.snapshot = this.options.store.getSnapshot()
@@ -1199,28 +1590,6 @@ export class LongTermGoalService {
     if (!goal.id.startsWith('goal_draft')) {
       this.refreshExecutionBrief(goal.id)
     }
-    // 调整对话里 AI 若新建了项目，立即自动绑定到目标（不依赖 changeSet 确认）。
-    if (!goal.id.startsWith('goal_draft') && assistantResult.toolRuns?.length) {
-      const createdIds = this.detectCreatedProjectIds(assistantResult.toolRuns, [])
-      if (createdIds.length > 0) {
-        const current = this.getGoal(goal.id)
-        if (current) {
-          const bound = this.bindCreatedProjects(current, createdIds)
-          if (bound) {
-            this.upsertGoal(bound)
-            for (const pid of createdIds) {
-              this.addActivity({
-                goalId: goal.id,
-                actor: 'ai',
-                type: 'project_bound',
-                title: '已自动绑定新项目',
-                summary: pid
-              })
-            }
-          }
-        }
-      }
-    }
     this.trimCollections()
     this.persistAndEmit()
 
@@ -1273,7 +1642,16 @@ export class LongTermGoalService {
     const availableTools = this.options.aiEngine
       .getAvailableTools()
       .filter(tool => isGoalAdjustmentToolDefinition(tool, goal))
+    let toolProposal: GoalAdjustmentProposal | null = null
+    const customTools = this.createLongTermGoalTools(goal, {
+      allowMutation: false,
+      allowProposal: true,
+      onProposal: proposal => {
+        toolProposal = proposal
+      }
+    })
     const allowedToolNames = availableTools.map(tool => tool.name)
+      .concat(customTools.map(tool => tool.definition.name))
     const allowedMcpServerIds = goal.selectedMcpServerIds.length > 0 ? goal.selectedMcpServerIds : undefined
     const activeSkillContents = this.resolveSkillContents(goal)
     const messages: ChatMessage[] = [
@@ -1283,12 +1661,14 @@ export class LongTermGoalService {
           '你正在帮助用户调整一个长期目标。你的工作是通过多轮对话把目标收敛成更清晰、更可执行、更少打扰用户的新版本。',
           '你可以使用只读、检索、查询、分析类工具来理解当前环境、文件、文档、网页、数据库或上下文。',
           goal.targetProjectIds.length > 0
-            ? `本目标已绑定项目，你可以用 write_project_file / patch_project_file / read_project_file / list_project_files / rebuild_project 修改这些绑定项目（project_id 传绑定的 id）：${goal.targetProjectIds.join(', ')}。需要时也可用 create_project 新建项目，建后会自动绑定到本目标。`
-            : '本目标未绑定项目。若推进目标需要代码项目，可用 create_project 新建（建后会自动绑定）；除此之外不要使用其它写入、执行、删除、启动、重启、构建、安装类工具。',
+            ? `本目标已绑定项目，你可以用 write_project_file / patch_project_file / read_project_file / list_project_files / rebuild_project 修改这些绑定项目（project_id 传绑定的 id）：${goal.targetProjectIds.join(', ')}。需要时也可用 create_project 新建项目；如需把新项目绑定到本目标，必须把 targetProjectIds 放入 long_term_goal_propose_update 的 after，等待用户确认。`
+            : '本目标未绑定项目。若推进目标需要代码项目，可用 create_project 新建；如需把新项目绑定到本目标，必须把 targetProjectIds 放入 long_term_goal_propose_update 的 after，等待用户确认。除此之外不要使用其它写入、执行、删除、启动、重启、构建、安装类工具。',
           '结构性重构绑定项目后，必须用 write_project_file 同步更新项目根的 README.md，描述架构与可被长期目标调用的数据接口（HTTP 路由 / DB 表 / 文件格式），方便长期目标执行时直接读用接口推数据而无需重建项目。',
           '长期目标执行时只做数据填入/修改，不重构项目；项目重构只在用户对话中完成。',
           '如果信息不够，就继续追问；如果信息足够，就输出一个最终提案，并明确让用户确认后再应用。',
-          '不要把原始 JSON 直接展示给用户。你可以在正文后附加 HTML 注释 JSON 元数据，供系统解析。',
+          '当你准备修改目标本身时，必须先调用 long_term_goal_propose_update 生成待确认提案；不要只依赖正文或隐藏 JSON 来表达变更。',
+          '用户确认前，目标不会被真正改动；正文里要明确告诉用户这是待确认变更。',
+          '不要把原始 JSON 直接展示给用户，也不要在正文后附加 HTML 注释 JSON。',
           '正文应自然、简洁、像在和用户正常对话。',
           '需要时先思考，再调用工具，再给出结论。'
         ].join('\n')
@@ -1332,14 +1712,18 @@ export class LongTermGoalService {
       providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'max'),
       allowedToolNames: allowedToolNames.length > 0 ? allowedToolNames : undefined,
       allowedMcpServerIds,
+      customTools,
       activeSkillContents: activeSkillContents.length > 0 ? activeSkillContents : undefined,
       systemPromptSections: [
         [
           '## Long-term goal adjustment mode',
           '- Think before you answer.',
           '- Use tools only when they help you verify or understand the goal.',
+          '- Custom tools with the `long_term_goal_` prefix are long-term-goal-only tools.',
+          '- In adjustment/create mode, call `long_term_goal_propose_update` once the proposal is ready. This tool is read-only and creates a pending change that the user must confirm before it applies.',
+          '- Treat the current goal state from `long_term_goal_get_context` or the system-provided current goal as the source of truth. Do not let old conversation turns overwrite fields the user did not ask to change.',
           '- Keep the visible answer as markdown.',
-          '- Hide internal JSON in an HTML comment for system parsing.'
+          '- Do not hide JSON in HTML comments; use the long-term-goal tool for structured state.'
         ].join('\n')
       ]
     })) {
@@ -1412,8 +1796,8 @@ export class LongTermGoalService {
         const rawText = typeof event.message.content === 'string'
           ? event.message.content
           : contentParts.join('')
-        const content = formatGoalAdjustmentAssistantText(rawText)
-        const proposal = parseGoalAdjustmentProposal(rawText)
+        const proposal = toolProposal
+        const content = formatGoalAdjustmentAssistantText(rawText, proposal)
         const changeSet = proposal ? buildGoalAdjustmentChangeSet(goal, proposal, session.lastAssistantTurnId || generateId('goal_turn')) : null
 
         onEvent?.({
@@ -1446,8 +1830,8 @@ export class LongTermGoalService {
     }
 
     const rawText = contentParts.join('')
-    const content = formatGoalAdjustmentAssistantText(rawText)
-    const proposal = parseGoalAdjustmentProposal(rawText)
+    const proposal = toolProposal
+    const content = formatGoalAdjustmentAssistantText(rawText, proposal)
     const changeSet = proposal ? buildGoalAdjustmentChangeSet(goal, proposal, session.lastAssistantTurnId || generateId('goal_turn')) : null
     return {
       content,
@@ -1638,18 +2022,8 @@ export class LongTermGoalService {
       '## 要求',
       '- 结合用户刚才的回答与最新进展，重新判断：下一次什么时候执行、未来 24h 怎么安排、下一步任务列表是否需要调整。',
       '- 不要执行工作；只输出新的执行安排。',
-      '- 如果用户回答改变了目标方向或重点，可在 goalPatch 里更新 objective/todayFocus/currentPhase。',
-      '- 正文给用户看一句话总结（Markdown），不要展示 JSON。',
-      `- 在正文后附加 HTML 注释：<!-- ${GOAL_REPLAN_METADATA_LABEL} { ... } -->，注释内只能放一段合法 JSON。`,
-      '',
-      '元数据 JSON schema:',
-      JSON.stringify({
-        summary: '一句话告诉用户重规划后的安排',
-        nextRunAt: 'ISO 时间，下次执行时间',
-        upcomingSchedule: [{ at: 'ISO 时间', title: '执行项标题', reason: '为什么这时执行' }],
-        nextTasks: ['下一步任务 1', '下一步任务 2'],
-        goalPatch: { objective: '可选，更新后的目标', todayFocus: '可选，新的今日重点', currentPhase: '可选，新的阶段' }
-      }, null, 2)
+      '- 必须调用 long_term_goal_update_schedule 写入 nextRunAt、upcomingSchedule、nextTasks 和可选 objective/today_focus/current_phase。',
+      '- 正文给用户看一句话总结（Markdown），不要展示 JSON，也不要附加 HTML 注释。'
     ].join('\n')
   }
 
@@ -1672,7 +2046,15 @@ export class LongTermGoalService {
       .filter(tool => tool.name !== 'create_project'
         && !['write_project_file', 'patch_project_file', 'rebuild_project'].includes(tool.name)
         && (!GOAL_ADJUSTMENT_PROJECT_TOOLS.has(tool.name) || replanReadOnlyTools.has(tool.name)))
+    let toolReplanResult: LongTermGoalReplanResult | null = null
+    const customTools = this.createLongTermGoalTools(goal, {
+      allowMutation: true,
+      onScheduleUpdate: result => {
+        toolReplanResult = result
+      }
+    })
     const allowedToolNames = availableTools.map(tool => tool.name)
+      .concat(customTools.map(tool => tool.definition.name))
     const activeSkillContents = this.resolveSkillContents(goal)
     const contentParts: string[] = []
     const thinkingParts: string[] = []
@@ -1681,13 +2063,15 @@ export class LongTermGoalService {
         providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'high'),
         allowedToolNames: allowedToolNames.length > 0 ? allowedToolNames : undefined,
         allowedMcpServerIds: goal.selectedMcpServerIds.length > 0 ? goal.selectedMcpServerIds : undefined,
+        customTools,
         activeSkillContents: activeSkillContents.length > 0 ? activeSkillContents : undefined,
         systemPromptSections: [
           [
             '## Long-term goal replan mode',
             '- 只读分析，不要执行写入/构建/创建类工具。',
+            '- 必须使用 `long_term_goal_update_schedule` 直接同步 nextRunAt、未来 24h 安排和下一步任务；这是长期目标专属工具，不属于普通项目工具。',
             '- 结合用户最新回答重新决定执行安排。',
-            '- 正文一句话总结，JSON 元数据放 HTML 注释里。'
+            '- 正文一句话总结，不要输出 JSON 元数据或 HTML 注释。'
           ].join('\n')
         ]
       })) {
@@ -1696,12 +2080,8 @@ export class LongTermGoalService {
         if (event.type === 'token' && event.content) { contentParts.push(event.content); continue }
         if (event.type === 'done') {
           const rawText = typeof event.message.content === 'string' ? event.message.content : contentParts.join('')
-          const result = parseReplanResult(rawText)
-          onEvent?.({ type: 'done', message: { role: 'assistant', content: stripGoalMetadataForDisplay(rawText) || result?.summary || '重规划完成。' } })
-          if (result) {
-            this.applyReplanResult(goalId, result)
-          }
-          return result
+          onEvent?.({ type: 'done', message: { role: 'assistant', content: stripGoalMetadataForDisplay(rawText) || toolReplanResult?.summary || '重规划完成。' } })
+          return toolReplanResult
         }
       }
     } catch (err) {
@@ -1747,11 +2127,29 @@ export class LongTermGoalService {
 
   /** 定时执行时把 goal 绑定的首个项目作为 targetProjectId 传给 AI，使 write_project_file
    *  等工具定向到绑定项目而非新建项目。每日复盘任务不需绑定（只总结不写代码）。 */
-  resolveScheduledTaskOptions (task: ScheduledTaskDefinition): { targetProjectId?: string | null; workspaceRoot?: string | null } | undefined {
-    const goal = this.snapshot.goals.find(item => item.scheduleTaskId === task.id)
-    if (!goal || task.id !== goal.scheduleTaskId) return undefined
-    const targetProjectId = goal.targetProjectIds[0]
-    return targetProjectId ? { targetProjectId, workspaceRoot: null } : undefined
+  resolveScheduledTaskOptions (task: ScheduledTaskDefinition): { targetProjectId?: string | null; workspaceRoot?: string | null; customTools?: CustomToolRegistration[]; systemPromptSections?: string[] } | undefined {
+    const goal = this.snapshot.goals.find(item => item.scheduleTaskId === task.id || item.reviewScheduleTaskId === task.id)
+    if (!goal) return undefined
+    const isExecutionTask = task.id === goal.scheduleTaskId
+    const targetProjectId = isExecutionTask ? goal.targetProjectIds[0] : null
+    return {
+      targetProjectId: targetProjectId || null,
+      workspaceRoot: null,
+      customTools: this.createLongTermGoalTools(goal, {
+        allowMutation: true,
+        allowRunResult: true,
+        runResultKey: task.id
+      }),
+      systemPromptSections: [
+        [
+          '## Long-term goal custom tools',
+          '- Tools whose names start with `long_term_goal_` are only available in long-term goal mode.',
+          '- Prefer `long_term_goal_update_schedule` when you decide the next execution time, future 24h schedule preview, or next task queue should change.',
+          '- Before your final visible markdown report, call `long_term_goal_record_run_result` to record progress, gap analysis, next tasks, notification level, memory updates, and user questions.',
+          '- Do not encode long-term-goal state changes in hidden JSON or HTML comments.'
+        ].join('\n')
+      ]
+    }
   }
 
   shouldNotifyScheduledReport (report: ScheduledTaskRunReport): boolean | undefined {
@@ -1759,8 +2157,20 @@ export class LongTermGoalService {
     if (!goal) return undefined
     if (report.status === 'failed') return true
     if (goal.notificationPolicy === 'normal') return true
-    const result = parseGoalRunResult(report.resultText || '', goal.title)
+    const result = this.peekRunResult(report.taskId) || buildFallbackGoalRunResult(report.resultText || '', goal.title)
     return result.notificationLevel === 'notify' || result.needsUserInput || result.blockers.length > 0
+  }
+
+  private peekRunResult (taskId: string): ParsedGoalRunResult | null {
+    const result = this.pendingRunResults.get(taskId)
+    return result ? clone(result) : null
+  }
+
+  private consumeRunResult (taskId: string): ParsedGoalRunResult | null {
+    const result = this.pendingRunResults.get(taskId)
+    if (!result) return null
+    this.pendingRunResults.delete(taskId)
+    return clone(result)
   }
 
   reconcileScheduledReports (reports: ScheduledTaskRunReport[]): void {
@@ -1843,7 +2253,7 @@ export class LongTermGoalService {
   }
 
   private finishCompletedReport (goal: LongTermGoalDefinition, report: ScheduledTaskRunReport, existingRun?: LongTermGoalRun): void {
-    const parsed = parseGoalRunResult(report.resultText || report.summary, goal.title)
+    const parsed = this.consumeRunResult(report.taskId) || buildFallbackGoalRunResult(report.resultText || report.summary, goal.title)
     const displayResultText = stripGoalMetadataForDisplay(report.resultText || report.summary)
     const finishedAt = report.finishedAt || nowIso()
     const runId = existingRun?.id || generateId('goal_run')
@@ -2003,6 +2413,7 @@ export class LongTermGoalService {
   }
 
   private finishFailedReport (goal: LongTermGoalDefinition, report: ScheduledTaskRunReport, existingRun?: LongTermGoalRun): void {
+    this.pendingRunResults.delete(report.taskId)
     const finishedAt = report.finishedAt || nowIso()
     const runId = existingRun?.id || generateId('goal_run')
     const summary = compactText(report.error || report.summary || '长期目标执行失败。', 360)
@@ -2144,28 +2555,11 @@ export class LongTermGoalService {
       '- 明确指出距离目标还有哪些差距。',
       '- 自己决定下一次持续推进应该在什么时候运行，把 ISO 时间写入 nextRunAt。不要让用户手动设置频率；如果目标需要更密集推进就安排更近，如果等待外部条件就安排更远。',
       '- 给出未来 24 小时的执行时间表 upcomingSchedule（按时间顺序，每项含 at/title/reason），让用户能预览接下来的执行安排。',
+      '- 如果可用，优先调用 long_term_goal_update_schedule 同步 nextRunAt、upcomingSchedule 和 nextTasks；这是长期目标专属工具，和普通项目工具不同。',
       '- 若本次新建了项目，把新建项目 id 写入 bindProjectIds，系统会自动绑定到本目标。',
       '- 只有需要用户决定、授权、补信息、或遇到阻塞时，才把 needsUserInput 设为 true 或 notificationLevel 设为 notify。',
-      '- 正文输出给用户看的 Markdown 报告，重点写本次真实推进过程、结论、差距和下一步，不要把 JSON 直接展示给用户。',
-      `- 在正文末尾附加一个 HTML 注释：<!-- ${GOAL_RUN_METADATA_LABEL} { ... } -->，注释内只能放一段合法 JSON，供系统更新长期记忆和下次执行时间。`,
-      '',
-      '元数据 JSON schema:',
-      JSON.stringify({
-        progressSummary: '今天完成了什么和当前状态，一两句话',
-        gapToGoal: '距离目标仍缺什么，以及为什么重要',
-        nextPlan: ['下一步任务 1', '下一步任务 2'],
-        completedItems: ['本次完成项'],
-        importantAchievements: ['对后续有复用价值的重要成果'],
-        learnedSkills: ['本次学到的技能、方法、工具经验、项目约束或踩坑结论'],
-        blockers: ['阻塞点，没有则空数组'],
-        nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-        upcomingSchedule: [{ at: 'ISO 时间', title: '执行项标题', reason: '为什么这时执行' }],
-        bindProjectIds: ['本次新建的项目 id，没有则空数组'],
-        needsUserInput: false,
-        userQuestions: [{ id: 'q1', question: '需要用户决定的问题', options: ['选项 A', '选项 B'], reason: '为什么需要用户' }],
-        notificationLevel: 'silent',
-        memoryUpdates: [{ kind: 'progress_summary', title: '记忆标题', content: '长期可复用的信息', importance: 0.7 }]
-      }, null, 2)
+      '- 在最终 Markdown 报告前，必须调用 long_term_goal_record_run_result 记录 progressSummary、gapToGoal、nextPlan、completedItems、importantAchievements、learnedSkills、blockers、nextRunAt、upcomingSchedule、bindProjectIds、needsUserInput、userQuestions、notificationLevel、memoryUpdates。',
+      '- 正文输出给用户看的 Markdown 报告，重点写本次真实推进过程、结论、差距和下一步；不要输出 JSON，也不要附加 HTML 注释。'
     ].join('\n')
   }
 
@@ -2217,24 +2611,10 @@ export class LongTermGoalService {
       '## 长期记忆',
       memories || '暂无长期记忆。',
       '',
-      '请输出给用户看的 Markdown 每日复盘，不要把 JSON 直接展示给用户。正文之后附加 HTML 注释元数据，格式为：',
-      `<!-- ${GOAL_RUN_METADATA_LABEL} { ... } -->`,
-      '请根据今天进展刷新关键成果、技能方法和下一步计划，避免重复推进已经完成的事，并自行决定下一次推进时间 nextRunAt：',
-      JSON.stringify({
-        progressSummary: '今天整体进展和当前状态',
-        gapToGoal: '距离目标仍缺什么，以及为什么重要',
-        nextPlan: ['下一步任务 1', '下一步任务 2'],
-        completedItems: ['今天完成项'],
-        importantAchievements: ['今天沉淀的重要成果'],
-        learnedSkills: ['今天学到的技能、方法、工具经验、项目约束或踩坑结论'],
-        blockers: ['阻塞点，没有则空数组'],
-        nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-        upcomingSchedule: [{ at: 'ISO 时间', title: '执行项标题', reason: '为什么这时执行' }],
-        needsUserInput: false,
-        userQuestions: [{ id: 'q1', question: '需要用户决定的问题', options: ['选项 A', '选项 B'], reason: '为什么需要用户' }],
-        notificationLevel: 'silent',
-        memoryUpdates: [{ kind: 'daily_review', title: '每日总结', content: '长期可复用的复盘摘要', importance: 0.7 }]
-      }, null, 2)
+      '如果可用，优先调用 long_term_goal_update_schedule 同步 nextRunAt、upcomingSchedule 和 nextTasks；这是长期目标专属工具，和普通项目工具不同。',
+      '请根据今天进展刷新关键成果、技能方法和下一步计划，避免重复推进已经完成的事，并自行决定下一次推进时间 nextRunAt。',
+      '在最终 Markdown 复盘前，必须调用 long_term_goal_record_run_result 记录 progressSummary、gapToGoal、nextPlan、completedItems、importantAchievements、learnedSkills、blockers、nextRunAt、upcomingSchedule、needsUserInput、userQuestions、notificationLevel、memoryUpdates。',
+      '最终只输出给用户看的 Markdown 每日复盘；不要输出 JSON，也不要附加 HTML 注释。'
     ].join('\n')
   }
 
@@ -2273,7 +2653,7 @@ export class LongTermGoalService {
     }
     let savedTask: ScheduledTaskDefinition
     try {
-      savedTask = this.options.scheduledTaskService.saveTask(task)
+      savedTask = this.options.scheduledTaskService.saveTaskWhenIdle(task)
     } catch (error) {
       if (!existingTask) throw error
       console.warn('[long-term-goal-service] Failed to update running backing task:', (error as Error).message)
@@ -2305,7 +2685,7 @@ export class LongTermGoalService {
     }
     let savedReviewTask: ScheduledTaskDefinition
     try {
-      savedReviewTask = this.options.scheduledTaskService.saveTask(reviewTask)
+      savedReviewTask = this.options.scheduledTaskService.saveTaskWhenIdle(reviewTask)
     } catch (error) {
       if (!existingReviewTask) throw error
       console.warn('[long-term-goal-service] Failed to update running backing review task:', (error as Error).message)

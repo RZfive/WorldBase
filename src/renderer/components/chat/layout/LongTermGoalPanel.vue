@@ -1070,8 +1070,12 @@ watch(
 
 <style scoped>
 .goal-panel {
-  min-height: 100%;
-  overflow: auto;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
   padding: 18px;
   background: var(--app-chat-canvas);
   color: var(--app-text);
@@ -1089,12 +1093,14 @@ watch(
 
 .goal-titlebar,
 .goal-content {
-  max-width: 1180px;
+  width: 100%;
+  max-width: 1320px;
   margin: 0 auto;
 }
 
 .goal-titlebar {
   display: flex;
+  flex: 0 0 auto;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
@@ -1182,8 +1188,12 @@ watch(
 .goal-content {
   margin-top: 16px;
   display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 12px;
+  overflow: hidden;
 }
 
 .goal-overview-grid {
@@ -1203,7 +1213,7 @@ watch(
 }
 
 .goal-summary-card {
-  height: 168px;
+  height: 148px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1253,7 +1263,7 @@ button.goal-summary-card:hover,
   padding-left: 16px;
   overflow: auto;
   min-height: 0;
-  max-height: 118px;
+  max-height: 98px;
 }
 
 .goal-next-list li {
@@ -1272,7 +1282,7 @@ button.goal-summary-card:hover,
   gap: 5px;
   overflow: auto;
   min-height: 0;
-  max-height: 118px;
+  max-height: 98px;
 }
 
 .goal-intervention-item {
@@ -1350,11 +1360,13 @@ button.goal-summary-card:hover,
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-height: 0;
+  overflow: auto;
 }
 
 .goal-activity-list button {
   display: grid;
-  grid-template-columns: 150px 180px minmax(0, 1fr);
+  grid-template-columns: 118px 132px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   min-height: 44px;
@@ -1628,17 +1640,28 @@ button.goal-summary-card:hover,
 /* ── Activity + 24h schedule row ── */
 .goal-activity-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 220px;
+  grid-template-columns: minmax(420px, 0.9fr) minmax(340px, 0.58fr);
   gap: 12px;
   align-items: stretch;
+  min-height: 0;
 }
-.goal-activity-main { min-width: 0; }
+.goal-activity-main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 .goal-upcoming {
   border: 1px solid var(--app-border);
   border-radius: 8px;
   background: color-mix(in srgb, var(--app-panel) 92%, transparent);
   padding: 10px;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .goal-upcoming-replan {
   color: var(--app-accent);
@@ -1651,7 +1674,8 @@ button.goal-summary-card:hover,
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 280px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
 }
 .goal-upcoming-list li {

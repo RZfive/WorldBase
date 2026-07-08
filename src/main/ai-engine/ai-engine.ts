@@ -26,6 +26,11 @@ import type { FolderWorkspaceChangeEvent } from '../../shared/folder-workspace-t
 
 export type { StreamEvent, ProgressCallback, ProgressEvent }
 
+export interface CustomToolRegistration {
+  definition: ToolDefinition
+  handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>
+}
+
 export interface AIEngineServices {
   projectFS: ProjectFS
   runtimeManager: RuntimeManager
@@ -85,6 +90,7 @@ export interface AIRequestOptions {
   systemPromptSections?: string[]
   allowedToolNames?: string[]
   deniedToolNames?: string[]
+  customTools?: CustomToolRegistration[]
   /** Internal nesting depth used when this agent was spawned by another agent. */
   subagentNestingDepth?: number
 }
@@ -261,6 +267,9 @@ export class AIEngine {
     }
 
     registerAllTools(agent, toolServices)
+    for (const tool of options?.customTools || []) {
+      agent.registerTool(tool.definition.name, tool.definition, tool.handler)
+    }
     this.registerMcpTools(agent, options?.allowedMcpServerIds)
     agent.setActiveSkills(mergeUniqueStrings(this.activeSkillContents, options?.activeSkillContents))
     agent.setSystemPromptSections(systemPromptSections)
