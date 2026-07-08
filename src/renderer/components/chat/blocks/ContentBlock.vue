@@ -272,10 +272,13 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .message-output {
+  box-sizing: border-box;
   width: 100%;
+  min-width: 0;
   max-width: 100%;
   padding: 0;
   color: var(--app-text);
+  overflow-wrap: anywhere;
 }
 
 .message-output.user {
@@ -313,6 +316,8 @@ onBeforeUnmount(() => {
 
 .message-content-body {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .message-content-body > * + * {
@@ -325,6 +330,15 @@ onBeforeUnmount(() => {
 
 .message-text-group {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.message-text {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message-text-group > * + * {
@@ -513,6 +527,8 @@ onBeforeUnmount(() => {
 .message-output :deep(a) {
   color: var(--app-accent-strong);
   text-decoration: none;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message-output :deep(a:hover) {

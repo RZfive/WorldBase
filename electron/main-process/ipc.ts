@@ -1828,6 +1828,10 @@ export function setupIPC (): void {
     return longTermGoalService!.deleteGoal(goalId)
   })
 
+  ipcMain.handle('longTermGoals:deleteMemory', async (_event: IpcMainInvokeEvent, goalId: string, memoryId: string) => {
+    return longTermGoalService!.deleteGoalMemory(goalId, memoryId)
+  })
+
   ipcMain.handle('longTermGoals:runNow', async (_event: IpcMainInvokeEvent, goalId: string) => {
     return longTermGoalService!.runGoalNow(goalId)
   })

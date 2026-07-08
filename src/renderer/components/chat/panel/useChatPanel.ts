@@ -2010,6 +2010,14 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     }
   }
 
+  async function deleteLongTermGoalMemory (goalId: string, memoryId: string): Promise<void> {
+    if (!window.electronAPI?.deleteLongTermGoalMemory) return
+    const snapshot = await window.electronAPI.deleteLongTermGoalMemory(goalId, memoryId)
+    longTermGoalSnapshot.value = snapshot
+    await loadLongTermGoals()
+    await loadLongTermGoalSnapshot(goalId)
+  }
+
   async function sendLongTermGoalMessage (goalId: string, content: string): Promise<void> {
     if (!window.electronAPI?.streamLongTermGoalMessage) return
     const streamId = generateId()
@@ -3020,6 +3028,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     sendMessage,
     sendLongTermGoalMessage,
     compactLongTermGoalMemory,
+    deleteLongTermGoalMemory,
     applyLongTermGoalChangeSet,
     cancelLongTermGoalChangeSet,
     applyLongTermGoalCreation,

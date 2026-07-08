@@ -52,6 +52,7 @@ const emit = defineEmits<{
   (e: 'save-goal', goal: LongTermGoalDefinition, patch: Partial<LongTermGoalDefinition>): void
   (e: 'sendMessage', goalId: string, content: string): void
   (e: 'compactMemory', goalId: string): void
+  (e: 'deleteMemory', goalId: string, memoryId: string): void
   (e: 'applyChangeSet', changeSetId: string): void
   (e: 'cancelChangeSet', changeSetId: string): void
   (e: 'confirmCreation', changeSetId: string): void
@@ -83,6 +84,7 @@ const runDateFilter = ref('')
 const runPage = ref(1)
 const createProviderId = ref('')
 const createModelId = ref('')
+const selectedMemoryId = ref<string | null>(null)
 /** 可绑定项目列表 + 当前选中集合（projects 弹窗用）。 */
 interface BindableProject { id: string; name: string }
 const availableProjects = ref<BindableProject[]>([])
@@ -190,11 +192,21 @@ watch(
   () => props.goal?.id,
   () => {
     titleDraft.value = props.goal?.title || ''
+    selectedMemoryId.value = null
     closeDialog()
     runPage.value = 1
     runDateFilter.value = ''
   },
   { immediate: true }
+)
+
+watch(
+  () => visibleMemoryCards.value.map(memory => memory.id).join('|'),
+  () => {
+    if (selectedMemoryId.value && !visibleMemoryCards.value.some(memory => memory.id === selectedMemoryId.value)) {
+      selectedMemoryId.value = null
+    }
+  }
 )
 
 watch(
@@ -531,9 +543,9 @@ function compactMemory (): void {
   emit('compactMemory', goal.id)
 }
 
-function plainMemoryText (value: string): string {
+function readableMemoryText (value: string): string {
   return value
-    .replace(/```[\s\S]*?```/g, block => block.replace(/```[a-zA-Z0-9_-]*\n?/g, '').replace(/```/g, ''))
+    .replace(/```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
@@ -544,12 +556,36 @@ function plainMemoryText (value: string): string {
     .replace(/\*([^*]+)\*/g, '$1')
     .replace(/__([^_]+)__/g, '$1')
     .replace(/^>\s?/gm, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function plainMemoryText (value: string): string {
+  return readableMemoryText(value)
     .replace(/\s+/g, ' ')
     .trim()
 }
 
 function memoryPreview (memory: LongTermGoalMemoryEntry): string {
   return plainMemoryText(memory.content) || t('chatUi.noGoalMemoryContent')
+}
+
+function memoryDetailText (memory: LongTermGoalMemoryEntry): string {
+  return readableMemoryText(memory.content) || t('chatUi.noGoalMemoryContent')
+}
+
+function toggleMemoryCard (memory: LongTermGoalMemoryEntry): void {
+  selectedMemoryId.value = selectedMemoryId.value === memory.id ? null : memory.id
+}
+
+function deleteMemory (memory: LongTermGoalMemoryEntry): void {
+  const goal = props.goal
+  if (!goal) return
+  const ok = window.confirm(t('chatUi.deleteGoalMemoryConfirm', { title: memory.title }))
+  if (!ok) return
+  if (selectedMemoryId.value === memory.id) selectedMemoryId.value = null
+  emit('deleteMemory', goal.id, memory.id)
 }
 
 function memoryKindLabel (kind: LongTermGoalMemoryEntry['kind']): string {
@@ -994,14 +1030,37 @@ watch(
               {{ $t('chatUi.noGoalMemory') }}
             </div>
             <div v-else class="goal-memory-grid">
-              <article v-for="memory in visibleMemoryCards" :key="memory.id" class="goal-memory-card">
+              <article
+                v-for="memory in visibleMemoryCards"
+                :key="memory.id"
+                class="goal-memory-card"
+                :class="{ 'is-expanded': selectedMemoryId === memory.id }"
+                role="button"
+                tabindex="0"
+                :aria-expanded="selectedMemoryId === memory.id"
+                @click="toggleMemoryCard(memory)"
+                @keydown.enter.prevent="toggleMemoryCard(memory)"
+                @keydown.space.prevent="toggleMemoryCard(memory)"
+              >
                 <header>
                   <span>{{ memoryKindLabel(memory.kind) }}</span>
                   <strong>{{ memory.importance.toFixed(2) }}</strong>
                 </header>
                 <h3>{{ memory.title }}</h3>
-                <p>{{ memoryPreview(memory) }}</p>
-                <footer>{{ formatTime(memory.updatedAt) }}</footer>
+                <p v-if="selectedMemoryId !== memory.id">{{ memoryPreview(memory) }}</p>
+                <pre v-else class="goal-memory-card-full">{{ memoryDetailText(memory) }}</pre>
+                <footer>
+                  <span>{{ formatTime(memory.updatedAt) }}</span>
+                  <button
+                    type="button"
+                    class="goal-memory-delete-btn"
+                    @click.stop="deleteMemory(memory)"
+                    @keydown.enter.stop
+                    @keydown.space.stop
+                  >
+                    {{ $t('common.delete') }}
+                  </button>
+                </footer>
               </article>
             </div>
           </div>
@@ -1574,6 +1633,26 @@ button.goal-summary-card:hover,
   border-radius: 8px;
   padding: 10px;
   background: color-mix(in srgb, var(--app-panel) 92%, transparent);
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.goal-memory-card:hover,
+.goal-memory-card:focus-visible {
+  border-color: color-mix(in srgb, var(--app-accent) 42%, var(--app-border));
+  background: color-mix(in srgb, var(--app-panel) 98%, transparent);
+}
+
+.goal-memory-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 52%, transparent);
+  outline-offset: 2px;
+}
+
+.goal-memory-card.is-expanded {
+  grid-column: span 2;
+  min-height: 260px;
+  border-color: color-mix(in srgb, var(--app-accent) 48%, var(--app-border));
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
 }
 
 .goal-memory-card header,
@@ -1623,9 +1702,55 @@ button.goal-summary-card:hover,
   line-height: 1.45;
 }
 
+.goal-memory-card-full {
+  margin: 0;
+  flex: 1 1 auto;
+  min-height: 140px;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  background: color-mix(in srgb, var(--app-chat-canvas) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
+  border-radius: 8px;
+  padding: 10px;
+}
+
 .goal-memory-card footer {
-  justify-content: flex-start;
   margin-top: auto;
+}
+
+.goal-memory-card footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-memory-delete-btn {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, #dc2626 30%, var(--app-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, #dc2626 7%, var(--app-panel));
+  color: #b91c1c;
+  padding: 4px 8px;
+  font-size: 0.72rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.goal-memory-delete-btn:hover {
+  background: color-mix(in srgb, #dc2626 12%, var(--app-panel));
+}
+
+@media (max-width: 860px) {
+  .goal-memory-card.is-expanded {
+    grid-column: span 1;
+  }
 }
 
 .goal-memory-empty {

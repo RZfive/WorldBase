@@ -60,6 +60,7 @@ function getHostLabel (url: string): string {
   border-bottom: 1px solid var(--app-border);
   color: var(--app-text);
   font-size: 0.8em;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -70,11 +71,14 @@ function getHostLabel (url: string): string {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .web-search-item {
+  min-width: 0;
   padding: 10px 0 0;
   border-top: 1px solid var(--app-border);
+  overflow-wrap: anywhere;
 }
 
 .web-search-item:first-child {
@@ -87,6 +91,7 @@ function getHostLabel (url: string): string {
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
+  min-width: 0;
 }
 
 .web-search-rank {
@@ -104,16 +109,22 @@ function getHostLabel (url: string): string {
 }
 
 .web-search-source {
+  min-width: 0;
   font-size: 0.74em;
   color: var(--app-text-muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .web-search-link {
+  display: block;
   color: var(--app-accent-strong);
   text-decoration: none;
   font-size: 0.84em;
   font-weight: 600;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .web-search-link:hover {
@@ -125,6 +136,8 @@ function getHostLabel (url: string): string {
   color: var(--app-text-soft);
   font-size: 0.78em;
   line-height: 1.55;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .web-search-empty {

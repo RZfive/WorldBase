@@ -693,6 +693,7 @@ const enUS: MessageSchema = {
     goalMemoryCompactionDone: 'Organization complete',
     goalMemoryCompactionDoneDetail: 'Long-term memory has been updated and the execution brief was refreshed.',
     goalMemoryCompactionFailed: 'Organization failed',
+    deleteGoalMemoryConfirm: 'Delete memory "{title}"? The execution brief will be refreshed afterwards.',
     noGoalMemoryContent: 'No readable summary for this memory yet',
     goalMemoryKindGoalProfile: 'Goal profile',
     goalMemoryKindExecutionBrief: 'Execution brief',
