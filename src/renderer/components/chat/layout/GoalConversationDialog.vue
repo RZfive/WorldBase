@@ -146,9 +146,11 @@ function buildAttachmentPrompt (): string {
     <div v-if="open" class="goal-dialog-backdrop" @click.self="emit('close')">
       <section class="goal-dialog" role="dialog" aria-modal="true">
         <header class="goal-dialog-head">
-          <div>
+          <div class="goal-dialog-titleline">
             <h2>{{ title }}</h2>
             <p v-if="subtitle">{{ subtitle }}</p>
+          </div>
+          <div class="goal-dialog-head-controls">
             <ProviderModelDropdown
               v-if="allowInput && providers.length > 0"
               class="goal-dialog-provider"
@@ -160,8 +162,9 @@ function buildAttachmentPrompt (): string {
               @update:selected-model="(model) => emit('update:selected-model', model)"
               @select="(payload) => emit('select', payload)"
             />
+            <slot name="header-actions" />
+            <button type="button" class="goal-dialog-close" @click="emit('close')">×</button>
           </div>
-          <button type="button" class="goal-dialog-close" @click="emit('close')">×</button>
         </header>
 
         <div class="goal-dialog-messages">
@@ -239,33 +242,62 @@ function buildAttachmentPrompt (): string {
 
 .goal-dialog-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 16px 18px;
+  gap: 12px;
+  min-height: 50px;
+  padding: 9px 12px 9px 16px;
   border-bottom: 1px solid var(--app-border);
   background: color-mix(in srgb, var(--app-panel) 96%, transparent);
 }
 
+.goal-dialog-titleline {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex: 1 1 auto;
+}
+
 .goal-dialog-head h2 {
   margin: 0;
-  font-size: 1.05rem;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
   letter-spacing: 0;
 }
 
 .goal-dialog-head p {
-  margin: 4px 0 0;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--app-text-muted);
-  font-size: 0.84rem;
+  font-size: 0.8rem;
+}
+
+.goal-dialog-head-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-width: 0;
 }
 
 .goal-dialog-provider {
-  margin-top: 10px;
+  width: min(300px, 32vw);
+  min-width: 180px;
 }
 
 .goal-dialog-close {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
   border: 1px solid var(--app-border);
   border-radius: 8px;
   background: var(--app-panel-muted);
@@ -285,5 +317,22 @@ function buildAttachmentPrompt (): string {
   flex: 1 1 auto;
   height: 100%;
   min-height: 0;
+}
+
+@media (max-width: 760px) {
+  .goal-dialog-head {
+    align-items: flex-start;
+  }
+
+  .goal-dialog-titleline {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  .goal-dialog-provider {
+    width: min(220px, 42vw);
+    min-width: 140px;
+  }
 }
 </style>

@@ -81,6 +81,17 @@ interface ParsedGoalRunResult {
   memoryUpdates: Array<{ kind?: LongTermGoalMemoryEntry['kind']; title: string; content: string; importance?: number }>
 }
 
+interface GoalMemoryCompactionPlan {
+  summary: string
+  memories: Array<{
+    kind: LongTermGoalMemoryEntry['kind']
+    title: string
+    content: string
+    importance: number
+    sourceMemoryIds: string[]
+  }>
+}
+
 const GOAL_REPLAN_METADATA_LABEL = 'LONG_TERM_GOAL_REPLAN_METADATA'
 
 const MAX_RUN_HISTORY = 120
@@ -94,6 +105,7 @@ const LONG_TERM_GOAL_TASK_MARKER = '[LongTermGoal]'
 const LONG_TERM_GOAL_REVIEW_MARKER = '[LongTermGoalReview]'
 const GOAL_RUN_METADATA_LABEL = 'LONG_TERM_GOAL_RUN_METADATA'
 const GOAL_ADJUSTMENT_METADATA_LABEL = 'LONG_TERM_GOAL_ADJUSTMENT_METADATA'
+const LONG_TERM_GOAL_MEMORY_KINDS: LongTermGoalMemoryEntry['kind'][] = ['goal_profile', 'execution_brief', 'achievement', 'skill', 'progress_summary', 'daily_review', 'decision', 'blocker', 'plan', 'artifact']
 const GOAL_ADJUSTMENT_SAFE_TOOL_NAME_PATTERNS: RegExp[] = [
   /^list_/i,
   /^read_/i,
@@ -193,6 +205,56 @@ function compactText (value: string, maxLength: number): string {
   const normalized = value.replace(/\s+/g, ' ').trim()
   if (normalized.length <= maxLength) return normalized
   return `${normalized.slice(0, maxLength - 3)}...`
+}
+
+function limitMultilineText (value: string, maxLength: number): string {
+  const normalized = value.trim()
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, maxLength - 14).trim()}\n\n[truncated]`
+}
+
+function normalizeMemoryKind (value: unknown, fallback: LongTermGoalMemoryEntry['kind'] = 'progress_summary'): LongTermGoalMemoryEntry['kind'] {
+  const kind = normalizeString(value) as LongTermGoalMemoryEntry['kind']
+  if (LONG_TERM_GOAL_MEMORY_KINDS.includes(kind)) return kind
+  return fallback
+}
+
+function normalizeImportance (value: unknown, fallback = 0.6): number {
+  const numberValue = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numberValue)) return fallback
+  return Math.max(0, Math.min(1, numberValue))
+}
+
+function normalizeGoalMemoryCompactionPlan (value: Record<string, unknown>): GoalMemoryCompactionPlan | null {
+  const rawMemories = Array.isArray(value.memories) ? value.memories : []
+  const seen = new Set<string>()
+  const memories: GoalMemoryCompactionPlan['memories'] = []
+
+  for (const item of rawMemories) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const record = item as Record<string, unknown>
+    const kind = normalizeMemoryKind(record.kind)
+    if (kind === 'execution_brief') continue
+    const title = compactText(normalizeString(record.title), 120)
+    const content = limitMultilineText(normalizeString(record.content), 4000)
+    if (!title || !content) continue
+    const key = `${kind}:${title.toLowerCase()}:${compactText(content, 180).toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    memories.push({
+      kind,
+      title,
+      content,
+      importance: normalizeImportance(record.importance),
+      sourceMemoryIds: normalizeStringArray(record.source_memory_ids || record.sourceMemoryIds)
+    })
+  }
+
+  if (memories.length === 0 && rawMemories.length > 0) return null
+  return {
+    summary: compactText(normalizeString(value.summary) || 'AI 已整理长期目标记忆。', 420),
+    memories: memories.slice(0, MAX_MEMORY_ENTRIES - 1)
+  }
 }
 
 function dateKeyFromIso (value?: string | null): string {
@@ -1919,6 +1981,161 @@ export class LongTermGoalService {
     return this.getGoal(goalId)!
   }
 
+  async compactGoalMemoryWithAI (
+    goalId: string,
+    onEvent?: (event: LongTermGoalStreamEvent) => void
+  ): Promise<LongTermGoalSnapshot> {
+    const goal = this.getGoalOrThrow(goalId)
+    const editableMemories = this.snapshot.memories
+      .filter(item => item.goalId === goalId && item.kind !== 'execution_brief')
+
+    if (editableMemories.length === 0) {
+      this.refreshExecutionBrief(goalId)
+      this.addActivity({
+        goalId,
+        actor: 'system',
+        type: 'memory_compacted',
+        title: '长期记忆无需整理',
+        summary: '当前没有可合并或删除的长期记忆。'
+      })
+      this.persistAndEmit()
+      onEvent?.({ type: 'done', message: { role: 'assistant', content: '当前没有可合并或删除的长期记忆，执行记忆包已刷新。' } })
+      return this.getSnapshot(goalId)
+    }
+
+    const compactionState: { plan: GoalMemoryCompactionPlan | null } = { plan: null }
+    const customTools: CustomToolRegistration[] = [{
+      definition: {
+        name: 'long_term_goal_apply_memory_compaction',
+        description: 'Long-term goal custom tool: submit the cleaned, deduplicated, canonical memory set for this goal. Use it exactly once when manually organizing long-term goal memory.',
+        parameters: {
+          type: 'object',
+          properties: {
+            summary: {
+              type: 'string',
+              description: 'Short human-readable summary of what was removed, merged, and preserved.'
+            },
+            memories: {
+              type: 'array',
+              description: 'Canonical long-term memories to keep after deleting useless, stale, or duplicate memories. Do not include execution_brief; the system regenerates it.',
+              items: {
+                type: 'object',
+                properties: {
+                  kind: {
+                    type: 'string',
+                    enum: LONG_TERM_GOAL_MEMORY_KINDS.filter(kind => kind !== 'execution_brief')
+                  },
+                  title: { type: 'string' },
+                  content: { type: 'string' },
+                  importance: { type: 'number' },
+                  source_memory_ids: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Original memory ids that were preserved or merged into this memory.'
+                  }
+                },
+                required: ['kind', 'title', 'content']
+              }
+            }
+          },
+          required: ['summary', 'memories']
+        }
+      },
+      handler: async (args, onProgress) => {
+        const plan = normalizeGoalMemoryCompactionPlan(args)
+        if (!plan) {
+          throw new Error('记忆整理结果为空，请提交至少一条有效记忆，或传入空 memories 表示全部无效。')
+        }
+        compactionState.plan = plan
+        onProgress?.('整理长期目标记忆', `保留 ${plan.memories.length} 条，原始 ${editableMemories.length} 条`)
+        return {
+          success: true,
+          tool: 'long_term_goal_apply_memory_compaction',
+          goalId,
+          keptCount: plan.memories.length,
+          originalCount: editableMemories.length,
+          requiresHiddenJson: false
+        }
+      }
+    }]
+
+    const contentParts: string[] = []
+    const thinkingParts: string[] = []
+
+    try {
+      for await (const event of this.options.aiEngine.chatStream(this.buildMemoryCompactionMessages(goal, editableMemories), undefined, {
+        providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'high', 0.2),
+        allowedToolNames: customTools.map(tool => tool.definition.name),
+        customTools,
+        systemPromptSections: [
+          [
+            '## Long-term goal memory organization mode',
+            '- This mode has exactly one custom mutation tool: `long_term_goal_apply_memory_compaction`.',
+            '- Use that tool to submit the final canonical memory set; do not encode memory changes in hidden JSON or HTML comments.',
+            '- Delete useless, vague, duplicated, superseded, or purely mechanical memories.',
+            '- Preserve durable user decisions, current blockers, goal definition, reusable achievements, methods, constraints, plans, and artifacts.',
+            '- The system regenerates the execution brief after the tool call.'
+          ].join('\n')
+        ]
+      })) {
+        if (event.type !== 'done') {
+          onEvent?.(event as LongTermGoalStreamEvent)
+        }
+        if (event.type === 'thinking' && event.content) {
+          thinkingParts.push(event.content)
+          continue
+        }
+        if (event.type === 'token' && event.content) {
+          contentParts.push(event.content)
+          continue
+        }
+        if (event.type === 'done') {
+          if (event.thinking) thinkingParts.push(event.thinking)
+          break
+        }
+      }
+    } catch (error) {
+      const errorMessage = (error as Error)?.message || '长期记忆整理失败。'
+      onEvent?.({ type: 'error', error: errorMessage })
+      throw error
+    }
+
+    const plan = compactionState.plan
+    if (!plan) {
+      this.refreshExecutionBrief(goalId)
+      this.addActivity({
+        goalId,
+        actor: 'system',
+        type: 'memory_compacted',
+        title: 'AI 记忆整理未应用',
+        summary: 'AI 没有调用长期目标记忆整理工具，未改动原始记忆。'
+      })
+      this.persistAndEmit()
+      const fallbackContent = 'AI 没有提交可应用的记忆整理结果，原始记忆保持不变。'
+      onEvent?.({
+        type: 'done',
+        message: { role: 'assistant', content: fallbackContent },
+        thinking: thinkingParts.join('') || undefined
+      })
+      return this.getSnapshot(goalId)
+    }
+
+    this.applyGoalMemoryCompactionPlan(goalId, plan, editableMemories.length)
+    this.persistAndEmit()
+    const keptCount = Math.min(
+      plan.memories.length + (plan.memories.some(memory => memory.kind === 'goal_profile') ? 0 : 1),
+      MAX_MEMORY_ENTRIES - 1
+    )
+    const finalContent = stripAssistantJson(contentParts.join('')) ||
+      `已整理长期记忆：从 ${editableMemories.length} 条收敛为 ${keptCount} 条，并刷新了执行记忆包。`
+    onEvent?.({
+      type: 'done',
+      message: { role: 'assistant', content: finalContent },
+      thinking: thinkingParts.join('') || undefined
+    })
+    return this.getSnapshot(goalId)
+  }
+
   private buildReplanPrompt (goal: LongTermGoalDefinition, triggerReason: string): string {
     const recentActivities = this.snapshot.activities
       .filter(item => item.goalId === goal.id)
@@ -2936,6 +3153,110 @@ export class LongTermGoalService {
       createdAt: nowIso(),
       ...input
     })
+  }
+
+  private buildMemoryCompactionMessages (
+    goal: LongTermGoalDefinition,
+    memories: LongTermGoalMemoryEntry[]
+  ): ChatMessage[] {
+    const sortedMemories = [...memories]
+      .sort((left, right) => {
+        if (right.importance !== left.importance) return right.importance - left.importance
+        return right.updatedAt.localeCompare(left.updatedAt)
+      })
+      .slice(0, 150)
+      .map(item => ({
+        id: item.id,
+        kind: item.kind,
+        title: item.title,
+        importance: item.importance,
+        sourceRunId: item.sourceRunId || null,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+        content: limitMultilineText(item.content, 900)
+      }))
+
+    return [
+      {
+        role: 'system',
+        content: [
+          '你正在整理一个长期目标的长期记忆。',
+          '必须调用 long_term_goal_apply_memory_compaction 一次，提交整理后的 canonical memories。',
+          '不要在正文里输出 JSON，不要使用 HTML 注释承载状态变更。',
+          '整理原则：删除空泛、重复、过期、被更近总结覆盖、只说明系统刷新执行记忆包的记录；合并表达同一事实的记录；保留用户确认的决定、当前阻塞、目标定义、可复用成果/技能/约束、当前计划和关键产物。',
+          '不要输出 execution_brief 类型记忆，系统会根据整理后的记忆重新生成执行记忆包。',
+          '重要度 importance 取 0 到 1：用户决定/阻塞/目标定义通常较高，可复用成果和方法次之，普通日常总结较低。',
+          '最终正文用一句话告诉用户整理完成即可。'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          '## 当前长期目标',
+          `id: ${goal.id}`,
+          `标题：${goal.title}`,
+          `目标：${goal.objective}`,
+          `当前阶段：${goal.currentPhase || '持续推进'}`,
+          `当前进展：${goal.progressSummary || '暂无'}`,
+          `当前差距：${goal.gapSummary || '暂无'}`,
+          '',
+          '## 待整理记忆',
+          JSON.stringify(sortedMemories, null, 2)
+        ].join('\n')
+      }
+    ]
+  }
+
+  private applyGoalMemoryCompactionPlan (
+    goalId: string,
+    plan: GoalMemoryCompactionPlan,
+    originalCount: number
+  ): void {
+    const goal = this.getGoalOrThrow(goalId)
+    const now = nowIso()
+    const compactedMemories: LongTermGoalMemoryEntry[] = plan.memories.map(memory => ({
+      id: generateId('goal_memory'),
+      goalId,
+      kind: memory.kind,
+      title: memory.title,
+      content: memory.content,
+      importance: memory.importance,
+      sourceRunId: null,
+      createdAt: now,
+      updatedAt: now
+    }))
+    if (!compactedMemories.some(memory => memory.kind === 'goal_profile')) {
+      compactedMemories.unshift({
+        id: generateId('goal_memory'),
+        goalId,
+        kind: 'goal_profile',
+        title: '目标定义',
+        content: `${goal.title}\n${goal.objective}\n节奏：${scheduleSummary(goal.schedule)}`,
+        importance: 0.9,
+        sourceRunId: null,
+        createdAt: now,
+        updatedAt: now
+      })
+    }
+    const keptMemories = compactedMemories.slice(0, MAX_MEMORY_ENTRIES - 1)
+    const otherGoalMemories = this.snapshot.memories.filter(item => item.goalId !== goalId)
+    this.snapshot.memories = [...keptMemories, ...otherGoalMemories]
+    this.addActivity({
+      goalId,
+      actor: 'ai',
+      type: 'memory_compacted',
+      title: 'AI 已整理长期记忆',
+      summary: plan.summary || `从 ${originalCount} 条记忆收敛为 ${keptMemories.length} 条。`,
+      details: JSON.stringify({
+        originalCount,
+        keptCount: keptMemories.length,
+        mergedSources: plan.memories
+          .filter(memory => memory.sourceMemoryIds.length > 0)
+          .map(memory => ({ title: memory.title, sourceMemoryIds: memory.sourceMemoryIds }))
+      }, null, 2)
+    })
+    this.refreshExecutionBrief(goalId)
+    this.updateGoalMemorySummary(goalId)
   }
 
   private writeMemory (goalId: string, input: {

@@ -581,24 +581,24 @@ watch(
 }
 
 .conversation-item-compact .conv-actions {
-  position: relative;
-  flex: 0 0 22px;
-  width: 22px;
-  min-width: 22px;
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  width: auto;
+  min-width: 0;
   height: 22px;
   display: flex;
   align-items: center;
   gap: 1px;
-  margin-left: 4px;
   z-index: 2;
   justify-content: flex-end;
   pointer-events: none;
+  transform: translateY(-50%);
 }
 
 .conversation-item-compact.has-dual-actions .conv-actions {
-  flex-basis: 42px;
-  width: 42px;
-  min-width: 42px;
+  width: auto;
+  min-width: 0;
 }
 
 .conversation-item-compact .conv-actions::before {

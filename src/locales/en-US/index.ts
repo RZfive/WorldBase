@@ -685,6 +685,8 @@ const enUS: MessageSchema = {
     replanning: 'Replanning based on your answer…',
     autoCompressed: 'Auto compressed',
     noGoalMemory: 'No long-term memory yet',
+    compactGoalMemory: 'Organize memory',
+    goalMemoryCompacting: 'Organizing…',
     needsYou: 'Needs you',
     needsDecision: 'Decision needed',
     noNeedToAct: 'No action needed',

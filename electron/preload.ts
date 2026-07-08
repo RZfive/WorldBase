@@ -657,6 +657,7 @@ export interface ElectronAPI {
   setLongTermGoalStatus: (goalId: string, status: LongTermGoalDefinition['status']) => Promise<LongTermGoalDefinition>
   deleteLongTermGoal: (goalId: string) => Promise<boolean>
   runLongTermGoalNow: (goalId: string) => Promise<ScheduledTaskRunReport>
+  compactLongTermGoalMemory: (goalId: string, streamId?: string) => Promise<LongTermGoalSnapshot>
   sendLongTermGoalMessage: (goalId: string, content: string) => Promise<LongTermGoalMessageResult>
   streamLongTermGoalMessage: (goalId: string, content: string, streamId: string) => Promise<LongTermGoalMessageResult>
   streamLongTermGoalCreate: (content: string, options: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] } | undefined, streamId: string) => Promise<LongTermGoalMessageResult>
@@ -953,6 +954,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setLongTermGoalStatus: (goalId: string, status: LongTermGoalDefinition['status']) => ipcRenderer.invoke('longTermGoals:setStatus', goalId, status),
   deleteLongTermGoal: (goalId: string) => ipcRenderer.invoke('longTermGoals:delete', goalId),
   runLongTermGoalNow: (goalId: string) => ipcRenderer.invoke('longTermGoals:runNow', goalId),
+  compactLongTermGoalMemory: (goalId: string, streamId?: string) => ipcRenderer.invoke('longTermGoals:compactMemory', goalId, streamId),
   sendLongTermGoalMessage: (goalId: string, content: string) => ipcRenderer.invoke('longTermGoals:message', goalId, content),
   streamLongTermGoalMessage: (goalId: string, content: string, streamId: string) => ipcRenderer.invoke('longTermGoals:streamMessage', goalId, content, streamId),
   streamLongTermGoalCreate: (content: string, options: { providerId?: string | null; modelId?: string | null; selectedMcpServerIds?: string[] } | undefined, streamId: string) => ipcRenderer.invoke('longTermGoals:streamCreate', content, options, streamId),

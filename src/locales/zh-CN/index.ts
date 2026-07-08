@@ -686,6 +686,8 @@ const zhCN = {
     replanning: '正在根据你的回答重新规划…',
     autoCompressed: '自动压缩',
     noGoalMemory: '暂无长期记忆',
+    compactGoalMemory: '整理记忆',
+    goalMemoryCompacting: '整理中…',
     needsYou: '需要你',
     needsDecision: '待决定',
     noNeedToAct: '无需处理',
