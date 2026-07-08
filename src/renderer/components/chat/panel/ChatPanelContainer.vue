@@ -123,7 +123,7 @@ const {
   streamingCreate,
   streamingRun,
   streamingReplan,
-  streamingMemory,
+  memoryCompaction,
   createConversationHistory,
   goalAutoOpenRunId,
   clearGoalAutoOpenRunId,
@@ -679,7 +679,7 @@ watch(
           :streaming-create="streamingCreate"
           :streaming-run="streamingRun"
           :streaming-replan="streamingReplan"
-          :streaming-memory="streamingMemory"
+          :memory-compaction="memoryCompaction"
           :create-conversation-history="createConversationHistory"
           :pending-creation-confirm="pendingCreationConfirm"
           :goal-auto-open-run-id="goalAutoOpenRunId"

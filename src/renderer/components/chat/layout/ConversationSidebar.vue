@@ -229,7 +229,6 @@ function cancelRenameConversation () {
         >
           <span class="conv-section-toggle-copy">
             <span class="conv-section-title">Agent</span>
-            <span class="conv-section-hint">{{ $t('chatUi.agentSectionHint') }}</span>
           </span>
           <span class="conv-section-meta">{{ filteredAgentItems.length }}/{{ props.agentItems.length }}</span>
           <span class="conv-section-caret-shell" aria-hidden="true">
@@ -266,7 +265,6 @@ function cancelRenameConversation () {
         >
           <span class="conv-section-toggle-copy">
             <span class="conv-section-title">{{ $t('chatUi.groups') }}</span>
-            <span class="conv-section-hint">{{ $t('chatUi.groupSectionHint') }}</span>
           </span>
           <span class="conv-section-meta">{{ filteredGroupItems.length }}/{{ props.groupItems.length }}</span>
           <span class="conv-section-caret-shell" aria-hidden="true">
@@ -303,8 +301,7 @@ function cancelRenameConversation () {
             @click="toggleSection('longTermGoals')"
           >
             <span class="conv-section-toggle-copy">
-              <span class="conv-section-title">{{ $t('chatUi.longTermGoals') }}</span>
-              <span class="conv-section-hint">{{ $t('chatUi.longTermGoalSectionHint') }}</span>
+              <span class="conv-section-title">{{ $t('chatUi.longTermGoalsShort') }}</span>
             </span>
             <span class="conv-section-meta">{{ filteredLongTermGoalItems.length }}/{{ props.longTermGoalItems.length }}</span>
           </button>
@@ -365,7 +362,6 @@ function cancelRenameConversation () {
           >
             <span class="conv-section-toggle-copy">
               <span class="conv-section-title">{{ $t('appShell.chat') }}</span>
-              <span class="conv-section-hint">{{ $t('chatUi.conversationSectionHint') }}</span>
             </span>
             <span class="conv-section-meta">{{ filteredConversationCount }}/{{ props.conversationItems.length }}</span>
           </button>
@@ -716,9 +712,7 @@ function cancelRenameConversation () {
 .conv-section-toggle-copy {
   flex: 1;
   display: flex;
-  flex-direction: row;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
   min-width: 0;
 }
 
@@ -728,15 +722,6 @@ function cancelRenameConversation () {
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-}
-
-.conv-section-hint {
-  color: var(--app-text-faint);
-  font-size: 0.68rem;
-  line-height: 1.2;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .conv-section-meta {

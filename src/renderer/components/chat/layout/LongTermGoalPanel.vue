@@ -5,13 +5,22 @@ import GoalConversationDialog from './GoalConversationDialog.vue'
 import GoalCreationConfirmCard from './GoalCreationConfirmCard.vue'
 import ProviderModelDropdown from './ProviderModelDropdown.vue'
 import type { ChatMessage, ChatMessageBlock, ToolRun } from '../types'
-import type { LongTermGoalConversationTurn, LongTermGoalMessageResult } from '../../../../shared/long-term-goal-types'
+import type { LongTermGoalConversationTurn, LongTermGoalMemoryEntry, LongTermGoalMessageResult } from '../../../../shared/long-term-goal-types'
 
 interface ProviderItem {
   id: string
   name: string
   models: string[]
   activeModel?: string
+}
+
+interface LongTermGoalMemoryCompactionProgress {
+  goalId: string
+  status: 'running' | 'completed' | 'failed'
+  stage: string
+  detail?: string
+  percent: number
+  error?: string
 }
 
 const props = defineProps<{
@@ -26,7 +35,7 @@ const props = defineProps<{
   streamingAdjust?: { userContent: string; message: ChatMessage } | null
   streamingCreate?: { userContent: string; message: ChatMessage } | null
   streamingRun?: { goalId: string; run: LongTermGoalRun } | null
-  streamingMemory?: { goalId: string; message: ChatMessage } | null
+  memoryCompaction?: LongTermGoalMemoryCompactionProgress | null
   createConversationHistory?: ChatMessage[]
   pendingCreationConfirm?: { changeSet: LongTermGoalChangeSet; proposal: NonNullable<LongTermGoalMessageResult['proposal']> } | null
   goalAutoOpenRunId?: string | null
@@ -96,7 +105,21 @@ const openInterventions = computed(() => (props.goal?.openInterventions || []).f
 const selectedIntervention = computed(() => openInterventions.value.find(item => item.id === activeInterventionId.value) || openInterventions.value[0] || null)
 const activeRun = computed(() => runs.value.find(item => item.id === activeRunId.value) || null)
 const nextTasks = computed(() => props.goal?.nextTasks.filter(item => item.status !== 'done' && item.status !== 'skipped').slice(0, 8) || [])
-const memoryCompacting = computed(() => Boolean(props.goal?.id && props.streamingMemory?.goalId === props.goal.id))
+const activeMemoryCompaction = computed(() => (
+  props.goal?.id && props.memoryCompaction?.goalId === props.goal.id
+    ? props.memoryCompaction
+    : null
+))
+const memoryCompacting = computed(() => activeMemoryCompaction.value?.status === 'running')
+const memoryProgressPercent = computed(() => Math.max(0, Math.min(100, activeMemoryCompaction.value?.percent ?? 0)))
+const memoryProgressLabel = computed(() => `${Math.round(memoryProgressPercent.value)}%`)
+const visibleMemoryCards = computed(() => {
+  return [...memories.value]
+    .sort((left, right) => {
+      if (right.importance !== left.importance) return right.importance - left.importance
+      return right.updatedAt.localeCompare(left.updatedAt)
+    })
+})
 
 /** 未来 24 小时执行时间表（按时间升序），来自 AI 输出 + nextTasks 补充。 */
 const upcoming24h = computed(() => {
@@ -463,20 +486,6 @@ const interventionMessages = computed<ChatMessage[]>(() => {
   return [asAssistantMessage(content)]
 })
 
-const memoryMessages = computed<ChatMessage[]>(() => {
-  const content = [
-    `# ${t('chatUi.goalMemory')}`,
-    memories.value.length === 0
-      ? t('chatUi.noGoalMemory')
-      : memories.value.map(memory => `## ${memory.title}\n\n\`${memory.kind}\` · ${memory.importance.toFixed(2)}\n\n${memory.content}`).join('\n\n')
-  ].join('\n\n')
-  const base = [asAssistantMessage(content)]
-  if (props.streamingMemory && props.streamingMemory.goalId === props.goal?.id) {
-    return [...base, props.streamingMemory.message]
-  }
-  return base
-})
-
 const adjustMessages = computed<ChatMessage[]>(() => {
   const turns = [...conversations.value]
     .filter(turn => turn.goalId === props.goal?.id)
@@ -520,6 +529,43 @@ function compactMemory (): void {
   const goal = props.goal
   if (!goal || memoryCompacting.value) return
   emit('compactMemory', goal.id)
+}
+
+function plainMemoryText (value: string): string {
+  return value
+    .replace(/```[\s\S]*?```/g, block => block.replace(/```[a-zA-Z0-9_-]*\n?/g, '').replace(/```/g, ''))
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*\d+\.\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/^>\s?/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function memoryPreview (memory: LongTermGoalMemoryEntry): string {
+  return plainMemoryText(memory.content) || t('chatUi.noGoalMemoryContent')
+}
+
+function memoryKindLabel (kind: LongTermGoalMemoryEntry['kind']): string {
+  const keyMap: Record<LongTermGoalMemoryEntry['kind'], string> = {
+    goal_profile: 'chatUi.goalMemoryKindGoalProfile',
+    execution_brief: 'chatUi.goalMemoryKindExecutionBrief',
+    achievement: 'chatUi.goalMemoryKindAchievement',
+    skill: 'chatUi.goalMemoryKindSkill',
+    progress_summary: 'chatUi.goalMemoryKindProgress',
+    daily_review: 'chatUi.goalMemoryKindDailyReview',
+    decision: 'chatUi.goalMemoryKindDecision',
+    blocker: 'chatUi.goalMemoryKindBlocker',
+    plan: 'chatUi.goalMemoryKindPlan',
+    artifact: 'chatUi.goalMemoryKindArtifact'
+  }
+  return t(keyMap[kind])
 }
 
 /** 打开绑定项目弹窗：拉项目列表 + 初始化选中集合为当前绑定。 */
@@ -913,7 +959,7 @@ watch(
         :open="activeDialog === 'memory'"
         :title="$t('chatUi.goalMemory')"
         :subtitle="goal.title"
-        :messages="memoryMessages"
+        :messages="[]"
         @close="closeDialog"
       >
         <template #header-actions>
@@ -925,6 +971,40 @@ watch(
           >
             {{ memoryCompacting ? $t('chatUi.goalMemoryCompacting') : $t('chatUi.compactGoalMemory') }}
           </button>
+        </template>
+        <template #messages>
+          <div class="goal-memory-panel">
+            <div v-if="activeMemoryCompaction" class="goal-memory-compacting">
+              <section
+                class="goal-memory-progress-card"
+                :class="`is-${activeMemoryCompaction.status}`"
+                role="status"
+              >
+                <div class="goal-memory-progress-head">
+                  <strong>{{ activeMemoryCompaction.stage }}</strong>
+                  <span>{{ memoryProgressLabel }}</span>
+                </div>
+                <div class="goal-memory-progress-track" aria-hidden="true">
+                  <span :style="{ width: `${memoryProgressPercent}%` }"></span>
+                </div>
+                <p>{{ activeMemoryCompaction.error || activeMemoryCompaction.detail || $t('chatUi.goalMemoryCompactingDetail') }}</p>
+              </section>
+            </div>
+            <div v-else-if="visibleMemoryCards.length === 0" class="goal-memory-empty">
+              {{ $t('chatUi.noGoalMemory') }}
+            </div>
+            <div v-else class="goal-memory-grid">
+              <article v-for="memory in visibleMemoryCards" :key="memory.id" class="goal-memory-card">
+                <header>
+                  <span>{{ memoryKindLabel(memory.kind) }}</span>
+                  <strong>{{ memory.importance.toFixed(2) }}</strong>
+                </header>
+                <h3>{{ memory.title }}</h3>
+                <p>{{ memoryPreview(memory) }}</p>
+                <footer>{{ formatTime(memory.updatedAt) }}</footer>
+              </article>
+            </div>
+          </div>
         </template>
       </GoalConversationDialog>
 
@@ -1465,6 +1545,171 @@ button.goal-summary-card:hover,
 .goal-memory-compact-btn {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.goal-memory-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  padding: 14px 18px 18px;
+  scrollbar-gutter: stable;
+  background: color-mix(in srgb, var(--app-chat-canvas) 96%, transparent);
+}
+
+.goal-memory-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+  align-content: start;
+}
+
+.goal-memory-card {
+  min-width: 0;
+  min-height: 150px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--app-panel) 92%, transparent);
+}
+
+.goal-memory-card header,
+.goal-memory-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  color: var(--app-text-muted);
+  font-size: 0.72rem;
+}
+
+.goal-memory-card header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-memory-card header strong {
+  flex: 0 0 auto;
+  color: var(--app-accent);
+  font-size: 0.72rem;
+}
+
+.goal-memory-card h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+.goal-memory-card p {
+  margin: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--app-text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.goal-memory-card footer {
+  justify-content: flex-start;
+  margin-top: auto;
+}
+
+.goal-memory-empty {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--app-text-muted);
+  font-size: 0.86rem;
+}
+
+.goal-memory-compacting {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+}
+
+.goal-memory-progress-card {
+  width: min(520px, 100%);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-panel) 94%, transparent);
+  padding: 16px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+}
+
+.goal-memory-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 0.86rem;
+}
+
+.goal-memory-progress-head strong {
+  min-width: 0;
+  color: var(--app-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-memory-progress-head span {
+  flex: 0 0 auto;
+  color: var(--app-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.goal-memory-progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-border) 68%, transparent);
+}
+
+.goal-memory-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--app-accent) 82%, #22c55e);
+  transition: width 180ms ease;
+}
+
+.goal-memory-progress-card p {
+  margin: 12px 0 0;
+  color: var(--app-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.goal-memory-progress-card.is-completed .goal-memory-progress-track span {
+  background: #16a34a;
+}
+
+.goal-memory-progress-card.is-failed {
+  border-color: color-mix(in srgb, #dc2626 42%, var(--app-border));
+}
+
+.goal-memory-progress-card.is-failed .goal-memory-progress-track span {
+  background: #dc2626;
 }
 
 .goal-danger-btn {

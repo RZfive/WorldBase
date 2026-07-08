@@ -94,6 +94,15 @@ interface UseChatPanelBindings {
   onContextConsumed: () => void
 }
 
+interface LongTermGoalMemoryCompactionProgress {
+  goalId: string
+  status: 'running' | 'completed' | 'failed'
+  stage: string
+  detail?: string
+  percent: number
+  error?: string
+}
+
 const sharedMessages = ref<ChatMessage[]>([])
 const sharedInputText = ref('')
 const sharedConversations = ref<ConversationSummary[]>([])
@@ -252,7 +261,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const streamingCreate = ref<{ userContent: string; message: ChatMessage } | null>(null)
   const streamingRun = ref<{ goalId: string; run: LongTermGoalRun } | null>(null)
   const streamingReplan = ref<{ goalId: string; message: ChatMessage } | null>(null)
-  const streamingMemory = ref<{ goalId: string; message: ChatMessage } | null>(null)
+  const memoryCompaction = ref<LongTermGoalMemoryCompactionProgress | null>(null)
   const createConversationHistory = ref<ChatMessage[]>([])
   const pendingCreationConfirm = ref<{ changeSet: LongTermGoalChangeSet; proposal: NonNullable<LongTermGoalMessageResult['proposal']> } | null>(null)
   const goalAutoOpenRunId = ref<string | null>(null)
@@ -262,7 +271,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     streamingAdjust.value = null
     streamingRun.value = null
     streamingReplan.value = null
-    streamingMemory.value = null
+    memoryCompaction.value = null
     streamingCreate.value = null
     createConversationHistory.value = []
     pendingCreationConfirm.value = null
@@ -1928,26 +1937,76 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   async function compactLongTermGoalMemory (goalId: string): Promise<void> {
     if (!window.electronAPI?.compactLongTermGoalMemory) return
     const streamId = generateId()
-    const message: ChatMessage = {
-      role: 'assistant',
-      content: '',
-      speakerName: 'Long-Term Goal',
-      blocks: [createContentBlock('')]
+    let terminalEventReceived = false
+    memoryCompaction.value = {
+      goalId,
+      status: 'running',
+      stage: t('chatUi.goalMemoryCompactionPreparing'),
+      detail: t('chatUi.goalMemoryCompactingDetail'),
+      percent: 8
     }
-    streamingMemory.value = { goalId, message }
-    try {
-      const snapshot = await streamGoalConversation<LongTermGoalSnapshot>(
-        message,
-        streamId,
-        () => window.electronAPI!.compactLongTermGoalMemory!(goalId, streamId)
+    const stageFloors: Record<string, number> = {
+      '准备整理记忆': 12,
+      'AI 分析记忆': 32,
+      '生成整理结果': 72,
+      '整理长期目标记忆': 76,
+      '应用整理结果': 88,
+      '无需整理': 100,
+      '整理未应用': 100,
+      '整理完成': 100
+    }
+    const updateRunningProgress = (stage?: string, detail?: string): void => {
+      const current = memoryCompaction.value
+      const currentPercent = current?.goalId === goalId ? current.percent : 8
+      const nextPercent = Math.min(
+        94,
+        Math.max(stage ? stageFloors[stage] || 0 : 0, currentPercent + 12)
       )
-      if (snapshot) {
-        longTermGoalSnapshot.value = snapshot
+      memoryCompaction.value = {
+        goalId,
+        status: 'running',
+        stage: stage || current?.stage || t('chatUi.goalMemoryCompactionPreparing'),
+        detail: detail || current?.detail || t('chatUi.goalMemoryCompactingDetail'),
+        percent: nextPercent
       }
+    }
+    const finishProgress = (status: LongTermGoalMemoryCompactionProgress['status'], error?: string): void => {
+      terminalEventReceived = true
+      memoryCompaction.value = {
+        goalId,
+        status,
+        stage: status === 'failed' ? t('chatUi.goalMemoryCompactionFailed') : t('chatUi.goalMemoryCompactionDone'),
+        detail: error || (status === 'failed' ? t('chatUi.streamFailedUnknown') : t('chatUi.goalMemoryCompactionDoneDetail')),
+        error,
+        percent: 100
+      }
+    }
+    const unsubscribe = window.electronAPI.onLongTermGoalStreamEvent?.(streamId, (event) => {
+      if (event.type === 'progress') {
+        updateRunningProgress(event.stage, event.detail)
+      } else if (event.type === 'done') {
+        finishProgress('completed')
+      } else if (event.type === 'error') {
+        finishProgress('failed', event.error || t('chatUi.streamFailedUnknown'))
+      }
+    })
+    try {
+      const snapshot = await window.electronAPI.compactLongTermGoalMemory(goalId, streamId)
+      longTermGoalSnapshot.value = snapshot
+      if (!terminalEventReceived) finishProgress('completed')
       await loadLongTermGoals()
       await loadLongTermGoalSnapshot(goalId)
+    } catch (err) {
+      finishProgress('failed', (err as Error).message)
+      console.error('[longTermGoal] memory compaction failed:', err)
     } finally {
-      streamingMemory.value = null
+      unsubscribe?.()
+      window.setTimeout(() => {
+        const current = memoryCompaction.value
+        if (current?.goalId === goalId && current.status === 'completed') {
+          memoryCompaction.value = null
+        }
+      }, 900)
     }
   }
 
@@ -2913,7 +2972,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     streamingCreate,
     streamingRun,
     streamingReplan,
-    streamingMemory,
+    memoryCompaction,
     createConversationHistory,
     goalAutoOpenRunId,
     handleAgentSelectionChange,
