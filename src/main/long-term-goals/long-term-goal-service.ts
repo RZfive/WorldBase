@@ -814,7 +814,7 @@ function normalizeGoalAdjustmentProposal (
 function formatGoalAdjustmentAssistantText (text: string, fallbackProposal?: GoalAdjustmentProposal | null): string {
   const cleaned = stripGoalAdjustmentMetadataForDisplay(text)
   if (cleaned) return cleaned
-  const parsed = fallbackProposal || parseGoalAdjustmentProposal(text)
+  const parsed = fallbackProposal
   if (!parsed) return '我还需要更多信息来继续把目标收敛成更好的版本。'
   return [
     '# 目标调整提案',
@@ -2046,11 +2046,11 @@ export class LongTermGoalService {
       .filter(tool => tool.name !== 'create_project'
         && !['write_project_file', 'patch_project_file', 'rebuild_project'].includes(tool.name)
         && (!GOAL_ADJUSTMENT_PROJECT_TOOLS.has(tool.name) || replanReadOnlyTools.has(tool.name)))
-    let toolReplanResult: LongTermGoalReplanResult | null = null
+    const replanState: { result: LongTermGoalReplanResult | null } = { result: null }
     const customTools = this.createLongTermGoalTools(goal, {
       allowMutation: true,
       onScheduleUpdate: result => {
-        toolReplanResult = result
+        replanState.result = result
       }
     })
     const allowedToolNames = availableTools.map(tool => tool.name)
@@ -2080,8 +2080,9 @@ export class LongTermGoalService {
         if (event.type === 'token' && event.content) { contentParts.push(event.content); continue }
         if (event.type === 'done') {
           const rawText = typeof event.message.content === 'string' ? event.message.content : contentParts.join('')
-          onEvent?.({ type: 'done', message: { role: 'assistant', content: stripGoalMetadataForDisplay(rawText) || toolReplanResult?.summary || '重规划完成。' } })
-          return toolReplanResult
+          const result = replanState.result
+          onEvent?.({ type: 'done', message: { role: 'assistant', content: stripGoalMetadataForDisplay(rawText) || result?.summary || '重规划完成。' } })
+          return result
         }
       }
     } catch (err) {
