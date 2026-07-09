@@ -8,7 +8,7 @@ const props = withDefaults(defineProps<{
   subtitle?: string
   isMaximized?: boolean
 }>(), {
-  title: 'The World',
+  title: 'WorldBase',
   icon: '🌍',
   subtitle: '',
   isMaximized: false

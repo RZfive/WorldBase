@@ -737,7 +737,7 @@ export function setupIPC (): void {
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const { buffer, mimeType } = await resolveImageBuffer(imageUrl)
     const extension = guessImageExtension(mimeType)
-    const safeDefaultName = (defaultName && defaultName.trim()) || `the-world-image.${extension}`
+    const safeDefaultName = (defaultName && defaultName.trim()) || `worldbase-image.${extension}`
     const finalDefaultName = safeDefaultName.includes('.') ? safeDefaultName : `${safeDefaultName}.${extension}`
 
     const dialogOptions = {
@@ -852,7 +852,7 @@ export function setupIPC (): void {
       const safeFolderLabel = (folderName?.trim() || t('mainDialog.ungroupedFolder')).replace(/[\\/:*?"<>|]/g, '_')
       const dialogOptions = {
         title: t('mainDialog.exportFolderZipTitle'),
-        defaultPath: `the-world-${safeFolderLabel}.zip`,
+        defaultPath: `worldbase-${safeFolderLabel}.zip`,
         filters: [{ name: 'ZIP', extensions: ['zip'] }]
       }
       const result = senderWindow
@@ -930,7 +930,7 @@ export function setupIPC (): void {
 
   ipcMain.handle('media:saveMarkdown', async (event: IpcMainInvokeEvent, markdown: string, defaultName?: string) => {
     const senderWindow = getSenderWindow(event) || getMainWindow()
-    const safeDefaultName = (defaultName && defaultName.trim()) || 'the-world-ai-response.md'
+    const safeDefaultName = (defaultName && defaultName.trim()) || 'worldbase-ai-response.md'
     const finalDefaultName = safeDefaultName.toLowerCase().endsWith('.md') ? safeDefaultName : `${safeDefaultName}.md`
 
     const dialogOptions = {
@@ -1519,7 +1519,7 @@ export function setupIPC (): void {
     const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
     const dialogOptions = {
       title: t('mainDialog.exportEncryptedConfigTitle'),
-      defaultPath: `the-world-config-${stamp}.${PORTABLE_SETTINGS_EXTENSION}`,
+      defaultPath: `worldbase-config-${stamp}.${PORTABLE_SETTINGS_EXTENSION}`,
       filters: [
         { name: t('mainDialog.configPackageFilterName'), extensions: [PORTABLE_SETTINGS_EXTENSION] }
       ]

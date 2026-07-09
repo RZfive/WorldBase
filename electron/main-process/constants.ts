@@ -1,7 +1,24 @@
-export const APP_DISPLAY_NAME = 'The World'
-export const LEGACY_USER_DATA_DIR_NAMES = ['the-world']
-export const CRITICAL_USER_DATA_DIR_NAMES = ['conversations', 'projects']
-export const CRITICAL_USER_DATA_FILE_NAMES = ['settings.json']
+export const APP_DISPLAY_NAME = 'WorldBase'
+export const LEGACY_USER_DATA_DIR_NAMES = ['The World', 'the-world']
+export const CRITICAL_USER_DATA_DIR_NAMES = [
+  'conversations',
+  'projects',
+  'snapshots',
+  'skills',
+  'agents',
+  'agent-groups',
+  'im',
+  'agent-memory',
+  'image-library',
+  'ai-logs'
+]
+export const CRITICAL_USER_DATA_FILE_NAMES = [
+  'settings.json',
+  'scheduled-tasks.json',
+  'long-term-goals.json',
+  'studio-tasks.json',
+  'usage-records.json'
+]
 export const DEFAULT_MAIN_WINDOW_MIN_WIDTH = 800
 export const DEFAULT_MAIN_WINDOW_MIN_HEIGHT = 500
 export const DEFAULT_WINDOW_EXPAND_ANIMATION_DURATION_MS = 240

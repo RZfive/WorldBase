@@ -169,7 +169,7 @@ function getDownloadName (imageUrl: string): string {
   const mimeType = imageUrl.match(/^data:(image\/[^;]+);base64,/)?.[1]
   const extension = mimeType?.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
   const timestamp = new Date().toISOString().replace(/[.:]/g, '-')
-  return `the-world-image-${timestamp}.${extension}`
+  return `worldbase-image-${timestamp}.${extension}`
 }
 
 async function downloadImage (imageUrl: string) {

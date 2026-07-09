@@ -19,7 +19,7 @@ export function toolOpenProjectApp (services: ToolServices): Tool {
   return {
     definition: {
       name: 'open_project_app',
-      description: 'Ask The World shell to open an existing project in the managed app UI. Prefer this over launching an unmanaged preview server yourself.',
+      description: 'Ask WorldBase shell to open an existing project in the managed app UI. Prefer this over launching an unmanaged preview server yourself.',
       parameters: {
         type: 'object',
         properties: {

@@ -1,4 +1,4 @@
-# The World — 项目目录结构
+# WorldBase — 项目目录结构
 
 ```
 the-world/

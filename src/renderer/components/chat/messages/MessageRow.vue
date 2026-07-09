@@ -65,7 +65,7 @@ function hasRenderableBlock (block: ChatMessageBlock): boolean {
 }
 
 function getMessageAuthor (): string {
-  return props.msg.role === 'assistant' ? (props.msg.speakerName || props.assistantName || 'The World AI') : t('chatUi.you')
+  return props.msg.role === 'assistant' ? (props.msg.speakerName || props.assistantName || 'WorldBase AI') : t('chatUi.you')
 }
 
 function getAssistantIcon (): string {
@@ -73,7 +73,7 @@ function getAssistantIcon (): string {
 }
 
 function getModelLabel (): string {
-  return props.msg.modelLabel || 'The World AI'
+  return props.msg.modelLabel || 'WorldBase AI'
 }
 
 function getMessageText (): string {

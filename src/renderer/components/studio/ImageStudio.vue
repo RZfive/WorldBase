@@ -597,7 +597,7 @@ async function handleSaveToFile (source: ImageLibraryItem | ImageLibraryEntry) {
   const data = await resolveImageData(source)
   if (!data?.dataUrl) return
   const stamp = source.createdAt.replace(/[:.]/g, '-')
-  await window.electronAPI.saveImageToFile(data.dataUrl, `the-world-${stamp}`)
+  await window.electronAPI.saveImageToFile(data.dataUrl, `worldbase-${stamp}`)
 }
 
 async function handleDelete (ids: string[]) {

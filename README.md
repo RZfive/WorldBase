@@ -1,4 +1,4 @@
-# 🌍 The World
+# 🌍 WorldBase
 
 AI 驱动的项目生成器与管理平台。通过自然语言对话创建完整的 Web 应用，并持续管理、修改和分析项目数据。
 
@@ -65,7 +65,7 @@ pnpm electron:build
 
 当前打包流程会将 Electron 主进程编译为 V8 字节码 (`.jsc`) 并通过 loader 启动；preload 产物保留为压缩后的普通 JS，以避免安装包中的 `contextBridge`/IPC 桥接在字节码模式下失效。开发态 `pnpm electron:dev` 仍使用普通 JS 产物，便于调试。
 
-> Windows 下如果生成/打包 Next.js standalone 应用时触发 symlink 权限错误，The World 会在构建阶段自动拉起管理员授权。
+> Windows 下如果生成/打包 Next.js standalone 应用时触发 symlink 权限错误，WorldBase 会在构建阶段自动拉起管理员授权。
 
 ## 环境变量
 

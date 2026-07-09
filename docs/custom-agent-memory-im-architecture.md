@@ -1,4 +1,4 @@
-# The World — 自定义 Agent、长期记忆、群协作与 IM 接入升级方案
+# WorldBase — 自定义 Agent、长期记忆、群协作与 IM 接入升级方案
 
 ## 1. 目标
 

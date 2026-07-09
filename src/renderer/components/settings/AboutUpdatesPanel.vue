@@ -106,7 +106,7 @@ async function checkForUpdates () {
       <div class="au-product">
         <span class="au-mark">🌍</span>
         <div class="au-product-copy">
-          <strong class="au-name">{{ aboutInfo?.productName || 'The World' }}</strong>
+          <strong class="au-name">{{ aboutInfo?.productName || 'WorldBase' }}</strong>
           <span class="au-version">{{ $t('settings.about.version', { version: aboutInfo?.version || '—' }) }}</span>
         </div>
       </div>

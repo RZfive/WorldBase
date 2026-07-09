@@ -1,8 +1,8 @@
-# The World — 系统架构文档
+# WorldBase — 系统架构文档
 
 ## 概述
 
-**The World** 是一个基于 Electron + Vue 3 的桌面应用，核心能力是通过 AI 对话生成完整的 Web 应用项目，并对这些生成的子项目进行持续管理、修改和数据分析。
+**WorldBase** 是一个基于 Electron + Vue 3 的桌面应用，核心能力是通过 AI 对话生成完整的 Web 应用项目，并对这些生成的子项目进行持续管理、修改和数据分析。
 
 ### 核心理念
 
@@ -14,7 +14,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                      The World (Electron 主进程)                  │
+│                      WorldBase (Electron 主进程)                  │
 │                                                                   │
 │  ┌──── AI Agent (主 AI) ─────────────────────────────────────┐   │
 │  │                                                            │   │
@@ -140,13 +140,13 @@ class ProjectApiClient {
 
 | 路径 | 说明 | 适用场景 |
 |------|------|---------|
-| 通过宿主标准数据接口 | 生成项目 → The World `/api/projects/:projectId/data/*` → SQLite | 应用运行时标准读写 |
+| 通过宿主标准数据接口 | 生成项目 → WorldBase `/api/projects/:projectId/data/*` → SQLite | 应用运行时标准读写 |
 | 直接访问 | 主 AI → DataAccess → 直接打开数据库文件 | AI 数据分析（只读） |
 
 **生成项目的数据接口约定**:
 - 生成项目不能自行管理 SQLite 驱动或自行建库
 - 必须在 `.world-meta.json` 的 `dataSchema` 中声明 `database: "sqlite"`、`dbPath` 和 `tables`
-- The World 在创建项目时自动初始化 SQLite 表
+- WorldBase 在创建项目时自动初始化 SQLite 表
 - 运行中的项目通过环境变量获取接口地址：
   - `THE_WORLD_PROJECT_ID`
   - `THE_WORLD_LAN_BASE_URL`

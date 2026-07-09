@@ -1,4 +1,4 @@
-# The World / worldbase — 在线更新双仓接口契约
+# WorldBase / worldbase — 在线更新双仓接口契约
 
 更新时间：2026-05-17  
 状态：实施契约草案（可直接进入开发拆分）
@@ -86,8 +86,8 @@ Cloudflare 侧的最终产物必须落在统一路径结构下：
 ```text
 /desktop/{channel}/{platform}/{arch}/{version}/release.json
 /desktop/{channel}/{platform}/{arch}/{version}/latest.yml
-/desktop/{channel}/{platform}/{arch}/{version}/The-World-Setup-{version}.exe
-/desktop/{channel}/{platform}/{arch}/{version}/The-World-Setup-{version}.exe.blockmap
+/desktop/{channel}/{platform}/{arch}/{version}/WorldBase-Setup-{version}.exe
+/desktop/{channel}/{platform}/{arch}/{version}/WorldBase-Setup-{version}.exe.blockmap
 
 /desktop/{channel}/{platform}/{arch}/current/release.json
 /desktop/{channel}/{platform}/{arch}/current/latest.yml
@@ -125,7 +125,7 @@ Windows x64 必需包含：
 {
   "schemaVersion": 1,
   "appId": "com.theworld.app",
-  "productName": "The World",
+  "productName": "WorldBase",
   "channel": "stable",
   "platform": "win32",
   "arch": "x64",
@@ -149,9 +149,9 @@ Windows x64 必需包含：
   "assets": [
     {
       "kind": "installer",
-      "fileName": "The-World-Setup-0.1.1.exe",
-      "relativePath": "desktop/stable/win32/x64/0.1.1/The-World-Setup-0.1.1.exe",
-      "downloadUrl": "https://downloads.example.com/desktop/stable/win32/x64/0.1.1/The-World-Setup-0.1.1.exe",
+      "fileName": "WorldBase-Setup-0.1.1.exe",
+      "relativePath": "desktop/stable/win32/x64/0.1.1/WorldBase-Setup-0.1.1.exe",
+      "downloadUrl": "https://downloads.example.com/desktop/stable/win32/x64/0.1.1/WorldBase-Setup-0.1.1.exe",
       "sha512": "base64-sha512",
       "sha256": "hex-sha256",
       "size": 147176880,
@@ -159,9 +159,9 @@ Windows x64 必需包含：
     },
     {
       "kind": "blockmap",
-      "fileName": "The-World-Setup-0.1.1.exe.blockmap",
-      "relativePath": "desktop/stable/win32/x64/0.1.1/The-World-Setup-0.1.1.exe.blockmap",
-      "downloadUrl": "https://downloads.example.com/desktop/stable/win32/x64/0.1.1/The-World-Setup-0.1.1.exe.blockmap",
+      "fileName": "WorldBase-Setup-0.1.1.exe.blockmap",
+      "relativePath": "desktop/stable/win32/x64/0.1.1/WorldBase-Setup-0.1.1.exe.blockmap",
+      "downloadUrl": "https://downloads.example.com/desktop/stable/win32/x64/0.1.1/WorldBase-Setup-0.1.1.exe.blockmap",
       "sha256": "hex-sha256",
       "size": 123456,
       "contentType": "application/octet-stream"
@@ -281,8 +281,8 @@ GET /api/app-update/latest?channel=stable&platform=win32&arch=x64&current=0.1.0
     "en": ["Fixed runtime log collection.", "Added About & Updates page."]
   },
   "asset": {
-    "fileName": "The-World-Setup-0.1.1.exe",
-    "downloadUrl": "https://downloads.example.com/desktop/stable/win32/x64/0.1.1/The-World-Setup-0.1.1.exe",
+    "fileName": "WorldBase-Setup-0.1.1.exe",
+    "downloadUrl": "https://downloads.example.com/desktop/stable/win32/x64/0.1.1/WorldBase-Setup-0.1.1.exe",
     "sha512": "base64-sha512",
     "sha256": "hex-sha256",
     "size": 147176880
@@ -358,7 +358,7 @@ GET /api/app-update/latest?channel=stable&platform=win32&arch=x64&current=0.1.0
 
 ```json
 {
-  "productName": "The World",
+  "productName": "WorldBase",
   "version": "0.1.0",
   "appId": "com.theworld.app",
   "platform": "win32",
@@ -393,7 +393,7 @@ GET /api/app-update/latest?channel=stable&platform=win32&arch=x64&current=0.1.0
 {
   "ok": true,
   "version": "0.1.1",
-  "filePath": "C:\\Users\\<user>\\AppData\\Local\\The World\\updates\\0.1.1\\The-World-Setup-0.1.1.exe",
+  "filePath": "C:\\Users\\<user>\\AppData\\Local\\WorldBase\\updates\\0.1.1\\WorldBase-Setup-0.1.1.exe",
   "verified": true
 }
 ```

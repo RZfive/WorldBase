@@ -288,7 +288,7 @@ async function searchBing (
     headers: {
       accept: 'application/rss+xml,application/xml,text/xml;q=0.9,text/plain;q=0.5,*/*;q=0.1',
       'accept-language': buildAcceptLanguageHeader(query),
-      'user-agent': 'The World AI Agent/1.0'
+      'user-agent': 'WorldBase AI Agent/1.0'
     }
   })
 
@@ -351,7 +351,7 @@ async function searchDuckDuckGo (
     headers: {
       accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.1',
       'accept-language': buildAcceptLanguageHeader(query),
-      'user-agent': 'The World AI Agent/1.0'
+      'user-agent': 'WorldBase AI Agent/1.0'
     }
   })
 
@@ -409,7 +409,7 @@ async function searchGitHubRepositories (
     redirect: 'follow',
     headers: {
       accept: 'application/vnd.github+json',
-      'user-agent': 'The World AI Agent/1.0'
+      'user-agent': 'WorldBase AI Agent/1.0'
     }
   })
 
