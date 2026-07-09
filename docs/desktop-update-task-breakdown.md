@@ -1,4 +1,4 @@
-# The World / worldbase — 在线更新双仓实施任务拆分表
+# WorldBase / worldbase — 在线更新双仓实施任务拆分表
 
 更新时间：2026-05-17  
 适用对象：`worldbase` 同事、`the-world` 同事、联调负责人、发布负责人

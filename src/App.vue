@@ -137,7 +137,7 @@ const sourceProject = ref<Record<string, unknown> | null>(null)
 const showLaunchpad = ref(false)
 const chatSurfaceStatus = ref<ChatSurfaceStatusSummary>({
   contextLabel: t('appShell.newChatContext'),
-  contextDetail: 'The World AI',
+  contextDetail: 'WorldBase AI',
   isLoading: false,
   pendingAuthCount: 0,
   activeTodoCount: 0,

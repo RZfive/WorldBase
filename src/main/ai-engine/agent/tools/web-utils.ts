@@ -391,7 +391,7 @@ export async function fetchPublicWebpage (rawUrl: string, options: FetchPublicWe
       headers: {
         accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,text/*;q=0.8,*/*;q=0.2',
         'accept-language': buildAcceptLanguageHeader(options.query),
-        'user-agent': 'The World AI Agent/1.0'
+        'user-agent': 'WorldBase AI Agent/1.0'
       }
     })
 

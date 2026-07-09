@@ -221,7 +221,7 @@ export async function requestMemoryCompactionPlanChunk (provider: OpenAIProvider
     {
       role: 'system',
       content: [
-        '你是 The World 的长期记忆整理器。你的任务是压缩整理用户、Agent、项目和频道记忆。',
+        '你是 WorldBase 的长期记忆整理器。你的任务是压缩整理用户、Agent、项目和频道记忆。',
         '只允许基于输入 JSON 中的记忆做判断，不得编造新事实，不得引用输入外的 ID。',
         '删除标准：空壳内容、Markdown 标题/表格碎片、无复用价值碎片、明显过时或与软件工程/当前 Agent 工作无关的知识。',
         '合并标准：同一 scope 且同一 type 下语义重复或高度近似的记忆。跨 scope 或跨 type 不要合并。',

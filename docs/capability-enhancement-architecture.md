@@ -1,14 +1,14 @@
-# The World — AI Agent 能力补全架构设计
+# WorldBase — AI Agent 能力补全架构设计
 
-> 基于 Claude Code 源码分析，对 The World Agent 系统的能力差距分析与增强设计方案。
+> 基于 Claude Code 源码分析，对 WorldBase Agent 系统的能力差距分析与增强设计方案。
 
 ---
 
-## 1. 对标分析：Claude Code vs The World
+## 1. 对标分析：Claude Code vs WorldBase
 
 ### 1.1 能力矩阵对比
 
-| 能力维度 | Claude Code | The World 现状 | 差距等级 |
+| 能力维度 | Claude Code | WorldBase 现状 | 差距等级 |
 |---------|-------------|---------------|---------|
 | **工具系统** | 50+ 工具，Zod schema 校验，feature-gated 按需加载 | 30+ 工具，JSON Schema 定义，全量注册 | ⚠️ 中 |
 | **文件编辑** | FileEdit (精确替换)、FileWrite (整文件)、FileRead (行范围) | write_project_file (整文件)、patch_project_file (行范围补丁)、read_project_file | ✅ 基本对齐 |
@@ -63,7 +63,7 @@
 | **P2** | MCP 协议支持 | 中 | 高 | 生态扩展，但当前生态尚未成熟 |
 | **P2** | Hook 系统 | 中 | 中 | 扩展性好，但非当前瓶颈 |
 | **P3** | LSP 集成 | 中 | 高 | Electron 环境下集成 LSP 成本较高 |
-| **P3** | Web 获取工具 | 低 | 低 | The World 是项目管理场景，web 搜索非核心 |
+| **P3** | Web 获取工具 | 低 | 低 | WorldBase 是项目管理场景，web 搜索非核心 |
 
 ---
 
@@ -73,7 +73,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                     The World Agent 系统 (增强版)                         │
+│                     WorldBase Agent 系统 (增强版)                         │
 │                                                                          │
 │  ┌─── Coordinator Layer (NEW) ──────────────────────────────────────┐   │
 │  │  PlanEngine       — 任务规划与拆分                                │   │
@@ -794,7 +794,7 @@ const gitCommitTool = {
   name: 'git_commit',
   description: '提交当前修改。Agent 的修改会被标记为 AI 生成。',
   // ...
-  // 自动添加 commit trailer: "Generated-by: The World AI Agent"
+  // 自动添加 commit trailer: "Generated-by: WorldBase AI Agent"
 }
 ```
 
@@ -913,7 +913,7 @@ Week 11-13:
 Claude Code 将工具分为 **读取类** 和 **写入类**，读取类工具可以并行执行:
 
 ```typescript
-// The World 实现建议
+// WorldBase 实现建议
 const READONLY_TOOLS = new Set([
   'read_project_file', 'list_project_files', 'glob_search', 'grep_search',
   'query_project_database', 'get_project_status', 'get_project_logs',
@@ -950,7 +950,7 @@ Claude Code 的策略值得直接采用:
 Claude Code 的鲁棒 JSON 解析值得参考:
 
 ```typescript
-// 当前 The World 已有类似实现，但可以增强:
+// 当前 WorldBase 已有类似实现，但可以增强:
 function repairToolArguments(raw: string): Record<string, unknown> {
   // 1. 去除 markdown 代码围栏
   let cleaned = raw.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '')
@@ -977,7 +977,7 @@ function repairToolArguments(raw: string): Record<string, unknown> {
 
 ### 5.4 Feature-Gated 工具加载
 
-Claude Code 根据 feature flag 按需加载工具。The World 可以简化实现:
+Claude Code 根据 feature flag 按需加载工具。WorldBase 可以简化实现:
 
 ```typescript
 // src/main/ai-engine/agent/tools/index.ts
@@ -1014,9 +1014,9 @@ function registerAllTools(options: ToolRegistryOptions): RegisteredTool[] {
 
 ## 6. 与 Claude Code 的关键差异
 
-The World 不应照搬 Claude Code 的全部设计。以下是需要注意的差异：
+WorldBase 不应照搬 Claude Code 的全部设计。以下是需要注意的差异：
 
-| 方面 | Claude Code | The World | 处理策略 |
+| 方面 | Claude Code | WorldBase | 处理策略 |
 |------|-------------|-----------|---------|
 | **运行环境** | 终端 CLI + 用户本地文件系统 | Electron 桌面应用 + 受控子项目 | 权限模型更简单，安全边界更清晰 |
 | **目标场景** | 通用代码编辑辅助 | 全栈项目生成与管理 | 工具设计以项目为中心，不需要通用 bash |
@@ -1026,18 +1026,18 @@ The World 不应照搬 Claude Code 的全部设计。以下是需要注意的差
 | **数据访问** | 通过文件系统 | 统一数据层 (SQLite + API) | 保持现有数据访问优势 |
 
 **不建议引入的 Claude Code 特性**:
-- ~~Worktree 隔离~~ — The World 的子项目天然隔离
+- ~~Worktree 隔离~~ — WorldBase 的子项目天然隔离
 - ~~ML 安全分类器~~ — 规则引擎足够，避免复杂度
 - ~~MCP 协议~~ (P3延后) — 当前生态ROI不足
 - ~~Terminal capture~~ — Electron 环境下子项目运行时已有日志收集
-- ~~REPL 工具~~ — The World 已有 `run_project_command`
+- ~~REPL 工具~~ — WorldBase 已有 `run_project_command`
 
 ---
 
 ## 7. 总结
 
-The World 当前的 Agent 系统在 **项目管理** 和 **全栈生成** 方面有独特优势（统一数据层、运行时管理、项目隔离），但在 **代码理解**、**安全控制**、**智能规划**、**可扩展性** 方面存在明显差距。
+WorldBase 当前的 Agent 系统在 **项目管理** 和 **全栈生成** 方面有独特优势（统一数据层、运行时管理、项目隔离），但在 **代码理解**、**安全控制**、**智能规划**、**可扩展性** 方面存在明显差距。
 
-通过借鉴 Claude Code 的关键设计模式 — 特别是 **代码搜索工具**、**多层权限引擎**、**Plan 模式**、**Skill 分叉执行**、**循环检测** — 可以显著提升 The World Agent 的代码生成质量和安全性，同时保持项目管理场景的特色优势。
+通过借鉴 Claude Code 的关键设计模式 — 特别是 **代码搜索工具**、**多层权限引擎**、**Plan 模式**、**Skill 分叉执行**、**循环检测** — 可以显著提升 WorldBase Agent 的代码生成质量和安全性，同时保持项目管理场景的特色优势。
 
 核心原则: **不做通用 coding agent，做最强的项目管理 AI**。

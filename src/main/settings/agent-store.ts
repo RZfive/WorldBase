@@ -83,7 +83,7 @@ function buildDefaultAgent (): AgentDefinition {
     name: t('mainDialog.defaultAgentName'),
     icon: '🤖',
     description: t('mainDialog.defaultAgentDescription'),
-    systemPrompt: 'You are the primary The World agent. Coordinate user requests pragmatically, favor grounded implementation, and reuse available skills and memory before inventing new flows.',
+    systemPrompt: 'You are the primary WorldBase agent. Coordinate user requests pragmatically, favor grounded implementation, and reuse available skills and memory before inventing new flows.',
     reasoningStrength: 'medium',
     skillIds: [],
     allowedTools: [],

@@ -291,7 +291,7 @@ export class ProcessManagerService {
   }
 
   /**
-   * Heuristic: does this command line look like a project process spawned by TheWorld?
+   * Heuristic: does this command line look like a project process spawned by WorldBase?
    */
   private _looksLikeProjectProcess (commandLine: string): boolean {
     const lower = commandLine.toLowerCase()
@@ -302,7 +302,7 @@ export class ProcessManagerService {
     }
     return (
       lower.includes('the_world') ||
-      // The World's own install/userData path contains "the-world"; only match
+      // The app's own install/userData path may contain "the-world"; only match
       // the project directory so the host and its helpers aren't flagged.
       lower.includes('the-world/projects') ||
       lower.includes('server.js') ||

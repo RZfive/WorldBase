@@ -99,7 +99,7 @@ export function buildAssistantExportBaseName (date = new Date()): string {
     padTimePart(date.getSeconds())
   ].join('')
 
-  return `the-world-ai-response-${stamp}`
+  return `worldbase-ai-response-${stamp}`
 }
 
 export function messageContentToMarkdown (content: MessageContent): string {

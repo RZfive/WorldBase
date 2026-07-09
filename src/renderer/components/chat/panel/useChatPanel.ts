@@ -645,7 +645,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     if (currentLongTermGoal.value) return currentLongTermGoal.value.title
     if (currentGroupDefinition.value) return currentGroupDefinition.value.name
     if (currentAgentDefinition.value) return currentAgentDefinition.value.name
-    return 'The World AI'
+    return 'WorldBase AI'
   })
 
   const currentModelLabel = computed(() => {
@@ -663,7 +663,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
     const provider = providers.value.find(item => item.id === activeProviderId.value)
     const labelParts = [selectedModel.value, provider?.name].filter(Boolean)
-    return labelParts.length > 0 ? labelParts.join(' · ') : 'The World AI'
+    return labelParts.length > 0 ? labelParts.join(' · ') : 'WorldBase AI'
   })
 
   const currentContextDetail = computed(() => {
@@ -810,7 +810,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       return currentAgentDefinition.value.name
     }
 
-    return 'The World AI'
+    return 'WorldBase AI'
   }
 
   async function loadSkills () {

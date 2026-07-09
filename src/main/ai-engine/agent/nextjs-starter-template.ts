@@ -9,7 +9,7 @@ flowchart TD
   UI --> Page[app/page.(js|tsx)]
   Layout --> Styles[app/globals.css]
   Page --> Components[Reusable UI sections]
-  Components --> HostAPI[The World host APIs / data endpoints]
+  Components --> HostAPI[WorldBase host APIs / data endpoints]
   Build[package.json scripts] --> NextBuild[next build]
   NextBuild --> Standalone[.next/standalone/server.js]
   Meta[.world-meta.json runtime.backend.command] --> Standalone
@@ -18,8 +18,8 @@ flowchart TD
 const JS_LAYOUT_TEMPLATE = `import './globals.css'
 
 export const metadata = {
-  title: 'The World App',
-  description: 'Generated from The World base template'
+  title: 'WorldBase App',
+  description: 'Generated from WorldBase base template'
 }
 
 export default function RootLayout ({ children }) {
@@ -36,8 +36,8 @@ import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 
 export const metadata: Metadata = {
-  title: 'The World App',
-  description: 'Generated from The World base template'
+  title: 'WorldBase App',
+  description: 'Generated from WorldBase base template'
 }
 
 export default function RootLayout ({ children }: { children: ReactNode }) {
@@ -60,7 +60,7 @@ const JS_PAGE_TEMPLATE = `const highlights = [
   },
   {
     title: 'Runtime ready',
-    description: 'Keep the Next.js App Router structure so build and startup stay compatible with The World.'
+    description: 'Keep the Next.js App Router structure so build and startup stay compatible with WorldBase.'
   }
 ]
 
@@ -68,7 +68,7 @@ export default function HomePage () {
   return (
     <main className="page-shell">
       <section className="hero-card">
-        <span className="eyebrow">The World starter template</span>
+        <span className="eyebrow">WorldBase starter template</span>
         <h1>Start from a working Next.js baseline</h1>
         <p className="hero-copy">
           Replace this content with the requested product experience while keeping the starter structure intact.
@@ -99,7 +99,7 @@ const TS_PAGE_TEMPLATE = `const highlights = [
   },
   {
     title: 'Runtime ready',
-    description: 'Keep the Next.js App Router structure so build and startup stay compatible with The World.'
+    description: 'Keep the Next.js App Router structure so build and startup stay compatible with WorldBase.'
   }
 ]
 
@@ -107,7 +107,7 @@ export default function HomePage () {
   return (
     <main className="page-shell">
       <section className="hero-card">
-        <span className="eyebrow">The World starter template</span>
+        <span className="eyebrow">WorldBase starter template</span>
         <h1>Start from a working Next.js baseline</h1>
         <p className="hero-copy">
           Replace this content with the requested product experience while keeping the starter structure intact.
@@ -341,8 +341,8 @@ export function getNextJsStarterArchitectureDescription (): string {
     '- App shell: app/layout.(js|tsx) is the only root layout entry and must import app/globals.css.',
     '- Page entry: app/page.(js|tsx) is the initial screen and should be replaced with the requested product UI instead of deleted without a replacement.',
     '- Styling layer: app/globals.css contains resets, design tokens, spacing, and responsive defaults so generated apps never launch without styles.',
-    '- Data layer: browser components call The World host APIs and project data endpoints instead of creating their own local infrastructure.',
-    '- Persistence rule: any app that needs data saving must declare tables in .world-meta.json dataSchema and use The World host SQLite APIs only.',
+    '- Data layer: browser components call WorldBase host APIs and project data endpoints instead of creating their own local infrastructure.',
+    '- Persistence rule: any app that needs data saving must declare tables in .world-meta.json dataSchema and use WorldBase host SQLite APIs only.',
     '- Forbidden persistence patterns: do not add better-sqlite3, sqlite3, Prisma, Drizzle, Sequelize, TypeORM, custom SQLite bootstrap code, or ad hoc local file storage for business data.',
     '',
     'Template architecture diagram:',
@@ -370,7 +370,7 @@ export function applyNextJsStarterTemplate (
 
   if (!nextFiles['package.json']) {
     nextFiles['package.json'] = `${JSON.stringify({
-      name: 'the-world-generated-app',
+      name: 'worldbase-generated-app',
       private: true,
       scripts: {
         dev: 'next dev',

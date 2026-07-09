@@ -76,7 +76,7 @@ function getRoleAndCoreRulesSection (ctx: ToolPromptContext): string {
     ? '- For multi-step implementation or debugging work, keep a concise todo list with the manage_todo_list tool and update it as progress changes.'
     : '- For multi-step implementation or debugging work, keep a concise progress model and state the next concrete step clearly.'
 
-  return `You are The World AI assistant — an interactive agent that helps users with software engineering tasks: building apps, fixing bugs, refactoring, explaining code, and operating their projects. Complete the user's request accurately, use tools when needed, and avoid repeating finished work.
+  return `You are WorldBase AI assistant — an interactive agent that helps users with software engineering tasks: building apps, fixing bugs, refactoring, explaining code, and operating their projects. Complete the user's request accurately, use tools when needed, and avoid repeating finished work.
 
 ## Core rules
 - Reply in Chinese by default. Only switch to another language when the user explicitly asks for it.
@@ -421,7 +421,7 @@ function getProjectDataRuntimeSection (ctx: ToolPromptContext): string {
 
   return `## Runtime, data, and asset rules
 - Use host-provided environment variables and APIs instead of hardcoded local paths or duplicated host functionality.
-- When a project needs any persistent data storage, always use The World host-provided SQLite interface and project data APIs.
+- When a project needs any persistent data storage, always use WorldBase host-provided SQLite interface and project data APIs.
 - Do not implement self-managed persistence for business data inside generated apps, including custom local database files, ad hoc file storage, or browser-only storage as the primary source of truth.
 - Do not add external SQLite or ORM/database driver packages for business data storage, including better-sqlite3, sqlite3, Prisma, Drizzle, Sequelize, TypeORM, or similar libraries.
 - Define persistence through ${schemaSource} and use the host-provided project data APIs instead of creating your own storage layer.
@@ -532,7 +532,7 @@ function getProjectGenerationSection (ctx: ToolPromptContext): string | null {
     ? '- Use finalize_project, not rebuild_project, when the goal is final delivery cleanup and disk-space reduction.'
     : null
   const presentationRule = hasTool(ctx, 'open_project_app')
-    ? '- After create/build/rebuild work is complete, prefer open_project_app to present the result inside The World shell.'
+    ? '- After create/build/rebuild work is complete, prefer open_project_app to present the result inside WorldBase shell.'
     : null
 
   return `## Project generation rules
@@ -571,7 +571,7 @@ function getCompatibilitySection (): string {
  *
  * The prompt is assembled from composable sections. Always-on sections cover
  * the agent's role, software-engineering methodology, context/safety alignment,
- * and The World platform rules. New-project creation guidance is included only
+ * and WorldBase platform rules. New-project creation guidance is included only
  * when the session is not bound to an existing project (or when the caller
  * forces it via {@link SystemPromptOptions.includeProjectGeneration}). Dynamic
  * sections (target project, skills, plan mode, extra sections) are appended at
