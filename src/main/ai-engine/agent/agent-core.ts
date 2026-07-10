@@ -86,6 +86,28 @@ export interface SessionState {
 export class AgentCore {
   // Keep summaries short enough to fit comfortably back into the prompt.
   private static readonly AUTO_CONTINUE_PREFIX = '[AUTO_CONTINUE]'
+  private static readonly FINISH_TASK_NUDGE_PREFIX = '[FINISH_TASK_NUDGE]'
+  private static readonly FINISH_TASK_TOOL_NAME = 'finish_task'
+  private static readonly MAX_FINISH_TASK_NUDGES = 2
+  private static readonly FINISH_TASK_TOOL_DEFINITION: ToolDefinition = {
+    name: AgentCore.FINISH_TASK_TOOL_NAME,
+    description: 'Signal that the current user request is fully complete. Use this as the final action after tool-based or multi-step work; do not use it while work remains.',
+    parameters: {
+      type: 'object',
+      properties: {
+        final_response: {
+          type: 'string',
+          description: 'The final response to show the user. Include what changed, verification performed, and any remaining caveats.'
+        },
+        status: {
+          type: 'string',
+          enum: ['completed', 'partial', 'blocked'],
+          description: 'Completion status for the request.'
+        }
+      },
+      required: ['final_response']
+    }
+  }
   private static readonly CONTEXT_SUMMARY_PREFIX = '[CONTEXT_SUMMARY]'
   private static readonly CONTEXT_GOAL_ANCHOR_PREFIX = '[CONTEXT_GOAL_ANCHOR]'
   private static readonly CONTEXT_SUMMARY_CHAR_LIMIT = 1500
@@ -259,9 +281,15 @@ export class AgentCore {
    * Get all tool definitions (for LLM function calling).
    */
   getToolDefinitions (): ToolDefinition[] {
-    return Array.from(this.tools.entries())
+    const runtimeTools = Array.from(this.tools.entries())
       .filter(([name]) => this._isToolVisible(name))
       .map(([, tool]) => tool.definition)
+
+    if (runtimeTools.some(tool => tool.name === AgentCore.FINISH_TASK_TOOL_NAME)) {
+      return runtimeTools
+    }
+
+    return [...runtimeTools, AgentCore.FINISH_TASK_TOOL_DEFINITION]
   }
 
   /**
@@ -355,6 +383,50 @@ export class AgentCore {
     }
 
     return assistantContent || ''
+  }
+
+  private _isFinishTaskToolCall (toolCall: ToolCall): boolean {
+    return this._resolveToolName(toolCall.function.name) === AgentCore.FINISH_TASK_TOOL_NAME
+  }
+
+  private _splitFinishTaskToolCalls (toolCalls?: ToolCall[]): { finishCall: ToolCall | null; regularCalls: ToolCall[] } {
+    const calls = toolCalls || []
+    const finishCall = calls.find(call => this._isFinishTaskToolCall(call)) || null
+    return {
+      finishCall,
+      regularCalls: calls.filter(call => !this._isFinishTaskToolCall(call))
+    }
+  }
+
+  private _buildFinishTaskMessage (toolCall: ToolCall, fallbackContent: ChatMessage['content'] = ''): ChatMessage {
+    try {
+      const args = this._parseToolArguments(AgentCore.FINISH_TASK_TOOL_NAME, toolCall.function.arguments)
+      const finalResponse = typeof args.final_response === 'string'
+        ? args.final_response.trim()
+        : ''
+      const content = finalResponse || this._serializeMessageContentForSummary(fallbackContent)
+      return {
+        role: 'assistant',
+        content
+      }
+    } catch {
+      return {
+        role: 'assistant',
+        content: this._serializeMessageContentForSummary(fallbackContent)
+      }
+    }
+  }
+
+  private _shouldRequireFinishTask (hasExecutedTools: boolean, finishNudgeCount: number): boolean {
+    return hasExecutedTools && finishNudgeCount < AgentCore.MAX_FINISH_TASK_NUDGES
+  }
+
+  private _withFinishTaskNudge (messages: ChatMessage[], nudgeCount: number): ChatMessage[] {
+    const withoutPreviousNudge = this._removeSystemMessagesByPrefix(messages, AgentCore.FINISH_TASK_NUDGE_PREFIX)
+    return this._insertSystemDirective(
+      withoutPreviousNudge,
+      `${AgentCore.FINISH_TASK_NUDGE_PREFIX}\n上一轮 assistant 没有调用任何工具，也没有调用 ${AgentCore.FINISH_TASK_TOOL_NAME}，因此不能仅凭普通文本判断任务已经完成。请在下一步二选一：\n- 如果任务已经完成并且已经做过必要验证，调用 ${AgentCore.FINISH_TASK_TOOL_NAME}，在 final_response 中给出最终答复。\n- 如果任务还没完成，调用下一步真正需要的工具继续执行。\n不要再次只输出普通文本来表示“我会继续”或“已完成”。这是第 ${nudgeCount + 1} 次完成信号校验。`
+    )
   }
 
   private _parseToolArguments (toolName: string, rawArguments: string): Record<string, unknown> {
@@ -827,6 +899,8 @@ export class AgentCore {
       let messages: ChatMessage[] = [systemMessage, ...userMessages]
       const loopGuard = this._createLoopGuardState()
       let segmentIterations = 0
+      let hasExecutedTools = false
+      let finishNudgeCount = 0
 
       while (true) {
         const stopReason = this._getLoopStopReason(loopGuard)
@@ -845,19 +919,36 @@ export class AgentCore {
         loopGuard.totalIterations++
 
         const response = await this.provider.chatCompletion(messages, toolDefs)
+        const { finishCall, regularCalls } = this._splitFinishTaskToolCalls(response.tool_calls)
 
-        if (!response.tool_calls || response.tool_calls.length === 0) {
+        if (finishCall && regularCalls.length === 0) {
+          return this._buildFinishTaskMessage(finishCall, response.content)
+        }
+
+        if (regularCalls.length === 0) {
+          if (this._shouldRequireFinishTask(hasExecutedTools, finishNudgeCount)) {
+            messages.push({
+              ...response,
+              tool_calls: undefined
+            })
+            messages = this._withFinishTaskNudge(messages, finishNudgeCount)
+            finishNudgeCount++
+            continue
+          }
           return {
             role: 'assistant',
             content: response.content || ''
           }
         }
 
-        messages.push(response)
+        messages.push({
+          ...response,
+          tool_calls: regularCalls
+        })
         const executions: ToolExecutionRecord[] = []
 
         // Read-only tools within a group run concurrently; writes stay serial.
-        for (const group of this._groupToolCalls(response.tool_calls)) {
+        for (const group of this._groupToolCalls(regularCalls)) {
           const groupResults = group.length === 1
             ? [await this._executeToolCall(group[0])]
             : await Promise.all(group.map(call => this._executeToolCall(call)))
@@ -866,6 +957,8 @@ export class AgentCore {
             messages.push(message)
           }
         }
+        hasExecutedTools = true
+        finishNudgeCount = 0
 
         this._recordIterationActivity(loopGuard, executions)
 
@@ -905,6 +998,8 @@ export class AgentCore {
       let segmentIterations = 0
       let renderedContent = ''
       let fullThinking = ''
+      let hasExecutedTools = false
+      let finishNudgeCount = 0
 
       while (true) {
         this._throwIfAborted(abortSignal)
@@ -983,8 +1078,30 @@ export class AgentCore {
 
       if (!assistantMessage) break
 
-      // No tool calls → final response
-      if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+      const { finishCall, regularCalls } = this._splitFinishTaskToolCalls(assistantMessage.tool_calls)
+      if (finishCall && regularCalls.length === 0) {
+        yield {
+          type: 'done',
+          message: this._buildFinishTaskMessage(finishCall, this._resolveFinalAssistantContent(assistantMessage.content, renderedContent)),
+          thinking: fullThinking || undefined
+        }
+        return
+      }
+
+      // No regular tool calls → either final response (simple chat/no tools used)
+      // or a missing explicit finish signal after tool-based work.
+      if (regularCalls.length === 0) {
+        if (this._shouldRequireFinishTask(hasExecutedTools, finishNudgeCount)) {
+          messages.push({
+            ...assistantMessage,
+            content: this._resolveFinalAssistantContent(assistantMessage.content, iterationContent),
+            tool_calls: undefined
+          })
+          messages = this._withFinishTaskNudge(messages, finishNudgeCount)
+          finishNudgeCount++
+          continue
+        }
+
         yield {
           type: 'done',
           message: {
@@ -998,10 +1115,13 @@ export class AgentCore {
 
       // Execute tool calls — read-only tools within a group run concurrently,
       // writes and other side-effecting tools stay serial.
-      messages.push(assistantMessage)
+      messages.push({
+        ...assistantMessage,
+        tool_calls: regularCalls
+      })
       const executions: ToolExecutionRecord[] = []
 
-        for (const group of this._groupToolCalls(assistantMessage.tool_calls)) {
+        for (const group of this._groupToolCalls(regularCalls)) {
           this._throwIfAborted(abortSignal)
 
           for (const toolCall of group) {
@@ -1021,6 +1141,8 @@ export class AgentCore {
             messages.push(message)
           }
         }
+        hasExecutedTools = true
+        finishNudgeCount = 0
 
         this._recordIterationActivity(loopGuard, executions)
 

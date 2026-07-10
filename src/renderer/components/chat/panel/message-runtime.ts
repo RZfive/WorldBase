@@ -29,6 +29,11 @@ const DEFAULT_STOP_COPY: AssistantStopCopy = {
   detail: 'The user stopped this generation',
   content: '(Stopped)'
 }
+const CONTEXT_TEXT_MAX_CHARS = 1600
+const CONTEXT_THINKING_MAX_CHARS = 2000
+const CONTEXT_PROGRESS_MAX_ITEMS = 5
+const CONTEXT_TOOL_MAX_ITEMS = 20
+const CONTEXT_PREVIEW_MAX_ITEMS = 8
 
 function isStoppedStage (stage: string, stoppedStage = DEFAULT_STOP_COPY.stage): boolean {
   return stage === stoppedStage || stage === DEFAULT_STOP_COPY.stage || stage === LEGACY_STOPPED_STAGE
@@ -36,6 +41,20 @@ function isStoppedStage (stage: string, stoppedStage = DEFAULT_STOP_COPY.stage):
 
 function includesStoppedContent (content: string, stoppedContent = DEFAULT_STOP_COPY.content): boolean {
   return content.includes(stoppedContent) || content.includes(DEFAULT_STOP_COPY.content) || content.includes(LEGACY_STOPPED_CONTENT)
+}
+
+function truncateContextText (value: string, maxChars: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, maxChars)}...[truncated ${normalized.length - maxChars} chars]`
+}
+
+function getMessageToolRuns (message: ChatMessage): ToolRun[] {
+  return Array.isArray(message.toolRuns) && message.toolRuns.length > 0
+    ? message.toolRuns
+    : (Array.isArray(message.blocks)
+        ? message.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'tool' }> => block.kind === 'tool').map(block => block.toolRun)
+        : [])
 }
 
 export function findLatestAssistantMessage (chatMessages: ChatMessage[]): ChatMessage | null {
@@ -174,25 +193,42 @@ export function isAssistantMessageStopped (message: ChatMessage, copy: Assistant
     return true
   }
 
-  const toolRuns = Array.isArray(message.toolRuns) && message.toolRuns.length > 0
-    ? message.toolRuns
-    : (Array.isArray(message.blocks)
-        ? message.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'tool' }> => block.kind === 'tool').map(block => block.toolRun)
-        : [])
+  const toolRuns = getMessageToolRuns(message)
 
   return toolRuns.some(toolRun => toolRun.progress.some(step => isStoppedStage(step.stage, copy.stage)))
 }
 
-export function buildInterruptedRunSummary (history: ChatMessage[]): string | null {
-  const latestAssistant = findLatestAssistantMessage(history)
-  if (!latestAssistant || !isAssistantMessageStopped(latestAssistant)) {
+function hasAssistantExecutionContext (message: ChatMessage): boolean {
+  if (message.thinking?.trim()) return true
+  if (getMessageToolRuns(message).length > 0) return true
+
+  const blocks = Array.isArray(message.blocks) ? message.blocks : []
+  return blocks.some(block => block.kind !== 'content')
+}
+
+function buildAssistantExecutionSummary (latestAssistant: ChatMessage, options: { interrupted: boolean; requireExecutionContext?: boolean }): string | null {
+  if (options.requireExecutionContext && !hasAssistantExecutionContext(latestAssistant)) {
     return null
   }
 
   const lines = [
-    '以下是上一轮被用户手动终止时的执行进度。如果用户是在继续同一个任务，请把这些内容视为已经完成或已知状态，不要要求用户重复说明，也不要重复已完成的步骤。'
+    options.interrupted
+      ? '以下是上一轮被用户手动终止时的执行进度。如果用户是在继续同一个任务，请把这些内容视为已经完成或已知状态，不要要求用户重复说明，也不要重复已完成的步骤。'
+      : '以下是上一轮 AI 回复与执行上下文。请默认把这些内容视为当前对话的连续上下文，基于它继续推进；不要把上一轮已经完成的步骤当作新任务重复执行。'
   ]
 
+  const visibleContent = getMessageTextContent(latestAssistant.content)
+  if (visibleContent) {
+    lines.push('上一轮可见回复：')
+    lines.push(truncateContextText(visibleContent, CONTEXT_TEXT_MAX_CHARS))
+  }
+
+  if (latestAssistant.thinking?.trim()) {
+    lines.push('上一轮 thinking 片段：')
+    lines.push(truncateContextText(latestAssistant.thinking, CONTEXT_THINKING_MAX_CHARS))
+  }
+
+  const blocks = Array.isArray(latestAssistant.blocks) ? latestAssistant.blocks : []
   const todoBlock = getLatestTodoBlock(latestAssistant)
   if (todoBlock && todoBlock.items.length > 0) {
     lines.push('当前 Todo 状态：')
@@ -206,15 +242,11 @@ export function buildInterruptedRunSummary (history: ChatMessage[]): string | nu
     }
   }
 
-  const toolRuns = Array.isArray(latestAssistant.toolRuns) && latestAssistant.toolRuns.length > 0
-    ? latestAssistant.toolRuns
-    : (Array.isArray(latestAssistant.blocks)
-        ? latestAssistant.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'tool' }> => block.kind === 'tool').map(block => block.toolRun)
-        : [])
+  const toolRuns = getMessageToolRuns(latestAssistant)
 
   if (toolRuns.length > 0) {
-    lines.push('上一轮工具执行进度：')
-    for (const toolRun of toolRuns) {
+    lines.push('上一轮工具请求/执行进度：')
+    for (const toolRun of toolRuns.slice(-CONTEXT_TOOL_MAX_ITEMS)) {
       const statusLabel = toolRun.status === 'failed'
         ? '失败'
         : toolRun.progress.some(step => isStoppedStage(step.stage))
@@ -222,14 +254,14 @@ export function buildInterruptedRunSummary (history: ChatMessage[]): string | nu
           : toolRun.status === 'completed'
             ? '已完成'
             : '执行中'
-      const recentProgress = toolRun.progress.slice(-3).map(step => step.detail ? `${step.stage}: ${step.detail}` : step.stage)
+      const recentProgress = toolRun.progress
+        .slice(-CONTEXT_PROGRESS_MAX_ITEMS)
+        .map(step => step.detail ? `${step.stage}: ${step.detail}` : step.stage)
       lines.push(`- ${toolRun.name} [${statusLabel}]${recentProgress.length > 0 ? ` -> ${recentProgress.join(' | ')}` : ''}`)
     }
   }
 
-  const authBlocks = Array.isArray(latestAssistant.blocks)
-    ? latestAssistant.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'auth_request' }> => block.kind === 'auth_request')
-    : []
+  const authBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'auth_request' }> => block.kind === 'auth_request')
   if (authBlocks.length > 0) {
     lines.push('授权记录：')
     for (const block of authBlocks) {
@@ -238,17 +270,51 @@ export function buildInterruptedRunSummary (history: ChatMessage[]): string | nu
     }
   }
 
-  const previewBlocks = Array.isArray(latestAssistant.blocks)
-    ? latestAssistant.blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'file_preview' }> => block.kind === 'file_preview')
-    : []
+  const previewBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'file_preview' }> => block.kind === 'file_preview')
   if (previewBlocks.length > 0) {
     lines.push('已生成或查看过的文件预览：')
-    for (const block of previewBlocks.slice(-3)) {
+    for (const block of previewBlocks.slice(-CONTEXT_PREVIEW_MAX_ITEMS)) {
       lines.push(`- ${block.filePath}`)
     }
   }
 
-  return lines.join('\n')
+  const webSearchBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'web_search' }> => block.kind === 'web_search')
+  if (webSearchBlocks.length > 0) {
+    lines.push('上一轮网页搜索：')
+    for (const block of webSearchBlocks.slice(-CONTEXT_PREVIEW_MAX_ITEMS)) {
+      lines.push(`- ${block.query}: ${block.results.slice(0, 3).map(result => result.url).join(', ')}`)
+    }
+  }
+
+  const webFetchBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'web_fetch' }> => block.kind === 'web_fetch')
+  if (webFetchBlocks.length > 0) {
+    lines.push('上一轮网页读取：')
+    for (const block of webFetchBlocks.slice(-CONTEXT_PREVIEW_MAX_ITEMS)) {
+      const title = block.result.title ? ` (${block.result.title})` : ''
+      lines.push(`- ${block.result.final_url || block.result.url}${title}`)
+    }
+  }
+
+  return lines.length > 1 ? lines.join('\n') : null
+}
+
+export function buildInterruptedRunSummary (history: ChatMessage[]): string | null {
+  const latestAssistant = findLatestAssistantMessage(history)
+  if (!latestAssistant || !isAssistantMessageStopped(latestAssistant)) {
+    return null
+  }
+
+  return buildAssistantExecutionSummary(latestAssistant, { interrupted: true })
+}
+
+function buildLatestAssistantExecutionSummary (sourceMessages: ChatMessage[]): string | null {
+  const latestAssistant = findLatestAssistantMessage(sourceMessages.slice(0, -1))
+  if (!latestAssistant) return null
+
+  return buildAssistantExecutionSummary(latestAssistant, {
+    interrupted: false,
+    requireExecutionContext: true
+  })
 }
 
 export function buildOutgoingChatMessages (sourceMessages: ChatMessage[]): Array<{ role: string; content: MessageContent }> {
@@ -261,7 +327,7 @@ export function buildOutgoingChatMessages (sourceMessages: ChatMessage[]): Array
     return outgoingMessages
   }
 
-  const summary = buildInterruptedRunSummary(sourceMessages.slice(0, -1))
+  const summary = buildInterruptedRunSummary(sourceMessages.slice(0, -1)) || buildLatestAssistantExecutionSummary(sourceMessages)
   if (!summary) {
     return outgoingMessages
   }
