@@ -302,8 +302,9 @@ export class ProcessManagerService {
     }
     return (
       lower.includes('the_world') ||
-      // The app's own install/userData path may contain "the-world"; only match
-      // the project directory so the host and its helpers aren't flagged.
+      // The app's own install/userData path may contain the product name; only
+      // match the project directory so the host and its helpers aren't flagged.
+      lower.includes('worldbase/projects') ||
       lower.includes('the-world/projects') ||
       lower.includes('server.js') ||
       lower.includes('next-server') ||
