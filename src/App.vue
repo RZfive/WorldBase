@@ -128,6 +128,10 @@ function toPlainSavedWebApps (webApps: SavedWebApp[]): SavedWebApp[] {
   }))
 }
 
+function cleanOptionalString (value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
 const currentView = ref<MainView>('chat')
 const appChatPresentation = ref<AppChatPresentation>('full')
 const chatProjectContext = ref<Record<string, unknown> | null>(null)
@@ -149,6 +153,7 @@ const runningApps = ref(new Map<string, RunningApp>())
 const browserApps = ref(new Map<string, RunningApp>())
 const savedWebApps = ref<SavedWebApp[]>([])
 const pinnedDockApps = ref<PinnedDockApp[]>([])
+const projectCatalog = ref(new Map<string, ProjectListItem>())
 
 /** Running apps minus any that are pinned (pinned ones render in their own section). */
 const dockApps = computed(() => {
@@ -166,19 +171,30 @@ const dockApps = computed(() => {
 const pinnedDockItems = computed<RunningApp[]>(() => {
   return pinnedDockApps.value.map(pinned => {
     const running = runningApps.value.get(pinned.id) || browserApps.value.get(pinned.id)
+    const embedded = embeddedApps.value.get(pinned.id)
+    const projectMeta = pinned.kind === 'project'
+      ? projectCatalog.value.get(pinned.id)
+      : null
+    const savedWebApp = pinned.kind === 'browser'
+      ? savedWebApps.value.find(app => (
+          app.id === pinned.id ||
+          (pinned.url && normalizeWebUrlInput(app.url) === normalizeWebUrlInput(pinned.url))
+        )) || null
+      : null
+
     return {
       id: pinned.id,
-      name: running?.name || pinned.name,
+      name: running?.name || projectMeta?.name || savedWebApp?.name || pinned.name,
       kind: pinned.kind,
-      type: running?.type || pinned.type || (pinned.kind === 'browser' ? 'browser' : 'unknown'),
-      icon: running?.icon || pinned.icon,
-      url: running?.url || pinned.url,
+      type: running?.type || projectMeta?.type || savedWebApp?.type || pinned.type || (pinned.kind === 'browser' ? 'browser' : 'unknown'),
+      icon: running?.icon || projectMeta?.icon || savedWebApp?.icon || pinned.icon,
+      url: running?.url || savedWebApp?.url || pinned.url,
       port: running?.port,
       isWindow: running?.isWindow ?? false,
-      closable: running?.closable,
+      closable: running?.closable ?? (embedded?.kind === 'project' ? true : undefined),
       savedToLaunchpad: running?.savedToLaunchpad,
       pinned: true,
-      isRunning: Boolean(running)
+      isRunning: Boolean(running || embedded)
     }
   })
 })
@@ -473,12 +489,18 @@ async function pinAppToDock (app: RunningApp) {
   hideDockCtx()
   if (isDockAppPinned(app)) return
 
+  const projectMeta = app.kind === 'project'
+    ? (await fetchProjectMeta(app.id).catch(() => null)) as Record<string, unknown> | null
+    : null
+  const nextIcon = cleanOptionalString(projectMeta?.icon) || app.icon
   const next: PinnedDockApp = {
     id: app.id,
     kind: app.kind,
-    name: app.name,
-    type: app.kind === 'project' ? app.type : undefined,
-    icon: app.icon && app.icon !== '🌐' ? app.icon : undefined,
+    name: cleanOptionalString(projectMeta?.name) || app.name,
+    type: app.kind === 'project'
+      ? (cleanOptionalString(projectMeta?.type) || app.type)
+      : undefined,
+    icon: nextIcon && nextIcon !== '🌐' ? nextIcon : undefined,
     url: app.kind === 'browser' ? app.url : undefined,
     addedAt: new Date().toISOString()
   }
@@ -1076,6 +1098,8 @@ async function refreshRunningApps () {
 
     if (refreshToken !== runningAppsRefreshToken) return
 
+    projectCatalog.value = new Map(projects.map(project => [project.id, project]))
+
     const openSet = new Set(openWindows)
     const oldRunningApps = runningApps.value
     const nextRunningApps = new Map<string, RunningApp>()
@@ -1092,7 +1116,8 @@ async function refreshRunningApps () {
           type: (proj.type as string) || 'unknown',
           icon: proj.icon as string | undefined,
           port: status.port,
-          isWindow: openSet.has(id) || (existing?.isWindow ?? false)
+          isWindow: openSet.has(id) || (existing?.isWindow ?? false),
+          closable: true
         })
       }
     }
