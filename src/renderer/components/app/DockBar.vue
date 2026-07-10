@@ -48,6 +48,14 @@ function resolveIcon (app: RunningApp) {
 function appTitle (app: RunningApp): string {
   return app.name + (app.isWindow ? t('appShell.independentWindowSuffix') : '')
 }
+
+function canCloseApp (app: RunningApp): boolean {
+  return Boolean(app.closable && (app.isRunning ?? true))
+}
+
+function closeTitle (app: RunningApp): string {
+  return app.kind === 'project' ? t('appShell.dockStop') : t('appShell.dockCloseWebPage')
+}
 </script>
 
 <template>
@@ -85,7 +93,7 @@ function appTitle (app: RunningApp): string {
         <div
           v-for="app in props.pinnedApps"
           :key="'pin-' + app.id"
-          :class="['dock-item', 'dock-app', 'dock-pinned', { 'dock-active': props.currentView === 'app' && props.embeddedProjectId === app.id, 'dock-windowed': app.isWindow }]"
+          :class="['dock-item', 'dock-app', 'dock-pinned', { 'dock-active': props.currentView === 'app' && props.embeddedProjectId === app.id, 'dock-windowed': app.isWindow, 'dock-running': app.isRunning }]"
           :title="appTitle(app)"
           :data-tip="app.name"
           @click="emit('switchToApp', app)"
@@ -99,10 +107,11 @@ function appTitle (app: RunningApp): string {
             <span class="dock-pin-badge" :title="$t('appShell.pinnedToDock')">📌</span>
             <span v-if="app.isWindow" class="dock-window-badge">↗</span>
             <button
-              v-if="app.closable && app.isRunning"
+              v-if="canCloseApp(app)"
               class="dock-close-btn"
               type="button"
-              :title="$t('common.close')"
+              :title="closeTitle(app)"
+              :aria-label="closeTitle(app)"
               @click.stop="emit('closeApp', app.id)"
             >
               ×
@@ -118,7 +127,7 @@ function appTitle (app: RunningApp): string {
       <div
         v-for="[appId, app] in props.runningApps"
         :key="appId"
-        :class="['dock-item', 'dock-app', { 'dock-active': props.currentView === 'app' && props.embeddedProjectId === appId, 'dock-windowed': app.isWindow }]"
+        :class="['dock-item', 'dock-app', { 'dock-active': props.currentView === 'app' && props.embeddedProjectId === appId, 'dock-windowed': app.isWindow, 'dock-running': app.closable }]"
         :title="appTitle(app)"
         :data-tip="app.name"
         @click="emit('switchToApp', app)"
@@ -131,10 +140,11 @@ function appTitle (app: RunningApp): string {
           </span>
           <span v-if="app.isWindow" class="dock-window-badge">↗</span>
           <button
-            v-if="app.closable"
+            v-if="canCloseApp(app)"
             class="dock-close-btn"
             type="button"
-            :title="$t('common.close')"
+            :title="closeTitle(app)"
+            :aria-label="closeTitle(app)"
             @click.stop="emit('closeApp', app.id)"
           >
             ×
@@ -392,16 +402,16 @@ function appTitle (app: RunningApp): string {
 
 .dock-close-btn {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 15px;
-  height: 15px;
+  top: 3px;
+  right: 3px;
+  width: 16px;
+  height: 16px;
   padding: 0;
   border: none;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.8);
+  background: rgba(15, 23, 42, 0.86);
   color: #ffffff;
-  font-size: 0.72em;
+  font-size: 0.78em;
   line-height: 1;
   display: flex;
   align-items: center;
@@ -410,6 +420,10 @@ function appTitle (app: RunningApp): string {
   opacity: 0;
   transition: opacity 0.14s ease, transform 0.14s ease, background 0.14s ease;
   z-index: 2;
+}
+
+.dock-item.dock-running .dock-close-btn {
+  opacity: 0.86;
 }
 
 .dock-item:hover .dock-close-btn,
