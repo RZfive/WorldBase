@@ -20,6 +20,8 @@ import { t } from '../i18n/main-i18n.js'
 import type { SettingsStore } from '../settings/settings-store.js'
 
 const APP_ID = 'com.theworld.app'
+const DEFAULT_UPDATE_WEBSITE_BASE_URL = 'https://worldbase.world'
+const DEFAULT_UPDATE_API_PATH = '/api/releases?latest=1'
 const CHECK_TIMEOUT_MS = 15000
 const DOWNLOADS_SUBDIR = 'updates'
 const PROGRESS_EMIT_INTERVAL_MS = 120
@@ -27,19 +29,29 @@ const UPDATE_CONFIG_ERROR_KEY = 'mainDialog.updateConfigRequired'
 
 interface RemoteUpdateResponse {
   status?: string
+  version?: string
   latestVersion?: string
   publishedAt?: string
-  notes?: {
-    zh?: unknown
-    en?: unknown
-  }
-  asset?: {
-    fileName?: string
-    downloadUrl?: string
-    sha512?: string
-    sha256?: string
-    size?: unknown
-  }
+  headline?: unknown
+  summary?: unknown
+  notes?: unknown
+  asset?: unknown
+  assets?: unknown
+  item?: unknown
+  items?: unknown
+}
+
+interface NormalizedRemoteUpdate {
+  status: Extract<AppUpdateStatus, 'update_available' | 'up_to_date' | 'unsupported_platform'>
+  latestVersion: string | null
+  publishedAt: string | null
+  notes: AppUpdateNotes | null
+  asset: AppUpdateAssetInfo | null
+}
+
+interface VersionParts {
+  core: number[]
+  prerelease: string[]
 }
 
 function inferChannelFromVersion (version: string): AppUpdateChannel {
@@ -55,6 +67,14 @@ function normalizeUrlBase (value: string): string {
 function joinWebsiteUrl (baseUrl: string, pathname: string): string {
   if (!baseUrl) return ''
   return `${baseUrl}${pathname.startsWith('/') ? pathname : `/${pathname}`}`
+}
+
+function isRecord (value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function getTrimmedString (value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 function isValidHttpUrl (value: string): boolean {
@@ -77,7 +97,7 @@ function cloneConfig (config: AppUpdateConfig): AppUpdateConfig {
 }
 
 function createWebsiteLinks (config: AppUpdateConfig): AppUpdateWebsiteLinks {
-  const baseUrl = normalizeUrlBase(config.websiteBaseUrl || '')
+  const baseUrl = normalizeUrlBase(config.websiteBaseUrl || DEFAULT_UPDATE_WEBSITE_BASE_URL)
   const downloadsUrl = normalizeUrlBase(config.downloadsPageUrl || '') || joinWebsiteUrl(baseUrl, '/downloads')
   const updatesUrl = normalizeUrlBase(config.updatesPageUrl || '') || joinWebsiteUrl(baseUrl, '/updates')
 
@@ -93,13 +113,25 @@ function createUpdateApiUrl (config: AppUpdateConfig, website: AppUpdateWebsiteL
   const explicit = normalizeUrlBase(config.updateApiUrl || '')
   if (explicit) return explicit
   if (!website.baseUrl) return ''
-  return joinWebsiteUrl(website.baseUrl, '/api/app-update/latest')
+  return joinWebsiteUrl(website.baseUrl, DEFAULT_UPDATE_API_PATH)
 }
 
 function normalizeNotes (value: unknown): AppUpdateNotes | null {
-  if (!value || typeof value !== 'object') return null
+  if (Array.isArray(value)) {
+    const notes = value
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map(item => item.trim())
+    return notes.length > 0 ? { zh: notes, en: notes } : null
+  }
 
-  const input = value as Record<string, unknown>
+  if (typeof value === 'string') {
+    const note = value.trim()
+    return note ? { zh: [note], en: [note] } : null
+  }
+
+  if (!isRecord(value)) return null
+
+  const input = value
   const zh = Array.isArray(input.zh)
     ? input.zh.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim())
     : []
@@ -111,21 +143,344 @@ function normalizeNotes (value: unknown): AppUpdateNotes | null {
   return { zh, en }
 }
 
-function normalizeAsset (value: unknown): AppUpdateAssetInfo | null {
-  if (!value || typeof value !== 'object') return null
+function normalizeLocalizedText (value: unknown): { zh: string; en: string } {
+  if (isRecord(value)) {
+    return {
+      zh: getTrimmedString(value.zh),
+      en: getTrimmedString(value.en)
+    }
+  }
 
-  const input = value as Record<string, unknown>
-  const fileName = typeof input.fileName === 'string' ? input.fileName.trim() : ''
-  const downloadUrl = typeof input.downloadUrl === 'string' ? input.downloadUrl.trim() : ''
+  const text = getTrimmedString(value)
+  return { zh: text, en: text }
+}
+
+function uniqueStrings (values: string[]): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+
+  for (const value of values) {
+    const normalized = value.trim()
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    result.push(normalized)
+  }
+
+  return result
+}
+
+function normalizeReleaseNotes (value: unknown): AppUpdateNotes | null {
+  if (!isRecord(value)) return normalizeNotes(value)
+
+  const notes = normalizeNotes(value.notes)
+  const headline = normalizeLocalizedText(value.headline)
+  const summary = normalizeLocalizedText(value.summary)
+  const zh = uniqueStrings([
+    ...(summary.zh ? [summary.zh] : []),
+    ...(notes?.zh || []),
+    ...(!summary.zh && !notes?.zh.length && headline.zh ? [headline.zh] : [])
+  ])
+  const en = uniqueStrings([
+    ...(summary.en ? [summary.en] : []),
+    ...(notes?.en || []),
+    ...(!summary.en && !notes?.en.length && headline.en ? [headline.en] : [])
+  ])
+
+  if (zh.length === 0 && en.length === 0) return null
+  return { zh, en }
+}
+
+function parseAssetSize (value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.round(value)
+  }
+
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+
+  const direct = Number(trimmed)
+  if (Number.isFinite(direct) && direct >= 0) {
+    return Math.round(direct)
+  }
+
+  const match = trimmed.match(/^([\d.]+)\s*(b|kb|mb|gb|tb)$/i)
+  if (!match) return null
+
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount) || amount < 0) return null
+
+  const unit = match[2].toLowerCase()
+  const multiplier = unit === 'tb'
+    ? 1024 ** 4
+    : unit === 'gb'
+      ? 1024 ** 3
+      : unit === 'mb'
+        ? 1024 ** 2
+        : unit === 'kb'
+          ? 1024
+          : 1
+
+  return Math.round(amount * multiplier)
+}
+
+function normalizeSha256 (value: unknown): string | undefined {
+  const checksum = getTrimmedString(value).toLowerCase()
+  return /^[a-f0-9]{64}$/.test(checksum) ? checksum : undefined
+}
+
+function normalizeSha512 (value: unknown): string | undefined {
+  const checksum = getTrimmedString(value)
+  return /^[a-z0-9+/=]{40,}$/i.test(checksum) ? checksum : undefined
+}
+
+function getFileNameFromUrl (value: string): string {
+  try {
+    const parsed = new URL(value)
+    return decodeURIComponent(path.basename(parsed.pathname)).trim()
+  } catch {
+    return ''
+  }
+}
+
+function resolveDownloadUrl (input: Record<string, unknown>, website: AppUpdateWebsiteLinks): string {
+  const explicit = getTrimmedString(input.downloadUrl) || getTrimmedString(input.url)
+  if (isValidHttpUrl(explicit)) return explicit
+
+  if (explicit.startsWith('/') && isValidHttpUrl(website.baseUrl)) {
+    try {
+      return new URL(explicit, website.baseUrl).toString()
+    } catch {
+      return ''
+    }
+  }
+
+  const slug = getTrimmedString(input.slug)
+  if (slug && isValidHttpUrl(website.baseUrl)) {
+    return joinWebsiteUrl(website.baseUrl, `/api/download/${encodeURIComponent(slug)}`)
+  }
+
+  return ''
+}
+
+function normalizeAsset (value: unknown, website: AppUpdateWebsiteLinks): AppUpdateAssetInfo | null {
+  if (!isRecord(value)) return null
+
+  const input = value
+  const downloadUrl = resolveDownloadUrl(input, website)
+  const slug = getTrimmedString(input.slug)
+  const format = getTrimmedString(input.format).replace(/^\./, '')
+  const fileName = getTrimmedString(input.fileName) ||
+    getFileNameFromUrl(downloadUrl) ||
+    (slug && format ? `${slug}.${format}` : slug)
   if (!fileName || !downloadUrl) return null
 
-  const size = Number(input.size)
   return {
     fileName,
     downloadUrl,
-    sha512: typeof input.sha512 === 'string' && input.sha512.trim() ? input.sha512.trim() : undefined,
-    sha256: typeof input.sha256 === 'string' && input.sha256.trim() ? input.sha256.trim().toLowerCase() : undefined,
-    size: Number.isFinite(size) && size >= 0 ? size : null
+    sha512: normalizeSha512(input.sha512),
+    sha256: normalizeSha256(input.sha256) || normalizeSha256(input.checksum),
+    size: parseAssetSize(input.size)
+  }
+}
+
+function parseVersionParts (version: string): VersionParts {
+  const withoutBuild = version.trim().replace(/^v/i, '').split('+')[0] || ''
+  const prereleaseStart = withoutBuild.indexOf('-')
+  const corePart = prereleaseStart >= 0 ? withoutBuild.slice(0, prereleaseStart) : withoutBuild
+  const prereleasePart = prereleaseStart >= 0 ? withoutBuild.slice(prereleaseStart + 1) : ''
+  const core = corePart
+    .split('.')
+    .slice(0, 3)
+    .map(part => Number.parseInt(part.replace(/[^0-9].*$/, ''), 10) || 0)
+
+  while (core.length < 3) core.push(0)
+
+  return {
+    core,
+    prerelease: prereleasePart
+      ? prereleasePart.split('.').map(part => part.trim()).filter(Boolean)
+      : []
+  }
+}
+
+function comparePrereleaseIdentifier (left: string, right: string): number {
+  const leftNumeric = /^\d+$/.test(left)
+  const rightNumeric = /^\d+$/.test(right)
+
+  if (leftNumeric && rightNumeric) {
+    return Number(left) - Number(right)
+  }
+  if (leftNumeric !== rightNumeric) {
+    return leftNumeric ? -1 : 1
+  }
+
+  return left.localeCompare(right, 'en')
+}
+
+function compareVersions (left: string, right: string): number {
+  const leftParts = parseVersionParts(left)
+  const rightParts = parseVersionParts(right)
+
+  for (let index = 0; index < 3; index++) {
+    if (leftParts.core[index] !== rightParts.core[index]) {
+      return leftParts.core[index] - rightParts.core[index]
+    }
+  }
+
+  if (leftParts.prerelease.length === 0 && rightParts.prerelease.length === 0) return 0
+  if (leftParts.prerelease.length === 0) return 1
+  if (rightParts.prerelease.length === 0) return -1
+
+  const maxLength = Math.max(leftParts.prerelease.length, rightParts.prerelease.length)
+  for (let index = 0; index < maxLength; index++) {
+    const leftIdentifier = leftParts.prerelease[index]
+    const rightIdentifier = rightParts.prerelease[index]
+    if (leftIdentifier === undefined) return -1
+    if (rightIdentifier === undefined) return 1
+
+    const result = comparePrereleaseIdentifier(leftIdentifier, rightIdentifier)
+    if (result !== 0) return result
+  }
+
+  return 0
+}
+
+function normalizeRemoteStatus (value: unknown): NormalizedRemoteUpdate['status'] | null {
+  switch (value) {
+    case 'update_available':
+    case 'up_to_date':
+    case 'unsupported_platform':
+      return value
+    default:
+      return null
+  }
+}
+
+function getPlatformAliases (platform: string): string[] {
+  switch (platform) {
+    case 'win32': return ['win32', 'windows', 'win']
+    case 'darwin': return ['darwin', 'macos', 'mac os', 'mac']
+    case 'linux': return ['linux']
+    default: return [platform]
+  }
+}
+
+function getArchAliases (arch: string): string[] {
+  switch (arch) {
+    case 'x64': return ['x64', 'x86_64', 'amd64']
+    case 'arm64': return ['arm64', 'aarch64', 'apple silicon']
+    case 'ia32': return ['ia32', 'x86']
+    default: return [arch]
+  }
+}
+
+function createAssetSearchText (asset: Record<string, unknown>): string {
+  return [
+    asset.slug,
+    asset.platform,
+    asset.arch,
+    asset.format,
+    asset.kind,
+    asset.fileName,
+    asset.url,
+    asset.downloadUrl
+  ]
+    .map(getTrimmedString)
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+}
+
+function isInstallableAsset (asset: Record<string, unknown>): boolean {
+  const kind = getTrimmedString(asset.kind).toLowerCase()
+  if (kind && kind !== 'installer') return false
+
+  const format = getTrimmedString(asset.format).toLowerCase()
+  const fileName = getTrimmedString(asset.fileName) || getFileNameFromUrl(getTrimmedString(asset.url) || getTrimmedString(asset.downloadUrl))
+  const extension = path.extname(fileName).replace(/^\./, '').toLowerCase()
+  const installableFormats = new Set(['exe', 'msi', 'dmg', 'pkg', 'appimage'])
+  return !format || installableFormats.has(format) || installableFormats.has(extension)
+}
+
+function assetMatchesRuntime (asset: Record<string, unknown>, platform: string, arch: string): boolean {
+  const text = createAssetSearchText(asset)
+  const platformMatches = getPlatformAliases(platform).some(alias => text.includes(alias))
+  const archMatches = getArchAliases(arch).some(alias => text.includes(alias))
+  return platformMatches && archMatches
+}
+
+function selectReleaseAsset (
+  assetsValue: unknown,
+  options: { platform: string; arch: string; website: AppUpdateWebsiteLinks }
+): AppUpdateAssetInfo | null {
+  if (!Array.isArray(assetsValue)) return null
+
+  const assets = assetsValue.filter(isRecord).filter(isInstallableAsset)
+  const exactMatch = assets.find(asset => assetMatchesRuntime(asset, options.platform, options.arch))
+  const fallbackMatch = assets.find(asset => getPlatformAliases(options.platform).some(alias => createAssetSearchText(asset).includes(alias)))
+  return normalizeAsset(exactMatch || fallbackMatch || null, options.website)
+}
+
+function selectReleaseItem (payload: RemoteUpdateResponse, channel: AppUpdateChannel): Record<string, unknown> | null {
+  if (isRecord(payload.item)) return payload.item
+  if (Array.isArray(payload.items)) {
+    const releases = payload.items.filter(isRecord)
+    return releases.find(item => getTrimmedString(item.channel) === channel) || releases[0] || null
+  }
+  if (getTrimmedString(payload.version)) return payload as Record<string, unknown>
+  return null
+}
+
+function normalizeRemoteUpdatePayload (
+  payload: unknown,
+  options: {
+    channel: AppUpdateChannel
+    currentVersion: string
+    platform: string
+    arch: string
+    website: AppUpdateWebsiteLinks
+  }
+): NormalizedRemoteUpdate {
+  if (!isRecord(payload)) {
+    throw new Error(t('mainDialog.updateCheckFailed'))
+  }
+
+  const response = payload as RemoteUpdateResponse
+  const releaseItem = selectReleaseItem(response, options.channel)
+  const explicitStatus = normalizeRemoteStatus(response.status)
+  const latestVersion = getTrimmedString(response.latestVersion) ||
+    getTrimmedString(response.version) ||
+    (releaseItem ? getTrimmedString(releaseItem.version) : '')
+
+  if (!latestVersion && explicitStatus !== 'unsupported_platform') {
+    throw new Error(t('mainDialog.updateCheckFailed'))
+  }
+
+  const notes = normalizeReleaseNotes(response) || normalizeReleaseNotes(releaseItem)
+  const publishedAt = getTrimmedString(response.publishedAt) ||
+    (releaseItem ? getTrimmedString(releaseItem.publishedAt) : '') ||
+    null
+  const asset = normalizeAsset(response.asset, options.website) ||
+    selectReleaseAsset(response.assets, options) ||
+    (releaseItem ? selectReleaseAsset(releaseItem.assets, options) : null)
+
+  if (explicitStatus) {
+    return {
+      status: explicitStatus,
+      latestVersion: latestVersion || null,
+      publishedAt,
+      notes,
+      asset: explicitStatus === 'update_available' ? asset : null
+    }
+  }
+
+  return {
+    status: compareVersions(latestVersion, options.currentVersion) > 0 ? 'update_available' : 'up_to_date',
+    latestVersion,
+    publishedAt,
+    notes,
+    asset
   }
 }
 
@@ -256,6 +611,9 @@ export class UpdateService extends EventEmitter {
 
     try {
       const url = new URL(this.updateApiUrl)
+      if (url.pathname.endsWith('/api/releases') && !url.searchParams.has('latest')) {
+        url.searchParams.set('latest', '1')
+      }
       url.searchParams.set('channel', channel)
       url.searchParams.set('platform', process.platform)
       url.searchParams.set('arch', process.arch)
@@ -273,27 +631,28 @@ export class UpdateService extends EventEmitter {
         throw new Error(body || t('mainDialog.updateApiHttpStatus', { status: response.status }))
       }
 
-      const payload = await response.json() as RemoteUpdateResponse
+      const payload = await response.json() as unknown
+      const remoteUpdate = normalizeRemoteUpdatePayload(payload, {
+        channel,
+        currentVersion: app.getVersion(),
+        platform: process.platform,
+        arch: process.arch,
+        website: this.website
+      })
       const now = new Date().toISOString()
-      const notes = normalizeNotes(payload.notes)
-      const asset = normalizeAsset(payload.asset)
 
-      if (payload.status === 'update_available') {
+      if (remoteUpdate.status === 'update_available') {
         const nextState: AppUpdateState = {
           ...this.createBaseState(),
           status: 'update_available',
-          latestVersion: typeof payload.latestVersion === 'string' && payload.latestVersion.trim()
-            ? payload.latestVersion.trim()
-            : null,
+          latestVersion: remoteUpdate.latestVersion,
           channel,
           lastCheckedAt: now,
-          publishedAt: typeof payload.publishedAt === 'string' && payload.publishedAt.trim()
-            ? payload.publishedAt.trim()
-            : null,
+          publishedAt: remoteUpdate.publishedAt,
           downloadedFilePath: this.state.downloadedFilePath,
           error: null,
-          notes,
-          asset,
+          notes: remoteUpdate.notes,
+          asset: remoteUpdate.asset,
           website: { ...this.website }
         }
 
@@ -302,20 +661,16 @@ export class UpdateService extends EventEmitter {
         return this.getState()
       }
 
-      if (payload.status === 'unsupported_platform') {
+      if (remoteUpdate.status === 'unsupported_platform') {
         this.updateState({
           status: 'unsupported_platform',
-          latestVersion: typeof payload.latestVersion === 'string' && payload.latestVersion.trim()
-            ? payload.latestVersion.trim()
-            : null,
+          latestVersion: remoteUpdate.latestVersion,
           lastCheckedAt: now,
-          publishedAt: typeof payload.publishedAt === 'string' && payload.publishedAt.trim()
-            ? payload.publishedAt.trim()
-            : null,
+          publishedAt: remoteUpdate.publishedAt,
           downloadedFilePath: null,
           progress: null,
           error: null,
-          notes,
+          notes: remoteUpdate.notes,
           asset: null,
           website: { ...this.website }
         })
@@ -324,17 +679,13 @@ export class UpdateService extends EventEmitter {
 
       this.updateState({
         status: 'up_to_date',
-        latestVersion: typeof payload.latestVersion === 'string' && payload.latestVersion.trim()
-          ? payload.latestVersion.trim()
-          : app.getVersion(),
+        latestVersion: remoteUpdate.latestVersion || app.getVersion(),
         lastCheckedAt: now,
-        publishedAt: typeof payload.publishedAt === 'string' && payload.publishedAt.trim()
-          ? payload.publishedAt.trim()
-          : null,
+        publishedAt: remoteUpdate.publishedAt,
         downloadedFilePath: null,
         progress: null,
         error: null,
-        notes,
+        notes: remoteUpdate.notes,
         asset: null,
         website: { ...this.website }
       })

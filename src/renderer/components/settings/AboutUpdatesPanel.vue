@@ -6,7 +6,7 @@ const props = defineProps<{
   active: boolean
 }>()
 
-const { t } = useI18n()
+const { locale, t } = useI18n()
 
 const aboutInfo = ref<AppAboutInfo | null>(null)
 const updateState = ref<AppUpdateState | null>(null)
@@ -32,6 +32,7 @@ const statusLabel = computed(() => {
   switch (updateState.value?.status) {
     case 'checking': return t('settings.about.statusChecking')
     case 'up_to_date': return t('settings.about.statusUpToDate')
+    case 'unsupported_platform': return t('settings.about.statusUnsupported')
     case 'update_available': return t('settings.about.statusUpdateAvailable', { version: updateState.value.latestVersion || '' }).trim()
     case 'failed': return t('settings.about.statusFailed')
     default: return ''
@@ -49,6 +50,29 @@ const statusTone = computed(() => {
 })
 
 const resolvedError = computed(() => localError.value || updateState.value?.error || '')
+
+const releaseNotes = computed(() => {
+  const notes = updateState.value?.notes
+  if (!notes) return []
+
+  const primaryLanguage = locale.value.startsWith('zh') ? 'zh' : 'en'
+  const fallbackLanguage = primaryLanguage === 'zh' ? 'en' : 'zh'
+  return notes[primaryLanguage].length > 0 ? notes[primaryLanguage] : notes[fallbackLanguage]
+})
+
+const publishedAtLabel = computed(() => {
+  const publishedAt = updateState.value?.publishedAt
+  if (!publishedAt) return ''
+
+  const date = new Date(publishedAt)
+  if (Number.isNaN(date.getTime())) return publishedAt
+
+  return new Intl.DateTimeFormat(locale.value, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  }).format(date)
+})
 
 async function activatePanel () {
   deactivatePanel()
@@ -121,6 +145,16 @@ async function checkForUpdates () {
 
     <p v-if="statusLabel" class="au-status" :data-tone="statusTone">{{ statusLabel }}</p>
     <p v-if="resolvedError" class="au-error">{{ resolvedError }}</p>
+
+    <section v-if="releaseNotes.length > 0 || publishedAtLabel" class="au-release">
+      <div class="au-release-head">
+        <strong>{{ $t('settings.about.releaseNotes') }}</strong>
+        <span v-if="publishedAtLabel">{{ $t('settings.about.releasedAt', { date: publishedAtLabel }) }}</span>
+      </div>
+      <ul v-if="releaseNotes.length > 0" class="au-release-list">
+        <li v-for="note in releaseNotes" :key="note">{{ note }}</li>
+      </ul>
+    </section>
   </section>
 </template>
 
@@ -219,6 +253,45 @@ async function checkForUpdates () {
   color: var(--app-danger);
 }
 
+.au-release {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-panel);
+}
+
+.au-release-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.au-release-head strong {
+  color: var(--app-text-strong);
+  font-size: 0.96em;
+}
+
+.au-release-head span {
+  flex: 0 0 auto;
+  color: var(--app-text-muted);
+  font-size: 0.82em;
+}
+
+.au-release-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--app-text);
+  font-size: 0.9em;
+  line-height: 1.55;
+}
+
 @media (max-width: 640px) {
   .au-hero {
     flex-direction: column;
@@ -227,6 +300,11 @@ async function checkForUpdates () {
 
   .au-check {
     width: 100%;
+  }
+
+  .au-release-head {
+    flex-direction: column;
+    gap: 4px;
   }
 }
 </style>

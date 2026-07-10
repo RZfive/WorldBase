@@ -1159,8 +1159,11 @@ const zhCN = {
       checking: '检查中…',
       statusChecking: '正在检查更新…',
       statusUpToDate: '当前已是最新版本',
+      statusUnsupported: '当前平台暂不支持应用内更新',
       statusUpdateAvailable: '发现新版本 {version}',
-      statusFailed: '更新检查失败'
+      statusFailed: '更新检查失败',
+      releaseNotes: '更新内容',
+      releasedAt: '发布于 {date}'
     },
     skills: {
       title: 'Skill 管理',
