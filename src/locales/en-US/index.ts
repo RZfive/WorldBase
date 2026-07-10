@@ -1158,8 +1158,11 @@ const enUS: MessageSchema = {
       checking: 'Checking…',
       statusChecking: 'Checking for updates…',
       statusUpToDate: 'You are up to date',
+      statusUnsupported: 'In-app updates are not supported on this platform yet',
       statusUpdateAvailable: 'New version available: {version}',
-      statusFailed: 'Update check failed'
+      statusFailed: 'Update check failed',
+      releaseNotes: 'Release notes',
+      releasedAt: 'Released {date}'
     },
     skills: {
       title: 'Skill Management',
