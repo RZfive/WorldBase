@@ -593,7 +593,7 @@ export class UpdateService extends EventEmitter {
     if (!isValidHttpUrl(this.updateApiUrl)) {
       return this.fail(t(UPDATE_CONFIG_ERROR_KEY))
     }
-    if (this.state.status === 'downloading') {
+    if (this.state.status === 'checking' || this.state.status === 'downloading') {
       return this.getState()
     }
 

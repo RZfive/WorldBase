@@ -15,6 +15,7 @@ const checking = ref(false)
 const localError = ref<string | null>(null)
 
 let updateStateCleanup: (() => void) | null = null
+let updateStateRevision = 0
 
 watch(() => props.active, (active) => {
   if (active) {
@@ -50,6 +51,7 @@ const statusTone = computed(() => {
 })
 
 const resolvedError = computed(() => localError.value || updateState.value?.error || '')
+const isChecking = computed(() => checking.value || updateState.value?.status === 'checking')
 
 const releaseNotes = computed(() => {
   const notes = updateState.value?.notes
@@ -77,6 +79,7 @@ const publishedAtLabel = computed(() => {
 async function activatePanel () {
   deactivatePanel()
   updateStateCleanup = window.electronAPI?.onAppUpdateStateChanged?.((state) => {
+    updateStateRevision += 1
     updateState.value = state
     if (state.status !== 'failed') {
       localError.value = null
@@ -94,6 +97,7 @@ async function loadPanelData () {
   if (!window.electronAPI) return
   loading.value = true
   localError.value = null
+  const revisionAtStart = updateStateRevision
 
   try {
     const [info, state] = await Promise.all([
@@ -101,7 +105,9 @@ async function loadPanelData () {
       window.electronAPI.getAppUpdateState()
     ])
     aboutInfo.value = info
-    updateState.value = state
+    if (updateStateRevision === revisionAtStart) {
+      updateState.value = state
+    }
   } catch (error) {
     localError.value = (error as Error).message
   } finally {
@@ -110,7 +116,7 @@ async function loadPanelData () {
 }
 
 async function checkForUpdates () {
-  if (!window.electronAPI || checking.value) return
+  if (!window.electronAPI || isChecking.value) return
   checking.value = true
   localError.value = null
 
@@ -136,10 +142,10 @@ async function checkForUpdates () {
       </div>
       <button
         class="au-check"
-        :disabled="loading || checking"
+        :disabled="loading || isChecking"
         @click="checkForUpdates"
       >
-        {{ checking ? $t('settings.about.checking') : $t('settings.about.check') }}
+        {{ isChecking ? $t('settings.about.checking') : $t('settings.about.check') }}
       </button>
     </div>
 
