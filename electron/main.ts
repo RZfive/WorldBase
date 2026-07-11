@@ -78,6 +78,12 @@ app.whenReady().then(async () => {
 
   createWindow()
 
+  // Check once per application launch. UpdateService persists and broadcasts
+  // every state transition, so About & Updates shows this result whenever it opens.
+  void mainState.updateService!.checkForUpdates().catch((error) => {
+    console.warn('[main] Startup update check failed:', (error as Error).message)
+  })
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
