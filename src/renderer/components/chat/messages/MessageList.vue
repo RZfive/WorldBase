@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { buildMessageBlocks, getContentParts } from '../message-utils'
+import { copyTextToClipboard } from '../export-utils'
 import type { ChatMessage, GalleryImage, FilePreviewState } from '../types'
 import MessageRow from './MessageRow.vue'
 import ImageLightbox from '../media/ImageLightbox.vue'
@@ -33,9 +34,17 @@ const messageKeyMap = new WeakMap<ChatMessage, string>()
 const estimatedMessageHeights = new Map<string, number>()
 const messageObservers = new Map<string, ResizeObserver>()
 const messageElements = new Map<string, HTMLElement>()
+const selectionCopyMenu = reactive({
+  visible: false,
+  text: '',
+  x: 0,
+  y: 0,
+  copied: false
+})
 let containerObserver: ResizeObserver | null = null
 let isProgrammaticScrolling = false
 let programmaticScrollFrameId: number | null = null
+let selectionCopyResetTimer: number | null = null
 let nextMessageKeyId = 0
 let measuredHeightTotal = 0
 let measuredHeightCount = 0
@@ -51,6 +60,8 @@ const MESSAGE_GAP = 20
 const FALLBACK_ESTIMATED_HEIGHT = 220
 const AUTO_SCROLL_THRESHOLD = 96
 const RESTORE_AUTO_SCROLL_THRESHOLD = 4
+const SELECTION_COPY_MENU_WIDTH = 112
+const SELECTION_COPY_MENU_HEIGHT = 40
 
 const latestAssistantMessageIndex = computed(() => {
   for (let i = props.messages.length - 1; i >= 0; i--) {
@@ -116,6 +127,67 @@ function handleMessageLinkClick (event: MouseEvent): void {
   emit('openLink', url.toString())
 }
 
+function hideSelectionCopyMenu (): void {
+  selectionCopyMenu.visible = false
+  selectionCopyMenu.copied = false
+}
+
+function getChatSelectionText (): string {
+  const selection = window.getSelection()
+  const container = messagesContainer.value
+  if (!selection || selection.isCollapsed || !container) return ''
+
+  const text = selection.toString().trim()
+  if (!text) return ''
+
+  for (let index = 0; index < selection.rangeCount; index++) {
+    const range = selection.getRangeAt(index)
+    if (range.intersectsNode(container)) return text
+  }
+
+  return ''
+}
+
+function positionSelectionCopyMenu (event: MouseEvent): void {
+  selectionCopyMenu.x = Math.max(8, Math.min(event.clientX, window.innerWidth - SELECTION_COPY_MENU_WIDTH - 8))
+  selectionCopyMenu.y = Math.max(8, Math.min(event.clientY, window.innerHeight - SELECTION_COPY_MENU_HEIGHT - 8))
+}
+
+function handleSelectionContextMenu (event: MouseEvent): void {
+  const selectedText = getChatSelectionText()
+  if (!selectedText) {
+    hideSelectionCopyMenu()
+    return
+  }
+
+  event.preventDefault()
+  positionSelectionCopyMenu(event)
+  selectionCopyMenu.text = selectedText
+  selectionCopyMenu.visible = true
+  selectionCopyMenu.copied = false
+}
+
+function handleDocumentSelectionChange (): void {
+  if (!getChatSelectionText()) hideSelectionCopyMenu()
+}
+
+async function copySelectedText (): Promise<void> {
+  if (!selectionCopyMenu.text) return
+
+  try {
+    await copyTextToClipboard(selectionCopyMenu.text)
+    selectionCopyMenu.copied = true
+    if (selectionCopyResetTimer != null) window.clearTimeout(selectionCopyResetTimer)
+    selectionCopyResetTimer = window.setTimeout(() => {
+      hideSelectionCopyMenu()
+      selectionCopyResetTimer = null
+    }, 700)
+  } catch (error) {
+    console.error('Failed to copy selected message text:', error)
+    hideSelectionCopyMenu()
+  }
+}
+
 function markProgrammaticScroll (): void {
   isProgrammaticScrolling = true
   if (programmaticScrollFrameId != null) {
@@ -169,6 +241,7 @@ function syncViewportMetrics (): void {
 }
 
 function handleScroll (): void {
+  hideSelectionCopyMenu()
   if (!messagesContainer.value) return
   if (isProgrammaticScrolling) {
     syncViewportMetrics()
@@ -188,6 +261,7 @@ function handleScroll (): void {
 }
 
 function handleWheel (event: WheelEvent): void {
+  hideSelectionCopyMenu()
   if (!messagesContainer.value) return
   if (event.deltaY < 0 && messagesContainer.value.scrollHeight > messagesContainer.value.clientHeight) {
     autoStickEnabled.value = false
@@ -569,6 +643,9 @@ watch(
 )
 
 onMounted(() => {
+  document.addEventListener('click', hideSelectionCopyMenu)
+  document.addEventListener('selectionchange', handleDocumentSelectionChange)
+  window.addEventListener('blur', hideSelectionCopyMenu)
   syncViewportMetrics()
   if (props.messages.length > 0) {
     nextTick(scrollToBottom)
@@ -581,6 +658,13 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('click', hideSelectionCopyMenu)
+  document.removeEventListener('selectionchange', handleDocumentSelectionChange)
+  window.removeEventListener('blur', hideSelectionCopyMenu)
+  if (selectionCopyResetTimer != null) {
+    window.clearTimeout(selectionCopyResetTimer)
+    selectionCopyResetTimer = null
+  }
   containerObserver?.disconnect()
   containerObserver = null
   resetVirtualMeasurements()
@@ -588,7 +672,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="chat-messages" ref="messagesContainer" @scroll.passive="handleScroll" @wheel.capture.passive="handleWheel" @click.capture="handleMessageLinkClick">
+  <div class="chat-messages" ref="messagesContainer" @scroll.passive="handleScroll" @wheel.capture.passive="handleWheel" @click.capture="handleMessageLinkClick" @contextmenu="handleSelectionContextMenu">
     <div v-if="props.messages.length === 0" class="empty-state">
       <div class="empty-state-card">
         <div class="empty-state-icon">AI</div>
@@ -635,6 +719,21 @@ onUnmounted(() => {
 
     <ImageLightbox ref="lightboxRef" :images="galleryImages" />
     <MermaidPreviewDialog :diagram="activeMermaidPreview" @close="closeMermaidPreview" />
+
+    <Teleport to="body">
+      <div
+        v-if="selectionCopyMenu.visible"
+        class="message-selection-copy-menu"
+        :style="{ left: `${selectionCopyMenu.x}px`, top: `${selectionCopyMenu.y}px` }"
+        @mousedown.prevent
+        @click.stop
+        @contextmenu.prevent
+      >
+        <button class="message-selection-copy-action" type="button" @click.stop="copySelectedText">
+          {{ selectionCopyMenu.copied ? $t('chatUi.copied') : $t('chatUi.copy') }}
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -657,6 +756,33 @@ onUnmounted(() => {
 .message-spacer {
   width: 100%;
   flex: 0 0 auto;
+}
+
+.message-selection-copy-menu {
+  position: fixed;
+  z-index: 5000;
+  padding: 4px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-panel);
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+}
+
+.message-selection-copy-action {
+  height: 32px;
+  min-width: 96px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font-size: 0.86rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.message-selection-copy-action:hover {
+  background: var(--app-panel-subtle);
 }
 
 .empty-state {
