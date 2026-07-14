@@ -15,6 +15,8 @@ const zhCN = {
     cancel: '取消',
     confirm: '确定',
     selectAll: '全选',
+    copy: '复制',
+    paste: '粘贴',
     clear: '清空',
     close: '关闭',
     open: '打开',

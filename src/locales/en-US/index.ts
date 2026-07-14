@@ -14,6 +14,8 @@ const enUS: MessageSchema = {
     cancel: 'Cancel',
     confirm: 'OK',
     selectAll: 'Select all',
+    copy: 'Copy',
+    paste: 'Paste',
     clear: 'Clear',
     close: 'Close',
     open: 'Open',

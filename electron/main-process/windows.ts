@@ -1,5 +1,6 @@
-import { app, BrowserWindow, screen, session, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, screen, session, type DownloadItem, type IpcMainInvokeEvent, type Session } from 'electron'
 import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
 import { networkInterfaces } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +20,64 @@ import {
 import { aiRequestWindowStorage, activeWindowWidthAnimations, mainState, pendingPageAutomationRequests, projectWindows, type EnsureWindowWidthOptions, type WindowBounds } from './state.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const downloadHandlerSessions = new WeakSet<Session>()
+const INVALID_DOWNLOAD_FILENAME_PATTERN = /[<>:"/\\|?*\x00-\x1F]/g
+const MAX_DOWNLOAD_FILENAME_LENGTH = 180
+
+function sanitizeDownloadFilename (fileName: string): string {
+  const normalized = (fileName || 'download').replace(/\\/g, '/')
+  const baseName = path.basename(normalized).trim()
+  const safeName = baseName.replace(INVALID_DOWNLOAD_FILENAME_PATTERN, '_').trim()
+  if (!safeName || /^\.+$/.test(safeName)) return 'download'
+  return safeName
+}
+
+function limitDownloadFilenameLength (fileName: string): string {
+  if (fileName.length <= MAX_DOWNLOAD_FILENAME_LENGTH) return fileName
+
+  const extension = path.extname(fileName)
+  const name = path.basename(fileName, extension)
+  const maxNameLength = Math.max(1, MAX_DOWNLOAD_FILENAME_LENGTH - extension.length)
+  return `${name.slice(0, maxNameLength)}${extension}`
+}
+
+function resolveUniqueDownloadPath (suggestedFilename: string): string {
+  const downloadsDir = app.getPath('downloads')
+  fs.mkdirSync(downloadsDir, { recursive: true })
+
+  const safeFilename = limitDownloadFilenameLength(sanitizeDownloadFilename(suggestedFilename))
+  const extension = path.extname(safeFilename)
+  const name = path.basename(safeFilename, extension) || 'download'
+  let candidate = path.join(downloadsDir, safeFilename)
+  let counter = 1
+
+  while (fs.existsSync(candidate)) {
+    candidate = path.join(downloadsDir, `${name} (${counter})${extension}`)
+    counter += 1
+  }
+
+  return candidate
+}
+
+export function installWebviewDownloadHandler (targetSession: Session): void {
+  if (downloadHandlerSessions.has(targetSession)) return
+  downloadHandlerSessions.add(targetSession)
+
+  targetSession.on('will-download', (_event, item: DownloadItem) => {
+    try {
+      const targetPath = resolveUniqueDownloadPath(item.getFilename())
+      item.setSavePath(targetPath)
+
+      item.once('done', (_doneEvent, state) => {
+        if (state !== 'completed' && state !== 'cancelled') {
+          console.warn('[main] Webview download failed:', state, targetPath)
+        }
+      })
+    } catch (error) {
+      console.warn('[main] Failed to prepare webview download path:', error)
+    }
+  })
+}
 
 export function openWebviewPopupInDock (url: string): void {
   let parsedUrl: URL
@@ -41,6 +100,8 @@ export function openWebviewPopupInDock (url: string): void {
 
 export function attachMainWindowWebviewHandlers (win: BrowserWindow): void {
   win.webContents.on('did-attach-webview', (_event, guestContents) => {
+    installWebviewDownloadHandler(guestContents.session)
+
     guestContents.setWindowOpenHandler(({ url }) => {
       openWebviewPopupInDock(url)
       return { action: 'deny' }

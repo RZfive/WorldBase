@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { resolveProjectIcon } from "../../utils/project-icon";
+import { normalizeWebUrlInput } from "../../utils/web-app";
 import type {
   BrowserAutomationAction,
   BrowserAutomationActionResult,
@@ -39,14 +41,193 @@ const emit = defineEmits<{
   (e: "contextMenu", payload: BrowserContextMenuPayload): void;
 }>();
 
+const { t } = useI18n();
 const webviewRef = ref<WebviewLikeElement | null>(null);
+const addressInputRef = ref<HTMLInputElement | null>(null);
 const currentUrl = ref(props.url);
 const currentTitle = ref(props.title);
 const currentIcon = ref(props.icon);
+const addressInput = ref(props.url);
+const isAddressInputFocused = ref(false);
+const addressContextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  copied: false,
+});
+let addressContextMenuResetTimer: number | null = null;
 
 const resolvedIcon = computed(() =>
   resolveProjectIcon("browser", currentIcon.value),
 );
+
+const ADDRESS_CONTEXT_MENU_WIDTH = 128;
+const ADDRESS_CONTEXT_MENU_HEIGHT = 112;
+
+function syncAddressInput(nextUrl = currentUrl.value) {
+  if (!isAddressInputFocused.value) {
+    addressInput.value = nextUrl;
+  }
+}
+
+function loadUrlInWebview(nextUrl: string) {
+  const webview = webviewRef.value;
+  if (!webview) return;
+
+  try {
+    if (typeof webview.loadURL === "function") {
+      webview.loadURL(nextUrl);
+    } else {
+      webview.src = nextUrl;
+    }
+  } catch {
+    webview.src = nextUrl;
+  }
+}
+
+function submitAddress(event?: Event) {
+  const normalizedUrl = normalizeWebUrlInput(addressInput.value);
+  if (!normalizedUrl) {
+    addressInput.value = currentUrl.value;
+    return;
+  }
+
+  currentUrl.value = normalizedUrl;
+  addressInput.value = normalizedUrl;
+  emitStateChange();
+  loadUrlInWebview(normalizedUrl);
+  const form = event?.target as HTMLFormElement | null;
+  form?.querySelector<HTMLInputElement>(".browser-view-url-input")?.blur();
+}
+
+function handleAddressFocus(event: FocusEvent) {
+  isAddressInputFocused.value = true;
+  const input = event.target as HTMLInputElement | null;
+  requestAnimationFrame(() => input?.select());
+}
+
+function handleAddressBlur() {
+  isAddressInputFocused.value = false;
+  addressInput.value = currentUrl.value;
+}
+
+function cancelAddressEdit(event: KeyboardEvent) {
+  addressInput.value = currentUrl.value;
+  (event.target as HTMLInputElement | null)?.blur();
+}
+
+function hideAddressContextMenu() {
+  addressContextMenu.visible = false;
+  addressContextMenu.copied = false;
+  if (addressContextMenuResetTimer != null) {
+    window.clearTimeout(addressContextMenuResetTimer);
+    addressContextMenuResetTimer = null;
+  }
+}
+
+function openAddressContextMenu(event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  isAddressInputFocused.value = true;
+  addressInputRef.value?.focus({ preventScroll: true });
+  addressContextMenu.visible = true;
+  addressContextMenu.copied = false;
+  addressContextMenu.x = Math.max(
+    8,
+    Math.min(event.clientX, window.innerWidth - ADDRESS_CONTEXT_MENU_WIDTH - 8),
+  );
+  addressContextMenu.y = Math.max(
+    8,
+    Math.min(event.clientY, window.innerHeight - ADDRESS_CONTEXT_MENU_HEIGHT - 8),
+  );
+}
+
+async function writeTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.setAttribute("aria-hidden", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  try {
+    document.execCommand("copy");
+  } finally {
+    textarea.remove();
+  }
+}
+
+function getAddressCopyText(): string {
+  const input = addressInputRef.value;
+  if (!input) return addressInput.value;
+  const start = input.selectionStart ?? 0;
+  const end = input.selectionEnd ?? start;
+  return start !== end ? input.value.slice(start, end) : input.value;
+}
+
+async function copyAddressInputText() {
+  const text = getAddressCopyText();
+  if (!text) return;
+
+  await writeTextToClipboard(text);
+  addressContextMenu.copied = true;
+  if (addressContextMenuResetTimer != null) window.clearTimeout(addressContextMenuResetTimer);
+  addressContextMenuResetTimer = window.setTimeout(() => {
+    hideAddressContextMenu();
+  }, 650);
+}
+
+function insertTextIntoAddressInput(text: string) {
+  const input = addressInputRef.value;
+  if (!input) return;
+
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  const nextValue = `${input.value.slice(0, start)}${text}${input.value.slice(end)}`;
+  const nextCaret = start + text.length;
+  addressInput.value = nextValue;
+  input.value = nextValue;
+  input.focus({ preventScroll: true });
+  window.requestAnimationFrame(() => {
+    input.setSelectionRange(nextCaret, nextCaret);
+  });
+}
+
+async function pasteAddressInputText() {
+  const input = addressInputRef.value;
+  if (!input) return;
+
+  input.focus({ preventScroll: true });
+
+  try {
+    if (navigator.clipboard?.readText) {
+      const text = await navigator.clipboard.readText();
+      if (text) insertTextIntoAddressInput(text);
+    } else {
+      document.execCommand("paste");
+    }
+  } catch {
+    document.execCommand("paste");
+  } finally {
+    hideAddressContextMenu();
+  }
+}
+
+function selectAddressInputText() {
+  const input = addressInputRef.value;
+  if (!input) return;
+  input.focus({ preventScroll: true });
+  input.select();
+  hideAddressContextMenu();
+}
 
 async function executeInPage<T>(runner: string, payload?: unknown): Promise<T> {
   const webview = webviewRef.value;
@@ -209,7 +390,10 @@ function syncFromWebview() {
 
   try {
     const nextUrl = webview.getURL();
-    if (nextUrl) currentUrl.value = nextUrl;
+    if (nextUrl) {
+      currentUrl.value = nextUrl;
+      syncAddressInput(nextUrl);
+    }
   } catch {
     // Ignore transient URL access failures while the webview is navigating.
   }
@@ -264,22 +448,6 @@ function attachWebviewListeners() {
     });
   };
 
-  const handleContextMenu = (event: Event) => {
-    const payload = event as Event & { params?: { x?: number; y?: number } };
-    console.info("[browser-webview] guest-contextmenu", {
-      appId: props.appId,
-      x: payload.params?.x ?? 0,
-      y: payload.params?.y ?? 0,
-      url: currentUrl.value,
-      title: currentTitle.value,
-    });
-    emit("contextMenu", {
-      appId: props.appId,
-      x: payload.params?.x ?? 0,
-      y: payload.params?.y ?? 0,
-    });
-  };
-
   webview.addEventListener(
     "page-title-updated",
     handleTitleUpdated as EventListener,
@@ -302,7 +470,6 @@ function attachWebviewListeners() {
     handleDidFinishLoad as EventListener,
   );
   webview.addEventListener("did-fail-load", handleDidFailLoad as EventListener);
-  webview.addEventListener("context-menu", handleContextMenu as EventListener);
 
   return () => {
     webview.removeEventListener(
@@ -333,10 +500,6 @@ function attachWebviewListeners() {
       "did-fail-load",
       handleDidFailLoad as EventListener,
     );
-    webview.removeEventListener(
-      "context-menu",
-      handleContextMenu as EventListener,
-    );
   };
 }
 
@@ -346,20 +509,17 @@ watch(
   () => props.url,
   async (nextUrl) => {
     currentUrl.value = nextUrl;
+    syncAddressInput(nextUrl);
     await nextTick();
     const webview = webviewRef.value;
     if (!webview) return;
     try {
       const activeUrl = webview.getURL();
       if (activeUrl !== nextUrl) {
-        if (typeof webview.loadURL === "function") {
-          webview.loadURL(nextUrl);
-        } else {
-          webview.src = nextUrl;
-        }
+        loadUrlInWebview(nextUrl);
       }
     } catch {
-      webview.src = nextUrl;
+      loadUrlInWebview(nextUrl);
     }
   },
   { flush: "post" },
@@ -380,12 +540,17 @@ watch(
 );
 
 onMounted(async () => {
+  document.addEventListener("click", hideAddressContextMenu);
+  window.addEventListener("blur", hideAddressContextMenu);
   await nextTick();
   detachListeners = attachWebviewListeners();
   emitStateChange();
 });
 
 onUnmounted(() => {
+  document.removeEventListener("click", hideAddressContextMenu);
+  window.removeEventListener("blur", hideAddressContextMenu);
+  hideAddressContextMenu();
   detachListeners?.();
 });
 </script>
@@ -412,7 +577,23 @@ onUnmounted(() => {
       </span>
       <div class="browser-view-meta">
         <span class="browser-view-title">{{ currentTitle }}</span>
-        <span class="browser-view-url">{{ currentUrl }}</span>
+        <form class="browser-view-address-form" @submit.prevent="submitAddress">
+          <input
+            ref="addressInputRef"
+            v-model="addressInput"
+            class="browser-view-url-input"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            autocapitalize="off"
+            :title="addressInput"
+            aria-label="URL"
+            @focus="handleAddressFocus"
+            @blur="handleAddressBlur"
+            @keydown.esc.prevent="cancelAddressEdit"
+            @contextmenu.prevent.stop="openAddressContextMenu"
+          />
+        </form>
       </div>
     </div>
     <webview
@@ -421,7 +602,28 @@ onUnmounted(() => {
       :src="props.url"
       partition="persist:the-world-browser"
       allowpopups
+      @contextmenu.stop
     ></webview>
+    <Teleport to="body">
+      <div
+        v-if="addressContextMenu.visible"
+        class="browser-address-context-menu"
+        :style="{ left: `${addressContextMenu.x}px`, top: `${addressContextMenu.y}px` }"
+        @mousedown.prevent.stop
+        @click.stop
+        @contextmenu.prevent
+      >
+        <button class="browser-address-context-action" type="button" @click.stop="copyAddressInputText">
+          {{ addressContextMenu.copied ? t('chatUi.copied') : t('common.copy') }}
+        </button>
+        <button class="browser-address-context-action" type="button" @click.stop="pasteAddressInputText">
+          {{ t('common.paste') }}
+        </button>
+        <button class="browser-address-context-action" type="button" @click.stop="selectAddressInputText">
+          {{ t('common.selectAll') }}
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -478,10 +680,10 @@ onUnmounted(() => {
   flex-direction: row;
   align-items: center;
   gap: 10px;
+  flex: 1;
 }
 
-.browser-view-title,
-.browser-view-url {
+.browser-view-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -489,14 +691,65 @@ onUnmounted(() => {
 }
 
 .browser-view-title {
+  flex: 0 1 auto;
+  max-width: 34%;
   color: #0f172a;
   font-size: 0.88rem;
   font-weight: 600;
 }
 
-.browser-view-url {
+.browser-view-address-form {
+  min-width: 0;
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+.browser-view-url-input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(148, 163, 184, 0.36);
+  border-radius: 8px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.92);
   color: #475569;
-  font-size: 0.75rem;
+  font-size: 0.78rem;
+  line-height: 30px;
+}
+
+.browser-view-url-input:focus {
+  border-color: rgba(37, 99, 235, 0.55);
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.browser-address-context-menu {
+  position: fixed;
+  z-index: 5000;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+}
+
+.browser-address-context-action {
+  width: 100%;
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #0f172a;
+  font-size: 0.84rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.browser-address-context-action:hover {
+  background: rgba(241, 245, 249, 0.95);
 }
 
 .browser-view-webview {

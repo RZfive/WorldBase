@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, type CSSProperties } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, type CSSProperties } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ProviderDropdown from './ProviderDropdown.vue'
+import { copyTextToClipboard } from '../export-utils'
 
 interface PendingAttachment {
   id: string
@@ -103,6 +104,13 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const activeMention = ref<MentionQueryState | null>(null)
 const activeMentionIndex = ref(0)
 const pendingSelection = ref<{ start: number; end: number } | null>(null)
+const inputContextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  copied: false
+})
+let inputContextMenuResetTimer: number | null = null
 const MAX_MENTION_DROPDOWN_HEIGHT = 320
 const MIN_MENTION_DROPDOWN_HEIGHT = 120
 const reasoningLevels: Array<{ value: ReasoningStrength; labelKey: string }> = [
@@ -135,6 +143,9 @@ const groupReasoningTitle = computed(() => {
 })
 const TEMPERATURE_MIN = 0
 const TEMPERATURE_MAX = 2
+const LARGE_PASTE_TEXT_ATTACHMENT_THRESHOLD = 2000
+const INPUT_CONTEXT_MENU_WIDTH = 128
+const INPUT_CONTEXT_MENU_HEIGHT = 112
 const showAdvancedPanel = ref(false)
 const fallbackTemperature = computed(() => {
   const value = props.providerDefaultTemperature
@@ -595,6 +606,23 @@ function hasTransferFiles (transfer: DataTransfer | null): boolean {
   return collectTransferFiles(transfer).length > 0
 }
 
+function formatPastedTextAttachmentTimestamp (date: Date): string {
+  const pad = (value: number, length = 2) => value.toString().padStart(length, '0')
+  return [
+    `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`,
+    `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`,
+    pad(date.getMilliseconds(), 3)
+  ].join('-')
+}
+
+function createPastedTextAttachment (text: string): File {
+  return new File(
+    [text],
+    `pasted-text-${formatPastedTextAttachmentTimestamp(new Date())}.txt`,
+    { type: 'text/plain;charset=utf-8' }
+  )
+}
+
 function handleAttachmentSelection (e: Event) {
   if (props.isLoading || props.isUploadingFiles) return
   const input = e.target as HTMLInputElement
@@ -608,10 +636,112 @@ function handlePaste (e: ClipboardEvent) {
   if (props.isLoading || props.isUploadingFiles) return
 
   const files = collectTransferFiles(e.clipboardData)
-  if (files.length === 0) return
+  if (files.length > 0) {
+    e.preventDefault()
+    emit('addAttachments', files)
+    return
+  }
+
+  const pastedText = e.clipboardData?.getData('text/plain') ?? ''
+  if (pastedText.length < LARGE_PASTE_TEXT_ATTACHMENT_THRESHOLD) return
 
   e.preventDefault()
-  emit('addAttachments', files)
+  emit('addAttachments', [createPastedTextAttachment(pastedText)])
+}
+
+function hideInputContextMenu () {
+  inputContextMenu.visible = false
+  inputContextMenu.copied = false
+  if (inputContextMenuResetTimer != null) {
+    window.clearTimeout(inputContextMenuResetTimer)
+    inputContextMenuResetTimer = null
+  }
+}
+
+function openInputContextMenu (e: MouseEvent) {
+  e.preventDefault()
+  e.stopPropagation()
+  inputFocused.value = true
+  textareaRef.value?.focus({ preventScroll: true })
+  inputContextMenu.visible = true
+  inputContextMenu.copied = false
+  inputContextMenu.x = Math.max(8, Math.min(e.clientX, window.innerWidth - INPUT_CONTEXT_MENU_WIDTH - 8))
+  inputContextMenu.y = Math.max(8, Math.min(e.clientY, window.innerHeight - INPUT_CONTEXT_MENU_HEIGHT - 8))
+}
+
+function getInputCopyText (): string {
+  const textarea = textareaRef.value
+  if (!textarea) return plainDraftText.value
+  const start = textarea.selectionStart ?? 0
+  const end = textarea.selectionEnd ?? start
+  return start !== end ? textarea.value.slice(start, end) : textarea.value
+}
+
+async function copyInputText () {
+  const text = getInputCopyText()
+  if (!text) return
+
+  try {
+    await copyTextToClipboard(text)
+    inputContextMenu.copied = true
+    if (inputContextMenuResetTimer != null) window.clearTimeout(inputContextMenuResetTimer)
+    inputContextMenuResetTimer = window.setTimeout(() => {
+      hideInputContextMenu()
+    }, 650)
+  } catch (error) {
+    console.error('Failed to copy chat input text:', error)
+    hideInputContextMenu()
+  }
+}
+
+function insertTextIntoInput (text: string) {
+  if (!text || props.isLoading || props.isUploadingFiles) return
+
+  if (text.length >= LARGE_PASTE_TEXT_ATTACHMENT_THRESHOLD) {
+    emit('addAttachments', [createPastedTextAttachment(text)])
+    return
+  }
+
+  const textarea = textareaRef.value
+  if (!textarea) return
+  const start = textarea.selectionStart ?? textarea.value.length
+  const end = textarea.selectionEnd ?? start
+  const nextText = `${textarea.value.slice(0, start)}${text}${textarea.value.slice(end)}`
+  const nextCaret = start + text.length
+  pendingSelection.value = { start: nextCaret, end: nextCaret }
+  emit('update:modelValue', buildTaggedDraftValue(nextText))
+  refreshMentionState(nextText)
+}
+
+async function pasteInputText () {
+  const textarea = textareaRef.value
+  if (!textarea || props.isLoading || props.isUploadingFiles) {
+    hideInputContextMenu()
+    return
+  }
+
+  textarea.focus({ preventScroll: true })
+
+  try {
+    if (navigator.clipboard?.readText) {
+      insertTextIntoInput(await navigator.clipboard.readText())
+    } else {
+      document.execCommand('paste')
+    }
+  } catch {
+    document.execCommand('paste')
+  } finally {
+    hideInputContextMenu()
+  }
+}
+
+function selectAllInputText () {
+  const textarea = textareaRef.value
+  if (!textarea) return
+  textarea.focus({ preventScroll: true })
+  textarea.select()
+  scheduleMentionRefresh()
+  hideInputContextMenu()
 }
 
 function handleDragEnter (e: DragEvent) {
@@ -666,6 +796,17 @@ function handleTextareaBlur () {
   activeMention.value = null
   activeMentionIndex.value = 0
 }
+
+onMounted(() => {
+  document.addEventListener('click', hideInputContextMenu)
+  window.addEventListener('blur', hideInputContextMenu)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', hideInputContextMenu)
+  window.removeEventListener('blur', hideInputContextMenu)
+  hideInputContextMenu()
+})
 </script>
 
 <template>
@@ -731,6 +872,7 @@ function handleTextareaBlur () {
           @mouseup="scheduleMentionRefresh"
           @scroll="scheduleMentionRefresh"
           @paste="handlePaste"
+          @contextmenu.prevent.stop="openInputContextMenu"
           @focus="handleTextareaFocus"
           @blur="handleTextareaBlur"
           rows="3"
@@ -886,6 +1028,26 @@ function handleTextareaBlur () {
         </div>
       </div>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="inputContextMenu.visible"
+        class="chat-input-context-menu"
+        :style="{ left: `${inputContextMenu.x}px`, top: `${inputContextMenu.y}px` }"
+        @mousedown.prevent.stop
+        @click.stop
+        @contextmenu.prevent
+      >
+        <button class="chat-input-context-action" type="button" :disabled="plainDraftText.length === 0" @click.stop="copyInputText">
+          {{ inputContextMenu.copied ? $t('chatUi.copied') : $t('common.copy') }}
+        </button>
+        <button class="chat-input-context-action" type="button" :disabled="props.isLoading || props.isUploadingFiles" @click.stop="pasteInputText">
+          {{ $t('common.paste') }}
+        </button>
+        <button class="chat-input-context-action" type="button" :disabled="plainDraftText.length === 0" @click.stop="selectAllInputText">
+          {{ $t('common.selectAll') }}
+        </button>
+      </div>
+    </Teleport>
     <div v-if="props.uploadFeedback" class="upload-feedback" role="status">{{ props.uploadFeedback }}</div>
   </div>
 </template>
@@ -1318,6 +1480,39 @@ function handleTextareaBlur () {
 .input-container textarea.busy {
   opacity: 0.8;
   cursor: progress;
+}
+
+.chat-input-context-menu {
+  position: fixed;
+  z-index: 5000;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-panel);
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+}
+
+.chat-input-context-action {
+  width: 100%;
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font-size: 0.86rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-input-context-action:hover:not(:disabled) {
+  background: var(--app-panel-subtle);
+}
+
+.chat-input-context-action:disabled {
+  cursor: not-allowed;
+  color: var(--app-text-faint);
 }
 
 .runtime-status-bar {
