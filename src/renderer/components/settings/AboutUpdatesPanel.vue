@@ -12,6 +12,7 @@ const aboutInfo = ref<AppAboutInfo | null>(null)
 const updateState = ref<AppUpdateState | null>(null)
 const loading = ref(false)
 const checking = ref(false)
+const actionBusy = ref(false)
 const localError = ref<string | null>(null)
 
 let updateStateCleanup: (() => void) | null = null
@@ -35,6 +36,10 @@ const statusLabel = computed(() => {
     case 'up_to_date': return t('settings.about.statusUpToDate')
     case 'unsupported_platform': return t('settings.about.statusUnsupported')
     case 'update_available': return t('settings.about.statusUpdateAvailable', { version: updateState.value.latestVersion || '' }).trim()
+    case 'downloading': return t('settings.about.statusDownloading')
+    case 'downloaded': return t('settings.about.statusDownloaded')
+    case 'installing': return t('settings.about.statusInstalling')
+    case 'install_triggered': return t('settings.about.statusInstallTriggered')
     case 'failed': return t('settings.about.statusFailed')
     default: return ''
   }
@@ -45,6 +50,10 @@ const statusTone = computed(() => {
     case 'up_to_date': return 'ok'
     case 'update_available': return 'busy'
     case 'checking': return 'busy'
+    case 'downloading': return 'busy'
+    case 'downloaded': return 'ok'
+    case 'installing': return 'busy'
+    case 'install_triggered': return 'ok'
     case 'failed': return 'danger'
     default: return 'idle'
   }
@@ -52,6 +61,26 @@ const statusTone = computed(() => {
 
 const resolvedError = computed(() => localError.value || updateState.value?.error || '')
 const isChecking = computed(() => checking.value || updateState.value?.status === 'checking')
+const isUpdating = computed(() => actionBusy.value || updateState.value?.status === 'downloading' || updateState.value?.status === 'installing')
+const supportsInAppInstall = computed(() => (aboutInfo.value?.platform || updateState.value?.platform) === 'win32')
+const canStartDownload = computed(() => updateState.value?.status === 'update_available' && Boolean(updateState.value.asset))
+const canInstall = computed(() => updateState.value?.status === 'downloaded' || updateState.value?.status === 'install_triggered')
+const progressLabel = computed(() => {
+  const progress = updateState.value?.progress
+  if (!progress) return ''
+  const downloaded = formatBytes(progress.bytesDownloaded)
+  const total = progress.totalBytes != null ? formatBytes(progress.totalBytes) : ''
+  const percent = progress.percent != null ? `${progress.percent.toFixed(progress.percent % 1 === 0 ? 0 : 1)}%` : ''
+
+  if (total && percent) return `${percent} · ${downloaded} / ${total}`
+  if (total) return `${downloaded} / ${total}`
+  return downloaded
+})
+const progressBarWidth = computed(() => {
+  const percent = updateState.value?.progress?.percent
+  if (percent == null) return '0%'
+  return `${Math.max(0, Math.min(100, percent))}%`
+})
 
 const releaseNotes = computed(() => {
   const notes = updateState.value?.notes
@@ -128,6 +157,67 @@ async function checkForUpdates () {
     checking.value = false
   }
 }
+
+function formatBytes (bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+}
+
+async function downloadAndInstallUpdate () {
+  if (!window.electronAPI || isUpdating.value) return
+  actionBusy.value = true
+  localError.value = null
+
+  try {
+    const downloadedState = await window.electronAPI.downloadAppUpdate()
+    updateState.value = downloadedState
+    if (downloadedState.status === 'downloaded') {
+      const result = await window.electronAPI.installAppUpdate()
+      updateState.value = result.state
+      if (!result.success) {
+        localError.value = result.error || result.state.error
+      }
+    }
+  } catch (error) {
+    localError.value = (error as Error).message
+  } finally {
+    actionBusy.value = false
+  }
+}
+
+async function installUpdate () {
+  if (!window.electronAPI || isUpdating.value) return
+  actionBusy.value = true
+  localError.value = null
+
+  try {
+    const result = await window.electronAPI.installAppUpdate()
+    updateState.value = result.state
+    if (!result.success) {
+      localError.value = result.error || result.state.error
+    }
+  } catch (error) {
+    localError.value = (error as Error).message
+  } finally {
+    actionBusy.value = false
+  }
+}
+
+async function openDownloadsPage () {
+  if (!window.electronAPI) return
+  localError.value = null
+  const result = await window.electronAPI.openAppUpdateWebsite('downloads')
+  if (!result.success) {
+    localError.value = result.error || t('settings.about.openDownloadsFailed')
+  }
+}
 </script>
 
 <template>
@@ -151,6 +241,42 @@ async function checkForUpdates () {
 
     <p v-if="statusLabel" class="au-status" :data-tone="statusTone">{{ statusLabel }}</p>
     <p v-if="resolvedError" class="au-error">{{ resolvedError }}</p>
+
+    <section v-if="updateState?.status === 'downloading' || progressLabel" class="au-progress" aria-live="polite">
+      <div class="au-progress-bar" role="progressbar" :aria-valuenow="updateState?.progress?.percent ?? undefined" aria-valuemin="0" aria-valuemax="100">
+        <span :style="{ width: progressBarWidth }" />
+      </div>
+      <span>{{ progressLabel || $t('settings.about.downloadPreparing') }}</span>
+    </section>
+
+    <div v-if="canStartDownload || canInstall || updateState?.status === 'unsupported_platform'" class="au-actions">
+      <button
+        v-if="canStartDownload && supportsInAppInstall"
+        class="au-primary"
+        type="button"
+        :disabled="isUpdating"
+        @click="downloadAndInstallUpdate"
+      >
+        {{ isUpdating ? $t('settings.about.updating') : $t('settings.about.downloadAndInstall') }}
+      </button>
+      <button
+        v-else-if="canInstall && supportsInAppInstall"
+        class="au-primary"
+        type="button"
+        :disabled="isUpdating"
+        @click="installUpdate"
+      >
+        {{ isUpdating ? $t('settings.about.installing') : $t('settings.about.installAndRestart') }}
+      </button>
+      <button
+        v-else
+        class="au-secondary"
+        type="button"
+        @click="openDownloadsPage"
+      >
+        {{ $t('settings.about.openDownloads') }}
+      </button>
+    </div>
 
     <section v-if="releaseNotes.length > 0 || publishedAtLabel" class="au-release">
       <div class="au-release-head">
@@ -257,6 +383,70 @@ async function checkForUpdates () {
   margin: 0;
   font-size: 0.86em;
   color: var(--app-danger);
+}
+
+.au-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--app-text-muted);
+  font-size: 0.84em;
+}
+
+.au-progress-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--app-panel-subtle);
+  border: 1px solid var(--app-border);
+}
+
+.au-progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--app-accent);
+  transition: width 0.18s ease;
+}
+
+.au-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.au-primary,
+.au-secondary {
+  min-height: 38px;
+  padding: 9px 16px;
+  border-radius: 10px;
+  font-size: 0.88em;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+}
+
+.au-primary {
+  border: 1px solid var(--app-accent-strong);
+  background: var(--app-accent);
+  color: var(--app-button-text, #fff);
+}
+
+.au-secondary {
+  border: 1px solid var(--app-border);
+  background: var(--app-panel);
+  color: var(--app-text-strong);
+}
+
+.au-primary:hover:not(:disabled),
+.au-secondary:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.au-primary:disabled,
+.au-secondary:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .au-release {

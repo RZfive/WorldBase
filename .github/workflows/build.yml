@@ -20,7 +20,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const artifactNames = ['windows-build', 'mac-arm-build'];
+            const artifactNames = ['windows-build', 'mac-arm-build', 'linux-build'];
             const keepCount = 5;
 
             for (const name of artifactNames) {
@@ -135,5 +135,53 @@ jobs:
           path: |
             release/*.dmg
             release/*.dmg.blockmap
+          compression-level: 0
+          if-no-files-found: error
+
+  build-linux:
+    needs: cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Restore Electron caches
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('pnpm-lock.yaml', 'package.json', 'electron-builder.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build Electron (Linux)
+        run: pnpm electron:build:linux
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-build
+          path: |
+            release/*.AppImage
+            release/latest-linux.yml
           compression-level: 0
           if-no-files-found: error
