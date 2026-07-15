@@ -21,6 +21,7 @@ import type { SettingsStore } from '../settings/settings-store.js'
 
 const APP_ID = 'com.theworld.app'
 const DEFAULT_UPDATE_WEBSITE_BASE_URL = 'https://worldbase.world'
+const DEFAULT_UPDATE_API_BASE_URL = 'https://api.worldbase.world'
 const DEFAULT_UPDATE_API_PATH = '/api/releases?latest=1'
 const CHECK_TIMEOUT_MS = 15000
 const DOWNLOADS_SUBDIR = 'updates'
@@ -52,6 +53,13 @@ interface NormalizedRemoteUpdate {
 interface VersionParts {
   core: number[]
   prerelease: string[]
+}
+
+interface AssetSelectionOptions {
+  platform: string
+  arch: string
+  website: AppUpdateWebsiteLinks
+  apiBaseUrl: string
 }
 
 function inferChannelFromVersion (version: string): AppUpdateChannel {
@@ -112,8 +120,17 @@ function createWebsiteLinks (config: AppUpdateConfig): AppUpdateWebsiteLinks {
 function createUpdateApiUrl (config: AppUpdateConfig, website: AppUpdateWebsiteLinks): string {
   const explicit = normalizeUrlBase(config.updateApiUrl || '')
   if (explicit) return explicit
-  if (!website.baseUrl) return ''
-  return joinWebsiteUrl(website.baseUrl, DEFAULT_UPDATE_API_PATH)
+  void website
+  return joinWebsiteUrl(DEFAULT_UPDATE_API_BASE_URL, DEFAULT_UPDATE_API_PATH)
+}
+
+function resolveApiBaseUrl (updateApiUrl: string): string {
+  try {
+    const parsed = new URL(updateApiUrl)
+    return `${parsed.protocol}//${parsed.host}`
+  } catch {
+    return DEFAULT_UPDATE_API_BASE_URL
+  }
 }
 
 function normalizeNotes (value: unknown): AppUpdateNotes | null {
@@ -243,36 +260,52 @@ function getFileNameFromUrl (value: string): string {
   }
 }
 
-function resolveDownloadUrl (input: Record<string, unknown>, website: AppUpdateWebsiteLinks): string {
+function resolveDownloadUrl (
+  input: Record<string, unknown>,
+  options: { website: AppUpdateWebsiteLinks; apiBaseUrl: string }
+): string {
+  const slug = getTrimmedString(input.slug)
+  if (slug && isValidHttpUrl(options.apiBaseUrl)) {
+    return joinWebsiteUrl(options.apiBaseUrl, `/api/download/${encodeURIComponent(slug)}`)
+  }
+
   const explicit = getTrimmedString(input.downloadUrl) || getTrimmedString(input.url)
   if (isValidHttpUrl(explicit)) return explicit
 
-  if (explicit.startsWith('/') && isValidHttpUrl(website.baseUrl)) {
+  if (explicit.startsWith('/') && isValidHttpUrl(options.apiBaseUrl)) {
     try {
-      return new URL(explicit, website.baseUrl).toString()
+      return new URL(explicit, options.apiBaseUrl).toString()
     } catch {
       return ''
     }
   }
 
-  const slug = getTrimmedString(input.slug)
-  if (slug && isValidHttpUrl(website.baseUrl)) {
-    return joinWebsiteUrl(website.baseUrl, `/api/download/${encodeURIComponent(slug)}`)
+  if (explicit.startsWith('/') && isValidHttpUrl(options.website.baseUrl)) {
+    try {
+      return new URL(explicit, options.website.baseUrl).toString()
+    } catch {
+      return ''
+    }
   }
 
   return ''
 }
 
-function normalizeAsset (value: unknown, website: AppUpdateWebsiteLinks): AppUpdateAssetInfo | null {
+function normalizeAsset (
+  value: unknown,
+  options: { website: AppUpdateWebsiteLinks; apiBaseUrl: string }
+): AppUpdateAssetInfo | null {
   if (!isRecord(value)) return null
 
   const input = value
-  const downloadUrl = resolveDownloadUrl(input, website)
+  const downloadUrl = resolveDownloadUrl(input, options)
   const slug = getTrimmedString(input.slug)
   const format = getTrimmedString(input.format).replace(/^\./, '')
   const fileName = getTrimmedString(input.fileName) ||
+    getFileNameFromUrl(getTrimmedString(input.url)) ||
+    (slug && format ? `${slug}.${format}` : '') ||
     getFileNameFromUrl(downloadUrl) ||
-    (slug && format ? `${slug}.${format}` : slug)
+    slug
   if (!fileName || !downloadUrl) return null
 
   return {
@@ -412,14 +445,14 @@ function assetMatchesRuntime (asset: Record<string, unknown>, platform: string, 
 
 function selectReleaseAsset (
   assetsValue: unknown,
-  options: { platform: string; arch: string; website: AppUpdateWebsiteLinks }
+  options: AssetSelectionOptions
 ): AppUpdateAssetInfo | null {
   if (!Array.isArray(assetsValue)) return null
 
   const assets = assetsValue.filter(isRecord).filter(isInstallableAsset)
   const exactMatch = assets.find(asset => assetMatchesRuntime(asset, options.platform, options.arch))
   const fallbackMatch = assets.find(asset => getPlatformAliases(options.platform).some(alias => createAssetSearchText(asset).includes(alias)))
-  return normalizeAsset(exactMatch || fallbackMatch || null, options.website)
+  return normalizeAsset(exactMatch || fallbackMatch || null, options)
 }
 
 function selectReleaseItem (payload: RemoteUpdateResponse, channel: AppUpdateChannel): Record<string, unknown> | null {
@@ -440,6 +473,7 @@ function normalizeRemoteUpdatePayload (
     platform: string
     arch: string
     website: AppUpdateWebsiteLinks
+    apiBaseUrl: string
   }
 ): NormalizedRemoteUpdate {
   if (!isRecord(payload)) {
@@ -461,7 +495,7 @@ function normalizeRemoteUpdatePayload (
   const publishedAt = getTrimmedString(response.publishedAt) ||
     (releaseItem ? getTrimmedString(releaseItem.publishedAt) : '') ||
     null
-  const asset = normalizeAsset(response.asset, options.website) ||
+  const asset = normalizeAsset(response.asset, options) ||
     selectReleaseAsset(response.assets, options) ||
     (releaseItem ? selectReleaseAsset(releaseItem.assets, options) : null)
 
@@ -637,7 +671,8 @@ export class UpdateService extends EventEmitter {
         currentVersion: app.getVersion(),
         platform: process.platform,
         arch: process.arch,
-        website: this.website
+        website: this.website,
+        apiBaseUrl: resolveApiBaseUrl(this.updateApiUrl)
       })
       const now = new Date().toISOString()
 
