@@ -133,6 +133,46 @@ function resolveApiBaseUrl (updateApiUrl: string): string {
   }
 }
 
+function describeUnexpectedUpdateApiResponse (response: Response, body: string): string {
+  const contentType = response.headers.get('content-type') || ''
+  const location = response.headers.get('location') || response.url
+  const looksLikeHtml = /<!doctype\s+html|<html[\s>]/i.test(body)
+  const looksLikeAccess = /cloudflareaccess\.com|Cloudflare Access|cdn-cgi\/access/i.test(`${location}\n${body}`)
+
+  if (looksLikeAccess) {
+    return '更新接口被 Cloudflare Access 拦截，请放行 api.worldbase.world 的 /api/releases 公开路径。'
+  }
+
+  if (looksLikeHtml) {
+    return '更新接口返回了 HTML 页面而不是 JSON，请检查 API 域名和 Access 放行配置。'
+  }
+
+  return `更新接口返回了非 JSON 内容：${contentType || 'unknown'}`
+}
+
+function parseUpdateApiJsonResponse (response: Response, body: string): unknown {
+  const contentType = response.headers.get('content-type') || ''
+
+  if (!contentType.toLowerCase().includes('application/json')) {
+    throw new Error(describeUnexpectedUpdateApiResponse(response, body))
+  }
+
+  try {
+    return JSON.parse(body) as unknown
+  } catch {
+    throw new Error('更新接口返回的 JSON 格式无效。')
+  }
+}
+
+function isProtectedUploadDownloadUrl (value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    return parsed.pathname.startsWith('/api/uploads/')
+  } catch {
+    return value.includes('/api/uploads/')
+  }
+}
+
 function normalizeNotes (value: unknown): AppUpdateNotes | null {
   if (Array.isArray(value)) {
     const notes = value
@@ -660,12 +700,13 @@ export class UpdateService extends EventEmitter {
         }
       })
 
+      const body = await response.text().catch(() => '')
+
       if (!response.ok) {
-        const body = await response.text().catch(() => '')
         throw new Error(body || t('mainDialog.updateApiHttpStatus', { status: response.status }))
       }
 
-      const payload = await response.json() as unknown
+      const payload = parseUpdateApiJsonResponse(response, body)
       const remoteUpdate = normalizeRemoteUpdatePayload(payload, {
         channel,
         currentVersion: app.getVersion(),
@@ -974,6 +1015,13 @@ export class UpdateService extends EventEmitter {
       if (restored.status === 'downloaded' || restored.status === 'install_triggered') {
         restored.status = restored.asset ? 'update_available' : 'idle'
       }
+    }
+
+    if (restored.asset && isProtectedUploadDownloadUrl(restored.asset.downloadUrl)) {
+      restored.asset = null
+      restored.downloadedFilePath = null
+      restored.progress = null
+      restored.status = 'idle'
     }
 
     if (restored.status === 'checking' || restored.status === 'downloading' || restored.status === 'installing') {
