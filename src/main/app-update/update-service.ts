@@ -1,4 +1,5 @@
 import { app, shell } from 'electron'
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter, once } from 'node:events'
 import fs from 'node:fs'
@@ -26,6 +27,8 @@ const DEFAULT_UPDATE_API_PATH = '/api/releases?latest=1'
 const CHECK_TIMEOUT_MS = 15000
 const DOWNLOADS_SUBDIR = 'updates'
 const PROGRESS_EMIT_INTERVAL_MS = 120
+const INSTALLER_LAUNCH_DELAY_SECONDS = 2
+const APP_QUIT_AFTER_INSTALL_TRIGGER_MS = 300
 const UPDATE_CONFIG_ERROR_KEY = 'mainDialog.updateConfigRequired'
 
 interface RemoteUpdateResponse {
@@ -603,6 +606,11 @@ async function ensureDeleted (targetPath: string): Promise<void> {
   }
 }
 
+function buildDelayedInstallerCommand (installerPath: string): string {
+  const escapedPath = installerPath.replace(/"/g, '""')
+  return `timeout /t ${INSTALLER_LAUNCH_DELAY_SECONDS} /nobreak >nul & start "" "${escapedPath}"`
+}
+
 export class UpdateService extends EventEmitter {
   private readonly settingsStore: SettingsStore
   private readonly updatesDir: string
@@ -921,12 +929,20 @@ export class UpdateService extends EventEmitter {
       return { success: false, state, error: state.error || undefined }
     }
 
+    const installerPath = this.state.downloadedFilePath
     this.updateState({ status: 'installing', error: null })
 
-    const error = await shell.openPath(this.state.downloadedFilePath)
-    if (error) {
-      const state = this.fail(error)
-      return { success: false, state, error }
+    try {
+      const launcher = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', buildDelayedInstallerCommand(installerPath)], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      })
+      launcher.unref()
+    } catch (error) {
+      const message = (error as Error).message || t('mainDialog.updateInstallFailed')
+      const state = this.fail(message)
+      return { success: false, state, error: message }
     }
 
     this.updateState({
@@ -934,6 +950,10 @@ export class UpdateService extends EventEmitter {
       progress: null,
       error: null
     })
+
+    setTimeout(() => {
+      app.quit()
+    }, APP_QUIT_AFTER_INSTALL_TRIGGER_MS)
 
     return { success: true, state: this.getState() }
   }

@@ -21,7 +21,8 @@
     "electron:dev": "pnpm build && pnpm build:electron && pnpm exec electron .",
     "electron:build": "pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --publish never",
     "electron:build:win": "pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --win --publish never",
-    "electron:build:mac:arm64": "pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --mac --arm64 --publish never"
+    "electron:build:mac:arm64": "pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --mac --arm64 --publish never",
+    "electron:build:linux": "pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --linux --publish never"
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
