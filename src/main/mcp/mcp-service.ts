@@ -580,7 +580,7 @@ export class MCPService extends EventEmitter {
       const transport = this.createTransport(session.config)
       const client = new Client({
         name: 'the-world',
-        version: process.env.npm_package_version || '0.1.0'
+        version: process.env.npm_package_version || '1.0.0'
       })
 
       await withTimeout(client.connect(transport), session.config.timeoutMs, t('mainDialog.mcpConnectServerLabel', { name: session.config.name }))
