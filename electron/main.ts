@@ -8,6 +8,7 @@ import { initializeServices } from './main-process/services.js'
 import { setupIPC } from './main-process/ipc.js'
 import { setMainLocale } from '../src/main/i18n/main-i18n.js'
 import { createWindow, setupEmbeddedAppCorsWorkaround } from './main-process/windows.js'
+import { reportStartup } from '../src/main/app-start-report/startup-report-service.js'
 
 app.setName(APP_DISPLAY_NAME)
 app.setAppUserModelId('com.theworld.app')
@@ -77,6 +78,13 @@ app.whenReady().then(async () => {
   }
 
   createWindow()
+
+  void reportStartup({
+    settingsStore: mainState.settingsStore!,
+    systemService: mainState.systemService!
+  }).catch((error) => {
+    console.warn('[main] Startup report failed:', (error as Error).message)
+  })
 
   // Check once per application launch. UpdateService persists and broadcasts
   // every state transition, so About & Updates shows this result whenever it opens.
