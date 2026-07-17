@@ -65,6 +65,14 @@ interface AssetSelectionOptions {
   apiBaseUrl: string
 }
 
+interface InstallerLaunchConfig {
+  command: string
+  args: string[]
+  windowsHide?: boolean
+}
+
+type UpdatePlatformFamily = 'win' | 'mac' | 'linux'
+
 function inferChannelFromVersion (version: string): AppUpdateChannel {
   return /(?:alpha|beta|rc)/i.test(version) ? 'beta' : 'stable'
 }
@@ -433,13 +441,46 @@ function normalizeRemoteStatus (value: unknown): NormalizedRemoteUpdate['status'
   }
 }
 
+function normalizePlatformFamily (platform: string): UpdatePlatformFamily | null {
+  const normalized = platform.trim().toLowerCase()
+  switch (normalized) {
+    case 'win32':
+    case 'windows':
+    case 'win':
+      return 'win'
+    case 'darwin':
+    case 'macos':
+    case 'mac os':
+    case 'mac':
+    case 'osx':
+      return 'mac'
+    case 'linux':
+      return 'linux'
+    default:
+      return null
+  }
+}
+
 function getPlatformAliases (platform: string): string[] {
-  switch (platform) {
-    case 'win32': return ['win32', 'windows', 'win']
-    case 'darwin': return ['darwin', 'macos', 'mac os', 'mac']
+  switch (normalizePlatformFamily(platform)) {
+    case 'win': return ['win32', 'windows', 'win']
+    case 'mac': return ['darwin', 'macos', 'mac os', 'mac', 'osx']
     case 'linux': return ['linux']
     default: return [platform]
   }
+}
+
+function getInstallableFormatsForPlatform (platform: string): Set<string> {
+  switch (normalizePlatformFamily(platform)) {
+    case 'win': return new Set(['exe', 'msi'])
+    case 'mac': return new Set(['dmg', 'pkg'])
+    case 'linux': return new Set(['appimage'])
+    default: return new Set()
+  }
+}
+
+function isSupportedUpdatePlatform (platform: string): boolean {
+  return getInstallableFormatsForPlatform(platform).size > 0
 }
 
 function getArchAliases (arch: string): string[] {
@@ -468,21 +509,61 @@ function createAssetSearchText (asset: Record<string, unknown>): string {
     .toLowerCase()
 }
 
-function isInstallableAsset (asset: Record<string, unknown>): boolean {
+function escapeRegExp (value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function assetSearchTextIncludesAlias (text: string, alias: string): boolean {
+  const parts = alias
+    .toLowerCase()
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(escapeRegExp)
+  if (parts.length === 0) return false
+
+  const pattern = parts.join('[^a-z0-9]+')
+  return new RegExp(`(^|[^a-z0-9])${pattern}($|[^a-z0-9])`).test(text)
+}
+
+function getAssetFormats (asset: Record<string, unknown>): string[] {
+  const format = getTrimmedString(asset.format).replace(/^\./, '').toLowerCase()
+  const fileName = getTrimmedString(asset.fileName) || getFileNameFromUrl(getTrimmedString(asset.url) || getTrimmedString(asset.downloadUrl))
+  const extension = path.extname(fileName).replace(/^\./, '').toLowerCase()
+  return Array.from(new Set([format, extension].filter(Boolean)))
+}
+
+function isInstallableAsset (asset: Record<string, unknown>, platform: string): boolean {
   const kind = getTrimmedString(asset.kind).toLowerCase()
   if (kind && kind !== 'installer') return false
 
-  const format = getTrimmedString(asset.format).toLowerCase()
-  const fileName = getTrimmedString(asset.fileName) || getFileNameFromUrl(getTrimmedString(asset.url) || getTrimmedString(asset.downloadUrl))
-  const extension = path.extname(fileName).replace(/^\./, '').toLowerCase()
-  const installableFormats = new Set(['exe', 'msi', 'dmg', 'pkg', 'appimage'])
-  return !format || installableFormats.has(format) || installableFormats.has(extension)
+  const platformFormats = getInstallableFormatsForPlatform(platform)
+  if (platformFormats.size === 0) return false
+
+  const formats = getAssetFormats(asset)
+  return formats.length === 0 || formats.some(format => platformFormats.has(format))
+}
+
+function assetMatchesPlatform (asset: Record<string, unknown>, platform: string): boolean {
+  const text = createAssetSearchText(asset)
+  return getPlatformAliases(platform).some(alias => assetSearchTextIncludesAlias(text, alias))
+}
+
+function assetHasPlatformHint (asset: Record<string, unknown>): boolean {
+  const text = createAssetSearchText(asset)
+  return ['win', 'mac', 'linux'].some(platform =>
+    getPlatformAliases(platform).some(alias => assetSearchTextIncludesAlias(text, alias))
+  )
+}
+
+function assetMatchesOrOmitsPlatform (asset: Record<string, unknown>, platform: string): boolean {
+  return assetMatchesPlatform(asset, platform) || !assetHasPlatformHint(asset)
 }
 
 function assetMatchesRuntime (asset: Record<string, unknown>, platform: string, arch: string): boolean {
   const text = createAssetSearchText(asset)
-  const platformMatches = getPlatformAliases(platform).some(alias => text.includes(alias))
-  const archMatches = getArchAliases(arch).some(alias => text.includes(alias))
+  const platformMatches = getPlatformAliases(platform).some(alias => assetSearchTextIncludesAlias(text, alias))
+  const archMatches = getArchAliases(arch).some(alias => assetSearchTextIncludesAlias(text, alias))
   return platformMatches && archMatches
 }
 
@@ -492,10 +573,23 @@ function selectReleaseAsset (
 ): AppUpdateAssetInfo | null {
   if (!Array.isArray(assetsValue)) return null
 
-  const assets = assetsValue.filter(isRecord).filter(isInstallableAsset)
+  const assets = assetsValue
+    .filter(isRecord)
+    .filter(asset => isInstallableAsset(asset, options.platform))
   const exactMatch = assets.find(asset => assetMatchesRuntime(asset, options.platform, options.arch))
-  const fallbackMatch = assets.find(asset => getPlatformAliases(options.platform).some(alias => createAssetSearchText(asset).includes(alias)))
-  return normalizeAsset(exactMatch || fallbackMatch || null, options)
+  const fallbackMatch = assets.find(asset => assetMatchesPlatform(asset, options.platform))
+  const genericMatch = assets.find(asset => assetMatchesOrOmitsPlatform(asset, options.platform))
+  return normalizeAsset(exactMatch || fallbackMatch || genericMatch || null, options)
+}
+
+function normalizeRuntimeAsset (value: unknown, options: AssetSelectionOptions): AppUpdateAssetInfo | null {
+  if (!isRecord(value) || !isInstallableAsset(value, options.platform) || !assetMatchesOrOmitsPlatform(value, options.platform)) return null
+  return normalizeAsset(value, options)
+}
+
+function isRuntimeAssetInfoSupportedForPlatform (asset: AppUpdateAssetInfo, platform: string): boolean {
+  const assetRecord = asset as unknown as Record<string, unknown>
+  return isInstallableAsset(assetRecord, platform) && assetMatchesOrOmitsPlatform(assetRecord, platform)
 }
 
 function selectReleaseItem (payload: RemoteUpdateResponse, channel: AppUpdateChannel): Record<string, unknown> | null {
@@ -538,7 +632,7 @@ function normalizeRemoteUpdatePayload (
   const publishedAt = getTrimmedString(response.publishedAt) ||
     (releaseItem ? getTrimmedString(releaseItem.publishedAt) : '') ||
     null
-  const asset = normalizeAsset(response.asset, options) ||
+  const asset = normalizeRuntimeAsset(response.asset, options) ||
     selectReleaseAsset(response.assets, options) ||
     (releaseItem ? selectReleaseAsset(releaseItem.assets, options) : null)
 
@@ -606,9 +700,50 @@ async function ensureDeleted (targetPath: string): Promise<void> {
   }
 }
 
-function buildDelayedInstallerCommand (installerPath: string): string {
+function buildDelayedWindowsInstallerCommand (installerPath: string): string {
   const escapedPath = installerPath.replace(/"/g, '""')
   return `timeout /t ${INSTALLER_LAUNCH_DELAY_SECONDS} /nobreak >nul & start "" "${escapedPath}"`
+}
+
+function buildInstallerLaunchConfig (installerPath: string, platform: string): InstallerLaunchConfig | null {
+  switch (normalizePlatformFamily(platform)) {
+    case 'win':
+      return {
+        command: process.env.ComSpec || 'cmd.exe',
+        args: ['/d', '/s', '/c', buildDelayedWindowsInstallerCommand(installerPath)],
+        windowsHide: true
+      }
+    case 'mac':
+      return {
+        command: '/bin/sh',
+        args: [
+          '-c',
+          'sleep "$1"; open "$2"',
+          'worldbase-update-launcher',
+          String(INSTALLER_LAUNCH_DELAY_SECONDS),
+          installerPath
+        ]
+      }
+    case 'linux':
+      return {
+        command: '/bin/sh',
+        args: [
+          '-c',
+          'sleep "$1"; chmod +x "$2"; "$2" >/dev/null 2>&1 &',
+          'worldbase-update-launcher',
+          String(INSTALLER_LAUNCH_DELAY_SECONDS),
+          installerPath
+        ]
+      }
+    default:
+      return null
+  }
+}
+
+function isInstallerPathSupportedForPlatform (installerPath: string, platform: string): boolean {
+  const extension = path.extname(installerPath).replace(/^\./, '').toLowerCase()
+  const platformFormats = getInstallableFormatsForPlatform(platform)
+  return platformFormats.has(extension)
 }
 
 export class UpdateService extends EventEmitter {
@@ -789,8 +924,11 @@ export class UpdateService extends EventEmitter {
     if (!this.state.asset || !this.state.latestVersion) {
       return this.fail(t('mainDialog.updateNoDownloadableAsset'))
     }
-    if (process.platform !== 'win32') {
+    if (!isSupportedUpdatePlatform(process.platform)) {
       return this.fail(t('mainDialog.updateDownloadUnsupportedPlatform'))
+    }
+    if (!isRuntimeAssetInfoSupportedForPlatform(this.state.asset, process.platform)) {
+      return this.fail(t('mainDialog.updateInstallerPlatformMismatch'))
     }
 
     const asset = this.state.asset
@@ -919,7 +1057,7 @@ export class UpdateService extends EventEmitter {
   }
 
   async installDownloadedUpdate (): Promise<{ success: boolean; state: AppUpdateState; error?: string }> {
-    if (process.platform !== 'win32') {
+    if (!isSupportedUpdatePlatform(process.platform)) {
       const state = this.fail(t('mainDialog.updateInstallUnsupportedPlatform'))
       return { success: false, state, error: state.error || undefined }
     }
@@ -930,13 +1068,23 @@ export class UpdateService extends EventEmitter {
     }
 
     const installerPath = this.state.downloadedFilePath
+    if (!isInstallerPathSupportedForPlatform(installerPath, process.platform)) {
+      const state = this.fail(t('mainDialog.updateInstallerPlatformMismatch'))
+      return { success: false, state, error: state.error || undefined }
+    }
+
     this.updateState({ status: 'installing', error: null })
 
     try {
-      const launcher = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', buildDelayedInstallerCommand(installerPath)], {
+      const launchConfig = buildInstallerLaunchConfig(installerPath, process.platform)
+      if (!launchConfig) {
+        throw new Error(t('mainDialog.updateInstallUnsupportedPlatform'))
+      }
+
+      const launcher = spawn(launchConfig.command, launchConfig.args, {
         detached: true,
         stdio: 'ignore',
-        windowsHide: true
+        windowsHide: launchConfig.windowsHide
       })
       launcher.unref()
     } catch (error) {
@@ -1042,6 +1190,14 @@ export class UpdateService extends EventEmitter {
       restored.downloadedFilePath = null
       restored.progress = null
       restored.status = 'idle'
+    }
+
+    if (restored.asset && !isRuntimeAssetInfoSupportedForPlatform(restored.asset, process.platform)) {
+      restored.asset = null
+      restored.downloadedFilePath = null
+      restored.progress = null
+      restored.status = 'idle'
+      restored.error = null
     }
 
     if (restored.status === 'checking' || restored.status === 'downloading' || restored.status === 'installing') {

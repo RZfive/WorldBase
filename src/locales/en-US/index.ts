@@ -291,6 +291,7 @@ const enUS: MessageSchema = {
     updateDownloadFailed: 'Failed to download update',
     updateInstallUnsupportedPlatform: 'In-app installation is not supported on this platform yet. Please get the latest version from the official website.',
     updateInstallerMissing: 'No installable update package was found. Please download the update first.',
+    updateInstallerPlatformMismatch: 'The update package does not match this platform. Check for updates and download it again.',
     updateInstallFailed: 'Failed to start the update installer',
     updateWebsiteNotConfigured: 'Official website URL has not been configured.',
     appPackageMissingManifest: 'The app package is missing manifest.json and cannot be imported.',

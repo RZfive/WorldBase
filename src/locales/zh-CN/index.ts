@@ -292,6 +292,7 @@ const zhCN = {
     updateDownloadFailed: '下载更新失败',
     updateInstallUnsupportedPlatform: '当前平台暂不支持应用内安装，请前往官网获取最新版本。',
     updateInstallerMissing: '尚未找到可安装的更新包，请先下载更新。',
+    updateInstallerPlatformMismatch: '更新包与当前平台不匹配，请重新检查并下载更新。',
     updateInstallFailed: '启动更新安装器失败',
     updateWebsiteNotConfigured: '官网地址尚未配置。',
     appPackageMissingManifest: '应用包缺少 manifest.json，无法导入。',
