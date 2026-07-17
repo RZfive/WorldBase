@@ -62,7 +62,10 @@ const statusTone = computed(() => {
 const resolvedError = computed(() => localError.value || updateState.value?.error || '')
 const isChecking = computed(() => checking.value || updateState.value?.status === 'checking')
 const isUpdating = computed(() => actionBusy.value || updateState.value?.status === 'downloading' || updateState.value?.status === 'installing')
-const supportsInAppInstall = computed(() => (aboutInfo.value?.platform || updateState.value?.platform) === 'win32')
+const supportsInAppInstall = computed(() => {
+  const platform = (aboutInfo.value?.platform || updateState.value?.platform || '').toLowerCase()
+  return ['win32', 'windows', 'win', 'darwin', 'macos', 'mac os', 'mac', 'osx', 'linux'].includes(platform)
+})
 const canStartDownload = computed(() => updateState.value?.status === 'update_available' && Boolean(updateState.value.asset))
 const canInstall = computed(() => updateState.value?.status === 'downloaded' || updateState.value?.status === 'install_triggered')
 const progressLabel = computed(() => {
