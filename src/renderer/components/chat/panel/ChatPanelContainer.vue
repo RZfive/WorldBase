@@ -857,7 +857,7 @@ watch(
   height: 34px;
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
-  background: color-mix(in srgb, var(--app-panel) 92%, transparent);
+  background: var(--app-chat-list-raised);
   color: var(--app-text-muted);
   cursor: pointer;
   transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
@@ -867,7 +867,7 @@ watch(
 .conversation-sidebar-rail-action:hover,
 .conversation-sidebar-rail-section:hover {
   border-color: color-mix(in srgb, var(--app-accent) 32%, var(--app-border));
-  background: color-mix(in srgb, var(--app-accent-soft) 42%, var(--app-panel));
+  background: color-mix(in srgb, var(--app-accent-soft) 42%, var(--app-chat-list-raised));
   color: var(--app-text);
 }
 
@@ -880,7 +880,7 @@ watch(
 .conversation-sidebar-rail {
   width: 100%;
   border-right: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-panel) 92%, transparent);
+  background: var(--app-chat-list-surface);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -955,7 +955,7 @@ watch(
   height: 16px;
   padding: 0 4px;
   border-radius: 999px;
-  background: var(--app-panel-strong);
+  background: var(--app-chat-list-raised);
   border: 1px solid var(--app-border);
   color: var(--app-text-muted);
   font-size: 0.6rem;
@@ -974,7 +974,7 @@ watch(
   padding: 10px;
   border-radius: 16px;
   border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-panel) 94%, transparent);
+  background: color-mix(in srgb, var(--app-chat-list-raised) 96%, transparent);
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.14);
   -webkit-backdrop-filter: blur(14px) saturate(120%);
   backdrop-filter: blur(14px) saturate(120%);

@@ -1,8 +1,9 @@
 /**
  * Word (docx) → DocumentNode[] parser.
- * Uses mammoth to extract structured content with heading detection.
+ * Reads OOXML paragraphs so editor nodes retain stable source locations.
  */
-import mammoth from 'mammoth'
+import { DOMParser } from '@xmldom/xmldom'
+import JSZip from 'jszip'
 import type { DocumentNode } from './document-types.js'
 
 let nodeCounter = 0
@@ -12,41 +13,35 @@ function nextId (): string {
 
 export async function parseWordToNodes (buffer: Buffer): Promise<DocumentNode[]> {
   nodeCounter = 0
-  const result = await mammoth.extractRawText({ buffer })
-  const text = result.value || ''
-
-  // Also attempt to get HTML to detect headings
-  const htmlResult = await mammoth.convertToHtml({ buffer })
-  const html = htmlResult.value || ''
-
+  const zip = await JSZip.loadAsync(buffer)
+  const documentXml = await zip.file('word/document.xml')?.async('string')
+  if (!documentXml) throw new Error('The DOCX file is missing word/document.xml')
+  const document = new DOMParser().parseFromString(documentXml, 'application/xml')
+  const paragraphs = Array.from(document.getElementsByTagName('w:p'))
   const nodes: DocumentNode[] = []
-  let pageIdx = 1
+  for (const [paragraphIndex, paragraph] of paragraphs.entries()) {
+    const text = Array.from(paragraph.getElementsByTagName('w:t'))
+      .map(textNode => textNode.textContent || '')
+      .join('')
+    if (!text.trim()) continue
 
-  // Extract headings from HTML for structure
-  const headingRegex = /<h(\d)[^>]*>([\s\S]*?)<\/h\1>/gi
-  const headings: Array<{ level: number; text: string; index: number }> = []
-  let match: RegExpExecArray | null
-  while ((match = headingRegex.exec(html)) !== null) {
-    const headingText = match[2].replace(/<[^>]+>/g, '').trim()
-    if (headingText) {
-      headings.push({ level: parseInt(match[1], 10), text: headingText, index: match.index })
-    }
-  }
-
-  // Split raw text into paragraphs
-  const rawParagraphs = text.split(/\n+/).filter(p => p.trim())
-
-  for (const para of rawParagraphs) {
-    // Check if this paragraph matches a heading
-    const headingMatch = headings.find(h => para.trim().startsWith(h.text.substring(0, 20)))
+    const styleElement = paragraph.getElementsByTagName('w:pStyle')[0]
+    const styleValue = styleElement?.getAttribute('w:val') || styleElement?.getAttribute('val') || ''
+    const headingMatch = /heading\s*([1-6])/i.exec(styleValue)
     const isHeading = Boolean(headingMatch)
+    const isList = paragraph.getElementsByTagName('w:numPr').length > 0
 
     nodes.push({
       id: nextId(),
-      type: isHeading ? 'heading' : 'paragraph',
-      text: para.trim(),
-      level: isHeading ? (headingMatch!.level) : 0,
-      pageIndex: pageIdx
+      type: isHeading ? 'heading' : isList ? 'list_item' : 'paragraph',
+      text,
+      level: isHeading ? Number(headingMatch?.[1] || 1) : 0,
+      pageIndex: 1,
+      meta: {
+        docxPart: 'word/document.xml',
+        docxParagraphIndex: paragraphIndex,
+        paragraphStyle: styleValue
+      }
     })
   }
 

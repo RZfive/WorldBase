@@ -269,15 +269,15 @@ watch(
 }
 
 .agent-item {
-  background: color-mix(in srgb, var(--app-panel) 94%, var(--app-accent-soft) 6%);
+  background: color-mix(in srgb, var(--app-chat-list-raised) 94%, var(--app-accent-soft) 6%);
 }
 
 .group-item {
-  background: color-mix(in srgb, var(--app-panel) 94%, #14b8a6 5%);
+  background: color-mix(in srgb, var(--app-chat-list-raised) 94%, #14b8a6 5%);
 }
 
 .conversation-item {
-  background: var(--app-panel);
+  background: var(--app-chat-list-raised);
 }
 
 .conversation-item-compact {
@@ -352,7 +352,7 @@ watch(
 }
 
 .conv-avatar-shell.agent {
-  background: color-mix(in srgb, var(--app-accent-soft) 32%, var(--app-panel));
+  background: color-mix(in srgb, var(--app-accent-soft) 32%, var(--app-chat-list-raised));
 }
 
 .conv-avatar-shell.group {
@@ -360,7 +360,7 @@ watch(
 }
 
 .conv-avatar-shell.conversation {
-  background: color-mix(in srgb, var(--app-panel-muted) 78%, var(--app-panel));
+  background: color-mix(in srgb, var(--app-panel-muted) 78%, var(--app-chat-list-raised));
 }
 
 .conv-copy {
@@ -606,7 +606,7 @@ watch(
   position: absolute;
   inset: -3px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--app-panel) 38%, transparent);
+  background: color-mix(in srgb, var(--app-chat-list-raised) 38%, transparent);
   -webkit-backdrop-filter: blur(8px) saturate(118%);
   backdrop-filter: blur(8px) saturate(118%);
   opacity: 0;
@@ -647,7 +647,7 @@ watch(
   pointer-events: auto;
   transform: translateX(0);
   color: var(--app-accent);
-  background: color-mix(in srgb, var(--app-panel) 34%, transparent);
+  background: color-mix(in srgb, var(--app-chat-list-raised) 34%, transparent);
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
 }

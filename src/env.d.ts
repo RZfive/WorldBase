@@ -27,6 +27,11 @@ type FolderWorkspaceFileEntry = import('./shared/folder-workspace-types.js').Fol
 type FolderWorkspaceListResult = import('./shared/folder-workspace-types.js').FolderWorkspaceListResult
 type FolderWorkspacePickResult = import('./shared/folder-workspace-types.js').FolderWorkspacePickResult
 type FolderWorkspaceReadResult = import('./shared/folder-workspace-types.js').FolderWorkspaceReadResult
+type DocumentEditOperation = import('./shared/document-edit-types.js').DocumentEditOperation
+type DocumentEditExportRequest = import('./shared/document-edit-types.js').DocumentEditExportRequest
+type DocumentEditExportResult = import('./shared/document-edit-types.js').DocumentEditExportResult
+type DocumentEditImagePickResult = import('./shared/document-edit-types.js').DocumentEditImagePickResult
+type DocumentEditSourceState = import('./shared/document-edit-types.js').DocumentEditSourceState
 type LongTermGoalDefinition = import('./shared/long-term-goal-types.js').LongTermGoalDefinition
 type LongTermGoalSaveInput = import('./shared/long-term-goal-types.js').LongTermGoalSaveInput
 type LongTermGoalSnapshot = import('./shared/long-term-goal-types.js').LongTermGoalSnapshot
@@ -1085,6 +1090,9 @@ interface ElectronAPI {
   updateDocumentSelectionLabel: (regionId: string, label: string) => Promise<DocumentSelectionDTO | null>
   getDocumentSelections: (artifactId: string) => Promise<DocumentSelectionDTO[]>
   buildDocumentSelectionsPrompt: (regionIds?: string[]) => Promise<string>
+  getDocumentEditSourceState: (artifactId: string) => Promise<DocumentEditSourceState>
+  pickDocumentEditImage: () => Promise<DocumentEditImagePickResult>
+  exportDocumentEditCopy: (request: DocumentEditExportRequest) => Promise<DocumentEditExportResult>
 
   // Folder workspace preview
   pickFolderWorkspace: () => Promise<FolderWorkspacePickResult>

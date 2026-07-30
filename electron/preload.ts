@@ -6,6 +6,7 @@ import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibrar
 import type { UsageRecord, UsageSummary } from '../src/main/settings/usage-store.js'
 import type { ConversationFolderWorkspaceState, FolderWorkspaceChangeEvent, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
 import type { LongTermGoalChangeSet, LongTermGoalDefinition, LongTermGoalIntervention, LongTermGoalMessageResult, LongTermGoalRun, LongTermGoalSaveInput, LongTermGoalSnapshot, LongTermGoalStreamEvent } from '../src/shared/long-term-goal-types.js'
+import type { DocumentEditExportRequest, DocumentEditExportResult, DocumentEditImagePickResult, DocumentEditSourceState } from '../src/shared/document-edit-types.js'
 
 interface ChatMessage {
   role: string
@@ -716,6 +717,9 @@ export interface ElectronAPI {
   updateDocumentSelectionLabel: (regionId: string, label: string) => Promise<unknown | null>
   getDocumentSelections: (artifactId: string) => Promise<unknown[]>
   buildDocumentSelectionsPrompt: (regionIds?: string[]) => Promise<string>
+  getDocumentEditSourceState: (artifactId: string) => Promise<DocumentEditSourceState>
+  pickDocumentEditImage: () => Promise<DocumentEditImagePickResult>
+  exportDocumentEditCopy: (request: DocumentEditExportRequest) => Promise<DocumentEditExportResult>
 
   // Folder workspace preview
   pickFolderWorkspace: () => Promise<FolderWorkspacePickResult>
@@ -1066,6 +1070,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateDocumentSelectionLabel: (regionId: string, label: string) => ipcRenderer.invoke('document:updateSelectionLabel', regionId, label),
   getDocumentSelections: (artifactId: string) => ipcRenderer.invoke('document:getSelections', artifactId),
   buildDocumentSelectionsPrompt: (regionIds?: string[]) => ipcRenderer.invoke('document:buildSelectionsPrompt', regionIds),
+  getDocumentEditSourceState: (artifactId: string) => ipcRenderer.invoke('document:getEditSourceState', artifactId),
+  pickDocumentEditImage: () => ipcRenderer.invoke('document:pickEditImage'),
+  exportDocumentEditCopy: (request: DocumentEditExportRequest) => ipcRenderer.invoke('document:exportEditCopy', request),
 
   // Folder workspace preview
   pickFolderWorkspace: () => ipcRenderer.invoke('folderWorkspace:pickFolder'),

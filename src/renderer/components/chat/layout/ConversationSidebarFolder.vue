@@ -525,7 +525,7 @@ const emit = defineEmits<{
   padding: 6px 8px;
   border-radius: 7px;
   border: 1px dashed color-mix(in srgb, var(--app-border) 74%, transparent);
-  background: color-mix(in srgb, var(--app-panel) 78%, transparent);
+  background: color-mix(in srgb, var(--app-chat-list-raised) 78%, transparent);
   color: var(--app-text-faint);
   font-size: 0.7rem;
 }
