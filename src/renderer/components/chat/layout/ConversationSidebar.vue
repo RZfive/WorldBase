@@ -476,7 +476,7 @@ function cancelRenameConversation () {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  background: var(--app-panel);
+  background: var(--app-chat-list-surface);
   border-right: 1px solid var(--app-border);
   display: flex;
   flex-direction: column;
@@ -522,7 +522,7 @@ function cancelRenameConversation () {
   height: 38px;
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
-  background: color-mix(in srgb, var(--app-panel-strong) 86%, transparent);
+  background: var(--app-chat-list-raised);
   color: var(--app-text-muted);
   display: inline-flex;
   align-items: center;
@@ -538,7 +538,7 @@ function cancelRenameConversation () {
 
 .conv-collapse-btn:hover {
   border-color: color-mix(in srgb, var(--app-accent) 28%, var(--app-border));
-  background: color-mix(in srgb, var(--app-accent-soft) 36%, var(--app-panel));
+  background: color-mix(in srgb, var(--app-accent-soft) 36%, var(--app-chat-list-raised));
   color: var(--app-text);
 }
 

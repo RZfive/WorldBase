@@ -26,7 +26,9 @@ import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '..
 import type { ActivePageAutomationContext, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
 import type { FolderWorkspacePickResult } from '../../src/shared/folder-workspace-types.js'
+import type { DocumentEditExportRequest } from '../../src/shared/document-edit-types.js'
 import { assertFolderWorkspaceRoot, getFolderWorkspaceRootName, listFolderWorkspaceFiles, readFolderWorkspaceFile } from '../../src/main/folder-workspace/folder-workspace-fs.js'
+import { calculateDocumentSha256, exportDocumentCopy, readDocumentEditImage } from '../../src/main/document-edit/document-edit-service.js'
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
 import { mainState, activeChatSessions, pendingPageAutomationRequests, projectWindows, type EnsureWindowWidthOptions } from './state.js'
 import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH } from './constants.js'
@@ -1074,6 +1076,76 @@ export function setupIPC (): void {
     }
 
     return { success: true }
+  })
+
+  ipcMain.handle('document:getEditSourceState', async (_event: IpcMainInvokeEvent, artifactId: string) => {
+    const artifact = documentStore.getArtifact(artifactId)
+    if (!artifact) throw new Error(t('mainDialog.documentNotFound', { id: artifactId }))
+    const stat = await fs.stat(artifact.filePath)
+    return {
+      sha256: await calculateDocumentSha256(artifact.filePath),
+      size: stat.size,
+      mtimeMs: stat.mtimeMs
+    }
+  })
+
+  ipcMain.handle('document:pickEditImage', async (event: IpcMainInvokeEvent) => {
+    const senderWindow = getSenderWindow(event) || getMainWindow()
+    const options = {
+      title: t('mainDialog.pickDocumentEditImageTitle'),
+      filters: [{ name: t('mainDialog.imageFileFilterName'), extensions: ['png', 'jpg', 'jpeg'] }],
+      properties: ['openFile' as const]
+    }
+    const result = senderWindow
+      ? await dialog.showOpenDialog(senderWindow, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || !result.filePaths[0]) return { canceled: true }
+    return { canceled: false, image: await readDocumentEditImage(result.filePaths[0]) }
+  })
+
+  ipcMain.handle('document:exportEditCopy', async (event: IpcMainInvokeEvent, request: DocumentEditExportRequest) => {
+    const artifact = documentStore.getArtifact(request.artifactId)
+    if (!artifact) throw new Error(t('mainDialog.documentNotFound', { id: request.artifactId }))
+    if (artifact.fileType !== 'pdf' && artifact.fileType !== 'docx') {
+      throw new Error(t('mainDialog.documentEditingUnsupportedFormat', { fileType: artifact.fileType }))
+    }
+
+    const currentSha256 = await calculateDocumentSha256(artifact.filePath)
+    if (currentSha256 !== request.sourceSha256) {
+      throw new Error(t('mainDialog.documentSourceChanged'))
+    }
+
+    const extension = artifact.fileType === 'pdf' ? '.pdf' : '.docx'
+    const parsedPath = path.parse(artifact.filePath)
+    const timestamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12)
+    const defaultPath = path.join(parsedPath.dir, `${parsedPath.name}-edited-${timestamp}${extension}`)
+    const senderWindow = getSenderWindow(event) || getMainWindow()
+    const options = {
+      title: t('mainDialog.saveDocumentCopyTitle'),
+      defaultPath,
+      filters: [{
+        name: artifact.fileType === 'pdf' ? 'PDF' : 'Word',
+        extensions: [extension.slice(1)]
+      }]
+    }
+    const result = senderWindow
+      ? await dialog.showSaveDialog(senderWindow, options)
+      : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return { canceled: true }
+
+    const outputPath = path.extname(result.filePath).toLowerCase() === extension
+      ? result.filePath
+      : `${result.filePath}${extension}`
+    await exportDocumentCopy(artifact.filePath, outputPath, artifact.fileType, request.operations)
+
+    const exportedArtifact = await parseDocument(outputPath)
+    documentStore.addArtifact(exportedArtifact)
+    const hydratedArtifact = await ensureDocumentRenderPreview(exportedArtifact.id)
+    return {
+      canceled: false,
+      filePath: outputPath,
+      artifact: hydratedArtifact || exportedArtifact
+    }
   })
 
   ipcMain.handle('document:remove', async (_event: IpcMainInvokeEvent, artifactId: string) => {

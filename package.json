@@ -27,6 +27,8 @@
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/client": "^2.0.0-alpha.2",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "@xmldom/xmldom": "^0.9.10",
     "better-sqlite3": "^12.8.0",
     "body-parser": "^1.20.4",
     "bytenode": "^1.5.7",
@@ -43,6 +45,7 @@
     "mermaid": "11.14.0",
     "officegen": "^0.6.5",
     "pako": "^1.0.11",
+    "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^5.6.205",
     "pnpm": "10.33.0",
