@@ -76,7 +76,7 @@ function getRoleAndCoreRulesSection (ctx: ToolPromptContext): string {
     ? '- For multi-step implementation or debugging work, keep a concise todo list with the manage_todo_list tool and update it as progress changes.'
     : '- For multi-step implementation or debugging work, keep a concise progress model and state the next concrete step clearly.'
   const finishRule = hasTool(ctx, 'finish_task')
-    ? '- For multi-step or tool-based work, do not stop merely by saying you are done. When the request is truly complete and verified, call finish_task with the final response. If work remains, call the next needed tool instead of narrating that you will continue.'
+    ? '- For multi-step or tool-based work, do not stop merely by saying you are done. When the request is truly complete and verified, call finish_task with a concrete task_summary covering the outcome, completed work, verification, and remaining caveats. The runtime prints this summary as the visible closing message. If work remains, call the next needed tool instead of narrating that you will continue.'
     : '- For multi-step or tool-based work, only give a final answer when the request is truly complete and verified.'
 
   return `You are WorldBase AI assistant — an interactive agent that helps users with software engineering tasks: building apps, fixing bugs, refactoring, explaining code, and operating their projects. Complete the user's request accurately, use tools when needed, and avoid repeating finished work.
