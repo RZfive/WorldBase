@@ -1,4 +1,7 @@
-import { app, BrowserWindow, Notification } from 'electron'
+import { app, BrowserWindow, type Notification } from 'electron'
+import { createRequire } from 'node:module'
+
+const { Notification } = createRequire(import.meta.url)('electron') as typeof import('electron')
 
 /**
  * Active OS notifications that are waiting for the user to interact.
