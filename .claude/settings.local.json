@@ -5,7 +5,9 @@
       "Bash(pnpm exec *)",
       "Bash(git --no-pager diff src/main/scheduler/scheduled-task-service.ts)",
       "Bash(git --no-pager diff src/main/long-term-goals/long-term-goal-service.ts)",
-      "Bash(git --no-pager diff src/renderer/components/settings/UsagePanel.vue src/locales/)"
+      "Bash(git --no-pager diff src/renderer/components/settings/UsagePanel.vue src/locales/)",
+      "Bash(pnpm install *)",
+      "Bash(pnpm run *)"
     ]
   }
 }

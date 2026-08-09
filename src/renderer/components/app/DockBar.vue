@@ -201,14 +201,7 @@ function closeTitle (app: RunningApp): string {
   align-items: center;
   gap: 6px;
   padding: 6px calc((var(--dock-width) - var(--dock-slot-size)) / 2) 6px;
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--app-panel) 72%, transparent),
-    color-mix(in srgb, var(--app-panel-strong) 78%, transparent) 55%,
-    color-mix(in srgb, var(--app-panel) 72%, transparent)
-  );
-  backdrop-filter: blur(10px) saturate(1.25);
-  -webkit-backdrop-filter: blur(10px) saturate(1.25);
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-strong) 55%, var(--app-panel));
 }
 
 .dock-top,
