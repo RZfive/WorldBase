@@ -91,13 +91,17 @@ export class AgentCore {
   private static readonly MAX_FINISH_TASK_NUDGES = 2
   private static readonly FINISH_TASK_TOOL_DEFINITION: ToolDefinition = {
     name: AgentCore.FINISH_TASK_TOOL_NAME,
-    description: 'Signal that the current user request is fully complete. Use this as the final action after tool-based or multi-step work; do not use it while work remains.',
+    description: 'Signal that the current user request is fully complete. Use this as the final action after tool-based or multi-step work. The task summary is printed as the visible closing message, so make it concrete and do not use this tool while work remains.',
     parameters: {
       type: 'object',
       properties: {
+        task_summary: {
+          type: 'string',
+          description: 'Required visible task summary in the user\'s language. State the outcome, important completed work, verification performed, and any remaining caveats or next steps. Write the Markdown body only; the runtime adds the heading.'
+        },
         final_response: {
           type: 'string',
-          description: 'The final response to show the user. Include what changed, verification performed, and any remaining caveats.'
+          description: 'Optional short handoff shown after the task summary. Do not repeat the summary. Retained for compatibility with older callers.'
         },
         status: {
           type: 'string',
@@ -105,7 +109,7 @@ export class AgentCore {
           description: 'Completion status for the request.'
         }
       },
-      required: ['final_response']
+      required: ['task_summary']
     }
   }
   private static readonly CONTEXT_SUMMARY_PREFIX = '[CONTEXT_SUMMARY]'
@@ -401,10 +405,21 @@ export class AgentCore {
   private _buildFinishTaskMessage (toolCall: ToolCall, fallbackContent: ChatMessage['content'] = ''): ChatMessage {
     try {
       const args = this._parseToolArguments(AgentCore.FINISH_TASK_TOOL_NAME, toolCall.function.arguments)
+      const taskSummary = typeof args.task_summary === 'string'
+        ? args.task_summary.trim()
+        : ''
       const finalResponse = typeof args.final_response === 'string'
         ? args.final_response.trim()
         : ''
-      const content = finalResponse || this._serializeMessageContentForSummary(fallbackContent)
+      const fallbackText = this._serializeMessageContentForSummary(fallbackContent)
+      const summaryBlock = taskSummary
+        ? `## \u4efb\u52a1\u5c0f\u7ed3\n\n${taskSummary}`
+        : ''
+      const content = summaryBlock
+        ? (finalResponse && finalResponse !== taskSummary
+            ? `${summaryBlock}\n\n${finalResponse}`
+            : summaryBlock)
+        : (finalResponse || fallbackText)
       return {
         role: 'assistant',
         content
@@ -425,7 +440,7 @@ export class AgentCore {
     const withoutPreviousNudge = this._removeSystemMessagesByPrefix(messages, AgentCore.FINISH_TASK_NUDGE_PREFIX)
     return this._insertSystemDirective(
       withoutPreviousNudge,
-      `${AgentCore.FINISH_TASK_NUDGE_PREFIX}\n上一轮 assistant 没有调用任何工具，也没有调用 ${AgentCore.FINISH_TASK_TOOL_NAME}，因此不能仅凭普通文本判断任务已经完成。请在下一步二选一：\n- 如果任务已经完成并且已经做过必要验证，调用 ${AgentCore.FINISH_TASK_TOOL_NAME}，在 final_response 中给出最终答复。\n- 如果任务还没完成，调用下一步真正需要的工具继续执行。\n不要再次只输出普通文本来表示“我会继续”或“已完成”。这是第 ${nudgeCount + 1} 次完成信号校验。`
+      `${AgentCore.FINISH_TASK_NUDGE_PREFIX}\n上一轮 assistant 没有调用任何工具，也没有调用 ${AgentCore.FINISH_TASK_TOOL_NAME}，因此不能仅凭普通文本判断任务已经完成。请在下一步二选一：\n- 如果任务已经完成并且已经做过必要验证，调用 ${AgentCore.FINISH_TASK_TOOL_NAME}，在 task_summary 中写明结果、已完成工作、验证和剩余注意事项；这段小结会被直接打印给用户。\n- 如果任务还没完成，调用下一步真正需要的工具继续执行。\n不要再次只输出普通文本来表示“我会继续”或“已完成”。这是第 ${nudgeCount + 1} 次完成信号校验。`
     )
   }
 
@@ -1080,9 +1095,20 @@ export class AgentCore {
 
       const { finishCall, regularCalls } = this._splitFinishTaskToolCalls(assistantMessage.tool_calls)
       if (finishCall && regularCalls.length === 0) {
+        const finishMessage = this._buildFinishTaskMessage(
+          finishCall,
+          this._resolveFinalAssistantContent(assistantMessage.content, renderedContent)
+        )
+        const visibleSummary = this._serializeMessageContentForSummary(finishMessage.content)
+        if (visibleSummary) {
+          // Create a content block after the final tool run. When the text only
+          // arrives with `done`, the renderer may backfill the initial empty
+          // block and make a long task appear to stop without a closing summary.
+          yield { type: 'token', content: visibleSummary }
+        }
         yield {
           type: 'done',
-          message: this._buildFinishTaskMessage(finishCall, this._resolveFinalAssistantContent(assistantMessage.content, renderedContent)),
+          message: finishMessage,
           thinking: fullThinking || undefined
         }
         return
