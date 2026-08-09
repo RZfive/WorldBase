@@ -1287,6 +1287,9 @@ onUnmounted(() => {
   --lp-folder-glow: rgba(245, 158, 11, 0.12);
   position: absolute;
   inset: 0;
+  /* Match the main content frame so the overlay cannot paint over the shell
+     at the rounded top-left corner. */
+  border-top-left-radius: var(--app-frame-corner-radius, 16px);
   z-index: 20;
   color: var(--app-text);
   background:

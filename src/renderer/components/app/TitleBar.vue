@@ -85,7 +85,13 @@ const maximizeLabel = computed(() => props.isMaximized ? t('appShell.restore') :
   height: 38px;
   padding: 0 12px;
   box-sizing: border-box;
-  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--app-panel-strong) 72%, transparent),
+    color-mix(in srgb, var(--app-panel) 68%, transparent)
+  );
+  backdrop-filter: blur(10px) saturate(1.25);
+  -webkit-backdrop-filter: blur(10px) saturate(1.25);
   flex-shrink: 0;
   user-select: none;
   gap: 10px;
@@ -95,7 +101,11 @@ const maximizeLabel = computed(() => props.isMaximized ? t('appShell.restore') :
   height: 34px;
   padding: 0 0 0 12px;
   gap: 0;
-  background: linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--app-panel-strong) 72%, transparent),
+    color-mix(in srgb, var(--app-panel) 68%, transparent)
+  );
 }
 
 .titlebar-drag {

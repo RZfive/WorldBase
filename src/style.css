@@ -16,10 +16,12 @@
   --app-accent-strong: #0284c7;
   --app-accent-soft: rgba(14, 165, 233, 0.14);
   --app-accent-glow: rgba(14, 165, 233, 0.28);
-  --app-shell-bg: #090b0f;
+  /* Translucent shell lets the transparent Electron window show through with
+     a frosted-glass blur applied by the app frame. */
+  --app-shell-bg: rgba(9, 11, 15, 0.72);
   --app-shell-tint-1: rgba(56, 189, 248, 0.08);
   --app-shell-tint-2: rgba(245, 158, 11, 0.06);
-  --app-main-surface: rgba(6, 10, 16, 0.72);
+  --app-main-surface: #0b1018;
   /* Opaque flatten of --app-main-surface over --app-shell-bg — the solid color
      the semi-transparent chat canvas actually reads as. Used by surfaces that
      must fully occlude content (e.g. the floating chat header) while matching
@@ -53,22 +55,23 @@
   --app-accent-strong: #0369a1;
   --app-accent-soft: rgba(2, 132, 199, 0.12);
   --app-accent-glow: rgba(2, 132, 199, 0.2);
-  --app-shell-bg: #eef3f9;
-  --app-shell-tint-1: rgba(14, 165, 233, 0.12);
-  --app-shell-tint-2: rgba(245, 158, 11, 0.1);
-  --app-main-surface: rgba(255, 255, 255, 0.74);
+  /* Frosted white frame around an opaque white work surface. */
+  --app-shell-bg: rgba(255, 255, 255, 0.62);
+  --app-shell-tint-1: rgba(14, 165, 233, 0.08);
+  --app-shell-tint-2: rgba(245, 158, 11, 0.06);
+  --app-main-surface: #ffffff;
   /* Opaque flatten of --app-main-surface over --app-shell-bg — near-white, so
      the floating chat header matches the message-list canvas instead of the
      bluer raw shell-bg (#eef3f9). */
-  --app-chat-canvas: #fbfcfd;
-  --app-panel: rgba(255, 255, 255, 0.88);
-  --app-panel-strong: rgba(255, 255, 255, 0.96);
+  --app-chat-canvas: #ffffff;
+  --app-panel: rgba(255, 255, 255, 0.9);
+  --app-panel-strong: #ffffff;
   --app-panel-muted: rgba(15, 23, 42, 0.04);
   --app-panel-subtle: rgba(15, 23, 42, 0.03);
   --app-input-bg: rgba(255, 255, 255, 0.9);
   --app-input-border: rgba(15, 23, 42, 0.1);
-  --app-border: rgba(15, 23, 42, 0.08);
-  --app-border-strong: rgba(15, 23, 42, 0.14);
+  --app-border: rgba(15, 23, 42, 0.12);
+  --app-border-strong: rgba(15, 23, 42, 0.2);
   --app-text: #0f172a;
   --app-text-strong: #020617;
   --app-text-soft: #334155;

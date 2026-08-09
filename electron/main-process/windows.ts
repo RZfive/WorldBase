@@ -485,8 +485,18 @@ export function createWindow (): void {
     width: 1200,
     height: 800,
     frame: false,
-    transparent: false,
-    backgroundColor: '#0f0f10',
+    // Windows transparent windows expose a rectangular compositor layer around
+    // the renderer's rounded frame. Keep Windows opaque; macOS/Linux retain
+    // transparent shells and their platform-appropriate effects.
+    transparent: process.platform !== 'win32',
+    backgroundColor: process.platform === 'win32' ? '#0f0f10' : '#00000000',
+    // Acrylic paints a native rectangular layer before the renderer can clip
+    // its rounded frame, leaving visible square corners. Keep the window
+    // transparent and let the renderer own the frosted surfaces instead.
+    backgroundMaterial: undefined,
+    vibrancy: process.platform === 'darwin' ? 'under-window' : undefined,
+    visualEffectState: process.platform === 'darwin' ? 'active' : undefined,
+    roundedCorners: process.platform === 'win32',
     minWidth: DEFAULT_MAIN_WINDOW_MIN_WIDTH,
     minHeight: DEFAULT_MAIN_WINDOW_MIN_HEIGHT,
     webPreferences: {
