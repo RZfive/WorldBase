@@ -1423,6 +1423,8 @@ onUnmounted(() => {
     radial-gradient(circle at top left, var(--app-shell-tint-1), transparent 22%),
     radial-gradient(circle at bottom left, var(--app-shell-tint-2), transparent 18%),
     var(--app-shell-bg);
+  backdrop-filter: blur(10px) saturate(1.25);
+  -webkit-backdrop-filter: blur(10px) saturate(1.25);
   color: var(--app-text);
   border-radius: 10px;
   overflow: hidden;
