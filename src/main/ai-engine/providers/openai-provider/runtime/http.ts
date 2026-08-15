@@ -8,13 +8,16 @@ import type {
   ResponsesBody,
   StreamReadResult
 } from '../types.js'
+import type { AnthropicMessagesBody } from '../../anthropic-provider/types.js'
 
 export const STANDARD_REQUEST_TIMEOUT_MS = 60000
 export const IMAGE_REQUEST_TIMEOUT_MS = 600000
 export const STREAM_IDLE_TIMEOUT_MS = 90000
 export const STREAM_IDLE_TIMEOUT_MESSAGE = 'AI stream idle timed out'
 
-type JsonRequestBody = ChatCompletionBody | ResponsesBody | ImagesGenerationsBody
+export const ANTHROPIC_VERSION = '2023-06-01'
+
+type JsonRequestBody = ChatCompletionBody | ResponsesBody | ImagesGenerationsBody | AnthropicMessagesBody
 
 export function validateOpenAIConfig (runtime: Pick<OpenAIProviderRuntime, 'apiKey' | 'baseUrl' | 'model'>): void {
   if (!runtime.apiKey.trim()) {
@@ -28,13 +31,36 @@ export function validateOpenAIConfig (runtime: Pick<OpenAIProviderRuntime, 'apiK
   }
 }
 
+/**
+ * Default request headers: OpenAI-style bearer auth.
+ *
+ * Anthropic-protocol requests send BOTH x-api-key (the native Anthropic
+ * header) and Authorization: Bearer (accepted by Anthropic and required by
+ * Anthropic-compatible gateways such as Volcengine Ark, which reject
+ * x-api-key alone with a 401).
+ */
+export function buildAuthHeaders (
+  runtime: Pick<OpenAIProviderRuntime, 'apiKey'>,
+  headerMode: 'bearer' | 'anthropic' = 'bearer'
+): Record<string, string> {
+  if (headerMode === 'anthropic') {
+    return {
+      'x-api-key': runtime.apiKey,
+      Authorization: `Bearer ${runtime.apiKey}`,
+      'anthropic-version': ANTHROPIC_VERSION
+    }
+  }
+  return { Authorization: `Bearer ${runtime.apiKey}` }
+}
+
 export async function fetchWithRetry (
   runtime: Pick<OpenAIProviderRuntime, 'apiKey' | 'baseUrl' | 'model'>,
   url: string,
   body: JsonRequestBody,
   stream: boolean,
   abortSignal?: AbortSignal,
-  options?: RequestOptions
+  options?: RequestOptions,
+  headerMode: 'bearer' | 'anthropic' = 'bearer'
 ): Promise<Response> {
   validateOpenAIConfig(runtime)
 
@@ -63,7 +89,7 @@ export async function fetchWithRetry (
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${runtime.apiKey}`
+          ...buildAuthHeaders(runtime, headerMode)
         },
         body: JSON.stringify(body),
         signal: controller.signal
@@ -78,7 +104,7 @@ export async function fetchWithRetry (
       }
 
       const errorText = await response.text()
-      const error = new Error(`OpenAI API error (${response.status}): ${errorText}`)
+      const error = new Error(`AI API error (${response.status}) POST ${url}: ${errorText}`)
       if (timeout) clearTimeout(timeout)
       if (abortSignal) {
         abortSignal.removeEventListener('abort', onAbort)
@@ -159,7 +185,7 @@ export async function fetchMultipartWithRetry (
       }
 
       const errorText = await response.text()
-      const error = new Error(`OpenAI API error (${response.status}): ${errorText}`)
+      const error = new Error(`AI API error (${response.status}) POST ${url}: ${errorText}`)
       clearTimeout(timeout)
       if (abortSignal) abortSignal.removeEventListener('abort', onAbort)
 

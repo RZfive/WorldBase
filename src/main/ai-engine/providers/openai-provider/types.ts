@@ -190,6 +190,9 @@ export type StreamReadResult = Awaited<ReturnType<ReadableStreamDefaultReader<Ui
 
 export type ProviderReasoningEffort = 'low' | 'medium' | 'high' | 'max'
 
+/** Wire protocol the provider speaks: OpenAI-compatible or native Anthropic Messages. */
+export type ProviderApiProtocol = 'openai' | 'anthropic'
+
 export interface OpenAIProviderRuntime {
   apiKey: string
   baseUrl: string

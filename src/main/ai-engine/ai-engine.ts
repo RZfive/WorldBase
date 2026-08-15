@@ -1,5 +1,6 @@
 import { AgentCore, type StreamEvent, type ProgressCallback, type ProgressEvent } from './agent/agent-core.js'
-import { OpenAIProvider } from './providers/openai-provider.js'
+import { createProvider } from './providers/index.js'
+import type { ChatProvider } from './providers/index.js'
 import { registerAllTools } from './agent/tools/index.js'
 import { SubagentService } from './agent/subagent-service.js'
 import type { ChatMessage, ToolDefinition } from './providers/openai-provider.js'
@@ -62,6 +63,8 @@ export interface AIConfigInput {
   apiKey?: string
   baseUrl?: string
   model?: string
+  /** Wire protocol: OpenAI-compatible chat/completions or native Anthropic Messages API. */
+  apiProtocol?: 'openai' | 'anthropic'
   /** 供应商 id（用于用量统计分组；不影响 provider 行为）。 */
   providerId?: string
   /** 供应商名称快照（用量统计展示用）。 */
@@ -193,7 +196,7 @@ export class AIEngine {
     this.services.scheduledTaskService = scheduledTaskService
   }
 
-  private applyConfigToProvider (provider: OpenAIProvider, config: AIConfigInput): void {
+  private applyConfigToProvider (provider: ChatProvider, config: AIConfigInput): void {
     if (config.apiKey !== undefined) {
       provider.setApiKey(config.apiKey)
     }
@@ -224,7 +227,16 @@ export class AIEngine {
   }
 
   private createAgent (options?: AIRequestOptions): AgentCore {
-    const provider = new OpenAIProvider()
+    // Pick the provider class from the effective protocol (explicit setting
+    // wins, else auto-detect from the merged base URL).
+    const effectiveConfig: AIConfigInput = {
+      ...this.baseConfig,
+      ...(options?.providerConfig ?? {})
+    }
+    const provider = createProvider({
+      baseUrl: effectiveConfig.baseUrl,
+      apiProtocol: effectiveConfig.apiProtocol
+    })
     this.applyConfigToProvider(provider, this.baseConfig)
     if (options?.providerConfig) {
       this.applyConfigToProvider(provider, options.providerConfig)

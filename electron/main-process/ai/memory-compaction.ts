@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { OpenAIProvider } from '../../../src/main/ai-engine/providers/openai-provider.js'
+import { createProvider } from '../../../src/main/ai-engine/providers/index.js'
+import type { ChatProvider } from '../../../src/main/ai-engine/providers/index.js'
 import type { ChatMessage } from '../../../src/main/ai-engine/providers/openai-provider.js'
 import type { MemoryCompactionPlan } from '../../../src/main/ai-engine/memory/memory-engine.js'
 import type { MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry } from '../../../src/shared/agent-workspace-types.js'
@@ -198,13 +199,16 @@ export function chunkMemoryEntriesForAiCompaction (entries: MemoryEntry[]): Memo
   return chunks
 }
 
-export function createMemoryCompactionProvider (): OpenAIProvider {
+export function createMemoryCompactionProvider (): ChatProvider {
   const providerConfig = resolveProviderConfig()
   if (!providerConfig?.apiKey || !providerConfig.baseUrl || !providerConfig.model) {
     throw new Error(t('mainDialog.memoryCompactionProviderIncomplete'))
   }
 
-  const provider = new OpenAIProvider()
+  const provider = createProvider({
+    baseUrl: providerConfig.baseUrl,
+    apiProtocol: providerConfig.apiProtocol
+  })
   provider.setApiKey(providerConfig.apiKey)
   provider.setBaseUrl(providerConfig.baseUrl)
   provider.setModel(providerConfig.model)
@@ -216,7 +220,7 @@ export function createMemoryCompactionProvider (): OpenAIProvider {
   return provider
 }
 
-export async function requestMemoryCompactionPlanChunk (provider: OpenAIProvider, entries: MemoryEntry[], index: number, total: number): Promise<MemoryCompactionPlan> {
+export async function requestMemoryCompactionPlanChunk (provider: ChatProvider, entries: MemoryEntry[], index: number, total: number): Promise<MemoryCompactionPlan> {
   const messages: ChatMessage[] = [
     {
       role: 'system',
