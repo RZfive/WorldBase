@@ -42,7 +42,7 @@ export async function chatCompletion (
 
   try {
     const response = await fetchWithRetry(runtime, chatCompletionUrl, body, false, abortSignal, options)
-    const data = await response.json() as { choices: Array<{ message: ApiChatMessage }>; usage?: Record<string, unknown> }
+    const data = await readJsonWithAbort(response, abortSignal) as { choices: Array<{ message: ApiChatMessage }>; usage?: Record<string, unknown> }
     const message = normalizeAssistantMessage(data.choices[0].message)
     if (data.usage && runtime.onUsage) {
       runtime.onUsage(data.usage as Parameters<UsageCallback>[0])
@@ -98,7 +98,7 @@ export async function * chatCompletionStream (
         if (abortSignal?.aborted) {
           throw normalizeAbortReason(abortSignal.reason)
         }
-        const { done, value } = await readStreamChunkWithIdleTimeout(reader, STREAM_IDLE_TIMEOUT_MS)
+        const { done, value } = await readStreamChunkWithIdleTimeout(reader, STREAM_IDLE_TIMEOUT_MS, abortSignal)
         if (done) break
 
         buffer += decoder.decode(value, { stream: true })
@@ -185,5 +185,26 @@ export async function * chatCompletionStream (
       runtime.logger?.logProviderCallFailure(callId, normalized, { stream: true, model: runtime.model })
     }
     throw normalized
+  }
+}
+
+async function readJsonWithAbort (response: Response, abortSignal?: AbortSignal): Promise<unknown> {
+  if (!abortSignal) return response.json()
+  if (abortSignal.aborted) {
+    await response.body?.cancel().catch(() => {})
+    throw normalizeAbortReason(abortSignal.reason)
+  }
+  let onAbort: (() => void) | null = null
+  try {
+    const abort = new Promise<never>((_, reject) => {
+      onAbort = () => {
+        void response.body?.cancel().catch(() => {})
+        reject(normalizeAbortReason(abortSignal.reason))
+      }
+      abortSignal.addEventListener('abort', onAbort, { once: true })
+    })
+    return await Promise.race([response.json(), abort])
+  } finally {
+    if (onAbort) abortSignal.removeEventListener('abort', onAbort)
   }
 }

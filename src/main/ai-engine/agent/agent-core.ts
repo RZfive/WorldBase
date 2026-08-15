@@ -895,9 +895,9 @@ export class AgentCore {
     return Math.max(1, contextWindow - reservedTokens)
   }
 
-  async run (userMessages: ChatMessage[]): Promise<ChatMessage> {
+  async run (userMessages: ChatMessage[], abortSignal?: AbortSignal): Promise<ChatMessage> {
     this._resetSessionState()
-    this.currentAbortSignal = undefined
+    this.currentAbortSignal = abortSignal
     const toolDefs = this.getToolDefinitions()
     const systemMessage: ChatMessage = {
       role: 'system',
@@ -918,22 +918,23 @@ export class AgentCore {
       let finishNudgeCount = 0
 
       while (true) {
+        this._throwIfAborted(abortSignal)
         const stopReason = this._getLoopStopReason(loopGuard)
         if (stopReason) {
           return this._buildStopMessage(stopReason)
         }
 
         if (segmentIterations >= this.maxIterations) {
-          messages = await this._prepareAutomaticContinuation(messages, loopGuard)
+          messages = await this._prepareAutomaticContinuation(messages, loopGuard, undefined, abortSignal)
           segmentIterations = 0
         }
 
         const forceCompression = segmentIterations > 0 && segmentIterations % this.proactiveCompressionInterval === 0
-        messages = await this._compressContextIfNeeded(messages, undefined, undefined, forceCompression)
+        messages = await this._compressContextIfNeeded(messages, undefined, abortSignal, forceCompression)
         segmentIterations++
         loopGuard.totalIterations++
 
-        const response = await this.provider.chatCompletion(messages, toolDefs)
+        const response = await this.provider.chatCompletion(messages, toolDefs, abortSignal)
         const { finishCall, regularCalls } = this._splitFinishTaskToolCalls(response.tool_calls)
 
         if (finishCall && regularCalls.length === 0) {
@@ -965,8 +966,8 @@ export class AgentCore {
         // Read-only tools within a group run concurrently; writes stay serial.
         for (const group of this._groupToolCalls(regularCalls)) {
           const groupResults = group.length === 1
-            ? [await this._executeToolCall(group[0])]
-            : await Promise.all(group.map(call => this._executeToolCall(call)))
+            ? [await this._executeToolCall(group[0], undefined, abortSignal)]
+            : await Promise.all(group.map(call => this._executeToolCall(call, undefined, abortSignal)))
           for (const { execution, message } of groupResults) {
             executions.push(execution)
             messages.push(message)

@@ -1,7 +1,8 @@
-import { app, BrowserWindow, type Notification } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { createRequire } from 'node:module'
 
-const { Notification } = createRequire(import.meta.url)('electron') as typeof import('electron')
+const { Notification: ElectronNotification } = createRequire(import.meta.url)('electron') as typeof import('electron')
+type AppNotification = InstanceType<typeof ElectronNotification>
 
 /**
  * Active OS notifications that are waiting for the user to interact.
@@ -12,10 +13,10 @@ const { Notification } = createRequire(import.meta.url)('electron') as typeof im
  * clicking the notification silently does nothing. Keeping a strong reference
  * here until the notification closes prevents that.
  */
-const activeNotifications = new Set<Notification>()
+const activeNotifications = new Set<AppNotification>()
 
 export function isNotificationSupported (): boolean {
-  return Notification.isSupported()
+  return ElectronNotification.isSupported()
 }
 
 /**
@@ -42,8 +43,8 @@ export function focusMainWindow (mainWindow: BrowserWindow | null | undefined): 
  * handler survives garbage collection.
  */
 export function showAppNotification (title: string, body: string, onClick?: () => void): void {
-  if (!Notification.isSupported()) return
-  const notification = new Notification({ title, body })
+  if (!ElectronNotification.isSupported()) return
+  const notification = new ElectronNotification({ title, body })
   if (onClick) {
     notification.once('click', () => {
       try {

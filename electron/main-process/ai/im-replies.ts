@@ -70,7 +70,7 @@ export async function generateImGatewayReply (binding: ChannelBinding, event: Ch
         sourceConversationId: binding.boundConversationId,
         sourceSessionId: `im_${binding.id}_${event.messageId}`,
         userId: event.senderId || 'external-user',
-        enabledScopeTypes: runtimeContext.agent?.memoryScopes
+        enabledScopeTypes: runtimeContext.memoryScopeTypes
       })
     } catch (memoryError) {
       console.error('[im] Failed to ingest memory:', memoryError)

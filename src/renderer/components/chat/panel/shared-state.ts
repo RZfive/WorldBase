@@ -85,6 +85,7 @@ export const sharedChatPanelState = {
   backgroundStreamMessages: new Map<string, BackgroundStreamState>(),
   activeCleanups: new Map<string, () => void>(),
   activeStreamSessionIds: new Map<string, string>(),
+  activeGroupSessionIds: reactive(new Set<string>()),
   conversationTargets: new Map<string, string | null>()
 }
 
@@ -109,6 +110,7 @@ export function cleanupSharedChatPanelResources (): void {
   for (const cleanup of sharedChatPanelState.activeCleanups.values()) cleanup()
   sharedChatPanelState.activeCleanups.clear()
   sharedChatPanelState.activeStreamSessionIds.clear()
+  sharedChatPanelState.activeGroupSessionIds.clear()
 
   const lifecycle = sharedChatPanelLifecycle
   lifecycle.providerChangeCleanup?.()

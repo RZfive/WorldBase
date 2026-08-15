@@ -49,7 +49,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: { role: string; content: MessageContent }
@@ -63,10 +63,16 @@ interface StreamEvent {
   lineCount?: number
   added?: number
   removed?: number
+  groupId?: string
+  active?: boolean
   plan?: AgentGroupCollaborationPlan
   groupProgress?: AgentGroupProgressSnapshot
   transcript?: AgentGroupTranscript
   sidechat?: AgentSidechatSession
+  board?: SharedBoardSnapshot
+  directReply?: AgentGroupDirectReply
+  injection?: AgentGroupUserInjection
+  peerMessage?: AgentGroupMessage
   query?: string
   engine?: string
   results?: WebSearchResultItem[]
@@ -180,12 +186,22 @@ interface AgentGroupCollaborationPlan {
   updatedAt: string
 }
 
+interface AgentGroupTranscriptToolCall {
+  name: string
+  summary: string
+  status: 'completed' | 'failed'
+}
+
 interface AgentGroupTranscriptEntry {
   id: string
   round: number
   agentId: string
   agentName: string
   content: string
+  toolCalls?: AgentGroupTranscriptToolCall[]
+  peerMessages?: Array<{ toAgentName: string; request: string; response: string }>
+  directReply?: boolean
+  boardFields?: SharedBoardUpdate['field'][]
 }
 
 interface AgentGroupTranscript {
@@ -241,7 +257,7 @@ interface AgentSidechatSession {
   groupName: string
   agentId: string
   agentName: string
-  mode: 'user_targeted' | 'coordinator_assigned' | 'group_deliberation'
+  mode: 'user_targeted' | 'coordinator_assigned' | 'group_deliberation' | 'peer_message' | 'direct_reply'
   initiatedByName: string
   reportToName: string
   request: string
@@ -251,6 +267,81 @@ interface AgentSidechatSession {
   updatedAt: string
   error?: string
   progress: AgentGroupProgressStep[]
+}
+
+interface AgentGroupMessage {
+  id: string
+  groupId: string
+  fromAgentId: string
+  fromAgentName: string
+  toAgentId: string
+  toAgentName: string
+  request: string
+  response: string
+  status: 'pending' | 'completed' | 'failed' | 'timeout' | 'rejected'
+  round: number
+  createdAt: string
+  resolvedAt?: string
+  error?: string
+}
+
+interface SharedBoardTask {
+  id: string
+  title: string
+  ownerAgentId?: string
+  status: 'todo' | 'running' | 'blocked' | 'done'
+  summary?: string
+}
+
+interface SharedBoard {
+  goal: string
+  assumptions: string[]
+  tasks: SharedBoardTask[]
+  decisions: string[]
+  evidenceRefs: string[]
+  openQuestions: string[]
+}
+
+interface SharedBoardUpdate {
+  id: string
+  groupId: string
+  agentId: string
+  agentName: string
+  field: 'goal' | 'assumptions' | 'tasks' | 'decisions' | 'evidenceRefs' | 'openQuestions'
+  op: 'set' | 'add' | 'update' | 'remove'
+  payload: unknown
+  reason?: string
+  at: string
+}
+
+interface SharedBoardSnapshot {
+  groupId: string
+  groupName: string
+  board: SharedBoard
+  recentUpdates: SharedBoardUpdate[]
+  updatedAt: string
+}
+
+interface AgentGroupDirectReply {
+  id: string
+  groupId: string
+  groupName: string
+  agentId: string
+  agentName: string
+  content: string
+  round: number
+  endorsed: boolean
+  at: string
+}
+
+interface AgentGroupUserInjection {
+  id: string
+  groupId: string
+  groupName: string
+  content: string
+  targetAgentIds: string[]
+  round: number
+  at: string
 }
 
 interface MemorySearchScope {
@@ -374,6 +465,10 @@ type ChatMessageBlock =
   | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
+  | { id: string; kind: 'group_board'; board: SharedBoardSnapshot }
+  | { id: string; kind: 'group_direct_reply'; directReply: AgentGroupDirectReply }
+  | { id: string; kind: 'group_user_injection'; injection: AgentGroupUserInjection }
+  | { id: string; kind: 'group_peer_message'; peerMessage: AgentGroupMessage }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
@@ -867,6 +962,7 @@ interface ElectronAPI {
   chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
+  injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void

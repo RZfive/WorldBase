@@ -1,10 +1,32 @@
-import type { AIEngine, ProgressCallback, ProgressEvent } from '../../../src/main/ai-engine/ai-engine.js'
+import type { AIEngine, AIRequestOptions, ProgressCallback, ProgressEvent } from '../../../src/main/ai-engine/ai-engine.js'
 import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
-import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupDefinition, AgentGroupParticipant, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentSidechatSession, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupDefinition, AgentGroupParticipant, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupTranscriptToolCall, AgentMemoryScope, AgentSidechatSession, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
 import { mainState } from '../state.js'
 import { buildActiveAgentSection, buildActiveGroupSection, resolveProviderConfig, resolveSkillContentsByIds } from './agent-context.js'
 import { firstNonEmptyLine, getLastUserMessageText, getMessageText, serializeMessageContentForDisplay, truncateSectionText } from '../chat-message-utils.js'
+import { GroupSession, groupSessionRegistry, type GroupSessionEvent } from './group-session.js'
+import { buildGroupCollabTools } from './tool-group-collab.js'
+
+const GROUP_COLLAB_TOOL_NAMES = ['message_agent', 'read_board', 'update_board', 'reply_to_user']
+
+function mergeUniqueValues<T extends string> (...collections: Array<readonly T[] | undefined>): T[] {
+  return Array.from(new Set(collections.flatMap(collection => collection ?? [])))
+}
+
+function resolveGroupToolAllowlist (allowedToolNames?: string[]): string[] {
+  if (!allowedToolNames || allowedToolNames.length === 0) return []
+  return mergeUniqueValues(allowedToolNames, GROUP_COLLAB_TOOL_NAMES)
+}
+
+function resolveGroupMemoryScopes (agentScopes: AgentMemoryScope[], group: AgentGroupDefinition): AgentMemoryScope[] {
+  return mergeUniqueValues(agentScopes, group.sharedMemoryScopes)
+}
+
+function throwIfAborted (signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  throw signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason || 'Group deliberation aborted.'))
+}
 
 export interface GroupDeliberationResult {
   promptSection: string | null
@@ -39,7 +61,7 @@ export interface GroupPlannerReview {
 }
 
 export type GroupDeliberationProgressCallback = (
-  stageOrEvent: string | ProgressEvent | { type: 'group_collaboration_plan'; plan: AgentGroupCollaborationPlan } | { type: 'group_progress'; groupProgress: AgentGroupProgressSnapshot } | { type: 'agent_sidechat'; sidechat: AgentSidechatSession },
+  stageOrEvent: string | ProgressEvent | { type: 'group_collaboration_plan'; plan: AgentGroupCollaborationPlan } | { type: 'group_session_state'; groupId: string; active: boolean } | { type: 'group_progress'; groupProgress: AgentGroupProgressSnapshot } | { type: 'agent_sidechat'; sidechat: AgentSidechatSession } | { type: 'group_board'; board: import('../../../src/shared/agent-workspace-types.js').SharedBoardSnapshot } | { type: 'group_direct_reply'; directReply: import('../../../src/shared/agent-workspace-types.js').AgentGroupDirectReply } | { type: 'group_user_injection'; injection: import('../../../src/shared/agent-workspace-types.js').AgentGroupUserInjection } | { type: 'group_peer_message'; peerMessage: import('../../../src/shared/agent-workspace-types.js').AgentGroupMessage },
   detail?: string
 ) => void
 
@@ -667,7 +689,9 @@ export async function buildGroupRoundCoordinatorPlan (input: {
   round: number
   totalRounds: number
   selectionSource: 'explicit_mentions' | 'coordinator_decides' | 'mentioned_agent_decides' | 'default_group_discussion'
+  abortSignal?: AbortSignal
 }): Promise<GroupRoundCoordinatorPlan> {
+  throwIfAborted(input.abortSignal)
   const fallbackRequest = truncateSectionText(input.normalizedRequest || input.latestUserMessage, 600)
   const fallbackMemberIds = input.selectionSource === 'mentioned_agent_decides'
     ? []
@@ -690,7 +714,7 @@ export async function buildGroupRoundCoordinatorPlan (input: {
     userMessage: input.latestUserMessage,
     targetProjectId: input.targetProjectId,
     userId: 'local-user',
-    enabledScopeTypes: input.planner.memoryScopes
+    enabledScopeTypes: resolveGroupMemoryScopes(input.planner.memoryScopes, input.group)
   })
   const candidateLines = input.candidateMemberIds.map((memberId) => {
     const member = mainState.agentStore?.get(memberId)
@@ -762,7 +786,8 @@ export async function buildGroupRoundCoordinatorPlan (input: {
         ...(plannerMemory?.sections || []),
         planningPrompt
       ],
-      deniedToolNames: input.runtimeAiEngine.getAvailableTools().map(tool => tool.name)
+      deniedToolNames: input.runtimeAiEngine.getAvailableTools().map(tool => tool.name),
+      abortSignal: input.abortSignal
     })
     return parseGroupRoundCoordinatorPlan({
       rawText: getMessageText(response.content),
@@ -772,6 +797,7 @@ export async function buildGroupRoundCoordinatorPlan (input: {
       fallbackShouldContinue
     })
   } catch {
+    throwIfAborted(input.abortSignal)
     return {
       shouldContinue: fallbackShouldContinue,
       selectedMemberIds: fallbackShouldContinue ? fallbackMemberIds : [],
@@ -789,7 +815,10 @@ export async function buildGroupDeliberationSection (input: {
   targetProjectId?: string | null
   fallbackReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
   onProgress?: GroupDeliberationProgressCallback
+  sessionId?: string
+  abortSignal?: AbortSignal
 }): Promise<GroupDeliberationResult> {
+  throwIfAborted(input.abortSignal)
   if (!mainState.aiEngine || !mainState.agentStore) {
     return { promptSection: null, transcript: null }
   }
@@ -797,7 +826,6 @@ export async function buildGroupDeliberationSection (input: {
   const runtimeAiEngine = mainState.aiEngine
   const runtimeAgentStore = mainState.agentStore
 
-  const allToolNames = runtimeAiEngine.getAvailableTools().map(tool => tool.name)
   const latestUserMessage = getLastUserMessageText(input.messages)
   const routing = input.routing || parseGroupRouting(input.group, latestUserMessage)
   const coordinator = runtimeAgentStore.get(input.group.coordinatorAgentId)
@@ -851,14 +879,131 @@ export async function buildGroupDeliberationSection (input: {
     return { promptSection: null, transcript: null }
   }
 
+  // ── R1/R2/R5 · Group session: peer message bus + shared board + HITL queue ──
+  const sessionParticipantIds = Array.from(new Set([
+    input.group.coordinatorAgentId,
+    ...memberIds
+  ].filter(Boolean)))
+  const forwardSessionEvent = (event: GroupSessionEvent): void => {
+    if (!input.onProgress) return
+    if (event.type === 'board_update' && event.snapshot) {
+      input.onProgress({ type: 'group_board', board: event.snapshot })
+    } else if (event.type === 'direct_reply' && event.reply) {
+      input.onProgress({ type: 'group_direct_reply', directReply: event.reply })
+    } else if (event.type === 'injection' && event.injection) {
+      input.onProgress({ type: 'group_user_injection', injection: event.injection })
+    } else if (event.type === 'peer_message' && event.message) {
+      input.onProgress({ type: 'group_peer_message', peerMessage: event.message })
+    }
+  }
+
+  /**
+   * R1 · Run a target agent's reply to a peer message. Bounded by the session's
+   * recursion-depth + deadlock guards (enforced in sendMessage before this runs).
+   * The target gets its own context, its tools (per its allow/deny lists), the
+   * collab tools bound to its identity, and the live board.
+   */
+  const sessionRef: { current: GroupSession | null } = { current: null }
+  const runPeerReply = async (peerInput: {
+    targetAgentId: string
+    request: string
+    fromAgentId: string
+    fromAgentName: string
+    abortSignal: AbortSignal
+  }): Promise<string> => {
+    const session = sessionRef.current
+    if (!session) throw new Error('message_agent: group session is not active.')
+    const targetAgent = runtimeAgentStore.get(peerInput.targetAgentId)
+    if (!targetAgent) {
+      throw new Error(`message_agent: target agent "${peerInput.targetAgentId}" not found.`)
+    }
+    const peerBudgetAbort = new AbortController()
+    const peerAbortSignal = AbortSignal.any([peerInput.abortSignal, peerBudgetAbort.signal])
+    const peerSections: string[] = [
+      buildActiveAgentSection(targetAgent),
+      buildActiveGroupSection(input.group),
+      `## Peer message from ${peerInput.fromAgentName}`,
+      `- Another group member (${peerInput.fromAgentName}) is consulting you directly.`,
+      '- Reply concisely with what they asked. This is a focused consultation, not a full discussion round.',
+      '- You may use your tools and the shared board (read_board / update_board).',
+      '- Do not address the end user; address the consulting member.',
+      `- Their question: ${truncateSectionText(peerInput.request, 1200)}`
+    ]
+    peerSections.push(session.buildBoardPromptSection().section)
+    const peerTools = buildGroupCollabTools(session, targetAgent.id, targetAgent.name, peerAbortSignal, (id) => runtimeAgentStore.get(id)?.name)
+    const peerProgress = ((_stageOrEvent: string | ProgressEvent, _detail?: string) => {
+      // Tool budget is enforced in the stream loop below (tool_start is a
+      // StreamEvent, not a ProgressEvent).
+    }) as unknown as ProgressCallback
+
+    let replyText = ''
+    try {
+      for await (const event of runtimeAiEngine.chatStream(
+        [{ role: 'user', content: peerInput.request }],
+        peerProgress,
+        {
+          targetProjectId: input.targetProjectId ?? null,
+          providerConfig: resolveProviderConfig(
+            targetAgent.providerId,
+            targetAgent.modelId,
+            targetAgent.reasoningStrength || input.fallbackReasoningStrength || 'medium'
+          ),
+          activeSkillContents: resolveSkillContentsByIds(targetAgent.skillIds),
+          systemPromptSections: peerSections,
+          allowedToolNames: resolveGroupToolAllowlist(targetAgent.allowedTools),
+          deniedToolNames: targetAgent.deniedTools || [],
+          customTools: peerTools,
+          abortSignal: peerAbortSignal
+        } satisfies AIRequestOptions
+      )) {
+        if (event.type === 'done') {
+          replyText = getMessageText(event.message.content)
+        } else if (event.type === 'error') {
+          throw new Error(event.error)
+        } else if (event.type === 'tool_start' && event.name) {
+          const budget = session.consumeToolBudget(targetAgent.id)
+          if (!budget.allowed) {
+            peerBudgetAbort.abort(new Error(`Tool budget exceeded for ${targetAgent.name}.`))
+          }
+        }
+      }
+    } catch (err) {
+      if (peerBudgetAbort.signal.aborted) {
+        return truncateSectionText(replyText, 800) || `(${targetAgent.name} hit its tool budget and stopped; partial reply above.)`
+      }
+      throw err
+    }
+    return replyText || `(${targetAgent.name} returned no reply.)`
+  }
+
+  const groupSession = new GroupSession({
+    groupId: input.group.id,
+    groupName: input.group.name,
+    coordinatorId: input.group.coordinatorAgentId,
+    participantIds: sessionParticipantIds,
+    injectionRecipientIds: memberIds,
+    round: 1,
+    maxRecursionDepth: 2,
+    messageTimeoutMs: 60_000,
+    perMemberToolBudget: 12,
+    abortSignal: input.abortSignal,
+    runPeerReply,
+    onEvent: forwardSessionEvent
+  })
+  sessionRef.current = groupSession
+  if (input.sessionId) groupSessionRegistry.register(input.sessionId, groupSession)
+  input.onProgress?.({ type: 'group_session_state', groupId: input.group.id, active: true })
+
   const notes: string[] = []
   const plannerNotes: GroupPlannerReview[] = []
   const entries: AgentGroupTranscript['entries'] = []
 
+  try {
   emitGroupProgressSnapshot(input.onProgress, snapshot)
 
   for (let round = 1; round <= totalRounds; round++) {
     snapshot.activeRound = round
+    groupSession.setRound(round)
     const candidateMemberIds = memberIds.filter(memberId => {
       const item = getGroupProgressItem(snapshot, memberId)
       if (!item) return false
@@ -868,6 +1013,7 @@ export async function buildGroupDeliberationSection (input: {
     if (candidateMemberIds.length === 0) {
       break
     }
+    groupSession.setInjectionRecipients(candidateMemberIds)
 
     const roundPlan = isDiscussionMode
       ? await buildGroupRoundCoordinatorPlan({
@@ -885,7 +1031,8 @@ export async function buildGroupDeliberationSection (input: {
           mentionedMemberIds: routing.mentionedMemberIds,
           round,
           totalRounds,
-          selectionSource: discussionSelectionSource
+          selectionSource: discussionSelectionSource,
+          abortSignal: input.abortSignal
         })
       : {
           shouldContinue: candidateMemberIds.length > 0,
@@ -895,6 +1042,7 @@ export async function buildGroupDeliberationSection (input: {
         }
     const roundMemberIds = roundPlan.selectedMemberIds.filter(memberId => candidateMemberIds.includes(memberId))
     latestInvitedMemberIds = [...roundMemberIds]
+    groupSession.setInjectionRecipients(roundMemberIds)
 
     emitGroupCollaborationPlan(input.onProgress, createGroupCollaborationPlan({
       group: input.group,
@@ -955,7 +1103,7 @@ export async function buildGroupDeliberationSection (input: {
       const results = await Promise.all(batch.map(async memberId => {
         const item = getGroupProgressItem(snapshot, memberId)
         if (!item) {
-          return { memberId, member: null, error: 'Missing progress item for member', noteText: '', noteDisplayText: '' }
+          return { memberId, member: null, error: 'Missing progress item for member', noteText: '', noteDisplayText: '', toolCalls: [], peerMessages: [], directReplies: [] }
         }
 
         const member = runtimeAgentStore.get(memberId)
@@ -967,7 +1115,7 @@ export async function buildGroupDeliberationSection (input: {
           item.updatedAt = new Date().toISOString()
           appendGroupProgressStep(item, t('mainDialog.groupProgressInvalidConfig'), item.detail)
           emitGroupProgressSnapshot(input.onProgress, snapshot)
-          return { memberId, member: null, error: item.detail, noteText: '', noteDisplayText: '' }
+          return { memberId, member: null, error: item.detail, noteText: '', noteDisplayText: '', toolCalls: [], peerMessages: [], directReplies: [] }
         }
 
         item.agentName = member.name
@@ -986,7 +1134,7 @@ export async function buildGroupDeliberationSection (input: {
           userMessage: latestUserMessage,
           targetProjectId: input.targetProjectId,
           userId: 'local-user',
-          enabledScopeTypes: member.memoryScopes
+          enabledScopeTypes: resolveGroupMemoryScopes(member.memoryScopes, input.group)
         })
         const sidechatSession = createAgentSidechatSession({
           group: input.group,
@@ -1008,83 +1156,163 @@ export async function buildGroupDeliberationSection (input: {
         appendAgentSidechatProgress(sidechatSession, item.stage, item.detail)
         emitAgentSidechatSession(input.onProgress, sidechatSession)
 
+        let activeInjectionAbort: AbortController | null = null
+        let injectionRequested = false
+        const removeInjectionListener = groupSession.onInjection(memberId, () => {
+          injectionRequested = true
+          activeInjectionAbort?.abort(new Error('Group member turn superseded by user clarification.'))
+        })
+
         try {
           let noteText = ''
           let noteDisplayText = ''
-          const sidechatProgress = ((progressEventOrStage: string | ProgressEvent, detail?: string) => {
-            if (typeof progressEventOrStage === 'string') {
-              appendAgentSidechatProgress(sidechatSession, progressEventOrStage, detail)
-            } else if (progressEventOrStage.type === 'progress') {
-              appendAgentSidechatProgress(sidechatSession, progressEventOrStage.stage, progressEventOrStage.detail)
+          const memberToolCalls: AgentGroupTranscriptToolCall[] = []
+          const memberBudgetAbort = new AbortController()
+          let completed = false
+          while (!completed) {
+            throwIfAborted(input.abortSignal)
+            injectionRequested = false
+            activeInjectionAbort = new AbortController()
+            const memberAbortSignal = AbortSignal.any([
+              ...(input.abortSignal ? [input.abortSignal] : []),
+              memberBudgetAbort.signal,
+              activeInjectionAbort.signal
+            ])
+            // Drain both queued and newly delivered clarifications before each attempt.
+            const injections = groupSession.drainInjections(memberId)
+            const injectionSection = injections.length > 0
+              ? [
+                  '## User clarification (injected mid-discussion)',
+                  '- The user interrupted the group discussion with the following. Treat it as authoritative and adjust your contribution accordingly.',
+                  ...injections.map(injection => `- ${truncateSectionText(injection.content, 600)}`)
+                ].join('\n')
+              : null
+            const boardSection = groupSession.buildBoardPromptSection().section
+            let attemptNoteText = ''
+            let attemptNoteDisplayText = ''
+            const sidechatProgress = ((progressEventOrStage: string | ProgressEvent, detail?: string) => {
+              if (typeof progressEventOrStage === 'string') {
+                appendAgentSidechatProgress(sidechatSession, progressEventOrStage, detail)
+              } else if (progressEventOrStage.type === 'progress') {
+                appendAgentSidechatProgress(sidechatSession, progressEventOrStage.stage, progressEventOrStage.detail)
+              }
+              emitAgentSidechatSession(input.onProgress, sidechatSession)
+            }) as unknown as ProgressCallback
+            try {
+              for await (const sidechatEvent of runtimeAiEngine.chatStream(input.messages, sidechatProgress, {
+                targetProjectId: input.targetProjectId ?? null,
+                providerConfig: resolveProviderConfig(
+                  member.providerId,
+                  member.modelId,
+                  member.reasoningStrength || input.fallbackReasoningStrength || 'medium'
+                ),
+                activeSkillContents: resolveSkillContentsByIds(member.skillIds),
+                systemPromptSections: [
+                  buildActiveAgentSection(member),
+                  buildActiveGroupSection(input.group),
+                  buildGroupMemberRoleSection({
+                    memberName: member.name,
+                    coordinatorName,
+                    reportToName,
+                    initiatedByName: initiatorName,
+                    isDiscussionMode
+                  }),
+                  isDiscussionMode
+                    ? '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Do not claim to be the coordinator.\n- Use the refined round brief below, plus prior notes and the shared board, to deepen or correct the group result.\n- Focus on your unique contribution, defects to fix, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- You MAY use tools to ground your note (read files, search, run commands). Keep tool use focused and bounded.\n- Use message_agent to consult another member directly, read_board/update_board to coordinate shared state, and reply_to_user only if the user explicitly asked you to answer directly.'
+                    : '## Targeted sidechat instructions\n- The user explicitly routed this turn to you inside the selected agent group.\n- Provide supporting material for the coordinator, not a coordinator-style response.\n- Do not address the end user directly unless another prompt section explicitly asks for a direct reply.\n- Focus on the assigned topic only and provide a concise actionable result.\n- If you use tools, keep the final answer short and grounded in what you observed.',
+                  roundBriefSection,
+                  boardSection,
+                  ...(memberMemory?.sections || []),
+                  ...(priorNotesSection ? [priorNotesSection] : []),
+                  ...(injectionSection ? [injectionSection] : [])
+                ],
+                allowedToolNames: resolveGroupToolAllowlist(member.allowedTools),
+                deniedToolNames: member.deniedTools || [],
+                customTools: buildGroupCollabTools(groupSession, memberId, member.name, memberAbortSignal, (id) => runtimeAgentStore.get(id)?.name),
+                abortSignal: memberAbortSignal
+              })) {
+                if (sidechatEvent.type === 'token' && sidechatEvent.content) {
+                  sidechatSession.response += sidechatEvent.content
+                  sidechatSession.updatedAt = new Date().toISOString()
+                  emitAgentSidechatSession(input.onProgress, sidechatSession)
+                } else if (sidechatEvent.type === 'thinking' && sidechatEvent.content) {
+                  appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressThinking'), truncateSectionText(sidechatEvent.content, 120))
+                  emitAgentSidechatSession(input.onProgress, sidechatSession)
+                } else if (sidechatEvent.type === 'tool_start' && sidechatEvent.name) {
+                  appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressToolStart'), sidechatEvent.name)
+                  emitAgentSidechatSession(input.onProgress, sidechatSession)
+                  // R3 · enforce per-member tool budget; abort if exceeded.
+                  const budget = groupSession.consumeToolBudget(memberId)
+                  if (!budget.allowed) {
+                    memberBudgetAbort.abort(new Error(`Tool budget exceeded for ${member.name}.`))
+                  }
+                } else if (sidechatEvent.type === 'tool_end' && sidechatEvent.name) {
+                  appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressToolEnd'), sidechatEvent.name)
+                  emitAgentSidechatSession(input.onProgress, sidechatSession)
+                  memberToolCalls.push({ name: sidechatEvent.name, summary: '', status: 'completed' })
+                } else if (sidechatEvent.type === 'progress' && sidechatEvent.stage) {
+                  appendAgentSidechatProgress(sidechatSession, sidechatEvent.stage, sidechatEvent.detail)
+                  emitAgentSidechatSession(input.onProgress, sidechatSession)
+                } else if (sidechatEvent.type === 'done') {
+                  attemptNoteText = getMessageText(sidechatEvent.message.content)
+                  attemptNoteDisplayText = serializeMessageContentForDisplay(sidechatEvent.message.content) || attemptNoteText
+                  sidechatSession.response = attemptNoteDisplayText
+                  sidechatSession.status = 'completed'
+                  sidechatSession.updatedAt = new Date().toISOString()
+                  appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressSidechatDone'), t('mainDialog.groupProgressRoundDetail', { round }))
+                  emitAgentSidechatSession(input.onProgress, sidechatSession)
+                } else if (sidechatEvent.type === 'error') {
+                  // R3 · budget abort surfaces as an error; keep partial output if any.
+                  if (memberBudgetAbort.signal.aborted) {
+                    if (!attemptNoteText && sidechatSession.response) {
+                      attemptNoteText = sidechatSession.response
+                      attemptNoteDisplayText = sidechatSession.response
+                    }
+                    break
+                  }
+                  throw new Error(sidechatEvent.error)
+                }
+              }
+            } catch (error) {
+              if (injectionRequested && !memberBudgetAbort.signal.aborted && !input.abortSignal?.aborted) {
+                sidechatSession.response = ''
+                sidechatSession.status = 'running'
+                sidechatSession.error = undefined
+                appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressPrepareContext'), 'User clarification received; restarting this member turn.')
+                emitAgentSidechatSession(input.onProgress, sidechatSession)
+                continue
+              }
+              throw error
+            } finally {
+              activeInjectionAbort = null
             }
-            emitAgentSidechatSession(input.onProgress, sidechatSession)
-          }) as unknown as ProgressCallback
-          for await (const sidechatEvent of runtimeAiEngine.chatStream(input.messages, sidechatProgress, {
-            targetProjectId: input.targetProjectId ?? null,
-            providerConfig: resolveProviderConfig(
-              member.providerId,
-              member.modelId,
-              member.reasoningStrength || input.fallbackReasoningStrength || 'medium'
-            ),
-            activeSkillContents: resolveSkillContentsByIds(member.skillIds),
-            systemPromptSections: [
-              buildActiveAgentSection(member),
-              buildActiveGroupSection(input.group),
-              buildGroupMemberRoleSection({
-                memberName: member.name,
-                coordinatorName,
-                reportToName,
-                initiatedByName: initiatorName,
-                isDiscussionMode
-              }),
-              isDiscussionMode
-                ? '## Internal group deliberation instructions\n- You are producing an internal working note for the selected agent group.\n- Do not address the user directly.\n- Do not claim to be the coordinator.\n- Use the refined round brief below, plus prior notes, to deepen or correct the group result.\n- Focus on your unique contribution, defects to fix, missing evidence, and recommended next actions.\n- Be concise and concrete.\n- Do not use any tools in this internal round.'
-                : '## Targeted sidechat instructions\n- The user explicitly routed this turn to you inside the selected agent group.\n- Provide supporting material for the coordinator, not a coordinator-style response.\n- Do not address the end user directly unless another prompt section explicitly asks for a direct reply.\n- Focus on the assigned topic only and provide a concise actionable result.\n- If you use tools, keep the final answer short and grounded in what you observed.',
-              roundBriefSection,
-              ...(memberMemory?.sections || []),
-              ...(priorNotesSection ? [priorNotesSection] : [])
-            ],
-            allowedToolNames: member.allowedTools || [],
-            deniedToolNames: isDiscussionMode ? allToolNames : (member.deniedTools || [])
-          })) {
-            if (sidechatEvent.type === 'token' && sidechatEvent.content) {
-              sidechatSession.response += sidechatEvent.content
-              sidechatSession.updatedAt = new Date().toISOString()
-              emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (sidechatEvent.type === 'thinking' && sidechatEvent.content) {
-              appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressThinking'), truncateSectionText(sidechatEvent.content, 120))
-              emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (sidechatEvent.type === 'tool_start' && sidechatEvent.name) {
-              appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressToolStart'), sidechatEvent.name)
-              emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (sidechatEvent.type === 'tool_end' && sidechatEvent.name) {
-              appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressToolEnd'), sidechatEvent.name)
-              emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (sidechatEvent.type === 'progress' && sidechatEvent.stage) {
-              appendAgentSidechatProgress(sidechatSession, sidechatEvent.stage, sidechatEvent.detail)
-              emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (sidechatEvent.type === 'done') {
-              noteText = getMessageText(sidechatEvent.message.content)
-              noteDisplayText = serializeMessageContentForDisplay(sidechatEvent.message.content) || noteText
-              sidechatSession.response = noteDisplayText
-              sidechatSession.status = 'completed'
-              sidechatSession.updatedAt = new Date().toISOString()
-              appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressSidechatDone'), t('mainDialog.groupProgressRoundDetail', { round }))
-              emitAgentSidechatSession(input.onProgress, sidechatSession)
-            } else if (sidechatEvent.type === 'error') {
-              throw new Error(sidechatEvent.error)
-            }
+
+            noteText = attemptNoteText
+            noteDisplayText = attemptNoteDisplayText
+            completed = true
           }
+          groupSession.finishInjectionTurn(memberId)
 
           return {
             memberId,
             member,
             noteText,
             noteDisplayText,
+            toolCalls: memberToolCalls,
+            peerMessages: groupSession.getPeerMessages(memberId),
+            directReplies: groupSession.getDirectReplies(memberId),
             error: ''
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error)
+          if (input.abortSignal?.aborted) {
+            sidechatSession.status = 'failed'
+            sidechatSession.error = truncateSectionText(errorMessage, 200)
+            sidechatSession.updatedAt = new Date().toISOString()
+            appendAgentSidechatProgress(sidechatSession, t('mainDialog.groupProgressFailed'), sidechatSession.error)
+            emitAgentSidechatSession(input.onProgress, sidechatSession)
+            throwIfAborted(input.abortSignal)
+          }
           sidechatSession.status = 'failed'
           sidechatSession.error = truncateSectionText(errorMessage, 200)
           sidechatSession.updatedAt = new Date().toISOString()
@@ -1096,7 +1324,9 @@ export async function buildGroupDeliberationSection (input: {
           item.updatedAt = new Date().toISOString()
           appendGroupProgressStep(item, t('mainDialog.groupProgressFailed'), item.detail)
           emitGroupProgressSnapshot(input.onProgress, snapshot)
-          return { memberId, member, error: errorMessage, noteText: '', noteDisplayText: '' }
+          return { memberId, member, error: errorMessage, noteText: '', noteDisplayText: '', toolCalls: [], peerMessages: [], directReplies: [] }
+        } finally {
+          removeInjectionListener()
         }
       }))
 
@@ -1127,13 +1357,26 @@ export async function buildGroupDeliberationSection (input: {
         item.updatedAt = new Date().toISOString()
 
         if (result.noteText) {
+          const peerMessages = (result.peerMessages || [])
+            .filter(message => message.fromAgentId === result.memberId)
+            .map(message => ({ toAgentName: message.toAgentName, request: message.request, response: message.response }))
+          const directReplies = result.directReplies || []
+          const boardFieldsTouched = Array.from(new Set((groupSession.getBoardUpdatesByAgent(result.memberId)).map(update => update.field)))
           entries.push({
             id: `${input.group.id}_${round}_${result.memberId}_${entries.length}`,
             round,
             agentId: result.memberId,
             agentName: result.member?.name || item.agentName,
-            content: result.noteDisplayText || result.noteText
+            content: result.noteDisplayText || result.noteText,
+            toolCalls: result.toolCalls && result.toolCalls.length > 0 ? result.toolCalls : undefined,
+            peerMessages: peerMessages.length > 0 ? peerMessages : undefined,
+            directReply: directReplies.length > 0,
+            boardFields: boardFieldsTouched.length > 0 ? boardFieldsTouched : undefined
           })
+          // R6 · surface any direct replies this member posted into the final answer context.
+          for (const reply of directReplies) {
+            notes.push(`### Round ${round} · ${reply.agentName} (direct reply to user)\n${reply.content}`)
+          }
           notes.push(`### Round ${round} · ${result.member?.name || item.agentName}\n${result.noteText}`)
           plannerNotes.push({
             memberId: result.memberId,
@@ -1197,7 +1440,27 @@ export async function buildGroupDeliberationSection (input: {
     round: snapshot.activeRound || undefined,
     shouldContinue: false
   }))
-
+  // R2 · emit a final board snapshot so the UI shows the settled state.
+  if (input.onProgress) {
+    input.onProgress({ type: 'group_board', board: groupSession.snapshot() })
+  }
+  // R7 · write a group-scoped knowledge memory so future runs recall this collaboration.
+  if (input.group.sharedMemoryScopes.includes('group') && notes.length > 0) {
+    try {
+      const participantNames = Array.from(new Set(entries.map(entry => entry.agentName))).join(', ')
+      mainState.memoryEngine?.writeGroupKnowledge({
+        group: input.group,
+        title: `群组协作：${truncateSectionText(discussionRequest, 60)}`,
+        summary: truncateSectionText(notes.join('\n\n'), 600),
+        details: `参与者: ${participantNames}；轮次: ${snapshot.activeRound}/${totalRounds}。`,
+        tags: ['group-collaboration', input.group.id],
+        importance: 0.7,
+        confidence: 0.7
+      })
+    } catch {
+      // Memory write is best-effort; never fail the deliberation on it.
+    }
+  }
   if (notes.length === 0) {
     return { promptSection: null, transcript: null }
   }
@@ -1228,5 +1491,22 @@ export async function buildGroupDeliberationSection (input: {
             : []
         }
       : null
+  }
+  } finally {
+    if (input.abortSignal?.aborted) {
+      const detail = 'Group deliberation stopped.'
+      for (const item of snapshot.items) {
+        if (item.status !== 'running' && item.status !== 'queued') continue
+        item.status = 'failed'
+        item.stage = t('mainDialog.groupProgressFailed')
+        item.detail = detail
+        item.updatedAt = new Date().toISOString()
+        appendGroupProgressStep(item, t('mainDialog.groupProgressFailed'), detail)
+      }
+      emitGroupProgressSnapshot(input.onProgress, snapshot)
+    }
+    sessionRef.current = null
+    if (input.sessionId) groupSessionRegistry.release(input.sessionId, groupSession)
+    input.onProgress?.({ type: 'group_session_state', groupId: input.group.id, active: false })
   }
 }

@@ -70,6 +70,8 @@ const props = defineProps<{
   planModeActive: boolean
   availableAgents?: AgentOption[]
   selectedAgentId?: string
+  selectedGroupId?: string
+  activeGroupSessionId?: string
   groupMentionHints?: GroupMentionHint[]
   isGroupConversation?: boolean
   isNewConversation?: boolean
@@ -104,6 +106,13 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const activeMention = ref<MentionQueryState | null>(null)
 const activeMentionIndex = ref(0)
 const pendingSelection = ref<{ start: number; end: number } | null>(null)
+// R5 · human-in-the-loop injection into a running group deliberation.
+const showInjectPanel = ref(false)
+const injectText = ref('')
+const injectFeedback = ref<'idle' | 'sent' | 'failed'>('idle')
+const isInjecting = ref(false)
+let injectFeedbackTimer: ReturnType<typeof setTimeout> | null = null
+const canInject = computed(() => Boolean(props.isGroupConversation && props.selectedGroupId && props.activeGroupSessionId && props.isLoading))
 const inputContextMenu = reactive({
   visible: false,
   x: 0,
@@ -236,6 +245,47 @@ const hasDraftContent = computed(() => {
   return props.modelValue.trim().length > 0 || props.pendingImages.length > 0 || props.pendingFiles.length > 0
 })
 const isSendDisabled = computed(() => props.isUploadingFiles || (!props.isLoading && !hasDraftContent.value))
+
+function clearInjectFeedbackTimer (): void {
+  if (injectFeedbackTimer !== null) {
+    clearTimeout(injectFeedbackTimer)
+    injectFeedbackTimer = null
+  }
+}
+
+function scheduleInjectFeedbackReset (delay: number): void {
+  clearInjectFeedbackTimer()
+  injectFeedbackTimer = setTimeout(() => {
+    injectFeedback.value = 'idle'
+    injectFeedbackTimer = null
+  }, delay)
+}
+
+async function submitGroupInjection (): Promise<void> {
+  if (isInjecting.value) return
+  const groupId = props.selectedGroupId
+  const sessionId = props.activeGroupSessionId
+  const content = injectText.value.trim()
+  if (!sessionId || !groupId || !content) return
+  if (!window.electronAPI?.injectGroupClarification) return
+  isInjecting.value = true
+  try {
+    const result = await window.electronAPI.injectGroupClarification(sessionId, groupId, content)
+    if (result?.injected) {
+      injectFeedback.value = 'sent'
+      injectText.value = ''
+      scheduleInjectFeedbackReset(2500)
+    } else {
+      injectFeedback.value = 'failed'
+      scheduleInjectFeedbackReset(3500)
+    }
+  } catch {
+    injectFeedback.value = 'failed'
+    scheduleInjectFeedbackReset(3500)
+  } finally {
+    isInjecting.value = false
+  }
+}
 const runtimeStatusLabel = computed(() => {
   if (!props.isLoading) {
     return ''
@@ -358,6 +408,14 @@ watch(() => props.modelValue, () => {
   })
 })
 
+watch(canInject, (active) => {
+  if (active) return
+  showInjectPanel.value = false
+  injectText.value = ''
+  injectFeedback.value = 'idle'
+  clearInjectFeedbackTimer()
+})
+
 function buildDraftValue (tags: DocumentTagChip[], text: string): string {
   const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
   const docSegment = tags.map(tag => tag.raw).join(' ')
@@ -453,7 +511,10 @@ function measureMentionPosition (textarea: HTMLTextAreaElement, text: string, ca
 function computeMentionState (text: string, textarea: HTMLTextAreaElement): MentionQueryState | null {
   const caret = textarea.selectionStart ?? text.length
   const beforeCaret = text.slice(0, caret)
-  const match = /(?:^|\s)@([^\s@]*)$/.exec(beforeCaret)
+  // `@` triggers a mention when at the start of the input or after any character
+  // that is not whitespace or another `@`. The looser left boundary (previously
+  // `(?:^|\s)`) lets CJK input work without a leading space, e.g. "请帮我@张三".
+  const match = /(?:^|[^\s@])@([^\s@]*)$/.exec(beforeCaret)
   if (!match) {
     return null
   }
@@ -806,6 +867,7 @@ onUnmounted(() => {
   document.removeEventListener('click', hideInputContextMenu)
   window.removeEventListener('blur', hideInputContextMenu)
   hideInputContextMenu()
+  clearInjectFeedbackTimer()
 })
 </script>
 
@@ -1013,6 +1075,39 @@ onUnmounted(() => {
               <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
             </label>
             <span class="tooltip-text">{{ $t('chatUi.addAttachment') }}</span>
+          </div>
+          <div v-if="canInject" class="tooltip-container group-inject-wrapper">
+            <button
+              class="action-btn group-inject-btn"
+              :class="{ active: showInjectPanel }"
+              type="button"
+              :aria-label="$t('chatUi.groupInjectButton')"
+              @click="showInjectPanel = !showInjectPanel"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+            </button>
+            <span class="tooltip-text">{{ $t('chatUi.groupInjectButton') }}</span>
+            <Transition name="advanced-drawer">
+              <div v-if="showInjectPanel" class="group-inject-panel" @click.stop>
+                <textarea
+                  v-model="injectText"
+                  class="group-inject-textarea"
+                  :placeholder="$t('chatUi.groupInjectPlaceholder')"
+                  rows="2"
+                  @keydown.enter.exact.prevent="submitGroupInjection"
+                />
+                <div class="group-inject-actions">
+                  <span v-if="injectFeedback === 'sent'" class="group-inject-feedback sent">{{ $t('chatUi.groupInjectSent') }}</span>
+                  <span v-else-if="injectFeedback === 'failed'" class="group-inject-feedback failed">{{ $t('chatUi.groupInjectFailed') }}</span>
+                  <button
+                    class="group-inject-submit"
+                    type="button"
+                    :disabled="isInjecting || !injectText.trim()"
+                    @click="submitGroupInjection"
+                  >{{ $t('chatUi.groupInjectSubmit') }}</button>
+                </div>
+              </div>
+            </Transition>
           </div>
           <button
             class="action-btn send-btn"
@@ -1590,6 +1685,80 @@ onUnmounted(() => {
   overflow: visible;
   transform-origin: left center;
   will-change: max-width, opacity, transform;
+}
+
+.group-inject-btn.active {
+  background: color-mix(in srgb, var(--app-accent) 18%, transparent);
+  color: var(--app-accent-strong);
+}
+
+.group-inject-wrapper {
+  position: relative;
+}
+
+.group-inject-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  width: 300px;
+  max-width: 70vw;
+  padding: 10px;
+  border: 1px solid var(--app-border-strong, var(--app-border));
+  border-radius: 10px;
+  background: var(--chat-input-surface, var(--app-panel));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  z-index: 20;
+  transform-origin: bottom right;
+}
+
+.group-inject-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 140px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--chat-input-bg, transparent);
+  color: var(--app-text);
+  font-size: 0.84em;
+  line-height: 1.45;
+  font-family: inherit;
+}
+
+.group-inject-textarea:focus {
+  outline: none;
+  border-color: var(--app-accent);
+}
+
+.group-inject-actions {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.group-inject-feedback {
+  font-size: 0.74em;
+  margin-right: auto;
+}
+.group-inject-feedback.sent { color: #2f7a4a; }
+.group-inject-feedback.failed { color: #b25a1e; }
+
+.group-inject-submit {
+  border: none;
+  border-radius: 6px;
+  padding: 5px 14px;
+  background: var(--app-accent);
+  color: #fff;
+  font-size: 0.78em;
+  font-weight: 600;
+  cursor: pointer;
+}
+.group-inject-submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .advanced-drawer-enter-active,

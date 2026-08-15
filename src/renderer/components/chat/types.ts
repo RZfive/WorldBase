@@ -1,4 +1,4 @@
-import type { AgentGroupCollaborationPlan, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentSidechatSession } from '../../../shared/agent-workspace-types.js'
+import type { AgentGroupCollaborationPlan, AgentGroupDirectReply, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentSidechatSession, SharedBoardSnapshot } from '../../../shared/agent-workspace-types.js'
 
 export type MessageContent = string | ChatContentPart[]
 
@@ -66,6 +66,10 @@ export type ChatMessageBlock =
   | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
+  | { id: string; kind: 'group_board'; board: SharedBoardSnapshot }
+  | { id: string; kind: 'group_direct_reply'; directReply: AgentGroupDirectReply }
+  | { id: string; kind: 'group_user_injection'; injection: AgentGroupUserInjection }
+  | { id: string; kind: 'group_peer_message'; peerMessage: import('../../../shared/agent-workspace-types.js').AgentGroupMessage }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }

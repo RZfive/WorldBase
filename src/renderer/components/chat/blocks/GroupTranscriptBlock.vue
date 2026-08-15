@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { renderMarkdown } from '../markdown'
+import type { AgentGroupTranscriptEntry } from '../../../../shared/agent-workspace-types.js'
 import type { ChatMessageBlock } from '../types'
+
+type EnrichedEntry = AgentGroupTranscriptEntry & { html: string }
 
 const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'group_transcript' }>
@@ -15,14 +18,12 @@ const canExpand = computed(() => {
 })
 const summaryHtml = computed(() => renderMarkdown(transcript.value.summary))
 const rounds = computed(() => {
-  const roundMap = new Map<number, Array<{ id: string; agentName: string; content: string; html: string }>>()
+  const roundMap = new Map<number, EnrichedEntry[]>()
 
   for (const entry of transcript.value.entries) {
     const bucket = roundMap.get(entry.round) || []
     bucket.push({
-      id: entry.id,
-      agentName: entry.agentName,
-      content: entry.content,
+      ...entry,
       html: renderMarkdown(entry.content)
     })
     roundMap.set(entry.round, bucket)
@@ -80,12 +81,25 @@ function toggleExpanded (): void {
           v-for="entry in round.entries"
           :key="entry.id"
           class="group-transcript-entry"
+          :class="{ 'direct-reply': entry.directReply }"
         >
           <div class="group-transcript-entry-head">
             <div class="group-transcript-entry-agent">{{ entry.agentName }}</div>
+            <span v-if="entry.directReply" class="group-transcript-entry-tag direct">{{ $t('chatUi.groupDirectReplyLabel') }}</span>
+            <span v-if="entry.boardFields && entry.boardFields.length" class="group-transcript-entry-tag board">{{ entry.boardFields.join(', ') }}</span>
             <span class="group-transcript-entry-round">{{ $t('chatUi.groupRoundTitle', { round: round.round }) }}</span>
           </div>
           <div class="group-transcript-entry-body markdown-body" v-html="entry.html" />
+          <div v-if="entry.toolCalls && entry.toolCalls.length" class="group-transcript-tools">
+            <span class="group-transcript-tools-label">{{ $t('chatUi.groupTranscriptTools') }}</span>
+            <span v-for="(tool, index) in entry.toolCalls" :key="`tool-${entry.id}-${index}`" class="group-transcript-tool-chip" :data-status="tool.status">{{ tool.name }}</span>
+          </div>
+          <div v-if="entry.peerMessages && entry.peerMessages.length" class="group-transcript-peers">
+            <div v-for="(peer, index) in entry.peerMessages" :key="`peer-${entry.id}-${index}`" class="group-transcript-peer">
+              <span class="group-transcript-peer-route">-> {{ peer.toAgentName }}</span>
+              <span class="group-transcript-peer-request">{{ peer.request }}</span>
+            </div>
+          </div>
         </article>
       </section>
     </div>
@@ -200,12 +214,92 @@ function toggleExpanded (): void {
   border-top: 1px solid var(--app-border);
 }
 
+.group-transcript-entry.direct-reply {
+  border-top-color: color-mix(in srgb, var(--app-accent) 30%, var(--app-border));
+}
+
 .group-transcript-entry-head {
   display: flex;
   align-items: center;
   justify-content: flex-start;
   gap: 10px;
   margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.group-transcript-entry-tag {
+  font-size: 0.64em;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.04em;
+}
+
+.group-transcript-entry-tag.direct {
+  background: color-mix(in srgb, var(--app-accent) 15%, transparent);
+  color: var(--app-accent-strong);
+}
+
+.group-transcript-entry-tag.board {
+  background: var(--app-border);
+  color: var(--app-text-muted);
+}
+
+.group-transcript-tools {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.group-transcript-tools-label {
+  font-size: 0.66em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--app-text-muted);
+}
+
+.group-transcript-tool-chip {
+  font-family: var(--app-mono, monospace);
+  font-size: 0.68em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
+}
+
+.group-transcript-tool-chip[data-status="failed"] {
+  border-color: #b25a1e;
+  color: #b25a1e;
+}
+
+.group-transcript-peers {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.group-transcript-peer {
+  font-size: 0.74em;
+  color: var(--app-text-muted);
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.group-transcript-peer-route {
+  font-weight: 700;
+  color: var(--app-accent-strong);
+  flex-shrink: 0;
+}
+
+.group-transcript-peer-request {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .group-transcript-entry-agent {

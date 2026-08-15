@@ -1,4 +1,4 @@
-import type { AgentGroupCollaborationPlan } from '../../../../shared/agent-workspace-types.js'
+import type { AgentGroupCollaborationPlan, AgentGroupDirectReply, AgentGroupMessage, AgentGroupUserInjection, SharedBoardSnapshot } from '../../../../shared/agent-workspace-types.js'
 import type {
   AgentGroupProgressSnapshot,
   AgentGroupTranscript,
@@ -309,6 +309,58 @@ export function upsertGroupTranscriptBlock (message: ChatMessage, transcript: Ag
     blocks.push(createGroupTranscriptBlock(transcript))
   }
 
+  positionGroupMetaBlocks(message)
+}
+
+export function upsertGroupBoardBlock (message: ChatMessage, board: SharedBoardSnapshot): void {
+  const blocks = ensureBlocks(message)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_board' }> => {
+    return block.kind === 'group_board'
+  })
+  if (existing) {
+    existing.board = { ...board, board: { ...board.board }, recentUpdates: board.recentUpdates.map(u => ({ ...u })) }
+  } else {
+    blocks.push({ id: createBlockId('group_board'), kind: 'group_board', board })
+  }
+  positionGroupMetaBlocks(message)
+}
+
+export function appendGroupDirectReplyBlock (message: ChatMessage, reply: AgentGroupDirectReply): void {
+  const blocks = ensureBlocks(message)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_direct_reply' }> => {
+    return block.kind === 'group_direct_reply' && block.directReply.id === reply.id
+  })
+  if (existing) {
+    existing.directReply = { ...reply }
+  } else {
+    blocks.push({ id: createBlockId('group_direct_reply'), kind: 'group_direct_reply', directReply: { ...reply } })
+  }
+  positionGroupMetaBlocks(message)
+}
+
+export function appendGroupUserInjectionBlock (message: ChatMessage, injection: AgentGroupUserInjection): void {
+  const blocks = ensureBlocks(message)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_user_injection' }> => {
+    return block.kind === 'group_user_injection' && block.injection.id === injection.id
+  })
+  if (existing) {
+    existing.injection = { ...injection }
+  } else {
+    blocks.push({ id: createBlockId('group_injection'), kind: 'group_user_injection', injection: { ...injection } })
+  }
+  positionGroupMetaBlocks(message)
+}
+
+export function appendGroupPeerMessageBlock (message: ChatMessage, peerMessage: AgentGroupMessage): void {
+  const blocks = ensureBlocks(message)
+  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_peer_message' }> => {
+    return block.kind === 'group_peer_message' && block.peerMessage.id === peerMessage.id
+  })
+  if (existing) {
+    existing.peerMessage = { ...peerMessage }
+  } else {
+    blocks.push({ id: createBlockId('group_peer'), kind: 'group_peer_message', peerMessage: { ...peerMessage } })
+  }
   positionGroupMetaBlocks(message)
 }
 

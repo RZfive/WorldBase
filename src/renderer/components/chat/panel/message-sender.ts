@@ -26,7 +26,11 @@ import {
   setAssistantErrorState,
   syncLegacyToolRuns,
   syncTodoBlock,
+  appendGroupDirectReplyBlock,
+  appendGroupPeerMessageBlock,
+  appendGroupUserInjectionBlock,
   upsertAgentSidechatBlock,
+  upsertGroupBoardBlock,
   upsertGroupCollaborationPlanBlock,
   upsertGroupProgressBlock,
   upsertGroupTranscriptBlock
@@ -79,6 +83,7 @@ interface ChatMessageSenderOptions {
   streamingConversationIds: Set<string>
   activeCleanups: Map<string, () => void>
   activeStreamSessionIds: Map<string, string>
+  activeGroupSessionIds: Set<string>
   backgroundStreamMessages: Map<string, BackgroundStreamState>
   unreadConversationIds: Set<string>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
@@ -122,6 +127,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     streamingConversationIds: streamingConvIds,
     activeCleanups,
     activeStreamSessionIds,
+    activeGroupSessionIds,
     backgroundStreamMessages,
     unreadConversationIds,
     setConversationTarget,
@@ -146,7 +152,9 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       activeCleanups.delete(sessionId)
     }
 
+    if (activeStreamSessionIds.get(convId) !== sessionId) return
     activeStreamSessionIds.delete(convId)
+    activeGroupSessionIds.delete(sessionId)
     streamingConvIds.delete(convId)
     backgroundStreamMessages.delete(convId)
     // If a stream wraps up while the user is looking at a different conversation,
@@ -412,6 +420,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             } else if (event.type === 'group_collaboration_plan' && event.plan) {
               flushPendingStreamText()
               upsertGroupCollaborationPlanBlock(assistantMessage, event.plan)
+            } else if (event.type === 'group_session_state' && event.groupId) {
+              flushPendingStreamText()
+              if (event.active) activeGroupSessionIds.add(sessionId)
+              else activeGroupSessionIds.delete(sessionId)
             } else if (event.type === 'group_progress' && event.groupProgress) {
               flushPendingStreamText()
               upsertGroupProgressBlock(assistantMessage, event.groupProgress)
@@ -421,6 +433,18 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             } else if (event.type === 'group_transcript' && event.transcript) {
               flushPendingStreamText()
               upsertGroupTranscriptBlock(assistantMessage, event.transcript)
+            } else if (event.type === 'group_board' && event.board) {
+              flushPendingStreamText()
+              upsertGroupBoardBlock(assistantMessage, event.board)
+            } else if (event.type === 'group_direct_reply' && event.directReply) {
+              flushPendingStreamText()
+              appendGroupDirectReplyBlock(assistantMessage, event.directReply)
+            } else if (event.type === 'group_user_injection' && event.injection) {
+              flushPendingStreamText()
+              appendGroupUserInjectionBlock(assistantMessage, event.injection)
+            } else if (event.type === 'group_peer_message' && event.peerMessage) {
+              flushPendingStreamText()
+              appendGroupPeerMessageBlock(assistantMessage, event.peerMessage)
             } else if (event.type === 'tool_start' && event.name) {
               flushPendingStreamText()
               hadToolSinceLastThinking = true
@@ -515,8 +539,14 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
         })
 
         activeCleanups.set(sessionId, cleanup)
+        activeGroupSessionIds.delete(sessionId)
 
         const chatMessages = JSON.parse(JSON.stringify(await buildOutgoingMessagesWithDocumentWorkspaceContext(targetMessages.slice(0, -1))))
+        if (activeStreamSessionIds.get(convId) !== sessionId || !streamingConvIds.has(convId)) {
+          cleanup()
+          activeCleanups.delete(sessionId)
+          return
+        }
         await window.electronAPI.chatStream(
           chatMessages,
           sessionId,
@@ -559,6 +589,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
         ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
         finalizePendingAuthBlocks(assistantMessage)
         activeStreamSessionIds.delete(convId)
+        activeGroupSessionIds.delete(sessionId)
         streamingConvIds.delete(convId)
         void doSaveConversation(convId, targetMessages)
         if (currentConversationId.value === convId) {
