@@ -1,5 +1,6 @@
 import { getSystemPrompt } from './prompts/system-prompt.js'
-import type { OpenAIProvider, ToolDefinition, ChatMessage, ToolCall } from '../providers/openai-provider.js'
+import type { ToolDefinition, ChatMessage, ToolCall } from '../providers/openai-provider.js'
+import type { ChatProvider } from '../providers/chat-provider.js'
 import { normalizeAbortReason, USER_ABORT_MESSAGE } from '../abort-utils.js'
 import type { AIExecutionAuthMode } from '../../settings/settings-store.js'
 import type { AILogSessionLogger } from '../../settings/ai-log-store.js'
@@ -167,7 +168,7 @@ export class AgentCore {
   private static readonly TOOL_ALIASES: ReadonlyMap<string, string> = new Map([
     ['spawn_subagentstasks', 'spawn_subagents']
   ])
-  private provider: OpenAIProvider
+  private provider: ChatProvider
   private services: Record<string, unknown>
   private tools = new Map<string, RegisteredTool>()
   // Per-segment iteration budget before the agent automatically compacts and continues.
@@ -198,7 +199,7 @@ export class AgentCore {
   /** Shared mutable state accessible by tool handlers within a session. */
   public sessionState: SessionState = { createdProjectId: null, targetProjectId: null, authMode: 'strict' }
 
-  constructor (provider: OpenAIProvider, services: Record<string, unknown>) {
+  constructor (provider: ChatProvider, services: Record<string, unknown>) {
     this.provider = provider
     this.services = services
     this.permissionEngine = new PermissionEngine({})

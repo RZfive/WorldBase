@@ -18,6 +18,7 @@
     "build:electron": "pnpm build:main && pnpm build:preload",
     "build:electron:bytecode": "pnpm build:main:bytecode && pnpm build:preload:bytecode",
     "test:group-session": "node --experimental-strip-types --test tests/group-session.test.mjs",
+    "test:anthropic-protocol": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/anthropic-protocol.test.mjs",
     "test:im-gateway": "node scripts/im-gateway-smoke.mjs",
     "electron:dev": "pnpm build && pnpm build:electron && pnpm exec electron .",
     "electron:build": "pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --publish never",

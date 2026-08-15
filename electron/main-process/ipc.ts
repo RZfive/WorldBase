@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { USER_ABORT_MESSAGE } from '../../src/main/ai-engine/abort-utils.js'
-import { OpenAIProvider } from '../../src/main/ai-engine/providers/openai-provider.js'
+import { createProvider } from '../../src/main/ai-engine/providers/index.js'
 import type { MessageContent } from '../../src/main/ai-engine/providers/openai-provider.js'
 import { PROJECT_PACKAGE_EXTENSION } from '../../src/main/project-fs/project-package-service.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../../src/main/ai-engine/agent/tools/office-utils.js'
@@ -946,7 +946,10 @@ export function setupIPC (): void {
       const model = provider.models.includes(req.model) ? req.model : provider.activeModel
       if (!model) throw new Error(t('mainDialog.providerNoModels'))
 
-      const aiProvider = new OpenAIProvider()
+      const aiProvider = createProvider({
+        baseUrl: provider.baseUrl,
+        apiProtocol: provider.apiProtocol
+      })
       aiProvider.setApiKey(provider.apiKey)
       aiProvider.setBaseUrl(provider.baseUrl)
       aiProvider.setModel(model)

@@ -1,4 +1,4 @@
-import type { ChatCompletionBody, ProviderReasoningEffort } from '../types.js'
+import type { ChatCompletionBody, ProviderApiProtocol, ProviderReasoningEffort } from '../types.js'
 
 export const CODING_TEMPERATURE = 0.3
 
@@ -20,6 +20,17 @@ export function isAnthropicProvider (baseUrl: string, model: string): boolean {
   const normalizedBaseUrl = baseUrl.toLowerCase()
   const normalizedModel = model.toLowerCase()
   return normalizedBaseUrl.includes('anthropic') || normalizedModel.includes('claude')
+}
+
+/**
+ * Resolve which wire protocol to use. An explicit provider setting always
+ * wins; otherwise a native Anthropic base URL implies the Messages API while
+ * everything else (including Claude models served through OpenAI-compatible
+ * gateways like OpenRouter) stays on chat/completions.
+ */
+export function resolveApiProtocol (baseUrl: string, explicit?: ProviderApiProtocol): ProviderApiProtocol {
+  if (explicit === 'anthropic' || explicit === 'openai') return explicit
+  return baseUrl.toLowerCase().includes('anthropic.com') ? 'anthropic' : 'openai'
 }
 
 export function resolveReasoningEffort (

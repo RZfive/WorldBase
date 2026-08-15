@@ -112,6 +112,7 @@ interface AIProvider {
   name: string
   baseUrl: string
   apiKey: string
+  apiProtocol?: 'openai' | 'anthropic'
   models: string[]
   modelContextWindows?: Record<string, number>
   modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>

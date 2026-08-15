@@ -22,6 +22,7 @@ import type {
   ToolDefinition,
   UsageCallback
 } from './openai-provider/types.js'
+import type { ChatProvider } from './chat-provider.js'
 
 export type {
   ChatContentImagePart,
@@ -41,7 +42,7 @@ export type {
  * OpenAIProvider — OpenAI 兼容 API 提供者
  * 支持 OpenAI, Azure OpenAI, 以及任何兼容 API
  */
-export class OpenAIProvider {
+export class OpenAIProvider implements ChatProvider {
   private apiKey: string
   private baseUrl: string
   private model: string

@@ -22,6 +22,8 @@ export interface AIProvider {
   name: string
   baseUrl: string
   apiKey: string
+  /** Wire protocol: 'anthropic' uses the native Messages API; default auto-detects from baseUrl. */
+  apiProtocol?: 'openai' | 'anthropic'
   models: string[]
   /** Context window per model name */
   modelContextWindows?: Record<string, number>
@@ -242,6 +244,7 @@ function normalizeProvider (input: AIProvider): AIProvider {
     name: input.name,
     baseUrl: normalizeBaseUrl(input.baseUrl),
     apiKey: input.apiKey,
+    apiProtocol: input.apiProtocol === 'anthropic' || input.apiProtocol === 'openai' ? input.apiProtocol : undefined,
     models,
     modelContextWindows,
     modelCapabilities,

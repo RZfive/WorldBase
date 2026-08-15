@@ -15,6 +15,7 @@ interface AIProvider {
   name: string
   baseUrl: string
   apiKey: string
+  apiProtocol?: 'openai' | 'anthropic'
   models: string[]
   modelContextWindows?: Record<string, number>
   modelPricing?: Record<string, ModelPricingEntry>
@@ -76,6 +77,22 @@ const editingProviderLabel = computed(() => {
     ? t('settings.provider.editProvider')
     : t('settings.provider.addProvider')
 })
+
+/** Select proxy with '' meaning "auto-detect from base URL". */
+const editApiProtocol = computed<'openai' | 'anthropic' | ''>({
+  get: () => editDraft.value?.apiProtocol ?? '',
+  set: (value) => {
+    if (editDraft.value) {
+      editDraft.value.apiProtocol = value === 'openai' || value === 'anthropic' ? value : undefined
+    }
+  }
+})
+
+function providerProtocolLabel (provider: AIProvider): string {
+  if (provider.apiProtocol === 'anthropic') return t('settings.provider.apiProtocolAnthropic')
+  if (provider.apiProtocol === 'openai') return t('settings.provider.apiProtocolOpenAI')
+  return t('settings.provider.apiProtocolAuto')
+}
 
 onMounted(async () => {
   await loadSettings()
@@ -616,6 +633,18 @@ function formatContextWindow (value: number): string {
           <div class="pp-separator" />
 
           <div class="pp-field">
+            <label>{{ $t('settings.provider.apiProtocol') }}</label>
+            <select v-model="editApiProtocol" class="pp-select">
+              <option value="">{{ $t('settings.provider.apiProtocolAuto') }}</option>
+              <option value="openai">{{ $t('settings.provider.apiProtocolOpenAI') }}</option>
+              <option value="anthropic">{{ $t('settings.provider.apiProtocolAnthropic') }}</option>
+            </select>
+            <span class="pp-hint">{{ $t('settings.provider.apiProtocolHint') }}</span>
+          </div>
+
+          <div class="pp-separator" />
+
+          <div class="pp-field">
             <label>{{ $t('settings.provider.apiKey') }}</label>
             <input v-model="editDraft.apiKey" type="password" placeholder="sk-..." />
             <span class="pp-hint">{{ $t('settings.provider.apiKeyHint') }}</span>
@@ -790,6 +819,13 @@ function formatContextWindow (value: number): string {
           <div class="pp-row">
             <span class="pp-row-label">{{ $t('settings.provider.apiUrl') }}</span>
             <span class="pp-row-value">{{ selectedProvider.baseUrl }}</span>
+          </div>
+
+          <div class="pp-separator" />
+
+          <div class="pp-row">
+            <span class="pp-row-label">{{ $t('settings.provider.apiProtocol') }}</span>
+            <span class="pp-row-value">{{ providerProtocolLabel(selectedProvider) }}</span>
           </div>
 
           <div class="pp-separator" />
