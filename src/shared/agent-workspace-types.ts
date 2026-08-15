@@ -78,12 +78,27 @@ export interface AgentGroupCollaborationPlan {
   updatedAt: string
 }
 
+export interface AgentGroupTranscriptToolCall {
+  name: string
+  /** Short human-readable summary of args/result, truncated. */
+  summary: string
+  status: 'completed' | 'failed'
+}
+
 export interface AgentGroupTranscriptEntry {
   id: string
   round: number
   agentId: string
   agentName: string
   content: string
+  /** R8 · tool calls this member made while producing the entry. */
+  toolCalls?: AgentGroupTranscriptToolCall[]
+  /** R1 · peer messages this member sent/received while producing the entry. */
+  peerMessages?: Array<{ toAgentName: string; request: string; response: string }>
+  /** R6 · true if this entry is a direct reply to the user. */
+  directReply?: boolean
+  /** R2 · board fields this entry touched. */
+  boardFields?: SharedBoardUpdate['field'][]
 }
 
 export interface AgentGroupTranscript {
@@ -139,7 +154,7 @@ export interface AgentSidechatSession {
   groupName: string
   agentId: string
   agentName: string
-  mode: 'user_targeted' | 'coordinator_assigned' | 'group_deliberation'
+  mode: 'user_targeted' | 'coordinator_assigned' | 'group_deliberation' | 'peer_message' | 'direct_reply'
   initiatedByName: string
   reportToName: string
   request: string
@@ -149,6 +164,87 @@ export interface AgentSidechatSession {
   updatedAt: string
   error?: string
   progress: AgentGroupProgressStep[]
+}
+
+/**
+ * R1 · A point-to-point message between two agents within a group session.
+ * Carried by the GroupMessageBus. `fromAgentId` -> `toAgentId`, synchronous
+ * request/response with a timeout. The bus records every envelope so the
+ * transcript can replay who consulted whom.
+ */
+export interface AgentGroupMessage {
+  id: string
+  groupId: string
+  fromAgentId: string
+  fromAgentName: string
+  toAgentId: string
+  toAgentName: string
+  request: string
+  response: string
+  status: 'pending' | 'completed' | 'failed' | 'timeout' | 'rejected'
+  round: number
+  createdAt: string
+  resolvedAt?: string
+  error?: string
+}
+
+/**
+ * R2 · A field-level update to the shared board. Every write produces one of
+ * these and is appended to an audit log; the board itself is merged field by
+ * field so concurrent writers don't clobber each other's unrelated fields.
+ */
+export interface SharedBoardUpdate {
+  id: string
+  groupId: string
+  agentId: string
+  agentName: string
+  field: 'goal' | 'assumptions' | 'tasks' | 'decisions' | 'evidenceRefs' | 'openQuestions'
+  /** How the field should be applied. */
+  op: 'set' | 'add' | 'update' | 'remove'
+  /** Payload - shape depends on field+op (task objects for tasks, strings otherwise). */
+  payload: unknown
+  reason?: string
+  at: string
+}
+
+/** R2 · A snapshot of the board plus its recent audit log, for UI rendering. */
+export interface SharedBoardSnapshot {
+  groupId: string
+  groupName: string
+  board: SharedBoard
+  /** Recent updates, newest last. */
+  recentUpdates: SharedBoardUpdate[]
+  updatedAt: string
+}
+
+/**
+ * R6 · A member's direct reply to the user, surfaced into the main conversation
+ * stream instead of being relayed by the coordinator.
+ */
+export interface AgentGroupDirectReply {
+  id: string
+  groupId: string
+  groupName: string
+  agentId: string
+  agentName: string
+  /** The user-visible text the member wants to say directly. */
+  content: string
+  round: number
+  /** True when the coordinator explicitly endorsed/forwarded this reply. */
+  endorsed: boolean
+  at: string
+}
+
+/** R5 · A user clarification injected mid-deliberation. */
+export interface AgentGroupUserInjection {
+  id: string
+  groupId: string
+  groupName: string
+  content: string
+  /** Agents that should receive the injection; empty = all active members. */
+  targetAgentIds: string[]
+  round: number
+  at: string
 }
 
 export interface SharedBoardTask {

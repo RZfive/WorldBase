@@ -37,6 +37,7 @@ import { ensureDocumentRenderPreview } from './media/document-preview.js'
 import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, notifyAiTaskStatus, resolveAgentRuntimeContext } from './ai/agent-context.js'
 import { getAllUserMessageTexts, getConversationTitleFromMessages, getLastUserMessageText, getMessageText } from './chat-message-utils.js'
 import { buildDirectGroupReplyPromptSection, buildGroupDeliberationSection, parseGroupRouting, resolveDirectGroupReplyRoute, type GroupDeliberationProgressCallback } from './ai/group-deliberation.js'
+import { groupSessionRegistry } from './ai/group-session.js'
 import { cloneMemoryCompactionStatus, runMemoryCompactionWithStatus } from './ai/memory-compaction.js'
 import { applyMcpServersToService } from './services.js'
 import { drainPendingStudioImageTasks } from './media/image-studio-queue.js'
@@ -208,6 +209,12 @@ export function setupIPC (): void {
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
     const authModeRef = { current: authMode ?? 'strict' }
+    // Register before any asynchronous context resolution so a stop request
+    // arriving immediately after invocation can always find this stream.
+    activeChatSessions.set(sessionId, {
+      abortController,
+      authMode: authModeRef
+    })
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
     const folderWorkspacePromptSection = buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
@@ -260,10 +267,6 @@ export function setupIPC (): void {
           targetProjectId: runtimeContext.effectiveTargetProjectId
         })
       : undefined
-    activeChatSessions.set(sessionId, {
-      abortController,
-      authMode: authModeRef
-    })
     const TEXT_STREAM_FLUSH_INTERVAL_MS = 33
     let pendingTokenContent = ''
     let pendingThinkingContent = ''
@@ -288,6 +291,7 @@ export function setupIPC (): void {
           if ('stage' in event) safe.stage = String(event.stage || '')
           if ('detail' in event) safe.detail = String(event.detail || '')
           if ('active' in event) safe.active = Boolean(event.active)
+          if ('groupId' in event) safe.groupId = String(event.groupId || '')
           if ('totalCost' in event) safe.totalCost = Number(event.totalCost || 0)
           if ('inputTokens' in event) safe.inputTokens = Number(event.inputTokens || 0)
           if ('outputTokens' in event) safe.outputTokens = Number(event.outputTokens || 0)
@@ -412,23 +416,7 @@ export function setupIPC (): void {
         sendEventToRenderer(stageOrEvent as unknown as Record<string, unknown>)
       }
     }
-    const groupDeliberation = runtimeContext.group && !directGroupReply
-      ? await runWithAiRequestWindow(senderWindow, async () => {
-          const group = runtimeContext.group
-          if (!group) {
-            return { promptSection: null, transcript: null }
-          }
-          return await buildGroupDeliberationSection({
-            messages,
-            group,
-            routing: groupRouting || undefined,
-            channelBinding: runtimeContext.channelBinding,
-            targetProjectId: runtimeContext.effectiveTargetProjectId,
-            fallbackReasoningStrength: reasoningStrength,
-            onProgress
-          })
-        })
-      : { promptSection: null, transcript: null }
+    let groupDeliberation = { promptSection: null, transcript: null } as Awaited<ReturnType<typeof buildGroupDeliberationSection>>
     let groupTranscriptSent = false
     const emitGroupTranscriptIfNeeded = () => {
       if (groupTranscriptSent || !groupDeliberation.transcript || sender.isDestroyed()) {
@@ -443,6 +431,31 @@ export function setupIPC (): void {
       groupTranscriptSent = true
     }
     try {
+      if (abortController.signal.aborted) {
+        throw abortController.signal.reason instanceof Error
+          ? abortController.signal.reason
+          : new Error(USER_ABORT_MESSAGE)
+      }
+      groupDeliberation = runtimeContext.group && !directGroupReply
+        ? await runWithAiRequestWindow(senderWindow, async () => {
+            const group = runtimeContext.group
+            if (!group) {
+              return { promptSection: null, transcript: null }
+            }
+            return await buildGroupDeliberationSection({
+              messages,
+              group,
+              routing: groupRouting || undefined,
+              channelBinding: runtimeContext.channelBinding,
+              targetProjectId: runtimeContext.effectiveTargetProjectId,
+              fallbackReasoningStrength: reasoningStrength,
+              onProgress,
+              sessionId,
+              abortSignal: abortController.signal
+            })
+          })
+        : { promptSection: null, transcript: null }
+
       await runWithAiRequestWindow(senderWindow, async () => {
         for await (const streamEvent of aiEngine!.chatStream(messages, onProgress, {
             conversationId,
@@ -486,7 +499,7 @@ export function setupIPC (): void {
                   sourceConversationId: conversationId,
                   sourceSessionId: sessionId,
                   userId: 'local-user',
-                  enabledScopeTypes: runtimeContext.agent?.memoryScopes
+                  enabledScopeTypes: runtimeContext.memoryScopeTypes
                 })
               } catch (memoryError) {
                 console.error('[ai:chatStream] Failed to ingest memory:', memoryError)
@@ -527,7 +540,9 @@ export function setupIPC (): void {
       }
     } finally {
       flushBufferedTextEvents()
-      activeChatSessions.delete(sessionId)
+      if (activeChatSessions.get(sessionId)?.abortController === abortController) {
+        activeChatSessions.delete(sessionId)
+      }
     }
     return { ok: true }
   })
@@ -539,6 +554,31 @@ export function setupIPC (): void {
     }
     sessionState.authMode.current = authMode
     return { ok: true, updated: true }
+  })
+
+  // R5 · Inject a user clarification into a running group deliberation.
+  // The stream session id prevents concurrent conversations using the same
+  // group from receiving each other's clarifications.
+  ipcMain.handle('ai:groupInject', async (_event: IpcMainInvokeEvent, sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => {
+    const session = groupSessionRegistry.get(sessionId)
+    if (!session) {
+      return { ok: false, injected: false, error: 'No active group session for this stream.' }
+    }
+    if (session.groupId !== groupId) {
+      return { ok: false, injected: false, error: 'The active group session does not match this conversation.' }
+    }
+    if (typeof content !== 'string' || !content.trim()) {
+      return { ok: false, injected: false, error: 'content is required.' }
+    }
+    try {
+      const injection = session.inject({
+        content: content.trim(),
+        targetAgentIds: Array.isArray(targetAgentIds) ? targetAgentIds : undefined
+      })
+      return { ok: true, injected: true, injection }
+    } catch (error) {
+      return { ok: false, injected: false, error: error instanceof Error ? error.message : String(error) }
+    }
   })
 
   ipcMain.handle('ai:stopStream', async (_event: IpcMainInvokeEvent, sessionId: string) => {

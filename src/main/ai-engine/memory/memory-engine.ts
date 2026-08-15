@@ -459,7 +459,8 @@ export class MemoryEngine {
     if (entry.pinned) return true
     if (entry.memoryType === 'user_trait' || entry.memoryType === 'agent_skill') return true
 
-    if (entry.memoryType === 'knowledge' && !isDurableSoftwareKnowledge(entry.summary)) {
+    const isGroupCollaborationKnowledge = entry.scopeType === 'group' && entry.tags.includes('group-collaboration')
+    if (entry.memoryType === 'knowledge' && !isGroupCollaborationKnowledge && !isDurableSoftwareKnowledge(entry.summary)) {
       return false
     }
 
@@ -516,6 +517,40 @@ export class MemoryEngine {
       createdAt: timestamp,
       updatedAt: timestamp
     }
+  }
+
+  /**
+   * R7 · Write a single knowledge entry scoped to a group. Used by the group
+   * deliberation runtime to persist a collaboration summary so future runs of
+   * the same group can recall how it worked together.
+   */
+  writeGroupKnowledge (input: {
+    group: AgentGroupDefinition
+    title: string
+    summary: string
+    details?: string
+    tags?: string[]
+    sourceConversationId?: string
+    sourceSessionId?: string
+    importance?: number
+    confidence?: number
+  }): MemoryEntry | null {
+    if (!input.title.trim() || !input.summary.trim()) return null
+    const entry = this.buildEntry({
+      scopeType: 'group',
+      scopeId: input.group.id,
+      memoryType: 'knowledge',
+      title: input.title.trim(),
+      summary: input.summary.trim(),
+      details: input.details,
+      tags: input.tags ?? [],
+      sourceConversationId: input.sourceConversationId,
+      sourceSessionId: input.sourceSessionId,
+      importance: input.importance ?? 0.7,
+      confidence: input.confidence ?? 0.7,
+      pinned: false
+    })
+    return this.store.upsert(entry)
   }
 
   private extractUserTraitEntries (messages: string[], scopes: MemorySearchScope[], sourceConversationId?: string, sourceSessionId?: string): MemoryEntry[] {

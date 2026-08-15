@@ -78,6 +78,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     backgroundStreamMessages,
     activeCleanups,
     activeStreamSessionIds,
+    activeGroupSessionIds,
     conversationTargets
   } = sharedChatPanelState
   const {
@@ -101,6 +102,11 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
 
   const isLoading = computed(() => {
     return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
+  })
+  const activeGroupSessionId = computed(() => {
+    if (!isLoading.value || !currentConversationId.value) return undefined
+    const sessionId = activeStreamSessionIds.get(currentConversationId.value)
+    return sessionId && activeGroupSessionIds.has(sessionId) ? sessionId : undefined
   })
 
   const {
@@ -428,6 +434,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     streamingConversationIds: streamingConvIds,
     activeCleanups,
     activeStreamSessionIds,
+    activeGroupSessionIds,
     backgroundStreamMessages,
     unreadConversationIds,
     setConversationTarget,
@@ -473,6 +480,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   })
 
   return {
+    activeGroupSessionId,
     activeProviderId,
     activeSkillIds,
     activeTodoItems,
@@ -558,6 +566,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     respondToAskUserRequest,
     currentAskUserRequest,
     selectedChannelBindingId,
+    selectedGroupId,
     selectedModel,
     selectAllSkills,
     sendMessage,

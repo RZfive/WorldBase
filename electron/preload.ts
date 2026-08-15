@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../src/shared/image-studio-types.js'
@@ -20,7 +20,7 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: ChatMessage
@@ -34,9 +34,16 @@ interface StreamEvent {
   lineCount?: number
   added?: number
   removed?: number
+  groupId?: string
+  active?: boolean
+  plan?: import('../src/shared/agent-workspace-types.js').AgentGroupCollaborationPlan
   groupProgress?: AgentGroupProgressSnapshot
   transcript?: AgentGroupTranscript
   sidechat?: AgentSidechatSession
+  board?: import('../src/shared/agent-workspace-types.js').SharedBoardSnapshot
+  directReply?: import('../src/shared/agent-workspace-types.js').AgentGroupDirectReply
+  injection?: AgentGroupUserInjection
+  peerMessage?: import('../src/shared/agent-workspace-types.js').AgentGroupMessage
   query?: string
   engine?: string
   results?: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }>
@@ -490,6 +497,7 @@ export interface ElectronAPI {
   chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
+  injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
@@ -734,6 +742,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
+  injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => ipcRenderer.invoke('ai:groupInject', sessionId, groupId, content, targetAgentIds),
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => {
     const channel = `ai:stream-event:${sessionId}`
     const handler = (_e: Electron.IpcRendererEvent, event: StreamEvent) => callback(event)

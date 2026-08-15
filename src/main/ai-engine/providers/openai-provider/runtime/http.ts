@@ -107,7 +107,7 @@ export async function fetchWithRetry (
       lastError = normalized
     }
 
-    await delay(Math.min(1000 * (2 ** (attempt - 1)), 5000))
+    await delay(Math.min(1000 * (2 ** (attempt - 1)), 5000), abortSignal)
   }
 
   throw lastError || new Error('AI request failed')
@@ -183,7 +183,7 @@ export async function fetchMultipartWithRetry (
       lastError = normalized
     }
 
-    await delay(Math.min(1000 * (2 ** (attempt - 1)), 5000))
+    await delay(Math.min(1000 * (2 ** (attempt - 1)), 5000), abortSignal)
   }
 
   throw lastError || new Error('AI request failed')
@@ -201,12 +201,22 @@ export function normalizeRequestError (error: unknown): Error {
 
 export async function readStreamChunkWithIdleTimeout (
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  timeoutMs: number
+  timeoutMs: number,
+  abortSignal?: AbortSignal
 ): Promise<StreamReadResult> {
   let timeout: ReturnType<typeof setTimeout> | null = null
+  let onAbort: (() => void) | null = null
 
   try {
+    if (abortSignal?.aborted) throw normalizeAbortReason(abortSignal.reason)
     const readPromise = reader.read()
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        void reader.cancel(abortSignal?.reason).catch(() => {})
+        reject(normalizeAbortReason(abortSignal?.reason))
+      }
+      abortSignal?.addEventListener('abort', onAbort, { once: true })
+    })
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
         void reader.cancel(STREAM_IDLE_TIMEOUT_MESSAGE).catch(() => {
@@ -216,9 +226,10 @@ export async function readStreamChunkWithIdleTimeout (
       }, timeoutMs)
     })
 
-    return await Promise.race([readPromise, timeoutPromise])
+    return await Promise.race([readPromise, timeoutPromise, abortPromise])
   } finally {
     if (timeout) clearTimeout(timeout)
+    if (abortSignal && onAbort) abortSignal.removeEventListener('abort', onAbort)
   }
 }
 
@@ -240,6 +251,18 @@ function isRetryableError (error: Error): boolean {
     message.includes('unexpected end of json input')
 }
 
-async function delay (ms: number): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, ms))
+async function delay (ms: number, abortSignal?: AbortSignal): Promise<void> {
+  if (abortSignal?.aborted) throw normalizeAbortReason(abortSignal.reason)
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      abortSignal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      abortSignal?.removeEventListener('abort', onAbort)
+      reject(normalizeAbortReason(abortSignal?.reason))
+    }
+    abortSignal?.addEventListener('abort', onAbort, { once: true })
+  })
 }

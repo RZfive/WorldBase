@@ -31,6 +31,7 @@ const MAX_DOCUMENT_WORKSPACE_WIDTH = 1280
 const WORKSPACE_OPEN_ANIMATION_DURATION_MS = 240
 
 const {
+  activeGroupSessionId,
   activeProviderId,
   activeSkillIds,
   activeTodoItems,
@@ -107,6 +108,7 @@ const {
   respondToSudoPasswordRequest,
   respondToAskUserRequest,
   selectedChannelBindingId,
+  selectedGroupId,
   selectedModel,
   selectAllSkills,
   sendMessage,
@@ -783,6 +785,8 @@ watch(
             :plan-mode-active="planModeActive"
             :available-agents="nonDefaultAgents"
             :selected-agent-id="agentSelectorValue"
+            :selected-group-id="selectedGroupId"
+            :active-group-session-id="activeGroupSessionId"
             :group-mention-hints="groupMentionHints"
             :is-group-conversation="isGroupConversation"
             :is-new-conversation="!currentConversationId"

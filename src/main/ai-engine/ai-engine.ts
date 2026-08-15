@@ -325,24 +325,43 @@ export class AIEngine {
     }
   }
 
-  private async primeMcpTools (allowedMcpServerIds?: string[]): Promise<void> {
+  private async primeMcpTools (allowedMcpServerIds?: string[], abortSignal?: AbortSignal): Promise<void> {
     if (!this.services.mcpService) return
-    await this.services.mcpService.refreshEnabledServers(allowedMcpServerIds)
+    if (abortSignal?.aborted) throw abortSignal.reason instanceof Error ? abortSignal.reason : new Error('AI request aborted.')
+    const refresh = this.services.mcpService.refreshEnabledServers(allowedMcpServerIds)
+    if (!abortSignal) {
+      await refresh
+      return
+    }
+    let onAbort: (() => void) | null = null
+    try {
+      await Promise.race([
+        refresh,
+        new Promise<never>((_, reject) => {
+          onAbort = () => {
+            reject(abortSignal.reason instanceof Error ? abortSignal.reason : new Error('AI request aborted.'))
+          }
+          abortSignal.addEventListener('abort', onAbort, { once: true })
+        })
+      ])
+    } finally {
+      if (onAbort) abortSignal.removeEventListener('abort', onAbort)
+    }
   }
 
   /**
    * Handle a chat message from the user (non-streaming).
    */
   async chat (messages: ChatMessage[], options?: AIRequestOptions): Promise<ChatMessage> {
-    await this.primeMcpTools(options?.allowedMcpServerIds)
-    return this.createAgent(options).run(messages)
+    await this.primeMcpTools(options?.allowedMcpServerIds, options?.abortSignal)
+    return this.createAgent(options).run(messages, options?.abortSignal)
   }
 
   /**
    * Handle a chat message with streaming response.
    */
   async *chatStream (messages: ChatMessage[], onProgress?: ProgressCallback, options?: AIRequestOptions): AsyncGenerator<StreamEvent> {
-    await this.primeMcpTools(options?.allowedMcpServerIds)
+    await this.primeMcpTools(options?.allowedMcpServerIds, options?.abortSignal)
     yield * this.createAgent(options).runStream(messages, onProgress, options?.abortSignal)
   }
 

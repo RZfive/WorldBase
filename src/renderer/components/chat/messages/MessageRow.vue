@@ -10,6 +10,10 @@ import GroupCollaborationPlanBlock from '../blocks/GroupCollaborationPlanBlock.v
 import AgentSidechatBlock from '../blocks/AgentSidechatBlock.vue'
 import GroupProgressBlock from '../blocks/GroupProgressBlock.vue'
 import GroupTranscriptBlock from '../blocks/GroupTranscriptBlock.vue'
+import SharedBoardBlock from '../blocks/SharedBoardBlock.vue'
+import GroupDirectReplyBlock from '../blocks/GroupDirectReplyBlock.vue'
+import GroupUserInjectionBlock from '../blocks/GroupUserInjectionBlock.vue'
+import GroupPeerMessageBlock from '../blocks/GroupPeerMessageBlock.vue'
 import WebSearchBlock from '../blocks/WebSearchBlock.vue'
 import WebFetchBlock from '../blocks/WebFetchBlock.vue'
 import AttachmentBlock from '../blocks/AttachmentBlock.vue'
@@ -139,6 +143,26 @@ const messageText = computed(() => getMessageText())
 
           <GroupTranscriptBlock
             v-else-if="block.kind === 'group_transcript'"
+            :block="block"
+          />
+
+          <SharedBoardBlock
+            v-else-if="block.kind === 'group_board'"
+            :block="block"
+          />
+
+          <GroupDirectReplyBlock
+            v-else-if="block.kind === 'group_direct_reply'"
+            :block="block"
+          />
+
+          <GroupUserInjectionBlock
+            v-else-if="block.kind === 'group_user_injection'"
+            :block="block"
+          />
+
+          <GroupPeerMessageBlock
+            v-else-if="block.kind === 'group_peer_message'"
             :block="block"
           />
 

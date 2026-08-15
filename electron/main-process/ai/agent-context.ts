@@ -1,6 +1,6 @@
 import type { AIExecutionPreferences, AIProvidersConfig } from '../../../src/main/settings/settings-store.js'
 import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
-import type { AgentDefinition, AgentGroupDefinition, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
 import { mainState } from '../state.js'
 import { broadcastToAppWindows } from '../windows.js'
@@ -17,6 +17,7 @@ export interface ResolvedAgentRuntimeContext {
   systemPromptSections: string[]
   allowedToolNames: string[]
   deniedToolNames: string[]
+  memoryScopeTypes: AgentMemoryScope[] | undefined
 }
 
 export function notifyAgentWorkspaceChanged (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }): void {
@@ -38,6 +39,14 @@ export function mergeUniqueStrings (...collections: Array<string[] | undefined>)
   }
 
   return result
+}
+
+export function resolveAgentMemoryScopes (
+  agent?: AgentDefinition | null,
+  group?: AgentGroupDefinition | null
+): AgentMemoryScope[] | undefined {
+  if (!agent && !group) return undefined
+  return mergeUniqueStrings(agent?.memoryScopes, group?.sharedMemoryScopes) as AgentMemoryScope[]
 }
 
 export function resolveSkillContentsByIds (skillIds?: string[]): string[] {
@@ -215,6 +224,7 @@ export function resolveAgentRuntimeContext (input: {
     effectiveReasoningStrength,
     input.requestedTemperature
   )
+  const memoryScopeTypes = resolveAgentMemoryScopes(agent, group)
   const memoryContext = mainState.memoryEngine?.buildPromptContext({
     agent,
     group,
@@ -222,7 +232,7 @@ export function resolveAgentRuntimeContext (input: {
     userMessage: getLastUserMessageText(input.messages),
     targetProjectId: effectiveTargetProjectId,
     userId: 'local-user',
-    enabledScopeTypes: agent?.memoryScopes
+    enabledScopeTypes: memoryScopeTypes
   })
   const systemPromptSections = [
     agent ? buildActiveAgentSection(agent) : null,
@@ -240,6 +250,7 @@ export function resolveAgentRuntimeContext (input: {
     activeSkillContents: resolveSkillContentsByIds(agent?.skillIds),
     systemPromptSections,
     allowedToolNames: agent?.allowedTools || [],
-    deniedToolNames: agent?.deniedTools || []
+    deniedToolNames: agent?.deniedTools || [],
+    memoryScopeTypes
   }
 }

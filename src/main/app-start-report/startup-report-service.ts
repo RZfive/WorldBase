@@ -147,6 +147,8 @@ function buildSystemPayload (snapshot: SystemStatusSnapshot) {
 }
 
 export async function reportStartup (options: StartupReportOptions): Promise<void> {
+  if (!app.isPackaged) return
+
   const reportUrl = resolveReportUrl(options.settingsStore)
   if (!isValidHttpUrl(reportUrl)) return
 
