@@ -7,6 +7,7 @@ import { createChatConversationStorage } from './conversation-storage'
 import { ensureSharedChatPanelLifecycleBindings } from './lifecycle-bindings'
 import { createLongTermGoalState } from './long-term-goal-state'
 import { createChatMessageSender } from './message-sender'
+import { createChatMessageBranching } from './message-branching'
 import { createChatProviderState } from './provider-state'
 import { getLatestVisibleTodoItems } from './message-runtime'
 import { sharedChatPanelState } from './shared-state'
@@ -445,6 +446,24 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     resetTransientStreamState
   })
 
+  const {
+    editingMessageId,
+    cancelEditMessage,
+    forkFromMessage,
+    startEditMessage,
+    submitEdit
+  } = createChatMessageBranching({
+    t,
+    messages,
+    currentConversationId,
+    conversations,
+    streamingConversationIds: streamingConvIds,
+    loadConversation,
+    loadConversations,
+    saveConversation: (conversationId, chatMessages) => doSaveConversation(conversationId, chatMessages),
+    sendMessage
+  })
+
   watch(() => props.projectContext, (ctx) => {
     if (!ctx) return
 
@@ -505,6 +524,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     currentSudoPasswordRequest,
     deleteConversation,
     deleteLongTermGoal,
+    cancelEditMessage,
     documentDockVisible,
     documentWorkspaceActiveFilePath,
     documentWorkspaceDocuments,
@@ -514,7 +534,10 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     folderWorkspaceRootPath,
     folderWorkspaceVisible,
     folderWorkspaceWidth,
+    editUserMessage: submitEdit,
+    editingMessageId,
     filePreview,
+    forkFromMessage,
     groupMentionHints,
     groupSidebarItems,
     longTermGoalSidebarItems,
@@ -582,6 +605,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     answerLongTermGoalIntervention,
     shouldUseConversationProviderOverride,
     showSkillPicker,
+    startEditUserMessage: startEditMessage,
     stopCurrentStream,
     togglePlanMode,
     toggleSkill,

@@ -78,6 +78,8 @@ export type ChatMessageBlock =
 export interface ChatMessage {
   role: string
   content: ChatMessageContent
+  /** Stable message identity; set on new writes, absent on legacy history. */
+  id?: string
   thinking?: string
   speakerName?: string
   modelLabel?: string
@@ -126,6 +128,16 @@ export interface Conversation {
   documentWorkspace?: ConversationDocumentWorkspaceState
   /** Conversation-scoped folder/code workspace state. */
   folderWorkspace?: ConversationFolderWorkspaceState
+  /** 直接父会话 id（fork / 编辑分叉时写入） */
+  forkedFromConversationId?: string
+  /** 分叉锚点：父会话中被复制前缀的最后一条消息 id */
+  forkedFromMessageId?: string
+  /** 谱系树根会话 id（同一棵树的会话共享） */
+  rootConversationId?: string
+  /** 树深度：根为 0，每分叉一层 +1 */
+  forkDepth?: number
+  /** 分叉时间 */
+  forkedAt?: string
 }
 
 interface ConversationListEntry extends Omit<Conversation, 'messages'> {
@@ -230,7 +242,12 @@ export class ChatHistoryStore {
           targetProjectId: data.targetProjectId,
           agentId: data.agentId,
           groupId: data.groupId,
-          channelBindingId: data.channelBindingId
+          channelBindingId: data.channelBindingId,
+          forkedFromConversationId: data.forkedFromConversationId,
+          forkedFromMessageId: data.forkedFromMessageId,
+          rootConversationId: data.rootConversationId,
+          forkDepth: data.forkDepth,
+          forkedAt: data.forkedAt
         })
       } catch {
         // skip corrupted files

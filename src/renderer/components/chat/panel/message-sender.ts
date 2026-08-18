@@ -100,6 +100,21 @@ const CODE_TAG_PATTERN = /\[\[code:([^\]#|]+)#L(\d+)(?:-L?(\d+))?(?:\|([^\]]*))?
 const LEGACY_FILE_PREVIEW_STAGE = '\u6587\u4ef6\u9884\u89c8'
 const STREAM_RENDER_FLUSH_INTERVAL_MS = 50
 
+/**
+ * A user message built outside the composer - used by edit & resend, so the
+ * edited message re-enters the exact same streaming pipeline as a fresh send.
+ */
+export interface PreparedUserMessage {
+  /** Stable message id (editing reuses the original anchor id). */
+  id: string
+  /** Model-visible content (string, or parts when images are present). */
+  content: ChatMessage['content']
+  /** Display blocks for the user bubble. */
+  blocks?: ChatMessageBlock[]
+  /** Plain text used for assistant speaker-name resolution. */
+  text: string
+}
+
 export function createChatMessageSender (options: ChatMessageSenderOptions) {
   const {
     t,
@@ -193,49 +208,63 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     void doSaveConversation(convId, targetMessages)
   }
 
-  async function sendMessage () {
-    const text = inputText.value.trim()
-    if ((!text && pendingImages.value.length === 0 && pendingFiles.value.length === 0) || isLoading.value || isUploadingFiles.value) return
+  async function sendMessage (prepared?: PreparedUserMessage) {
+    if (isLoading.value || isUploadingFiles.value) return
 
     let messageContent: ChatMessage['content']
-    const filePrompt = buildUploadedFilesPrompt(pendingFiles.value)
-    const { projectId: taggedProjectId, normalizedText: textAfterProject } = extractProjectTagRefs(text, PROJECT_TAG_PATTERN)
-    if (taggedProjectId && !targetProjectId.value) {
-      targetProjectId.value = taggedProjectId
-      setConversationTarget(currentConversationId.value || '', taggedProjectId)
-    }
-    const { regionIds: referencedDocumentRegionIds, normalizedText: textAfterDocuments } = extractDocumentTagRefs(textAfterProject, DOCUMENT_TAG_PATTERN)
-    const { normalizedText } = extractCodeTagRefs(textAfterDocuments, CODE_TAG_PATTERN)
-
-    let docSelectionsPrompt = ''
-    if (referencedDocumentRegionIds.length > 0 && window.electronAPI?.buildDocumentSelectionsPrompt) {
-      try {
-        docSelectionsPrompt = await window.electronAPI.buildDocumentSelectionsPrompt(referencedDocumentRegionIds)
-      } catch { /* ignore */ }
-    }
-
-    const combinedText = [normalizedText, filePrompt, docSelectionsPrompt].filter(Boolean).join('\n\n')
+    let text: string
     const userBlocks: ChatMessageBlock[] = []
 
-    if (normalizedText) {
-      userBlocks.push(createContentBlock(normalizedText))
-    }
-    for (const file of pendingFiles.value) {
-      userBlocks.push(createAttachmentBlock(file))
-    }
-
-    if (pendingImages.value.length > 0) {
-      const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = []
-      if (combinedText) {
-        parts.push({ type: 'text', text: combinedText })
+    if (prepared) {
+      messageContent = prepared.content
+      if (prepared.blocks && prepared.blocks.length > 0) {
+        userBlocks.push(...prepared.blocks)
       }
-      for (const img of pendingImages.value) {
-        parts.push({ type: 'image_url', image_url: { url: img.base64 } })
-      }
-      messageContent = parts
-      userBlocks.push(createContentBlock(parts.filter(part => part.type === 'image_url')))
+      text = prepared.text
     } else {
-      messageContent = combinedText
+      const composerText = inputText.value.trim()
+      if (!composerText && pendingImages.value.length === 0 && pendingFiles.value.length === 0) return
+
+      const filePrompt = buildUploadedFilesPrompt(pendingFiles.value)
+      const { projectId: taggedProjectId, normalizedText: textAfterProject } = extractProjectTagRefs(composerText, PROJECT_TAG_PATTERN)
+      if (taggedProjectId && !targetProjectId.value) {
+        targetProjectId.value = taggedProjectId
+        setConversationTarget(currentConversationId.value || '', taggedProjectId)
+      }
+      const { regionIds: referencedDocumentRegionIds, normalizedText: textAfterDocuments } = extractDocumentTagRefs(textAfterProject, DOCUMENT_TAG_PATTERN)
+      const { normalizedText } = extractCodeTagRefs(textAfterDocuments, CODE_TAG_PATTERN)
+
+      let docSelectionsPrompt = ''
+      if (referencedDocumentRegionIds.length > 0 && window.electronAPI?.buildDocumentSelectionsPrompt) {
+        try {
+          docSelectionsPrompt = await window.electronAPI.buildDocumentSelectionsPrompt(referencedDocumentRegionIds)
+        } catch { /* ignore */ }
+      }
+
+      const combinedText = [normalizedText, filePrompt, docSelectionsPrompt].filter(Boolean).join('\n\n')
+
+      if (normalizedText) {
+        userBlocks.push(createContentBlock(normalizedText))
+      }
+      for (const file of pendingFiles.value) {
+        userBlocks.push(createAttachmentBlock(file))
+      }
+
+      if (pendingImages.value.length > 0) {
+        const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = []
+        if (combinedText) {
+          parts.push({ type: 'text', text: combinedText })
+        }
+        for (const img of pendingImages.value) {
+          parts.push({ type: 'image_url', image_url: { url: img.base64 } })
+        }
+        messageContent = parts
+        userBlocks.push(createContentBlock(parts.filter(part => part.type === 'image_url')))
+      } else {
+        messageContent = combinedText
+      }
+
+      text = normalizedText
     }
 
     const convId = currentConversationId.value || generateId()
@@ -243,19 +272,23 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
 
     messages.value.push({
       role: 'user',
+      id: prepared?.id ?? generateId(),
       content: messageContent,
       blocks: userBlocks.length > 0 ? userBlocks : undefined
     })
-    inputText.value = ''
-    pendingImages.value = []
-    pendingFiles.value = []
-    uploadFeedback.value = ''
+    if (!prepared) {
+      inputText.value = ''
+      pendingImages.value = []
+      pendingFiles.value = []
+      uploadFeedback.value = ''
+    }
     resetTransientStreamState()
 
     const assistantSpeakerName = resolveAssistantSpeakerName(text)
 
     messages.value.push({
       role: 'assistant',
+      id: generateId(),
       content: '',
       thinking: '',
       speakerName: assistantSpeakerName,

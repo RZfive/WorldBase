@@ -11,6 +11,7 @@ import type { DocumentEditExportRequest, DocumentEditExportResult, DocumentEditI
 interface ChatMessage {
   role: string
   content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+  id?: string
 }
 
 interface AISettings {
@@ -76,6 +77,11 @@ interface ConversationSummary {
   groupId?: string
   channelBindingId?: string
   folderWorkspace?: ConversationFolderWorkspaceState
+  forkedFromConversationId?: string
+  forkedFromMessageId?: string
+  rootConversationId?: string
+  forkDepth?: number
+  forkedAt?: string
 }
 
 interface ConversationDocumentReference {

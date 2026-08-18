@@ -107,12 +107,17 @@ const {
   respondToAuthRequest,
   respondToSudoPasswordRequest,
   respondToAskUserRequest,
+  cancelEditMessage,
+  editUserMessage,
+  editingMessageId,
+  forkFromMessage,
   selectedChannelBindingId,
   selectedGroupId,
   selectedModel,
   selectAllSkills,
   sendMessage,
   sendLongTermGoalMessage,
+  startEditUserMessage,
   compactLongTermGoalMemory,
   deleteLongTermGoalMemory,
   applyLongTermGoalChangeSet,
@@ -736,9 +741,15 @@ watch(
             :file-preview="filePreview"
             :assistant-icon="currentAssistantIcon"
             :assistant-name="currentAssistantName"
+            :editing-message-id="editingMessageId"
+            :group-mode="isGroupConversation"
             @respond-auth="respondToAuthRequest"
             @respond-sudo-password="respondToSudoPasswordRequest"
             @open-link="(url) => emit('openWebLink', url)"
+            @request-edit-message="startEditUserMessage"
+            @fork-message="forkFromMessage"
+            @submit-edit="(payload) => editUserMessage(payload.messageId, payload.text, payload.mode)"
+            @cancel-edit="cancelEditMessage"
           />
 
           <PinnedTodoPanel

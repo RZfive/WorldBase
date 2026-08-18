@@ -38,6 +38,8 @@ export interface ConversationSidebarItem {
   unreadCount: number
   isActive: boolean
   isPinned?: boolean
+  /** Forked from another conversation (lineage badge ⑂). */
+  isFork?: boolean
 }
 
 export interface LongTermGoalSidebarItem {

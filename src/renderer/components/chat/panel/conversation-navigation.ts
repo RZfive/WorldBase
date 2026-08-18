@@ -1,6 +1,7 @@
 import type { ComputedRef, Ref } from 'vue'
 import type { ComposerTranslation } from 'vue-i18n'
 import { generateId } from './message-blocks'
+import { ensureMessageIds } from './message-branching'
 import { getPinnedAgentConversation, getPinnedGroupConversation } from './provider-utils'
 import { DEFAULT_REASONING_STRENGTH } from './shared-state'
 import type {
@@ -253,7 +254,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     const backgroundState = backgroundStreamMessages.get(conversationId)
     if (backgroundState) {
       currentConversationId.value = conversationId
-      messages.value = backgroundState.messages
+      messages.value = ensureMessageIds(backgroundState.messages)
       targetProjectId.value = backgroundState.targetProjectId
       currentAuthMode.value = backgroundState.authMode
       reasoningStrength.value = backgroundState.reasoningStrength
@@ -277,7 +278,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     if (!conversation) return
 
     currentConversationId.value = conversation.id
-    messages.value = conversation.messages
+    messages.value = ensureMessageIds(conversation.messages)
     targetProjectId.value = conversation.targetProjectId || null
     currentAuthMode.value = conversation.authMode === 'auto' ? 'auto' : 'strict'
     reasoningStrength.value = conversation.reasoningStrength || DEFAULT_REASONING_STRENGTH

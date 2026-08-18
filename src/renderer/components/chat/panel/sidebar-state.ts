@@ -291,7 +291,8 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
         isStreaming: streamingConversationIds.has(conversation.id),
         pendingAuthCount: getPendingAuthCount(conversation.id),
         unreadCount: getUnreadCount(conversation.id),
-        isActive: currentConversationId.value === conversation.id
+        isActive: currentConversationId.value === conversation.id,
+        isFork: Boolean(conversation.forkedFromConversationId)
       }))
   })
 

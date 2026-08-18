@@ -52,6 +52,7 @@ const emit = defineEmits<{
 
 const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item && Boolean(props.item.isPinned))
 const isCompactConversation = computed(() => props.compact && props.variant === 'conversation')
+const showForkBadge = computed(() => props.variant === 'conversation' && (props.item as ConversationSidebarItem).isFork === true && !props.renaming)
 const renameInputEl = ref<HTMLInputElement | null>(null)
 
 watch(
@@ -115,6 +116,11 @@ watch(
               @dragstart.stop.prevent
             >
             <span v-else class="conv-title">{{ item.title }}</span>
+            <span
+              v-if="showForkBadge"
+              class="conv-fork-badge"
+              :title="$t('chatUi.forkedConversationBadge')"
+            >⑂</span>
           </div>
           <span
             v-if="item.pendingAuthCount > 0"
@@ -404,6 +410,14 @@ watch(
 .conv-title-row-compact .conv-title-stack {
   flex: 1;
   min-width: 0;
+}
+
+.conv-fork-badge {
+  flex-shrink: 0;
+  font-size: 0.8em;
+  font-weight: 800;
+  color: var(--app-accent-strong, var(--app-accent));
+  opacity: 0.85;
 }
 
 .conv-icon {
