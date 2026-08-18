@@ -58,6 +58,16 @@ export interface ConversationSummary {
   groupId?: string
   channelBindingId?: string
   folderWorkspace?: ConversationFolderWorkspaceState
+  /** 直接父会话 id（fork / 编辑分叉时写入） */
+  forkedFromConversationId?: string
+  /** 分叉锚点：父会话中被复制前缀的最后一条消息 id */
+  forkedFromMessageId?: string
+  /** 谱系树根会话 id（同一棵树的会话共享） */
+  rootConversationId?: string
+  /** 树深度：根为 0，每分叉一层 +1 */
+  forkDepth?: number
+  /** 分叉时间 */
+  forkedAt?: string
 }
 
 export interface ChatPanelProps {

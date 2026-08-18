@@ -21,6 +21,7 @@ import AuthRequestBlock from '../blocks/AuthRequestBlock.vue'
 import SudoPasswordBlock from '../blocks/SudoPasswordBlock.vue'
 import ContentBlock from '../blocks/ContentBlock.vue'
 import ErrorBlock from '../blocks/ErrorBlock.vue'
+import MessageEditBox from './MessageEditBox.vue'
 
 const props = defineProps<{
   msg: ChatMessage
@@ -31,6 +32,7 @@ const props = defineProps<{
   collapsedThinking: Record<string, boolean>
   assistantIcon?: string
   assistantName?: string
+  editingMessageId?: string | null
 }>()
 
 const { t } = useI18n()
@@ -41,6 +43,10 @@ const emit = defineEmits<{
   (e: 'toggleThinking', blockId: string): void
   (e: 'openLightbox', messageIndex: number, blockIndex: number, partIndex: number): void
   (e: 'openMermaidPreview', code: string): void
+  (e: 'requestEditMessage', messageId: string): void
+  (e: 'forkMessage', messageId: string): void
+  (e: 'submitEdit', payload: { messageId: string; text: string; mode: 'fork' | 'inplace' }): void
+  (e: 'cancelEdit'): void
 }>()
 
 function getBlocks (): ChatMessageBlock[] {
@@ -88,6 +94,12 @@ const blocks = computed(() => getBlocks())
 const isStreamingAssistantMessage = computed(() => isStreamingAssistant())
 const lastContentBlockIndex = computed(() => getLastContentBlockIndex(blocks.value))
 const messageText = computed(() => getMessageText())
+
+const isUserMessage = computed(() => props.msg.role === 'user')
+const isMessageEditable = computed(() => isUserMessage.value && Boolean(props.msg.id) && !props.isLoading)
+const isEditing = computed(() => Boolean(props.msg.id) && props.editingMessageId === props.msg.id)
+const editableText = computed(() => (typeof props.msg.content === 'string' ? props.msg.content : props.msg.content.map(part => part.type === 'text' ? (part.text || '') : '').join('\n\n')))
+const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.content.some(part => part.type === 'image_url'))
 </script>
 
 <template>
@@ -106,8 +118,19 @@ const messageText = computed(() => getMessageText())
         </template>
       </div>
 
-      <div class="message-flow" :class="props.msg.role">
-        <template v-for="(block, blockIndex) in blocks" :key="block.id">
+      <template v-if="isEditing">
+        <MessageEditBox
+          :initial-text="editableText"
+          :has-images="hasImages"
+          :busy="props.isLoading"
+          @submit="(text, mode) => emit('submitEdit', { messageId: props.msg.id || '', text, mode })"
+          @cancel="emit('cancelEdit')"
+        />
+      </template>
+
+      <template v-else>
+        <div class="message-flow" :class="props.msg.role">
+          <template v-for="(block, blockIndex) in blocks" :key="block.id">
             <ThinkingBlock
               v-if="block.kind === 'thinking' && hasRenderableBlock(block)"
               :block="block"
@@ -209,8 +232,30 @@ const messageText = computed(() => getMessageText())
             @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
             @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
           />
-        </template>
-      </div>
+          </template>
+
+          <div v-if="isUserMessage && props.msg.id" class="message-user-actions">
+            <button
+              v-if="isMessageEditable"
+              class="message-user-action-btn"
+              type="button"
+              :title="$t('chatUi.editMessageAction')"
+              @click="emit('requestEditMessage', props.msg.id)"
+            >
+              {{ $t('chatUi.editMessageAction') }}
+            </button>
+            <button
+              class="message-user-action-btn"
+              type="button"
+              :disabled="props.isLoading"
+              :title="$t('chatUi.forkFromHereAction')"
+              @click="emit('forkMessage', props.msg.id)"
+            >
+              {{ $t('chatUi.forkFromHereAction') }}
+            </button>
+          </div>
+        </div>
+      </template>
     </div>
   </article>
 </template>
@@ -260,6 +305,45 @@ const messageText = computed(() => getMessageText())
 
 .message-flow.user {
   align-items: flex-end;
+}
+
+.message-user-actions {
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.message-row:hover .message-user-actions,
+.message-user-actions:focus-within {
+  opacity: 1;
+}
+
+/* No hover available (touch) - keep the actions visible. */
+@media (hover: none) {
+  .message-user-actions {
+    opacity: 0.75;
+  }
+}
+
+.message-user-action-btn {
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border);
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.message-user-action-btn:hover:not(:disabled) {
+  border-color: var(--app-accent);
+  color: var(--app-text-strong);
+}
+
+.message-user-action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .message-meta {

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { buildMessageBlocks, getContentParts } from '../message-utils'
+import { buildMessageBlocks, getContentParts, getContentText } from '../message-utils'
 import { copyTextToClipboard } from '../export-utils'
-import type { ChatMessage, GalleryImage, FilePreviewState } from '../types'
+import type { ChatMessage, GalleryImage, FilePreviewState, MinimapRow } from '../types'
 import MessageRow from './MessageRow.vue'
+import MessageMinimap from './MessageMinimap.vue'
 import ImageLightbox from '../media/ImageLightbox.vue'
 import MermaidPreviewDialog from '../media/MermaidPreviewDialog.vue'
 
@@ -13,12 +14,19 @@ const props = defineProps<{
   filePreview: FilePreviewState
   assistantIcon?: string
   assistantName?: string
+  editingMessageId?: string | null
+  /** Group (multi-agent) conversation: minimap always shows + carries the group badge. */
+  groupMode?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'respondAuth', requestId: string, approved: boolean): void
   (e: 'respondSudoPassword', requestId: string, password: string | null): void
   (e: 'openLink', url: string): void
+  (e: 'requestEditMessage', messageId: string): void
+  (e: 'forkMessage', messageId: string): void
+  (e: 'submitEdit', payload: { messageId: string; text: string; mode: 'fork' | 'inplace' }): void
+  (e: 'cancelEdit'): void
 }>()
 
 const messagesContainer = ref<HTMLElement | null>(null)
@@ -237,7 +245,25 @@ function syncViewportMetrics (): void {
   if (!messagesContainer.value) return
   scrollTop.value = messagesContainer.value.scrollTop
   viewportHeight.value = messagesContainer.value.clientHeight
+  readContainerPaddings()
+  readMinimapTrackWidth()
   nearBottom.value = isNearBottom(messagesContainer.value)
+}
+
+/** Resolved container paddings, so minimap ratios map onto the real scroll extent. */
+const containerPaddings = ref({ top: 0, bottom: 0 })
+
+function readContainerPaddings (): void {
+  const element = messagesContainer.value
+  if (!element) return
+  const style = window.getComputedStyle(element)
+  const next = {
+    top: Number.parseFloat(style.paddingTop) || 0,
+    bottom: Number.parseFloat(style.paddingBottom) || 0
+  }
+  if (next.top !== containerPaddings.value.top || next.bottom !== containerPaddings.value.bottom) {
+    containerPaddings.value = next
+  }
 }
 
 function handleScroll (): void {
@@ -383,6 +409,154 @@ const bottomSpacerHeight = computed(() => {
   if (visibleRange.value.end < visibleRange.value.start) return 0
   return Math.max(0, totalContentHeight.value - getOffsetBefore(visibleRange.value.end + 1))
 })
+
+// --- Minimap (PRD R9): scaled 1:1 conversation preview for quick navigation ---
+
+/** Group chat detection: panel flag, or group content blocks in the history. */
+const isGroupChat = computed(() => {
+  if (props.groupMode === true) return true
+  return props.messages.some(message =>
+    Array.isArray(message.blocks) && message.blocks.some(block => block.kind.startsWith('group_'))
+  )
+})
+
+/** Any conversation that overflows the screen gets the minimap. */
+const minimapVisible = computed(() => {
+  return totalContentHeight.value > Math.max(viewportHeight.value, 1)
+})
+
+/** Real scrollable extent: content plus resolved paddings, matching the container's scrollHeight. */
+const minimapTotalHeight = computed(() => {
+  return containerPaddings.value.top + totalContentHeight.value + containerPaddings.value.bottom
+})
+
+const minimapRows = computed<MinimapRow[]>(() => {
+  const padTop = containerPaddings.value.top
+  const mounted = minimapMountedIndexes.value
+  let userOrdinal = 0
+
+  return props.messages.map((message, index) => {
+    const isUser = message.role === 'user'
+    if (isUser) userOrdinal += 1
+    const excerpt = getContentText(message.content)
+    return {
+      key: getMessageKey(index),
+      messageIndex: index,
+      role: isUser ? 'user' as const : 'assistant' as const,
+      offsetPx: padTop + getOffsetBefore(index),
+      extentPx: getMessageExtent(index),
+      excerpt: excerpt.slice(0, 80),
+      ordinal: isUser ? userOrdinal : undefined,
+      isEditing: isUser && Boolean(message.id) && message.id === props.editingMessageId,
+      mounted: mounted.has(index)
+    }
+  })
+})
+
+/**
+ * Progressive mounting of the REAL row renders inside the minimap (1:1 reuse
+ * of MessageRow + all block components, uniformly scaled). The viewport
+ * neighborhood mounts immediately; the rest fills in during browser idle time
+ * in small batches so a long history never blocks the UI thread. Conversations
+ * beyond the cap keep lightweight stripes for the far tail.
+ */
+const MINIMAP_MAX_MOUNTED_ROWS = 300
+const minimapMountedIndexes = ref<Set<number>>(new Set())
+let minimapMountIdleId: number | null = null
+let minimapMountQueue: number[] = []
+
+function rebuildMinimapMountQueue (): void {
+  const mounted = minimapMountedIndexes.value
+  const center = Math.floor((visibleRange.value.start + visibleRange.value.end) / 2)
+  const indexes: number[] = []
+  for (let i = 0; i < props.messages.length; i++) {
+    if (!mounted.has(i)) indexes.push(i)
+  }
+  // Priority: closest to the current viewport first.
+  indexes.sort((a, b) => Math.abs(a - center) - Math.abs(b - center))
+  minimapMountQueue = indexes.slice(0, Math.max(0, MINIMAP_MAX_MOUNTED_ROWS - mounted.size))
+}
+
+function mountMinimapRows (indexes: number[]): void {
+  if (indexes.length === 0) return
+  const next = new Set(minimapMountedIndexes.value)
+  for (const index of indexes) next.add(index)
+  minimapMountedIndexes.value = next
+}
+
+/** Mount the viewport neighborhood right away, schedule the rest for idle. */
+function ensureMinimapViewportMounted (): void {
+  if (!minimapVisible.value) return
+  const range = visibleRange.value
+  const from = Math.max(0, range.start - 6)
+  const to = Math.min(props.messages.length - 1, range.end + 6)
+  const immediate: number[] = []
+  for (let i = from; i <= to; i++) {
+    if (!minimapMountedIndexes.value.has(i)) immediate.push(i)
+  }
+  mountMinimapRows(immediate.slice(0, MINIMAP_MAX_MOUNTED_ROWS))
+  scheduleMinimapIdleMounts()
+}
+
+function scheduleMinimapIdleMounts (): void {
+  rebuildMinimapMountQueue()
+  if (minimapMountQueue.length === 0) return
+  if (typeof window.requestIdleCallback !== 'function') {
+    mountMinimapRows(minimapMountQueue.splice(0, minimapMountQueue.length))
+    return
+  }
+  if (minimapMountIdleId != null) return
+  minimapMountIdleId = window.requestIdleCallback(() => {
+    minimapMountIdleId = null
+    // Small batches per idle slot; Vue mounts + markdown/KaTeX renders cost.
+    mountMinimapRows(minimapMountQueue.splice(0, 3))
+    if (minimapMountQueue.length > 0) scheduleMinimapIdleMounts()
+  }, { timeout: 2000 })
+}
+
+watch([() => props.messages.length, () => visibleRange.value.start], () => {
+  ensureMinimapViewportMounted()
+})
+
+/** Rendered track width of the real message list (for the uniform minimap scale). */
+const minimapTrackWidth = ref(0)
+
+function readMinimapTrackWidth (): void {
+  const element = messagesContainer.value
+  if (!element) return
+  const style = window.getComputedStyle(element)
+  const horizontal = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0)
+  const inner = element.clientWidth - horizontal
+  // Keep in sync with --chat-message-track-max used by .message-row.
+  minimapTrackWidth.value = Math.max(Math.min(inner, 1180), 1)
+}
+
+const highlightedMessageKey = ref<string | null>(null)
+let jumpHighlightTimer: number | null = null
+
+function jumpToMessageIndex (index: number): void {
+  const container = messagesContainer.value
+  if (!container) return
+  autoStickEnabled.value = false
+  const maxTop = Math.max(0, container.scrollHeight - container.clientHeight)
+  const target = Math.min(Math.max(getOffsetBefore(index) - 24, 0), maxTop)
+  setContainerScrollTop(container, target)
+
+  highlightedMessageKey.value = getMessageKey(index)
+  if (jumpHighlightTimer != null) window.clearTimeout(jumpHighlightTimer)
+  jumpHighlightTimer = window.setTimeout(() => {
+    highlightedMessageKey.value = null
+    jumpHighlightTimer = null
+  }, 1500)
+}
+
+function minimapScrub (ratio: number): void {
+  const container = messagesContainer.value
+  if (!container) return
+  autoStickEnabled.value = false
+  const maxTop = Math.max(0, container.scrollHeight - container.clientHeight)
+  setContainerScrollTop(container, Math.min(Math.max(ratio, 0), 1) * maxTop)
+}
 
 function flushAnchorDelta (): void {
   anchorFlushScheduled = false
@@ -651,6 +825,7 @@ onMounted(() => {
   document.addEventListener('selectionchange', handleDocumentSelectionChange)
   window.addEventListener('blur', hideSelectionCopyMenu)
   syncViewportMetrics()
+  ensureMinimapViewportMounted()
   if (props.messages.length > 0) {
     nextTick(scrollToBottom)
   }
@@ -671,12 +846,44 @@ onUnmounted(() => {
   }
   containerObserver?.disconnect()
   containerObserver = null
+  if (minimapMountIdleId != null && typeof window.cancelIdleCallback === 'function') {
+    window.cancelIdleCallback(minimapMountIdleId)
+    minimapMountIdleId = null
+  }
+  if (jumpHighlightTimer != null) {
+    window.clearTimeout(jumpHighlightTimer)
+    jumpHighlightTimer = null
+  }
   resetVirtualMeasurements()
 })
 </script>
 
 <template>
-  <div class="chat-messages" ref="messagesContainer" @scroll.passive="handleScroll" @wheel.capture.passive="handleWheel" @click.capture="handleMessageLinkClick" @contextmenu="handleSelectionContextMenu">
+  <div class="message-list-shell">
+    <MessageMinimap
+      v-if="minimapVisible"
+      :rows="minimapRows"
+      :messages="props.messages"
+      :track-width="minimapTrackWidth"
+      :total-scroll-px="minimapTotalHeight"
+      :scroll-top-px="scrollTop"
+      :viewport-px="viewportHeight"
+      :is-streaming="props.isLoading"
+      :assistant-icon="props.assistantIcon"
+      :assistant-name="props.assistantName"
+      :group-icon="isGroupChat ? (props.assistantIcon?.trim() || '👥') : undefined"
+      @jump="jumpToMessageIndex"
+      @scrub="minimapScrub"
+    />
+    <div
+      class="chat-messages"
+      :class="{ 'with-minimap': minimapVisible }"
+      ref="messagesContainer"
+      @scroll.passive="handleScroll"
+      @wheel.capture.passive="handleWheel"
+      @click.capture="handleMessageLinkClick"
+      @contextmenu="handleSelectionContextMenu"
+    >
     <div v-if="props.messages.length === 0" class="empty-state">
       <div class="empty-state-card">
         <div class="empty-state-icon">AI</div>
@@ -699,7 +906,7 @@ onUnmounted(() => {
         :key="key"
         :ref="(element) => setMessageItemRef(key, index, element)"
         class="message-item"
-        :class="{ 'with-leading-gap': index > 0 }"
+        :class="{ 'with-leading-gap': index > 0, 'jump-highlight': key === highlightedMessageKey }"
       >
         <MessageRow
           :msg="msg"
@@ -710,11 +917,16 @@ onUnmounted(() => {
           :collapsed-thinking="collapsedThinking"
           :assistant-icon="props.assistantIcon"
           :assistant-name="props.assistantName"
+          :editing-message-id="props.editingMessageId"
           @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
           @respond-sudo-password="(requestId, password) => emit('respondSudoPassword', requestId, password)"
           @toggle-thinking="toggleThinking"
           @open-lightbox="(mi, bi, pi) => openLightbox(mi, bi, pi)"
           @open-mermaid-preview="openMermaidPreview"
+          @request-edit-message="(messageId) => emit('requestEditMessage', messageId)"
+          @fork-message="(messageId) => emit('forkMessage', messageId)"
+          @submit-edit="(payload) => emit('submitEdit', payload)"
+          @cancel-edit="() => emit('cancelEdit')"
         />
       </div>
 
@@ -738,10 +950,19 @@ onUnmounted(() => {
         </button>
       </div>
     </Teleport>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.message-list-shell {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .chat-messages {
   flex: 1;
   min-height: 0;
@@ -753,8 +974,38 @@ onUnmounted(() => {
   position: relative;
 }
 
+/* Long conversations: the minimap IS the scroll UI - hide the native bar and
+   shift content left so the wider minimap never covers it. */
+.chat-messages.with-minimap {
+  padding-right: 104px;
+  scrollbar-gutter: auto;
+  scrollbar-width: none;
+}
+
+.chat-messages.with-minimap::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
 .message-item.with-leading-gap {
   margin-top: 20px;
+}
+
+.message-item.jump-highlight {
+  border-radius: 14px;
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 4px;
+  animation: jump-highlight-fade 1.5s ease forwards;
+}
+
+@keyframes jump-highlight-fade {
+  0%, 55% {
+    outline-color: color-mix(in srgb, var(--app-accent) 55%, transparent);
+  }
+  100% {
+    outline-color: transparent;
+  }
 }
 
 .message-spacer {

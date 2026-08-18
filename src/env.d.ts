@@ -97,6 +97,11 @@ interface ConversationSummary {
   groupId?: string
   channelBindingId?: string
   folderWorkspace?: ConversationFolderWorkspaceState
+  forkedFromConversationId?: string
+  forkedFromMessageId?: string
+  rootConversationId?: string
+  forkDepth?: number
+  forkedAt?: string
 }
 
 interface ConversationDocumentReference {
@@ -479,6 +484,7 @@ interface ConversationData extends ConversationSummary {
   messages: Array<{
     role: string
     content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+    id?: string
     thinking?: string
     speakerName?: string
     modelLabel?: string
