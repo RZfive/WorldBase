@@ -494,6 +494,10 @@ function ensureMinimapViewportMounted (): void {
   for (let i = from; i <= to; i++) {
     if (!minimapMountedIndexes.value.has(i)) immediate.push(i)
   }
+  // Always mount the tail: it is where streaming output lands, and it may sit
+  // outside the viewport neighborhood while the conversation grows.
+  const last = props.messages.length - 1
+  if (last >= 0 && !minimapMountedIndexes.value.has(last)) immediate.push(last)
   mountMinimapRows(immediate.slice(0, MINIMAP_MAX_MOUNTED_ROWS))
   scheduleMinimapIdleMounts()
 }
@@ -514,7 +518,12 @@ function scheduleMinimapIdleMounts (): void {
   }, { timeout: 2000 })
 }
 
-watch([() => props.messages.length, () => visibleRange.value.start], () => {
+// Mount on appends and viewport moves - AND on visibility: a streaming reply
+// often grows the conversation past the overflow threshold mid-stream, and
+// neither messages.length nor visibleRange.start changes while a single
+// message streams. Without this, rows appended while the minimap was hidden
+// stay unmounted (3px stripes) and new output never renders in the rail.
+watch([() => props.messages.length, () => visibleRange.value.start, minimapVisible], () => {
   ensureMinimapViewportMounted()
 })
 
