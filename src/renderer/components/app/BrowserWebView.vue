@@ -7,6 +7,8 @@ import type {
   BrowserAutomationAction,
   BrowserAutomationActionResult,
   BrowserAutomationSnapshot,
+  BrowserAutomationSnapshotElement,
+  BrowserAutomationSnapshotFormField,
 } from "../../../shared/page-automation-types.js";
 
 interface BrowserAppStatePayload {
@@ -244,9 +246,15 @@ async function executeInPage<T>(runner: string, payload?: unknown): Promise<T> {
   );
 }
 
+const SNAPSHOT_TEXT_PREVIEW_LIMIT = 12000;
+const SNAPSHOT_INTERACTIVE_ELEMENT_LIMIT = 64;
+const SNAPSHOT_FORM_FIELD_LIMIT = 64;
+const SNAPSHOT_ELEMENT_TEXT_LIMIT = 240;
+
 async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
   return await executeInPage<BrowserAutomationSnapshot>(`
-    const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+
     const buildSelector = (element) => {
       if (!(element instanceof Element)) return null;
       if (element.id) return '#' + CSS.escape(element.id);
@@ -254,8 +262,12 @@ async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
       const tokens = [
         ['data-testid', element.getAttribute('data-testid')],
         ['data-test', element.getAttribute('data-test')],
+        ['data-id', element.getAttribute('data-id')],
         ['name', element.getAttribute('name')],
         ['aria-label', element.getAttribute('aria-label')],
+        ['aria-labelledby', element.getAttribute('aria-labelledby')],
+        ['placeholder', element.getAttribute('placeholder')],
+        ['title', element.getAttribute('title')],
       ].filter((entry) => entry[1]);
 
       if (tokens.length > 0) {
@@ -265,8 +277,12 @@ async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
 
       const path = [];
       let node = element;
-      while (node instanceof Element && path.length < 5) {
+      while (node instanceof Element && path.length < 6) {
         let segment = node.tagName.toLowerCase();
+        if (segment === 'html' || segment === 'body') {
+          path.unshift(segment);
+          break;
+        }
         const parent = node.parentElement;
         if (parent) {
           const siblings = Array.from(parent.children).filter((child) => child.tagName === node.tagName);
@@ -280,22 +296,78 @@ async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
       return path.join(' > ');
     };
 
-    const interactiveElements = Array.from(document.querySelectorAll('a, button, input, textarea, select, [role="button"], [onclick]'))
-      .slice(0, 24)
+    const findLabel = (element) => {
+      const id = element.id;
+      if (id) {
+        const label = document.querySelector('label[for="' + CSS.escape(id) + '"]');
+        if (label) return normalizeText(label.textContent);
+      }
+      let parent = element.parentElement;
+      for (let i = 0; i < 3 && parent; i++) {
+        if (parent.tagName.toLowerCase() === 'label') return normalizeText(parent.textContent);
+        parent = parent.parentElement;
+      }
+      const ariaLabelledBy = element.getAttribute('aria-labelledby');
+      if (ariaLabelledBy) {
+        const labelEl = document.getElementById(ariaLabelledBy);
+        if (labelEl) return normalizeText(labelEl.textContent);
+      }
+      return null;
+    };
+
+    const interactiveElements = Array.from(document.querySelectorAll(
+      'a, button, input, textarea, select, [role="button"], [role="link"], [role="tab"], [onclick]'
+    ))
+      .slice(0, ${SNAPSHOT_INTERACTIVE_ELEMENT_LIMIT})
       .map((element) => ({
         selector: buildSelector(element),
         tag: element.tagName.toLowerCase(),
-        text: normalizeText(element.textContent || element.getAttribute('value') || element.getAttribute('placeholder')).slice(0, 120),
+        text: normalizeText(
+          element.textContent || element.getAttribute('value') || element.getAttribute('placeholder') || element.getAttribute('aria-label')
+        ).slice(0, ${SNAPSHOT_ELEMENT_TEXT_LIMIT}),
         role: element.getAttribute('role'),
       }))
       .filter((entry) => Boolean(entry.selector));
+
+    const formFieldSelectors = 'input, textarea, select';
+    const formFields = Array.from(document.querySelectorAll(formFieldSelectors))
+      .slice(0, ${SNAPSHOT_FORM_FIELD_LIMIT})
+      .map((element) => {
+        const tag = element.tagName.toLowerCase();
+        const type = element.getAttribute('type') || null;
+        const field = {
+          selector: buildSelector(element),
+          tag,
+          type,
+          name: element.getAttribute('name') || null,
+          label: findLabel(element),
+          placeholder: element.getAttribute('placeholder') || null,
+          value: '',
+        };
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+          field.value = element.value || '';
+        } else if (element instanceof HTMLSelectElement) {
+          field.value = element.value || '';
+          field.options = Array.from(element.options).map((opt) => ({
+            value: opt.value,
+            label: normalizeText(opt.textContent || opt.value || ''),
+          }));
+        }
+        return field;
+      })
+      .filter((entry) => Boolean(entry.selector));
+
+    const rawText = normalizeText(document.body?.innerText || '');
+    const textPreview = rawText.slice(0, ${SNAPSHOT_TEXT_PREVIEW_LIMIT});
 
     return {
       url: location.href,
       title: document.title,
       origin: location.origin || null,
-      textPreview: normalizeText(document.body?.innerText || '').slice(0, 1600),
+      textPreview,
+      fullTextAvailable: rawText.length <= ${SNAPSHOT_TEXT_PREVIEW_LIMIT},
       interactiveElements,
+      formFields,
       capturedAt: Date.now(),
     };
   `);
@@ -303,12 +375,26 @@ async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
 
 async function runAutomationAction(action: BrowserAutomationAction): Promise<BrowserAutomationActionResult> {
   return await executeInPage<BrowserAutomationActionResult>(`
+    const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+
     const ensureElement = (selector) => {
       const element = document.querySelector(selector);
       if (!element) {
         throw new Error('Element not found for selector: ' + selector);
       }
       return element;
+    };
+
+    const setInputValue = (element, text, append) => {
+      if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
+        throw new Error('Selected element does not accept text input: ' + element.outerHTML.slice(0, 120));
+      }
+      element.focus();
+      const nextValue = append ? (element.value + text) : text;
+      element.value = nextValue;
+      element.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      return nextValue.length;
     };
 
     switch (payload?.type) {
@@ -324,16 +410,131 @@ async function runAutomationAction(action: BrowserAutomationAction): Promise<Bro
 
       case 'input': {
         const element = ensureElement(payload.selector);
-        if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
-          throw new Error('Selected element does not accept text input: ' + payload.selector);
+        const textLength = setInputValue(element, payload.text, Boolean(payload.append));
+        return { ok: true, type: payload.type, selector: payload.selector, textLength };
+      }
+
+      case 'select': {
+        const element = ensureElement(payload.selector);
+        if (!(element instanceof HTMLSelectElement)) {
+          throw new Error('Selected element is not a <select>: ' + payload.selector);
         }
-        element.focus();
-        if ('value' in element) {
-          element.value = payload.text;
+        if (typeof payload.value === 'string') {
+          element.value = payload.value;
+        } else if (typeof payload.label === 'string') {
+          const match = Array.from(element.options).find((opt) =>
+            normalizeText(opt.textContent || '') === payload.label || opt.value === payload.label
+          );
+          if (!match) throw new Error('No option matched label: ' + payload.label);
+          element.value = match.value;
+        } else if (typeof payload.index === 'number') {
+          if (payload.index < 0 || payload.index >= element.options.length) {
+            throw new Error('Option index out of range: ' + payload.index);
+          }
+          element.value = element.options[payload.index].value;
+        } else {
+          throw new Error('select requires value, label, or index');
         }
-        element.dispatchEvent(new InputEvent('input', { bubbles: true, data: payload.text }));
         element.dispatchEvent(new Event('change', { bubbles: true }));
-        return { ok: true, type: payload.type, selector: payload.selector, textLength: payload.text.length };
+        return { ok: true, type: payload.type, selector: payload.selector };
+      }
+
+      case 'batch_input': {
+        if (!Array.isArray(payload.fields)) {
+          throw new Error('batch_input requires a fields array');
+        }
+        let filled = 0;
+        let skipped = 0;
+        for (const field of payload.fields) {
+          const element = document.querySelector(field?.selector);
+          if (!element) {
+            skipped++;
+            continue;
+          }
+          try {
+            if (element instanceof HTMLSelectElement) {
+              element.value = field.text;
+              element.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+              setInputValue(element, field.text, Boolean(field.append));
+            } else {
+              skipped++;
+              continue;
+            }
+            filled++;
+          } catch {
+            skipped++;
+          }
+        }
+        return { ok: true, type: payload.type, filled, skipped };
+      }
+
+      case 'extract': {
+        let text = '';
+        if (typeof payload.selector === 'string' && payload.selector.trim()) {
+          const element = document.querySelector(payload.selector);
+          if (!element) {
+            throw new Error('Element not found for extract selector: ' + payload.selector);
+          }
+          text = normalizeText(element.innerText || '');
+        } else {
+          text = normalizeText(document.body?.innerText || '');
+        }
+        const offset = Math.max(0, Number(payload.offset) || 0);
+        const maxChars = Number(payload.maxChars) || 0;
+        const limit = maxChars > 0 ? maxChars : 60000;
+        const slice = text.slice(offset, offset + limit);
+        const truncated = offset + slice.length < text.length;
+        return {
+          ok: true,
+          type: payload.type,
+          selector: payload.selector,
+          text: slice,
+          offset,
+          truncated,
+          totalLength: text.length
+        };
+      }
+
+      case 'evaluate': {
+        if (typeof payload.script !== 'string' || !payload.script.trim()) {
+          throw new Error('evaluate requires a non-empty script string');
+        }
+        // eslint-disable-next-line no-eval
+        const result = eval(payload.script);
+        return { ok: true, type: payload.type, result };
+      }
+
+      case 'hover': {
+        const element = ensureElement(payload.selector);
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+        element.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+        element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        return { ok: true, type: payload.type, selector: payload.selector };
+      }
+
+      case 'focus': {
+        const element = ensureElement(payload.selector);
+        element.focus();
+        return { ok: true, type: payload.type, selector: payload.selector };
+      }
+
+      case 'press_key': {
+        const target = payload.selector ? ensureElement(payload.selector) : document.activeElement || document.body;
+        target.focus();
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: payload.key, bubbles: true }));
+        target.dispatchEvent(new KeyboardEvent('keypress', { key: payload.key, bubbles: true }));
+        if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+          if (payload.key.length === 1) {
+            target.value += payload.key;
+            target.dispatchEvent(new InputEvent('input', { data: payload.key, bubbles: true }));
+          } else if (payload.key === 'Backspace') {
+            target.value = target.value.slice(0, -1);
+            target.dispatchEvent(new InputEvent('input', { bubbles: true }));
+          }
+        }
+        target.dispatchEvent(new KeyboardEvent('keyup', { key: payload.key, bubbles: true }));
+        return { ok: true, type: payload.type, selector: payload.selector, key: payload.key };
       }
 
       case 'scroll': {

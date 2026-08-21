@@ -112,15 +112,59 @@ export function normalizeToolCalls (toolCalls?: ToolCall[]): ToolCall[] | undefi
   }))
 }
 
+/**
+ * Unpaired UTF-16 surrogates in page/web-derived text survive JSON.stringify
+ * as "\udXXX" escapes, which strict server-side JSON parsers (Volcengine Ark,
+ * Rust serde) reject with 400 InvalidParameter. Replace them with U+FFFD.
+ */
+const LONE_SURROGATE_PATTERN = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+
+function sanitizeOutgoingText (value: string): string {
+  if (!value) return value
+  return value.replace(LONE_SURROGATE_PATTERN, '�')
+}
+
+function sanitizeOutgoingContent (content: MessageContent): MessageContent {
+  if (typeof content === 'string') {
+    return sanitizeOutgoingText(content)
+  }
+  if (Array.isArray(content)) {
+    return content.map(part =>
+      part.type === 'text' && typeof part.text === 'string'
+        ? { ...part, text: sanitizeOutgoingText(part.text) }
+        : part
+    )
+  }
+  return content
+}
+
 export function normalizeOutgoingMessages (messages: ChatMessage[]): ChatMessage[] {
   const normalized = messages.map(message => {
+    // Reasoning models emit reasoning_content in responses, but echoing it
+    // back in request messages is non-standard and strict OpenAI-compatible
+    // gateways (e.g. Volcengine Ark) reject the unknown field with
+    // 400 InvalidParameter. Providers regenerate reasoning each turn, so it
+    // is never needed in the request.
+    const { reasoning_content: _reasoningContent, ...rest } = message
+
+    const sanitized: ChatMessage = {
+      ...rest,
+      content: sanitizeOutgoingContent(message.content)
+    }
+
     if (!message.tool_calls || message.tool_calls.length === 0) {
-      return message
+      return sanitized
     }
 
     return {
-      ...message,
-      tool_calls: normalizeToolCalls(message.tool_calls)
+      ...sanitized,
+      tool_calls: normalizeToolCalls(message.tool_calls)?.map(toolCall => ({
+        ...toolCall,
+        function: {
+          ...toolCall.function,
+          arguments: sanitizeOutgoingText(toolCall.function.arguments)
+        }
+      }))
     }
   })
 
