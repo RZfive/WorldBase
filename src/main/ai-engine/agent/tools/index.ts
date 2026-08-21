@@ -39,7 +39,7 @@ import {
 } from './tool-workspace-files.js'
 import { toolWebSearch } from './tool-web-search.js'
 import { toolFetchWebpage } from './tool-fetch-webpage.js'
-import { toolInteractCurrentPage, toolReadCurrentPage } from './tool-active-page.js'
+import { toolInteractCurrentPage, toolReadCurrentPage, toolFillCurrentPageForm, toolSaveCurrentPageAsDocument } from './tool-active-page.js'
 import { toolEnterPlanMode, toolExitPlanMode } from './tool-plan-mode.js'
 import { toolRunSkill, toolListSkills } from './tool-run-skill.js'
 import { toolInstallSkill } from './tool-install-skill.js'
@@ -198,7 +198,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
   }
 
   if (services.readActivePage && services.interactWithActivePage) {
-    tools.push(toolInteractCurrentPage(services))
+    tools.push(toolInteractCurrentPage(services), toolFillCurrentPageForm(services), toolSaveCurrentPageAsDocument(services))
   }
 
   // Register the canonical spawn_subagents tool only when a subagent service is

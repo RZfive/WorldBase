@@ -395,7 +395,9 @@ export function buildActivePagePromptSection (activePageContext?: ActivePageAuto
     `- Active page title: ${activePageContext.title || '(untitled page)'}`,
     `- Active page URL: ${activePageContext.url || '(unknown URL)'}`,
     `- Active page origin: ${activePageContext.origin || '(unknown origin)'}`,
-    '- If the user asks what is on this page or asks you to operate it, call read_current_page first to inspect the live DOM, then use interact_current_page for click, input, scroll, or wait actions.',
+    '- If the user asks what is on this page or asks you to operate it, call read_current_page first to inspect the live DOM, then use interact_current_page for click, input, select, scroll, wait, extract, evaluate, hover, focus, or press_key actions.',
+    '- For filling multiple form fields at once, use fill_current_page_form with the selectors returned by read_current_page.',
+    '- For long pages, either paginate with interact_current_page action="extract" plus offset/max_chars, or call save_current_page_as_document to persist the page as a chunked document and read it with read_document.',
     '- Do not use fetch_webpage for this active in-app page. fetch_webpage is only for public external references, not the live embedded browser surface.'
   ]
 
