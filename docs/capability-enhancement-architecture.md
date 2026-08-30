@@ -146,7 +146,7 @@
 #### 3.2.1 glob_search — 文件模式搜索
 
 ```typescript
-// src/main/ai-engine/agent/tools/tool-glob-search.ts
+// apps/electron/src/main/ai-engine/agent/tools/tool-glob-search.ts
 
 interface GlobSearchParams {
   project_id: string
@@ -173,7 +173,7 @@ interface GlobSearchResult {
 #### 3.2.2 grep_search — 代码内容搜索
 
 ```typescript
-// src/main/ai-engine/agent/tools/tool-grep-search.ts
+// apps/electron/src/main/ai-engine/agent/tools/tool-grep-search.ts
 
 interface GrepSearchParams {
   project_id: string
@@ -210,7 +210,7 @@ interface GrepSearchResult {
 当前系统仅有命令白名单 + 高危操作用户确认两层。需要设计更灵活的权限框架。
 
 ```typescript
-// src/main/ai-engine/agent/permissions/permission-engine.ts
+// apps/electron/src/main/ai-engine/agent/permissions/permission-engine.ts
 
 /**
  * 权限决策链 (按顺序执行, 先匹配先决定):
@@ -289,7 +289,7 @@ const COMMAND_SAFETY_RULES = [
 当前系统对大输出简单截断 (40KB)，导致 Agent 丢失关键信息。
 
 ```typescript
-// src/main/ai-engine/agent/tool-result-storage.ts
+// apps/electron/src/main/ai-engine/agent/tool-result-storage.ts
 
 const INLINE_THRESHOLD = 30_000    // 30KB 以下：直接内联
 const PERSIST_THRESHOLD = 100_000  // 100KB 以上：写入文件返回引用
@@ -354,7 +354,7 @@ class ToolResultStorage {
 让 Agent 在复杂任务中先规划、再执行，减少错误和返工。
 
 ```typescript
-// src/main/ai-engine/agent/plan-mode.ts
+// apps/electron/src/main/ai-engine/agent/plan-mode.ts
 
 interface PlanStep {
   id: string
@@ -433,7 +433,7 @@ Plan 模式在 UI 层的展现：
 当前 SkillStore 仅将 skill 内容注入 system prompt。需要增强为完整的 Skill 执行框架。
 
 ```typescript
-// src/main/ai-engine/skills/skill-engine.ts
+// apps/electron/src/main/ai-engine/skills/skill-engine.ts
 
 /**
  * Skill 定义格式 (Markdown + YAML frontmatter)
@@ -533,7 +533,7 @@ const runSkillTool: ToolDefinition = {
 **借鉴**: Claude Code 的迭代指纹去重和循环检测
 
 ```typescript
-// src/main/ai-engine/agent/loop-detector.ts
+// apps/electron/src/main/ai-engine/agent/loop-detector.ts
 
 interface IterationFingerprint {
   toolCalls: Array<{
@@ -595,7 +595,7 @@ class LoopDetector {
 **借鉴**: Claude Code 的 `cost-tracker.ts`
 
 ```typescript
-// src/main/ai-engine/cost-tracker.ts
+// apps/electron/src/main/ai-engine/cost-tracker.ts
 
 interface ModelPricing {
   inputPerMillion: number    // 输入 token 单价 (美元/百万token)
@@ -653,7 +653,7 @@ UI 展示: 在聊天面板底部显示 token 消耗和预估成本。
 **借鉴**: Claude Code 的 Coordinator/Worker 模式
 
 ```typescript
-// src/main/ai-engine/coordinator/coordinator.ts
+// apps/electron/src/main/ai-engine/coordinator/coordinator.ts
 
 /**
  * Coordinator 模式:
@@ -759,7 +759,7 @@ const spawnAgentTool: ToolDefinition = {
 **借鉴**: Claude Code 的 git 状态注入和 commit 归因
 
 ```typescript
-// src/main/ai-engine/agent/tools/tool-git-operations.ts
+// apps/electron/src/main/ai-engine/agent/tools/tool-git-operations.ts
 
 /** 在每次 LLM 请求的系统 prompt 中注入 git 状态 */
 function buildGitContext(projectId: string): string {
@@ -805,7 +805,7 @@ const gitCommitTool = {
 **借鉴**: Claude Code 的 pre/post sampling hooks
 
 ```typescript
-// src/main/ai-engine/hooks/hook-manager.ts
+// apps/electron/src/main/ai-engine/hooks/hook-manager.ts
 
 type HookPhase = 'preSampling' | 'postSampling' | 'preTool' | 'postTool'
 
@@ -980,7 +980,7 @@ function repairToolArguments(raw: string): Record<string, unknown> {
 Claude Code 根据 feature flag 按需加载工具。WorldBase 可以简化实现:
 
 ```typescript
-// src/main/ai-engine/agent/tools/index.ts
+// apps/electron/src/main/ai-engine/agent/tools/index.ts
 
 interface ToolRegistryOptions {
   enablePlanMode?: boolean

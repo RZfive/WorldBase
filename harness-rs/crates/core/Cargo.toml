@@ -1,0 +1,30 @@
+[package]
+name = "worldbase-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+uuid = { workspace = true }
+worldbase-docs = { path = "../docs" }
+worldbase-search = { path = "../search" }
+worldbase-protocol = { path = "../protocol" }
+worldbase-providers = { path = "../providers" }
+worldbase-tools = { path = "../tools" }
+worldbase-memory = { path = "../memory" }
+worldbase-skills = { path = "../skills" }
+worldbase-scheduler = { path = "../scheduler" }
+worldbase-mcp-client = { path = "../mcp-client" }
+worldbase-group = { path = "../group" }
+worldbase-project-runtime = { path = "../project-runtime" }
+worldbase-exec = { path = "../exec" }
+worldbase-im-gateway = { path = "../im-gateway" }

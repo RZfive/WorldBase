@@ -58,7 +58,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: apps/electron/pnpm-lock.yaml
 
       - name: Restore Electron caches
         uses: actions/cache@v5
@@ -66,27 +66,27 @@ jobs:
           path: |
             ~\AppData\Local\electron\Cache
             ~\AppData\Local\electron-builder\Cache
-          key: ${{ runner.os }}-electron-${{ hashFiles('pnpm-lock.yaml', 'package.json', 'electron-builder.json') }}
+          key: ${{ runner.os }}-electron-${{ hashFiles('apps/electron/pnpm-lock.yaml', 'apps/electron/package.json', 'apps/electron/electron-builder.json') }}
           restore-keys: |
             ${{ runner.os }}-electron-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm --dir apps/electron install --frozen-lockfile
 
       - name: Typecheck
-        run: pnpm typecheck
+        run: pnpm --dir apps/electron typecheck
 
       - name: Build Electron (Windows)
-        run: pnpm electron:build:win
+        run: pnpm --dir apps/electron electron:build:win
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v7
         with:
           name: windows-build
           path: |
-            release/*.exe
-            release/*.blockmap
-            release/latest.yml
+            apps/electron/release/*.exe
+            apps/electron/release/*.blockmap
+            apps/electron/release/latest.yml
           compression-level: 0
           if-no-files-found: error
 
@@ -107,7 +107,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: apps/electron/pnpm-lock.yaml
 
       - name: Restore Electron caches
         uses: actions/cache@v5
@@ -115,26 +115,26 @@ jobs:
           path: |
             ~/Library/Caches/electron
             ~/Library/Caches/electron-builder
-          key: ${{ runner.os }}-electron-${{ hashFiles('pnpm-lock.yaml', 'package.json', 'electron-builder.json') }}
+          key: ${{ runner.os }}-electron-${{ hashFiles('apps/electron/pnpm-lock.yaml', 'apps/electron/package.json', 'apps/electron/electron-builder.json') }}
           restore-keys: |
             ${{ runner.os }}-electron-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm --dir apps/electron install --frozen-lockfile
 
       - name: Typecheck
-        run: pnpm typecheck
+        run: pnpm --dir apps/electron typecheck
 
       - name: Build Electron (macOS ARM)
-        run: pnpm electron:build:mac:arm64
+        run: pnpm --dir apps/electron electron:build:mac:arm64
 
       - name: Upload macOS ARM artifacts
         uses: actions/upload-artifact@v7
         with:
           name: mac-arm-build
           path: |
-            release/*.dmg
-            release/*.dmg.blockmap
+            apps/electron/release/*.dmg
+            apps/electron/release/*.dmg.blockmap
           compression-level: 0
           if-no-files-found: error
 
@@ -155,7 +155,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: apps/electron/pnpm-lock.yaml
 
       - name: Restore Electron caches
         uses: actions/cache@v5
@@ -163,25 +163,25 @@ jobs:
           path: |
             ~/.cache/electron
             ~/.cache/electron-builder
-          key: ${{ runner.os }}-electron-${{ hashFiles('pnpm-lock.yaml', 'package.json', 'electron-builder.json') }}
+          key: ${{ runner.os }}-electron-${{ hashFiles('apps/electron/pnpm-lock.yaml', 'apps/electron/package.json', 'apps/electron/electron-builder.json') }}
           restore-keys: |
             ${{ runner.os }}-electron-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm --dir apps/electron install --frozen-lockfile
 
       - name: Typecheck
-        run: pnpm typecheck
+        run: pnpm --dir apps/electron typecheck
 
       - name: Build Electron (Linux)
-        run: pnpm electron:build:linux
+        run: pnpm --dir apps/electron electron:build:linux
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
         with:
           name: linux-build
           path: |
-            release/*.AppImage
-            release/latest-linux.yml
+            apps/electron/release/*.AppImage
+            apps/electron/release/latest-linux.yml
           compression-level: 0
           if-no-files-found: error
