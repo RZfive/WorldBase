@@ -5,7 +5,7 @@ import {
   StdioClientTransport,
   StreamableHTTPClientTransport
 } from '@modelcontextprotocol/client'
-import type { CallToolResult, Prompt, Resource, Tool } from '@modelcontextprotocol/client'
+import type { Prompt, Resource, Tool } from '@modelcontextprotocol/client'
 import type { ProgressCallback } from '../ai-engine/agent/agent-core.js'
 import type { ToolDefinition } from '../ai-engine/providers/openai-provider.js'
 import type { MCPServerConfig } from '../settings/settings-store.js'
@@ -460,20 +460,58 @@ export class MCPService extends EventEmitter {
       throw new Error(`未知的 MCP 工具: ${localName}`)
     }
 
-    const allowedServerIdSet = normalizeAllowedServerIds(allowedServerIds)
-    if (allowedServerIdSet && !allowedServerIdSet.has(binding.serverId)) {
-      throw new Error(`MCP 服务器 ${binding.serverId} 未被当前任务授权`)
+    return await this.executeServerTool(
+      binding.serverId,
+      binding.remoteName,
+      args,
+      onProgress,
+      allowedServerIds,
+      binding.localName
+    )
+  }
+
+  /**
+   * Execute an MCP tool by its Electron server id and remote name. This keeps
+   * the generic Rust `mcp_call` compatibility tool on the same authenticated
+   * Electron connection as dynamically discovered MCP tools.
+   */
+  async executeServerTool (
+    serverId: string,
+    remoteName: string,
+    args: Record<string, unknown>,
+    onProgress?: ProgressCallback,
+    allowedServerIds?: Iterable<string>,
+    localName?: string
+  ): Promise<unknown> {
+    const normalizedServerId = serverId.trim()
+    const normalizedRemoteName = remoteName.trim()
+    if (!normalizedServerId || !normalizedRemoteName) {
+      throw new Error('MCP server 和 tool 为必填项')
     }
 
-    const session = await this.ensureConnected(binding.serverId)
-    onProgress?.('🔌 调用 MCP 工具', `${session.config.name}: ${binding.remoteName}`)
+    const allowedServerIdSet = normalizeAllowedServerIds(allowedServerIds)
+    if (allowedServerIdSet && !allowedServerIdSet.has(normalizedServerId)) {
+      throw new Error(`MCP 服务器 ${normalizedServerId} 未被当前任务授权`)
+    }
+
+    const session = await this.ensureConnected(normalizedServerId)
+    onProgress?.('🔌 调用 MCP 工具', `${session.config.name}: ${normalizedRemoteName}`)
     const result = await withTimeout(
-      session.client!.callTool({ name: binding.remoteName, arguments: args }),
+      session.client!.callTool({ name: normalizedRemoteName, arguments: args }),
       session.config.timeoutMs,
-      `调用 MCP 工具 ${binding.remoteName}`
+      `调用 MCP 工具 ${normalizedRemoteName}`
     )
 
-    return this.normalizeCallToolResult(binding, result)
+    return {
+      server_id: normalizedServerId,
+      tool: normalizedRemoteName,
+      local_name: localName,
+      is_error: (result as { isError?: boolean }).isError === true,
+      structured_content: (result as { structuredContent?: unknown }).structuredContent,
+      content: Array.isArray((result as { content?: unknown[] }).content)
+        ? (result as { content?: unknown[] }).content
+        : []
+    }
   }
 
   async dispose (): Promise<void> {
@@ -736,18 +774,6 @@ export class MCPService extends EventEmitter {
       return { supported: true, items: Array.isArray(result.prompts) ? result.prompts : [] }
     } catch {
       return { supported: false, items: [] }
-    }
-  }
-
-  private normalizeCallToolResult (binding: MCPDynamicToolBinding, result: CallToolResult): Record<string, unknown> {
-    return {
-      server_id: binding.serverId,
-      tool: binding.remoteName,
-      is_error: (result as { isError?: boolean }).isError === true,
-      structured_content: (result as { structuredContent?: unknown }).structuredContent,
-      content: Array.isArray((result as { content?: unknown[] }).content)
-        ? (result as { content?: unknown[] }).content
-        : []
     }
   }
 

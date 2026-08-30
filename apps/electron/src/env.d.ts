@@ -553,6 +553,7 @@ type AIExecutionAuthMode = 'strict' | 'auto'
 interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
   enableAiLogging: boolean
+  harnessBackend: 'ts' | 'rust'
 }
 
 interface ChatFontPreferences {
@@ -965,7 +966,7 @@ interface DocumentSummaryDTO {
 
 interface ElectronAPI {
   // AI
-  chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext) => Promise<{ role: string; content: MessageContent }>
+  chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<{ role: string; content: MessageContent }>
   chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
@@ -1027,6 +1028,7 @@ interface ElectronAPI {
   listImageLibraryTags: () => Promise<string[]>
   renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
+  onImageLibraryChanged: (callback: (payload: { source?: string }) => void) => () => void
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
   drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
   loadStudioImageTasks: () => Promise<ImageStudioTask[]>

@@ -2,9 +2,13 @@
 //! + HITL 注入队列。纯状态机 + provider 调用，全端可用。
 
 use anyhow::{bail, Context, Result};
+use futures::future::join_all;
 use futures::StreamExt;
+use serde_json::{json, Value};
+use std::future::Future;
 use worldbase_protocol::types::{
-    GroupBoard, GroupMember, GroupMode, GroupRoundRecord, GroupSessionMeta,
+    GroupBoard, GroupBoardTask, GroupMember, GroupMode, GroupRoundRecord, GroupSessionMeta,
+    GroupUserInjection,
 };
 use worldbase_providers::{create_provider, ContentBlock, LlmMessage, LlmRole};
 
@@ -16,12 +20,34 @@ pub type OnBoardFn<'a> = &'a mut (dyn FnMut(&GroupBoard) + Send);
 pub struct GroupEngine;
 
 impl GroupEngine {
+    pub const DEFAULT_MAX_PARALLEL_WORKERS: usize = 2;
+    pub const MAX_PARALLEL_WORKERS: usize = 5;
+
     /// 创建会话。coordinator 缺省取第一个成员。
     pub fn create(
         topic: &str,
         mode: GroupMode,
         members: Vec<GroupMember>,
         coordinator: Option<String>,
+    ) -> Result<GroupSessionMeta> {
+        Self::create_with_max_parallel_workers(
+            topic,
+            mode,
+            members,
+            coordinator,
+            Self::DEFAULT_MAX_PARALLEL_WORKERS,
+        )
+    }
+
+    /// Create a session with the Electron-configured member concurrency cap.
+    /// The cap is normalized here because this crate is also callable without
+    /// Electron's settings-store validation.
+    pub fn create_with_max_parallel_workers(
+        topic: &str,
+        mode: GroupMode,
+        members: Vec<GroupMember>,
+        coordinator: Option<String>,
+        max_parallel_workers: usize,
     ) -> Result<GroupSessionMeta> {
         if members.len() < 2 {
             bail!("group session requires at least 2 members");
@@ -35,9 +61,12 @@ impl GroupEngine {
             created_at: worldbase_protocol::event::now_rfc3339(),
             status: "open".into(),
             board: GroupBoard::default(),
+            board_updates: vec![],
             rounds: vec![],
             coordinator: coord,
+            max_parallel_workers: max_parallel_workers.clamp(1, Self::MAX_PARALLEL_WORKERS),
             pending_injections: vec![],
+            active_member_ids: vec![],
         })
     }
 
@@ -88,69 +117,489 @@ impl GroupEngine {
         on_message: OnMessageFn<'_>,
         on_board: OnBoardFn<'_>,
     ) -> Result<usize> {
-        let speakers = Self::route_speakers(session, user_input);
+        Self::run_round_for_members(session, user_input, round, None, on_message, on_board).await
+    }
+
+    /// Run one round for an explicit Electron-selected member subset.  The
+    /// desktop route has already resolved mentions and coordinator planning,
+    /// so preserving that selection lets Rust own execution without silently
+    /// changing the user's group-routing intent.
+    pub async fn run_round_for_members(
+        session: &mut GroupSessionMeta,
+        user_input: &str,
+        round: u32,
+        selected_members: Option<&[String]>,
+        on_message: OnMessageFn<'_>,
+        on_board: OnBoardFn<'_>,
+    ) -> Result<usize> {
+        Self::run_round_with_executor(
+            session,
+            user_input,
+            round,
+            selected_members,
+            |member, prompt| async move { run_member_provider(&member, &prompt).await },
+            on_message,
+            on_board,
+        )
+        .await
+    }
+
+    /// Execute a round with a caller-provided member runner. The core harness
+    /// uses this to route Electron members through Rust's full agent/tool loop
+    /// while the standalone group crate retains its provider-only fallback.
+    pub async fn run_round_with_executor<F, Fut>(
+        session: &mut GroupSessionMeta,
+        user_input: &str,
+        round: u32,
+        selected_members: Option<&[String]>,
+        execute_member: F,
+        on_message: OnMessageFn<'_>,
+        on_board: OnBoardFn<'_>,
+    ) -> Result<usize>
+    where
+        F: FnMut(GroupMember, String) -> Fut,
+        Fut: Future<Output = Result<String>>,
+    {
+        Self::run_round_with_executor_and_hook(
+            session,
+            user_input,
+            round,
+            selected_members,
+            execute_member,
+            |_session, _member| {},
+            true,
+            on_message,
+            on_board,
+        )
+        .await
+    }
+
+    /// Native group execution can synchronize a Rust-owned live session just
+    /// before every member starts. This keeps board writes and HITL injections
+    /// that arrive while a previous member is running visible to the next
+    /// member without letting a stale local executor overwrite them.
+    pub async fn run_round_with_executor_and_hook<F, Fut, H>(
+        session: &mut GroupSessionMeta,
+        user_input: &str,
+        round: u32,
+        selected_members: Option<&[String]>,
+        execute_member: F,
+        before_member: H,
+        apply_inline_board_directives: bool,
+        on_message: OnMessageFn<'_>,
+        on_board: OnBoardFn<'_>,
+    ) -> Result<usize>
+    where
+        F: FnMut(GroupMember, String) -> Fut,
+        Fut: Future<Output = Result<String>>,
+        H: FnMut(&mut GroupSessionMeta, &GroupMember),
+    {
+        Self::run_round_with_executor_batched_and_hook(
+            session,
+            user_input,
+            round,
+            selected_members,
+            1,
+            execute_member,
+            before_member,
+            apply_inline_board_directives,
+            on_message,
+            on_board,
+        )
+        .await
+    }
+
+    /// Execute selected members in stable batches. The limit is applied in
+    /// Rust, after Electron has selected participants, so the selected Rust
+    /// harness owns the group scheduler rather than delegating it back to TS.
+    ///
+    /// The hook still runs before each member prompt is assembled. That lets a
+    /// native session merge board writes and HITL injections that arrived
+    /// between batches before launching the next set of member runs.
+    pub async fn run_round_with_executor_batched_and_hook<F, Fut, H>(
+        session: &mut GroupSessionMeta,
+        user_input: &str,
+        round: u32,
+        selected_members: Option<&[String]>,
+        max_parallel_workers: usize,
+        mut execute_member: F,
+        mut before_member: H,
+        apply_inline_board_directives: bool,
+        on_message: OnMessageFn<'_>,
+        on_board: OnBoardFn<'_>,
+    ) -> Result<usize>
+    where
+        F: FnMut(GroupMember, String) -> Fut,
+        Fut: Future<Output = Result<String>>,
+        H: FnMut(&mut GroupSessionMeta, &GroupMember),
+    {
+        let speakers = Self::resolve_speakers(session, user_input, selected_members);
+        let speaker_keys: Vec<String> = speakers.iter().map(member_delivery_key).collect();
         let mut count = 0;
+        // An injection is addressed to every selected recipient, rather than
+        // being consumed by the first member that happens to run. Keep the
+        // original records through the round so broadcast and multi-target
+        // clarifications can be rendered into each matching member prompt.
+        let mut pending_injections = std::mem::take(&mut session.pending_injections);
+        let parallelism = max_parallel_workers.clamp(1, Self::MAX_PARALLEL_WORKERS);
+        for batch in speakers.chunks(parallelism) {
+            let mut runs = Vec::with_capacity(batch.len());
+            for member in batch {
+                before_member(session, member);
+                // A native injection may have arrived while the previous
+                // batch was executing. Keep it alongside the local queue and
+                // retain delivery acknowledgements for final reconciliation.
+                pending_injections.append(&mut session.pending_injections);
+                let member_key = member_delivery_key(member);
+                // Targeted clarifications only go to their durable Electron
+                // member IDs. An empty target list is a broadcast to every
+                // member selected for this round.
+                let injection_text: Vec<String> = pending_injections
+                    .iter_mut()
+                    .filter_map(|injection| {
+                        let addressed = injection.target_agent_ids.is_empty()
+                            || member.agent_id.as_deref().is_some_and(|agent_id| {
+                                injection
+                                    .target_agent_ids
+                                    .iter()
+                                    .any(|target| target == agent_id)
+                            });
+                        if !addressed || injection.delivered_to_agent_ids.contains(&member_key) {
+                            return None;
+                        }
+                        injection.delivered_to_agent_ids.push(member_key.clone());
+                        Some(injection.content.clone())
+                    })
+                    .collect();
+                let prompt = build_prompt(session, member, user_input, round, &injection_text);
+                let execution = execute_member(member.clone(), prompt);
+                let member = member.clone();
+                runs.push(async move { execution.await.map(|content| (member, content)) });
+            }
 
-        for name in speakers {
-            let Some(member) = session.members.iter().find(|m| m.name == name).cloned() else {
-                continue;
-            };
-            // HITL 注入：清空队列并入提示
-            let injections: Vec<String> = std::mem::take(&mut session.pending_injections);
-            let prompt = build_prompt(session, &member, user_input, round, &injections);
-            let content = call_member(&member, &prompt).await?;
+            let results = join_all(runs).await;
+            let mut completed = Vec::with_capacity(results.len());
+            let mut failure = None;
+            for result in results {
+                match result {
+                    Ok(completion) => completed.push(completion),
+                    Err(error) if failure.is_none() => failure = Some(error),
+                    Err(_) => {}
+                }
+            }
+            if let Some(error) = failure {
+                // Do not lose a clarification merely because a member
+                // execution failed before the round could finish.
+                pending_injections.append(&mut session.pending_injections);
+                session.pending_injections = pending_injections;
+                return Err(error);
+            }
 
-            // 成员输出中的 board.update 指令被引擎采纳（工具化前的简化语义）
-            apply_board_directives(session, &content);
-            session.rounds.push(GroupRoundRecord {
-                member: member.name.clone(),
-                content: content.clone(),
-                round,
-                created_at: worldbase_protocol::event::now_rfc3339(),
-            });
-            on_board(&session.board);
-            on_message(member.name.clone(), content, round);
-            count += 1;
+            for (member, content) in completed {
+                // Provider-only sessions retain the legacy text directive.
+                // Native Rust members use the structured update_board tool
+                // instead so a local execution snapshot cannot clobber a
+                // live board write.
+                if apply_inline_board_directives {
+                    apply_board_directives(session, &content);
+                }
+                session.rounds.push(GroupRoundRecord {
+                    member: member.name.clone(),
+                    content: content.clone(),
+                    round,
+                    created_at: worldbase_protocol::event::now_rfc3339(),
+                });
+                on_board(&session.board);
+                on_message(member.name, content, round);
+                count += 1;
+            }
         }
+
+        // Retain recipients that have not actually consumed this injection.
+        // In particular, a clarification that arrives after a target's prompt
+        // was built remains queued for the next round instead of disappearing.
+        session.pending_injections = pending_injections
+            .into_iter()
+            .filter(|injection| {
+                if injection.target_agent_ids.is_empty() {
+                    return speaker_keys
+                        .iter()
+                        .any(|member_id| !injection.delivered_to_agent_ids.contains(member_id));
+                }
+                injection
+                    .target_agent_ids
+                    .iter()
+                    .any(|agent_id| !injection.delivered_to_agent_ids.contains(agent_id))
+            })
+            .collect();
         Ok(count)
     }
 
+    /// Resolve Electron-selected durable IDs or member names into the actual
+    /// group members that will run in this round.
+    pub fn resolve_speakers(
+        session: &GroupSessionMeta,
+        user_input: &str,
+        selected_members: Option<&[String]>,
+    ) -> Vec<GroupMember> {
+        let names = selected_members
+            .filter(|members| !members.is_empty())
+            .map(|members| {
+                members
+                    .iter()
+                    .filter_map(|selected| {
+                        session
+                            .members
+                            .iter()
+                            .find(|member| {
+                                member.name == *selected
+                                    || member.agent_id.as_deref() == Some(selected.as_str())
+                            })
+                            .map(|member| member.name.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| Self::route_speakers(session, user_input));
+        names
+            .into_iter()
+            .filter_map(|name| {
+                session
+                    .members
+                    .iter()
+                    .find(|member| member.name == name)
+                    .cloned()
+            })
+            .collect()
+    }
+
     /// 黑板字段更新（op: set/add/remove）。
-    pub fn board_update(session: &mut GroupSessionMeta, field: &str, op: &str, value: &str) -> Result<()> {
-        let list = match field {
-            "assumptions" => &mut session.board.assumptions,
-            "tasks" => &mut session.board.tasks,
-            "decisions" => &mut session.board.decisions,
-            "evidenceRefs" | "evidence_refs" => &mut session.board.evidence_refs,
-            "openQuestions" | "open_questions" => &mut session.board.open_questions,
-            "goal" => {
-                if op == "set" {
-                    session.board.goal = value.to_string();
-                }
+    pub fn board_update(
+        session: &mut GroupSessionMeta,
+        field: &str,
+        op: &str,
+        value: &str,
+    ) -> Result<()> {
+        let payload = if field == "tasks" && op == "add" {
+            json!({ "id": uuid::Uuid::new_v4().to_string(), "title": value, "status": "todo" })
+        } else if field == "tasks" && op == "set" {
+            json!([{
+                "id": uuid::Uuid::new_v4().to_string(),
+                "title": value,
+                "status": "todo"
+            }])
+        } else if op == "set" && field != "goal" {
+            // The pre-structured Rust RPC accepted one string for list-set.
+            // Keep that compact legacy spelling while the new tool accepts a
+            // full array payload.
+            json!([value])
+        } else {
+            json!(value)
+        };
+        Self::board_update_value(session, field, op, payload)
+    }
+
+    /// Apply Electron's structured board payload without losing task metadata.
+    pub fn board_update_value(
+        session: &mut GroupSessionMeta,
+        field: &str,
+        op: &str,
+        payload: Value,
+    ) -> Result<()> {
+        let field = canonical_board_field(field)?;
+        if field == "goal" {
+            if op == "set" {
+                let value = payload
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("goal set payload must be a string"))?;
+                session.board.goal = value.to_string();
                 return Ok(());
             }
-            other => bail!("unknown board field: {other}"),
+            bail!("goal only supports set");
+        }
+        if field == "tasks" {
+            return apply_task_update(&mut session.board.tasks, op, payload);
+        }
+        let list = match field {
+            "assumptions" => &mut session.board.assumptions,
+            "decisions" => &mut session.board.decisions,
+            "evidenceRefs" => &mut session.board.evidence_refs,
+            "openQuestions" => &mut session.board.open_questions,
+            _ => unreachable!("canonical_board_field only returns known fields"),
         };
         match op {
             "set" => {
+                let values = payload
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("{field} set payload must be a string array"))?;
                 list.clear();
-                list.push(value.to_string());
+                list.extend(
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned),
+                );
             }
             "add" => {
-                if !list.iter().any(|v| v == value) {
+                let value = payload
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("{field} add payload must be a string"))?;
+                if !list.iter().any(|known| known == value) {
                     list.push(value.to_string());
                 }
             }
-            "remove" => list.retain(|v| v != value),
+            "remove" => {
+                let value = payload
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("{field} remove payload must be a string"))?;
+                list.retain(|known| known != value);
+            }
             other => bail!("unknown board op: {other}"),
         }
         Ok(())
     }
 
     /// HITL 注入：入队，下一轮发言时进入上下文。
-    pub fn inject(session: &mut GroupSessionMeta, content: &str) {
-        session.pending_injections.push(content.to_string());
+    pub fn inject(session: &mut GroupSessionMeta, content: &str, target_agent_ids: Vec<String>) {
+        session.pending_injections.push(GroupUserInjection {
+            id: uuid::Uuid::new_v4().to_string(),
+            content: content.to_string(),
+            target_agent_ids,
+            round: 0,
+            created_at: worldbase_protocol::event::now_rfc3339(),
+            delivered_to_agent_ids: vec![],
+        });
     }
+}
+
+fn member_delivery_key(member: &GroupMember) -> String {
+    member
+        .agent_id
+        .as_deref()
+        .filter(|agent_id| !agent_id.trim().is_empty())
+        .unwrap_or(&member.name)
+        .to_string()
+}
+
+fn canonical_board_field(field: &str) -> Result<&str> {
+    match field {
+        "goal" | "assumptions" | "tasks" | "decisions" => Ok(field),
+        "evidenceRefs" | "evidence_refs" => Ok("evidenceRefs"),
+        "openQuestions" | "open_questions" => Ok("openQuestions"),
+        other => bail!("unknown board field: {other}"),
+    }
+}
+
+fn normalize_task(payload: Value) -> Result<GroupBoardTask> {
+    let payload = payload
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("task payload must be an object"))?;
+    let title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("task title is required"))?;
+    let id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let status = payload
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .unwrap_or("todo");
+    if !matches!(status, "todo" | "running" | "blocked" | "done") {
+        bail!("invalid task status: {status}");
+    }
+    let owner_agent_id = payload
+        .get("ownerAgentId")
+        .or_else(|| payload.get("owner_agent_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+        .map(ToOwned::to_owned);
+    let summary = payload
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .map(ToOwned::to_owned);
+    Ok(GroupBoardTask {
+        id,
+        title: title.to_string(),
+        owner_agent_id,
+        status: status.to_string(),
+        summary,
+    })
+}
+
+fn apply_task_update(tasks: &mut Vec<GroupBoardTask>, op: &str, payload: Value) -> Result<()> {
+    match op {
+        "set" => {
+            let values = payload
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("tasks set payload must be an array"))?;
+            *tasks = values
+                .iter()
+                .cloned()
+                .map(normalize_task)
+                .collect::<Result<Vec<_>>>()?;
+        }
+        "add" => {
+            let task = normalize_task(payload)?;
+            if !tasks
+                .iter()
+                .any(|known| known.id == task.id || known.title == task.title)
+            {
+                tasks.push(task);
+            }
+        }
+        "update" => {
+            let payload = payload
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("tasks update payload must be an object"))?;
+            let id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("tasks update payload requires id"))?;
+            if let Some(existing) = tasks.iter_mut().find(|task| task.id == id) {
+                if let Some(title) = payload.get("title").and_then(Value::as_str) {
+                    let title = title.trim();
+                    if !title.is_empty() {
+                        existing.title = title.to_string();
+                    }
+                }
+                if let Some(owner_agent_id) = payload.get("ownerAgentId") {
+                    existing.owner_agent_id = owner_agent_id.as_str().map(ToOwned::to_owned);
+                }
+                if let Some(status) = payload.get("status").and_then(Value::as_str) {
+                    if !matches!(status, "todo" | "running" | "blocked" | "done") {
+                        bail!("invalid task status: {status}");
+                    }
+                    existing.status = status.to_string();
+                }
+                if let Some(summary) = payload.get("summary") {
+                    existing.summary = summary.as_str().map(ToOwned::to_owned);
+                }
+            }
+        }
+        "remove" => {
+            let key = payload.as_str().ok_or_else(|| {
+                anyhow::anyhow!("tasks remove payload must be a task id or title")
+            })?;
+            tasks.retain(|task| task.id != key && task.title != key);
+        }
+        other => bail!("unknown board op: {other}"),
+    }
+    Ok(())
 }
 
 fn build_prompt(
@@ -179,16 +628,39 @@ fn build_prompt(
         GroupMode::CoordinatorOnly => "你是协调者：汇总规划、给结论，不闲聊。",
         GroupMode::Targeted => "你被用户点名：直接回应，可用 @其他成员 咨询。",
         GroupMode::Discussion => "全员讨论：补充前人未覆盖的观点，可用 @点名 回应。",
-        GroupMode::CoordinatorDecides => "你是协调者或被协调者点名的成员：协调者先规划，成员按分工执行。",
+        GroupMode::CoordinatorDecides => {
+            "你是协调者或被协调者点名的成员：协调者先规划，成员按分工执行。"
+        }
         GroupMode::MentionedAgentDecides => "你被点名：自行判断是否需要 @拉入其他成员。",
     };
 
     let board = format!(
-        "目标:{}\n假设:[{}]\n任务:[{}]\n决策:[{}]\n待解问题:[{}]",
+        "目标:{}\n假设:[{}]\n任务:[{}]\n决策:[{}]\n证据:[{}]\n待解问题:[{}]",
         session.board.goal,
         session.board.assumptions.join("; "),
-        session.board.tasks.join("; "),
+        session
+            .board
+            .tasks
+            .iter()
+            .map(|task| {
+                let owner = task
+                    .owner_agent_id
+                    .as_deref()
+                    .filter(|owner| !owner.trim().is_empty())
+                    .map(|owner| format!(" -> {owner}"))
+                    .unwrap_or_default();
+                let summary = task
+                    .summary
+                    .as_deref()
+                    .filter(|summary| !summary.trim().is_empty())
+                    .map(|summary| format!(": {summary}"))
+                    .unwrap_or_default();
+                format!("[{}] {}{}{}", task.status, task.title, owner, summary)
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
         session.board.decisions.join("; "),
+        session.board.evidence_refs.join("; "),
         session.board.open_questions.join("; "),
     );
 
@@ -199,7 +671,7 @@ fn build_prompt(
     };
 
     format!(
-        "你是群组讨论成员「{name}」。人设：{persona}\n其他成员：\n{others}\n讨论主题：{topic}\n模式：{mode_hint}\n\n当前黑板：\n{board}\n\n最近发言：\n{recent}\n\n用户输入：{user}{inject}\n\n请用不超过 200 字发言。可用指令更新黑板：[board]字段|set/add/remove|内容（字段: assumptions/tasks/decisions/goal/openQuestions）",
+        "你是群组讨论成员「{name}」。人设：{persona}\n其他成员：\n{others}\n讨论主题：{topic}\n模式：{mode_hint}\n\n当前黑板：\n{board}\n\n最近发言：\n{recent}\n\n用户输入：{user}{inject}\n\n请用不超过 200 字发言。可用指令更新黑板：[board]字段|set/add/remove|内容（字段: assumptions/tasks/decisions/evidenceRefs/goal/openQuestions）",
         name = member.name,
         persona = member.persona,
         others = others,
@@ -221,12 +693,19 @@ fn apply_board_directives(session: &mut GroupSessionMeta, content: &str) {
         };
         let parts: Vec<&str> = rest.trim().splitn(3, '|').collect();
         if parts.len() == 3 {
-            let _ = GroupEngine::board_update(session, parts[0].trim(), parts[1].trim(), parts[2].trim());
+            let _ = GroupEngine::board_update(
+                session,
+                parts[0].trim(),
+                parts[1].trim(),
+                parts[2].trim(),
+            );
         }
     }
 }
 
-async fn call_member(member: &GroupMember, prompt: &str) -> Result<String> {
+/// Provider-only fallback used by clients that do not supply a native agent
+/// runner. Electron's Rust route uses run_round_with_executor instead.
+pub async fn run_member_provider(member: &GroupMember, prompt: &str) -> Result<String> {
     let cfg = member.provider.clone().unwrap_or_default();
     let provider = create_provider(&cfg).context("create member provider")?;
     let mut stream = provider
@@ -234,10 +713,13 @@ async fn call_member(member: &GroupMember, prompt: &str) -> Result<String> {
             Some("你是群组协作中的成员，发言精炼、有观点。"),
             vec![LlmMessage {
                 role: LlmRole::User,
-                content: vec![ContentBlock::Text { text: prompt.to_string() }],
+                content: vec![ContentBlock::Text {
+                    text: prompt.to_string(),
+                }],
             }],
             vec![],
             1024,
+            worldbase_providers::ChatOptions::default(),
         )
         .await?;
     let mut text = String::new();
@@ -259,6 +741,11 @@ async fn call_member(member: &GroupMember, prompt: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
     use worldbase_protocol::types::ProviderConfig;
 
     fn members() -> Vec<GroupMember> {
@@ -266,16 +753,25 @@ mod tests {
             GroupMember {
                 name: "协调者".into(),
                 persona: "统筹".into(),
+                agent_id: None,
+                allowed_tool_names: vec![],
+                denied_tool_names: vec![],
                 provider: Some(ProviderConfig::default()),
             },
             GroupMember {
                 name: "工程师".into(),
                 persona: "实现".into(),
+                agent_id: None,
+                allowed_tool_names: vec![],
+                denied_tool_names: vec![],
                 provider: Some(ProviderConfig::default()),
             },
             GroupMember {
                 name: "评审".into(),
                 persona: "挑刺".into(),
+                agent_id: None,
+                allowed_tool_names: vec![],
+                denied_tool_names: vec![],
                 provider: Some(ProviderConfig::default()),
             },
         ]
@@ -334,6 +830,47 @@ mod tests {
     }
 
     #[test]
+    fn structured_task_updates_preserve_owner_and_lifecycle() {
+        let mut session = GroupEngine::create("t", GroupMode::Discussion, members(), None).unwrap();
+        GroupEngine::board_update_value(
+            &mut session,
+            "tasks",
+            "add",
+            json!({
+                "id": "task-rust",
+                "title": "Move group tools into Rust",
+                "ownerAgentId": "engineer",
+                "status": "running",
+                "summary": "Runtime trait is wired"
+            }),
+        )
+        .unwrap();
+        GroupEngine::board_update_value(
+            &mut session,
+            "tasks",
+            "update",
+            json!({ "id": "task-rust", "status": "done" }),
+        )
+        .unwrap();
+
+        assert_eq!(session.board.tasks.len(), 1);
+        let task = &session.board.tasks[0];
+        assert_eq!(task.owner_agent_id.as_deref(), Some("engineer"));
+        assert_eq!(task.status, "done");
+        assert_eq!(task.summary.as_deref(), Some("Runtime trait is wired"));
+
+        GroupEngine::board_update_value(
+            &mut session,
+            "tasks",
+            "add",
+            json!({ "title": "Generated task id" }),
+        )
+        .unwrap();
+        assert!(!session.board.tasks[1].id.is_empty());
+        assert_eq!(session.board.tasks[1].status, "todo");
+    }
+
+    #[test]
     fn parses_board_directives_from_output() {
         let mut session = GroupEngine::create("t", GroupMode::Discussion, members(), None).unwrap();
         apply_board_directives(
@@ -346,18 +883,225 @@ mod tests {
 
     #[tokio::test]
     async fn run_round_with_mock_and_inject() {
-        let mut session = GroupEngine::create("选型", GroupMode::Discussion, members(), None).unwrap();
-        GroupEngine::inject(&mut session, "补充：预算只有两周");
+        let mut session =
+            GroupEngine::create("选型", GroupMode::Discussion, members(), None).unwrap();
+        GroupEngine::inject(&mut session, "补充：预算只有两周", vec![]);
         let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = collected.clone();
         let mut on_board = |_b: &GroupBoard| {};
-        let n = GroupEngine::run_round(&mut session, "评估方案", 1, &mut |member, content, round| {
-            sink.lock().unwrap().push((member, content, round));
-        }, &mut on_board)
+        let n = GroupEngine::run_round(
+            &mut session,
+            "评估方案",
+            1,
+            &mut |member, content, round| {
+                sink.lock().unwrap().push((member, content, round));
+            },
+            &mut on_board,
+        )
         .await
         .unwrap();
         assert_eq!(n, 3);
         assert_eq!(session.rounds.len(), 3);
         assert_eq!(collected.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn batched_executor_observes_parallel_worker_limit() {
+        let mut session = GroupEngine::create_with_max_parallel_workers(
+            "parallel scheduling",
+            GroupMode::Discussion,
+            members(),
+            None,
+            2,
+        )
+        .unwrap();
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let max_parallel_workers = session.max_parallel_workers;
+        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_board = |_board: &GroupBoard| {};
+
+        let count = GroupEngine::run_round_with_executor_batched_and_hook(
+            &mut session,
+            "Review the implementation.",
+            1,
+            None,
+            max_parallel_workers,
+            {
+                let running = running.clone();
+                let peak = peak.clone();
+                move |member, _prompt| {
+                    let running = running.clone();
+                    let peak = peak.clone();
+                    async move {
+                        let current = running.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        running.fetch_sub(1, Ordering::SeqCst);
+                        Ok(format!("{} completed", member.name))
+                    }
+                }
+            },
+            |_session, _member| {},
+            true,
+            &mut on_message,
+            &mut on_board,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(count, 3);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(session.max_parallel_workers, 2);
+    }
+
+    #[tokio::test]
+    async fn targeted_injection_is_only_visible_to_its_member() {
+        let mut configured = members();
+        configured[0].agent_id = Some("coordinator".into());
+        configured[1].agent_id = Some("engineer".into());
+        configured[2].agent_id = Some("reviewer".into());
+        let mut session =
+            GroupEngine::create("targeted", GroupMode::Discussion, configured, None).unwrap();
+        GroupEngine::inject(
+            &mut session,
+            "Only the engineer should see this clarification.",
+            vec!["engineer".into()],
+        );
+        let selected = vec!["coordinator".to_string(), "engineer".to_string()];
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = observed.clone();
+        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_board = |_board: &GroupBoard| {};
+
+        GroupEngine::run_round_with_executor(
+            &mut session,
+            "Review the route.",
+            1,
+            Some(&selected),
+            move |member, prompt| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push((member.agent_id, prompt));
+                    Ok("done".to_string())
+                }
+            },
+            &mut on_message,
+            &mut on_board,
+        )
+        .await
+        .unwrap();
+
+        let observed = observed.lock().unwrap();
+        let coordinator_prompt = observed
+            .iter()
+            .find(|(id, _)| id.as_deref() == Some("coordinator"))
+            .map(|(_, prompt)| prompt)
+            .unwrap();
+        let engineer_prompt = observed
+            .iter()
+            .find(|(id, _)| id.as_deref() == Some("engineer"))
+            .map(|(_, prompt)| prompt)
+            .unwrap();
+        assert!(!coordinator_prompt.contains("Only the engineer"));
+        assert!(engineer_prompt.contains("Only the engineer"));
+        assert!(session.pending_injections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn broadcast_injection_reaches_every_selected_member() {
+        let mut configured = members();
+        configured[0].agent_id = Some("coordinator".into());
+        configured[1].agent_id = Some("engineer".into());
+        configured[2].agent_id = Some("reviewer".into());
+        let mut session =
+            GroupEngine::create("broadcast", GroupMode::Discussion, configured, None).unwrap();
+        GroupEngine::inject(
+            &mut session,
+            "All selected members must account for the revised budget.",
+            vec![],
+        );
+        let selected = vec!["coordinator".to_string(), "engineer".to_string()];
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = observed.clone();
+        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_board = |_board: &GroupBoard| {};
+
+        GroupEngine::run_round_with_executor(
+            &mut session,
+            "Review the route.",
+            1,
+            Some(&selected),
+            move |member, prompt| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push((member.agent_id, prompt));
+                    Ok("done".to_string())
+                }
+            },
+            &mut on_message,
+            &mut on_board,
+        )
+        .await
+        .unwrap();
+
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 2);
+        for (_, prompt) in observed.iter() {
+            assert!(prompt.contains("All selected members must account for the revised budget."));
+        }
+        assert!(session.pending_injections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hook_delivers_an_injection_that_arrives_between_member_turns() {
+        let mut configured = members();
+        configured[0].agent_id = Some("coordinator".into());
+        configured[1].agent_id = Some("engineer".into());
+        configured[2].agent_id = Some("reviewer".into());
+        let mut session =
+            GroupEngine::create("live injection", GroupMode::Discussion, configured, None).unwrap();
+        let selected = vec!["coordinator".to_string(), "engineer".to_string()];
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = observed.clone();
+        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_board = |_board: &GroupBoard| {};
+
+        GroupEngine::run_round_with_executor_and_hook(
+            &mut session,
+            "Review the route.",
+            1,
+            Some(&selected),
+            move |member, prompt| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push((member.agent_id, prompt));
+                    Ok("done".to_string())
+                }
+            },
+            |session, member| {
+                if member.agent_id.as_deref() == Some("engineer") {
+                    GroupEngine::inject(
+                        session,
+                        "This clarification arrived after the coordinator started.",
+                        vec!["engineer".into()],
+                    );
+                }
+            },
+            false,
+            &mut on_message,
+            &mut on_board,
+        )
+        .await
+        .unwrap();
+
+        let observed = observed.lock().unwrap();
+        let engineer_prompt = observed
+            .iter()
+            .find(|(id, _)| id.as_deref() == Some("engineer"))
+            .map(|(_, prompt)| prompt)
+            .unwrap();
+        assert!(engineer_prompt.contains("This clarification arrived after the coordinator"));
+        assert!(session.pending_injections.is_empty());
     }
 }

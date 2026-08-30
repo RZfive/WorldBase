@@ -2,7 +2,8 @@ const STORAGE_KEY = 'the-world:ai-execution-preferences'
 
 const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
   notifyOnTaskComplete: true,
-  enableAiLogging: false
+  enableAiLogging: false,
+  harnessBackend: 'ts'
 }
 
 function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreferences {
@@ -14,7 +15,8 @@ function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreference
       : DEFAULT_AI_EXECUTION_PREFERENCES.notifyOnTaskComplete,
     enableAiLogging: typeof input.enableAiLogging === 'boolean'
       ? input.enableAiLogging
-      : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging
+      : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging,
+    harnessBackend: input.harnessBackend === 'rust' ? 'rust' : 'ts'
   }
 }
 

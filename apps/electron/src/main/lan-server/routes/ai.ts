@@ -1,9 +1,12 @@
 import { Router, type Request, type Response } from 'express'
-import type { AIEngine } from '../../ai-engine/ai-engine.js'
+import type { AIConfigInput } from '../../ai-engine/ai-engine.js'
+import type { AIExecutionEngine } from '../../ai-harness/types.js'
 import type { SettingsStore } from '../../settings/settings-store.js'
 
 interface AIServices {
-  aiEngine: AIEngine
+  aiEngine: AIExecutionEngine
+  resolveAiEngine?: () => Promise<AIExecutionEngine>
+  configureAiEngines?: (config: AIConfigInput) => void
   settingsStore?: SettingsStore
 }
 
@@ -17,7 +20,18 @@ interface ChatMessage {
  */
 export function aiRouter (services: AIServices): Router {
   const router = Router()
-  const { aiEngine } = services
+  const getAiEngine = async (): Promise<AIExecutionEngine> => {
+    return await services.resolveAiEngine?.() || services.aiEngine
+  }
+  const configureAiEngines = (config: AIConfigInput) => {
+    if (services.configureAiEngines) {
+      services.configureAiEngines(config)
+      return
+    }
+    // Legacy callers that do not supply the selector keep their existing
+    // single-engine behavior.
+    ;(services.aiEngine as unknown as { configure?: (input: AIConfigInput) => void }).configure?.(config)
+  }
 
   // Chat with AI
   router.post('/chat', async (req: Request, res: Response) => {
@@ -29,7 +43,7 @@ export function aiRouter (services: AIServices): Router {
         return
       }
 
-      const response = await aiEngine.chat(messages)
+      const response = await (await getAiEngine()).chat(messages)
       res.json(response)
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -37,16 +51,20 @@ export function aiRouter (services: AIServices): Router {
   })
 
   // Get available tools
-  router.get('/tools', (_req: Request, res: Response) => {
-    const tools = aiEngine.getAvailableTools()
-    res.json({ tools })
+  router.get('/tools', async (_req: Request, res: Response) => {
+    try {
+      const tools = (await getAiEngine()).getAvailableTools()
+      res.json({ tools })
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
   })
 
   // Configure AI
   router.post('/configure', (req: Request, res: Response) => {
     try {
       const { apiKey, baseUrl, model } = req.body as { apiKey?: string; baseUrl?: string; model?: string }
-      aiEngine.configure({ apiKey, baseUrl, model })
+      configureAiEngines({ apiKey, baseUrl, model })
       res.json({ success: true })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -80,7 +98,7 @@ export function aiRouter (services: AIServices): Router {
       if (settingsStore) {
         settingsStore.saveAISettings(config)
       }
-      aiEngine.configure(config)
+      configureAiEngines(config)
       res.json({ success: true })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })

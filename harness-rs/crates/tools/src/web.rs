@@ -76,14 +76,22 @@ impl Tool for WebSearchTool {
         let mut results = Vec::new();
         let mut rest = html.as_str();
         while results.len() < 8 {
-            let Some(start) = rest.find("<a rel=\"nofollow\" href=\"") else { break };
+            let Some(start) = rest.find("<a rel=\"nofollow\" href=\"") else {
+                break;
+            };
             let after = &rest[start + "<a rel=\"nofollow\" href=\"".len()..];
-            let Some(url_end) = after.find('"') else { break };
+            let Some(url_end) = after.find('"') else {
+                break;
+            };
             let url = &after[..url_end];
             let after_url = &after[url_end + 1..];
-            let Some(title_start) = after_url.find('>') else { break };
+            let Some(title_start) = after_url.find('>') else {
+                break;
+            };
             let after_title = &after_url[title_start + 1..];
-            let Some(title_end) = after_title.find("</a>") else { break };
+            let Some(title_end) = after_title.find("</a>") else {
+                break;
+            };
             let title = strip_html(&after_title[..title_end]);
             if url.starts_with("http") && !title.is_empty() {
                 results.push(json!({ "title": title, "url": url }));
@@ -92,7 +100,9 @@ impl Tool for WebSearchTool {
         }
 
         if results.is_empty() {
-            return Ok(json!({ "results": [], "note": "搜索无结果或被限流，可改用 web_fetch 抓取已知 URL" }));
+            return Ok(
+                json!({ "results": [], "note": "搜索无结果或被限流，可改用 web_fetch 抓取已知 URL" }),
+            );
         }
         Ok(json!({ "results": results }))
     }
@@ -117,11 +127,18 @@ impl Tool for WebFetchTool {
     }
     async fn execute(&self, input: Value, _services: &ToolServices) -> Result<Value> {
         let url = require_str(&input, "url")?;
-        anyhow::ensure!(url.starts_with("http://") || url.starts_with("https://"), "only http(s) supported");
+        anyhow::ensure!(
+            url.starts_with("http://") || url.starts_with("https://"),
+            "only http(s) supported"
+        );
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (compatible; WorldBaseHarness/1.0)")
             .build()?;
-        let resp = client.get(url).timeout(std::time::Duration::from_secs(20)).send().await?;
+        let resp = client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await?;
         let content_type = resp
             .headers()
             .get("content-type")
@@ -129,7 +146,11 @@ impl Tool for WebFetchTool {
             .unwrap_or("")
             .to_string();
         let body = resp.text().await?;
-        let text = if content_type.contains("html") { strip_html(&body) } else { body };
+        let text = if content_type.contains("html") {
+            strip_html(&body)
+        } else {
+            body
+        };
         let text: String = text.chars().take(50_000).collect();
         Ok(json!({ "url": url, "content_type": content_type, "text": text }))
     }

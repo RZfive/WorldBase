@@ -45,7 +45,8 @@ impl SseParser {
             if let Some(rest) = line.strip_prefix("event:") {
                 self.current_event = Some(rest.trim_start().to_string());
             } else if let Some(rest) = line.strip_prefix("data:") {
-                self.current_data.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+                self.current_data
+                    .push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
             }
             // 其他字段（id:/retry:/注释）忽略
         }

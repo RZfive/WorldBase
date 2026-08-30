@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { type BrowserWindow } from 'electron'
-import { AIEngine, type AIConfigInput, type CustomToolRegistration, type ProgressEvent } from '../ai-engine/ai-engine.js'
+import { type AIConfigInput, type CustomToolRegistration, type ProgressEvent } from '../ai-engine/ai-engine.js'
+import type { AIExecutionEngine } from '../ai-harness/types.js'
 import { t } from '../i18n/main-i18n.js'
 import { focusMainWindow, isNotificationSupported, showAppNotification } from '../notifications.js'
 import type { SkillStore } from '../settings/skill-store.js'
@@ -15,7 +16,8 @@ import {
 
 interface ScheduledTaskServiceOptions {
   store: ScheduledTaskStore
-  aiEngine: AIEngine
+  aiEngine: AIExecutionEngine
+  resolveAiEngine?: () => Promise<AIExecutionEngine>
   skillStore?: SkillStore
   getMainWindow?: () => BrowserWindow | null
   resolveProviderConfig?: (task?: ScheduledTaskDefinition) => AIConfigInput | undefined
@@ -166,6 +168,10 @@ export class ScheduledTaskService {
   private readonly deferredTaskSaves = new Map<string, ScheduledTaskDefinition>()
 
   constructor (private readonly options: ScheduledTaskServiceOptions) {}
+
+  private async getAiEngine (): Promise<AIExecutionEngine> {
+    return await this.options.resolveAiEngine?.() || this.options.aiEngine
+  }
 
   start (): void {
     this.tasks = sortTasks(this.options.store.getTasks()).map(task => this.resolvePersistedTask(task))
@@ -628,7 +634,8 @@ export class ScheduledTaskService {
 
       const executionPrompt = this.options.resolveTaskPrompt?.(task) || task.prompt
       const taskOptions = this.options.resolveTaskOptions?.(task)
-      for await (const event of this.options.aiEngine.chatStream([
+      const aiEngine = await this.getAiEngine()
+      for await (const event of aiEngine.chatStream([
         { role: 'user', content: executionPrompt }
       ], onProgress, {
         providerConfig: this.options.resolveProviderConfig?.(task),

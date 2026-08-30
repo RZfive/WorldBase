@@ -1,38 +1,46 @@
-/// iOS 设计系统：主题、分组列表、导航栏、聊天气泡、输入条等共享组件。
-/// 视觉对齐 Apple HIG：浅色分组列表（iOS 设置 App 风格）、SF 尺寸节奏、
-/// 系统蓝 #007AFF、iOS Messages 气泡。
+/// 共享设计系统（晨昏 2.0）：主题、分组列表、导航栏、聊天气泡、输入条。
+///
+/// 配色定稿方向 A「晨昏」：晨蓝 #5B6BE0 → 曦橙 #E8826B，薄雾蓝分组底。
+/// 对话主页的流体玻璃材质在 core/glass.dart；本文件的组件服务于
+/// 设置/应用/绘图等分组列表页与群组页（深浅色续接见 glass.dart 的 DawnPalette）。
 library;
+
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'glass.dart';
 import 'harness_client.dart';
 import 'markdown_renderer.dart';
 import 'providers.dart';
 
-/// iOS 系统蓝。
-const Color iosBlue = Color(0xFF007AFF);
+/// 晨蓝（晨昏主色，原 iOS 系统蓝 #007AFF 的替换）。
+const Color iosBlue = Color(0xFF5B6BE0);
 const Color iosGreen = Color(0xFF34C759);
 const Color iosRed = Color(0xFFFF3B30);
 const Color iosOrange = Color(0xFFFF9500);
-const Color iosPurple = Color(0xFFAF52DE);
+const Color iosPurple = Color(0xFF9A6BD6);
 const Color iosTeal = Color(0xFF30B0C7);
-const Color iosIndigo = Color(0xFF5856D6);
-const Color iosPink = Color(0xFFFF2D55);
+const Color iosIndigo = Color(0xFF5B6BE0);
+const Color iosPink = Color(0xFFE8826B);
 
-/// 分组列表背景（iOS Settings 同款）。
-const Color iosGroupedBg = Color(0xFFF2F2F7);
+/// 曦橙（渐变副色）。
+const Color dawnCoral = Color(0xFFE8826B);
+
+/// 分组列表背景（薄雾蓝，原冷灰 #F2F2F7 的升温版）。
+const Color iosGroupedBg = Color(0xFFEEF0F6);
 /// 卡片背景。
 const Color iosCardBg = Color(0xFFFFFFFF);
 /// 分隔线。
-const Color iosSeparator = Color(0xFFE5E5EA);
+const Color iosSeparator = Color(0xFFE3E5EE);
 /// 主文字。
-const Color iosLabel = Color(0xFF000000);
+const Color iosLabel = Color(0xFF24252D);
 /// 次级文字。
-const Color iosSecondaryLabel = Color(0xFF8E8E93);
-/// 助手气泡背景（iOS Messages 灰）。
-const Color iosBubbleGray = Color(0xFFE9E9EB);
+const Color iosSecondaryLabel = Color(0xFF6A6F85);
+/// 助手气泡背景（晨昏雾白）。
+const Color iosBubbleGray = Color(0xFFF7F8FC);
 
 /// App 全局主题：iOS 观感的浅色 Material 容器（保留 Navigator 能力）。
 ThemeData buildIosTheme() {
@@ -62,6 +70,34 @@ ThemeData buildIosTheme() {
   );
 }
 
+/// 晨昏深色主题：夜色蓝紫底,玻璃高光保留(对话主页的深色由 DawnPalette 驱动)。
+ThemeData buildDawnDarkTheme() {
+  final base = ThemeData(
+    useMaterial3: true,
+    brightness: Brightness.dark,
+    platform: TargetPlatform.iOS,
+    colorScheme: const ColorScheme.dark(
+      primary: Color(0xFF8B96F0),
+      onPrimary: Color(0xFF14161F),
+      surface: Color(0xFF1C1E28),
+      onSurface: Color(0xFFECEDF2),
+    ),
+  );
+  return base.copyWith(
+    scaffoldBackgroundColor: const Color(0xFF14161F),
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {TargetPlatform.iOS: CupertinoPageTransitionsBuilder(), TargetPlatform.macOS: CupertinoPageTransitionsBuilder()},
+    ),
+    textTheme: base.textTheme.apply(
+      bodyColor: const Color(0xFFECEDF2),
+      displayColor: const Color(0xFFECEDF2),
+      fontFamilyFallback: const ['SF Pro Text', 'SF Pro Display', 'PingFang SC', 'Helvetica Neue'],
+    ),
+    dialogTheme: const DialogThemeData(backgroundColor: Color(0xFF1C1E28), surfaceTintColor: Colors.transparent),
+    splashFactory: NoSplash.splashFactory,
+  );
+}
+
 /// iOS 紧凑导航栏（无标题文字，图标左右分布，44pt 高）。
 class IosNavBar extends StatelessWidget {
   const IosNavBar({super.key, this.leading, this.actions = const [], this.bottom});
@@ -72,26 +108,32 @@ class IosNavBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: iosGroupedBg.withValues(alpha: 0.94),
-      child: Column(
-        children: [
-          SizedBox(
-            height: 44,
-            child: Row(
-              children: [
-                if (leading != null)
-                  Padding(padding: const EdgeInsets.only(left: 4), child: leading!)
-                else
-                  const SizedBox(width: 12),
-                const Spacer(),
-                ...actions.map((a) => Padding(padding: const EdgeInsets.only(right: 6), child: a)),
-                const SizedBox(width: 6),
-              ],
-            ),
+    final p = DawnPalette.of(context);
+    return ClipRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          color: p.groupedBg.withValues(alpha: 0.82),
+          child: Column(
+            children: [
+              SizedBox(
+                height: 44,
+                child: Row(
+                  children: [
+                    if (leading != null)
+                      Padding(padding: const EdgeInsets.only(left: 4), child: leading!)
+                    else
+                      const SizedBox(width: 12),
+                    const Spacer(),
+                    ...actions.map((a) => Padding(padding: const EdgeInsets.only(right: 6), child: a)),
+                    const SizedBox(width: 6),
+                  ],
+                ),
+              ),
+              if (bottom != null) bottom!,
+            ],
           ),
-          if (bottom != null) bottom!,
-        ],
+        ),
       ),
     );
   }
@@ -107,7 +149,7 @@ class IosScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: iosGroupedBg,
+      backgroundColor: DawnPalette.of(context).groupedBg,
       drawer: null,
       body: Column(
         children: [
@@ -129,6 +171,7 @@ class IosSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -136,34 +179,34 @@ class IosSection extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(left: 20, right: 20, top: 14, bottom: 6),
             child: Text(header!,
-                style: const TextStyle(fontSize: 13, color: iosSecondaryLabel, letterSpacing: -0.1)),
+                style: TextStyle(fontSize: 13, color: p.ink2, letterSpacing: -0.1)),
           ),
         Container(
           margin: const EdgeInsets.symmetric(horizontal: 16),
           decoration: BoxDecoration(
-            color: iosCardBg,
-            borderRadius: BorderRadius.circular(12),
+            color: p.cardBg,
+            borderRadius: BorderRadius.circular(16),
           ),
           clipBehavior: Clip.antiAlias,
-          child: Column(children: _withSeparators(children)),
+          child: Column(children: _withSeparators(children, p)),
         ),
         if (footer != null)
           Padding(
             padding: const EdgeInsets.only(left: 20, right: 20, top: 6),
-            child: Text(footer!, style: const TextStyle(fontSize: 12, color: iosSecondaryLabel)),
+            child: Text(footer!, style: TextStyle(fontSize: 12, color: p.ink2)),
           ),
       ],
     );
   }
 
-  List<Widget> _withSeparators(List<Widget> items) {
+  List<Widget> _withSeparators(List<Widget> items, DawnPalette p) {
     final out = <Widget>[];
     for (var i = 0; i < items.length; i++) {
       out.add(items[i]);
       if (i != items.length - 1) {
-        out.add(const Padding(
-          padding: EdgeInsets.only(left: 56),
-          child: Divider(height: 1, thickness: 0.5, color: iosSeparator),
+        out.add(Padding(
+          padding: const EdgeInsets.only(left: 56),
+          child: Divider(height: 1, thickness: 0.5, color: p.separator),
         ));
       }
     }
@@ -194,6 +237,7 @@ class IosRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return CupertinoButton(
       padding: EdgeInsets.zero,
       onPressed: onTap,
@@ -220,13 +264,13 @@ class IosRow extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(title,
-                        style: const TextStyle(fontSize: 16, letterSpacing: -0.3),
+                        style: TextStyle(fontSize: 16, letterSpacing: -0.3, color: p.ink),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis),
                     if (subtitle != null && subtitle!.isNotEmpty) ...[
                       const SizedBox(height: 1),
                       Text(subtitle!,
-                          style: const TextStyle(fontSize: 12.5, color: iosSecondaryLabel),
+                          style: TextStyle(fontSize: 12.5, color: p.ink2),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis),
                     ],
@@ -256,7 +300,7 @@ class IosIconButton extends StatelessWidget {
       padding: const EdgeInsets.all(6),
       minSize: 0,
       onPressed: onPressed,
-      child: Icon(icon, size: 22, color: iosBlue),
+      child: Icon(icon, size: 22, color: DawnPalette.of(context).indigo),
     );
   }
 }
@@ -313,6 +357,7 @@ class IosBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
@@ -330,12 +375,20 @@ class IosBubble extends StatelessWidget {
                 .clamp(260.0, 680.0),
           ),
           decoration: BoxDecoration(
-            color: isUser ? iosBlue : iosBubbleGray,
+            color: isUser ? null : p.cardBg,
+            gradient: isUser
+                ? const LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xFF5B6BE0), Color(0xFF9A6BD6), Color(0xFFE8826B)],
+                  )
+                : null,
+            border: isUser ? null : Border.all(color: p.separator),
             borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(18),
-              topRight: const Radius.circular(18),
-              bottomLeft: Radius.circular(isUser ? 18 : 5),
-              bottomRight: Radius.circular(isUser ? 5 : 18),
+              topLeft: const Radius.circular(21),
+              topRight: const Radius.circular(21),
+              bottomLeft: Radius.circular(isUser ? 21 : 8),
+              bottomRight: Radius.circular(isUser ? 8 : 21),
             ),
           ),
           child: Column(
@@ -345,8 +398,8 @@ class IosBubble extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 2),
                   child: Text('@$member',
-                      style: const TextStyle(
-                          fontSize: 12, fontWeight: FontWeight.w600, color: iosBlue)),
+                      style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600, color: p.indigo)),
                 ),
               MarkdownMessage(
                 data: text.isEmpty && isStreaming ? '…' : text,
@@ -376,6 +429,7 @@ class IosToolCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
@@ -383,14 +437,14 @@ class IosToolCard extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
         constraints: const BoxConstraints(maxWidth: 300),
         decoration: BoxDecoration(
-          color: const Color(0xFFFFFFFF),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: isError ? iosRed.withValues(alpha: 0.4) : iosSeparator),
+          color: p.cardBg,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: isError ? iosRed.withValues(alpha: 0.4) : p.separator),
           boxShadow: [
             BoxShadow(
-              color: const Color(0x14000000),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
+              color: p.shadowColor.withValues(alpha: 0.12),
+              blurRadius: 16,
+              offset: const Offset(0, 6),
             ),
           ],
         ),
@@ -401,7 +455,7 @@ class IosToolCard extends StatelessWidget {
             Icon(
               isError ? CupertinoIcons.exclamationmark_circle_fill : CupertinoIcons.wrench_fill,
               size: 15,
-              color: isError ? iosRed : iosBlue,
+              color: isError ? iosRed : p.indigo,
             ),
             const SizedBox(width: 7),
             Flexible(
@@ -409,10 +463,10 @@ class IosToolCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('工具 · $name',
-                      style: const TextStyle(
-                          fontSize: 12, fontWeight: FontWeight.w600, letterSpacing: -0.2)),
+                      style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600, letterSpacing: -0.2, color: p.ink)),
                   const SizedBox(height: 2),
-                  Text(text, style: const TextStyle(fontSize: 12, color: iosSecondaryLabel)),
+                  Text(text, style: TextStyle(fontSize: 12, color: p.ink2)),
                 ],
               ),
             ),
@@ -440,11 +494,12 @@ class IosChatInputBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return Container(
-      padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
-      decoration: const BoxDecoration(
-        color: iosGroupedBg,
-        border: Border(top: BorderSide(color: iosSeparator, width: 0.5)),
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+      decoration: BoxDecoration(
+        color: p.groupedBg,
+        border: Border(top: BorderSide(color: p.separator, width: 0.5)),
       ),
       child: SafeArea(
         top: false,
@@ -455,13 +510,14 @@ class IosChatInputBar extends StatelessWidget {
               child: CupertinoTextField(
                 controller: controller,
                 placeholder: hint,
-                padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+                placeholderStyle: TextStyle(fontSize: 16, color: p.ink3),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                 decoration: BoxDecoration(
-                  color: iosCardBg,
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: iosSeparator),
+                  color: p.cardBg,
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: p.separator),
                 ),
-                style: const TextStyle(fontSize: 16, letterSpacing: -0.3, color: iosLabel),
+                style: TextStyle(fontSize: 16, letterSpacing: -0.3, color: p.ink),
                 onSubmitted: onSubmitted,
                 minLines: 1,
                 maxLines: 4,
@@ -473,8 +529,15 @@ class IosChatInputBar extends StatelessWidget {
               child: Container(
                 width: 32,
                 height: 32,
-                decoration: const BoxDecoration(color: iosBlue, shape: BoxShape.circle),
-                child: const Icon(CupertinoIcons.arrow_up, size: 18, color: Color(0xFFFFFFFF)),
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xFF5B6BE0), Color(0xFFE8826B)],
+                  ),
+                ),
+                child: const Icon(CupertinoIcons.arrow_up, size: 17, color: Color(0xFFFFFFFF)),
               ),
             ),
           ],
@@ -508,36 +571,6 @@ class IosPrimaryButton extends StatelessWidget {
   }
 }
 
-/// 底部 Tab 栏（CupertinoTabBar）。
-class IosTabBar extends StatelessWidget {
-  const IosTabBar({required this.currentIndex, required this.onTap, super.key});
-
-  final int currentIndex;
-  final ValueChanged<int> onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return CupertinoTabBar(
-      currentIndex: currentIndex,
-      onTap: onTap,
-      backgroundColor: const Color(0xF9F9F9F9),
-      activeColor: iosBlue,
-      inactiveColor: iosSecondaryLabel,
-      height: 52,
-      items: const [
-        BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.chat_bubble, size: 24), label: '对话'),
-        BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.square_grid_2x2, size: 24), label: '应用'),
-        BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.star_fill, size: 24), label: '绘图'),
-        BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.person_crop_circle, size: 24), label: '我的'),
-      ],
-    );
-  }
-}
-
 /// iOS 空态视图。
 class IosEmptyHint extends StatelessWidget {
   const IosEmptyHint({required this.icon, required this.title, this.subtitle, super.key});
@@ -548,18 +581,19 @@ class IosEmptyHint extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 52, color: const Color(0xFFC7C7CC)),
+          Icon(icon, size: 52, color: p.ink3),
           const SizedBox(height: 12),
           Text(title,
-              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600, letterSpacing: -0.4)),
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, letterSpacing: -0.4, color: p.ink)),
           if (subtitle != null) ...[
             const SizedBox(height: 4),
             Text(subtitle!, textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+                style: TextStyle(fontSize: 13, color: p.ink2)),
           ],
         ],
       ),
@@ -581,7 +615,7 @@ PageRouteBuilder cupertinoRoute(Widget page) {
   );
 }
 
-/// Drawer 白色化容器（会话抽屉用）。
+/// 抽屉/子页通用容器（分组底,跟随深浅色）。
 class IosDrawer extends StatelessWidget {
   const IosDrawer({required this.child, super.key});
 
@@ -590,7 +624,7 @@ class IosDrawer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Drawer(
-      backgroundColor: iosGroupedBg,
+      backgroundColor: DawnPalette.of(context).groupedBg,
       shape: const RoundedRectangleBorder(),
       child: child,
     );

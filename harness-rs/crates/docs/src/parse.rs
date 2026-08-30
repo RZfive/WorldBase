@@ -61,7 +61,8 @@ fn sheets_text(sheets: &[Value]) -> String {
 }
 
 pub fn pdf(path: &std::path::Path) -> Result<Value> {
-    let doc = lopdf::Document::load(path).with_context(|| format!("load pdf {}", path.display()))?;
+    let doc =
+        lopdf::Document::load(path).with_context(|| format!("load pdf {}", path.display()))?;
     let mut text = String::new();
     for page_id in doc.get_pages().keys() {
         if let Ok(content) = doc.extract_text(&[*page_id]) {
@@ -73,7 +74,8 @@ pub fn pdf(path: &std::path::Path) -> Result<Value> {
 }
 
 pub fn docx(path: &std::path::Path) -> Result<Value> {
-    let file = std::fs::File::open(path).with_context(|| format!("open docx {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("open docx {}", path.display()))?;
     let mut archive = zip::ZipArchive::new(file)?;
     let mut document_xml = String::new();
     for i in 0..archive.len() {
@@ -99,9 +101,13 @@ pub fn extract_docx_paragraphs(xml: &str) -> Vec<String> {
         let mut rest = para_xml;
         while let Some(start) = rest.find("<w:t") {
             let after = &rest[start..];
-            let Some(tag_end) = after.find('>') else { break };
+            let Some(tag_end) = after.find('>') else {
+                break;
+            };
             let body = &after[tag_end + 1..];
-            let Some(end) = body.find("</w:t>") else { break };
+            let Some(end) = body.find("</w:t>") else {
+                break;
+            };
             text.push_str(&body[..end]);
             rest = &body[end + 6..];
         }

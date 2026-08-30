@@ -8,9 +8,11 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
+rusqlite = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+zip = { workspace = true }
 worldbase-protocol = { path = "../protocol" }
 
 [dev-dependencies]

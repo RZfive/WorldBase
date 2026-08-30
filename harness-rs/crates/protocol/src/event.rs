@@ -20,7 +20,11 @@ pub struct EventFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum EventKind {
     /// 流开始。
     Start { model: String },
@@ -29,21 +33,70 @@ pub enum EventKind {
     /// 文本增量。
     Delta { text: String },
     /// 发起工具调用。
-    ToolCall { call_id: String, name: String, args: Value },
+    ToolCall {
+        call_id: String,
+        name: String,
+        args: Value,
+    },
     /// 工具执行完成。
-    ToolResult { call_id: String, name: String, content: String, is_error: bool },
+    ToolResult {
+        call_id: String,
+        name: String,
+        content: String,
+        is_error: bool,
+    },
     /// 权限询问（宿主需以 chat.respond 应答）。
-    PermissionRequest { request_id: String, tool_name: String, args_summary: String },
+    PermissionRequest {
+        request_id: String,
+        tool_name: String,
+        args_summary: String,
+    },
     /// 本轮完整助手消息（含工具调用记录）。
     AssistantMessage { content: String },
     /// 群组：成员发言。
-    GroupMessage { member: String, round: u32, content: String },
-    /// 群组：黑板更新。
-    BoardUpdate { board: crate::types::GroupBoard },
+    GroupMessage {
+        member: String,
+        round: u32,
+        content: String,
+    },
+    /// 群组：黑板更新。`update` is present for a first-class collaboration
+    /// tool write and absent for a legacy/full-board refresh.
+    BoardUpdate {
+        board: crate::types::GroupBoard,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        update: Option<crate::types::GroupBoardUpdate>,
+    },
+    /// 群组：成员之间的同步咨询状态。
+    GroupPeerMessage {
+        message: crate::types::GroupPeerMessage,
+    },
+    /// 群组：成员直接发给最终用户的回复。
+    GroupDirectReply {
+        reply: crate::types::GroupDirectReply,
+    },
     /// 图像生成完成（携带条目）。
     ImageReady { entry: crate::types::ImageEntry },
+    /// One completed model request's usage and the current run totals. Hosts
+    /// use this to update their own usage stores and live cost display.
+    Usage {
+        provider_id: Option<String>,
+        provider_name: String,
+        model: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+        cost: f64,
+        total_cost: f64,
+        total_input_tokens: u64,
+        total_output_tokens: u64,
+    },
     /// 宿主反向请求（宿主必须以 host.respond 应答）。
-    HostRequest { request_id: String, request_kind: String, payload: serde_json::Value },
+    HostRequest {
+        request_id: String,
+        request_kind: String,
+        payload: serde_json::Value,
+    },
     /// 通知类（后台任务、scheduler 触发等）。
     Notice { text: String },
     /// 流正常结束。
@@ -64,7 +117,10 @@ impl EventKind {
             EventKind::AssistantMessage { .. } => "assistant_message",
             EventKind::GroupMessage { .. } => "group_message",
             EventKind::BoardUpdate { .. } => "board_update",
+            EventKind::GroupPeerMessage { .. } => "group_peer_message",
+            EventKind::GroupDirectReply { .. } => "group_direct_reply",
             EventKind::ImageReady { .. } => "image_ready",
+            EventKind::Usage { .. } => "usage",
             EventKind::HostRequest { .. } => "host_request",
             EventKind::Notice { .. } => "notice",
             EventKind::Done { .. } => "done",
@@ -121,7 +177,10 @@ pub struct StreamChannel {
 impl StreamChannel {
     pub fn new() -> Self {
         let (tx, _rx) = tokio::sync::broadcast::channel(1024);
-        Self { buffer: tokio::sync::Mutex::new(EventBuffer::new()), tx }
+        Self {
+            buffer: tokio::sync::Mutex::new(EventBuffer::new()),
+            tx,
+        }
     }
 
     pub async fn publish(&self, stream_id: &str, kind: EventKind) -> u64 {
@@ -129,12 +188,26 @@ impl StreamChannel {
             let mut buf = self.buffer.lock().await;
             buf.push(stream_id, kind.clone())
         };
-        let _ = self.tx.send(EventFrame { stream_id: stream_id.into(), seq, ts: now_rfc3339(), kind });
+        let _ = self.tx.send(EventFrame {
+            stream_id: stream_id.into(),
+            seq,
+            ts: now_rfc3339(),
+            kind,
+        });
         seq
     }
 
     pub async fn replay(&self, after_seq: i64) -> Vec<EventFrame> {
         self.buffer.lock().await.after(after_seq)
+    }
+
+    /// Snapshot the newest event currently buffered by this stream. A caller
+    /// can subscribe before starting a nested run and then replay only frames
+    /// produced by that run, even when several runs intentionally share one
+    /// parent stream (native group deliberation).
+    pub async fn latest_seq(&self) -> i64 {
+        let buffer = self.buffer.lock().await;
+        buffer.next_seq as i64 - 1
     }
 }
 
@@ -185,7 +258,15 @@ mod tests {
         let mut buf = EventBuffer::new();
         assert_eq!(buf.push("s", EventKind::Start { model: "m".into() }), 0);
         assert_eq!(buf.push("s", EventKind::Delta { text: "a".into() }), 1);
-        assert_eq!(buf.push("s", EventKind::Done { stop_reason: "end".into() }), 2);
+        assert_eq!(
+            buf.push(
+                "s",
+                EventKind::Done {
+                    stop_reason: "end".into()
+                }
+            ),
+            2
+        );
         let replay = buf.after(1);
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].seq, 2);

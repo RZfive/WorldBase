@@ -29,7 +29,11 @@ impl Tool for MemoryAddTool {
         let content = require_str(&input, "content")?;
         let tags: Vec<String> = input["tags"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let id = services.store.add_memory(content, &tags)?;
         Ok(json!({ "id": id, "stored": true }))
@@ -85,7 +89,9 @@ impl Tool for MemoryDeleteTool {
         "ask"
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let id = input["id"].as_i64().ok_or_else(|| anyhow::anyhow!("missing id"))?;
+        let id = input["id"]
+            .as_i64()
+            .ok_or_else(|| anyhow::anyhow!("missing id"))?;
         let deleted = services.store.delete_memory(id)?;
         Ok(json!({ "deleted": deleted }))
     }

@@ -79,7 +79,12 @@ impl Tool for ReadCurrentPageTool {
     async fn execute(&self, _input: Value, services: &ToolServices) -> Result<Value> {
         let stream = services.current_stream.lock().unwrap().clone();
         tools_host_bridge(services)
-            .request(&stream, "page_automation", json!({ "action": "read" }), PAGE_TIMEOUT)
+            .request(
+                &stream,
+                "page_automation",
+                json!({ "action": "read" }),
+                PAGE_TIMEOUT,
+            )
             .await
     }
 }

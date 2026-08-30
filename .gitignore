@@ -36,6 +36,7 @@ dist-electron/
 apps/electron/dist/
 apps/electron/dist-electron/
 apps/electron/release/
+apps/electron/resources/harness/
 
 # Flutter build output
 apps/mobile/.dart_tool/

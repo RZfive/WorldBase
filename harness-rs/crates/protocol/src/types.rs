@@ -41,7 +41,11 @@ impl Capabilities {
                 // 移动端 UI 可应答权限询问 / ask_user / 页面自动化
                 "interactive".into(),
             ],
-            excludes: vec!["subprocess".into(), "port_binding".into(), "webhook_receiver".into()],
+            excludes: vec![
+                "subprocess".into(),
+                "port_binding".into(),
+                "webhook_receiver".into(),
+            ],
         }
     }
 
@@ -119,12 +123,33 @@ pub struct ChatMessage {
     pub role: Role,
     /// 纯文本视图（渲染用）；工具调用见 `tool_calls` / `tool_results`。
     pub content: String,
+    /// 原始多模态内容块。`content` 始终保留可检索的纯文本视图，`parts` 则保留
+    /// 图片等提供商需要的 payload，避免 Electron -> Rust 同步时丢失附件。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ChatContentPart>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_results: Vec<ToolResultRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+}
+
+/// 与 Electron 的 `MessageContent` 对齐的可持久化消息内容块。
+///
+/// 当前公开聊天协议支持文本和 data/HTTP image URL；未知块由 Electron 在发送前
+/// 归一为文本附件摘要，确保旧客户端仍能与新 app-server 互通。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageUrl {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +197,24 @@ pub struct ConversationDetail {
     pub messages: Vec<ChatMessage>,
 }
 
+/// Electron → Rust conversation history synchronization payload.
+/// The current user turn is excluded so `chat.send` appends it exactly once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSyncParams {
+    pub id: String,
+    #[serde(default = "default_conversation_title")]
+    pub title: String,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub messages: Vec<ChatMessage>,
+}
+
+fn default_conversation_title() -> String {
+    "新对话".into()
+}
+
 /// chat.send 参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,6 +229,61 @@ pub struct ChatSendParams {
     /// 本条消息使用的模型覆盖。
     #[serde(default)]
     pub model: Option<String>,
+    /// Structured content for the pending user message. `text` remains the
+    /// canonical plain-text projection for storage/search and old clients.
+    #[serde(default)]
+    pub content_parts: Vec<ChatContentPart>,
+    #[serde(flatten)]
+    pub context: ChatRunContext,
+}
+
+/// Ephemeral execution context passed by an Electron host for one agent run.
+/// It is intentionally separate from the persisted conversation and agent
+/// definition: settings, group state and a selected folder can change between
+/// turns without mutating the reusable agent record.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatRunContext {
+    /// Per-run prompt additions supplied by Electron's agent/group/memory
+    /// context. They are deliberately run-scoped and never persisted as an
+    /// agent's base persona.
+    #[serde(default)]
+    pub system_prompt_sections: Vec<String>,
+    #[serde(default)]
+    pub active_skill_contents: Vec<String>,
+    /// Electron agent policy. An empty allow list means all tools; deny always
+    /// wins. Custom descriptors are host-executed domain tools.
+    #[serde(default)]
+    pub allowed_tool_names: Vec<String>,
+    #[serde(default)]
+    pub denied_tool_names: Vec<String>,
+    #[serde(default)]
+    pub custom_tools: Vec<ToolDescriptor>,
+    /// The selected folder workspace only affects workspace tools. Managed
+    /// project tools continue resolving `project_id` in the app project's root.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub target_project_id: Option<String>,
+    /// Restricts this run to the Electron MCP server IDs explicitly selected
+    /// by the caller. `None` means every enabled configured server; an
+    /// explicit empty list deliberately exposes no MCP server.
+    #[serde(default)]
+    pub allowed_mcp_server_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Electron can enable plan mode before a run starts. Rust owns the
+    /// execution-time guard so stale tool schemas and MCP calls cannot bypass
+    /// the plan restriction.
+    #[serde(default)]
+    pub plan_mode_active: bool,
+    /// Per-run dollar (or configured currency) cap supplied by Electron.
+    /// Rust checks this after every completed provider call before it starts
+    /// another agent-loop iteration.
+    #[serde(default)]
+    pub budget_limit: Option<f64>,
 }
 
 /// chat.send 返回：流 id，事件经通知下发。
@@ -256,7 +354,12 @@ pub struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         // 无 key 时用 mock provider，保证 harness 全链路可运行、可测试。
-        Self { kind: "mock".into(), model: "mock-1".into(), api_key: String::new(), base_url: None }
+        Self {
+            kind: "mock".into(),
+            model: "mock-1".into(),
+            api_key: String::new(),
+            base_url: None,
+        }
     }
 }
 
@@ -299,6 +402,9 @@ pub struct ModelInfo {
     /// 输出单价（/ 1M tokens）。
     #[serde(default)]
     pub output_price: f64,
+    /// Cached-input price (/ 1M tokens), when the provider reports it.
+    #[serde(default)]
+    pub cache_read_price: f64,
     /// 该模型支持图片生成（OpenAI images 接口）。
     #[serde(default)]
     pub image_generation: bool,
@@ -336,10 +442,121 @@ pub struct AgentDefinition {
     pub model_id: Option<String>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    #[serde(default = "default_agent_reasoning_strength")]
+    pub reasoning_strength: String,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub denied_tools: Vec<String>,
+    #[serde(default = "default_agent_memory_scopes")]
+    pub memory_scopes: Vec<String>,
+    #[serde(default)]
+    pub memory_write_policy: AgentMemoryWritePolicy,
+    #[serde(default)]
+    pub auto_reply_policy: AgentAutoReplyPolicy,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
+}
+
+fn default_agent_reasoning_strength() -> String {
+    "medium".into()
+}
+
+fn default_agent_memory_scopes() -> Vec<String> {
+    vec!["user".into(), "agent".into(), "project".into()]
+}
+
+/// Memory write permissions attached to an Agent Workspace agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMemoryWritePolicy {
+    #[serde(default = "default_true")]
+    pub allow_user_traits: bool,
+    #[serde(default = "default_true")]
+    pub allow_agent_skills: bool,
+    #[serde(default = "default_true")]
+    pub allow_steps: bool,
+    #[serde(default = "default_true")]
+    pub allow_knowledge: bool,
+}
+
+impl Default for AgentMemoryWritePolicy {
+    fn default() -> Self {
+        Self {
+            allow_user_traits: true,
+            allow_agent_skills: true,
+            allow_steps: true,
+            allow_knowledge: true,
+        }
+    }
+}
+
+/// Auto-reply policy used by channel/group routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAutoReplyPolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub require_mention: bool,
+}
+
+impl Default for AgentAutoReplyPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_mention: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Durable Agent Workspace group definition.  This is intentionally kept
+/// separate from [`GroupSessionMeta`], which represents a live collaboration
+/// run.  The shape mirrors Electron's `AgentGroupDefinition` so the settings
+/// IPC can switch ownership without converting through the session model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentGroupDefinition {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub coordinator_agent_id: String,
+    #[serde(default)]
+    pub member_agent_ids: Vec<String>,
+    #[serde(default = "default_agent_group_max_rounds")]
+    pub max_rounds: u32,
+    #[serde(default = "default_agent_group_parallel_workers")]
+    pub max_parallel_workers: u32,
+    #[serde(default)]
+    pub shared_memory_scopes: Vec<String>,
+    #[serde(default = "default_agent_group_visibility")]
+    pub visibility: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+fn default_agent_group_max_rounds() -> u32 {
+    2
+}
+
+fn default_agent_group_parallel_workers() -> u32 {
+    2
+}
+
+fn default_agent_group_visibility() -> String {
+    "summary_only".to_string()
 }
 
 /// 会话分叉/编辑请求（对齐桌面 message-branching）。
@@ -394,11 +611,38 @@ pub struct ImageQuery {
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
+    pub offset: Option<u32>,
+    #[serde(default)]
     pub folder: Option<String>,
     #[serde(default)]
     pub tag: Option<String>,
+    /// All requested tags must be present. `tag` is retained as the compact
+    /// legacy spelling used by the original Studio RPC.
+    #[serde(default)]
+    pub tags: Vec<String>,
     #[serde(default)]
     pub search: Option<String>,
+}
+
+/// Rust-owned paginated image-library result. The Electron renderer maps this
+/// to its URL-bearing view type; byte serving remains a host protocol concern.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagePage {
+    pub images: Vec<ImageEntry>,
+    pub total: u32,
+    #[serde(default)]
+    pub next_offset: Option<u32>,
+}
+
+/// Folder metadata including image IDs suitable for host-generated covers.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFolder {
+    pub name: String,
+    pub count: u32,
+    #[serde(default)]
+    pub cover_image_ids: Vec<String>,
 }
 
 /// 轻应用（Agent 生成的单页应用）。
@@ -469,6 +713,10 @@ pub struct ImageGenerateParams {
     /// "1:1" | "3:2" | "2:3" | "16:9" | "9:16" | "4:3" | "3:4"
     #[serde(default)]
     pub aspect: Option<String>,
+    /// Explicit pixel size (for example 1024x1024), taking precedence over
+    /// aspect/resolution exactly as Electron's Image Studio does.
+    #[serde(default)]
+    pub size: Option<String>,
     /// "1K"（默认）| "2K" | "4K"
     #[serde(default)]
     pub resolution: Option<String>,
@@ -488,6 +736,15 @@ pub struct ImageGenerateParams {
     /// edit 模式的参考图（base64，来自图库或上传）。
     #[serde(default)]
     pub input_image_b64: Option<String>,
+    /// Image Studio's native data-URL list for multi-image edits.
+    #[serde(default)]
+    pub input_images: Vec<String>,
+    /// Optional gallery folder for generated entries.
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// Optional gallery tags for generated entries.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// 群组黑板（对齐桌面 SharedBoard 六字段）。
@@ -499,13 +756,91 @@ pub struct GroupBoard {
     #[serde(default)]
     pub assumptions: Vec<String>,
     #[serde(default)]
-    pub tasks: Vec<String>,
+    pub tasks: Vec<GroupBoardTask>,
     #[serde(default)]
     pub decisions: Vec<String>,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub open_questions: Vec<String>,
+}
+
+/// A structured shared-board task. Electron has always treated tasks
+/// differently from the board's other string lists: ownership, lifecycle and
+/// a short status summary are part of the native group contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupBoardTask {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<String>,
+    #[serde(default = "default_group_task_status")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+fn default_group_task_status() -> String {
+    "todo".into()
+}
+
+/// A field-level board mutation recorded by the Rust-owned group session.
+/// Keeping the original JSON payload mirrors Electron's audit log and avoids
+/// flattening task updates into lossy text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupBoardUpdate {
+    pub id: String,
+    pub group_id: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub field: String,
+    pub op: String,
+    pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub at: String,
+}
+
+/// A point-to-point group consultation. It is emitted twice, once while the
+/// target is running and again with its terminal status, just like Electron's
+/// GroupSession message bus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPeerMessage {
+    pub id: String,
+    pub group_id: String,
+    pub from_agent_id: String,
+    pub from_agent_name: String,
+    pub to_agent_id: String,
+    pub to_agent_name: String,
+    pub request: String,
+    #[serde(default)]
+    pub response: String,
+    pub status: String,
+    pub round: u32,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A direct member reply to the end user, surfaced through the parent native
+/// group stream rather than being relayed by Electron's TypeScript harness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupDirectReply {
+    pub id: String,
+    pub group_id: String,
+    pub group_name: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub content: String,
+    pub round: u32,
+    pub endorsed: bool,
+    pub at: String,
 }
 
 /// 宿主反向请求帧（harness → 宿主，宿主以 host.respond 应答）。
@@ -582,6 +917,14 @@ pub enum GroupMode {
 pub struct GroupMember {
     pub name: String,
     pub persona: String,
+    /// Durable Electron agent ID. When present, Rust resolves the member's
+    /// persisted persona, provider/model selection, and tool policy itself.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub allowed_tool_names: Vec<String>,
+    #[serde(default)]
+    pub denied_tool_names: Vec<String>,
     #[serde(default)]
     pub provider: Option<ProviderConfig>,
 }
@@ -600,14 +943,53 @@ pub struct GroupSessionMeta {
     /// 黑板（六字段结构化）。
     #[serde(default)]
     pub board: GroupBoard,
+    /// Latest first-class board mutations, oldest first. The renderer only
+    /// needs a short tail, but retaining the session log makes native group
+    /// state inspectable through `group.get` as well.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub board_updates: Vec<GroupBoardUpdate>,
     #[serde(default)]
     pub rounds: Vec<GroupRoundRecord>,
     /// 协调者成员名（默认第一个成员）。
     #[serde(default)]
     pub coordinator: Option<String>,
+    /// Maximum number of members that may execute at once in a round. This
+    /// mirrors Electron's group setting so the Rust route owns scheduling as
+    /// well as the member/tool execution itself.
+    #[serde(default = "default_group_max_parallel_workers")]
+    pub max_parallel_workers: usize,
     /// HITL 注入队列（下一轮发言时进入上下文）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_injections: Vec<String>,
+    pub pending_injections: Vec<GroupUserInjection>,
+    /// Durable members whose current round has not been finalized. This is
+    /// used to validate live HITL injection targets in the Rust control plane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_member_ids: Vec<String>,
+}
+
+fn default_group_max_parallel_workers() -> usize {
+    2
+}
+
+/// A live user clarification for a native group. An empty target list means
+/// broadcast; otherwise only matching durable member IDs receive it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupUserInjection {
+    #[serde(default)]
+    pub id: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_agent_ids: Vec<String>,
+    #[serde(default)]
+    pub round: u32,
+    #[serde(default)]
+    pub created_at: String,
+    /// Internal delivery acknowledgements. They let a late live injection
+    /// survive into the next round instead of being discarded merely because
+    /// its target completed before the local executor observed it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivered_to_agent_ids: Vec<String>,
 }
 
 /// 一轮发言记录。

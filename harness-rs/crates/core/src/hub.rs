@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use worldbase_memory::Store;
 use worldbase_mcp_client::McpManager;
+use worldbase_memory::Store;
 use worldbase_protocol::event::StreamChannel;
-use worldbase_protocol::types::{Capabilities, ProviderConfig};
+use worldbase_protocol::types::{Capabilities, ChatRunContext, ProviderConfig};
 use worldbase_scheduler::Scheduler;
 use worldbase_skills::SkillRegistry;
 use worldbase_tools::{filter_tools, Tool, ToolServices};
@@ -24,6 +24,13 @@ pub struct RunHandle {
     /// 本轮对话的供应商/模型覆盖（客户端快速切换）。
     pub provider_id: Option<String>,
     pub model: Option<String>,
+    /// Host-provided execution context for this stream. It must never bleed
+    /// into a concurrent conversation, so it lives on the run handle instead
+    /// of Hub-wide mutable state.
+    pub context: ChatRunContext,
+    /// Present only for a Rust-native group member. The collaboration tool
+    /// implementations live in core, while tools only see this trait object.
+    pub group_collaboration: Option<Arc<dyn worldbase_tools::GroupCollaborationRuntime>>,
 }
 
 pub struct Hub {
@@ -42,11 +49,13 @@ pub struct Hub {
     /// request_id → 权限应答 sender。
     pub pending_permissions: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
     /// group 会话（内存态；黑板/轮次见 group crate）。
-    pub group_sessions: std::sync::Mutex<HashMap<String, worldbase_protocol::types::GroupSessionMeta>>,
+    pub group_sessions:
+        std::sync::Mutex<HashMap<String, worldbase_protocol::types::GroupSessionMeta>>,
     /// 全局事件广播（serve/app-server 向宿主转发）。
     pub event_tx: tokio::sync::broadcast::Sender<worldbase_protocol::event::EventFrame>,
     /// 直接注入的 provider（测试/特殊部署覆盖 settings 配置）。
-    pub custom_provider: std::sync::Mutex<Option<std::sync::Arc<dyn worldbase_providers::Provider>>>,
+    pub custom_provider:
+        std::sync::Mutex<Option<std::sync::Arc<dyn worldbase_providers::Provider>>>,
     /// 宿主反向请求挂起表（host.request → host.respond）。
     pub pending_host_requests:
         std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>,
@@ -58,13 +67,17 @@ impl Hub {
         let skills = Arc::new(SkillRegistry::new(SkillRegistry::default_dirs(&workspace)));
         let scheduler = Arc::new(Scheduler::new(store.clone()));
         let hub = Arc::new(Self {
-            workspace,
+            workspace: workspace.clone(),
             store,
             skills,
             scheduler,
             mcp: Arc::new(McpManager::default()),
+            // Electron starts the app-server with its actual `projects`
+            // directory as the workspace. Project tools must use that same
+            // root; resolving through Store::default_dir() would create a
+            // second, invisible project catalog under WORLDBASE_HOME.
             projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(
-                Store::default_dir().join("projects"),
+                workspace.clone(),
             )),
             tools: worldbase_tools::builtin_tools(),
             streams: std::sync::Mutex::new(HashMap::new()),
@@ -113,7 +126,10 @@ impl Hub {
         });
 
         let result = tokio::time::timeout(timeout, rx).await;
-        self.pending_host_requests.lock().unwrap().remove(&request_id);
+        self.pending_host_requests
+            .lock()
+            .unwrap()
+            .remove(&request_id);
         match result {
             Ok(Ok(value)) => Ok(value),
             _ => anyhow::bail!("host request timeout or cancelled: {kind}"),
@@ -122,7 +138,12 @@ impl Hub {
 
     /// 宿主应答入口（host.respond）。
     pub fn host_respond(&self, request_id: &str, result: serde_json::Value) -> bool {
-        if let Some(tx) = self.pending_host_requests.lock().unwrap().remove(request_id) {
+        if let Some(tx) = self
+            .pending_host_requests
+            .lock()
+            .unwrap()
+            .remove(request_id)
+        {
             let _ = tx.send(result);
             true
         } else {
@@ -195,7 +216,11 @@ impl Hub {
                     }
                 }
                 let model = Some(entry.active_model.clone());
-                Ok((worldbase_providers::create_provider_from_entry(&entry)?, Some(entry), model))
+                Ok((
+                    worldbase_providers::create_provider_from_entry(&entry)?,
+                    Some(entry),
+                    model,
+                ))
             }
             None => {
                 let (p, entry, model) = self.provider_for_agent(None)?;
@@ -227,7 +252,11 @@ impl Hub {
                         }
                     }
                     let model = Some(entry.active_model.clone());
-                    return Ok((worldbase_providers::create_provider_from_entry(&entry)?, Some(entry), model));
+                    return Ok((
+                        worldbase_providers::create_provider_from_entry(&entry)?,
+                        Some(entry),
+                        model,
+                    ));
                 }
             }
         }
@@ -243,33 +272,67 @@ impl Hub {
         Ok((provider, entry, model))
     }
 
-    /// 模型单价（每 1M tokens）：按 entry 内模型匹配。
+    /// 模型单价（每 1M tokens）：输入、输出、缓存读取，按 entry 内模型匹配。
     pub fn model_prices(
         &self,
         entry: Option<&worldbase_protocol::types::ProviderEntry>,
         model: &str,
-    ) -> (f64, f64) {
-        let Some(entry) = entry else { return (0.0, 0.0) };
+    ) -> (f64, f64, f64) {
+        let Some(entry) = entry else {
+            return (0.0, 0.0, 0.0);
+        };
         for m in &entry.models {
             if m.id == model {
-                return (m.input_price, m.output_price);
+                return (m.input_price, m.output_price, m.cache_read_price);
             }
         }
-        (0.0, 0.0)
+        (0.0, 0.0, 0.0)
     }
 
     pub fn services(self: &Arc<Self>) -> ToolServices {
+        self.services_for_run(None, None, None)
+    }
+
+    /// Build isolated tool services for a stream. The managed project catalog
+    /// always remains rooted at `workspace`; Electron's folder workspace is a
+    /// separate optional root used only by its `*_workspace_*` tool family.
+    pub fn services_for_run(
+        self: &Arc<Self>,
+        folder_workspace: Option<std::path::PathBuf>,
+        target_project_id: Option<String>,
+        allowed_mcp_server_ids: Option<Vec<String>>,
+    ) -> ToolServices {
         let host = worldbase_tools::HostBridge::new();
         let hub_arc: std::sync::Arc<Hub> = self.clone();
         let channel: std::sync::Arc<dyn worldbase_tools::host_bridge::HostChannel> = hub_arc;
         host.set(channel);
+        // Electron treats an omitted selection and an empty selection as
+        // unrestricted. Normalize here as well so direct app-server callers
+        // cannot accidentally get a stricter MCP policy than the TS harness.
+        let allowed_mcp_server_ids = allowed_mcp_server_ids.and_then(|server_ids| {
+            let server_ids: std::collections::HashSet<String> = server_ids
+                .into_iter()
+                .map(|server_id| server_id.trim().to_string())
+                .filter(|server_id| !server_id.is_empty())
+                .collect();
+            (!server_ids.is_empty()).then(|| std::sync::Arc::new(server_ids))
+        });
         ToolServices {
             workspace: self.workspace.clone(),
+            folder_workspace,
+            target_project_id,
+            allowed_mcp_server_ids,
+            plan_goal: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            todo_items: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            read_files: std::sync::Arc::new(
+                std::sync::Mutex::new(std::collections::HashSet::new()),
+            ),
             store: self.store.clone(),
             skills: self.skills.clone(),
             scheduler: self.scheduler.clone(),
             mcp: self.mcp.clone(),
             projects: self.projects.clone(),
+            group_collaboration: None,
             host: std::sync::Arc::new(host),
             current_stream: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
         }
@@ -294,14 +357,15 @@ impl Hub {
         });
     }
 
-    /// 注册新流，返回通道。
+    /// Register a stream, preserving an existing channel when nested work
+    /// deliberately shares its parent's stream ID (for example a native group
+    /// member). Replacing that channel loses subscribers and buffered events.
     pub fn register_stream(&self, stream_id: &str) -> Arc<StreamChannel> {
-        let channel = Arc::new(StreamChannel::new());
-        self.streams
-            .lock()
-            .unwrap()
-            .insert(stream_id.to_string(), channel.clone());
-        channel
+        let mut streams = self.streams.lock().unwrap();
+        streams
+            .entry(stream_id.to_string())
+            .or_insert_with(|| Arc::new(StreamChannel::new()))
+            .clone()
     }
 
     /// 解析当前 provider 配置：settings."provider" > 环境变量 > mock。
@@ -341,7 +405,7 @@ impl Hub {
         filter_tools(&self.tools, caps)
     }
 
-    /// 启动后台任务：scheduler 循环。
+    /// 启动后台任务：scheduler 与项目网关循环。
     pub fn start_background(self: &Arc<Self>) {
         let hub = self.clone();
         tokio::spawn(async move {
@@ -351,7 +415,8 @@ impl Hub {
                 let entry = entry.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        crate::agent::run_scheduled_task(hub, &entry.id, &entry.name, &entry.task).await
+                        crate::agent::run_scheduled_task(hub, &entry.id, &entry.name, &entry.task)
+                            .await
                     {
                         tracing::warn!(schedule = %entry.name, error = %e, "scheduled task failed");
                     }
@@ -359,6 +424,24 @@ impl Hub {
             });
             if let Err(e) = hub.scheduler.run_loop(on_due).await {
                 tracing::warn!(error = %e, "scheduler loop exited");
+            }
+        });
+
+        // Project processes are Rust-owned while the Electron switch selects
+        // this harness. Mirror AppGateway's 30-second recovery cadence here
+        // instead of tying recovery to a renderer/system-status query.
+        let hub = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // `interval` ticks immediately; consume that first tick to match
+            // Electron's setInterval behavior, whose first pass is delayed.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = hub.projects.gateway_health_check_for_ui().await {
+                    tracing::warn!(error = %error, "project gateway health check failed");
+                }
             }
         });
     }

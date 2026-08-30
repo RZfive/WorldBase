@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/glass.dart';
 import '../../core/ios_ui.dart';
 import '../../core/providers.dart';
 
@@ -48,6 +49,7 @@ class _GroupPageState extends ConsumerState<GroupPage> {
     final controller = ref.watch(groupChatProvider.notifier);
     final session = controller.session;
     final messages = ref.watch(groupChatProvider);
+    final p = DawnPalette.of(context);
 
     return IosScreen(
       navBar: IosNavBar(
@@ -96,7 +98,7 @@ class _GroupPageState extends ConsumerState<GroupPage> {
                       ),
                       const SizedBox(width: 8),
                       Text('协调者: ${session.coordinator ?? '-'}',
-                          style: const TextStyle(fontSize: 12, color: iosSecondaryLabel)),
+                          style: TextStyle(fontSize: 12, color: p.ink2)),
                     ],
                   ),
                 ),
@@ -170,13 +172,14 @@ class _GroupPageState extends ConsumerState<GroupPage> {
     if (session == null) return;
     final board = session.board;
     List<String> asList(dynamic v) => (v as List?)?.map((e) => e.toString()).toList() ?? [];
+    final p = DawnPalette.of(context);
     showCupertinoModalPopup<void>(
       context: context,
       builder: (_) => Container(
         height: MediaQuery.of(context).size.height * 0.62,
-        decoration: const BoxDecoration(
-          color: iosGroupedBg,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+        decoration: BoxDecoration(
+          color: p.groupedBg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
         ),
         child: SafeArea(
           child: ListView(
@@ -261,11 +264,12 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return Container(
       constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
-      decoration: const BoxDecoration(
-        color: iosGroupedBg,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      decoration: BoxDecoration(
+        color: p.groupedBg,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
       ),
       child: SafeArea(
         child: SingleChildScrollView(
@@ -282,13 +286,13 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet> {
                 placeholder: '讨论主题',
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 decoration: BoxDecoration(
-                  color: iosCardBg,
+                  color: p.cardBg,
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: iosSeparator),
+                  border: Border.all(color: p.separator),
                 ),
               ),
               const SizedBox(height: 14),
-              const Text('协作模式', style: TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+              Text('协作模式', style: TextStyle(fontSize: 13, color: p.ink2)),
               const SizedBox(height: 6),
               CupertinoSlidingSegmentedControl<String>(
                 groupValue: _mode,
@@ -302,7 +306,7 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet> {
                 onValueChanged: (v) => setState(() => _mode = v ?? _mode),
               ),
               const SizedBox(height: 14),
-              const Text('成员', style: TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+              Text('成员', style: TextStyle(fontSize: 13, color: p.ink2)),
               const SizedBox(height: 6),
               IosSection(
                 children: [
@@ -343,9 +347,9 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet> {
                 placeholder: '名字 | 人设',
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 decoration: BoxDecoration(
-                  color: iosCardBg,
+                  color: p.cardBg,
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: iosSeparator),
+                  border: Border.all(color: p.separator),
                 ),
               ),
               const SizedBox(height: 14),

@@ -15,7 +15,8 @@ use std::sync::Arc;
 use worldbase_protocol::DEFAULT_SERVE_PORT;
 
 /// 收到 IM 消息的回调：(channel, sender, text) → 回复文本。
-pub type OnImMessage = Arc<dyn Fn(&str, &str, &str) -> futures::future::BoxFuture<'static, String> + Send + Sync>;
+pub type OnImMessage =
+    Arc<dyn Fn(&str, &str, &str) -> futures::future::BoxFuture<'static, String> + Send + Sync>;
 
 pub struct ImGateway {
     #[allow(dead_code)]
@@ -36,7 +37,12 @@ struct GatewayState {
 
 impl ImGateway {
     /// 启动 webhook 监听（绑定 127.0.0.1:port）。
-    pub async fn start(channel: &str, verify_token: &str, port: Option<u16>, on_message: OnImMessage) -> Result<Arc<Self>> {
+    pub async fn start(
+        channel: &str,
+        verify_token: &str,
+        port: Option<u16>,
+        on_message: OnImMessage,
+    ) -> Result<Arc<Self>> {
         let (tx, _rx) = tokio::sync::watch::channel(false);
         let gateway = Arc::new(Self {
             channel: channel.into(),
@@ -132,7 +138,9 @@ fn extract_message(payload: &Value) -> (String, String) {
 pub async fn send_feishu_text(domain: &str, token: &str, open_id: &str, text: &str) -> Result<()> {
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{domain}/open-apis/im/v1/messages?receive_id_type=open_id"))
+        .post(format!(
+            "{domain}/open-apis/im/v1/messages?receive_id_type=open_id"
+        ))
         .bearer_auth(token)
         .json(&json!({
             "receive_id": open_id,
@@ -162,7 +170,10 @@ mod tests {
             "event": { "sender": { "sender_id": { "open_id": "ou1" } },
                         "message": { "content": { "text": "帮我查天气" } } }
         });
-        assert_eq!(extract_message(&feishu), ("ou1".into(), "帮我查天气".into()));
+        assert_eq!(
+            extract_message(&feishu),
+            ("ou1".into(), "帮我查天气".into())
+        );
 
         let generic = json!({ "sender": "alice", "text": "hello" });
         assert_eq!(extract_message(&generic), ("alice".into(), "hello".into()));
@@ -175,7 +186,9 @@ mod tests {
             let text = text.to_string();
             Box::pin(async move { format!("ack {sender}: {text}") })
         });
-        let gw = ImGateway::start("test", "token", Some(19999), on_msg).await.unwrap();
+        let gw = ImGateway::start("test", "token", Some(19999), on_msg)
+            .await
+            .unwrap();
         let client = reqwest::Client::new();
         // 等 listener 起来
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;

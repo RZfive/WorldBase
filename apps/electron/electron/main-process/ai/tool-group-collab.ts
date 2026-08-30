@@ -21,6 +21,7 @@ export function buildGroupCollabTools (
   resolveAgentName?: (agentId: string) => string | undefined
 ): CustomToolRegistration[] {
   const messageAgent: CustomToolRegistration = {
+    domain: 'electron_host_override',
     definition: {
       name: 'message_agent',
       description: [
@@ -72,6 +73,7 @@ export function buildGroupCollabTools (
   }
 
   const readBoard: CustomToolRegistration = {
+    domain: 'electron_host_override',
     definition: {
       name: 'read_board',
       description: 'Read the current state of the shared group board (goal, assumptions, tasks, decisions, evidence, open questions). Read this before posting updates so you do not duplicate work or contradict a decision another member already recorded.',
@@ -83,6 +85,7 @@ export function buildGroupCollabTools (
   }
 
   const updateBoard: CustomToolRegistration = {
+    domain: 'electron_host_override',
     definition: {
       name: 'update_board',
       description: [
@@ -126,6 +129,7 @@ export function buildGroupCollabTools (
   }
 
   const replyToUser: CustomToolRegistration = {
+    domain: 'electron_host_override',
     definition: {
       name: 'reply_to_user',
       description: [

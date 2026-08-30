@@ -3,9 +3,203 @@
 use super::{require_str, Tool, ToolServices};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use sha1::{Digest, Sha1};
+use serde_json::{json, Map, Value};
+use std::{path::Path, time::{SystemTime, UNIX_EPOCH}};
+use unicode_normalization::UnicodeNormalization;
+use uuid::Uuid;
 
 pub struct ProjectCreateTool;
+
+fn object_argument(
+    input: &Value,
+    key: &str,
+    allow_missing_or_null: bool,
+) -> Result<Map<String, Value>> {
+    let Some(value) = input.get(key) else {
+        anyhow::ensure!(
+            allow_missing_or_null,
+            "create_project 的 {key} 参数必须是 JSON 对象"
+        );
+        return Ok(Map::new());
+    };
+    if value.is_null() && allow_missing_or_null {
+        return Ok(Map::new());
+    }
+
+    let mut current = value.clone();
+    for _ in 0..3 {
+        if let Some(object) = current.as_object() {
+            return Ok(object.clone());
+        }
+        let Some(text) = current.as_str() else {
+            break;
+        };
+        let text = text.trim();
+        if !text.starts_with('{') {
+            break;
+        }
+        current = serde_json::from_str(text).map_err(|error| {
+            anyhow::anyhow!("create_project 的 {key} 参数不是有效 JSON 对象: {error}")
+        })?;
+    }
+
+    anyhow::bail!("create_project 的 {key} 参数必须是 JSON 对象")
+}
+
+fn project_files(input: &Value, development_mode: bool) -> Result<Map<String, Value>> {
+    let files = object_argument(input, "files", development_mode)?;
+    anyhow::ensure!(
+        development_mode || !files.is_empty(),
+        "create_project 的 files 参数至少要包含一个文件。"
+    );
+    for (file_path, content) in &files {
+        anyhow::ensure!(
+            !file_path.trim().is_empty(),
+            "create_project 的 files 参数包含空文件路径。"
+        );
+        let normalized = file_path.replace('\\', "/");
+        anyhow::ensure!(
+            !normalized.starts_with('/')
+                && !normalized.contains('\0')
+                && !normalized.split('/').any(|part| part == "..")
+                && !Path::new(file_path).components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                }),
+            "create_project 的文件路径不允许越出项目目录: {file_path}"
+        );
+        anyhow::ensure!(
+            content.is_string(),
+            "create_project 的 files[\"{file_path}\"] 必须是完整文件内容字符串。"
+        );
+    }
+    Ok(files)
+}
+
+fn project_type(input: &Value) -> Result<&str> {
+    let value = require_str(input, "type")?;
+    anyhow::ensure!(
+        matches!(value, "frontend" | "backend" | "fullstack"),
+        "create_project 的 type 必须是 frontend、backend 或 fullstack。"
+    );
+    Ok(value)
+}
+
+fn package_has_next(files: &Map<String, Value>) -> bool {
+    files
+        .get("package.json")
+        .and_then(Value::as_str)
+        .and_then(|content| serde_json::from_str::<Value>(content).ok())
+        .map(|package| {
+            ["dependencies", "devDependencies"].into_iter().any(|key| {
+                package
+                    .get(key)
+                    .and_then(Value::as_object)
+                    .map(|entries| entries.contains_key("next"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+const MAX_PROJECT_SLUG_LENGTH: usize = 20;
+const PROJECT_ID_HASH_LENGTH: usize = 8;
+
+/// Generate the same filesystem-safe project ID shape as Electron's
+/// `tool-create-project`: ASCII slug plus a short SHA-1 suffix, or a longer
+/// hash-only ID for names that contain no Latin characters.
+fn generate_project_id(name: &str) -> String {
+    let normalized_name: String = name
+        .nfkd()
+        .filter(|character| !('\u{0300}'..='\u{036f}').contains(character))
+        .collect();
+    let mut slug = String::new();
+    let mut pending_separator = false;
+    for character in normalized_name.chars() {
+        if character.is_ascii_alphanumeric() {
+            if pending_separator && !slug.is_empty() {
+                slug.push('_');
+            }
+            pending_separator = false;
+            slug.push(character.to_ascii_lowercase());
+        } else {
+            pending_separator = true;
+        }
+        if slug.len() >= MAX_PROJECT_SLUG_LENGTH {
+            break;
+        }
+    }
+    if slug.len() > MAX_PROJECT_SLUG_LENGTH {
+        slug.truncate(MAX_PROJECT_SLUG_LENGTH);
+    }
+    while slug.ends_with('_') {
+        slug.pop();
+    }
+
+    let nonce = Uuid::new_v4().to_string();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let digest = |length: usize| {
+        let mut hasher = Sha1::new();
+        hasher.update(format!("{name}:{now}:{nonce}"));
+        let hex = format!("{:x}", hasher.finalize());
+        hex[..length].to_string()
+    };
+    if slug.is_empty() {
+        format!("proj_{}", digest(MAX_PROJECT_SLUG_LENGTH))
+    } else {
+        format!("proj_{slug}_{}", digest(PROJECT_ID_HASH_LENGTH))
+    }
+}
+
+fn metadata_project_value(services: &ToolServices, project_id: &str) -> Value {
+    services
+        .projects
+        .project_meta(project_id)
+        .unwrap_or_else(|_| json!({ "id": project_id }))
+}
+
+fn error_message(error: &anyhow::Error) -> String {
+    error.to_string()
+}
+
+fn lifecycle_failure(
+    name: &str,
+    project: Value,
+    project_id: &str,
+    stage: &str,
+    error: String,
+    output: Option<Value>,
+    logs: Option<Value>,
+) -> Value {
+    let mut result = json!({
+        "success": false,
+        "ready": false,
+        "recoverable": true,
+        "stage": stage,
+        "project": project,
+        "projectId": project_id,
+        "project_id": project_id,
+        "error": error,
+        "message": format!(
+            "Project \"{name}\" files were created (ID: {project_id}), but the {stage} stage failed. The project is NOT running. Fix the project and retry with rebuild_project or start_project_server."
+        )
+    });
+    if let Some(output) = output {
+        result["output"] = output;
+    }
+    if let Some(logs) = logs {
+        result["logs"] = logs;
+    }
+    result
+}
 
 #[async_trait]
 impl Tool for ProjectCreateTool {
@@ -13,13 +207,23 @@ impl Tool for ProjectCreateTool {
         "create_project"
     }
     fn description(&self) -> &str {
-        "创建全栈 Next.js 项目（桌面/server 独有）"
+        "Create a managed project that Electron can list, edit, package and run. Supports incremental files and .world-meta.json metadata."
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "name": { "type": "string" } },
-            "required": ["name"]
+            "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string", "enum": ["frontend", "backend", "fullstack"] },
+                "files": { "type": "object", "description": "Optional map of relative file paths to full file contents." },
+                "meta": { "type": "object", "description": "Optional .world-meta.json fields." },
+                "development_mode": { "type": "boolean", "description": "Create an incremental project workflow." },
+                "install_dependencies": { "type": "boolean", "description": "Install package dependencies immediately after creation; defaults to true outside development mode when package.json exists." },
+                "build_and_start": { "type": "boolean", "description": "Build Next.js projects and start the runtime immediately; defaults to true outside development mode." },
+                "cleanup_dependencies_on_success": { "type": "boolean", "description": "Remove node_modules after a successful build/start." },
+                "cleanup_build_cache_on_success": { "type": "boolean", "description": "Remove build caches after a successful build/start." }
+            },
+            "required": ["name", "type"]
         })
     }
     fn domain(&self) -> &str {
@@ -29,9 +233,240 @@ impl Tool for ProjectCreateTool {
         "ask"
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let name = require_str(&input, "name")?;
-        let info = services.projects.create_project(name).await?;
-        Ok(serde_json::to_value(&info)?)
+        if let Some(project_id) = services
+            .target_project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|project_id| !project_id.is_empty())
+        {
+            return Ok(json!({
+                "success": false,
+                "error": format!(
+                "本次对话正在优化现有项目 {project_id}，不允许创建新项目。请使用 write_project_file 工具将代码写入已有项目，project_id 为 \"{project_id}\"。"
+                )
+            }));
+        }
+        let name = require_str(&input, "name")?.trim().to_string();
+        anyhow::ensure!(!name.is_empty(), "create_project 的 name 不能为空。");
+        let project_type = project_type(&input)?.to_string();
+        let development_mode = input
+            .get("development_mode")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let files = project_files(&input, development_mode)?;
+        let meta = object_argument(&input, "meta", true)?;
+        let next_hint = meta
+            .get("framework")
+            .and_then(Value::as_str)
+            .is_some_and(|framework| framework.eq_ignore_ascii_case("nextjs"))
+            || files.contains_key("next.config.js")
+            || files.contains_key("next.config.mjs")
+            || files.contains_key("next.config.ts")
+            || files.contains_key("next.config.cjs")
+            || package_has_next(&files);
+
+        // Electron generates the ID before writing any files. Keep that ID
+        // explicit when handing the project to Rust so TS/Rust switching can
+        // address the same directory and metadata record.
+        let project_id = generate_project_id(&name);
+
+        // Match Electron's workflow metadata while preserving any additional
+        // caller-provided workflow fields.
+        let mut full_meta = meta;
+        let mut workflow = full_meta
+            .remove("workflow")
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        workflow.entry("mode").or_insert_with(|| {
+            Value::String(
+                if development_mode {
+                    "development"
+                } else {
+                    "direct"
+                }
+                .into(),
+            )
+        });
+        workflow
+            .entry("incremental")
+            .or_insert(Value::Bool(development_mode));
+        full_meta.insert("workflow".into(), Value::Object(workflow));
+        full_meta
+            .entry("name")
+            .or_insert_with(|| Value::String(name.clone()));
+        full_meta
+            .entry("type")
+            .or_insert_with(|| Value::String(project_type.clone()));
+        let meta_value = Value::Object(full_meta);
+
+        let info = services
+            .projects
+            .create_project_with_id_and_files_and_template(
+                &project_id,
+                &name,
+                &project_type,
+                &files,
+                meta_value,
+                files.is_empty() && next_hint,
+            )
+            .await?;
+        let project_id = info.id.clone();
+        let project = metadata_project_value(services, &project_id);
+
+        // Electron initializes declared SQLite tables before any lifecycle
+        // work.  The Rust control plane owns that same schema operation.
+        let _ = services
+            .projects
+            .initialize_project_database_for_tool(&project_id)?;
+
+        let root = services.projects.project_root(&project_id)?;
+        let has_package_json = root.join("package.json").is_file();
+        let should_install = input
+            .get("install_dependencies")
+            .and_then(Value::as_bool)
+            .unwrap_or(!development_mode && has_package_json);
+        let should_build_and_start = input
+            .get("build_and_start")
+            .and_then(Value::as_bool)
+            .unwrap_or(!development_mode);
+        let cleanup_dependencies = input
+            .get("cleanup_dependencies_on_success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let cleanup_build_cache = input
+            .get("cleanup_build_cache_on_success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        if has_package_json && should_install {
+            if let Err(error) = services.projects.install(&root).await {
+                let _ = services
+                    .projects
+                    .cleanup_project_for_ui(&project_id, true, true)
+                    .await;
+                return Ok(lifecycle_failure(
+                    &name,
+                    project,
+                    &project_id,
+                    "install",
+                    error_message(&error),
+                    None,
+                    None,
+                ));
+            }
+        }
+
+        if development_mode && !should_build_and_start {
+            return Ok(json!({
+                "success": true,
+                "ready": false,
+                "development_mode": true,
+                "project": project,
+                "projectId": project_id,
+                "project_id": project_id,
+                "message": format!("Project \"{name}\" created with ID: {project_id}. Development mode is active. Continue with write_project_file or patch_project_file, then call rebuild_project when ready.")
+            }));
+        }
+
+        let current_meta = metadata_project_value(services, &project_id);
+        let is_next = current_meta
+            .get("framework")
+            .and_then(Value::as_str)
+            .is_some_and(|framework| framework.eq_ignore_ascii_case("nextjs"))
+            || next_hint;
+
+        if should_build_and_start && is_next && has_package_json {
+            let build = match services.projects.build_project_for_ui(&project_id).await {
+                Ok(build) => build,
+                Err(error) => {
+                    return Ok(lifecycle_failure(
+                        &name,
+                        metadata_project_value(services, &project_id),
+                        &project_id,
+                        "build",
+                        error_message(&error),
+                        None,
+                        None,
+                    ));
+                }
+            };
+            let build_ok = build
+                .get("success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !build_ok {
+                let output = build.get("output").cloned();
+                let error = build
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown build error")
+                    .to_string();
+                return Ok(lifecycle_failure(
+                    &name,
+                    metadata_project_value(services, &project_id),
+                    &project_id,
+                    "build",
+                    error,
+                    output,
+                    None,
+                ));
+            }
+            if cleanup_dependencies || cleanup_build_cache {
+                let _ = services
+                    .projects
+                    .cleanup_project_for_ui(&project_id, cleanup_dependencies, cleanup_build_cache)
+                    .await;
+            }
+        }
+
+        let server = if should_build_and_start {
+            match services.projects.start_dev(&project_id).await {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    let logs = services.projects.logs(&project_id, 40).await;
+                    return Ok(lifecycle_failure(
+                        &name,
+                        metadata_project_value(services, &project_id),
+                        &project_id,
+                        "start",
+                        error_message(&error),
+                        None,
+                        Some(serde_json::to_value(logs)?),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
+        let project = metadata_project_value(services, &project_id);
+        let (status, port, ready) = server
+            .as_ref()
+            .map(|server| {
+                (
+                    server.status.clone(),
+                    Some(server.port),
+                    server.status == "running",
+                )
+            })
+            .unwrap_or_else(|| ("created".to_string(), None, false));
+        let command = project
+            .get("runtime")
+            .and_then(|runtime| runtime.get("backend"))
+            .and_then(|backend| backend.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or("node server.js");
+        Ok(json!({
+            "success": true,
+            "ready": ready,
+            "project": project,
+            "projectId": project_id,
+            "project_id": project_id,
+            "port": port,
+            "status": status,
+            "development_mode": development_mode,
+            "message": format!("Project \"{name}\" created with ID: {project_id}.{} Runtime configured with command: {command}{}", if should_install { " Dependencies installed." } else { " Dependencies were not auto-installed." }, if let Some(port) = port { format!(" Running on port {port}") } else if should_build_and_start { String::new() } else { " Continue editing files and call rebuild_project when ready.".to_string() })
+        }))
     }
 }
 
@@ -84,7 +519,13 @@ impl Tool for ProjectDevStartTool {
         "ask"
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let project = require_str(&input, "project")?;
+        // `project_id` is the Electron spelling; retain `project` for the
+        // original Rust protocol and CLI callers.
+        let project = input
+            .get("project_id")
+            .or_else(|| input.get("project"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing required string parameter: project_id"))?;
         if input["install"].as_bool().unwrap_or(true) {
             let path = services.projects.list_projects()?;
             let found = path.iter().find(|p| p.id == project);
@@ -93,7 +534,9 @@ impl Tool for ProjectDevStartTool {
                     .projects
                     .install(std::path::Path::new(&p.path))
                     .await?;
-                return Ok(json!({ "installLog": log, "note": "install 完成，请再次调用且 install=false 启动" }));
+                return Ok(
+                    json!({ "installLog": log, "note": "install 完成，请再次调用且 install=false 启动" }),
+                );
             }
         }
         let info = services.projects.start_dev(project).await?;
@@ -122,8 +565,319 @@ impl Tool for ProjectDevStopTool {
         "desktop"
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let project = require_str(&input, "project")?;
+        let project = input
+            .get("project_id")
+            .or_else(|| input.get("project"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing required string parameter: project_id"))?;
         let stopped = services.projects.stop_dev(project).await?;
         Ok(json!({ "stopped": stopped }))
+    }
+}
+
+/// Restart a managed project server, mirroring Electron's
+/// `restart_project_server` tool.  Stopping first is important because
+/// `start_dev` intentionally returns an existing handle when one is active.
+pub struct ProjectDevRestartTool;
+
+#[async_trait]
+impl Tool for ProjectDevRestartTool {
+    fn name(&self) -> &str {
+        "project_dev_restart"
+    }
+
+    fn description(&self) -> &str {
+        "重启项目 dev server"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "project_id": { "type": "string" } },
+            "required": ["project_id"]
+        })
+    }
+
+    fn domain(&self) -> &str {
+        "desktop"
+    }
+
+    fn permission(&self) -> &str {
+        "ask"
+    }
+
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let project = require_str(&input, "project_id")?;
+        let _ = services.projects.stop_dev(project).await?;
+        let info = services.projects.start_dev(project).await?;
+        Ok(serde_json::to_value(&info)?)
+    }
+}
+
+/// Return the lifecycle/health state of a managed project server.
+pub struct ProjectStatusTool;
+
+#[async_trait]
+impl Tool for ProjectStatusTool {
+    fn name(&self) -> &str {
+        "get_project_status"
+    }
+
+    fn description(&self) -> &str {
+        "获取当前项目开发服务状态"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "project_id": { "type": "string" } },
+            "required": ["project_id"]
+        })
+    }
+
+    fn domain(&self) -> &str {
+        "desktop"
+    }
+
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let project = require_str(&input, "project_id")?;
+        services.projects.status(project).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn services(root: &std::path::Path, target_project_id: Option<&str>) -> ToolServices {
+        let workspace = root.join("workspace");
+        let projects = root.join("projects");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+        let store = Arc::new(worldbase_memory::Store::open(&root.join("store.sqlite")).unwrap());
+        ToolServices {
+            host: Arc::new(super::super::HostBridge::new()),
+            current_stream: Arc::new(Mutex::new(String::new())),
+            workspace,
+            folder_workspace: None,
+            target_project_id: target_project_id.map(ToOwned::to_owned),
+            allowed_mcp_server_ids: None,
+            plan_goal: Arc::new(Mutex::new(None)),
+            todo_items: Arc::new(Mutex::new(Vec::new())),
+            read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            store: store.clone(),
+            skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
+            scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
+            mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(projects)),
+            group_collaboration: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn target_project_prevents_new_project_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path(), Some("existing-project"));
+
+        let result = ProjectCreateTool
+            .execute(json!({ "name": "another-project" }), &services)
+            .await
+            .unwrap();
+
+        assert_eq!(result["success"], false);
+        assert!(result["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("existing-project"));
+        assert!(!temp.path().join("projects/another-project").exists());
+    }
+
+    #[tokio::test]
+    async fn development_mode_allows_an_empty_project_without_lifecycle_side_effects() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path(), None);
+
+        let result = ProjectCreateTool
+            .execute(
+                json!({
+                    "name": "incremental shell",
+                    "type": "fullstack",
+                    "development_mode": true
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["ready"], false);
+        assert_eq!(result["development_mode"], true);
+        let project_id = result["projectId"].as_str().unwrap();
+        let root = services.projects.project_root(project_id).unwrap();
+        assert!(!root.join("package.json").exists());
+        assert_eq!(root.join(".world-meta.json").is_file(), true);
+        let meta: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join(".world-meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta["workflow"]["mode"], "development");
+        assert_eq!(meta["workflow"]["incremental"], true);
+    }
+
+    #[tokio::test]
+    async fn create_project_uses_electron_id_shape_and_completes_partial_next_template() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path(), None);
+        let result = ProjectCreateTool
+            .execute(
+                json!({
+                    "name": "Café Planner",
+                    "type": "frontend",
+                    "development_mode": true,
+                    "build_and_start": false,
+                    "files": {
+                        "package.json": "{\"dependencies\":{\"next\":\"1\"}}",
+                        "app/page.tsx": "export default function Page () { return <main>ok</main> }"
+                    }
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true);
+        let project_id = result["projectId"].as_str().unwrap();
+        let mut parts = project_id.split('_');
+        assert_eq!(parts.next(), Some("proj"));
+        assert_eq!(parts.next(), Some("cafe"));
+        assert_eq!(parts.next(), Some("planner"));
+        let suffix = parts.next().unwrap_or_default();
+        assert_eq!(suffix.len(), 8);
+        assert!(suffix.chars().all(|character| character.is_ascii_hexdigit()));
+        let root = services.projects.project_root(project_id).unwrap();
+        assert!(root.join("app/layout.tsx").is_file());
+        assert!(root.join("app/globals.css").is_file());
+        assert!(root.join("next.config.js").is_file());
+        let package: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("package.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(package["dependencies"]["next"], "^15.0.0");
+        assert_eq!(package["scripts"]["start"], "next start");
+    }
+
+    #[tokio::test]
+    async fn create_project_uses_hash_only_id_for_non_latin_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path(), None);
+        let result = ProjectCreateTool
+            .execute(
+                json!({
+                    "name": "笔记管理",
+                    "type": "backend",
+                    "development_mode": true,
+                    "build_and_start": false
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        let project_id = result["projectId"].as_str().unwrap();
+        let suffix = project_id.strip_prefix("proj_").unwrap();
+        assert_eq!(suffix.len(), 20);
+        assert!(suffix.chars().all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn create_project_initializes_declared_sqlite_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path(), None);
+        let result = ProjectCreateTool
+            .execute(
+                json!({
+                    "name": "notes data",
+                    "type": "backend",
+                    "development_mode": true,
+                    "files": { "server.js": "console.log('ready')" },
+                    "meta": {
+                        "dataSchema": {
+                            "database": "sqlite",
+                            "dbPath": "data/notes.sqlite",
+                            "tables": [{
+                                "name": "notes",
+                                "columns": [
+                                    { "name": "id", "type": "INTEGER", "primaryKey": true, "autoIncrement": true },
+                                    { "name": "body", "type": "TEXT", "notNull": true }
+                                ]
+                            }]
+                        }
+                    }
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["success"], true);
+        let project_id = result["projectId"].as_str().unwrap();
+        let root = services.projects.project_root(project_id).unwrap();
+        let db = root.join("data/notes.sqlite");
+        assert!(db.is_file());
+        let connection = rusqlite::Connection::open(db).unwrap();
+        let table_exists: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='notes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1);
+    }
+
+    #[tokio::test]
+    async fn next_build_failure_is_reported_as_recoverable_stage() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path(), None);
+        let result = ProjectCreateTool
+            .execute(
+                json!({
+                    "name": "broken next",
+                    "type": "frontend",
+                    "install_dependencies": false,
+                    "build_and_start": true,
+                    "files": {
+                        "package.json": "{\"scripts\":{\"build\":\"node -e \\\"process.exit(1)\\\"\"},\"dependencies\":{\"next\":\"1\"}}",
+                        "next.config.js": "module.exports = { output: 'standalone' }",
+                        "app/page.js": "export default function Page(){ return null }"
+                    }
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["success"], false);
+        assert_eq!(result["recoverable"], true);
+        assert_eq!(result["stage"], "build");
+        assert!(result["projectId"].as_str().is_some());
+        assert!(result["output"].as_str().is_some());
+    }
+
+    #[test]
+    fn create_project_schema_exposes_electron_lifecycle_options() {
+        let schema = ProjectCreateTool.input_schema();
+        let properties = schema["properties"].as_object().unwrap();
+        for key in [
+            "development_mode",
+            "install_dependencies",
+            "build_and_start",
+            "cleanup_dependencies_on_success",
+            "cleanup_build_cache_on_success",
+        ] {
+            assert!(
+                properties.contains_key(key),
+                "missing schema property {key}"
+            );
+        }
+        assert_eq!(schema["required"], json!(["name", "type"]));
     }
 }

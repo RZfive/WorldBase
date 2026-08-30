@@ -12,7 +12,8 @@ const savingPreferences = ref(false)
 const feedback = ref('')
 const executionPreferences = ref<AIExecutionPreferences>({
   notifyOnTaskComplete: true,
-  enableAiLogging: false
+  enableAiLogging: false,
+  harnessBackend: 'ts'
 })
 const conversations = ref<AILogConversationSummary[]>([])
 const activeConversationId = ref<string | null>(null)
@@ -47,7 +48,8 @@ async function loadPreferences () {
   } catch {
     executionPreferences.value = {
       notifyOnTaskComplete: true,
-      enableAiLogging: false
+      enableAiLogging: false,
+      harnessBackend: 'ts'
     }
   }
 }

@@ -200,7 +200,7 @@ export class PermissionEngine {
       }
     }
 
-    if (toolName.startsWith('mcp__')) {
+    if (toolName === 'mcp_call' || toolName.startsWith('mcp__')) {
       const approved = await this._askUser(toolName, args, t('mainDialog.permissionReasonExternalMcp'))
       return { allowed: approved, reason: 'External MCP tool invocation', askedUser: true }
     }

@@ -6,6 +6,7 @@ import '../../core/ios_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../core/glass.dart';
 import '../core/harness_client.dart';
 
 /// 活跃 WebView 控制器持有者：供页面自动化反向请求使用。
@@ -116,6 +117,7 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
 
   void _showPermissionDialog(PendingPermission req) {
     if (!mounted) return;
+    final p = DawnPalette.of(context);
     showCupertinoDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -123,7 +125,7 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
         title: Text('「${req.toolName}」请求执行'),
         content: Padding(
           padding: const EdgeInsets.only(top: 8),
-          child: Text(req.argsSummary, style: const TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+          child: Text(req.argsSummary, style: TextStyle(fontSize: 13, color: p.ink2)),
         ),
         actions: [
           CupertinoDialogAction(

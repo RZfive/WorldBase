@@ -2,7 +2,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import { createProxyMiddleware } from 'http-proxy-middleware'
 import { randomBytes } from 'node:crypto'
 import { isIP } from 'node:net'
-import { projectsRouter } from './routes/projects.js'
+import { projectsRouter, type LanProjectControl } from './routes/projects.js'
 import { aiRouter } from './routes/ai.js'
 import { systemRouter } from './routes/system.js'
 import type { ProjectFS } from '../project-fs/project-fs.js'
@@ -10,6 +10,7 @@ import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
 import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { AIEngine } from '../ai-engine/ai-engine.js'
+import type { AIExecutionEngine } from '../ai-harness/types.js'
 import type { SettingsStore } from '../settings/settings-store.js'
 import type { SystemService } from '../system-capabilities/system-service.js'
 import type { ImGatewayService } from '../im/im-gateway-service.js'
@@ -150,10 +151,18 @@ export interface LanServerConfig {
   runtimeManager: RuntimeManager
   apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
-  aiEngine: AIEngine
+  aiEngine: AIExecutionEngine
+  resolveAiEngine?: () => Promise<AIExecutionEngine>
+  configureAiEngines?: (config: { apiKey?: string; baseUrl?: string; model?: string }) => void
   systemService: SystemService
   settingsStore?: SettingsStore
   imGatewayService?: ImGatewayService
+  /**
+   * Returns the active Rust project control plane while the migration switch
+   * selects Rust. When it returns a client, LAN project routes must not read
+   * any TS project/runtime/data service.
+   */
+  resolveRustProjectControl?: () => Promise<LanProjectControl | null>
 }
 
 /**
@@ -340,28 +349,38 @@ export class LanServer {
 
   private _setupProxy (): void {
     // Dynamic reverse proxy: /tool/:projectId/* → project's backend port
-    this.app.use('/tool/:projectId', (req: Request<{ projectId: string }>, res: Response, next: NextFunction) => {
+    this.app.use('/tool/:projectId', async (req: Request<{ projectId: string }>, res: Response, next: NextFunction) => {
       const { projectId } = req.params
-      const port = this.services.runtimeManager.getPort(projectId)
+      try {
+        const rust = await this.services.resolveRustProjectControl?.()
+        const native = rust
+          ? await rust.call<Record<string, unknown>>('project.status', { projectId })
+          : null
+        const port = rust
+          ? (typeof native?.port === 'number' ? native.port : undefined)
+          : this.services.runtimeManager.getPort(projectId)
 
-      if (!port) {
-        res.status(404).json({
-          error: `Project ${projectId} is not running`
-        })
-        return
-      }
-
-      this._setLanAuthCookie(res)
-
-      const proxy = createProxyMiddleware({
-        target: `http://127.0.0.1:${port}`,
-        changeOrigin: true,
-        pathRewrite: {
-          [`^/tool/${projectId}`]: ''
+        if (!port) {
+          res.status(404).json({
+            error: `Project ${projectId} is not running`
+          })
+          return
         }
-      })
 
-      proxy(req, res, next)
+        this._setLanAuthCookie(res)
+
+        const proxy = createProxyMiddleware({
+          target: `http://127.0.0.1:${port}`,
+          changeOrigin: true,
+          pathRewrite: {
+            [`^/tool/${projectId}`]: ''
+          }
+        })
+
+        proxy(req, res, next)
+      } catch (error) {
+        res.status(502).json({ error: (error as Error).message || `Unable to resolve ${projectId} runtime` })
+      }
     })
   }
 

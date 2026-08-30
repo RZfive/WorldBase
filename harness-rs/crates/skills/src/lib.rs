@@ -71,8 +71,10 @@ impl SkillRegistry {
     }
 
     fn load_one(path: &Path) -> Result<Skill> {
-        let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        let skill: Skill = serde_yaml::from_str(&raw).with_context(|| format!("parse yaml {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let skill: Skill =
+            serde_yaml::from_str(&raw).with_context(|| format!("parse yaml {}", path.display()))?;
         Ok(skill)
     }
 }

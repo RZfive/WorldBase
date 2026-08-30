@@ -3,8 +3,8 @@
 pub mod agent;
 pub mod dispatcher;
 pub mod hub;
-pub mod studio;
 pub mod permissions;
+pub mod studio;
 
 pub use agent::{start_chat, to_llm_messages, ChatRun};
 pub use dispatcher::ConnectionContext;

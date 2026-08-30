@@ -1150,7 +1150,13 @@ const zhCN = {
         notifyTitle: '任务结束后发送系统通知',
         notifyHint: '任务完成、失败或被停止时，通知中心会显示任务名称和状态，适合后台执行场景。',
         notifyOn: '开启任务结束通知',
-        notifyOff: '关闭任务结束通知'
+        notifyOff: '关闭任务结束通知',
+        harnessTitle: '对话 Harness',
+        harnessHint: '选择新对话的执行引擎。选择 Rust 后，项目、群组、工作区、图片、MCP 与附件均由 Rust 执行模型和工具循环，并通过 Electron 宿主桥接访问数据与服务。',
+        harnessTs: 'TypeScript（旧版）',
+        harnessTsHint: '旧版实现',
+        harnessRust: 'Rust（app-server）',
+        harnessRustHint: '完整聊天上下文由 Rust 执行'
       },
       transfer: {
         navLabel: '配置迁移',

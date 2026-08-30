@@ -21,7 +21,9 @@ pub fn glob(root: &Path, pattern: &str, limit: usize) -> Result<Vec<PathBuf>> {
                 let path = e.path();
                 if path.is_file() {
                     let rel = path.strip_prefix(root).unwrap_or(path);
-                    if matcher.is_match(&rel.to_string_lossy()) && tx.send(path.to_path_buf()).is_ok() {
+                    if matcher.is_match(&rel.to_string_lossy())
+                        && tx.send(path.to_path_buf()).is_ok()
+                    {
                         // 继续遍历，由主线程限流
                     }
                 }
@@ -94,7 +96,9 @@ pub fn grep(root: &Path, pattern: &str, literal: bool, limit: usize) -> Result<V
                 let path = e.path().to_path_buf();
                 if path.is_file() {
                     // 跳过二进制与超大文件
-                    let Ok(meta) = std::fs::metadata(&path) else { return WalkState::Continue };
+                    let Ok(meta) = std::fs::metadata(&path) else {
+                        return WalkState::Continue;
+                    };
                     if meta.len() > 4 * 1024 * 1024 {
                         return WalkState::Continue;
                     }

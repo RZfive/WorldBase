@@ -42,6 +42,7 @@ dependencies:
   path_provider: ^2.1.6
   flutter_markdown_plus: ^1.0.12
   flutter_highlight: ^0.7.0
+  highlight: ^0.7.0
   flutter_math_fork: ^0.7.4
   url_launcher: ^6.3.2
   markdown: ^7.3.1
@@ -69,6 +70,10 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/mermaid_host.html
+    - assets/mermaid.min.js
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -331,6 +331,7 @@ interface MCPStateSnapshot {
 interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
   enableAiLogging: boolean
+  harnessBackend: 'ts' | 'rust'
 }
 
 interface ChatFontPreferences {
@@ -500,7 +501,7 @@ interface SystemStatusSnapshot {
  */
 export interface ElectronAPI {
   // AI
-  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext) => Promise<ChatMessage>
+  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<ChatMessage>
   chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
@@ -561,6 +562,7 @@ export interface ElectronAPI {
   listImageLibraryTags: () => Promise<string[]>
   renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
+  onImageLibraryChanged: (callback: (payload: { source?: string }) => void) => () => void
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
   drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
   loadStudioImageTasks: () => Promise<ImageStudioTask[]>
@@ -745,7 +747,7 @@ export interface ElectronAPI {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
-  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext),
+  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext, folderWorkspaceRoot),
   chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
@@ -830,6 +832,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listImageLibraryTags: (): Promise<string[]> => ipcRenderer.invoke('image:library:listTags'),
   renameImageLibraryFolder: (oldName: string, newName: string): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:renameFolder', oldName, newName),
   deleteImageLibraryFolder: (folderName: string): Promise<{ updated: number }> => ipcRenderer.invoke('image:library:deleteFolder', folderName),
+  onImageLibraryChanged: (callback: (payload: { source?: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { source?: string }) => callback(payload)
+    ipcRenderer.on('image:library:changed', handler)
+    return () => { ipcRenderer.removeListener('image:library:changed', handler) }
+  },
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }): Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }> => ipcRenderer.invoke('image:prompt:optimize', req),
   drainPendingStudioImageTasks: (): Promise<ImageStudioGenerateRequest[]> => ipcRenderer.invoke('image:studio:drainPendingTasks'),
   loadStudioImageTasks: (): Promise<ImageStudioTask[]> => ipcRenderer.invoke('image:studio:loadTasks'),

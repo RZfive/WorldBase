@@ -1,6 +1,6 @@
 //! 技能工具：skill_list / skill_run。
 
-use super::{require_str, Tool, ToolServices};
+use super::{Tool, ToolServices};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -37,12 +37,20 @@ impl Tool for SkillRunTool {
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "name": { "type": "string" } },
-            "required": ["name"]
+            "properties": {
+                "name": { "type": "string" },
+                "skill_name": { "type": "string" },
+                "arguments": { "type": "object" }
+            },
+            "anyOf": [{ "required": ["name"] }, { "required": ["skill_name"] }]
         })
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let name = require_str(&input, "name")?;
+        let name = input
+            .get("skill_name")
+            .or_else(|| input.get("name"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing required string parameter: skill_name"))?;
         let skill = services
             .skills
             .get(name)?

@@ -114,6 +114,29 @@ export class ImageIndex {
     tx(rows)
   }
 
+  /**
+   * Replace this disposable cache from the durable image-library mirrors.
+   * This is used when moving back from Rust mode, where Rust owns mutations
+   * and Electron's index may contain stale rows for moved/deleted images.
+   */
+  replaceFromMirrors (rows: ImageIndexRow[], folderNames: string[]): void {
+    const insertImage = this.db.prepare(`
+      INSERT INTO images (${SELECT_COLUMNS})
+      VALUES (@id, @created_at, @mode, @provider_id, @model, @prompt, @negative_prompt, @aspect_ratio, @size, @quality, @output_format, @file_name, @thumb_name, @source_file_names, @folder, @tags, @width, @height)
+    `)
+    const insertFolder = this.db.prepare('INSERT OR IGNORE INTO folders (name) VALUES (?)')
+    const tx = this.db.transaction((items: ImageIndexRow[], folders: string[]) => {
+      this.db.prepare('DELETE FROM images').run()
+      this.db.prepare('DELETE FROM folders').run()
+      for (const item of items) insertImage.run(item)
+      for (const folder of folders) {
+        const name = folder.trim()
+        if (name) insertFolder.run(name)
+      }
+    })
+    tx(rows, folderNames)
+  }
+
   /** Update only the thumbnail file name (used by lazy thumbnail generation). */
   setThumbName (id: string, thumbName: string): void {
     this.db.prepare('UPDATE images SET thumb_name = ? WHERE id = ?').run(thumbName, id)

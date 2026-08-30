@@ -30,6 +30,8 @@ export type { StreamEvent, ProgressCallback, ProgressEvent }
 export interface CustomToolRegistration {
   definition: ToolDefinition
   handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>
+  /** Used by the Rust facade when this run is routed through app-server. */
+  domain?: 'electron_host_override' | 'host'
 }
 
 export interface AIEngineServices {

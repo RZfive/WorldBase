@@ -188,7 +188,10 @@ mod tests {
         // /tmp 在允许列表 → 换成 workspace 外路径验证
         let req2 = ExecRequest {
             program: "sh".into(),
-            args: vec!["-c".into(), "echo x > /tmp/seatbelt-probe".into()],
+            args: vec![
+                "-c".into(),
+                "echo x > /tmp/seatbelt-probe".into(),
+            ],
             cwd: None,
             env: Default::default(),
             timeout_secs: Some(10),
@@ -196,6 +199,9 @@ mod tests {
         };
         let _ = result;
         let result2 = run(&req2, dir.path()).await.unwrap();
-        assert_ne!(result2.exit_code, 0, "seatbelt should block write outside workspace");
+        assert_ne!(
+            result2.exit_code, 0,
+            "seatbelt should block write outside workspace"
+        );
     }
 }
