@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/glass.dart';
 import '../../core/harness_client.dart';
 import '../../core/ios_ui.dart';
 import '../../core/providers.dart';
@@ -12,6 +13,7 @@ class SettingsTab extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final p = DawnPalette.of(context);
     return IosScreen(
       navBar: const IosNavBar(),
       child: ListView(
@@ -70,7 +72,7 @@ class SettingsTab extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 14),
-          const IosSection(
+          IosSection(
             header: '扩展与连接',
             children: [
               SettingsEntry(
@@ -82,7 +84,7 @@ class SettingsTab extends ConsumerWidget {
               ),
               SettingsEntry(
                 icon: CupertinoIcons.gear_alt_fill,
-                iconColor: iosSecondaryLabel,
+                iconColor: p.ink2,
                 title: '通用与关于',
                 subtitle: 'Harness 连接 · 版本信息',
                 page: AdvancedPage(),
@@ -114,12 +116,13 @@ class SettingsEntry extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return IosRow(
       icon: icon,
       iconColor: iconColor,
       title: title,
       subtitle: subtitle,
-      trailing: const Icon(CupertinoIcons.chevron_forward, size: 14, color: iosSecondaryLabel),
+      trailing: Icon(CupertinoIcons.chevron_forward, size: 14, color: p.ink2),
       onTap: () => Navigator.of(context).push(cupertinoRoute(page)),
     );
   }
@@ -356,6 +359,7 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
   }
 
   Future<void> _editProvider(ProviderEntry? existing) async {
+    final p = DawnPalette.of(context);
     final nameCtrl = TextEditingController(text: existing?.name ?? '');
     final urlCtrl = TextEditingController(text: existing?.baseUrl ?? '');
     final keyCtrl = TextEditingController(text: existing?.apiKey ?? '');
@@ -394,8 +398,8 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
       context: context,
       builder: (ctx) => Container(
         constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.92),
-        decoration: const BoxDecoration(
-          color: iosGroupedBg,
+        decoration: BoxDecoration(
+          color: p.groupedBg,
           borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
         ),
         child: SafeArea(
@@ -411,7 +415,7 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                   const SizedBox(height: 12),
                   _field(nameCtrl, '名称'),
                   const SizedBox(height: 10),
-                  const Text('API 协议', style: TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+                  Text('API 协议', style: TextStyle(fontSize: 13, color: p.ink2)),
                   const SizedBox(height: 6),
                   CupertinoSlidingSegmentedControl<String>(
                     groupValue: protocol,
@@ -429,9 +433,9 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                   const SizedBox(height: 14),
                   Row(
                     children: [
-                      const Expanded(
+                      Expanded(
                         child: Text('模型（逐模型设置能力与价格）',
-                            style: TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+                            style: TextStyle(fontSize: 13, color: p.ink2)),
                       ),
                       CupertinoButton(
                         minSize: 0,
@@ -519,6 +523,7 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
     required VoidCallback onSetDefault,
     required VoidCallback onDelete,
   }) {
+    final p = DawnPalette.of(context);
     final m = models[i];
     final expanded = expandedIdx == i;
     final isDefault = m.id.isNotEmpty && m.id == activeModel;
@@ -537,7 +542,7 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                 Icon(
                   isDefault ? CupertinoIcons.checkmark_circle_fill : CupertinoIcons.circle,
                   size: 20,
-                  color: isDefault ? iosGreen : iosSeparator,
+                  color: isDefault ? iosGreen : p.separator,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -550,7 +555,7 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                       const SizedBox(height: 2),
                       Text(
                         '上下文 ${m.contextWindowK}K · 入 ${m.inputPrice}/M · 出 ${m.outputPrice}/M',
-                        style: const TextStyle(fontSize: 11, color: iosSecondaryLabel),
+                        style: TextStyle(fontSize: 11, color: p.ink2),
                       ),
                     ],
                   ),
@@ -567,7 +572,7 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                   ),
                 const SizedBox(width: 6),
                 Icon(expanded ? CupertinoIcons.chevron_up : CupertinoIcons.chevron_down,
-                    size: 14, color: iosSecondaryLabel),
+                    size: 14, color: p.ink2),
               ],
             ),
           ),
@@ -632,20 +637,21 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
   }
 
   Widget _miniField(TextEditingController ctrl, String label) {
+    final p = DawnPalette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: const TextStyle(fontSize: 10, color: iosSecondaryLabel)),
+        Text(label, style: TextStyle(fontSize: 10, color: p.ink2)),
         const SizedBox(height: 3),
         CupertinoTextField(
           controller: ctrl,
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
-            color: iosGroupedBg,
+            color: p.groupedBg,
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: iosSeparator),
+            border: Border.all(color: p.separator),
           ),
-          style: const TextStyle(fontSize: 12, color: iosLabel),
+          style: TextStyle(fontSize: 12, color: p.ink),
           keyboardType: TextInputType.numberWithOptions(decimal: true),
         ),
       ],
@@ -653,10 +659,11 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
   }
 
   Widget _field(TextEditingController ctrl, String label, {String? hint, bool obscure = false}) {
+    final p = DawnPalette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: const TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+        Text(label, style: TextStyle(fontSize: 13, color: p.ink2)),
         const SizedBox(height: 5),
         CupertinoTextField(
           controller: ctrl,
@@ -664,11 +671,11 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
           placeholder: hint,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
-            color: iosCardBg,
+            color: p.cardBg,
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: iosSeparator),
+            border: Border.all(color: p.separator),
           ),
-          style: const TextStyle(fontSize: 15, letterSpacing: -0.3, color: iosLabel),
+          style: TextStyle(fontSize: 15, letterSpacing: -0.3, color: p.ink),
         ),
       ],
     );
@@ -727,6 +734,7 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
   }
 
   Future<void> _editAgent(AgentDefinition? existing) async {
+    final p = DawnPalette.of(context);
     final providers = await HarnessClient.instance.listProviders();
     final providerList = (providers['providers'] as List?)?.cast<Map>() ?? [];
     final nameCtrl = TextEditingController(text: existing?.name ?? '');
@@ -739,8 +747,8 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
       context: context,
       builder: (ctx) => Container(
         constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.9),
-        decoration: const BoxDecoration(
-          color: iosGroupedBg,
+        decoration: BoxDecoration(
+          color: p.groupedBg,
           borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
         ),
         child: SafeArea(
@@ -763,9 +771,9 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
                           textAlign: TextAlign.center,
                           padding: const EdgeInsets.symmetric(vertical: 10),
                           decoration: BoxDecoration(
-                            color: iosCardBg,
+                            color: p.cardBg,
                             borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: iosSeparator),
+                            border: Border.all(color: p.separator),
                           ),
                         ),
                       ),
@@ -778,7 +786,7 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
                   const SizedBox(height: 10),
                   _field(promptCtrl, '人设（系统提示词）'),
                   const SizedBox(height: 12),
-                  const Text('绑定供应商（可选）', style: TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+                  Text('绑定供应商（可选）', style: TextStyle(fontSize: 13, color: p.ink2)),
                   const SizedBox(height: 6),
                   CupertinoSlidingSegmentedControl<String>(
                     groupValue: providerId ?? '',
@@ -828,10 +836,11 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
   }
 
   Widget _field(TextEditingController ctrl, String label, {String? hint}) {
+    final p = DawnPalette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: const TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+        Text(label, style: TextStyle(fontSize: 13, color: p.ink2)),
         const SizedBox(height: 5),
         CupertinoTextField(
           controller: ctrl,
@@ -839,11 +848,11 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
           maxLines: label.contains('人设') ? 3 : 1,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
-            color: iosCardBg,
+            color: p.cardBg,
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: iosSeparator),
+            border: Border.all(color: p.separator),
           ),
-          style: const TextStyle(fontSize: 15, letterSpacing: -0.3, color: iosLabel),
+          style: TextStyle(fontSize: 15, letterSpacing: -0.3, color: p.ink),
         ),
       ],
     );
@@ -865,6 +874,7 @@ class _MemoryCardState extends ConsumerState<_MemoryCard> {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return IosSection(
       header: '长期记忆',
       footer: 'FTS5 全文检索（中文自动回退子串匹配）',
@@ -892,9 +902,9 @@ class _MemoryCardState extends ConsumerState<_MemoryCard> {
         ),
         if (_hits != null)
           if (_hits!.isEmpty)
-            const IosRow(
+            IosRow(
               icon: CupertinoIcons.search,
-              iconColor: iosSecondaryLabel,
+              iconColor: p.ink2,
               title: '无匹配记忆',
             )
           else
@@ -1087,6 +1097,7 @@ class _UsageCardState extends ConsumerState<_UsageCard> {
   @override
   Widget build(BuildContext context) {
     final s = _summary;
+    final p = DawnPalette.of(context);
     return IosSection(
       header: '用量（近 30 天）',
       footer: '每次对话按供应商模型单价（/1M tokens）记账',
@@ -1133,9 +1144,9 @@ class _UsageCardState extends ConsumerState<_UsageCard> {
                     style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
               ),
           if (s.byModel.isEmpty && _expanded)
-            const IosRow(
+            IosRow(
                 icon: CupertinoIcons.chart_bar,
-                iconColor: iosSecondaryLabel,
+                iconColor: p.ink2,
                 title: '暂无用量记录'),
         ],
       ],
@@ -1143,6 +1154,7 @@ class _UsageCardState extends ConsumerState<_UsageCard> {
   }
 
   Widget _statBlock(String label, String value, Color color) {
+    final p = DawnPalette.of(context);
     return Expanded(
       child: Container(
         padding: const EdgeInsets.all(10),
@@ -1153,7 +1165,7 @@ class _UsageCardState extends ConsumerState<_UsageCard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(label, style: const TextStyle(fontSize: 11, color: iosSecondaryLabel)),
+            Text(label, style: TextStyle(fontSize: 11, color: p.ink2)),
             const SizedBox(height: 2),
             Text(value,
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: color)),
@@ -1172,6 +1184,7 @@ class _DailyBars extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     final days = daily.reversed.take(14).toList();
     final maxCost = days
         .map((d) => (d['cost'] as num?)?.toDouble() ?? 0)
@@ -1199,7 +1212,7 @@ class _DailyBars extends StatelessWidget {
                   ),
                   const SizedBox(height: 4),
                   Text((d['day'] as String).substring(5),
-                      style: const TextStyle(fontSize: 8, color: iosSecondaryLabel),
+                      style: TextStyle(fontSize: 8, color: p.ink2),
                       overflow: TextOverflow.ellipsis),
                 ],
               ),
@@ -1237,6 +1250,7 @@ class _SkillsCardState extends ConsumerState<_SkillsCard> {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return IosSection(
       header: '技能',
       footer: '技能以 YAML 存于 harness，Agent 可调用',
@@ -1246,7 +1260,7 @@ class _SkillsCardState extends ConsumerState<_SkillsCard> {
         else if (_skills!.isEmpty)
           IosRow(
             icon: CupertinoIcons.sparkles,
-            iconColor: iosSecondaryLabel,
+            iconColor: p.ink2,
             title: '暂无技能，点按新建',
             onTap: () => _createSkill(context),
           )
@@ -1270,11 +1284,12 @@ class _SkillsCardState extends ConsumerState<_SkillsCard> {
   }
 
   void _showSkill(BuildContext context, SkillDescriptor skill) {
+    final p = DawnPalette.of(context);
     showCupertinoModalPopup<void>(
       context: context,
       builder: (ctx) => Container(
-        decoration: const BoxDecoration(
-          color: iosGroupedBg,
+        decoration: BoxDecoration(
+          color: p.groupedBg,
           borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
         ),
         child: SafeArea(
@@ -1389,6 +1404,7 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return IosSection(
       header: '定时任务',
       footer: '移动端语义降级：iOS 后台触发受限，由系统补跑',
@@ -1396,16 +1412,16 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
         if (_schedules == null)
           const Padding(padding: EdgeInsets.all(16), child: CupertinoActivityIndicator())
         else if (_schedules!.isEmpty)
-          const IosRow(
+          IosRow(
             icon: CupertinoIcons.alarm,
-            iconColor: iosSecondaryLabel,
+            iconColor: p.ink2,
             title: '暂无任务',
           )
         else
           for (final s in _schedules!)
             IosRow(
               icon: CupertinoIcons.alarm_fill,
-              iconColor: s.enabled ? iosGreen : iosSecondaryLabel,
+              iconColor: s.enabled ? iosGreen : p.ink2,
               title: s.name,
               subtitle: '${s.cron} · 下次 ${s.nextRunAt ?? '-'}',
               onTap: () => _showActions(context, s),

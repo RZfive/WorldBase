@@ -30,10 +30,7 @@ impl Scheduler {
             task: task.into(),
             enabled: true,
             last_run_at: None,
-            next_run_at: next_run(cron_expr)
-                .ok()
-                .flatten()
-                .map(|t| t.to_rfc3339()),
+            next_run_at: next_run(cron_expr).ok().flatten().map(|t| t.to_rfc3339()),
         };
         self.store.create_schedule(&entry)?;
         Ok(entry)
@@ -68,7 +65,9 @@ impl Scheduler {
             if !entry.enabled {
                 continue;
             }
-            let Some(next) = next_run(&entry.cron)? else { continue };
+            let Some(next) = next_run(&entry.cron)? else {
+                continue;
+            };
             let now = Utc::now();
             // 到期判定：上次未运行过且 next <= now（30s 粒度的近似）。
             let due = match &entry.last_run_at {
@@ -101,7 +100,10 @@ fn to_crate_cron(expr: &str) -> Result<String> {
     let converted = match fields.len() {
         5 => {
             let dow = remap_dow(fields[4])?;
-            format!("0 {} {} {} {} {}", fields[0], fields[1], fields[2], fields[3], dow)
+            format!(
+                "0 {} {} {} {} {}",
+                fields[0], fields[1], fields[2], fields[3], dow
+            )
         }
         6 | 7 => expr.to_string(),
         n => anyhow::bail!("cron must have 5 fields, got {n}: {expr}"),
@@ -135,8 +137,8 @@ fn remap_dow(field: &str) -> Result<String> {
 
 /// 下一次运行时间（本地时区语义按 UTC 近似，移动端由宿主补跑修正）。
 pub fn next_run(expr: &str) -> Result<Option<DateTime<Utc>>> {
-    let schedule =
-        cron::Schedule::from_str(&to_crate_cron(expr)?).with_context(|| format!("invalid cron: {expr}"))?;
+    let schedule = cron::Schedule::from_str(&to_crate_cron(expr)?)
+        .with_context(|| format!("invalid cron: {expr}"))?;
     Ok(schedule.upcoming(Utc).next())
 }
 
@@ -157,7 +159,14 @@ mod tests {
         assert!(next > Utc::now());
         // 周一到周五
         let weekday = chrono::Datelike::weekday(&next);
-        assert!(matches!(weekday, chrono::Weekday::Mon | chrono::Weekday::Tue | chrono::Weekday::Wed | chrono::Weekday::Thu | chrono::Weekday::Fri));
+        assert!(matches!(
+            weekday,
+            chrono::Weekday::Mon
+                | chrono::Weekday::Tue
+                | chrono::Weekday::Wed
+                | chrono::Weekday::Thu
+                | chrono::Weekday::Fri
+        ));
     }
 
     #[test]
@@ -173,5 +182,4 @@ mod tests {
         assert!(sched.delete(&entry.id).unwrap());
         assert!(sched.list().unwrap().is_empty());
     }
-
 }

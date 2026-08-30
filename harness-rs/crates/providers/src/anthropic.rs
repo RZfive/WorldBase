@@ -1,7 +1,9 @@
 //! Anthropic Messages API 流式 provider。
 
 use super::sse::SseParser;
-use super::{ChunkStream, ContentBlock, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk};
+use super::{
+    ChatOptions, ChunkStream, ContentBlock, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk,
+};
 use anyhow::{bail, Context, Result};
 use futures::stream::StreamExt;
 use reqwest::Client;
@@ -38,10 +40,30 @@ impl AnthropicProvider {
             .iter()
             .map(|b| match b {
                 ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+                ContentBlock::ImageUrl { url } => {
+                    if let Some((media_type, data)) = url
+                        .strip_prefix("data:")
+                        .and_then(|value| value.split_once(";base64,"))
+                    {
+                        json!({
+                            "type": "image",
+                            "source": { "type": "base64", "media_type": media_type, "data": data }
+                        })
+                    } else {
+                        // Anthropic's Messages API does not accept arbitrary
+                        // remote image URLs. Preserve the reference instead of
+                        // silently dropping the attachment.
+                        json!({ "type": "text", "text": format!("[Image attachment: {url}]") })
+                    }
+                }
                 ContentBlock::ToolUse { id, name, input } => {
                     json!({ "type": "tool_use", "id": id, "name": name, "input": input })
                 }
-                ContentBlock::ToolResult { tool_use_id, content, is_error } => json!({
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => json!({
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
                     "content": content,
@@ -54,8 +76,14 @@ impl AnthropicProvider {
 }
 
 enum BlockAcc {
-    Text { text: String },
-    ToolUse { id: String, name: String, json_acc: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        json_acc: String,
+    },
 }
 
 struct StreamState {
@@ -66,6 +94,8 @@ struct StreamState {
     stop_reason: String,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
     finished: bool,
 }
 
@@ -83,7 +113,9 @@ impl StreamState {
                         name: block["name"].as_str().unwrap_or_default().into(),
                         json_acc: String::new(),
                     }),
-                    _ => self.blocks.push_back(BlockAcc::Text { text: String::new() }),
+                    _ => self.blocks.push_back(BlockAcc::Text {
+                        text: String::new(),
+                    }),
                 }
             }
             "content_block_delta" => {
@@ -105,13 +137,24 @@ impl StreamState {
                 }
             }
             "message_start" => {
-                self.input_tokens = payload["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                self.input_tokens = payload["message"]["usage"]["input_tokens"]
+                    .as_u64()
+                    .unwrap_or(0);
+                self.cache_read_tokens = payload["message"]["usage"]["cache_read_input_tokens"]
+                    .as_u64()
+                    .unwrap_or(0);
+                self.cache_creation_tokens = payload["message"]["usage"]
+                    ["cache_creation_input_tokens"]
+                    .as_u64()
+                    .unwrap_or(0);
             }
             "message_delta" => {
                 if let Some(reason) = payload["delta"]["stop_reason"].as_str() {
                     self.stop_reason = reason.to_string();
                 }
-                self.output_tokens = payload["usage"]["output_tokens"].as_u64().unwrap_or(self.output_tokens);
+                self.output_tokens = payload["usage"]["output_tokens"]
+                    .as_u64()
+                    .unwrap_or(self.output_tokens);
             }
             "message_stop" => {
                 let content: Vec<ContentBlock> = self
@@ -132,17 +175,26 @@ impl StreamState {
                     .collect();
                 self.queue.push_back(Ok(StreamChunk::Completed {
                     stop_reason: std::mem::take(&mut self.stop_reason),
-                    assistant: LlmMessage { role: LlmRole::Assistant, content },
+                    assistant: LlmMessage {
+                        role: LlmRole::Assistant,
+                        content,
+                    },
                     usage: super::TokenUsage {
                         input_tokens: self.input_tokens,
                         output_tokens: self.output_tokens,
+                        cache_read_tokens: self.cache_read_tokens,
+                        cache_creation_tokens: self.cache_creation_tokens,
                     },
                 }));
                 self.finished = true;
             }
             "error" => {
-                let msg = payload["error"]["message"].as_str().unwrap_or("unknown").to_string();
-                self.queue.push_back(Err(anyhow::anyhow!("anthropic stream error: {msg}")));
+                let msg = payload["error"]["message"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
+                self.queue
+                    .push_back(Err(anyhow::anyhow!("anthropic stream error: {msg}")));
                 self.finished = true;
             }
             _ => {}
@@ -166,6 +218,7 @@ impl Provider for AnthropicProvider {
         messages: Vec<LlmMessage>,
         tools: Vec<LlmTool>,
         max_tokens: u32,
+        _options: ChatOptions,
     ) -> Result<ChunkStream> {
         let mut body = json!({
             "model": self.model,
@@ -210,6 +263,8 @@ impl Provider for AnthropicProvider {
             stop_reason: "end_turn".into(),
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
             finished: false,
         };
 
@@ -226,7 +281,9 @@ impl Provider for AnthropicProvider {
                 }
                 match st.bytes.next().await {
                     None => return None,
-                    Some(Err(e)) => return Some((Err(anyhow::anyhow!("stream read error: {e}")), st)),
+                    Some(Err(e)) => {
+                        return Some((Err(anyhow::anyhow!("stream read error: {e}")), st))
+                    }
                     Some(Ok(chunk)) => {
                         let text = String::from_utf8_lossy(&chunk);
                         for ev in st.parser.feed(&text) {

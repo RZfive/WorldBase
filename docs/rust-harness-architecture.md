@@ -2,7 +2,9 @@
 
 **版本**: v5（定案）  
 **日期**: 2026-08-28  
-**核心原则**: **Harness 完整迁移当前 TS 全部能力（零删减）· 移动端宿主按平台能力降级 · 桌面/CLI/server 零降级**
+**目标原则**: **Harness 完整迁移当前 TS 全部能力（零删减）· 移动端宿主按平台能力降级 · 桌面/CLI/server 零降级**
+
+**当前实施状态（2026-08-30）**：Rust 已提供可运行的 core/app-server，并已接入 Electron 的可选 Harness 后端。Electron 默认仍使用 TS；选择 Rust 后，聊天、项目、文件工作区、图片 Studio 与 MCP 均通过 Rust 的 JSON-RPC/事件流处理，群组原生会话接入同步收敛中。TS Harness 保留为显式迁移选项，以及 Rust 可执行文件缺失或初始握手失败时的启动兜底。
 
 ---
 
@@ -28,7 +30,7 @@
 2. [总体架构与 crate 结构](#2-总体架构与-crate-结构)
 3. [通用承载：一个 dispatcher，四种 transport](#3-通用承载一个-dispatcher四种-transport)
 4. [宿主能力注入](#4-宿主能力注入)
-5. [Electron 集成：全能力保留](#5-electron-集成全能力保留)
+5. [Electron 集成：渐进迁移、全能力保留](#5-electron-集成渐进迁移全能力保留)
 6. [CLI 与 serve 模式](#6-cli-与-serve-模式)
 7. [对标 Codex](#7-对标-codex)
 8. [移动端降级：宿主层面的能力映射](#8-移动端降级宿主层面的能力映射)
@@ -39,20 +41,20 @@
 
 ## 1. 核心原则
 
-### Harness 是能力的全集，宿主按需裁剪
+### Harness 是能力的全集，宿主按需裁剪（目标）
 
-- **Rust harness core**: 当前 `apps/electron/src/main` 全部业务逻辑 1:1 平移——全栈项目运行时（bundled Node）、全部 60+ 工具、IM webhook 接收、重文档编辑、命令沙箱、群组协作、记忆、技能、MCP、scheduler……**零功能删减**
-- **桌面端/CLI/server**: 全能力，与现在 Electron 版功能完全对齐
+- **Rust harness core**: 目标是将 `apps/electron/src/main` 全部业务逻辑 1:1 平移——全栈项目运行时（bundled Node）、全部 60+ 工具、IM webhook 接收、重文档编辑、命令沙箱、群组协作、记忆、技能、MCP、scheduler……**零功能删减**
+- **桌面端/CLI/server**: 完成迁移后与 Electron 版功能完全对齐；当前 Electron 仍以 TS 为完整实现，Rust 按迁移清单逐域补齐
 - **移动端**: 通过 `cfg(feature = "mobile")` 裁剪出可编译子集 + 握手时能力协商过滤工具集（不跑 Node 子进程，用 WebView 轻应用替代全栈项目）
 
 **不是「为了移动端简化 harness」，而是「harness 保持完整，移动端选择性接入」。**
 
 ### 架构决策
 
-**Harness 是 Rust workspace: 完整迁移当前 TS 版全部能力，唯一 dispatcher + 四种接入方式。**
+**Harness 的最终形态是 Rust workspace: 完整迁移当前 TS 版全部能力，唯一 dispatcher + 四种接入方式。迁移期间 Electron 保持 TS/Rust 双后端可选。**
 
 - **CLI/TUI**: 直接链接 core crate（进程内，同 codex），**全能力**
-- **Electron**: spawn harness 二进制，stdio 上跑全双工 JSON-RPC（codex app-server 同款），**全能力**
+- **Electron**: spawn harness 二进制，stdio 上跑全双工 JSON-RPC（codex app-server 同款）；设置可选 TS/Rust，Rust 选择时由 Rust 承接已接入的业务域
 - **移动端**: 经 flutter_rust_bridge 把 core 编译为静态库链入 App（FFI 进程内），**按平台能力降级**（见 §8）
 - **server**: 同一二进制加 `serve`（axum，WS/HTTP），**全能力**
 
@@ -64,7 +66,7 @@
 2. **文档/搜索用 Rust 生态直接做满**（calamine/lopdf/ignore），不再是降级项
 3. **命令沙箱、本地推理等未来能力的语言位置就位**
 4. **单二进制分发**（distroless ~30MB，无 node_modules）
-5. **与当前 TS 版功能完全对齐**（bundled Node 运行时、exec、IM webhook 等全部可 1:1 迁移）
+5. **最终与当前 TS 版功能完全对齐**（bundled Node 运行时、exec、IM webhook 等全部可 1:1 迁移）
 
 ### 迁移范围（Harness 层面，全量 1:1）
 
@@ -99,14 +101,14 @@ the-world/
 └── docs/                # monorepo 级契约、架构与迁移文档
 ```
 
-Electron 源码已迁移至 `apps/electron/`，Rust P0 位于 `harness-rs/`，Flutter workspace 尚未创建。目录边界和后续迁移映射以 [docs/project-structure.md](project-structure.md) 为准。
+Electron 源码已迁移至 `apps/electron/`，Rust workspace 位于 `harness-rs/`，Flutter workspace 位于 `apps/mobile/`。目录边界和后续迁移映射以 [docs/project-structure.md](project-structure.md) 为准。
 
 ### 总体架构
 
 ```
                 ┌─ Flutter 移动 App ───── FFI(flutter_rust_bridge,进程内,能力过滤)
 Rust harness ───┼─ CLI(worldbase chat/run/projects)── in-proc(链接 core,全能力)
-(monorepo       ├─ Electron 桌面 ────────── stdio JSON-RPC(spawn 二进制,全能力)
+(monorepo       ├─ Electron 桌面 ────────── stdio JSON-RPC(spawn 二进制,按迁移域)
  multi-workspace)└─ worldbase serve ─────── WS/HTTP(axum,全能力)
 ```
 
@@ -209,12 +211,18 @@ apps/mobile/                      # 独立 Flutter workspace（P3 创建）
 
 ---
 
-## 5. Electron 集成：全能力保留
+## 5. Electron 集成：渐进迁移、全能力保留
+
+### 当前接入边界
+
+Electron 设置 → 执行中的“对话 Harness”提供 `TypeScript（旧版）`（默认）和 `Rust（app-server）` 两个后端。Rust 分支承接完整的 `ai:chat` / `ai:chatStream` 模型与工具循环，并同步会话历史、权限确认、项目、工作区、群组、页面、多模态附件、图片 Studio 与 MCP 上下文。项目、工作区、图片 Studio 与 MCP 已有 Rust 原生 RPC 路径；群组正在从 Electron 会话编排切换到 Rust 原生会话事件流。Electron 权威域工具通过 `tool.execute` 宿主反向 RPC 注册为 `electron_host_override`；Rust 二进制不可用或启动失败时才自动沿用 TS 路径。已有 Rust 流在切回 TS 后仍可完成、授权和停止。
+
+选择 Rust 不会丢弃 Electron 上下文，也不会根据上下文回退 TS。Rust 已注册 Electron 的公开 Agent 工具名；当操作依赖 Electron 权威数据、运行时或 UI 时，同名的 `electron_host_override` 描述符替换 Rust 内建工具，并由 Rust 循环发起 `tool.execute` 宿主 RPC。Electron 模式仅把 Rust 的计划模式控制作为原生工具暴露给模型，其余域工具均走宿主桥，避免绕过 Electron 的项目、工作区、权限、图库或 MCP 状态。项目目录/运行时日志、文档 artifact store、图片 Studio 队列、subagent、MCP/Skill/Agent Workspace 持久化以及完整 memory/group 行为仍需逐项验证 1:1 语义，但它们已进入 Rust 可测试执行路径。对应的 parity 清单维护在 [HARNESS.md](../HARNESS.md)，完成前不得删除 TS `AIEngine`、工具和 Electron 服务。
 
 ### 打包与进程模型
 
-- CI 编译 `worldbase-harness` 二进制(mac/win/linux)，electron-builder 放 `extraResources`
-- spawn 启动，崩溃自动拉起
+- CI 编译 `worldbase-app-server` 二进制(mac/win/linux)，electron-builder 放 `extraResources`
+- 用户选择 Rust 后按需 spawn；进程退出会向当前流发送错误，TS 后端仍可继续使用
 - main 职责: 窗口/托盘/对话框/通知/更新 + IPC 代理 + 注入能力
 
 ### 渐进切换（strangler）
@@ -228,7 +236,7 @@ ipcMain.handle('conversations:list', (e, args) => conversationStore.list(args))
 ipcMain.handle('conversations:list', (e, args) => harness.call('conversations.list', args))
 ```
 
-切换顺序: `settings:*` → `conversations:*` → `agents` → `ai:chatStream` → `projects/runtime` → `document`。每步桌面版全功能。
+切换顺序: `settings:*` → `conversations:*` → `agents` → `ai:chatStream` → `projects/runtime` → `document`。每个域在契约、行为和宿主交互完成验证前，不删除对应 TS 实现。
 
 ---
 
@@ -256,7 +264,7 @@ OpenAI Codex([openai/codex](https://github.com/openai/codex))架构同构验证:
 
 ## 8. 移动端降级：宿主层面的能力映射
 
-**前提重申**：Rust harness 保持完整（与当前 TS 版 1:1），移动端的「降级」发生在**宿主接入层**，不是 harness 层。
+**目标重申**：Rust harness 最终保持完整（与当前 TS 版 1:1），移动端的「降级」发生在**宿主接入层**，不是 harness 层。当前 Rust 仍在补齐 Electron TS parity。
 
 ### 接入方式：FFI 进程内
 
@@ -334,10 +342,10 @@ lib/
 |---|---|---|---|
 | P0 | Rust 骨架: core + providers + protocol + cli | CLI 跑通对话 | 5–6 周 |
 | P1 | 核心移植: tools/skills/memory/群组/scheduler/MCP | 契约测试对齐桌面 | 8–10 周 |
-| P2 | app-server + Electron 接入按域切换 | 桌面跑 Rust harness | 4–5 周 |
+| P2 | app-server + Electron 接入按域切换（当前进行中，聊天路径已可选） | 桌面可选择 Rust/TS，未迁移域继续 TS | 4–5 周 |
 | P3 | mobile-ffi + Flutter 四 Tab + 轻应用 + cargokit | 移动端双端上架 | 6–8 周 |
 | P4 | docs/search 全端 + exec/project-runtime(Rust 或 TS 注入) | 文档桌面级；全栈项目桌面可用 | 4–6 周 |
-| P5 | serve + 推送(可选)+ 删 TS + 上架打磨 | 一套 Rust 核心四宿主 | 3–4 周 |
+| P5 | 通过行为/E2E parity gate 后再删 TS + 上架打磨 | 一套 Rust 核心四宿主 | 3–4 周 |
 
 **总计**: 9–12 个月(1–2 人)
 
@@ -349,7 +357,7 @@ lib/
 
 - **FFI 边界**：单流+帧批量+panic 防线 P3 就位
 - **Rust 工期单价**：P1 超 50% 触发 fallback 评估
-- **移植期双运行**：已切域立即删 TS
+- **移植期双运行**：Rust 域通过设置按需启用；未完成 parity 前保留 TS 默认实现和回退路径
 - **构建矩阵**：5 target + 4 平台，P0 就建 CI
 - **协议冻结**：P0 协议带 protocolVersion + capabilities
 - **文档编辑 Rust 缺口**：桌面短期保留 TS 注入
@@ -376,5 +384,5 @@ lib/
 
 ---
 
-**文档状态**: ✅ 定案 v5 全 Rust，Harness 完整迁移当前 TS 能力，移动端宿主降级  
+**文档状态**: 🟡 v5 目标保留；当前处于 TS/Rust 渐进迁移，Electron 提供可选后端，Harness 全能力 parity 尚未完成
 **维护**: 随 P0–P5 更新细节

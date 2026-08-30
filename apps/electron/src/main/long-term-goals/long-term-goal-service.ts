@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
-import type { AIConfigInput, AIEngine, CustomToolRegistration } from '../ai-engine/ai-engine.js'
+import type { AIConfigInput, CustomToolRegistration } from '../ai-engine/ai-engine.js'
+import type { AIExecutionEngine } from '../ai-harness/types.js'
 import type { ChatMessage } from '../ai-engine/providers/openai-provider.js'
 import type { LongTermGoalStore } from '../settings/long-term-goal-store.js'
 import type { ScheduledTaskDefinition, ScheduledTaskProgressEntry, ScheduledTaskRunReport } from '../settings/scheduled-task-store.js'
@@ -28,7 +29,8 @@ import type {
 interface LongTermGoalServiceOptions {
   store: LongTermGoalStore
   scheduledTaskService: ScheduledTaskService
-  aiEngine: AIEngine
+  aiEngine: AIExecutionEngine
+  resolveAiEngine?: () => Promise<AIExecutionEngine>
   skillStore?: SkillStore
   projectFS?: { readFile: (projectId: string, relativePath: string) => Promise<string | null> }
   resolveProviderConfig?: (providerId?: string | null, modelId?: string | null, reasoningEffort?: 'low' | 'medium' | 'high' | 'max', temperature?: number) => AIConfigInput | undefined
@@ -874,6 +876,10 @@ export class LongTermGoalService {
 
   constructor (private readonly options: LongTermGoalServiceOptions) {}
 
+  private async getAiEngine (): Promise<AIExecutionEngine> {
+    return await this.options.resolveAiEngine?.() || this.options.aiEngine
+  }
+
   private createLongTermGoalTools (
     goalInput: LongTermGoalDefinition | string,
     options: {
@@ -1663,7 +1669,8 @@ export class LongTermGoalService {
     latestUserText: string,
     onEvent?: (event: LongTermGoalStreamEvent) => void
   ): Promise<GoalAdjustmentReply> {
-    const availableTools = this.options.aiEngine
+    const aiEngine = await this.getAiEngine()
+    const availableTools = aiEngine
       .getAvailableTools()
       .filter(tool => isGoalAdjustmentToolDefinition(tool, goal))
     let toolProposal: GoalAdjustmentProposal | null = null
@@ -1732,7 +1739,7 @@ export class LongTermGoalService {
     let activeToolRun: LongTermGoalRunToolRun | null = null
 
     try {
-    for await (const event of this.options.aiEngine.chatStream(messages, undefined, {
+    for await (const event of aiEngine.chatStream(messages, undefined, {
       providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'max'),
       allowedToolNames: allowedToolNames.length > 0 ? allowedToolNames : undefined,
       allowedMcpServerIds,
@@ -2096,7 +2103,8 @@ export class LongTermGoalService {
         stage: 'AI 分析记忆',
         detail: '正在判断可删除、合并和保留的记忆条目。'
       })
-      for await (const event of this.options.aiEngine.chatStream(this.buildMemoryCompactionMessages(goal, editableMemories), undefined, {
+      const aiEngine = await this.getAiEngine()
+      for await (const event of aiEngine.chatStream(this.buildMemoryCompactionMessages(goal, editableMemories), undefined, {
         providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'high', 0.2),
         allowedToolNames: customTools.map(tool => tool.definition.name),
         customTools,
@@ -2228,7 +2236,8 @@ export class LongTermGoalService {
     const prompt = this.buildReplanPrompt(goal, triggerReason)
     // 重规划只读：放行只读/检索/查询类工具 + 项目只读工具，排除 create_project 与写入/构建工具。
     const replanReadOnlyTools = new Set(['read_project_file', 'list_project_files', 'read_file'])
-    const availableTools = this.options.aiEngine
+    const aiEngine = await this.getAiEngine()
+    const availableTools = aiEngine
       .getAvailableTools()
       .filter(tool => isGoalAdjustmentToolDefinition(tool, goal))
       .filter(tool => tool.name !== 'create_project'
@@ -2247,7 +2256,7 @@ export class LongTermGoalService {
     const contentParts: string[] = []
     const thinkingParts: string[] = []
     try {
-      for await (const event of this.options.aiEngine.chatStream([{ role: 'user', content: prompt }], undefined, {
+      for await (const event of aiEngine.chatStream([{ role: 'user', content: prompt }], undefined, {
         providerConfig: this.options.resolveProviderConfig?.(goal.providerId, goal.modelId, 'high'),
         allowedToolNames: allowedToolNames.length > 0 ? allowedToolNames : undefined,
         allowedMcpServerIds: goal.selectedMcpServerIds.length > 0 ? goal.selectedMcpServerIds : undefined,

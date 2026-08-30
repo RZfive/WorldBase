@@ -86,7 +86,7 @@ export class PlanEngine {
   /** 检查某个工具是否在 Plan 模式下允许执行 */
   isToolAllowed (toolName: string): boolean {
     if (!this._active) return true
-    if (toolName.startsWith('mcp__')) return false
+    if (toolName === 'mcp_call' || toolName.startsWith('mcp__')) return false
     // Plan 模式下只禁止写入类工具
     return !PlanEngine.WRITE_TOOLS.has(toolName)
   }

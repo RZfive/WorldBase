@@ -61,7 +61,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Commands::Chat { message, workspace, title } => match message {
+        Commands::Chat {
+            message,
+            workspace,
+            title,
+        } => match message {
             Some(msg) => one_shot(&workspace, &title, &msg).await?,
             None => repl(&workspace, &title).await?,
         },
@@ -88,7 +92,9 @@ async fn main() -> Result<()> {
 }
 
 async fn build_hub(workspace: &PathBuf) -> Result<Arc<Hub>> {
-    let workspace = workspace.canonicalize().unwrap_or_else(|_| workspace.clone());
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.clone());
     // 运行时数据不入工作区：`$WORLDBASE_HOME/app.sqlite` 或 `~/.the-world/app.sqlite`
     let store = Arc::new(worldbase_memory::Store::open_default()?);
     Hub::new(workspace, store)
@@ -108,7 +114,11 @@ async fn one_shot(workspace: &PathBuf, title: &str, message: &str) -> Result<()>
     )
     .await
     .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-    let stream_id = result["stream_id"].as_str().unwrap_or_default().to_string();
+    let stream_id = result["streamId"]
+        .as_str()
+        .or_else(|| result["stream_id"].as_str())
+        .unwrap_or_default()
+        .to_string();
 
     // 等待流结束（Done/Error 事件）
     loop {
@@ -132,7 +142,10 @@ async fn repl(workspace: &PathBuf, title: &str) -> Result<()> {
     let hub = build_hub(workspace).await?;
     let ctx = ConnectionContext::new(Capabilities::cli());
     let conv = hub.store.create_conversation(title, None)?;
-    println!("🤖 WorldBase CLI（会话 {}）— 输入 /quit 退出", &conv.id[..8]);
+    println!(
+        "🤖 WorldBase CLI（会话 {}）— 输入 /quit 退出",
+        &conv.id[..8]
+    );
 
     let mut events = hub.event_tx.subscribe();
     loop {
@@ -159,7 +172,11 @@ async fn repl(workspace: &PathBuf, title: &str) -> Result<()> {
         )
         .await
         .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-        let stream_id = result["stream_id"].as_str().unwrap_or_default().to_string();
+        let stream_id = result["streamId"]
+            .as_str()
+            .or_else(|| result["stream_id"].as_str())
+            .unwrap_or_default()
+            .to_string();
 
         loop {
             let frame = match events.recv().await {
@@ -187,15 +204,32 @@ fn print_event(frame: &EventFrame) {
             let _ = std::io::stdout().flush();
         }
         EventKind::ToolCall { name, .. } => println!("\n[工具调用] {name}"),
-        EventKind::ToolResult { name, content, is_error, .. } => {
+        EventKind::ToolResult {
+            name,
+            content,
+            is_error,
+            ..
+        } => {
             let tag = if *is_error { "错误" } else { "完成" };
             let short: String = content.chars().take(120).collect();
             println!("[工具{name} {tag}] {short}");
         }
-        EventKind::PermissionRequest { tool_name, args_summary, .. } => {
+        EventKind::PermissionRequest {
+            tool_name,
+            args_summary,
+            ..
+        } => {
             println!("[权限询问] {tool_name} {args_summary}（CLI 模式按拒绝处理）");
         }
         EventKind::AssistantMessage { .. } => println!(),
+        EventKind::Usage {
+            total_cost,
+            total_input_tokens,
+            total_output_tokens,
+            ..
+        } => println!(
+            "[用量] input={total_input_tokens} output={total_output_tokens} cost={total_cost:.6}"
+        ),
         EventKind::Done { .. } => println!(),
         EventKind::Error { message } => println!("\n[错误] {message}"),
         EventKind::Start { model } => println!("[模型] {model}"),

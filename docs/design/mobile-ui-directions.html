@@ -1,0 +1,486 @@
+<title>晨昏 2.0</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,560;9..144,640&family=Noto+Serif+SC:wght@500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* ---------- page tokens ---------- */
+  :root{
+    --bg:#FAFAF8; --surface:#FFFFFF; --ink:#201D1A; --ink-2:#6F6A61; --ink-3:#9B958B;
+    --line:#E9E6E0; --line-strong:#DCD8D0;
+    --accent:#5B6BE0; --accent-soft:#E9ECFB;
+    --serif:'Fraunces','Noto Serif SC','Songti SC',serif;
+    --sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB','Helvetica Neue',sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#16161A; --surface:#1F2026; --ink:#EAE9E4; --ink-2:#A4A29A; --ink-3:#7C7A73;
+      --line:#2C2D34; --line-strong:#3A3B44; --accent:#93A0F5; --accent-soft:#262B4A;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#16161A; --surface:#1F2026; --ink:#EAE9E4; --ink-2:#A4A29A; --ink-3:#7C7A73;
+    --line:#2C2D34; --line-strong:#3A3B44; --accent:#93A0F5; --accent-soft:#262B4A;
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.75;padding:0 0 96px}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 28px}
+  ::selection{background:var(--accent-soft)}
+  code{font-family:var(--mono);font-size:.86em;background:var(--accent-soft);color:var(--accent);padding:1.5px 6px;border-radius:5px;white-space:nowrap}
+
+  /* ---------- header ---------- */
+  header{padding:72px 0 40px;border-bottom:1px solid var(--line)}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;color:var(--ink-3);text-transform:uppercase;display:flex;gap:14px;flex-wrap:wrap}
+  .eyebrow .tag{color:var(--accent)}
+  h1{
+    font-family:var(--serif);font-weight:560;font-size:clamp(42px,6vw,66px);
+    letter-spacing:.01em;line-height:1.15;margin:18px 0 20px;text-wrap:balance;
+    background:linear-gradient(115deg,#5B6BE0 10%,#A56BD0 48%,#E8826B 90%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .lede{max-width:680px;font-size:16.5px;color:var(--ink-2);text-wrap:pretty}
+  .lede em{font-style:normal;color:var(--ink);border-bottom:1.5px solid var(--accent)}
+  .head-grid{display:grid;grid-template-columns:1fr auto;gap:40px;align-items:end}
+  .meta{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);line-height:2.1;border-left:1px solid var(--line);padding-left:20px;white-space:nowrap}
+  .meta b{color:var(--ink-2);font-weight:500}
+
+  /* ---------- sections ---------- */
+  section{padding:60px 0 0}
+  .sec-eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;color:var(--accent);text-transform:uppercase;margin-bottom:10px}
+  h2{font-family:var(--serif);font-weight:560;font-size:clamp(25px,3.2vw,32px);line-height:1.25;text-wrap:balance;margin-bottom:14px}
+  .sec-intro{max-width:660px;color:var(--ink-2);margin-bottom:32px}
+  .sec-intro b{color:var(--ink)}
+
+  /* ---------- tables ---------- */
+  .table-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;min-width:680px}
+  th{text-align:left;font-family:var(--mono);font-weight:500;font-size:11px;letter-spacing:.12em;color:var(--ink-3);padding:13px 18px;border-bottom:1px solid var(--line);text-transform:uppercase;white-space:nowrap}
+  td{padding:13px 18px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink-2)}
+  tr:last-child td{border-bottom:none}
+  td:first-child{color:var(--ink);font-weight:500}
+  .arrow{color:var(--accent);font-family:var(--mono)}
+
+  /* ---------- lists ---------- */
+  .moves{list-style:none;border-top:1px solid var(--line)}
+  .moves li{padding:12px 2px;border-bottom:1px solid var(--line);font-size:14px;color:var(--ink-2);display:flex;gap:12px}
+  .moves li::before{content:"—";color:var(--accent);flex-shrink:0}
+  .moves li b{color:var(--ink);font-weight:600}
+  .check{list-style:none;border-top:1px solid var(--line)}
+  .check li{display:grid;grid-template-columns:170px 1fr;gap:20px;padding:15px 2px;border-bottom:1px solid var(--line)}
+  .check .k{font-weight:600;font-size:14px}
+  .check .v{color:var(--ink-2);font-size:13.5px}
+
+  .note{
+    border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:12px;
+    background:var(--surface);padding:16px 22px;margin-top:20px;color:var(--ink-2);font-size:14px;max-width:780px;
+  }
+  .note b{color:var(--ink)}
+
+  /* ---------- phones ---------- */
+  .phones{display:flex;gap:22px;flex-wrap:wrap;justify-content:center;margin-top:8px}
+  .phone-col{display:flex;flex-direction:column;gap:12px;align-items:center}
+  .phone-label{font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--ink-3);text-transform:uppercase}
+  .phone{width:292px;border-radius:46px;padding:9px;flex-shrink:0;
+    background:linear-gradient(160deg,#3a3a3e,#101013 60%);
+    box-shadow:0 30px 60px -18px rgba(20,18,40,.38),0 2px 8px rgba(20,18,40,.14)}
+  .screen{border-radius:38px;overflow:hidden;height:600px;display:flex;flex-direction:column;position:relative;font-size:13.5px;
+    background:linear-gradient(168deg,#E0E7F6 0%,#EBE8F2 38%,#F8E9DF 76%,#F5E0D6 100%);color:#24252D}
+  .island{position:absolute;top:9px;left:50%;transform:translateX(-50%);width:82px;height:23px;border-radius:13px;background:#0A0A0C;z-index:9}
+  .statusbar{height:40px;display:flex;justify-content:space-between;align-items:center;padding:8px 24px 0;font-size:11.5px;font-weight:600;flex-shrink:0;position:relative;z-index:8;color:#3B3D4C}
+  .status-icons{display:flex;gap:5px;align-items:center}
+  .homebar{height:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0;position:relative;z-index:8}
+  .homebar i{width:92px;height:4px;border-radius:2.5px;background:rgba(36,37,45,.3)}
+  .caption{font-size:11.5px;color:var(--ink-3);max-width:280px;text-align:center;line-height:1.6}
+
+  /* ===== liquid glass material ===== */
+  .g1,.g2,.g3{position:relative}
+  .g1{
+    background:rgba(255,255,255,.52);
+    backdrop-filter:blur(28px) saturate(1.8);-webkit-backdrop-filter:blur(28px) saturate(1.8);
+    border:1px solid rgba(255,255,255,.68);
+    box-shadow:0 10px 28px -6px rgba(96,104,180,.3),inset 0 1px 1px rgba(255,255,255,.95),inset 0 -1px 1px rgba(255,255,255,.2);
+  }
+  .g1::after{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    background:linear-gradient(135deg,rgba(255,255,255,.5),rgba(255,255,255,0) 45%);
+  }
+  .g2{
+    background:rgba(255,255,255,.44);
+    backdrop-filter:blur(18px) saturate(1.6);-webkit-backdrop-filter:blur(18px) saturate(1.6);
+    border:1px solid rgba(255,255,255,.58);
+    box-shadow:0 6px 18px -6px rgba(96,104,180,.22),inset 0 1px 1px rgba(255,255,255,.85);
+  }
+  .g3{
+    background:rgba(255,255,255,.38);
+    backdrop-filter:blur(14px) saturate(1.5);-webkit-backdrop-filter:blur(14px) saturate(1.5);
+    border:1px solid rgba(255,255,255,.52);
+    box-shadow:0 4px 14px -6px rgba(96,104,180,.18),inset 0 1px 1px rgba(255,255,255,.75);
+  }
+
+  /* ===== floating top bar ===== */
+  .topbar{display:flex;align-items:center;gap:10px;padding:4px 14px 10px;flex-shrink:0;position:relative;z-index:8}
+  .tbtn{width:37px;height:37px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#3B3D4C;flex-shrink:0}
+  .tbtn svg{width:17px;height:17px;position:relative;z-index:2}
+  .pill-wrap{flex:1;display:flex;justify-content:center;min-width:0}
+  .model-pill{display:flex;align-items:center;gap:6px;height:37px;padding:0 15px;border-radius:19px;font-size:12px;font-weight:600;color:#3B3D4C;max-width:100%}
+  .model-pill span{position:relative;z-index:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .model-pill svg{width:11px;height:11px;position:relative;z-index:2;flex-shrink:0}
+  .model-pill .dot{width:7px;height:7px;border-radius:50%;background:linear-gradient(135deg,#5B6BE0,#E8826B);position:relative;z-index:2;flex-shrink:0}
+
+  /* ===== hero (empty state) ===== */
+  .hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;padding:0 24px;position:relative;z-index:2}
+  .orb-big{
+    width:56px;height:56px;border-radius:50%;
+    background:conic-gradient(from 210deg,#5B6BE0,#B078D8,#E8826B,#5B6BE0);
+    animation:breathe 4.5s ease-in-out infinite;margin-bottom:4px;
+  }
+  @keyframes breathe{0%,100%{box-shadow:0 0 14px 2px rgba(122,110,220,.45);transform:scale(1)}50%{box-shadow:0 0 26px 8px rgba(232,130,107,.5);transform:scale(1.045)}}
+  @media (prefers-reduced-motion: reduce){.orb-big,.orb-mini,.cursor{animation:none}}
+  .hero .hi{font-size:21px;font-weight:600;color:#24252D;letter-spacing:.01em}
+  .hero .sub{font-size:12.5px;color:#6A6F85;text-align:center;line-height:1.6}
+  .chips{display:flex;flex-direction:column;gap:8px;padding:4px 16px 12px;position:relative;z-index:2}
+  .chip{display:flex;align-items:center;gap:9px;padding:9px 13px;border-radius:16px;font-size:12px;color:#3B3D4C;line-height:1.45}
+  .chip svg{width:14px;height:14px;color:#5B6BE0;flex-shrink:0;position:relative;z-index:2}
+  .chip span{position:relative;z-index:2}
+
+  /* ===== input dock ===== */
+  .toggles{display:flex;gap:8px;padding:0 16px 8px;position:relative;z-index:3}
+  .tg{display:flex;align-items:center;gap:5px;padding:6px 11px;border-radius:99px;font-size:11px;color:#6A6F85}
+  .tg svg{width:12px;height:12px;position:relative;z-index:2}
+  .tg span{position:relative;z-index:2}
+  .tg.on{color:#4554C9;background:rgba(91,107,224,.18);border-color:rgba(91,107,224,.4)}
+  .dock{padding:2px 14px 10px;position:relative;z-index:8;flex-shrink:0}
+  .capsule{display:flex;align-items:center;gap:6px;border-radius:27px;padding:7px 8px 7px 10px}
+  .capsule .plus{width:30px;height:30px;display:flex;align-items:center;justify-content:center;color:#4554C9;flex-shrink:0;position:relative;z-index:2}
+  .capsule .plus svg{width:18px;height:18px}
+  .capsule .hint{flex:1;font-size:13px;color:#9A9EB2;position:relative;z-index:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .capsule .mic{width:30px;height:30px;display:flex;align-items:center;justify-content:center;color:#6A6F85;flex-shrink:0;position:relative;z-index:2}
+  .capsule .mic svg{width:16px;height:16px}
+  .send{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+    background:linear-gradient(135deg,#5B6BE0,#E8826B);box-shadow:0 5px 14px -2px rgba(150,110,200,.6),inset 0 1px 1px rgba(255,255,255,.5);position:relative;z-index:2}
+  .send svg{width:15px;height:15px;color:#fff}
+
+  /* ===== chat ===== */
+  .chat{flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:10px;padding:6px 12px 12px;overflow:hidden;position:relative;z-index:2}
+  .msg{max-width:85%;padding:9px 13px;line-height:1.66}
+  .msg.user{align-self:flex-end;color:#FFF;border-radius:21px;border-bottom-right-radius:8px;
+    background:linear-gradient(135deg,#5B6BE0 0%,#9A6BD6 52%,#E8826B 100%);
+    box-shadow:0 8px 20px -6px rgba(122,100,200,.5),inset 0 1px 1px rgba(255,255,255,.4)}
+  .msg.ai{align-self:flex-start;border-radius:21px;border-bottom-left-radius:8px;color:#24252D}
+  .think{align-self:flex-start;display:flex;align-items:center;gap:7px;padding:6px 12px;border-radius:99px;font-size:11px;color:#6A6F85}
+  .think svg{width:11px;height:11px;position:relative;z-index:2;color:#8A8FA8}
+  .think span{position:relative;z-index:2}
+  .orb-mini{width:12px;height:12px;border-radius:50%;flex-shrink:0;position:relative;z-index:2;
+    background:conic-gradient(from 210deg,#5B6BE0,#B078D8,#E8826B,#5B6BE0);animation:breathe 4.5s ease-in-out infinite}
+  .cursor{display:inline-block;width:2.5px;height:13px;border-radius:1.5px;vertical-align:-2px;margin-left:2px;
+    background:linear-gradient(#5B6BE0,#E8826B);box-shadow:0 0 8px 1px rgba(160,120,220,.75);
+    animation:blink 1.1s ease-in-out infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+  .tool{align-self:flex-start;display:flex;gap:8px;align-items:flex-start;max-width:88%;padding:8px 11px;border-radius:16px}
+  .tool .t-ico{width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+    background:linear-gradient(135deg,#5B6BE0,#9A6BD6);position:relative;z-index:2}
+  .tool .t-ico svg{width:12px;height:12px;color:#fff}
+  .tool .t-title{font-size:11px;font-weight:600;line-height:1.4;color:#24252D;position:relative;z-index:2}
+  .tool .t-sub{font-size:11px;line-height:1.5;color:#6A6F85;position:relative;z-index:2}
+
+  /* ===== drawer phone ===== */
+  .behind{position:absolute;inset:0;z-index:2;display:flex;flex-direction:column;justify-content:flex-end;gap:10px;padding:90px 12px 90px;opacity:.85}
+  .behind .sk{border-radius:21px;height:44px}
+  .behind .sk.s1{align-self:flex-end;width:62%;background:linear-gradient(135deg,rgba(91,107,224,.5),rgba(232,130,107,.5))}
+  .behind .sk.s2{align-self:flex-start;width:78%;background:rgba(255,255,255,.5)}
+  .behind .sk.s3{align-self:flex-start;width:55%;background:rgba(255,255,255,.4)}
+  .dim{position:absolute;inset:0;z-index:5;background:rgba(30,33,58,.2);backdrop-filter:blur(3px) saturate(.85);-webkit-backdrop-filter:blur(3px) saturate(.85)}
+  .drawer{
+    position:absolute;top:10px;bottom:10px;left:10px;width:76%;z-index:7;border-radius:26px;
+    display:flex;flex-direction:column;overflow:hidden;
+    background:rgba(240,242,250,.68);
+    backdrop-filter:blur(40px) saturate(1.7);-webkit-backdrop-filter:blur(40px) saturate(1.7);
+    border:1px solid rgba(255,255,255,.7);
+    box-shadow:0 20px 50px -10px rgba(40,44,90,.4),inset 0 1px 1px rgba(255,255,255,.9);
+  }
+  .d-search{margin:12px 12px 4px;display:flex;align-items:center;gap:7px;padding:7px 11px;border-radius:14px;font-size:11.5px;color:#8A8FA8;
+    background:rgba(255,255,255,.55);border:1px solid rgba(255,255,255,.7)}
+  .d-search svg{width:12px;height:12px;flex-shrink:0}
+  .d-sec{font-size:9.5px;letter-spacing:.14em;color:#8A8FA8;padding:12px 16px 4px;font-weight:600}
+  .d-item{padding:7px 16px;font-size:12px;color:#3B3D4C;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:10px;margin:0 8px}
+  .d-item.on{background:rgba(255,255,255,.6);font-weight:600}
+  .d-spacer{flex:1}
+  .d-apps{border-top:1px solid rgba(255,255,255,.65);margin:0 8px;padding:8px 0}
+  .d-app{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:12px;font-size:12px;font-weight:500;color:#3B3D4C}
+  .d-app .a-ico{width:24px;height:24px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff}
+  .d-app .a-ico svg{width:13px;height:13px}
+  .d-app .a-ico.i1{background:linear-gradient(135deg,#5B6BE0,#9A6BD6)}
+  .d-app .a-ico.i2{background:linear-gradient(135deg,#E8826B,#E8A26B)}
+  .d-user{display:flex;align-items:center;gap:9px;padding:10px 14px 12px;border-top:1px solid rgba(255,255,255,.65);margin:0 8px}
+  .d-user .avatar{width:28px;height:28px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:#fff;
+    background:linear-gradient(135deg,#5B6BE0,#E8826B)}
+  .d-user .avatar svg{width:15px;height:15px}
+  .d-user .name{font-size:12px;font-weight:600;color:#3B3D4C;flex:1}
+  .d-user svg.gear{width:16px;height:16px;color:#8A8FA8}
+
+  /* ---------- responsive ---------- */
+  @media (max-width:920px){
+    .head-grid{grid-template-columns:1fr}
+    .meta{border-left:none;padding-left:0}
+    .check li{grid-template-columns:1fr;gap:4px}
+  }
+  footer{margin-top:72px;padding-top:28px;border-top:1px solid var(--line);color:var(--ink-3);font-size:12.5px;max-width:680px}
+</style>
+
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow"><span>WorldBase Mobile</span><span>视觉方向提案</span><span class="tag">迭代 2 · 2026.08</span></div>
+    <div class="head-grid">
+      <div>
+        <h1>晨昏 2.0</h1>
+        <p class="lede">本版采纳两条反馈:<em>Tab 栏退役</em>——对齐 DeepSeek、千问、ChatGPT 的「对话即主页」;配色定稿方向 A,并把材质整体升级为 <em>iOS 26 流体玻璃</em>——所有浮层都变成会折射光的玻璃,内容在玻璃下流动。</p>
+      </div>
+      <div class="meta">
+        <div>范围 <b>apps/mobile · Flutter</b></div>
+        <div>配色 <b>方向 A · 晨昏</b></div>
+        <div>材质 <b>Liquid Glass 三层规格</b></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ================= 导航范式 ================= -->
+  <section>
+    <div class="sec-eyebrow">Navigation</div>
+    <h2>Tab 栏为什么退役</h2>
+    <p class="sec-intro">Tab 栏属于内容型 App(微信、微博)——用户来「逛」。AI 助手是<b>单一任务流</b>:打开 → 说话 → 得到结果。DeepSeek、千问、ChatGPT、Claude、Gemini 已全部收敛到同一个范式:<b>对话即主页,历史进抽屉,能力进「+」,模型进顶部胶囊</b>。省下的 56px 还给对话本身。</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>现在的元素</th><th>新位置</th><th>理由</th></tr></thead>
+        <tbody>
+          <tr><td>Tab「对话」</td><td><span class="arrow">→</span> 即主页,打开 App 就是</td><td>最高频路径零跳转</td></tr>
+          <tr><td>历史会话列表</td><td><span class="arrow">→</span> 左上浮岛 · 悬浮玻璃抽屉</td><td>低频,但一滑即达</td></tr>
+          <tr><td>Tab「应用」「绘图」</td><td><span class="arrow">→</span> 输入条「+」能力面板 + 抽屉固定入口</td><td>能力是对话的输入,不是平级的目的地</td></tr>
+          <tr><td>Tab「我的」</td><td><span class="arrow">→</span> 抽屉底部用户行(账号 / 设置)</td><td>设置是低频出口,不该占据常驻面积</td></tr>
+          <tr><td>模型切换(埋在设置里)</td><td><span class="arrow">→</span> 顶部中央玻璃胶囊,随点随换</td><td>按对话选模型是常态操作,该浮在面上</td></tr>
+          <tr><td>深度思考 / 联网开关</td><td><span class="arrow">→</span> 输入条上方开关 pill</td><td>按消息粒度切换,而非全局设置</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= 材质系统 ================= -->
+  <section>
+    <div class="sec-eyebrow">Material</div>
+    <h2>三层流体玻璃</h2>
+    <p class="sec-intro">iOS 26 的 Liquid Glass 关键不是"更模糊",而是<b>透镜感</b>:悬浮投影让玻璃浮起,顶部 1px 内高光模拟边缘折射,135° 斜向 sheen 给出曲面——三者缺一不可。按层级分三种规格,层级越高、玻璃越"厚"。</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>层级</th><th>用途</th><th>背景</th><th>模糊</th><th>边缘</th><th>投影</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>L1 · 浮岛玻璃</td>
+            <td>顶栏按钮、模型胶囊、输入条、抽屉</td>
+            <td>white 52%</td><td>28px × 1.8 饱和</td>
+            <td>1px white 68% + 顶部内高光 + sheen</td>
+            <td>0 10 28 / indigo 30%</td>
+          </tr>
+          <tr>
+            <td>L2 · 气泡玻璃</td>
+            <td>AI 气泡、流式消息</td>
+            <td>white 44%</td><td>18px</td>
+            <td>1px white 58% + 顶部内高光</td>
+            <td>0 6 18 / 22%</td>
+          </tr>
+          <tr>
+            <td>L3 · 内容玻璃</td>
+            <td>建议 chips、工具卡、开关 pill</td>
+            <td>white 38%</td><td>14px</td>
+            <td>1px white 52%</td>
+            <td>0 4 14 / 18%</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">
+      <b>深色模式不是反色:</b>三层玻璃统一改为 <b>rgba(18,20,34,50–60%)</b>,描边与顶部内高光保留——玻璃在暗处反而更像玻璃,这是 Liquid Glass 与旧毛玻璃的分水岭。背景「晨昏渐变」在夜间整体压暗、色温转蓝紫,曦橙只留在 Orb 与发送键上。
+    </div>
+  </section>
+
+  <!-- ================= 三个界面 ================= -->
+  <section>
+    <div class="sec-eyebrow">Screens</div>
+    <h2>三个界面</h2>
+    <p class="sec-intro">主页空态、对话流、历史抽屉。注意看:没有一个元素"贴"在屏幕边缘——顶栏、输入条、抽屉全部<b>悬浮</b>,背景晨昏渐变在每一块玻璃下流动。</p>
+
+    <div class="phones">
+
+      <!-- ===== Phone 1 : 主页空态 ===== -->
+      <div class="phone-col">
+        <span class="phone-label">01 · 主页空态</span>
+        <div class="phone"><div class="screen">
+          <div class="island"></div>
+          <div class="statusbar"><span>9:41</span>
+            <span class="status-icons">
+              <svg width="15" height="10" viewBox="0 0 15 10" fill="currentColor"><rect x="0" y="6" width="3" height="4" rx="1"/><rect x="4" y="4" width="3" height="6" rx="1"/><rect x="8" y="2" width="3" height="8" rx="1"/><rect x="12" y="0" width="3" height="10" rx="1"/></svg>
+              <svg width="20" height="10" viewBox="0 0 22 11" fill="none"><rect x="0.5" y="0.5" width="17" height="10" rx="3" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="12" height="7" rx="1.5" fill="currentColor"/><path d="M19.5 3.5v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".4"/></svg>
+            </span>
+          </div>
+          <div class="topbar">
+            <span class="tbtn g1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><path d="M9.5 4.5v15"/></svg></span>
+            <div class="pill-wrap"><span class="model-pill g1"><i class="dot"></i><span>晨昏 · K3 旗舰</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg></span></div>
+            <span class="tbtn g1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5H6.8A2.8 2.8 0 0 0 4 7.3v10.4a2.8 2.8 0 0 0 2.8 2.8h10.4a2.8 2.8 0 0 0 2.8-2.8V12"/><path d="M17.8 3.2a2.2 2.2 0 0 1 3 3L11.5 15.5 8 16.5l1-3.5 8.8-9.8Z"/></svg></span>
+          </div>
+          <div class="hero">
+            <div class="orb-big"></div>
+            <div class="hi">上午好。</div>
+            <div class="sub">我是晨昏,今天想做点什么?</div>
+          </div>
+          <div class="chips">
+            <div class="chip g3"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M4.5 7.5 12 13l7.5-5.5"/></svg><span>帮我写一封得体的请假邮件</span></div>
+            <div class="chip g3"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="5.5" width="16" height="15" rx="3"/><path d="M4 10.5h16M8.5 3v4M15.5 3v4"/></svg><span>看看今天的日程,留个喘息的空档</span></div>
+            <div class="chip g3"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z"/><path d="M18.5 15.5l.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9.9-2.6Z"/></svg><span>用大白话解释「量子纠缠」</span></div>
+          </div>
+          <div class="toggles">
+            <span class="tg g3"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 18h5M10.5 21h3"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.8.7 1.1 1.3 1.1 2.2h5c0-.9.3-1.5 1.1-2.2A6 6 0 0 0 12 3Z"/></svg><span>深度思考</span></span>
+            <span class="tg g3 on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.6 2.3 3.9 5.2 3.9 8.5s-1.3 6.2-3.9 8.5c-2.6-2.3-3.9-5.2-3.9-8.5S9.4 5.8 12 3.5Z"/></svg><span>联网搜索</span></span>
+          </div>
+          <div class="dock">
+            <div class="capsule g1">
+              <span class="plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>
+              <span class="hint">问点什么…</span>
+              <span class="mic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21"/></svg></span>
+              <span class="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V6M6 11.5 12 5.5l6 6"/></svg></span>
+            </div>
+          </div>
+          <div class="homebar"><i></i></div>
+        </div></div>
+        <p class="caption">问候随时间变化;三条建议每日轮换,来自你的日历与最近对话。</p>
+      </div>
+
+      <!-- ===== Phone 2 : 对话流 ===== -->
+      <div class="phone-col">
+        <span class="phone-label">02 · 对话流</span>
+        <div class="phone"><div class="screen">
+          <div class="island"></div>
+          <div class="statusbar"><span>9:42</span>
+            <span class="status-icons">
+              <svg width="15" height="10" viewBox="0 0 15 10" fill="currentColor"><rect x="0" y="6" width="3" height="4" rx="1"/><rect x="4" y="4" width="3" height="6" rx="1"/><rect x="8" y="2" width="3" height="8" rx="1"/><rect x="12" y="0" width="3" height="10" rx="1"/></svg>
+              <svg width="20" height="10" viewBox="0 0 22 11" fill="none"><rect x="0.5" y="0.5" width="17" height="10" rx="3" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="12" height="7" rx="1.5" fill="currentColor"/><path d="M19.5 3.5v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".4"/></svg>
+            </span>
+          </div>
+          <div class="topbar">
+            <span class="tbtn g1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><path d="M9.5 4.5v15"/></svg></span>
+            <div class="pill-wrap"><span class="model-pill g1"><i class="dot"></i><span>晨昏 · K3 旗舰</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg></span></div>
+            <span class="tbtn g1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5H6.8A2.8 2.8 0 0 0 4 7.3v10.4a2.8 2.8 0 0 0 2.8 2.8h10.4a2.8 2.8 0 0 0 2.8-2.8V12"/><path d="M17.8 3.2a2.2 2.2 0 0 1 3 3L11.5 15.5 8 16.5l1-3.5 8.8-9.8Z"/></svg></span>
+          </div>
+          <div class="chat">
+            <div class="msg user">这周有点累,帮我安排一个轻松点的周三</div>
+            <div class="think g3"><span class="orb-mini"></span><span>已深度思考 · 12 秒</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg></div>
+            <div class="msg ai g2">好。周三只留两件事:上午十点复查方案,下午整段留空。三点的会我挪到了周四——那天你的状态通常会好些。</div>
+            <div class="tool g3">
+              <span class="t-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="5.5" width="16" height="15" rx="3"/><path d="M4 10.5h16M8.5 3v4M15.5 3v4"/></svg></span>
+              <span><span class="t-title">日历</span><br><span class="t-sub">已把周三 15:00 的会挪到周四</span></span>
+            </div>
+            <div class="msg ai g2">还要我把周三晚上也空出来吗?<span class="cursor"></span></div>
+          </div>
+          <div class="dock">
+            <div class="capsule g1">
+              <span class="plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>
+              <span class="hint">继续问…</span>
+              <span class="mic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21"/></svg></span>
+              <span class="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V6M6 11.5 12 5.5l6 6"/></svg></span>
+            </div>
+          </div>
+          <div class="homebar"><i></i></div>
+        </div></div>
+        <p class="caption">思考过程折叠为玻璃 pill;流式光标是一道渐变的"光",不是灰色转圈。</p>
+      </div>
+
+      <!-- ===== Phone 3 : 历史抽屉 ===== -->
+      <div class="phone-col">
+        <span class="phone-label">03 · 历史抽屉</span>
+        <div class="phone"><div class="screen">
+          <div class="island"></div>
+          <div class="statusbar"><span>9:43</span>
+            <span class="status-icons">
+              <svg width="15" height="10" viewBox="0 0 15 10" fill="currentColor"><rect x="0" y="6" width="3" height="4" rx="1"/><rect x="4" y="4" width="3" height="6" rx="1"/><rect x="8" y="2" width="3" height="8" rx="1"/><rect x="12" y="0" width="3" height="10" rx="1"/></svg>
+              <svg width="20" height="10" viewBox="0 0 22 11" fill="none"><rect x="0.5" y="0.5" width="17" height="10" rx="3" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="12" height="7" rx="1.5" fill="currentColor"/><path d="M19.5 3.5v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".4"/></svg>
+            </span>
+          </div>
+          <div class="behind">
+            <div class="sk s2"></div>
+            <div class="sk s1"></div>
+            <div class="sk s3"></div>
+          </div>
+          <div class="dim"></div>
+          <div class="drawer">
+            <div class="d-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>搜索对话</div>
+            <div class="d-sec">今天</div>
+            <div class="d-item on">安排一个轻松点的周三</div>
+            <div class="d-item">请假邮件 · 草稿</div>
+            <div class="d-item">量子纠缠 · 大白话解释</div>
+            <div class="d-sec">昨天</div>
+            <div class="d-item">睡前书单</div>
+            <div class="d-item">本周计划复盘</div>
+            <div class="d-sec">更早</div>
+            <div class="d-item">搬家清单</div>
+            <div class="d-spacer"></div>
+            <div class="d-apps">
+              <div class="d-app"><span class="a-ico i1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/></svg></span>应用广场</div>
+              <div class="d-app"><span class="a-ico i2"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 4.5l2.2 4.6 5 .7-3.6 3.5.9 5-4.5-2.4-4.5 2.4.9-5L4.8 9.8l5-.7L12 4.5Z"/></svg></span>绘图工作室</div>
+            </div>
+            <div class="d-user">
+              <span class="avatar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="8.5" r="3.5"/><path d="M5.5 19.5c1.2-3.2 3.7-5 6.5-5s5.3 1.8 6.5 5"/></svg></span>
+              <span class="name">任之武</span>
+              <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"/></svg>
+            </div>
+          </div>
+          <div class="homebar" style="z-index:8"><i></i></div>
+        </div></div>
+        <p class="caption">抽屉也是浮起来的玻璃:四周留 10px,背后的对话变暗、变模糊。</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ================= 细节时刻 ================= -->
+  <section>
+    <div class="sec-eyebrow">Details</div>
+    <h2>让它"活"起来的六个细节</h2>
+    <ul class="moves">
+      <li><b>时间问候</b>——空态问候随时间变化(上午好 / 下午好 / 晚上好),AI 有"时间感",这是人文感的最低成本来源。</li>
+      <li><b>每日建议</b>——三条建议 chips 每日轮换,来自日历、最近对话与使用习惯,而不是写死的功能广告。</li>
+      <li><b>深度思考可见</b>——思考过程折叠为玻璃 pill(「已深度思考 · 12 秒」),点开可展开推理;过程不再是一个沉默的转圈。</li>
+      <li><b>流式光标是一道光</b>——2.5px 渐变光标 + 光晕,1.1s 明暗;文字像被"写"出来,而不是"掉"下来。</li>
+      <li><b>弹簧动效</b>——浮岛入场 200ms spring;抽屉 280ms easeOutCubic;Orb 呼吸 4.5s 一个周期,思考时频率加快。</li>
+      <li><b>内容穿过玻璃</b>——消息列表延伸到顶栏与输入条之下滚动,玻璃把它们柔化成背景色,界面因此"深"了一层。</li>
+    </ul>
+  </section>
+
+  <!-- ================= B/C 并入 ================= -->
+  <section>
+    <div class="sec-eyebrow">Themes</div>
+    <h2>暖屿与苔径没有浪费</h2>
+    <p class="sec-intro">2.0 的玻璃骨架与配色解耦——<b>主题可整体切换</b>,晨昏是默认。方向 B、C 的精华以两种方式并入:</p>
+    <ul class="moves">
+      <li><b>暖屿 → 成为第二套主题</b>——问候头、时间感文案已并入 2.0;纸墨陶土配色作为「暖屿主题」整体保留,一键切换。</li>
+      <li><b>苔径 → 并入组件层</b>——23px+ 大圆角、按压下沉 2pt 的触感反馈直接进入玻璃组件;绿影签名留给未来的「苔径主题」。</li>
+    </ul>
+  </section>
+
+  <!-- ================= Flutter 落地 ================= -->
+  <section>
+    <div class="sec-eyebrow">Implementation</div>
+    <h2>Flutter 落地清单</h2>
+    <p class="sec-intro">全部改动仍集中在 <code>apps/mobile/lib</code> 的表现层,不动 harness 通信。建议顺序:先拆 Tab、再封玻璃组件、最后做空态与动效。</p>
+    <ul class="check">
+      <li><span class="k">拆 Tab 栏</span><span class="v"><code>worldbase_app.dart</code> 移除 <code>IosTabBar</code> + <code>IndexedStack</code>,home 直接挂载 <code>ChatTab</code>;原 <code>LaunchpadTab</code> / <code>StudioTab</code> / <code>SettingsTab</code> 改由抽屉路由进入。</span></li>
+      <li><span class="k">封装 GlassContainer</span><span class="v">新增 <code>core/glass.dart</code>:<code>ClipRRect</code> + <code>BackdropFilter(blur 28, saturate 1.8)</code> + 内高光渐变 + 悬浮阴影,三个层级参数化;替换 <code>ios_ui.dart</code> 中的纯色容器。</span></li>
+      <li><span class="k">顶部三浮岛</span><span class="v"><code>IosNavBar</code> → 菜单 / 模型胶囊 / 新会话;消息 <code>ListView</code> 加大上下 padding,让内容从玻璃下滚过。</span></li>
+      <li><span class="k">悬浮抽屉</span><span class="v"><code>Scaffold.drawer</code> + 玻璃材质,分组(今天 / 昨天 / 更早)+ 搜索 + 应用入口 + 底部用户行;四周 10px 内收,圆角 26。</span></li>
+      <li><span class="k">输入条改造</span><span class="v"><code>IosChatInputBar</code> → 悬浮胶囊(圆角 27、L1 玻璃);上方加「深度思考 / 联网搜索」<code>TogglePill</code>,状态按会话保存。</span></li>
+      <li><span class="k">空态组件</span><span class="v">新增 <code>GreetingHeader</code>(按小时取问候语)+ <code>SuggestionChips</code>(每日 3 条,可从 <code>conversationsProvider</code> 与日历推导)。</span></li>
+      <li><span class="k">深色模式</span><span class="v">三层玻璃直接给出暗色 token(背景 rgba(18,20,34,.5–.6),高光保留);<code>buildIosTheme()</code> 补 <code>ColorScheme.dark</code>,晨昏渐变夜间转蓝紫。</span></li>
+    </ul>
+  </section>
+
+  <footer>
+    <p>晨昏 2.0 = 方向 A 的配色 × DeepSeek/千问式导航 × iOS 26 流体玻璃。建议先用「对话」单页做样板:拆 Tab、封 GlassContainer、上浮岛与胶囊,跑顺后再铺抽屉与深色。源文件:<span style="font-family:var(--mono);font-size:11.5px">docs/design/mobile-ui-directions.html</span></p>
+  </footer>
+
+</div>

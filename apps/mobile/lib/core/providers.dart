@@ -137,9 +137,9 @@ class SelectedAgentNotifier extends Notifier<AgentDefinition?> {
 final selectedAgentProvider =
     NotifierProvider<SelectedAgentNotifier, AgentDefinition?>(SelectedAgentNotifier.new);
 
-/// 轻应用（Web 快捷方式，本地持久化）。
+/// 轻应用（Web 快捷方式，本地持久化）。无默认条目——用户自行添加。
 class WebAppsNotifier extends AsyncNotifier<List<WebApp>> {
-  static List<WebApp> get _defaultApps => [WebApp(name: 'WorldBase 文档', url: 'https://docs.rs')];
+  static List<WebApp> get _defaultApps => <WebApp>[];
 
   @override
   Future<List<WebApp>> build() async {
@@ -195,6 +195,31 @@ class ChatTargetNotifier extends Notifier<ChatTarget> {
 
 final chatTargetProvider =
     NotifierProvider<ChatTargetNotifier, ChatTarget>(ChatTargetNotifier.new);
+
+/// 对话开关:深度思考 / 联网搜索(输入条上方 TogglePill 的状态)。
+/// 目前仅 UI 态;待 harness 支持对应参数后,随 sendChat 一并传递即可。
+class ChatSwitches {
+  const ChatSwitches({this.deepThink = false, this.webSearch = false});
+
+  final bool deepThink;
+  final bool webSearch;
+
+  ChatSwitches copyWith({bool? deepThink, bool? webSearch}) => ChatSwitches(
+        deepThink: deepThink ?? this.deepThink,
+        webSearch: webSearch ?? this.webSearch,
+      );
+}
+
+class ChatSwitchesNotifier extends Notifier<ChatSwitches> {
+  @override
+  ChatSwitches build() => const ChatSwitches();
+
+  void toggleDeepThink() => state = state.copyWith(deepThink: !state.deepThink);
+  void toggleWebSearch() => state = state.copyWith(webSearch: !state.webSearch);
+}
+
+final chatSwitchesProvider =
+    NotifierProvider<ChatSwitchesNotifier, ChatSwitches>(ChatSwitchesNotifier.new);
 
 /// 轻应用列表版本号：工具生成新应用 / 切到应用 Tab 时自增，触发列表刷新。
 class LightAppsVersionNotifier extends Notifier<int> {

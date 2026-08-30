@@ -151,7 +151,7 @@ export function applyActiveProviderToAiEngine (): AIProvidersConfig {
   const normalizedConfig = mainState.settingsStore!.getProviders()
   const active = normalizedConfig.providers.find(provider => provider.id === normalizedConfig.activeProviderId)
 
-  mainState.aiEngine!.configure({
+  const config = {
     apiKey: active?.apiKey ?? '',
     baseUrl: active?.baseUrl ?? '',
     model: active?.activeModel ?? '',
@@ -160,10 +160,12 @@ export function applyActiveProviderToAiEngine (): AIProvidersConfig {
     imageGeneration: active?.activeModel ? active.modelCapabilities?.[active.activeModel]?.imageGeneration === true : false,
     imageEditing: active?.activeModel ? active.modelCapabilities?.[active.activeModel]?.imageEditing === true : false,
     enableThinking: active?.enableThinking ?? false,
-    reasoningEffort: 'medium',
+    reasoningEffort: 'medium' as const,
     temperature: active?.temperature,
     contextWindow: active?.activeModel ? active.modelContextWindows?.[active.activeModel] : undefined
-  })
+  }
+  mainState.aiEngine!.configure(config)
+  mainState.rustHarnessEngine?.configure(config)
 
   return normalizedConfig
 }

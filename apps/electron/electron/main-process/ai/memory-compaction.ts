@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { createProvider } from '../../../src/main/ai-engine/providers/index.js'
 import type { ChatProvider } from '../../../src/main/ai-engine/providers/index.js'
 import type { ChatMessage } from '../../../src/main/ai-engine/providers/openai-provider.js'
+import type { AIExecutionEngine } from '../../../src/main/ai-harness/types.js'
 import type { MemoryCompactionPlan } from '../../../src/main/ai-engine/memory/memory-engine.js'
 import type { MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry } from '../../../src/shared/agent-workspace-types.js'
 import { MEMORY_AI_COMPACTION_CHUNK_SIZE, MEMORY_AI_COMPACTION_TIMEOUT_MS } from '../constants.js'
@@ -9,6 +10,7 @@ import { mainState } from '../state.js'
 import { broadcastToAppWindows } from '../windows.js'
 import { getMessageText, truncateSectionText } from '../chat-message-utils.js'
 import { resolveProviderConfig } from './agent-context.js'
+import { startSelectedRustHarness } from './selected-execution-engine.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
 
 export function cloneMemoryCompactionStatus (): MemoryCompactionStatus {
@@ -221,7 +223,15 @@ export function createMemoryCompactionProvider (): ChatProvider {
 }
 
 export async function requestMemoryCompactionPlanChunk (provider: ChatProvider, entries: MemoryEntry[], index: number, total: number): Promise<MemoryCompactionPlan> {
-  const messages: ChatMessage[] = [
+  const messages = buildMemoryCompactionMessages(entries, index, total)
+
+  const response = await provider.chatCompletion(messages, [], undefined, { timeoutMs: MEMORY_AI_COMPACTION_TIMEOUT_MS })
+  const text = getMessageText(response.content)
+  return parseMemoryCompactionPlan(text, entries)
+}
+
+function buildMemoryCompactionMessages (entries: MemoryEntry[], index: number, total: number): ChatMessage[] {
+  return [
     {
       role: 'system',
       content: [
@@ -243,19 +253,31 @@ export async function requestMemoryCompactionPlanChunk (provider: ChatProvider, 
       ].join('\n\n')
     }
   ]
+}
 
-  const response = await provider.chatCompletion(messages, [], undefined, { timeoutMs: MEMORY_AI_COMPACTION_TIMEOUT_MS })
+async function requestMemoryCompactionPlanChunkWithEngine (engine: AIExecutionEngine, entries: MemoryEntry[], index: number, total: number): Promise<MemoryCompactionPlan> {
+  const providerConfig = resolveProviderConfig()
+  if (!providerConfig?.apiKey || !providerConfig.baseUrl || !providerConfig.model) {
+    throw new Error(t('mainDialog.memoryCompactionProviderIncomplete'))
+  }
+  const response = await engine.chat(buildMemoryCompactionMessages(entries, index, total), {
+    providerConfig: { ...providerConfig, temperature: 0.1 },
+    // The legacy compactor is a constrained JSON-only model request. Keep
+    // that behavior while routing provider execution through Rust.
+    allowedToolNames: ['__memory_compaction_no_tools__']
+  })
   const text = getMessageText(response.content)
   return parseMemoryCompactionPlan(text, entries)
 }
 
 export async function buildMemoryCompactionPlanWithAi (
   entries: MemoryEntry[],
-  onProgress?: (progress: { stage: string; detail?: string; totalChunks: number; completedChunks: number }) => void
+  onProgress?: (progress: { stage: string; detail?: string; totalChunks: number; completedChunks: number }) => void,
+  engine?: AIExecutionEngine
 ): Promise<MemoryCompactionPlan> {
   if (entries.length === 0) return { deleteIds: [], mergeGroups: [], updates: [] }
 
-  const provider = createMemoryCompactionProvider()
+  const provider = engine ? null : createMemoryCompactionProvider()
   const chunks = chunkMemoryEntriesForAiCompaction(entries)
   const plans: MemoryCompactionPlan[] = []
   onProgress?.({
@@ -272,7 +294,9 @@ export async function buildMemoryCompactionPlanWithAi (
       totalChunks: chunks.length,
       completedChunks: index
     })
-    plans.push(await requestMemoryCompactionPlanChunk(provider, chunks[index], index, chunks.length))
+    plans.push(engine
+      ? await requestMemoryCompactionPlanChunkWithEngine(engine, chunks[index], index, chunks.length)
+      : await requestMemoryCompactionPlanChunk(provider!, chunks[index], index, chunks.length))
     onProgress?.({
       stage: t('mainDialog.memoryCompactionAnalyzing'),
       detail: t('mainDialog.memoryCompactionBatchDone', { current: index + 1, total: chunks.length }),
@@ -313,6 +337,7 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
       completedChunks: 0
     })
 
+    const rustHarness = await startSelectedRustHarness()
     const plan = await buildMemoryCompactionPlanWithAi(entries, (progress) => {
       updateMemoryCompactionStatus({
         id: taskId,
@@ -323,7 +348,7 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
         totalChunks: progress.totalChunks,
         completedChunks: progress.completedChunks
       })
-    })
+    }, rustHarness || undefined)
 
     updateMemoryCompactionStatus({
       id: taskId,

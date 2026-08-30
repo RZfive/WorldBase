@@ -1,14 +1,23 @@
+import 'dart:math' as math;
+
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/material.dart' show Scaffold;
+import 'package:flutter/material.dart' show Colors, Divider, Drawer, Scaffold;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/glass.dart';
 import '../../core/ios_ui.dart';
+import '../../core/markdown_renderer.dart';
 import '../../core/providers.dart';
 import '../common/model_picker.dart';
+import '../launchpad/launchpad_tab.dart';
+import '../settings/settings_tab.dart';
+import '../studio/studio_tab.dart';
 import 'group_page.dart';
 
-/// 对话 Tab：会话抽屉 + 流式对话 + 分叉/编辑 + Agent/群组入口（iOS 风格）。
+/// 对话主页(晨昏 2.0):对话即主页。
+/// 悬浮顶栏(抽屉 / 模型胶囊 / 新会话)+ 空态问候 + 流体玻璃对话流
+/// + 胶囊输入条(深度思考 / 联网开关)+ 悬浮玻璃抽屉。
 class ChatTab extends ConsumerStatefulWidget {
   const ChatTab({super.key});
 
@@ -38,8 +47,8 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     super.dispose();
   }
 
-  void _send() {
-    final text = _inputCtrl.text.trim();
+  void _send([String? preset]) {
+    final text = (preset ?? _inputCtrl.text).trim();
     if (text.isEmpty) return;
     _inputCtrl.clear();
     ref.read(chatProvider.notifier).send(text);
@@ -59,93 +68,181 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     ref.read(chatProvider.notifier).clear();
   }
 
-  void _openGroups() {
-    Navigator.of(context).push(cupertinoRoute(const GroupPage()));
+  /// 「+」能力面板:应用 / 绘图 / 群组是对话的输入,不是平级 Tab。
+  void _openCapabilities() {
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => CupertinoActionSheet(
+        actions: [
+          CupertinoActionSheetAction(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _pushSubPage(const LaunchpadTab());
+            },
+            child: const Text('应用广场'),
+          ),
+          CupertinoActionSheetAction(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _pushSubPage(const StudioTab());
+            },
+            child: const Text('绘图工作室'),
+          ),
+          CupertinoActionSheetAction(
+            onPressed: () {
+              Navigator.pop(ctx);
+              Navigator.of(context).push(cupertinoRoute(const GroupPage()));
+            },
+            child: const Text('群组协作'),
+          ),
+        ],
+        cancelButton: CupertinoActionSheetAction(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('取消'),
+        ),
+      ),
+    );
+  }
+
+  /// 推送子页(应用 / 绘图 / 设置):自带悬浮玻璃返回按钮。
+  void _pushSubPage(Widget page) {
+    Navigator.of(context).push(cupertinoRoute(_SubPageBack(child: page)));
   }
 
   @override
   Widget build(BuildContext context) {
     final messages = ref.watch(chatProvider);
+    final busy = messages.any((m) => m.streaming);
+    final p = DawnPalette.of(context);
 
     return Scaffold(
-      backgroundColor: iosGroupedBg,
+      backgroundColor: p.bgGradient.first,
       drawer: const _ConversationDrawer(),
-      body: Column(
-        children: [
-          SafeArea(
-            bottom: false,
-            child: IosNavBar(
-              leading: Builder(
-                builder: (ctx) => IosIconButton(
-                  icon: CupertinoIcons.sidebar_left,
-                  onPressed: () => Scaffold.of(ctx).openDrawer(),
-                ),
+      drawerScrimColor: p.isDark ? Colors.black54 : const Color(0x3324283C),
+      body: DawnBackground(
+        child: Stack(
+          children: [
+            // 内容层:延伸到浮岛之下滚动,玻璃把它们柔化成背景色。
+            Positioned.fill(
+              child: messages.isEmpty
+                  ? _EmptyState(onChipTap: _send)
+                  : _buildMessageList(messages),
+            ),
+            // L1 浮岛:顶部三件套。
+            Positioned(
+              top: 0, left: 0, right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: _TopBar(onNewChat: _newConversation),
               ),
-              actions: [
-                IosIconButton(icon: CupertinoIcons.person_2, onPressed: _openGroups),
-                IosIconButton(icon: CupertinoIcons.square_pencil, onPressed: _newConversation),
+            ),
+            // L1 浮岛:开关 pills + 输入胶囊。
+            Positioned(
+              left: 0, right: 0, bottom: 0,
+              child: SafeArea(top: false, child: _buildDock(busy)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMessageList(List<UiMessage> messages) {
+    final topPad = MediaQuery.paddingOf(context).top + 54;
+    return ListView.builder(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      padding: EdgeInsets.fromLTRB(0, topPad, 0, 132),
+      itemCount: messages.length,
+      itemBuilder: (ctx, i) {
+        final m = messages[i];
+        if (m.isTool) {
+          return _DawnToolCard(name: m.toolName ?? '', text: m.text, isError: m.isError);
+        }
+        return _DawnBubble(
+          text: m.text,
+          isUser: m.role == 'user',
+          isStreaming: m.streaming,
+          onLongPress:
+              m.role == 'user' && m.dbId > 0 ? () => _showMessageActions(m) : null,
+        );
+      },
+    );
+  }
+
+  Widget _buildDock(bool busy) {
+    final p = DawnPalette.of(context);
+    final switches = ref.watch(chatSwitchesProvider);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              children: [
+                GlassToggle(
+                  icon: CupertinoIcons.lightbulb,
+                  label: '深度思考',
+                  on: switches.deepThink,
+                  onTap: () => ref.read(chatSwitchesProvider.notifier).toggleDeepThink(),
+                ),
+                const SizedBox(width: 8),
+                GlassToggle(
+                  icon: CupertinoIcons.globe,
+                  label: '联网搜索',
+                  on: switches.webSearch,
+                  onTap: () => ref.read(chatSwitchesProvider.notifier).toggleWebSearch(),
+                ),
               ],
             ),
           ),
-          Expanded(
-            child: messages.isEmpty
-                ? const IosEmptyHint(
-                    icon: CupertinoIcons.chat_bubble,
-                    title: '开始新对话',
-                    subtitle: '流式回复 · 工具调用 · 分叉编辑 · 群组协作',
+          GlassContainer(
+            level: GlassLevel.l1,
+            radius: 27,
+            padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                GestureDetector(
+                  onTap: _openCapabilities,
+                  child: Padding(
+                    padding: const EdgeInsets.all(6),
+                    child: Icon(CupertinoIcons.add, size: 22, color: p.indigo),
+                  ),
+                ),
+                Expanded(
+                  child: CupertinoTextField(
+                    controller: _inputCtrl,
+                    placeholder: '问点什么…',
+                    placeholderStyle: TextStyle(fontSize: 15, color: p.ink3),
+                    style: TextStyle(fontSize: 15, color: p.ink),
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+                    decoration: const BoxDecoration(),
+                    minLines: 1,
+                    maxLines: 4,
+                    onSubmitted: (_) => _send(),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                if (busy)
+                  GestureDetector(
+                    onTap: () => ref.read(chatProvider.notifier).abort(),
+                    child: Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: p.glassFill2,
+                        border: Border.all(color: p.glassBorder),
+                      ),
+                      child: const Icon(CupertinoIcons.stop_fill, size: 14, color: iosRed),
+                    ),
                   )
-                : ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(0, 8, 0, 8),
-                    itemCount: messages.length,
-                    itemBuilder: (ctx, i) {
-                      final m = messages[i];
-                      if (m.isTool) {
-                        return IosToolCard(name: m.toolName ?? '', text: m.text, isError: m.isError);
-                      }
-                      return IosBubble(
-                        text: m.text,
-                        isUser: m.role == 'user',
-                        isStreaming: m.streaming,
-                        onLongPress:
-                            m.role == 'user' && m.dbId > 0 ? () => _showMessageActions(m) : null,
-                      );
-                    },
-                  ),
-          ),
-          // 供应商/模型快速切换
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 2, 12, 2),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Consumer(builder: (context, watchRef, _) {
-                final target = watchRef.watch(chatTargetProvider);
-                return ModelPickerChip(
-                  label: target.label,
-                  onTap: () => showModelPickerSheet(
-                    context,
-                    title: '选择模型',
-                    selectedProviderId: target.providerId,
-                    selectedModel: target.model,
-                    onSelected: (pid, model, pname) => watchRef
-                        .read(chatTargetProvider.notifier)
-                        .set(ChatTarget(providerId: pid, model: model, providerName: pname)),
-                  ),
-                );
-              }),
+                else
+                  DawnSendButton(onTap: _send),
+              ],
             ),
-          ),
-          if (ref.watch(chatProvider.notifier).busy)
-            CupertinoButton(
-              minSize: 0,
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              onPressed: () => ref.read(chatProvider.notifier).abort(),
-              child: const Text('■ 停止', style: TextStyle(fontSize: 13, color: iosRed)),
-            ),
-          IosChatInputBar(
-            controller: _inputCtrl,
-            onSend: _send,
-            onSubmitted: (_) => _send(),
-            hint: '信息',
           ),
         ],
       ),
@@ -170,12 +267,12 @@ class _ChatTabState extends ConsumerState<ChatTab> {
           ),
           CupertinoActionSheetAction(
             onPressed: () => _editAndResend(ctx, conversation, message, 'fork'),
-            child: const Text('编辑并重发（分叉）'),
+            child: const Text('编辑并重发(分叉)'),
           ),
           CupertinoActionSheetAction(
             isDestructiveAction: true,
             onPressed: () => _editAndResend(ctx, conversation, message, 'inplace'),
-            child: const Text('编辑并重发（就地覆盖）'),
+            child: const Text('编辑并重发(就地覆盖)'),
           ),
           CupertinoActionSheetAction(
             onPressed: () async {
@@ -206,7 +303,7 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     final newText = await showCupertinoDialog<String>(
       context: ctx,
       builder: (dctx) => CupertinoAlertDialog(
-        title: Text(mode == 'inplace' ? '编辑重发（就地）' : '编辑重发（分叉）'),
+        title: Text(mode == 'inplace' ? '编辑重发(就地)' : '编辑重发(分叉)'),
         content: Padding(
           padding: const EdgeInsets.only(top: 10),
           child: CupertinoTextField(controller: ctrl, maxLines: 4, autofocus: true),
@@ -236,6 +333,585 @@ class _ChatTabState extends ConsumerState<ChatTab> {
   }
 }
 
+/// 顶部三浮岛:抽屉菜单 / 模型胶囊 / 新会话。
+class _TopBar extends ConsumerWidget {
+  const _TopBar({required this.onNewChat});
+
+  final VoidCallback onNewChat;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final p = DawnPalette.of(context);
+    final target = ref.watch(chatTargetProvider);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 4, 14, 8),
+      child: Row(
+        children: [
+          Builder(
+            builder: (ctx) => _GlassIconButton(
+              icon: CupertinoIcons.sidebar_left,
+              onTap: () => Scaffold.of(ctx).openDrawer(),
+            ),
+          ),
+          Expanded(
+            child: Center(
+              child: GlassContainer(
+                level: GlassLevel.l1,
+                radius: 19,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                onTap: () => showModelPickerSheet(
+                  context,
+                  title: '选择模型',
+                  selectedProviderId: target.providerId,
+                  selectedModel: target.model,
+                  onSelected: (pid, model, pname) => ref
+                      .read(chatTargetProvider.notifier)
+                      .set(ChatTarget(providerId: pid, model: model, providerName: pname)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 7, height: 7,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(colors: [p.indigo, p.coral]),
+                      ),
+                    ),
+                    const SizedBox(width: 7),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 150),
+                      child: Text(
+                        target.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: p.ink),
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Icon(CupertinoIcons.chevron_down, size: 11, color: p.ink2),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          _GlassIconButton(icon: CupertinoIcons.square_pencil, onTap: onNewChat),
+        ],
+      ),
+    );
+  }
+}
+
+/// L1 玻璃圆形图标按钮。
+class _GlassIconButton extends StatelessWidget {
+  const _GlassIconButton({required this.icon, required this.onTap});
+
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
+    return GlassContainer(
+      level: GlassLevel.l1,
+      radius: 99,
+      padding: const EdgeInsets.all(10),
+      onTap: onTap,
+      child: Icon(icon, size: 17, color: p.ink),
+    );
+  }
+}
+
+/// 空态:呼吸 Orb + 时间问候 + 每日建议 chips。
+class _EmptyState extends StatelessWidget {
+  const _EmptyState({required this.onChipTap});
+
+  final ValueChanged<String> onChipTap;
+
+  static const _chips = [
+    (CupertinoIcons.envelope, '帮我写一封得体的请假邮件'),
+    (CupertinoIcons.calendar, '看看今天的日程,留个喘息的空档'),
+    (CupertinoIcons.sparkles, '用大白话解释「量子纠缠」'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 18),
+      child: Column(
+        children: [
+          const Spacer(flex: 3),
+          const DawnOrb(size: 56),
+          const SizedBox(height: 14),
+          Text(dawnGreeting(),
+              style: TextStyle(fontSize: 21, fontWeight: FontWeight.w600, color: p.ink)),
+          const SizedBox(height: 6),
+          Text('我是晨昏,今天想做点什么?', style: TextStyle(fontSize: 12.5, color: p.ink2)),
+          const Spacer(flex: 2),
+          for (final (icon, text) in _chips) ...[
+            GlassContainer(
+              level: GlassLevel.l3,
+              radius: 16,
+              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
+              onTap: () => onChipTap(text),
+              child: Row(
+                children: [
+                  Icon(icon, size: 14, color: p.indigo),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Text(text,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12.5, color: p.ink)),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+          const SizedBox(height: 128), // 给输入胶囊与开关留出悬浮空间
+        ],
+      ),
+    );
+  }
+}
+
+/// 晨昏气泡:用户 = 晨蓝→曦橙渐变;AI = 雾白磨砂(列表内免 blur)。
+class _DawnBubble extends StatelessWidget {
+  const _DawnBubble({
+    required this.text,
+    required this.isUser,
+    this.isStreaming = false,
+    this.onLongPress,
+  });
+
+  final String text;
+  final bool isUser;
+  final bool isStreaming;
+  final VoidCallback? onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: GestureDetector(
+        onLongPress: onLongPress,
+        child: Container(
+          margin: EdgeInsets.only(
+            top: 4, bottom: 4,
+            left: isUser ? 56 : 12,
+            right: isUser ? 12 : 56,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+          constraints: BoxConstraints(
+            maxWidth:
+                (MediaQuery.sizeOf(context).width * (isUser ? 0.86 : 0.96)).clamp(260.0, 680.0),
+          ),
+          decoration: BoxDecoration(
+            gradient: isUser
+                ? LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: p.userBubbleGradient,
+                  )
+                : null,
+            color: isUser ? null : p.aiBubbleFill,
+            border: isUser ? null : Border.all(color: p.aiBubbleBorder),
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(21),
+              topRight: const Radius.circular(21),
+              bottomLeft: Radius.circular(isUser ? 21 : 8),
+              bottomRight: Radius.circular(isUser ? 8 : 21),
+            ),
+            boxShadow: isUser
+                ? [BoxShadow(color: p.indigo.withValues(alpha: 0.3), blurRadius: 14, offset: const Offset(0, 6))]
+                : [BoxShadow(color: p.shadowColor.withValues(alpha: 0.14), blurRadius: 12, offset: const Offset(0, 5))],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (!(isStreaming && text.isEmpty))
+                MarkdownMessage(data: text, isUser: isUser, isStreaming: isStreaming),
+              if (isStreaming)
+                Padding(
+                  padding: EdgeInsets.only(top: text.isEmpty ? 0 : 6),
+                  child: text.isEmpty
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const DawnOrb(size: 12),
+                            const SizedBox(width: 7),
+                            Text('正在思考…', style: TextStyle(fontSize: 11, color: p.ink2)),
+                          ],
+                        )
+                      : const LightCursor(),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 工具调用卡(L3 内容玻璃观感,列表内免 blur)。
+class _DawnToolCard extends StatelessWidget {
+  const _DawnToolCard({required this.name, required this.text, this.isError = false});
+
+  final String name;
+  final String text;
+  final bool isError;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+        constraints: const BoxConstraints(maxWidth: 300),
+        decoration: BoxDecoration(
+          color: p.aiBubbleFill,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: isError ? iosRed.withValues(alpha: 0.45) : p.aiBubbleBorder),
+          boxShadow: [BoxShadow(color: p.shadowColor.withValues(alpha: 0.12), blurRadius: 12, offset: const Offset(0, 5))],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 22,
+              height: 22,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(7),
+                gradient: isError
+                    ? null
+                    : LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [p.indigo, const Color(0xFF9A6BD6)],
+                      ),
+                color: isError ? iosRed.withValues(alpha: 0.12) : null,
+              ),
+              child: Icon(
+                isError ? CupertinoIcons.exclamationmark_circle_fill : CupertinoIcons.wrench_fill,
+                size: 12,
+                color: isError ? iosRed : Colors.white,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('工具 · $name',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: p.ink)),
+                  const SizedBox(height: 1),
+                  Text(text,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11, color: p.ink2)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 子页容器:为无返回键的分组列表页叠加悬浮玻璃返回按钮。
+class _SubPageBack extends StatelessWidget {
+  const _SubPageBack({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        child,
+        Positioned(
+          top: 0, left: 0,
+          child: SafeArea(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 10, top: 4),
+              child: _GlassIconButton(
+                icon: CupertinoIcons.chevron_left,
+                onTap: () => Navigator.of(context).pop(),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 悬浮玻璃抽屉:搜索 + 今天/昨天/更早 + 应用入口 + 用户行。
+class _ConversationDrawer extends ConsumerStatefulWidget {
+  const _ConversationDrawer();
+
+  @override
+  ConsumerState<_ConversationDrawer> createState() => _ConversationDrawerState();
+}
+
+class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
+  String _query = '';
+
+  void _open(Widget page, {bool wrap = true}) {
+    Navigator.of(context).pop(); // 先收抽屉
+    Navigator.of(context)
+        .push(cupertinoRoute(wrap ? _SubPageBack(child: page) : page));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
+    final conversations = ref.watch(conversationsProvider);
+    final width = math.min(320.0, MediaQuery.sizeOf(context).width * 0.82);
+
+    return Drawer(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      width: width,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 10, 0, 10),
+          child: GlassContainer(
+            level: GlassLevel.l1,
+            radius: 26,
+            fill: p.drawerFill,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                  child: CupertinoSearchTextField(
+                    placeholder: '搜索对话',
+                    onChanged: (v) => setState(() => _query = v),
+                    style: TextStyle(fontSize: 13, color: p.ink),
+                    placeholderStyle: TextStyle(fontSize: 13, color: p.ink3),
+                    decoration: BoxDecoration(
+                      color: p.isDark
+                          ? Colors.white.withValues(alpha: 0.08)
+                          : Colors.white.withValues(alpha: 0.55),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: conversations.when(
+                    data: (list) => _buildGroupedList(list, p),
+                    loading: () => const Center(child: CupertinoActivityIndicator()),
+                    error: (e, _) =>
+                        Center(child: Text('加载失败:$e', style: const TextStyle(fontSize: 12))),
+                  ),
+                ),
+                Divider(height: 1, thickness: 0.5, color: p.glassBorder),
+                _DrawerEntry(
+                  icon: CupertinoIcons.square_grid_2x2,
+                  colors: [p.indigo, const Color(0xFF9A6BD6)],
+                  label: '应用广场',
+                  onTap: () => _open(const LaunchpadTab()),
+                ),
+                _DrawerEntry(
+                  icon: CupertinoIcons.star_fill,
+                  colors: [p.coral, const Color(0xFFE8A26B)],
+                  label: '绘图工作室',
+                  onTap: () => _open(const StudioTab()),
+                ),
+                _DrawerEntry(
+                  icon: CupertinoIcons.person_2_fill,
+                  colors: [const Color(0xFF9A6BD6), p.coral],
+                  label: '群组协作',
+                  onTap: () => _open(const GroupPage(), wrap: false),
+                ),
+                Divider(height: 1, thickness: 0.5, color: p.glassBorder),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 10, 8, 12),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 28, height: 28,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: LinearGradient(colors: [p.indigo, p.coral]),
+                        ),
+                        child: const Icon(CupertinoIcons.person_fill, size: 15, color: Colors.white),
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Text('我的',
+                            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: p.ink)),
+                      ),
+                      CupertinoButton(
+                        minSize: 0,
+                        padding: const EdgeInsets.all(8),
+                        onPressed: () => _open(const SettingsTab()),
+                        child: Icon(CupertinoIcons.gear, size: 17, color: p.ink3),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGroupedList(List<ConversationMeta> list, DawnPalette p) {
+    final filtered = _query.isEmpty
+        ? list
+        : list.where((c) => c.title.toLowerCase().contains(_query.toLowerCase())).toList();
+    if (filtered.isEmpty) {
+      return Center(child: Text('暂无会话', style: TextStyle(fontSize: 12.5, color: p.ink2)));
+    }
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final groups = <String, List<ConversationMeta>>{'今天': [], '昨天': [], '更早': []};
+    for (final c in filtered) {
+      final dt = DateTime.tryParse(c.updatedAt)?.toLocal();
+      final day = dt == null ? null : DateTime(dt.year, dt.month, dt.day);
+      if (day == today) {
+        groups['今天']!.add(c);
+      } else if (day == yesterday) {
+        groups['昨天']!.add(c);
+      } else {
+        groups['更早']!.add(c);
+      }
+    }
+
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 8),
+      children: [
+        for (final entry in groups.entries)
+          if (entry.value.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 3),
+              child: Text(entry.key,
+                  style: TextStyle(
+                      fontSize: 9.5, fontWeight: FontWeight.w600, letterSpacing: 1.4, color: p.ink3)),
+            ),
+            for (final c in entry.value) _buildConversationTile(c, p),
+          ],
+      ],
+    );
+  }
+
+  Widget _buildConversationTile(ConversationMeta c, DawnPalette p) {
+    final selected = ref.watch(currentConversationProvider)?.id == c.id;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+      child: GestureDetector(
+        onTap: () async {
+          ref.read(currentConversationProvider.notifier).set(c);
+          await ref.read(chatProvider.notifier).loadHistory(c);
+          if (context.mounted) Navigator.of(context).pop();
+        },
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
+          decoration: BoxDecoration(
+            color: selected
+                ? (p.isDark
+                    ? Colors.white.withValues(alpha: 0.12)
+                    : Colors.white.withValues(alpha: 0.6))
+                : null,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              if (c.forkedFrom != null) ...[
+                Icon(CupertinoIcons.arrow_branch, size: 12, color: p.indigo),
+                const SizedBox(width: 6),
+              ],
+              Expanded(
+                child: Text(
+                  c.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                    color: p.ink,
+                  ),
+                ),
+              ),
+              _ConversationMenu(
+                conversation: c,
+                onRenamed: () => ref.read(conversationsProvider.notifier).refresh(),
+                onDeleted: () {
+                  if (ref.read(currentConversationProvider)?.id == c.id) {
+                    ref.read(currentConversationProvider.notifier).set(null);
+                    ref.read(chatProvider.notifier).clear();
+                  }
+                  ref.read(conversationsProvider.notifier).refresh();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 抽屉内的应用入口行(渐变图标块 + 名称)。
+class _DrawerEntry extends StatelessWidget {
+  const _DrawerEntry({
+    required this.icon,
+    required this.colors,
+    required this.label,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final List<Color> colors;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
+    return CupertinoButton(
+      minSize: 0,
+      padding: EdgeInsets.zero,
+      onPressed: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        child: Row(
+          children: [
+            Container(
+              width: 24, height: 24,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: colors,
+                ),
+              ),
+              child: Icon(icon, size: 13, color: Colors.white),
+            ),
+            const SizedBox(width: 9),
+            Text(label, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: p.ink)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Agent 选择弹层。
 class _AgentPickerSheet extends StatelessWidget {
   const _AgentPickerSheet({required this.agents});
@@ -244,20 +920,21 @@ class _AgentPickerSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return Container(
-      decoration: const BoxDecoration(
-        color: iosGroupedBg,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      decoration: BoxDecoration(
+        color: p.groupedBg,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
       ),
       child: SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 14, 20, 6),
-              child: Text('选择 Agent（新会话）',
-                  style: TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 6),
+              child: Text('选择 Agent(新会话)',
+                  style: TextStyle(fontSize: 13, color: p.ink2)),
             ),
             IosSection(
               children: [
@@ -285,102 +962,7 @@ class _AgentPickerSheet extends StatelessWidget {
   }
 }
 
-/// 会话抽屉（iOS 风格）。
-class _ConversationDrawer extends ConsumerStatefulWidget {
-  const _ConversationDrawer();
-
-  @override
-  ConsumerState<_ConversationDrawer> createState() => _ConversationDrawerState();
-}
-
-class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
-  String _query = '';
-
-  @override
-  Widget build(BuildContext context) {
-    final conversations = ref.watch(conversationsProvider);
-    return IosDrawer(
-      child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 14, 20, 4),
-              child: Text('会话',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, letterSpacing: -0.4)),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-              child: CupertinoSearchTextField(
-                placeholder: '搜索',
-                onChanged: (v) => setState(() => _query = v),
-              ),
-            ),
-            Expanded(
-              child: conversations.when(
-                data: (list) {
-                  final filtered = _query.isEmpty
-                      ? list
-                      : list
-                          .where((c) => c.title.toLowerCase().contains(_query.toLowerCase()))
-                          .toList();
-                  if (filtered.isEmpty) {
-                    return const Center(
-                        child: Text('暂无会话', style: TextStyle(color: iosSecondaryLabel)));
-                  }
-                  return ListView.builder(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    itemCount: filtered.length,
-                    itemBuilder: (ctx, i) {
-                      final c = filtered[i];
-                      final selected = ref.watch(currentConversationProvider)?.id == c.id;
-                      return Container(
-                        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: selected ? iosBlue.withValues(alpha: 0.12) : iosCardBg,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: IosRow(
-                          icon: c.forkedFrom != null
-                              ? CupertinoIcons.arrow_branch
-                              : CupertinoIcons.chat_bubble_fill,
-                          iconColor: c.forkedFrom != null ? iosPurple : iosBlue,
-                          title: c.title,
-                          subtitle: '${c.messageCount} 条消息',
-                          trailing: _ConversationMenu(
-                            conversation: c,
-                            onRenamed: () => ref.read(conversationsProvider.notifier).refresh(),
-                            onDeleted: () {
-                              if (ref.read(currentConversationProvider)?.id == c.id) {
-                                ref.read(currentConversationProvider.notifier).set(null);
-                                ref.read(chatProvider.notifier).clear();
-                              }
-                              ref.read(conversationsProvider.notifier).refresh();
-                            },
-                          ),
-                          onTap: () async {
-                            ref.read(currentConversationProvider.notifier).set(c);
-                            await ref.read(chatProvider.notifier).loadHistory(c);
-                            if (context.mounted) Navigator.of(context).pop();
-                          },
-                        ),
-                      );
-                    },
-                  );
-                },
-                loading: () => const Center(child: CupertinoActivityIndicator()),
-                error: (e, _) =>
-                    Center(child: Text('加载失败：$e', style: const TextStyle(fontSize: 12))),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 会话操作（长按弹层）。
+/// 会话操作(长按弹层)。
 class _ConversationMenu extends StatelessWidget {
   const _ConversationMenu({
     required this.conversation,
@@ -396,9 +978,9 @@ class _ConversationMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: () => _open(context),
-      child: const Padding(
-        padding: EdgeInsets.all(6),
-        child: Icon(CupertinoIcons.ellipsis, size: 16, color: iosSecondaryLabel),
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Icon(CupertinoIcons.ellipsis, size: 16, color: DawnPalette.of(context).ink2),
       ),
     );
   }

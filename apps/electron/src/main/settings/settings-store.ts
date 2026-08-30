@@ -95,10 +95,13 @@ export type LanguagePreference = 'zh-CN' | 'en-US' | 'system'
 
 export const DEFAULT_LANGUAGE_PREFERENCE: LanguagePreference = 'system'
 export type AIExecutionAuthMode = 'strict' | 'auto'
+/** Which agent harness handles chat execution in Electron. */
+export type HarnessBackend = 'ts' | 'rust'
 
 export interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
   enableAiLogging: boolean
+  harnessBackend: HarnessBackend
 }
 
 /**
@@ -150,7 +153,8 @@ export interface PortableSettingsConfig {
 
 export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
   notifyOnTaskComplete: true,
-  enableAiLogging: false
+  enableAiLogging: false,
+  harnessBackend: 'ts'
 }
 
 export const DEFAULT_CHAT_FONT_PREFERENCES: ChatFontPreferences = {
@@ -331,7 +335,8 @@ function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreference
       : DEFAULT_AI_EXECUTION_PREFERENCES.notifyOnTaskComplete,
     enableAiLogging: typeof input.enableAiLogging === 'boolean'
       ? input.enableAiLogging
-      : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging
+      : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging,
+    harnessBackend: input.harnessBackend === 'rust' ? 'rust' : 'ts'
   }
 }
 

@@ -73,7 +73,8 @@ const themePreference = ref<ThemePreference>('system')
 const languagePreference = ref<LanguagePreference>('system')
 const executionPreferences = ref<AIExecutionPreferences>({
   notifyOnTaskComplete: true,
-  enableAiLogging: false
+  enableAiLogging: false,
+  harnessBackend: 'ts'
 })
 const savingTheme = ref(false)
 const savingLanguage = ref(false)
@@ -444,6 +445,32 @@ async function saveTaskNotificationPreference (notifyOnTaskComplete: boolean) {
   }
 }
 
+async function saveHarnessBackend (harnessBackend: 'ts' | 'rust') {
+  if (savingExecution.value || executionPreferences.value.harnessBackend === harnessBackend) return
+
+  const previous = executionPreferences.value.harnessBackend
+  executionPreferences.value = {
+    ...executionPreferences.value,
+    harnessBackend
+  }
+
+  savingExecution.value = true
+  feedback.value = ''
+
+  try {
+    await persistAIExecutionPreferences(executionPreferences.value)
+    setFeedback(t('common.saved'))
+  } catch (err) {
+    executionPreferences.value = {
+      ...executionPreferences.value,
+      harnessBackend: previous
+    }
+    setFeedback(t('common.saveFailed', { message: (err as Error).message }))
+  } finally {
+    savingExecution.value = false
+  }
+}
+
 function toggleTaskNotificationPreference () {
   void saveTaskNotificationPreference(!executionPreferences.value.notifyOnTaskComplete)
 }
@@ -675,6 +702,44 @@ function handleFontReposition () {
               </span>
             </button>
           </section>
+
+          <section class="gs-control-card gs-harness-card">
+            <div class="gs-control-copy">
+              <span class="gs-control-title">{{ $t('settings.general.execution.harnessTitle') }}</span>
+              <p class="gs-control-hint">{{ $t('settings.general.execution.harnessHint') }}</p>
+            </div>
+            <div
+              class="gs-harness-segmented"
+              role="radiogroup"
+              :aria-label="$t('settings.general.execution.harnessTitle')"
+            >
+              <button
+                type="button"
+                class="gs-harness-option"
+                :class="{ active: executionPreferences.harnessBackend === 'ts' }"
+                :disabled="savingExecution"
+                role="radio"
+                :aria-checked="executionPreferences.harnessBackend === 'ts'"
+                @click="saveHarnessBackend('ts')"
+              >
+                <span>{{ $t('settings.general.execution.harnessTs') }}</span>
+                <small>{{ $t('settings.general.execution.harnessTsHint') }}</small>
+              </button>
+              <button
+                type="button"
+                class="gs-harness-option"
+                :class="{ active: executionPreferences.harnessBackend === 'rust' }"
+                :disabled="savingExecution"
+                role="radio"
+                :aria-checked="executionPreferences.harnessBackend === 'rust'"
+                @click="saveHarnessBackend('rust')"
+              >
+                <span>{{ $t('settings.general.execution.harnessRust') }}</span>
+                <small>{{ $t('settings.general.execution.harnessRustHint') }}</small>
+              </button>
+            </div>
+          </section>
+
         </template>
 
         <template v-else-if="activeSectionId === 'language'">
@@ -1349,6 +1414,66 @@ function handleFontReposition () {
   transform: translateX(24px);
 }
 
+.gs-harness-card {
+  align-items: flex-start;
+}
+
+.gs-harness-segmented {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(100%, 360px);
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-panel-subtle);
+}
+
+.gs-harness-option {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.gs-harness-option:hover:not(:disabled) {
+  color: var(--app-text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.gs-harness-option.active {
+  border-color: rgba(94, 123, 255, 0.4);
+  background: rgba(94, 123, 255, 0.16);
+  color: var(--app-text);
+}
+
+.gs-harness-option:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.gs-harness-option span {
+  overflow-wrap: anywhere;
+  font-size: 0.79em;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.gs-harness-option small {
+  overflow-wrap: anywhere;
+  color: var(--app-text-faint);
+  font-size: 0.69em;
+  line-height: 1.3;
+}
+
 .gs-transfer-card {
   display: flex;
   flex-direction: column;
@@ -1402,6 +1527,10 @@ function handleFontReposition () {
   .gs-control-card {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .gs-harness-segmented {
+    width: 100%;
   }
 }
 

@@ -1,4 +1,5 @@
-import type { AIEngine, AIRequestOptions, ProgressCallback, ProgressEvent } from '../../../src/main/ai-engine/ai-engine.js'
+import type { AIEngine, ProgressCallback, ProgressEvent } from '../../../src/main/ai-engine/ai-engine.js'
+import type { AIHarness, AIRequestOptions } from '../../../src/main/ai-harness/types.js'
 import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
 import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupDefinition, AgentGroupParticipant, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupTranscriptToolCall, AgentMemoryScope, AgentSidechatSession, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
@@ -64,6 +65,44 @@ export type GroupDeliberationProgressCallback = (
   stageOrEvent: string | ProgressEvent | { type: 'group_collaboration_plan'; plan: AgentGroupCollaborationPlan } | { type: 'group_session_state'; groupId: string; active: boolean } | { type: 'group_progress'; groupProgress: AgentGroupProgressSnapshot } | { type: 'agent_sidechat'; sidechat: AgentSidechatSession } | { type: 'group_board'; board: import('../../../src/shared/agent-workspace-types.js').SharedBoardSnapshot } | { type: 'group_direct_reply'; directReply: import('../../../src/shared/agent-workspace-types.js').AgentGroupDirectReply } | { type: 'group_user_injection'; injection: import('../../../src/shared/agent-workspace-types.js').AgentGroupUserInjection } | { type: 'group_peer_message'; peerMessage: import('../../../src/shared/agent-workspace-types.js').AgentGroupMessage },
   detail?: string
 ) => void
+
+/**
+ * The portion of an AI backend used by Electron's group-session orchestration.
+ *
+ * Group state, UI events, and the shared-board implementation remain in
+ * Electron. Provider execution and the model/tool loop can be selected per
+ * request, allowing the Rust facade to run every planner, member, and peer
+ * turn without requiring the legacy AIEngine implementation.
+ */
+export interface GroupExecutionEngine extends Pick<AIHarness, 'chat' | 'chatStream' | 'getAvailableTools'> {}
+
+type GroupRunContext = Pick<AIRequestOptions,
+  'authMode' | 'getAuthMode' | 'hostConversationId' | 'hostSessionId' | 'workspaceRoot'
+>
+
+/**
+ * Adapt the legacy engine to the run-scoped execution contract. Rust uses the
+ * agent identity when it persists the conversation; the legacy engine builds
+ * that identity into its prompt, so its adapter intentionally omits it.
+ */
+export function createGroupExecutionEngine (
+  legacyEngine: AIEngine,
+  selectedEngine?: GroupExecutionEngine
+): GroupExecutionEngine {
+  if (selectedEngine) return selectedEngine
+
+  return {
+    chat: async (messages, options) => {
+      const { agentId: _agentId, ...legacyOptions } = options || {}
+      return await legacyEngine.chat(messages, legacyOptions)
+    },
+    async *chatStream (messages, onProgress, options) {
+      const { agentId: _agentId, ...legacyOptions } = options || {}
+      yield * legacyEngine.chatStream(messages, onProgress, legacyOptions)
+    },
+    getAvailableTools: () => legacyEngine.getAvailableTools()
+  }
+}
 
 export function normalizeMentionToken (value: string): string {
   return value
@@ -674,7 +713,7 @@ export function summarizeGroupNote (value: string): string {
 }
 
 export async function buildGroupRoundCoordinatorPlan (input: {
-  runtimeAiEngine: AIEngine
+  runtimeAiEngine: GroupExecutionEngine
   planner: AgentDefinition | null
   group: AgentGroupDefinition
   messages: Array<{ role: string; content: MessageContent }>
@@ -690,6 +729,7 @@ export async function buildGroupRoundCoordinatorPlan (input: {
   totalRounds: number
   selectionSource: 'explicit_mentions' | 'coordinator_decides' | 'mentioned_agent_decides' | 'default_group_discussion'
   abortSignal?: AbortSignal
+  runtimeRequestContext?: GroupRunContext
 }): Promise<GroupRoundCoordinatorPlan> {
   throwIfAborted(input.abortSignal)
   const fallbackRequest = truncateSectionText(input.normalizedRequest || input.latestUserMessage, 600)
@@ -773,6 +813,8 @@ export async function buildGroupRoundCoordinatorPlan (input: {
 
   try {
     const response = await input.runtimeAiEngine.chat(input.messages, {
+      ...input.runtimeRequestContext,
+      agentId: input.planner.id,
       targetProjectId: input.targetProjectId ?? null,
       providerConfig: resolveProviderConfig(
         input.planner.providerId,
@@ -817,13 +859,17 @@ export async function buildGroupDeliberationSection (input: {
   onProgress?: GroupDeliberationProgressCallback
   sessionId?: string
   abortSignal?: AbortSignal
+  /** Keep group planning, member turns, and peer replies on the selected backend. */
+  runtimeAiHarness?: GroupExecutionEngine
+  /** Carry the active chat's workspace and authorization routing into every group turn. */
+  runtimeRequestContext?: GroupRunContext
 }): Promise<GroupDeliberationResult> {
   throwIfAborted(input.abortSignal)
   if (!mainState.aiEngine || !mainState.agentStore) {
     return { promptSection: null, transcript: null }
   }
 
-  const runtimeAiEngine = mainState.aiEngine
+  const runtimeAiEngine = createGroupExecutionEngine(mainState.aiEngine, input.runtimeAiHarness)
   const runtimeAgentStore = mainState.agentStore
 
   const latestUserMessage = getLastUserMessageText(input.messages)
@@ -942,6 +988,8 @@ export async function buildGroupDeliberationSection (input: {
         [{ role: 'user', content: peerInput.request }],
         peerProgress,
         {
+          ...input.runtimeRequestContext,
+          agentId: targetAgent.id,
           targetProjectId: input.targetProjectId ?? null,
           providerConfig: resolveProviderConfig(
             targetAgent.providerId,
@@ -1032,7 +1080,8 @@ export async function buildGroupDeliberationSection (input: {
           round,
           totalRounds,
           selectionSource: discussionSelectionSource,
-          abortSignal: input.abortSignal
+          abortSignal: input.abortSignal,
+          runtimeRequestContext: input.runtimeRequestContext
         })
       : {
           shouldContinue: candidateMemberIds.length > 0,
@@ -1200,6 +1249,8 @@ export async function buildGroupDeliberationSection (input: {
             }) as unknown as ProgressCallback
             try {
               for await (const sidechatEvent of runtimeAiEngine.chatStream(input.messages, sidechatProgress, {
+                ...input.runtimeRequestContext,
+                agentId: member.id,
                 targetProjectId: input.targetProjectId ?? null,
                 providerConfig: resolveProviderConfig(
                   member.providerId,

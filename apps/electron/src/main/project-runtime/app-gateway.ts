@@ -32,6 +32,7 @@ export class AppGateway {
   private projectFS: ProjectFS
   private builderService: BuilderService
   private healthCheckInterval: ReturnType<typeof setInterval> | null = null
+  private healthCheckInFlight: Promise<void> | null = null
   private restartPolicies = new Map<string, RestartPolicy>()
   private restartCounts = new Map<string, number>()
   private maxRestarts = 3
@@ -52,8 +53,8 @@ export class AppGateway {
   startHealthChecks (intervalMs = 30000): void {
     if (this.healthCheckInterval) return
 
-    this.healthCheckInterval = setInterval(async () => {
-      await this._performHealthChecks()
+    this.healthCheckInterval = setInterval(() => {
+      this._scheduleHealthChecks()
     }, intervalMs)
 
     console.log(`[AppGateway] Health checks started (every ${intervalMs / 1000}s)`)
@@ -62,12 +63,15 @@ export class AppGateway {
   /**
    * Stop periodic health checks.
    */
-  stopHealthChecks (): void {
+  async stopHealthChecks (): Promise<void> {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval)
       this.healthCheckInterval = null
       console.log('[AppGateway] Health checks stopped')
     }
+    // An already-running pass may be starting a TS project. Wait for it
+    // before Rust takes ownership of the same project directory and ports.
+    await this.healthCheckInFlight
   }
 
   /**
@@ -181,5 +185,16 @@ export class AppGateway {
         }
       }
     }
+  }
+
+  private _scheduleHealthChecks (): void {
+    if (this.healthCheckInFlight) return
+    let check: Promise<void>
+    check = this._performHealthChecks().catch(error => {
+      console.warn(`[AppGateway] Health check failed: ${(error as Error).message}`)
+    }).finally(() => {
+      if (this.healthCheckInFlight === check) this.healthCheckInFlight = null
+    })
+    this.healthCheckInFlight = check
   }
 }

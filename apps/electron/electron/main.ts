@@ -6,6 +6,7 @@ import { APP_DISPLAY_NAME } from './main-process/constants.js'
 import { mainState } from './main-process/state.js'
 import { initializeServices } from './main-process/services.js'
 import { setupIPC } from './main-process/ipc.js'
+import { isRustHarnessSelected, startSelectedRustHarness } from './main-process/ai/selected-execution-engine.js'
 import { setMainLocale } from '../src/main/i18n/main-i18n.js'
 import { createWindow, setupEmbeddedAppCorsWorkaround } from './main-process/windows.js'
 import { reportStartup } from '../src/main/app-start-report/startup-report-service.js'
@@ -56,6 +57,8 @@ app.whenReady().then(async () => {
   // its own cache instead of re-hitting the protocol and re-decoding on every scroll.
   protocol.handle(STUDIO_IMAGE_SCHEME, async (request) => {
     try {
+      const nativeImage = await readRustStudioImage(request.url)
+      if (nativeImage) return nativeImage
       const filePath = await mainState.imageLibraryStore?.resolveImageRequest(request.url)
       if (!filePath) return new Response(null, { status: 404 })
       const res = await net.fetch(pathToFileURL(filePath).toString())
@@ -72,7 +75,14 @@ app.whenReady().then(async () => {
   // with a stale instance still holding its port / file locks — that race is
   // what caused the internal-app crash-on-open.
   try {
-    await mainState.processManagerService!.cleanupOrphanProcesses()
+    if (isRustHarnessSelected()) {
+      const rustHarness = await startSelectedRustHarness()
+      if (rustHarness && mainState.rustHarness) {
+        await mainState.rustHarness.call('project.process.cleanupOrphans', {})
+      }
+    } else {
+      await mainState.processManagerService!.cleanupOrphanProcesses()
+    }
   } catch (err) {
     console.warn('[main] Orphan process cleanup failed on startup:', (err as Error).message)
   }
@@ -99,6 +109,45 @@ app.whenReady().then(async () => {
   })
 })
 
+/**
+ * Rust mode keeps the image-library index in the harness database. The custom
+ * protocol remains an Electron UI transport, but it must not require the TS
+ * gallery cache to have imported the image first.
+ */
+async function readRustStudioImage (rawUrl: string): Promise<Response | null> {
+  if (mainState.settingsStore?.getAIExecutionPreferences().harnessBackend !== 'rust') return null
+  const client = mainState.rustHarness
+  if (!client?.isAvailable()) return new Response(null, { status: 503 })
+  let id = ''
+  let variant: 'thumb' | 'full' = 'full'
+  try {
+    const url = new URL(rawUrl)
+    const parts = url.pathname.split('/').filter(Boolean)
+    id = decodeURIComponent(parts[0] || '')
+    variant = parts[1] === 'thumb' ? 'thumb' : 'full'
+  } catch {
+    return new Response(null, { status: 400 })
+  }
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(id)) return new Response(null, { status: 400 })
+
+  try {
+    const result = await client.call<Record<string, unknown>>('studio.library.read', { id, variant })
+    const dataUrl = typeof result.dataUrl === 'string' ? result.dataUrl : ''
+    const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl)
+    if (!match) return new Response(null, { status: 404 })
+    return new Response(Buffer.from(match[2], 'base64'), {
+      headers: {
+        'Content-Type': match[1],
+        'Cache-Control': 'public, max-age=31536000, immutable'
+      }
+    })
+  } catch {
+    // Rust is selected, so this URL must not reveal stale Electron gallery
+    // data when its native library cannot serve the item.
+    return new Response(null, { status: 404 })
+  }
+}
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
@@ -115,14 +164,21 @@ app.on('before-quit', (event) => {
 
   void (async () => {
     try {
-      if (mainState.runtimeManager) {
+      const rustSelected = isRustHarnessSelected()
+      if (!rustSelected && mainState.runtimeManager) {
         await mainState.runtimeManager.stopAll()
       }
       if (mainState.lanServer) {
         await mainState.lanServer.stop()
       }
-      if (mainState.mcpService) {
+      if (!rustSelected && mainState.mcpService) {
         await mainState.mcpService.dispose()
+      }
+      if (mainState.rustHarness) {
+        // Rust mode owns project children and MCP transports entirely in the
+        // app-server. Do not touch their dormant Electron counterparts.
+        if (rustSelected) await mainState.rustHarness.stopAllProjects().catch(() => {})
+        mainState.rustHarness.dispose()
       }
       if (mainState.updateService) {
         mainState.updateService.dispose()

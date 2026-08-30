@@ -1,6 +1,8 @@
 //! Mock provider：脚本化多轮流次，供测试与无 API key 的全链路演示。
 
-use super::{ChunkStream, ContentBlock, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk};
+use super::{
+    ChatOptions, ChunkStream, ContentBlock, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk,
+};
 use anyhow::Result;
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
@@ -24,7 +26,11 @@ pub struct MockProvider {
 
 impl MockProvider {
     pub fn new(model: impl Into<String>, script: Vec<MockTurn>) -> Self {
-        Self { model: model.into(), script: Mutex::new(script), cursor: AtomicUsize::new(0) }
+        Self {
+            model: model.into(),
+            script: Mutex::new(script),
+            cursor: AtomicUsize::new(0),
+        }
     }
 
     /// 无脚本时的默认行为：
@@ -87,6 +93,7 @@ impl Provider for MockProvider {
         messages: Vec<LlmMessage>,
         _tools: Vec<LlmTool>,
         _max_tokens: u32,
+        _options: ChatOptions,
     ) -> Result<ChunkStream> {
         let turn = {
             let script = self.script.lock().unwrap();
@@ -110,17 +117,25 @@ impl Provider for MockProvider {
             // 中文文本可能没有空格：split_inclusive(' ') 会把整段留在最后一段，OK。
             Box::pin(futures::stream::iter(chunks))
         } else {
-            Box::pin(futures::stream::iter(vec![Ok(StreamChunk::TextDelta(turn.text.clone()))]))
+            Box::pin(futures::stream::iter(vec![Ok(StreamChunk::TextDelta(
+                turn.text.clone(),
+            ))]))
         };
 
         // Completed 块在文本流之后追加。
         let content = {
             let mut c: Vec<ContentBlock> = Vec::new();
             if !turn.text.is_empty() {
-                c.push(ContentBlock::Text { text: turn.text.clone() });
+                c.push(ContentBlock::Text {
+                    text: turn.text.clone(),
+                });
             }
             for (id, name, input) in &turn.tool_calls {
-                c.push(ContentBlock::ToolUse { id: id.clone(), name: name.clone(), input: input.clone() });
+                c.push(ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                });
             }
             c
         };
@@ -133,12 +148,26 @@ impl Provider for MockProvider {
             .unwrap_or(10);
         let output_est = (turn.text.chars().count() as u64 / 2).max(1);
         let completed = Ok(StreamChunk::Completed {
-            stop_reason: if turn.tool_calls.is_empty() { "end_turn".into() } else { "tool_use".into() },
-            assistant: LlmMessage { role: LlmRole::Assistant, content },
-            usage: super::TokenUsage { input_tokens: input_est, output_tokens: output_est },
+            stop_reason: if turn.tool_calls.is_empty() {
+                "end_turn".into()
+            } else {
+                "tool_use".into()
+            },
+            assistant: LlmMessage {
+                role: LlmRole::Assistant,
+                content,
+            },
+            usage: super::TokenUsage {
+                input_tokens: input_est,
+                output_tokens: output_est,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
         });
 
-        Ok(Box::pin(stream.chain(futures::stream::iter(vec![completed]))))
+        Ok(Box::pin(
+            stream.chain(futures::stream::iter(vec![completed])),
+        ))
     }
 }
 
@@ -223,15 +252,23 @@ mod tests {
         let turn = provider.default_turn(&messages);
         assert_eq!(turn.tool_calls.len(), 1);
         assert_eq!(turn.tool_calls[0].1, "create_lightweight_app");
-        assert!(turn.tool_calls[0].2["html"].as_str().unwrap().contains("<html"));
-        assert!(turn.tool_calls[0].2["name"].as_str().unwrap().contains("番茄钟"));
+        assert!(turn.tool_calls[0].2["html"]
+            .as_str()
+            .unwrap()
+            .contains("<html"));
+        assert!(turn.tool_calls[0].2["name"]
+            .as_str()
+            .unwrap()
+            .contains("番茄钟"));
 
         // 工具结果之后 → 确认语，不再重复创建
         let after = vec![
             LlmMessage::text(LlmRole::User, "帮我做一个「番茄钟」应用"),
             LlmMessage {
                 role: LlmRole::Assistant,
-                content: vec![ContentBlock::Text { text: "好的".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "好的".into(),
+                }],
             },
             LlmMessage {
                 role: LlmRole::User,
@@ -259,16 +296,37 @@ mod tests {
             vec![
                 MockTurn {
                     text: "查看文件".into(),
-                    tool_calls: vec![("t1".into(), "read_file".into(), serde_json::json!({"path": "a.txt"}))],
+                    tool_calls: vec![(
+                        "t1".into(),
+                        "read_file".into(),
+                        serde_json::json!({"path": "a.txt"}),
+                    )],
                     stream_in_chunks: true,
                 },
-                MockTurn { text: "内容是 hello".into(), tool_calls: vec![], stream_in_chunks: true },
+                MockTurn {
+                    text: "内容是 hello".into(),
+                    tool_calls: vec![],
+                    stream_in_chunks: true,
+                },
             ],
         );
-        let tools = vec![LlmTool { name: "read_file".into(), description: "r".into(), input_schema: serde_json::json!({}) }];
+        let tools = vec![LlmTool {
+            name: "read_file".into(),
+            description: "r".into(),
+            input_schema: serde_json::json!({}),
+        }];
         let mut messages = vec![LlmMessage::text(LlmRole::User, "读一下 a.txt")];
 
-        let mut s1 = provider.chat_stream(None, messages.clone(), tools.clone(), 1024).await.unwrap();
+        let mut s1 = provider
+            .chat_stream(
+                None,
+                messages.clone(),
+                tools.clone(),
+                1024,
+                ChatOptions::default(),
+            )
+            .await
+            .unwrap();
         let mut deltas = String::new();
         let mut completed = None;
         while let Some(chunk) = s1.next().await {
@@ -291,7 +349,10 @@ mod tests {
                 is_error: false,
             }],
         });
-        let mut s2 = provider.chat_stream(None, messages, tools, 1024).await.unwrap();
+        let mut s2 = provider
+            .chat_stream(None, messages, tools, 1024, ChatOptions::default())
+            .await
+            .unwrap();
         let mut second_text = String::new();
         while let Some(chunk) = s2.next().await {
             if let StreamChunk::TextDelta(t) = chunk.unwrap() {

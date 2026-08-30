@@ -7,7 +7,8 @@ const FEEDBACK_DISPLAY_DURATION_MS = 1800
 const { t } = useI18n()
 const executionPreferences = ref<AIExecutionPreferences>({
   notifyOnTaskComplete: true,
-  enableAiLogging: false
+  enableAiLogging: false,
+  harnessBackend: 'ts'
 })
 const loading = ref(true)
 const saving = ref(false)
@@ -20,7 +21,8 @@ async function loadPreferences () {
   } catch {
     executionPreferences.value = {
       notifyOnTaskComplete: true,
-      enableAiLogging: false
+      enableAiLogging: false,
+      harnessBackend: 'ts'
     }
   } finally {
     loading.value = false

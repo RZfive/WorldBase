@@ -79,6 +79,38 @@ export function resolveDefaultModelPricing (model: string): ModelPricing | undef
   return bestMatch ? { ...bestMatch } : undefined
 }
 
+/**
+ * Resolve a model's price using the exact matching rules used by CostTracker.
+ * Electron's Rust client uses this when it serializes provider definitions, so
+ * a backend switch cannot silently zero out custom or built-in pricing.
+ */
+export function resolveModelPricing (
+  model: string,
+  overrides: Record<string, ModelPricing> = {}
+): ModelPricing | undefined {
+  if (!model) return undefined
+
+  const pricing = new Map<string, ModelPricing>(DEFAULT_MODEL_PRICING)
+  for (const [name, value] of Object.entries(overrides)) {
+    pricing.set(name, value)
+  }
+
+  if (pricing.has(model)) return { ...pricing.get(model)! }
+
+  const normalized = model.replace(/^(openai\/|anthropic\/|google\/|deepseek\/)/, '')
+  if (pricing.has(normalized)) return { ...pricing.get(normalized)! }
+
+  let bestMatch: ModelPricing | undefined
+  let bestMatchLength = 0
+  for (const [key, value] of pricing) {
+    if (normalized.includes(key) && key.length > bestMatchLength) {
+      bestMatch = value
+      bestMatchLength = key.length
+    }
+  }
+  return bestMatch ? { ...bestMatch } : undefined
+}
+
 export class CostTracker {
   private pricing = new Map<string, ModelPricing>(DEFAULT_MODEL_PRICING)
   private sessionUsage: UsageEntry[] = []
@@ -177,26 +209,6 @@ export class CostTracker {
 
   /** 模糊匹配模型名称 — 支持版本后缀、provider 前缀等 */
   private findPricing (model: string): ModelPricing | undefined {
-    // 精确匹配
-    if (this.pricing.has(model)) {
-      return this.pricing.get(model)
-    }
-
-    // 尝试去掉常见前缀后匹配
-    const normalized = model.replace(/^(openai\/|anthropic\/|google\/|deepseek\/)/, '')
-    if (this.pricing.has(normalized)) {
-      return this.pricing.get(normalized)
-    }
-
-    // 尝试包含匹配 — 找最长匹配的 key
-    let bestMatch: ModelPricing | undefined
-    let bestMatchLength = 0
-    for (const [key, pricing] of this.pricing) {
-      if (normalized.includes(key) && key.length > bestMatchLength) {
-        bestMatch = pricing
-        bestMatchLength = key.length
-      }
-    }
-    return bestMatch
+    return resolveModelPricing(model, Object.fromEntries(this.pricing))
   }
 }

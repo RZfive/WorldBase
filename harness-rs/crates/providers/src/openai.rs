@@ -1,7 +1,9 @@
 //! OpenAI Chat Completions 流式 provider（含 tool_calls，支持 OpenAI 兼容端点）。
 
 use super::sse::SseParser;
-use super::{ChunkStream, ContentBlock, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk};
+use super::{
+    ChatOptions, ChunkStream, ContentBlock, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk,
+};
 use anyhow::{bail, Context, Result};
 use futures::stream::StreamExt;
 use reqwest::Client;
@@ -39,17 +41,41 @@ impl OpenAIProvider {
                     for b in &m.content {
                         match b {
                             ContentBlock::Text { text } => text_parts.push(text.clone()),
+                            ContentBlock::ImageUrl { url } => text_parts.push(String::new()),
                             ContentBlock::ToolResult { .. } => tool_results.push(b),
                             ContentBlock::ToolUse { .. } => {}
                         }
                     }
                     for tr in tool_results {
-                        if let ContentBlock::ToolResult { tool_use_id, content, .. } = tr {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } = tr
+                        {
                             out.push(json!({ "role": "tool", "tool_call_id": tool_use_id, "content": content }));
                         }
                     }
-                    if !text_parts.is_empty() {
-                        out.push(json!({ "role": "user", "content": text_parts.join("\n") }));
+                    let multimodal: Vec<Value> = m
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } if !text.is_empty() => {
+                                Some(json!({ "type": "text", "text": text }))
+                            }
+                            ContentBlock::ImageUrl { url } if !url.is_empty() => {
+                                Some(json!({ "type": "image_url", "image_url": { "url": url } }))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if !multimodal.is_empty() {
+                        let content = if multimodal.iter().any(|part| part["type"] == "image_url") {
+                            Value::Array(multimodal)
+                        } else {
+                            json!(text_parts.join("\n"))
+                        };
+                        out.push(json!({ "role": "user", "content": content }));
                     }
                 }
                 LlmRole::Assistant => {
@@ -97,6 +123,7 @@ impl Provider for OpenAIProvider {
         messages: Vec<LlmMessage>,
         tools: Vec<LlmTool>,
         max_tokens: u32,
+        options: ChatOptions,
     ) -> Result<ChunkStream> {
         let mut wire = Self::to_wire_messages(&messages);
         if let Some(sys) = system {
@@ -107,10 +134,23 @@ impl Provider for OpenAIProvider {
             "model": self.model,
             "messages": wire,
             "stream": true,
-            "stream_options": { "include_usage": false },
+            "stream_options": { "include_usage": true },
         });
         // 部分兼容端点不识别 max_tokens → max_completion_tokens 变更，这里用旧字段并容忍失败。
         body["max_tokens"] = json!(max_tokens);
+        if let Some(temperature) = options.temperature.filter(|value| value.is_finite()) {
+            body["temperature"] = json!(temperature.clamp(0.0, 2.0));
+        }
+        if let Some(reasoning_effort) = options.reasoning_effort {
+            let normalized = match reasoning_effort.as_str() {
+                "low" | "medium" | "high" | "minimal" => reasoning_effort,
+                "max" => "high".to_string(),
+                _ => String::new(),
+            };
+            if !normalized.is_empty() {
+                body["reasoning_effort"] = json!(normalized);
+            }
+        }
         if !tools.is_empty() {
             body["tools"] = json!(tools
                 .iter()
@@ -144,6 +184,7 @@ impl Provider for OpenAIProvider {
             tool_calls: BTreeMap<usize, (String, String, String)>, // index → (id, name, args_acc)
             input_tokens: u64,
             output_tokens: u64,
+            cache_read_tokens: u64,
             finished: bool,
             queue: std::collections::VecDeque<Result<StreamChunk>>,
         }
@@ -170,10 +211,15 @@ impl Provider for OpenAIProvider {
                 blocks.extend(tool_blocks);
                 self.queue.push_back(Ok(StreamChunk::Completed {
                     stop_reason: "stop".into(),
-                    assistant: LlmMessage { role: LlmRole::Assistant, content: blocks },
+                    assistant: LlmMessage {
+                        role: LlmRole::Assistant,
+                        content: blocks,
+                    },
                     usage: super::TokenUsage {
                         input_tokens: self.input_tokens,
                         output_tokens: self.output_tokens,
+                        cache_read_tokens: self.cache_read_tokens,
+                        cache_creation_tokens: 0,
                     },
                 }));
                 self.finished = true;
@@ -189,13 +235,19 @@ impl Provider for OpenAIProvider {
                 };
                 if let Some(u) = payload.get("usage") {
                     self.input_tokens = u["prompt_tokens"].as_u64().unwrap_or(self.input_tokens);
-                    self.output_tokens = u["completion_tokens"].as_u64().unwrap_or(self.output_tokens);
+                    self.output_tokens = u["completion_tokens"]
+                        .as_u64()
+                        .unwrap_or(self.output_tokens);
+                    self.cache_read_tokens = u["prompt_tokens_details"]["cached_tokens"]
+                        .as_u64()
+                        .unwrap_or(self.cache_read_tokens);
                 }
                 let delta = &payload["choices"][0]["delta"];
                 if let Some(t) = delta["content"].as_str() {
                     if !t.is_empty() {
                         self.text.push_str(t);
-                        self.queue.push_back(Ok(StreamChunk::TextDelta(t.to_string())));
+                        self.queue
+                            .push_back(Ok(StreamChunk::TextDelta(t.to_string())));
                     }
                 }
                 if let Some(tcs) = delta["tool_calls"].as_array() {
@@ -223,6 +275,7 @@ impl Provider for OpenAIProvider {
             tool_calls: BTreeMap::new(),
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
             finished: false,
             queue: std::collections::VecDeque::new(),
         };
@@ -246,7 +299,9 @@ impl Provider for OpenAIProvider {
                         }
                         return None;
                     }
-                    Some(Err(e)) => return Some((Err(anyhow::anyhow!("stream read error: {e}")), st)),
+                    Some(Err(e)) => {
+                        return Some((Err(anyhow::anyhow!("stream read error: {e}")), st))
+                    }
                     Some(Ok(chunk)) => {
                         let text = String::from_utf8_lossy(&chunk);
                         for ev in st.parser.feed(&text) {

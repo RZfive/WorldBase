@@ -711,11 +711,13 @@ onActivated(() => {
 })
 
 let unsubscribeAgentTasks: (() => void) | null = null
+let unsubscribeImageLibraryChanged: (() => void) | null = null
 
 onMounted(() => {
   document.addEventListener('click', onDocumentClick)
   // Live drain when the agent queues tasks while the studio is already open.
   unsubscribeAgentTasks = window.electronAPI?.onStudioImageTasksAdded?.(() => { void drainAgentTasks() }) ?? null
+  unsubscribeImageLibraryChanged = window.electronAPI?.onImageLibraryChanged?.(() => { void handleLibraryRefresh() }) ?? null
   // Restore any failed/queued tasks left over from the last session so the user
   // can retry or dismiss them.
   void loadPersistedTasks()
@@ -725,6 +727,8 @@ onUnmounted(() => {
   document.removeEventListener('click', onDocumentClick)
   unsubscribeAgentTasks?.()
   unsubscribeAgentTasks = null
+  unsubscribeImageLibraryChanged?.()
+  unsubscribeImageLibraryChanged = null
 })
 </script>
 

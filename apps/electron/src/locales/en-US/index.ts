@@ -1149,7 +1149,13 @@ const enUS: MessageSchema = {
         notifyTitle: 'Notify when tasks end',
         notifyHint: 'When a task completes, fails, or is stopped, the notification center shows its name and status — handy for background work.',
         notifyOn: 'Turn on task-end notifications',
-        notifyOff: 'Turn off task-end notifications'
+        notifyOff: 'Turn off task-end notifications',
+        harnessTitle: 'Chat harness',
+        harnessHint: 'Choose the engine for new chats. Rust runs the model and tool loop for projects, groups, workspaces, images, MCP, and attachments through the Electron host bridge.',
+        harnessTs: 'TypeScript (legacy)',
+        harnessTsHint: 'Legacy implementation',
+        harnessRust: 'Rust (app-server)',
+        harnessRustHint: 'Full chat context through Rust'
       },
       transfer: {
         navLabel: 'Transfer',

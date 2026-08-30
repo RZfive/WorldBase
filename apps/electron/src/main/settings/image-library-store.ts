@@ -51,6 +51,30 @@ export interface ImageLibraryRecord {
   height?: number
 }
 
+/**
+ * Metadata emitted by the Rust harness after it has generated an image in
+ * the shared user-data image-library directory. The image bytes are already
+ * durable; Electron only needs to add its gallery metadata/index entry.
+ */
+export interface ExternalImageLibraryRecord {
+  id: string
+  createdAt: string
+  mode: ImageStudioMode
+  providerId: string
+  model: string
+  prompt: string
+  negativePrompt?: string
+  aspectRatio?: string
+  size?: string
+  quality?: ImageLibraryEntry['quality']
+  outputFormat?: ImageLibraryEntry['outputFormat']
+  fileName: string
+  /** Source files persisted by Rust for edit-mode results. */
+  sourceImageFileNames?: string[]
+  folder?: string
+  tags?: string[]
+}
+
 const MIME_BY_EXT: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',
@@ -223,27 +247,48 @@ export class ImageLibraryStore {
   private writeRecord (record: ImageLibraryRecord): void {
     fs.writeFileSync(this.metaPath(record.id), JSON.stringify(record, null, 2), 'utf-8')
     this.index.upsert(this.recordToRow(record))
+    this.writeFolderMirror()
   }
 
-  /* ---- Migration: rebuild index from durable json when out of sync ---- */
+  /** Keep the Rust/TS handoff registry durable for empty folders too. */
+  private writeFolderMirror (): void {
+    const names = this.index.listFolders()
+      .map(folder => folder.name)
+    fs.writeFileSync(path.join(this.dir, 'folders.json'), JSON.stringify(names, null, 2), 'utf-8')
+  }
+
+  /* ---- Migration: rebuild disposable index from durable JSON mirrors ---- */
 
   private migrateFromDisk (): void {
-    // Import any legacy folders.json registry once.
-    const legacyFolders = path.join(this.dir, 'folders.json')
-    if (fs.existsSync(legacyFolders)) {
+    this.rebuildIndexFromMirrors()
+  }
+
+  /**
+   * Recreate Electron's derived SQLite index from the image JSON mirrors.
+   * Rust mode writes these mirrors directly, so count-based upserts are not
+   * sufficient: equal row counts can still hide deletions, moves, or retags.
+   */
+  rebuildIndexFromMirrors (): void {
+    const folderNames: string[] = []
+    const foldersPath = path.join(this.dir, 'folders.json')
+    let loadedFolderMirror = false
+    if (fs.existsSync(foldersPath)) {
       try {
-        const names = JSON.parse(fs.readFileSync(legacyFolders, 'utf-8'))
-        if (Array.isArray(names)) names.forEach(n => typeof n === 'string' && this.index.addRegistryFolder(n))
+        const names = JSON.parse(fs.readFileSync(foldersPath, 'utf-8'))
+        if (Array.isArray(names)) {
+          folderNames.push(...names.filter((name): name is string => typeof name === 'string' && name.trim().length > 0))
+          loadedFolderMirror = true
+        }
       } catch {
-        // ignore malformed legacy registry
+        // Ignore a partial/corrupt mirror and retain folders derived from rows.
       }
     }
-
-    const files = this.metaFiles()
-    if (files.length === this.index.count()) return // already in sync
+    // Older Electron installs did not write folders.json. Preserve their
+    // registry exactly once; once a Rust mirror exists it is authoritative.
+    if (!loadedFolderMirror) folderNames.push(...this.index.listRegistryFolders())
 
     const rows: ImageIndexRow[] = []
-    for (const file of files) {
+    for (const file of this.metaFiles()) {
       try {
         const record = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as ImageLibraryRecord
         if (record?.id && record.fileName) rows.push(this.recordToRow(record))
@@ -251,7 +296,7 @@ export class ImageLibraryStore {
         // skip corrupted records
       }
     }
-    if (rows.length) this.index.upsertMany(rows)
+    this.index.replaceFromMirrors(rows, folderNames)
   }
 
   /* ---- Save ---- */
@@ -297,6 +342,58 @@ export class ImageLibraryStore {
 
     return {
       ...fullRecord,
+      thumbUrl: buildStudioImageUrl(id, 'thumb'),
+      fullUrl: buildStudioImageUrl(id, 'full')
+    }
+  }
+
+  /**
+   * Register an image produced by the Rust harness without copying it. Rust
+   * and Electron deliberately share `userData/image-library`, so retaining
+   * the original file keeps Rust's own index and Electron's gallery in sync.
+   */
+  async importExternalImage (record: ExternalImageLibraryRecord): Promise<ImageLibraryEntry | null> {
+    const id = this.sanitizeId(record.id)
+    const fileName = path.basename(record.fileName)
+    if (!id || !fileName) return null
+
+    const sourcePath = this.resolveFilePath(fileName)
+    if (!fs.existsSync(sourcePath)) return null
+
+    const existing = this.readRecord(id)
+    if (existing?.fileName === fileName) {
+      return {
+        ...existing,
+        thumbUrl: buildStudioImageUrl(id, 'thumb'),
+        fullUrl: buildStudioImageUrl(id, 'full')
+      }
+    }
+
+    const thumb = await this.writeThumbnail(id, fileName)
+    const dimensions = thumb ?? await this.readDimsFromOriginal(fileName)
+    const imported: ImageLibraryRecord = {
+      id,
+      createdAt: record.createdAt || new Date().toISOString(),
+      mode: record.mode === 'edit' ? 'edit' : 'generate',
+      providerId: record.providerId || '',
+      model: record.model || '',
+      prompt: record.prompt || '',
+      negativePrompt: record.negativePrompt,
+      aspectRatio: record.aspectRatio,
+      size: record.size || '',
+      quality: record.quality,
+      outputFormat: record.outputFormat,
+      fileName,
+      sourceImageFileNames: record.sourceImageFileNames?.length ? record.sourceImageFileNames : undefined,
+      thumbName: thumb?.name,
+      folder: record.folder,
+      tags: record.tags?.length ? record.tags : undefined,
+      width: dimensions?.width,
+      height: dimensions?.height
+    }
+    this.writeRecord(imported)
+    return {
+      ...imported,
       thumbUrl: buildStudioImageUrl(id, 'thumb'),
       fullUrl: buildStudioImageUrl(id, 'full')
     }
@@ -403,6 +500,7 @@ export class ImageLibraryStore {
       try { fs.unlinkSync(metaPath) } catch { /* best effort */ }
     }
     this.index.deleteById(safe)
+    this.writeFolderMirror()
     return true
   }
 
@@ -439,6 +537,7 @@ export class ImageLibraryStore {
   createFolder (name: string): ImageLibraryFolderCard[] {
     const trimmed = name.trim()
     if (trimmed) this.index.addRegistryFolder(trimmed)
+    this.writeFolderMirror()
     return this.listFolders()
   }
 
@@ -460,7 +559,9 @@ export class ImageLibraryStore {
       record.folder = next
       try { fs.writeFileSync(this.metaPath(id), JSON.stringify(record, null, 2), 'utf-8') } catch { /* best effort */ }
     }
-    return this.index.renameFolderEverywhere(oldName, next)
+    const updated = this.index.renameFolderEverywhere(oldName, next)
+    this.writeFolderMirror()
+    return updated
   }
 
   deleteFolder (folderName: string): number {
@@ -471,7 +572,9 @@ export class ImageLibraryStore {
       record.folder = undefined
       try { fs.writeFileSync(this.metaPath(id), JSON.stringify(record, null, 2), 'utf-8') } catch { /* best effort */ }
     }
-    return this.index.clearFolderEverywhere(folderName)
+    const updated = this.index.clearFolderEverywhere(folderName)
+    this.writeFolderMirror()
+    return updated
   }
 
   listAllTags (): string[] {

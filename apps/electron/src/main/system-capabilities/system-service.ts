@@ -91,26 +91,45 @@ export interface SystemStatusSnapshot {
   services: ServiceMap
 }
 
+/**
+ * Electron owns host-only observations (GPU, Electron heap and OS counters),
+ * while the selected harness owns managed project process state. This bridge
+ * keeps the two boundaries explicit instead of letting Rust-mode status read
+ * the dormant TypeScript RuntimeManager.
+ */
+export interface HarnessProjectRuntimeSnapshot {
+  services: ServiceMap
+  projectProcesses: ProjectProcessInfo[]
+}
+
+export type HarnessProjectRuntimeResolver = () => Promise<HarnessProjectRuntimeSnapshot | null>
+
 export class SystemService {
   private readonly runtimeManager: RuntimeManager
   private readonly appGateway: AppGateway
   private readonly refreshIntervalMs: number
+  private readonly harnessProjectRuntimeResolver?: HarnessProjectRuntimeResolver
   private cachedSnapshot: SystemStatusSnapshot | null = null
+  private cachedRuntimeSource: 'rust' | 'typescript' | null = null
   private lastCpuSample: CpuSample | null = null
 
   constructor (
     runtimeManager: RuntimeManager,
     appGateway: AppGateway,
-    refreshIntervalMs = 5000
+    refreshIntervalMs = 5000,
+    harnessProjectRuntimeResolver?: HarnessProjectRuntimeResolver
   ) {
     this.runtimeManager = runtimeManager
     this.appGateway = appGateway
     this.refreshIntervalMs = refreshIntervalMs
+    this.harnessProjectRuntimeResolver = harnessProjectRuntimeResolver
   }
 
   async getStatus (): Promise<SystemStatusSnapshot> {
     const now = Date.now()
-    if (this.cachedSnapshot) {
+    const harnessRuntime = await this.harnessProjectRuntimeResolver?.()
+    const runtimeSource = harnessRuntime ? 'rust' : 'typescript'
+    if (this.cachedSnapshot && this.cachedRuntimeSource === runtimeSource) {
       const cacheAgeMs = now - new Date(this.cachedSnapshot.fetchedAt).getTime()
       if (cacheAgeMs < this.refreshIntervalMs) {
         return {
@@ -120,8 +139,8 @@ export class SystemService {
       }
     }
 
-    const projectProcesses = this.runtimeManager.getProjectProcesses()
-    const services = await this.appGateway.getServiceMap()
+    const projectProcesses = harnessRuntime?.projectProcesses || this.runtimeManager.getProjectProcesses()
+    const services = harnessRuntime?.services || await this.appGateway.getServiceMap()
     const cpu = this.captureCpuInfo(now)
     const memory = this.captureMemoryInfo()
     const gpu = await this.captureGpuInfo()
@@ -159,6 +178,7 @@ export class SystemService {
     }
 
     this.cachedSnapshot = snapshot
+    this.cachedRuntimeSource = runtimeSource
     return snapshot
   }
 

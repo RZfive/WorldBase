@@ -36,7 +36,10 @@ async fn ask_host(hub: &Hub, stream_id: &str, tool_name: &str, args: &Value) -> 
     let args_summary = summarize_args(args);
 
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
-    hub.pending_permissions.lock().unwrap().insert(request_id.clone(), tx);
+    hub.pending_permissions
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), tx);
 
     // 发布 PermissionRequest 事件（流通道供 resume，全局广播供宿主转发）
     let frame_kind = EventKind::PermissionRequest {
@@ -72,7 +75,11 @@ fn summarize_args(args: &Value) -> String {
             .take(4)
             .map(|(k, v)| {
                 let vs = v.to_string();
-                let vs = if vs.len() > 80 { format!("{}…", &vs[..80]) } else { vs };
+                let vs = if vs.len() > 80 {
+                    format!("{}…", &vs[..80])
+                } else {
+                    vs
+                };
                 format!("{k}={vs}")
             })
             .collect::<Vec<_>>()

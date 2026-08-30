@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { BrowserWindow } from 'electron'
 import type { AIEngine } from '../../src/main/ai-engine/ai-engine.js'
+import type { RustHarnessEngine } from '../../src/main/ai-harness/rust-harness-engine.js'
 import type { ProjectFS } from '../../src/main/project-fs/project-fs.js'
 import type { ProjectPackageService } from '../../src/main/project-fs/project-package-service.js'
 import type { RuntimeManager } from '../../src/main/project-runtime/runtime-manager.js'
@@ -33,6 +34,7 @@ import type { DocumentStore } from '../../src/main/ai-engine/agent/tools/documen
 import type { MCPService } from '../../src/main/mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
 import type { LongTermGoalService } from '../../src/main/long-term-goals/long-term-goal-service.js'
+import type { RustHarnessClient } from './rust-harness-client.js'
 import type { MemoryCompactionResult, MemoryCompactionStatus } from '../../src/shared/agent-workspace-types.js'
 import type { PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
 import { t } from '../../src/main/i18n/main-i18n.js'
@@ -69,6 +71,10 @@ export const activeWindowWidthAnimations = new Map<number, ActiveWindowWidthAnim
 export const mainState = {
   mainWindow: null as BrowserWindow | null,
   aiEngine: null as AIEngine | null,
+  rustHarness: null as RustHarnessClient | null,
+  // Keep the Rust facade separate from AIEngine while migration is in
+  // progress. Callers choose it per request from the persisted preference.
+  rustHarnessEngine: null as RustHarnessEngine | null,
   projectFS: null as ProjectFS | null,
   runtimeManager: null as RuntimeManager | null,
   builderService: null as BuilderService | null,

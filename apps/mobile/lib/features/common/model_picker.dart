@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 
+import '../../core/glass.dart';
 import '../../core/ios_ui.dart';
 import '../../core/providers.dart';
 
@@ -21,13 +22,14 @@ Future<void> showModelPickerSheet(
       .toList();
 
   if (!context.mounted) return;
+  final pal = DawnPalette.of(context);
   showCupertinoModalPopup<void>(
     context: context,
     builder: (ctx) => Container(
       constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.75),
-      decoration: const BoxDecoration(
-        color: iosGroupedBg,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      decoration: BoxDecoration(
+        color: pal.groupedBg,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
       ),
       child: SafeArea(
         child: ListView(
@@ -41,7 +43,7 @@ Future<void> showModelPickerSheet(
               children: [
                 IosRow(
                   icon: CupertinoIcons.sparkles,
-                  iconColor: iosSecondaryLabel,
+                  iconColor: pal.ink2,
                   title: selectedProviderId == null ? '默认供应商 ✓' : '默认供应商',
                   subtitle: '使用供应商设置里的默认配置',
                   onTap: () {
@@ -57,9 +59,9 @@ Future<void> showModelPickerSheet(
                 header: '${p.name}${p.apiProtocol.isEmpty ? '' : ' · ${p.apiProtocol}'}',
                 children: [
                   if (p.models.isEmpty)
-                    const IosRow(
+                    IosRow(
                       icon: CupertinoIcons.exclamationmark_circle,
-                      iconColor: iosSecondaryLabel,
+                      iconColor: pal.ink2,
                       title: '该供应商没有配置模型',
                     )
                   else
@@ -108,14 +110,15 @@ class ModelPickerChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return GestureDetector(
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: iosCardBg,
+          color: p.cardBg,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: iosSeparator),
+          border: Border.all(color: p.separator),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -124,10 +127,10 @@ class ModelPickerChip extends StatelessWidget {
               child: Text(label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12, color: iosSecondaryLabel)),
+                  style: TextStyle(fontSize: 12, color: p.ink2)),
             ),
             const SizedBox(width: 4),
-            const Icon(CupertinoIcons.chevron_down, size: 12, color: iosSecondaryLabel),
+            Icon(CupertinoIcons.chevron_down, size: 12, color: p.ink2),
           ],
         ),
       ),

@@ -25,7 +25,7 @@ impl Tool for DocParseTool {
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let path = require_str(&input, "path")?;
         let full = services.workspace_path(path);
-        anyhow::ensure!(full.starts_with(&services.workspace), "path escapes workspace");
+        services.ensure_workspace_path(&full)?;
         let parsed = worldbase_docs::parse_file(&full)?;
         Ok(parsed)
     }
@@ -61,7 +61,7 @@ impl Tool for DocWriteTool {
         let path = require_str(&input, "path")?;
         let kind = require_str(&input, "kind")?;
         let full = services.workspace_path(path);
-        anyhow::ensure!(full.starts_with(&services.workspace), "path escapes workspace");
+        services.ensure_workspace_path(&full)?;
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -74,7 +74,11 @@ impl Tool for DocWriteTool {
             "csv" => {
                 let header: Vec<String> = input["header"]
                     .as_array()
-                    .map(|a| a.iter().map(|v| v.as_str().unwrap_or_default().into()).collect())
+                    .map(|a| {
+                        a.iter()
+                            .map(|v| v.as_str().unwrap_or_default().into())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let rows: Vec<Vec<String>> = input["rows"]
                     .as_array()

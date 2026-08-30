@@ -6,7 +6,6 @@
 //! - `GET /studio/{id}`：图库图片
 //! - `GET /lightapp/{id}`：Agent 生成的单页应用
 
-use worldbase_core::dispatcher::ConnectionContext;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -16,6 +15,7 @@ use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use worldbase_core::dispatcher::ConnectionContext;
 use worldbase_core::{dispatcher, Hub};
 use worldbase_protocol::event::EVENT_METHOD;
 use worldbase_protocol::rpc::{Incoming, RequestId, Response};
@@ -29,11 +29,17 @@ struct TransportState {
 
 /// 启动 loopback 传输（阻塞）。
 pub async fn run(hub: Arc<Hub>, port: u16, capabilities: Capabilities) -> anyhow::Result<()> {
-    let state = TransportState { hub, capabilities: Arc::new(capabilities) };
+    let state = TransportState {
+        hub,
+        capabilities: Arc::new(capabilities),
+    };
     let image_hub = state.hub.clone();
     let lightapp_hub = state.hub.clone();
     let app = Router::new()
-        .route("/health", get(|| async { Json(serde_json::json!({ "ok": true })) }))
+        .route(
+            "/health",
+            get(|| async { Json(serde_json::json!({ "ok": true })) }),
+        )
         .route("/rpc", post(rpc_handler))
         .route("/ws", get(ws_handler))
         .route(
@@ -42,8 +48,11 @@ pub async fn run(hub: Arc<Hub>, port: u16, capabilities: Capabilities) -> anyhow
                 let hub = image_hub.clone();
                 async move {
                     match worldbase_core::studio::StudioService::read_image_bytes(&hub, &id) {
-                        Ok((bytes, mime)) => ([(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response(),
-                        Err(e) => (StatusCode::NOT_FOUND, format!("{{ \"error\": \"{e}\" }}")).into_response(),
+                        Ok((bytes, mime)) => {
+                            ([(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response()
+                        }
+                        Err(e) => (StatusCode::NOT_FOUND, format!("{{ \"error\": \"{e}\" }}"))
+                            .into_response(),
                     }
                 }
             }),
@@ -55,11 +64,15 @@ pub async fn run(hub: Arc<Hub>, port: u16, capabilities: Capabilities) -> anyhow
                 async move {
                     match worldbase_core::studio::StudioService::read_lightapp(&id) {
                         Ok(html) => (
-                            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "text/html; charset=utf-8".to_string(),
+                            )],
                             html,
                         )
                             .into_response(),
-                        Err(e) => (StatusCode::NOT_FOUND, format!("{{ \"error\": \"{e}\" }}")).into_response(),
+                        Err(e) => (StatusCode::NOT_FOUND, format!("{{ \"error\": \"{e}\" }}"))
+                            .into_response(),
                     }
                 }
             }),
@@ -90,12 +103,21 @@ async fn rpc_handler(
         }
         Incoming::Notification(n) => {
             let _ = dispatcher::dispatch(&state.hub, &ctx, &n.method, n.params).await;
-            (StatusCode::OK, Json(Response::success(RequestId::Null, serde_json::json!({"ok": true}))))
+            (
+                StatusCode::OK,
+                Json(Response::success(
+                    RequestId::Null,
+                    serde_json::json!({"ok": true}),
+                )),
+            )
         }
     }
 }
 
-async fn ws_handler(State(state): State<TransportState>, upgrade: WebSocketUpgrade) -> axum::response::Response {
+async fn ws_handler(
+    State(state): State<TransportState>,
+    upgrade: WebSocketUpgrade,
+) -> axum::response::Response {
     upgrade.on_upgrade(move |socket| ws_connection(state, socket))
 }
 

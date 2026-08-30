@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/glass.dart';
 import '../../core/harness_client.dart';
 import '../../core/ios_ui.dart';
 import '../common/model_picker.dart';
@@ -118,22 +119,23 @@ class _StudioTabState extends ConsumerState<StudioTab> {
   }
 
   void _pickEditSource() {
+    final p = DawnPalette.of(context);
     showCupertinoModalPopup<void>(
       context: context,
       builder: (ctx) => Container(
         constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.6),
-        decoration: const BoxDecoration(
-          color: iosGroupedBg,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+        decoration: BoxDecoration(
+          color: p.groupedBg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
         ),
         child: SafeArea(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(20, 14, 20, 6),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 6),
                 child: Text('选择参考图（从图库）',
-                    style: TextStyle(fontSize: 13, color: iosSecondaryLabel)),
+                    style: TextStyle(fontSize: 13, color: p.ink2)),
               ),
               Expanded(
                 child: GridView.builder(
@@ -165,14 +167,15 @@ class _StudioTabState extends ConsumerState<StudioTab> {
   }
 
   void _showImageDetail(ImageEntry entry) {
+    final p = DawnPalette.of(context);
     final tagCtrl = TextEditingController(text: entry.tags.join(', '));
     final folderCtrl = TextEditingController(text: entry.folder);
     showCupertinoModalPopup<void>(
       context: context,
       builder: (ctx) => Container(
-        decoration: const BoxDecoration(
-          color: iosGroupedBg,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+        decoration: BoxDecoration(
+          color: p.groupedBg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
         ),
         child: SafeArea(
           child: SingleChildScrollView(
@@ -194,7 +197,7 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                 Text(entry.prompt,
                     style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
                 Text('${entry.createdAt} · ${entry.model}',
-                    style: const TextStyle(fontSize: 11, color: iosSecondaryLabel)),
+                    style: TextStyle(fontSize: 11, color: p.ink2)),
                 const SizedBox(height: 10),
                 Row(children: [
                   Expanded(child: _sheetField(folderCtrl, '文件夹')),
@@ -240,18 +243,19 @@ class _StudioTabState extends ConsumerState<StudioTab> {
   }
 
   Widget _sheetField(TextEditingController ctrl, String label) {
+    final p = DawnPalette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: const TextStyle(fontSize: 11, color: iosSecondaryLabel)),
+        Text(label, style: TextStyle(fontSize: 11, color: p.ink2)),
         const SizedBox(height: 4),
         CupertinoTextField(
           controller: ctrl,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
-            color: iosCardBg,
+            color: p.cardBg,
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: iosSeparator),
+            border: Border.all(color: p.separator),
           ),
           style: const TextStyle(fontSize: 13),
         ),
@@ -308,6 +312,7 @@ class _StudioTabState extends ConsumerState<StudioTab> {
   // ---------- 生成 ----------
 
   Widget _buildGenerateView() {
+    final p = DawnPalette.of(context);
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 4, 0, 20),
       children: [
@@ -326,9 +331,9 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                     placeholder: '描述你想要的图像…',
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: iosGroupedBg,
+                      color: p.groupedBg,
                       borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: iosSeparator),
+                      border: Border.all(color: p.separator),
                     ),
                     style: const TextStyle(fontSize: 15, letterSpacing: -0.3),
                   ),
@@ -338,9 +343,9 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                     placeholder: '负向提示词（不希望出现的元素）',
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: iosGroupedBg,
+                      color: p.groupedBg,
                       borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: iosSeparator),
+                      border: Border.all(color: p.separator),
                     ),
                     style: const TextStyle(fontSize: 13),
                   ),
@@ -355,7 +360,7 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                   const SizedBox(height: 10),
                   Row(
                     children: [
-                      const Text('数量', style: TextStyle(fontSize: 12, color: iosSecondaryLabel)),
+                      Text('数量', style: TextStyle(fontSize: 12, color: p.ink2)),
                       const SizedBox(width: 8),
                       for (var i = 1; i <= 4; i++)
                         Padding(
@@ -367,14 +372,14 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                               height: 30,
                               alignment: Alignment.center,
                               decoration: BoxDecoration(
-                                color: _n == i ? iosBlue : iosGroupedBg,
+                                color: _n == i ? iosBlue : p.groupedBg,
                                 borderRadius: BorderRadius.circular(8),
                               ),
                               child: Text('$i',
                                   style: TextStyle(
                                       fontSize: 14,
                                       fontWeight: FontWeight.w600,
-                                      color: _n == i ? const Color(0xFFFFFFFF) : iosLabel)),
+                                      color: _n == i ? const Color(0xFFFFFFFF) : p.ink)),
                             ),
                           ),
                         ),
@@ -408,6 +413,7 @@ class _StudioTabState extends ConsumerState<StudioTab> {
   // ---------- 编辑 ----------
 
   Widget _buildEditView() {
+    final p = DawnPalette.of(context);
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 4, 0, 20),
       children: [
@@ -425,9 +431,9 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                       width: double.infinity,
                       padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(
-                        color: iosGroupedBg,
+                        color: p.groupedBg,
                         borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: iosSeparator),
+                        border: Border.all(color: p.separator),
                       ),
                       child: Row(
                         children: [
@@ -442,8 +448,8 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                               ),
                             )
                           else
-                            const Icon(CupertinoIcons.photo_on_rectangle,
-                                size: 32, color: iosSecondaryLabel),
+                            Icon(CupertinoIcons.photo_on_rectangle,
+                                size: 32, color: p.ink2),
                           const SizedBox(width: 10),
                           Expanded(
                             child: Text(
@@ -453,8 +459,8 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                                 style: const TextStyle(fontSize: 13),
                                 overflow: TextOverflow.ellipsis),
                           ),
-                          const Icon(CupertinoIcons.chevron_forward,
-                              size: 14, color: iosSecondaryLabel),
+                          Icon(CupertinoIcons.chevron_forward,
+                              size: 14, color: p.ink2),
                         ],
                       ),
                     ),
@@ -467,9 +473,9 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                     placeholder: '描述如何修改这张图…',
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: iosGroupedBg,
+                      color: p.groupedBg,
                       borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: iosSeparator),
+                      border: Border.all(color: p.separator),
                     ),
                     style: const TextStyle(fontSize: 15, letterSpacing: -0.3),
                   ),
@@ -507,6 +513,7 @@ class _StudioTabState extends ConsumerState<StudioTab> {
   // ---------- 图库 ----------
 
   Widget _buildLibraryView() {
+    final p = DawnPalette.of(context);
     return Column(
       children: [
         Padding(
@@ -525,7 +532,7 @@ class _StudioTabState extends ConsumerState<StudioTab> {
               ),
               const SizedBox(width: 8),
               Text('${_gallery.length} 张',
-                  style: const TextStyle(fontSize: 12, color: iosSecondaryLabel)),
+                  style: TextStyle(fontSize: 12, color: p.ink2)),
             ],
           ),
         ),
@@ -561,12 +568,13 @@ class _StudioTabState extends ConsumerState<StudioTab> {
 
   Widget _paramRow(String label, List<String> options, String current, ValueChanged<String> onChanged) {
     // 窄屏（手机）下分段控件会溢出，改用可换行的选择芯片
+    final p = DawnPalette.of(context);
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: const TextStyle(fontSize: 12, color: iosSecondaryLabel)),
+          Text(label, style: TextStyle(fontSize: 12, color: p.ink2)),
           const SizedBox(height: 6),
           Wrap(
             spacing: 6,
@@ -578,16 +586,16 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
-                      color: current == o ? iosBlue : iosGroupedBg,
+                      color: current == o ? iosBlue : p.groupedBg,
                       borderRadius: BorderRadius.circular(8),
-                      border: current == o ? null : Border.all(color: iosSeparator),
+                      border: current == o ? null : Border.all(color: p.separator),
                     ),
                     child: Text(
                       o,
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: current == o ? FontWeight.w600 : FontWeight.w400,
-                        color: current == o ? const Color(0xFFFFFFFF) : iosLabel,
+                        color: current == o ? const Color(0xFFFFFFFF) : p.ink,
                       ),
                     ),
                   ),
@@ -610,11 +618,12 @@ class _ImageCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
     return GestureDetector(
       onTap: onOpen,
       child: Container(
         decoration: BoxDecoration(
-          color: iosCardBg,
+          color: p.cardBg,
           borderRadius: BorderRadius.circular(14),
           boxShadow: const [
             BoxShadow(color: Color(0x14000000), blurRadius: 10, offset: Offset(0, 3)),
@@ -668,11 +677,11 @@ class _ImageCard extends StatelessWidget {
                 entry.prompt,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
+                style: TextStyle(
                     fontSize: 10.5,
-                    color: iosLabel,
+                    color: p.ink,
                     fontWeight: FontWeight.w500,
-                    shadows: [Shadow(blurRadius: 6, color: Color(0x66FFFFFF))]),
+                    shadows: const [Shadow(blurRadius: 6, color: Color(0x66FFFFFF))]),
               ),
             ),
           ],

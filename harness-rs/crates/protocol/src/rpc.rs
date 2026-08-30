@@ -49,11 +49,19 @@ pub struct ErrorObject {
 
 impl ErrorObject {
     pub fn new(code: i32, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), data: None }
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
     }
 
     pub fn with_data(code: i32, message: impl Into<String>, data: Value) -> Self {
-        Self { code, message: message.into(), data: Some(data) }
+        Self {
+            code,
+            message: message.into(),
+            data: Some(data),
+        }
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -87,11 +95,19 @@ pub enum Response {
 
 impl Response {
     pub fn success(id: RequestId, result: Value) -> Self {
-        Response::Success { jsonrpc: "2.0".into(), id, result }
+        Response::Success {
+            jsonrpc: "2.0".into(),
+            id,
+            result,
+        }
     }
 
     pub fn error(id: RequestId, error: ErrorObject) -> Self {
-        Response::Error { jsonrpc: "2.0".into(), id, error }
+        Response::Error {
+            jsonrpc: "2.0".into(),
+            id,
+            error,
+        }
     }
 
     pub fn to_message(&self) -> String {
@@ -108,7 +124,11 @@ pub enum Incoming {
 }
 
 pub fn notification(method: &str, params: Value) -> String {
-    let n = Notification { jsonrpc: "2.0".into(), method: method.into(), params };
+    let n = Notification {
+        jsonrpc: "2.0".into(),
+        method: method.into(),
+        params,
+    };
     serde_json::to_string(&n).expect("notification serialize")
 }
 

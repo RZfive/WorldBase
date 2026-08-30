@@ -8,6 +8,7 @@ import { PROJECT_PACKAGE_EXTENSION } from '../../src/main/project-fs/project-pac
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
 import { t } from '../../src/main/i18n/main-i18n.js'
 import type { ActivePageAutomationContext, PageAutomationRendererRequest, PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
+import { forwardProjectRuntimeLog } from './project-runtime-log-routing.js'
 import {
   ALLOWED_WEBVIEW_POPUP_PROTOCOLS,
   DEFAULT_MAIN_WINDOW_MIN_HEIGHT,
@@ -109,8 +110,8 @@ export function attachMainWindowWebviewHandlers (win: BrowserWindow): void {
   })
 }
 
-export function resolveProjectIdFromRuntimeUrl (value: string): string | null {
-  if (!mainState.runtimeManager || !value) return null
+function resolveRuntimePortFromUrl (value: string): number | null {
+  if (!value) return null
 
   try {
     const parsedUrl = new URL(value)
@@ -119,31 +120,65 @@ export function resolveProjectIdFromRuntimeUrl (value: string): string | null {
     const port = Number(parsedUrl.port)
     if (!Number.isInteger(port) || port <= 0) return null
 
-    return mainState.runtimeManager.findProjectIdByPort(port)
+    return port
   } catch {
     return null
   }
 }
 
-export function forwardProjectRendererConsoleMessage (level: number, message: string, line: number, sourceId: string): void {
-  const projectId = resolveProjectIdFromRuntimeUrl(sourceId)
-  if (!projectId || !mainState.runtimeManager) return
+export function resolveProjectIdFromRuntimeUrl (value: string): string | null {
+  const port = resolveRuntimePortFromUrl(value)
+  if (!port || !mainState.runtimeManager) return null
+  return mainState.runtimeManager.findProjectIdByPort(port)
+}
 
+function forwardRuntimeLog (port: number, type: 'stdout' | 'stderr', text: string): void {
+  const rustClient = mainState.rustHarness
+  forwardProjectRuntimeLog({
+    port,
+    type,
+    text,
+    rustSelected: mainState.settingsStore?.getAIExecutionPreferences().harnessBackend === 'rust',
+    rust: rustClient
+      ? {
+          isRunning: () => rustClient.isRunning(),
+          append: async (nativePort, nativeType, nativeText) => {
+            return await rustClient.callRunning('project.logs.append', {
+              port: nativePort,
+              type: nativeType,
+              text: nativeText
+            })
+          }
+        }
+      : null,
+    typeScript: mainState.runtimeManager
+      ? {
+          findProjectIdByPort: port => mainState.runtimeManager!.findProjectIdByPort(port),
+          appendExternalLog: (projectId, logType, logText) => mainState.runtimeManager!.appendExternalLog(projectId, logType, logText)
+        }
+      : null,
+    onRustAppendError: error => {
+      // A handoff or app-server shutdown can race with Chromium console events.
+      console.warn('[rust-harness] Failed to append project renderer log:', error)
+    }
+  })
+}
+
+export function forwardProjectRendererConsoleMessage (level: number, message: string, line: number, sourceId: string): void {
   const levelLabel = ['debug', 'info', 'warn', 'error'][level] || String(level)
-  const type = level >= 3 ? 'stderr' : 'stdout'
+  const type: 'stdout' | 'stderr' = level >= 3 ? 'stderr' : 'stdout'
   const location = sourceId ? ` (${sourceId}:${line})` : ''
-  mainState.runtimeManager.appendExternalLog(projectId, type, `[app:${levelLabel}] ${message}${location}`)
+  const text = `[app:${levelLabel}] ${message}${location}`
+  const port = resolveRuntimePortFromUrl(sourceId)
+  if (!port) return
+  forwardRuntimeLog(port, type, text)
 }
 
 export function forwardProjectLoadFailure (errorCode: number, errorDescription: string, validatedURL: string): void {
-  const projectId = resolveProjectIdFromRuntimeUrl(validatedURL)
-  if (!projectId || !mainState.runtimeManager) return
-
-  mainState.runtimeManager.appendExternalLog(
-    projectId,
-    'stderr',
-    `[app:load-failed] ${errorDescription} (${errorCode}) (${validatedURL})`
-  )
+  const port = resolveRuntimePortFromUrl(validatedURL)
+  if (!port) return
+  const text = `[app:load-failed] ${errorDescription} (${errorCode}) (${validatedURL})`
+  forwardRuntimeLog(port, 'stderr', text)
 }
 
 export function attachProjectRuntimeLogForwarding (win: BrowserWindow): void {

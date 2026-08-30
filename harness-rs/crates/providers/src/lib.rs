@@ -21,7 +21,10 @@ pub mod openai;
 pub mod sse;
 
 pub use anthropic::AnthropicProvider;
-pub use entry::{create_provider_from_entry, generate_images, pixel_size, resolve_protocol, size_for, GeneratedImage, ImageParams};
+pub use entry::{
+    create_provider_from_entry, generate_images, pixel_size, resolve_protocol, size_for,
+    GeneratedImage, ImageParams,
+};
 pub use mock::{MockProvider, MockTurn};
 pub use openai::OpenAIProvider;
 
@@ -29,9 +32,26 @@ pub use openai::OpenAIProvider;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: Value },
-    ToolResult { tool_use_id: String, content: String, #[serde(default)] is_error: bool },
+    Text {
+        text: String,
+    },
+    /// A data URL or remote URL supplied by the host as a user image part.
+    /// OpenAI-compatible endpoints accept this directly; Anthropic converts
+    /// data URLs to an image source block.
+    ImageUrl {
+        url: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default)]
+        is_error: bool,
+    },
 }
 
 /// LLM 层消息。
@@ -50,7 +70,10 @@ pub enum LlmRole {
 
 impl LlmMessage {
     pub fn text(role: LlmRole, text: impl Into<String>) -> Self {
-        Self { role, content: vec![ContentBlock::Text { text: text.into() }] }
+        Self {
+            role,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
     }
 
     /// 提取纯文本视图。
@@ -71,7 +94,9 @@ impl LlmMessage {
         self.content
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, name, input } => Some((id.clone(), name.clone(), input.clone())),
+                ContentBlock::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -86,11 +111,24 @@ pub struct LlmTool {
     pub input_schema: Value,
 }
 
+/// Provider-native controls supplied for a single run. Keeping this separate
+/// from a saved provider entry prevents a temporary Electron slider change
+/// from leaking into another conversation.
+#[derive(Debug, Clone, Default)]
+pub struct ChatOptions {
+    pub temperature: Option<f32>,
+    pub reasoning_effort: Option<String>,
+}
+
 /// token 用量（对齐供应商回传）。
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
 }
 
 /// 流式输出块。provider 内部累积，`Completed` 携带完整助手消息与用量。
@@ -119,6 +157,7 @@ pub trait Provider: Send + Sync {
         messages: Vec<LlmMessage>,
         tools: Vec<LlmTool>,
         max_tokens: u32,
+        options: ChatOptions,
     ) -> Result<ChunkStream>;
 }
 
@@ -135,7 +174,9 @@ pub fn create_provider(cfg: &ProviderConfig) -> Result<std::sync::Arc<dyn Provid
             cfg.model.clone(),
             cfg.base_url.clone(),
         ))),
-        "mock" => Ok(std::sync::Arc::new(MockProvider::default_script(cfg.model.clone()))),
+        "mock" => Ok(std::sync::Arc::new(MockProvider::default_script(
+            cfg.model.clone(),
+        ))),
         other => anyhow::bail!("unknown provider kind: {other}"),
     }
 }
@@ -149,9 +190,17 @@ mod tests {
         let m = LlmMessage {
             role: LlmRole::Assistant,
             content: vec![
-                ContentBlock::Text { text: "hello".into() },
-                ContentBlock::ToolUse { id: "t1".into(), name: "read_file".into(), input: serde_json::json!({}) },
-                ContentBlock::Text { text: "world".into() },
+                ContentBlock::Text {
+                    text: "hello".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::Text {
+                    text: "world".into(),
+                },
             ],
         };
         assert_eq!(m.text_view(), "hello\nworld");
