@@ -1,6 +1,6 @@
 # Agent 编码能力优化 · 文档集
 
-把 WorldBase 内置编码 Agent（[src/main/ai-engine/](../../src/main/ai-engine/)）与官方 **Claude Code v2.1.88**（反编译源码）逐层对比，定位「同一个模型在 WorldBase 下编码能力更弱」的根因，并给出可落地的优化方案。
+把 WorldBase 内置编码 Agent（[apps/electron/src/main/ai-engine/](../../apps/electron/src/main/ai-engine/)）与官方 **Claude Code v2.1.88**（反编译源码）逐层对比，定位「同一个模型在 WorldBase 下编码能力更弱」的根因，并给出可落地的优化方案。
 
 ## 文档
 

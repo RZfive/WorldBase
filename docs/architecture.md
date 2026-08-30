@@ -69,7 +69,7 @@
 
 ### 1. ProjectFS — 项目文件系统访问层
 
-**路径**: `src/main/project-fs/`
+**路径**: `apps/electron/src/main/project-fs/`
 
 主 AI 通过此层读写子项目的任何文件，是实现"直接修改后端"的基础。
 
@@ -98,7 +98,7 @@ class ProjectFS {
 
 ### 2. ProjectApiClient — 子项目 API 桥接
 
-**路径**: `src/main/project-api-bridge/`
+**路径**: `apps/electron/src/main/project-api-bridge/`
 
 主 AI 调用运行中子项目的 HTTP API，用于测试、调试、获取运行时数据。
 
@@ -124,7 +124,7 @@ class ProjectApiClient {
 
 ### 3. ProjectDataAccess — 统一数据访问层
 
-**路径**: `src/main/project-data-access/`
+**路径**: `apps/electron/src/main/project-data-access/`
 
 主应用通过此层统一访问子项目的数据，支持多种存储格式。
 
@@ -161,7 +161,7 @@ class ProjectApiClient {
 
 ### 4. ProjectRuntime — 项目运行时管理
 
-**路径**: `src/main/project-runtime/`
+**路径**: `apps/electron/src/main/project-runtime/`
 
 | 文件 | 职责 |
 |------|------|
@@ -173,7 +173,7 @@ class ProjectApiClient {
 
 ### 5. AI Engine — AI 引擎与 Agent 系统
 
-**路径**: `src/main/ai-engine/`
+**路径**: `apps/electron/src/main/ai-engine/`
 
 主 AI 从"代码生成器"升级为"项目感知的全栈 Agent"。
 
@@ -219,7 +219,7 @@ class ProjectApiClient {
 
 ### 6. LAN Server — 局域网服务
 
-**路径**: `src/main/lan-server/`
+**路径**: `apps/electron/src/main/lan-server/`
 
 | 文件 | 职责 |
 |------|------|

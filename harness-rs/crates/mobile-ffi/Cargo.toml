@@ -1,0 +1,24 @@
+[package]
+name = "worldbase-mobile-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[features]
+default = ["desktop-support"]
+# iOS/Android 构建时关闭，排除 exec/webhook 等桌面能力。
+desktop-support = []
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+worldbase-core = { path = "../core" }
+worldbase-memory = { path = "../memory" }
+worldbase-protocol = { path = "../protocol" }
