@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'harness_client.dart';
+import 'markdown_renderer.dart';
 import 'providers.dart';
 
 /// iOS 系统蓝。
@@ -324,7 +325,10 @@ class IosBubble extends StatelessWidget {
             right: isUser ? 8 : 56,
           ),
           padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
-          constraints: const BoxConstraints(maxWidth: 290),
+          constraints: BoxConstraints(
+            maxWidth: (MediaQuery.sizeOf(context).width * (isUser ? 0.86 : 0.96))
+                .clamp(260.0, 680.0),
+          ),
           decoration: BoxDecoration(
             color: isUser ? iosBlue : iosBubbleGray,
             borderRadius: BorderRadius.only(
@@ -344,14 +348,10 @@ class IosBubble extends StatelessWidget {
                       style: const TextStyle(
                           fontSize: 12, fontWeight: FontWeight.w600, color: iosBlue)),
                 ),
-              Text(
-                text.isEmpty && isStreaming ? '…' : text,
-                style: TextStyle(
-                  fontSize: 16.5,
-                  height: 1.32,
-                  letterSpacing: -0.3,
-                  color: isUser ? const Color(0xFFFFFFFF) : iosLabel,
-                ),
+              MarkdownMessage(
+                data: text.isEmpty && isStreaming ? '…' : text,
+                isUser: isUser,
+                isStreaming: isStreaming,
               ),
               if (isStreaming)
                 const Padding(
