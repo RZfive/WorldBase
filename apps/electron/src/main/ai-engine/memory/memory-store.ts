@@ -1,23 +1,7 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
-import { createRequire } from 'node:module'
 import type { AgentMemoryScope, MemoryEntry, MemorySearchScope, MemoryType } from '../../../shared/agent-workspace-types.js'
-
-const nodeRequire = createRequire(import.meta.url)
-
-interface SqliteStatement {
-  run (...params: unknown[]): { changes: number, lastInsertRowid?: number | bigint }
-  all (...params: unknown[]): Array<Record<string, unknown>>
-  get (...params: unknown[]): Record<string, unknown> | undefined
-}
-
-interface SqliteDatabase {
-  prepare (sql: string): SqliteStatement
-  exec (sql: string): void
-  close (): void
-}
-
-type BetterSqliteDatabaseCtor = new (path: string) => SqliteDatabase
+import { openSqliteDatabase, type SqliteDatabase } from '../../sqlite-database.js'
 
 function normalizeStringArray (value: unknown): string[] {
   if (!Array.isArray(value)) return []
@@ -117,8 +101,7 @@ export class MemoryStore {
     }
 
     this.dbPath = path.join(dir, 'memory.sqlite')
-    const Database = nodeRequire('better-sqlite3') as BetterSqliteDatabaseCtor
-    this.db = new Database(this.dbPath)
+    this.db = openSqliteDatabase(this.dbPath)
     this.initialize()
   }
 

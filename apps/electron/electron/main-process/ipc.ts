@@ -335,7 +335,9 @@ export function setupIPC (): void {
                   ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
                   ...(activePagePromptSection ? [activePagePromptSection] : [])
                 ],
-                activeSkillContents: runtimeContext.activeSkillContents
+                activeSkillContents: runtimeContext.activeSkillContents,
+                memoryScopes: runtimeContext.memoryScopes,
+                memoryQuery: getLastUserMessageText(messages)
               }
             })
           }
@@ -347,7 +349,8 @@ export function setupIPC (): void {
             targetProjectId: runtimeContext.effectiveTargetProjectId,
             fallbackReasoningStrength: reasoningStrength,
             runtimeRequestContext: {
-              workspaceRoot: resolvedFolderWorkspaceRoot
+              workspaceRoot: resolvedFolderWorkspaceRoot,
+              memoryScopes: runtimeContext.memoryScopes
             }
           })
         })
@@ -368,7 +371,8 @@ export function setupIPC (): void {
           ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
         ],
         allowedToolNames: runtimeContext.allowedToolNames,
-        deniedToolNames: runtimeContext.deniedToolNames
+        deniedToolNames: runtimeContext.deniedToolNames,
+        memoryScopes: runtimeContext.memoryScopes
       }
       if (rustHarness) return await rustHarness.chat(messages, requestOptions)
       return await aiEngine.chat(messages, requestOptions)
@@ -641,7 +645,9 @@ export function setupIPC (): void {
                     ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
                     ...(activePagePromptSection ? [activePagePromptSection] : [])
                   ],
-                  activeSkillContents: runtimeContext.activeSkillContents
+                  activeSkillContents: runtimeContext.activeSkillContents,
+                  memoryScopes: runtimeContext.memoryScopes,
+                  memoryQuery: getLastUserMessageText(messages)
                 }
               })
             }
@@ -660,7 +666,8 @@ export function setupIPC (): void {
                 hostSessionId: sessionId,
                 workspaceRoot: resolvedFolderWorkspaceRoot,
                 authMode: authModeRef.current,
-                getAuthMode: () => authModeRef.current
+                getAuthMode: () => authModeRef.current,
+                memoryScopes: runtimeContext.memoryScopes
               }
             })
           })
@@ -687,7 +694,8 @@ export function setupIPC (): void {
             ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
           ],
           allowedToolNames: runtimeContext.allowedToolNames,
-          deniedToolNames: runtimeContext.deniedToolNames
+          deniedToolNames: runtimeContext.deniedToolNames,
+          memoryScopes: runtimeContext.memoryScopes
         }
         const stream = rustHarness
           ? rustHarness.chatStream(messages, onProgress, requestOptions)
@@ -701,7 +709,22 @@ export function setupIPC (): void {
             notifyAiTaskStatus(executionPreferences, messages, 'completed')
             aiLogger?.finish('completed', streamEvent.message)
 
-            if (memoryEngine) {
+            if (rustHarness && mainState.rustHarness) {
+              try {
+                await mainState.rustHarness.ingestMemory({
+                  agent: runtimeContext.agent,
+                  scopes: runtimeContext.memoryScopes,
+                  userMessages: getAllUserMessageTexts(messages),
+                  finalAssistantText: getMessageText(streamEvent.message.content),
+                  toolNames: executedToolNames,
+                  sourceConversationId: conversationId,
+                  sourceSessionId: sessionId
+                })
+              } catch (memoryError) {
+                console.error('[ai:chatStream] Failed to ingest Rust memory:', memoryError)
+                aiLogger?.logError('session', memoryError as Error, { phase: 'rust-memory-ingest', sessionId, conversationId })
+              }
+            } else if (memoryEngine) {
               try {
                 memoryEngine.ingestSessionMemory({
                   agent: runtimeContext.agent,
@@ -998,6 +1021,16 @@ export function setupIPC (): void {
       ? [{ scopeType: options.scopeType, scopeId: options.scopeId }]
       : undefined)
 
+    const rustClient = await selectedRustProjectClient()
+    if (rustClient) {
+      return await rustClient.listMemory({
+        query: options?.query,
+        scopes,
+        memoryTypes: options?.memoryTypes,
+        limit: options?.limit
+      })
+    }
+
     return memoryStore!.search({
       query: options?.query,
       scopes,
@@ -1016,7 +1049,7 @@ export function setupIPC (): void {
     if (!title) throw new Error(t('mainDialog.memoryTitleRequired'))
     if (!summary) throw new Error(t('mainDialog.memorySummaryRequired'))
 
-    return memoryStore!.upsert({
+    const normalizedEntry: MemoryEntry = {
       id: entry.id || `manual_${randomUUID()}`,
       scopeType,
       scopeId,
@@ -1034,14 +1067,21 @@ export function setupIPC (): void {
       lastUsedAt: entry.lastUsedAt,
       createdAt: entry.createdAt || new Date().toISOString(),
       updatedAt: entry.updatedAt || new Date().toISOString()
-    })
+    }
+    const rustClient = await selectedRustProjectClient()
+    if (rustClient) return await rustClient.saveMemory(normalizedEntry)
+    return memoryStore!.upsert(normalizedEntry)
   })
 
   ipcMain.handle('memory:pin', async (_event: IpcMainInvokeEvent, id: string, pinned: boolean) => {
+    const rustClient = await selectedRustProjectClient()
+    if (rustClient) return await rustClient.pinMemory(id, pinned)
     return memoryEngine!.pinMemory(id, pinned)
   })
 
   ipcMain.handle('memory:delete', async (_event: IpcMainInvokeEvent, id: string) => {
+    const rustClient = await selectedRustProjectClient()
+    if (rustClient) return await rustClient.deleteWorkspaceMemory(id)
     return memoryEngine!.deleteMemory(id)
   })
 
@@ -1052,6 +1092,9 @@ export function setupIPC (): void {
   })
 
   ipcMain.handle('memory:compactStatus', async (): Promise<MemoryCompactionStatus> => {
+    // Compaction status is a renderer-facing orchestration snapshot. The
+    // actual scan/apply operation is Rust-owned in Rust mode, while this
+    // process keeps the same progress events for both backends.
     return cloneMemoryCompactionStatus()
   })
 

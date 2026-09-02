@@ -18,6 +18,7 @@ export interface ResolvedAgentRuntimeContext {
   allowedToolNames: string[]
   deniedToolNames: string[]
   memoryScopeTypes: AgentMemoryScope[] | undefined
+  memoryScopes: Array<{ scopeType: AgentMemoryScope; scopeId: string }>
 }
 
 export function notifyAgentWorkspaceChanged (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }): void {
@@ -47,6 +48,24 @@ export function resolveAgentMemoryScopes (
 ): AgentMemoryScope[] | undefined {
   if (!agent && !group) return undefined
   return mergeUniqueStrings(agent?.memoryScopes, group?.sharedMemoryScopes) as AgentMemoryScope[]
+}
+
+function resolveRustMemoryScopes (input: {
+  agent?: AgentDefinition | null
+  group?: AgentGroupDefinition | null
+  channelBinding?: ChannelBinding | null
+  targetProjectId?: string | null
+  enabledScopeTypes?: AgentMemoryScope[]
+  userId?: string | null
+}): Array<{ scopeType: AgentMemoryScope; scopeId: string }> {
+  const enabled = new Set(input.enabledScopeTypes || ['user', 'agent', 'project', 'group', 'channel'])
+  const scopes: Array<{ scopeType: AgentMemoryScope; scopeId: string }> = []
+  if (enabled.has('user')) scopes.push({ scopeType: 'user', scopeId: input.userId?.trim() || 'local-user' })
+  if (input.agent && enabled.has('agent')) scopes.push({ scopeType: 'agent', scopeId: input.agent.id })
+  if (input.group && enabled.has('group')) scopes.push({ scopeType: 'group', scopeId: input.group.id })
+  if (input.channelBinding && enabled.has('channel')) scopes.push({ scopeType: 'channel', scopeId: input.channelBinding.id })
+  if (input.targetProjectId && enabled.has('project')) scopes.push({ scopeType: 'project', scopeId: input.targetProjectId })
+  return scopes
 }
 
 export function resolveSkillContentsByIds (skillIds?: string[]): string[] {
@@ -216,6 +235,7 @@ export function resolveAgentRuntimeContext (input: {
   requestedTargetProjectId?: string
   requestedReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
   requestedTemperature?: number
+  userId?: string
 }): ResolvedAgentRuntimeContext {
   const group = input.groupId ? mainState.agentGroupStore?.get(input.groupId) || null : null
   const channelBinding = input.channelBindingId ? mainState.channelBindingStore?.get(input.channelBindingId) || null : null
@@ -231,15 +251,26 @@ export function resolveAgentRuntimeContext (input: {
     input.requestedTemperature
   )
   const memoryScopeTypes = resolveAgentMemoryScopes(agent, group)
-  const memoryContext = mainState.memoryEngine?.buildPromptContext({
+  const memoryScopes = resolveRustMemoryScopes({
     agent,
     group,
     channelBinding,
-    userMessage: getLastUserMessageText(input.messages),
     targetProjectId: effectiveTargetProjectId,
-    userId: 'local-user',
-    enabledScopeTypes: memoryScopeTypes
+    enabledScopeTypes: memoryScopeTypes,
+    userId: input.userId
   })
+  const useRustMemory = mainState.settingsStore?.getAIExecutionPreferences().harnessBackend === 'rust'
+  const memoryContext = !useRustMemory
+    ? mainState.memoryEngine?.buildPromptContext({
+        agent,
+        group,
+        channelBinding,
+        userMessage: getLastUserMessageText(input.messages),
+        targetProjectId: effectiveTargetProjectId,
+        userId: 'local-user',
+        enabledScopeTypes: memoryScopeTypes
+      })
+    : undefined
   const systemPromptSections = [
     agent ? buildActiveAgentSection(agent) : null,
     group ? buildActiveGroupSection(group) : null,
@@ -257,6 +288,7 @@ export function resolveAgentRuntimeContext (input: {
     systemPromptSections,
     allowedToolNames: agent?.allowedTools || [],
     deniedToolNames: agent?.deniedTools || [],
-    memoryScopeTypes
+    memoryScopeTypes,
+    memoryScopes
   }
 }

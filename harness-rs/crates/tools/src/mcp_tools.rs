@@ -113,7 +113,9 @@ impl Tool for McpListResourcesTool {
                 .find(|entry| entry.id == server)
                 .map(|entry| entry.name)
                 .unwrap_or_else(|| server.to_string());
-            return Ok(json!({ "server": server_name, "server_id": server, "resources": resources }));
+            return Ok(
+                json!({ "server": server_name, "server_id": server, "resources": resources }),
+            );
         }
 
         let allowed = services.allowed_mcp_server_ids();

@@ -30,6 +30,13 @@ pub const SETTINGS_SET: &str = "settings.set";
 pub const MEMORY_SEARCH: &str = "memory.search";
 pub const MEMORY_ADD: &str = "memory.add";
 pub const MEMORY_DELETE: &str = "memory.delete";
+pub const MEMORY_INGEST: &str = "memory.ingest";
+/// Electron Agent Workspace memory catalog methods.
+pub const MEMORY_LIST: &str = "memory.list";
+pub const MEMORY_SAVE: &str = "memory.save";
+pub const MEMORY_PIN: &str = "memory.pin";
+pub const MEMORY_COMPACT: &str = "memory.compact";
+pub const MEMORY_COMPACT_STATUS: &str = "memory.compactStatus";
 
 pub const SKILL_LIST: &str = "skill.list";
 pub const SKILL_RUN: &str = "skill.run";
@@ -124,6 +131,7 @@ pub const AGENT_GROUP_SAVE: &str = "agentGroup.save";
 pub const AGENT_GROUP_DELETE: &str = "agentGroup.delete";
 
 pub const STUDIO_GENERATE: &str = "studio.generate";
+pub const STUDIO_PROMPT_OPTIMIZE: &str = "studio.prompt.optimize";
 pub const STUDIO_LIST: &str = "studio.list";
 pub const STUDIO_DELETE: &str = "studio.delete";
 pub const STUDIO_TAG: &str = "studio.tag";
@@ -240,6 +248,12 @@ pub const ALL_METHODS: &[&str] = &[
     MEMORY_SEARCH,
     MEMORY_ADD,
     MEMORY_DELETE,
+    MEMORY_INGEST,
+    MEMORY_LIST,
+    MEMORY_SAVE,
+    MEMORY_PIN,
+    MEMORY_COMPACT,
+    MEMORY_COMPACT_STATUS,
     SKILL_LIST,
     SKILL_RUN,
     SCHEDULE_LIST,
@@ -312,6 +326,7 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_GROUP_SAVE,
     AGENT_GROUP_DELETE,
     STUDIO_GENERATE,
+    STUDIO_PROMPT_OPTIMIZE,
     STUDIO_LIST,
     STUDIO_DELETE,
     STUDIO_TAG,

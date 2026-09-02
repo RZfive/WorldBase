@@ -2021,7 +2021,7 @@ mod tests {
         let layout = tokio::fs::read_to_string(Path::new(&info.path).join("app/layout.js"))
             .await
             .unwrap();
-        assert!(layout.starts_with("'use client'\nimport './globals.css'"));
+        assert!(layout.starts_with("'use client';\nimport './globals.css'"));
         assert!(!Path::new(&info.path).join("app/layout.tsx").exists());
     }
 

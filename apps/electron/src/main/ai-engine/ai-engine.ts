@@ -434,6 +434,6 @@ export class AIEngine {
    * Set session budget limit.
    */
   setBudgetLimit (limit: number | null): void {
-    this.budgetLimit = limit
+    this.budgetLimit = limit != null && Number.isFinite(limit) && limit > 0 ? limit : null
   }
 }

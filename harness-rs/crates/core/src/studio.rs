@@ -101,7 +101,8 @@ impl StudioService {
             let file = format!("{id}.{}", img.ext);
             let path = dir.join(&file);
             std::fs::write(&path, &img.bytes)?;
-            let thumbnail = worldbase_memory::Store::write_image_library_thumbnail(&dir, &id, &file);
+            let thumbnail =
+                worldbase_memory::Store::write_image_library_thumbnail(&dir, &id, &file);
             let mut meta = serde_json::json!({
                 "aspect": params.aspect,
                 "size": params.size,
@@ -272,6 +273,35 @@ fn image_model_for_studio_provider(
         .map(|model| model.id.clone())
 }
 
+/// A provider without a key is backed by the deterministic mock image
+/// generator.  Capability flags are still useful for keyed providers, but a
+/// freshly-created mobile provider often has no flags yet; rejecting that
+/// request would make the built-in/demo workflow fail before the mock can run.
+fn image_model_for_mock_provider(
+    provider: &worldbase_protocol::types::ProviderEntry,
+    requested_model: Option<&str>,
+) -> Option<String> {
+    if !provider.api_key.trim().is_empty() {
+        return None;
+    }
+    requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            let model = provider.active_model.trim();
+            (!model.is_empty()).then(|| model.to_string())
+        })
+        .or_else(|| {
+            provider
+                .models
+                .first()
+                .map(|model| model.id.trim().to_string())
+                .filter(|model| !model.is_empty())
+        })
+        .or_else(|| Some("mock-image".to_string()))
+}
+
 fn resolve_studio_image_target(
     hub: &Hub,
     params: &ImageGenerateParams,
@@ -290,6 +320,7 @@ fn resolve_studio_image_target(
             .find(|provider| provider.id == provider_id)
             .ok_or_else(|| anyhow::anyhow!("image provider not found: {provider_id}"))?;
         let model = image_model_for_studio_provider(provider, params.model.as_deref(), edit)
+            .or_else(|| image_model_for_mock_provider(provider, params.model.as_deref()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "selected model does not support image {}",
@@ -314,7 +345,36 @@ fn resolve_studio_image_target(
         .into_iter()
         .find_map(|provider| {
             image_model_for_studio_provider(provider, params.model.as_deref(), edit)
+                .or_else(|| image_model_for_mock_provider(provider, params.model.as_deref()))
                 .map(|model| (provider.clone(), model))
+        })
+        .or_else(|| {
+            // Keep the no-configuration mobile experience usable.  This
+            // synthetic entry has no key, so `generate_images` emits the
+            // deterministic SVG placeholder and never performs a network call.
+            if providers.providers.is_empty() {
+                return Some((
+                    worldbase_protocol::types::ProviderEntry {
+                        id: "mock".into(),
+                        name: "Mock".into(),
+                        base_url: String::new(),
+                        api_key: String::new(),
+                        api_protocol: "openai".into(),
+                        models: Vec::new(),
+                        active_model: "mock-image".into(),
+                        temperature: None,
+                        image_generation: true,
+                    },
+                    params
+                        .model
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|model| !model.is_empty())
+                        .unwrap_or("mock-image")
+                        .to_string(),
+                ));
+            }
+            None
         })
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -472,4 +532,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    #[test]
+    fn mock_provider_without_capability_flags_still_resolves() {
+        let provider = worldbase_protocol::types::ProviderEntry {
+            id: "mobile-demo".into(),
+            name: "Mobile demo".into(),
+            base_url: "https://example.invalid/v1".into(),
+            api_key: String::new(),
+            api_protocol: "openai".into(),
+            models: vec![worldbase_protocol::types::ModelInfo {
+                id: "text-model".into(),
+                context_window_k: 0,
+                input_price: 0.0,
+                output_price: 0.0,
+                cache_read_price: 0.0,
+                image_generation: false,
+                image_editing: false,
+            }],
+            active_model: "text-model".into(),
+            temperature: None,
+            image_generation: false,
+        };
+        assert_eq!(
+            image_model_for_mock_provider(&provider, None).as_deref(),
+            Some("text-model")
+        );
+        assert_eq!(
+            image_model_for_mock_provider(&provider, Some("mock-model")).as_deref(),
+            Some("mock-model")
+        );
+    }
 }

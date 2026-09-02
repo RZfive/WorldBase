@@ -62,6 +62,8 @@ export interface RustNativeGroupDeliberationInput {
     | 'budgetLimit'
     | 'systemPromptSections'
     | 'activeSkillContents'
+    | 'memoryScopes'
+    | 'memoryQuery'
   >
 }
 
@@ -261,7 +263,8 @@ export async function buildNativeRustGroupDeliberation (
             abortSignal: input.abortSignal,
             runtimeRequestContext: {
               workspaceRoot: commonContext.workspaceRoot,
-              authMode: commonContext.authMode
+              authMode: commonContext.authMode,
+              memoryScopes: commonContext.memoryScopes
             }
           })
           // The selected Rust engine must be supplied for planner-driven
@@ -421,6 +424,8 @@ function nativeGroupContext (input: RustNativeGroupDeliberationInput): RustChatO
     temperature: input.context?.temperature,
     planModeActive: input.context?.planModeActive,
     budgetLimit: input.context?.budgetLimit,
+    memoryScopes: input.context?.memoryScopes,
+    memoryQuery: input.context?.memoryQuery,
     systemPromptSections: uniqueStrings(input.context?.systemPromptSections),
     activeSkillContents: uniqueStrings(input.context?.activeSkillContents),
     allowedToolNames: [],

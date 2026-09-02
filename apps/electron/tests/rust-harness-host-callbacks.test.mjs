@@ -293,6 +293,39 @@ test('Rust-advertised spawn_subagents is always executed by the Electron Rust fa
   assert.equal(childRuns.length, 1, 'the facade must reject at the limit before creating a Rust child run')
 })
 
+test('Rust-advertised Electron document and page tools use host overrides', async () => {
+  const services = createServices({
+    documentStore: {
+      listSummaries: () => [],
+      getAllSelections: () => [],
+      getArtifact: () => null,
+      getArtifactChunks: () => null,
+      buildSelectionRefs: () => []
+    },
+    getMainWindow: () => null,
+    readActivePage: async () => ({ title: '', url: '', textPreview: '', fullTextAvailable: false, interactiveElements: [], formFields: [] }),
+    interactWithActivePage: async () => ({ ok: true, type: 'wait', timeoutMs: 0 })
+  })
+  const names = [
+    'ask_user',
+    'read_current_page',
+    'interact_current_page',
+    'fill_current_page_form',
+    'save_current_page_as_document',
+    'list_documents',
+    'read_document',
+    'open_project_app'
+  ]
+  const registrations = await collectHostTools(createHarnessEngine(services, names), {
+    authMode: 'strict',
+    workspaceRoot: process.cwd()
+  })
+  for (const name of names) {
+    const registration = getTool(registrations, name)
+    assert.equal(registration.domain, 'electron_host_override', `${name} must use the Electron host implementation`)
+  }
+})
+
 test('native Rust project, workspace, image, and MCP tool results notify the Electron bridge', async () => {
   const nativeResults = []
   const client = createNativeToolClient([

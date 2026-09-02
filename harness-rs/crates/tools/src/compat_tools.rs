@@ -21,7 +21,9 @@ const MAX_WORKSPACE_TREE_DEPTH: usize = 12;
 fn sanitize_agent_group_id(value: &str) -> String {
     value
         .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '_' || *character == '-')
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
+        })
         .collect()
 }
 
@@ -1650,7 +1652,7 @@ impl Tool for ListAgentWorkspaceCatalogTool {
         "list_agent_workspace_catalog"
     }
     fn description(&self) -> &str {
-        "List providers, skills, tools and existing agents."
+        "List providers, skills, existing agents and existing agent groups before creating Agent Workspace entities."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{}})
@@ -1669,10 +1671,36 @@ impl Tool for CreateAgentTool {
         "create_agent"
     }
     fn description(&self) -> &str {
-        "Create or update a custom Agent Workspace agent."
+        "Create or update a custom Agent Workspace agent. Use list_agent_workspace_catalog first to choose valid provider, model and skill IDs."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"},"description":{"type":"string"},"system_prompt":{"type":"string"},"provider_id":{"type":"string"},"model_id":{"type":"string"},"skill_ids":{"type":"array","items":{"type":"string"}}},"required":["name","system_prompt"]})
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Optional existing agent ID to update."},
+                "name": {"type": "string", "description": "Agent display name."},
+                "description": {"type": "string", "description": "Short description of the agent role."},
+                "system_prompt": {"type": "string", "description": "System prompt for the agent."},
+                "provider_id": {"type": "string", "description": "Provider ID from list_agent_workspace_catalog."},
+                "model_id": {"type": "string", "description": "Model ID under the selected provider."},
+                "reasoning_strength": {"type": "string", "enum": ["low", "medium", "high", "max"]},
+                "skill_ids": {"type": "array", "items": {"type": "string"}},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                "denied_tools": {"type": "array", "items": {"type": "string"}},
+                "memory_scopes": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["user", "agent", "project", "group", "channel"]}
+                },
+                "allow_user_traits": {"type": "boolean"},
+                "allow_agent_skills": {"type": "boolean"},
+                "allow_steps": {"type": "boolean"},
+                "allow_knowledge": {"type": "boolean"},
+                "auto_reply_enabled": {"type": "boolean"},
+                "auto_reply_require_mention": {"type": "boolean"}
+            },
+            "required": ["name", "system_prompt"],
+            "additionalProperties": false
+        })
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let now = worldbase_protocol::event::now_rfc3339();
@@ -1731,32 +1759,76 @@ impl Tool for CreateAgentTool {
                 .get("allowed_tools")
                 .or_else(|| input.get("allowedTools"))
                 .and_then(Value::as_array)
-                .map(|values| values.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
                 .unwrap_or_default(),
             denied_tools: input
                 .get("denied_tools")
                 .or_else(|| input.get("deniedTools"))
                 .and_then(Value::as_array)
-                .map(|values| values.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
                 .unwrap_or_default(),
             memory_scopes: input
                 .get("memory_scopes")
                 .or_else(|| input.get("memoryScopes"))
                 .and_then(Value::as_array)
-                .map(|values| values.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
                 .unwrap_or_else(|| vec!["user".into(), "agent".into(), "project".into()]),
             memory_write_policy: input
                 .get("memory_write_policy")
                 .or_else(|| input.get("memoryWritePolicy"))
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or_default(),
+                .unwrap_or_else(|| worldbase_protocol::types::AgentMemoryWritePolicy {
+                    allow_user_traits: input
+                        .get("allow_user_traits")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                    allow_agent_skills: input
+                        .get("allow_agent_skills")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                    allow_steps: input
+                        .get("allow_steps")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                    allow_knowledge: input
+                        .get("allow_knowledge")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                }),
             auto_reply_policy: input
                 .get("auto_reply_policy")
                 .or_else(|| input.get("autoReplyPolicy"))
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or_default(),
+                .unwrap_or_else(|| worldbase_protocol::types::AgentAutoReplyPolicy {
+                    enabled: input
+                        .get("auto_reply_enabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    require_mention: input
+                        .get("auto_reply_require_mention")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                }),
             created_at: existing
                 .as_ref()
                 .map(|a| a.created_at.clone())
@@ -1782,7 +1854,9 @@ impl Tool for CreateAgentGroupTool {
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let name = require_str(&input, "name")?.trim().to_string();
-        let coordinator = require_str(&input, "coordinator_agent_id")?.trim().to_string();
+        let coordinator = require_str(&input, "coordinator_agent_id")?
+            .trim()
+            .to_string();
         let mut member_ids = Vec::new();
         let mut seen = std::collections::HashSet::new();
         if let Some(values) = input.get("member_agent_ids").and_then(Value::as_array) {
@@ -1796,7 +1870,9 @@ impl Tool for CreateAgentGroupTool {
             }
         }
         if name.is_empty() || coordinator.is_empty() || member_ids.is_empty() {
-            return Ok(json!({"error": "name, coordinator_agent_id, and member_agent_ids are required."}));
+            return Ok(
+                json!({"error": "name, coordinator_agent_id, and member_agent_ids are required."}),
+            );
         }
         let known_agents: std::collections::HashSet<String> = services
             .store
@@ -1813,7 +1889,9 @@ impl Tool for CreateAgentGroupTool {
             .cloned()
             .collect::<Vec<_>>();
         if !invalid.is_empty() {
-            return Ok(json!({"error": format!("Unknown member_agent_ids: {}", invalid.join(", "))}));
+            return Ok(
+                json!({"error": format!("Unknown member_agent_ids: {}", invalid.join(", "))}),
+            );
         }
 
         // Electron always includes the coordinator first and de-duplicates
@@ -1863,9 +1941,11 @@ impl Tool for CreateAgentGroupTool {
         let mut scopes = Vec::new();
         if let Some(values) = input.get("shared_memory_scopes").and_then(Value::as_array) {
             for value in values {
-                let Some(scope) = value.as_str().map(str::trim).filter(|scope| {
-                    matches!(*scope, "group" | "project" | "channel")
-                }) else {
+                let Some(scope) = value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|scope| matches!(*scope, "group" | "project" | "channel"))
+                else {
                     continue;
                 };
                 if !scopes.iter().any(|existing| existing == scope) {
@@ -1908,7 +1988,9 @@ impl Tool for CreateAgentGroupTool {
         groups.retain(|item| item.get("id") != group.get("id"));
         groups.push(group.clone());
         services.store.set_agent_groups_setting(&groups)?;
-        Ok(json!({"success": true, "group": group, "message": format!("Agent 群组 {} 已保存。", group["name"].as_str().unwrap_or_default())}))
+        Ok(
+            json!({"success": true, "group": group, "message": format!("Agent 群组 {} 已保存。", group["name"].as_str().unwrap_or_default())}),
+        )
     }
 }
 
@@ -2190,6 +2272,7 @@ fn image_mime_for_data_url(value: &str) -> &'static str {
         .unwrap_or("image/png")
 }
 
+#[cfg(test)]
 fn image_extension_for_mime(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" | "image/jpg" => "jpg",
@@ -2203,6 +2286,7 @@ fn image_extension_for_mime(mime: &str) -> &'static str {
 /// Keep the concrete edit inputs with the generated result. The image bytes
 /// are already normalized to base64 for provider execution, so this covers
 /// library IDs, local paths, and data-URL inputs with one durable path.
+#[cfg(test)]
 fn write_edit_source_images(
     directory: &Path,
     id: &str,
@@ -2463,6 +2547,36 @@ fn image_model_for_provider(
         .map(|model| model.id.clone())
 }
 
+/// A provider without credentials is served by `generate_images`' deterministic
+/// mock implementation. Fresh mobile profiles often do not have model
+/// capability flags yet, so do not reject them before that implementation has
+/// a chance to run. Keyed providers still use the stricter capability check
+/// above and therefore cannot accidentally target a text-only model.
+fn image_model_for_mock_provider(
+    provider: &worldbase_protocol::types::ProviderEntry,
+    requested_model: Option<&str>,
+) -> Option<String> {
+    if !provider.api_key.trim().is_empty() {
+        return None;
+    }
+    requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            let model = provider.active_model.trim();
+            (!model.is_empty()).then(|| model.to_string())
+        })
+        .or_else(|| {
+            provider
+                .models
+                .first()
+                .map(|model| model.id.trim().to_string())
+                .filter(|model| !model.is_empty())
+        })
+        .or_else(|| Some("mock-image".to_string()))
+}
+
 fn resolve_image_provider(
     providers: &worldbase_protocol::types::ProvidersConfig,
     requested_provider: Option<&str>,
@@ -2478,13 +2592,15 @@ fn resolve_image_provider(
             .iter()
             .find(|provider| provider.id == provider_id)
             .ok_or_else(|| anyhow::anyhow!("image provider not found: {provider_id}"))?;
-        let model = image_model_for_provider(provider, requested_model, edit).ok_or_else(|| {
-            anyhow::anyhow!(
-                "provider {} has no configured model with image {} capability",
-                provider_id,
-                if edit { "editing" } else { "generation" }
-            )
-        })?;
+        let model = image_model_for_provider(provider, requested_model, edit)
+            .or_else(|| image_model_for_mock_provider(provider, requested_model))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provider {} has no configured model with image {} capability",
+                    provider_id,
+                    if edit { "editing" } else { "generation" }
+                )
+            })?;
         return Ok((provider.clone(), model));
     }
 
@@ -2503,7 +2619,35 @@ fn resolve_image_provider(
         .into_iter()
         .find_map(|provider| {
             image_model_for_provider(provider, requested_model, edit)
+                .or_else(|| image_model_for_mock_provider(provider, requested_model))
                 .map(|model| (provider.clone(), model))
+        })
+        .or_else(|| {
+            // A brand-new mobile installation has no provider entry at all.
+            // Keep the local/demo path functional; the empty key guarantees
+            // `generate_images` returns a local placeholder without a request.
+            if providers.providers.is_empty() {
+                Some((
+                    worldbase_protocol::types::ProviderEntry {
+                        id: "mock".into(),
+                        name: "Mock".into(),
+                        base_url: String::new(),
+                        api_key: String::new(),
+                        api_protocol: "openai".into(),
+                        models: Vec::new(),
+                        active_model: "mock-image".into(),
+                        temperature: None,
+                        image_generation: true,
+                    },
+                    requested_model
+                        .map(str::trim)
+                        .filter(|model| !model.is_empty())
+                        .unwrap_or("mock-image")
+                        .to_string(),
+                ))
+            } else {
+                None
+            }
         })
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -2513,6 +2657,8 @@ fn resolve_image_provider(
         })
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn run_image(input: &Value, services: &ToolServices, edit: bool) -> Result<Value> {
     let prompt = require_str(input, "prompt")?;
     // Native image tools bypass `studio.generate`, so they must perform the
@@ -2647,11 +2793,16 @@ async fn prepare_studio_request(
     let providers = services
         .store
         .get_setting("providers")?
-        .and_then(|value| serde_json::from_value::<worldbase_protocol::types::ProvidersConfig>(value).ok())
+        .and_then(|value| {
+            serde_json::from_value::<worldbase_protocol::types::ProvidersConfig>(value).ok()
+        })
         .unwrap_or_default();
     let (provider, model) = resolve_image_provider(
         &providers,
-        input.get("provider_id").or_else(|| input.get("providerId")).and_then(Value::as_str),
+        input
+            .get("provider_id")
+            .or_else(|| input.get("providerId"))
+            .and_then(Value::as_str),
         input.get("model").and_then(Value::as_str),
         edit,
     )?;
@@ -2725,13 +2876,12 @@ async fn prepare_studio_request(
     }))
 }
 
-async fn enqueue_studio_batch(
-    input: &Value,
-    services: &ToolServices,
-    edit: bool,
-) -> Result<Value> {
-    let Some(raw_tasks) = input.get("tasks").and_then(Value::as_array) else {
-        return run_image(input, services, edit).await;
+async fn enqueue_studio_batch(input: &Value, services: &ToolServices, edit: bool) -> Result<Value> {
+    let raw_tasks = match input.get("tasks").and_then(Value::as_array) {
+        Some(tasks) => tasks.clone(),
+        // Electron's tools always hand a single-form request to the shared
+        // queue instead of blocking the conversation on image generation.
+        None => vec![input.clone()],
     };
     if raw_tasks.is_empty() {
         return Ok(json!({
@@ -2827,6 +2977,68 @@ impl Tool for EditImageTool {
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         enqueue_studio_batch(&input, services, true).await
+    }
+}
+
+#[cfg(test)]
+mod image_provider_tests {
+    use super::*;
+    use worldbase_protocol::types::{ModelInfo, ProviderEntry, ProvidersConfig};
+
+    fn provider(api_key: &str) -> ProviderEntry {
+        ProviderEntry {
+            id: "mobile-demo".into(),
+            name: "Mobile demo".into(),
+            base_url: "https://example.invalid/v1".into(),
+            api_key: api_key.into(),
+            api_protocol: "openai".into(),
+            models: vec![ModelInfo {
+                id: "text-model".into(),
+                context_window_k: 0,
+                input_price: 0.0,
+                output_price: 0.0,
+                cache_read_price: 0.0,
+                image_generation: false,
+                image_editing: false,
+            }],
+            active_model: "text-model".into(),
+            temperature: None,
+            image_generation: false,
+        }
+    }
+
+    #[test]
+    fn no_key_provider_without_image_flags_uses_mock_target() {
+        let config = ProvidersConfig {
+            providers: vec![provider("")],
+            active_provider_id: Some("mobile-demo".into()),
+        };
+
+        let (resolved, model) =
+            resolve_image_provider(&config, Some("mobile-demo"), None, false).unwrap();
+
+        assert_eq!(resolved.id, "mobile-demo");
+        assert_eq!(model, "text-model");
+    }
+
+    #[test]
+    fn no_provider_configuration_uses_synthetic_mock_target() {
+        let (resolved, model) =
+            resolve_image_provider(&ProvidersConfig::default(), None, None, false).unwrap();
+
+        assert_eq!(resolved.id, "mock");
+        assert!(resolved.api_key.is_empty());
+        assert_eq!(model, "mock-image");
+    }
+
+    #[test]
+    fn keyed_provider_without_image_capability_remains_rejected() {
+        let config = ProvidersConfig {
+            providers: vec![provider("key")],
+            active_provider_id: Some("mobile-demo".into()),
+        };
+
+        assert!(resolve_image_provider(&config, Some("mobile-demo"), None, false).is_err());
     }
 }
 

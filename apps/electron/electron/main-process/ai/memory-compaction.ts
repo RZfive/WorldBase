@@ -326,7 +326,11 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
   })
 
   try {
-    const entries = mainState.memoryStore!.listAll(50000)
+    const rustHarness = await startSelectedRustHarness()
+    const rustClient = rustHarness ? mainState.rustHarness : null
+    const entries = rustClient
+      ? await rustClient.listMemory({ limit: 50000 })
+      : mainState.memoryStore!.listAll(50000)
     updateMemoryCompactionStatus({
       id: taskId,
       status: 'running',
@@ -337,7 +341,6 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
       completedChunks: 0
     })
 
-    const rustHarness = await startSelectedRustHarness()
     const plan = await buildMemoryCompactionPlanWithAi(entries, (progress) => {
       updateMemoryCompactionStatus({
         id: taskId,
@@ -359,7 +362,9 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
       completedChunks: mainState.memoryCompactionStatus.totalChunks
     })
 
-    const result = mainState.memoryEngine!.compactMemory(plan)
+    const result = rustClient
+      ? await rustClient.compactWorkspaceMemory(plan as unknown as Record<string, unknown>) as unknown as MemoryCompactionResult
+      : mainState.memoryEngine!.compactMemory(plan)
     updateMemoryCompactionStatus({
       id: taskId,
       status: 'completed',

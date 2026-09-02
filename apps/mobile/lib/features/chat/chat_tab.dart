@@ -17,7 +17,7 @@ import 'group_page.dart';
 
 /// 对话主页(晨昏 2.0):对话即主页。
 /// 悬浮顶栏(抽屉 / 模型胶囊 / 新会话)+ 空态问候 + 流体玻璃对话流
-/// + 胶囊输入条(深度思考 / 联网开关)+ 悬浮玻璃抽屉。
+/// + 带折叠模型参数的胶囊输入条 + 悬浮玻璃抽屉。
 class ChatTab extends ConsumerStatefulWidget {
   const ChatTab({super.key});
 
@@ -27,6 +27,15 @@ class ChatTab extends ConsumerStatefulWidget {
 
 class _ChatTabState extends ConsumerState<ChatTab> {
   final _inputCtrl = TextEditingController();
+  bool _advancedExpanded = false;
+
+  static const _reasoningLevels = ['low', 'medium', 'high', 'max'];
+  static const _reasoningLabels = {
+    'low': '低',
+    'medium': '中',
+    'high': '高',
+    'max': '最高',
+  };
 
   @override
   void initState() {
@@ -34,7 +43,9 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     Future.microtask(() async {
       final conversations = ref.read(conversationsProvider).value;
       final current = ref.read(currentConversationProvider);
-      if (current == null && conversations != null && conversations.isNotEmpty) {
+      if (current == null &&
+          conversations != null &&
+          conversations.isNotEmpty) {
         ref.read(currentConversationProvider.notifier).set(conversations.first);
         await ref.read(chatProvider.notifier).loadHistory(conversations.first);
       }
@@ -55,7 +66,18 @@ class _ChatTabState extends ConsumerState<ChatTab> {
   }
 
   Future<void> _newConversation() async {
-    final agents = ref.read(agentsProvider).value ?? [];
+    final cachedAgents = ref.read(agentsProvider).value;
+    late final List<AgentDefinition> agents;
+    if (cachedAgents == null) {
+      try {
+        agents = await HarnessClient.instance.listAgents();
+      } catch (_) {
+        agents = const [];
+      }
+    } else {
+      agents = cachedAgents;
+    }
+    if (!mounted) return;
     AgentDefinition? picked;
     if (agents.isNotEmpty) {
       picked = await showCupertinoModalPopup<AgentDefinition>(
@@ -130,15 +152,19 @@ class _ChatTabState extends ConsumerState<ChatTab> {
             ),
             // L1 浮岛:顶部三件套。
             Positioned(
-              top: 0, left: 0, right: 0,
+              top: 0,
+              left: 0,
+              right: 0,
               child: SafeArea(
                 bottom: false,
                 child: _TopBar(onNewChat: _newConversation),
               ),
             ),
-            // L1 浮岛:开关 pills + 输入胶囊。
+            // L1 浮岛:输入胶囊 + 折叠模型参数。
             Positioned(
-              left: 0, right: 0, bottom: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
               child: SafeArea(top: false, child: _buildDock(busy)),
             ),
           ],
@@ -151,19 +177,29 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     final topPad = MediaQuery.paddingOf(context).top + 54;
     return ListView.builder(
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-      padding: EdgeInsets.fromLTRB(0, topPad, 0, 132),
+      padding: EdgeInsets.fromLTRB(0, topPad, 0, _advancedExpanded ? 244 : 112),
       itemCount: messages.length,
       itemBuilder: (ctx, i) {
         final m = messages[i];
         if (m.isTool) {
-          return _DawnToolCard(name: m.toolName ?? '', text: m.text, isError: m.isError);
+          return _DawnToolCard(
+            name: m.toolName ?? '',
+            text: m.text,
+            isError: m.isError,
+            imageStatus: m.imageStatus,
+            imageEntries: m.imageEntries,
+            onWaitForImages: m.imageStatus == 'queued'
+                ? () => ref.read(chatProvider.notifier).waitForImages(m.id)
+                : null,
+          );
         }
         return _DawnBubble(
           text: m.text,
           isUser: m.role == 'user',
           isStreaming: m.streaming,
-          onLongPress:
-              m.role == 'user' && m.dbId > 0 ? () => _showMessageActions(m) : null,
+          onLongPress: m.role == 'user' && m.dbId > 0
+              ? () => _showMessageActions(m)
+              : null,
         );
       },
     );
@@ -172,44 +208,73 @@ class _ChatTabState extends ConsumerState<ChatTab> {
   Widget _buildDock(bool busy) {
     final p = DawnPalette.of(context);
     final switches = ref.watch(chatSwitchesProvider);
+    final reasoningIndex = _reasoningLevels.indexOf(switches.reasoningStrength);
+    final normalizedReasoningIndex = reasoningIndex < 0 ? 1 : reasoningIndex;
+    final effectiveTemperature =
+        switches.temperature ?? _providerDefaultTemperature();
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              children: [
-                GlassToggle(
-                  icon: CupertinoIcons.lightbulb,
-                  label: '深度思考',
-                  on: switches.deepThink,
-                  onTap: () => ref.read(chatSwitchesProvider.notifier).toggleDeepThink(),
+      child: GlassContainer(
+        level: GlassLevel.l1,
+        radius: 8,
+        padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_advancedExpanded) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+                child: Column(
+                  children: [
+                    _AdvancedSliderRow(
+                      label:
+                          '思考强度 (${_reasoningLabels[switches.reasoningStrength] ?? '中'})',
+                      value: normalizedReasoningIndex.toDouble(),
+                      min: 0,
+                      max: 3,
+                      divisions: 3,
+                      onChanged: (value) => ref
+                          .read(chatSwitchesProvider.notifier)
+                          .setReasoningStrength(
+                            _reasoningLevels[value.round().clamp(0, 3)],
+                          ),
+                    ),
+                    _AdvancedSliderRow(
+                      label:
+                          '模型温度 (${effectiveTemperature.toStringAsFixed(1)})',
+                      value: effectiveTemperature.clamp(0, 2).toDouble(),
+                      min: 0,
+                      max: 2,
+                      divisions: 20,
+                      onChanged: (value) => ref
+                          .read(chatSwitchesProvider.notifier)
+                          .setTemperature(value),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                GlassToggle(
-                  icon: CupertinoIcons.globe,
-                  label: '联网搜索',
-                  on: switches.webSearch,
-                  onTap: () => ref.read(chatSwitchesProvider.notifier).toggleWebSearch(),
-                ),
-              ],
-            ),
-          ),
-          GlassContainer(
-            level: GlassLevel.l1,
-            radius: 27,
-            padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
-            child: Row(
+              ),
+              Container(height: 0.5, color: p.separator),
+              const SizedBox(height: 4),
+            ],
+            Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                GestureDetector(
-                  onTap: _openCapabilities,
-                  child: Padding(
-                    padding: const EdgeInsets.all(6),
-                    child: Icon(CupertinoIcons.add, size: 22, color: p.indigo),
+                CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(34, 34),
+                  onPressed: () =>
+                      setState(() => _advancedExpanded = !_advancedExpanded),
+                  child: Icon(
+                    CupertinoIcons.gear_alt,
+                    size: 20,
+                    color: _advancedExpanded ? p.indigo : p.ink2,
                   ),
+                ),
+                CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(34, 34),
+                  onPressed: _openCapabilities,
+                  child: Icon(CupertinoIcons.add, size: 22, color: p.indigo),
                 ),
                 Expanded(
                   child: CupertinoTextField(
@@ -217,7 +282,10 @@ class _ChatTabState extends ConsumerState<ChatTab> {
                     placeholder: '问点什么…',
                     placeholderStyle: TextStyle(fontSize: 15, color: p.ink3),
                     style: TextStyle(fontSize: 15, color: p.ink),
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 8,
+                    ),
                     decoration: const BoxDecoration(),
                     minLines: 1,
                     maxLines: 4,
@@ -236,17 +304,41 @@ class _ChatTabState extends ConsumerState<ChatTab> {
                         color: p.glassFill2,
                         border: Border.all(color: p.glassBorder),
                       ),
-                      child: const Icon(CupertinoIcons.stop_fill, size: 14, color: iosRed),
+                      child: const Icon(
+                        CupertinoIcons.stop_fill,
+                        size: 14,
+                        color: iosRed,
+                      ),
                     ),
                   )
                 else
                   DawnSendButton(onTap: _send),
               ],
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
+  }
+
+  double _providerDefaultTemperature() {
+    final config = ref.watch(providersProvider).value;
+    if (config == null) return 0.3;
+    final target = ref.watch(chatTargetProvider);
+    final selectedAgent = ref.watch(selectedAgentProvider);
+    final providerId =
+        target.providerId ??
+        selectedAgent?.providerId ??
+        config['activeProviderId'];
+    final providers = (config['providers'] as List? ?? const [])
+        .whereType<Map>()
+        .map((raw) => ProviderEntry.fromJson(raw.cast<String, dynamic>()));
+    for (final provider in providers) {
+      if (provider.id == providerId && provider.temperature != null) {
+        return provider.temperature!.clamp(0, 2).toDouble();
+      }
+    }
+    return 0.3;
   }
 
   void _showMessageActions(UiMessage message) {
@@ -255,8 +347,12 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     showCupertinoModalPopup<void>(
       context: context,
       builder: (ctx) => CupertinoActionSheet(
-        title: Text(message.text,
-            maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+        title: Text(
+          message.text,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 13),
+        ),
         actions: [
           CupertinoActionSheetAction(
             onPressed: () {
@@ -271,16 +367,21 @@ class _ChatTabState extends ConsumerState<ChatTab> {
           ),
           CupertinoActionSheetAction(
             isDestructiveAction: true,
-            onPressed: () => _editAndResend(ctx, conversation, message, 'inplace'),
+            onPressed: () =>
+                _editAndResend(ctx, conversation, message, 'inplace'),
             child: const Text('编辑并重发(就地覆盖)'),
           ),
           CupertinoActionSheetAction(
             onPressed: () async {
               Navigator.pop(ctx);
-              final result = await HarnessClient.instance
-                  .forkConversation(conversation.id, message.dbId, mode: 'fork');
+              final result = await HarnessClient.instance.forkConversation(
+                conversation.id,
+                message.dbId,
+                mode: 'fork',
+              );
               final newId = result['conversationId'] as String;
-              final conversations = await HarnessClient.instance.listConversations();
+              final conversations = await HarnessClient.instance
+                  .listConversations();
               final newConv = conversations.firstWhere((c) => c.id == newId);
               ref.read(currentConversationProvider.notifier).set(newConv);
               await ref.read(chatProvider.notifier).loadHistory(newConv);
@@ -298,7 +399,11 @@ class _ChatTabState extends ConsumerState<ChatTab> {
   }
 
   Future<void> _editAndResend(
-      BuildContext ctx, ConversationMeta conversation, UiMessage message, String mode) async {
+    BuildContext ctx,
+    ConversationMeta conversation,
+    UiMessage message,
+    String mode,
+  ) async {
     final ctrl = TextEditingController(text: message.text);
     final newText = await showCupertinoDialog<String>(
       context: ctx,
@@ -306,10 +411,17 @@ class _ChatTabState extends ConsumerState<ChatTab> {
         title: Text(mode == 'inplace' ? '编辑重发(就地)' : '编辑重发(分叉)'),
         content: Padding(
           padding: const EdgeInsets.only(top: 10),
-          child: CupertinoTextField(controller: ctrl, maxLines: 4, autofocus: true),
+          child: CupertinoTextField(
+            controller: ctrl,
+            maxLines: 4,
+            autofocus: true,
+          ),
         ),
         actions: [
-          CupertinoDialogAction(onPressed: () => Navigator.pop(dctx), child: const Text('取消')),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(dctx),
+            child: const Text('取消'),
+          ),
           CupertinoDialogAction(
             isDefaultAction: true,
             onPressed: () => Navigator.pop(dctx, ctrl.text),
@@ -321,8 +433,12 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     if (newText == null || newText.trim().isEmpty || !ctx.mounted) return;
     Navigator.pop(ctx);
 
-    final result = await HarnessClient.instance
-        .forkConversation(conversation.id, message.dbId, newText: newText, mode: mode);
+    final result = await HarnessClient.instance.forkConversation(
+      conversation.id,
+      message.dbId,
+      newText: newText,
+      mode: mode,
+    );
     final targetId = result['conversationId'] as String;
     final conversations = await HarnessClient.instance.listConversations();
     final target = conversations.firstWhere((c) => c.id == targetId);
@@ -330,6 +446,59 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     await ref.read(chatProvider.notifier).loadHistory(target);
     ref.read(conversationsProvider.notifier).refresh();
     await ref.read(chatProvider.notifier).send(newText);
+  }
+}
+
+class _AdvancedSliderRow extends StatelessWidget {
+  const _AdvancedSliderRow({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.onChanged,
+  });
+
+  final String label;
+  final double value;
+  final double min;
+  final double max;
+  final int divisions;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
+    return SizedBox(
+      height: 48,
+      child: Row(
+        children: [
+          SizedBox(
+            width: 112,
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: p.ink,
+              ),
+            ),
+          ),
+          Expanded(
+            child: CupertinoSlider(
+              value: value,
+              min: min,
+              max: max,
+              divisions: divisions,
+              activeColor: p.indigo,
+              onChanged: onChanged,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -358,7 +527,10 @@ class _TopBar extends ConsumerWidget {
               child: GlassContainer(
                 level: GlassLevel.l1,
                 radius: 19,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 9,
+                ),
                 onTap: () => showModelPickerSheet(
                   context,
                   title: '选择模型',
@@ -366,13 +538,20 @@ class _TopBar extends ConsumerWidget {
                   selectedModel: target.model,
                   onSelected: (pid, model, pname) => ref
                       .read(chatTargetProvider.notifier)
-                      .set(ChatTarget(providerId: pid, model: model, providerName: pname)),
+                      .set(
+                        ChatTarget(
+                          providerId: pid,
+                          model: model,
+                          providerName: pname,
+                        ),
+                      ),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Container(
-                      width: 7, height: 7,
+                      width: 7,
+                      height: 7,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         gradient: LinearGradient(colors: [p.indigo, p.coral]),
@@ -385,7 +564,11 @@ class _TopBar extends ConsumerWidget {
                         target.label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: p.ink),
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: p.ink,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 5),
@@ -395,7 +578,10 @@ class _TopBar extends ConsumerWidget {
               ),
             ),
           ),
-          _GlassIconButton(icon: CupertinoIcons.square_pencil, onTap: onNewChat),
+          _GlassIconButton(
+            icon: CupertinoIcons.square_pencil,
+            onTap: onNewChat,
+          ),
         ],
       ),
     );
@@ -444,10 +630,19 @@ class _EmptyState extends StatelessWidget {
           const Spacer(flex: 3),
           const DawnOrb(size: 56),
           const SizedBox(height: 14),
-          Text(dawnGreeting(),
-              style: TextStyle(fontSize: 21, fontWeight: FontWeight.w600, color: p.ink)),
+          Text(
+            dawnGreeting(),
+            style: TextStyle(
+              fontSize: 21,
+              fontWeight: FontWeight.w600,
+              color: p.ink,
+            ),
+          ),
           const SizedBox(height: 6),
-          Text('我是晨昏,今天想做点什么?', style: TextStyle(fontSize: 12.5, color: p.ink2)),
+          Text(
+            '我是晨昏,今天想做点什么?',
+            style: TextStyle(fontSize: 12.5, color: p.ink2),
+          ),
           const Spacer(flex: 2),
           for (final (icon, text) in _chips) ...[
             GlassContainer(
@@ -460,10 +655,12 @@ class _EmptyState extends StatelessWidget {
                   Icon(icon, size: 14, color: p.indigo),
                   const SizedBox(width: 9),
                   Expanded(
-                    child: Text(text,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 12.5, color: p.ink)),
+                    child: Text(
+                      text,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 12.5, color: p.ink),
+                    ),
                   ),
                 ],
               ),
@@ -500,14 +697,16 @@ class _DawnBubble extends StatelessWidget {
         onLongPress: onLongPress,
         child: Container(
           margin: EdgeInsets.only(
-            top: 4, bottom: 4,
+            top: 4,
+            bottom: 4,
             left: isUser ? 56 : 12,
             right: isUser ? 12 : 56,
           ),
           padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
           constraints: BoxConstraints(
             maxWidth:
-                (MediaQuery.sizeOf(context).width * (isUser ? 0.86 : 0.96)).clamp(260.0, 680.0),
+                (MediaQuery.sizeOf(context).width * (isUser ? 0.86 : 0.96))
+                    .clamp(260.0, 680.0),
           ),
           decoration: BoxDecoration(
             gradient: isUser
@@ -526,14 +725,30 @@ class _DawnBubble extends StatelessWidget {
               bottomRight: Radius.circular(isUser ? 8 : 21),
             ),
             boxShadow: isUser
-                ? [BoxShadow(color: p.indigo.withValues(alpha: 0.3), blurRadius: 14, offset: const Offset(0, 6))]
-                : [BoxShadow(color: p.shadowColor.withValues(alpha: 0.14), blurRadius: 12, offset: const Offset(0, 5))],
+                ? [
+                    BoxShadow(
+                      color: p.indigo.withValues(alpha: 0.3),
+                      blurRadius: 14,
+                      offset: const Offset(0, 6),
+                    ),
+                  ]
+                : [
+                    BoxShadow(
+                      color: p.shadowColor.withValues(alpha: 0.14),
+                      blurRadius: 12,
+                      offset: const Offset(0, 5),
+                    ),
+                  ],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (!(isStreaming && text.isEmpty))
-                MarkdownMessage(data: text, isUser: isUser, isStreaming: isStreaming),
+                MarkdownMessage(
+                  data: text,
+                  isUser: isUser,
+                  isStreaming: isStreaming,
+                ),
               if (isStreaming)
                 Padding(
                   padding: EdgeInsets.only(top: text.isEmpty ? 0 : 6),
@@ -543,7 +758,10 @@ class _DawnBubble extends StatelessWidget {
                           children: [
                             const DawnOrb(size: 12),
                             const SizedBox(width: 7),
-                            Text('正在思考…', style: TextStyle(fontSize: 11, color: p.ink2)),
+                            Text(
+                              '正在思考…',
+                              style: TextStyle(fontSize: 11, color: p.ink2),
+                            ),
                           ],
                         )
                       : const LightCursor(),
@@ -558,15 +776,31 @@ class _DawnBubble extends StatelessWidget {
 
 /// 工具调用卡(L3 内容玻璃观感,列表内免 blur)。
 class _DawnToolCard extends StatelessWidget {
-  const _DawnToolCard({required this.name, required this.text, this.isError = false});
+  const _DawnToolCard({
+    required this.name,
+    required this.text,
+    this.isError = false,
+    this.imageStatus,
+    this.imageEntries = const [],
+    this.onWaitForImages,
+  });
 
   final String name;
   final String text;
   final bool isError;
+  final String? imageStatus;
+  final List<ImageEntry> imageEntries;
+  final VoidCallback? onWaitForImages;
 
   @override
   Widget build(BuildContext context) {
     final p = DawnPalette.of(context);
+    final isImageTool = name == 'generate_image' || name == 'edit_image';
+    final title = switch (name) {
+      'generate_image' => '图片生成',
+      'edit_image' => '图片编辑',
+      _ => '工具 · $name',
+    };
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
@@ -576,8 +810,16 @@ class _DawnToolCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: p.aiBubbleFill,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: isError ? iosRed.withValues(alpha: 0.45) : p.aiBubbleBorder),
-          boxShadow: [BoxShadow(color: p.shadowColor.withValues(alpha: 0.12), blurRadius: 12, offset: const Offset(0, 5))],
+          border: Border.all(
+            color: isError ? iosRed.withValues(alpha: 0.45) : p.aiBubbleBorder,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: p.shadowColor.withValues(alpha: 0.12),
+              blurRadius: 12,
+              offset: const Offset(0, 5),
+            ),
+          ],
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -598,7 +840,11 @@ class _DawnToolCard extends StatelessWidget {
                 color: isError ? iosRed.withValues(alpha: 0.12) : null,
               ),
               child: Icon(
-                isError ? CupertinoIcons.exclamationmark_circle_fill : CupertinoIcons.wrench_fill,
+                isError
+                    ? CupertinoIcons.exclamationmark_circle_fill
+                    : (isImageTool
+                          ? CupertinoIcons.photo_fill
+                          : CupertinoIcons.wrench_fill),
                 size: 12,
                 color: isError ? iosRed : Colors.white,
               ),
@@ -608,17 +854,131 @@ class _DawnToolCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('工具 · $name',
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: p.ink)),
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: p.ink,
+                    ),
+                  ),
                   const SizedBox(height: 1),
-                  Text(text,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 11, color: p.ink2)),
+                  Text(
+                    text,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: p.ink2),
+                  ),
+                  if (imageEntries.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 92,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: imageEntries.length,
+                        separatorBuilder: (_, _) => const SizedBox(width: 6),
+                        itemBuilder: (_, index) => GestureDetector(
+                          onTap: () => _openImage(context, imageEntries[index]),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(9),
+                            child: Image.network(
+                              '${HarnessClient.instance.httpBase}/studio/${imageEntries[index].id}',
+                              width: 92,
+                              height: 92,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => ColoredBox(
+                                color: p.groupedBg,
+                                child: const SizedBox(width: 92, height: 92),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (imageStatus == 'queued' && onWaitForImages != null) ...[
+                    const SizedBox(height: 7),
+                    SizedBox(
+                      height: 30,
+                      child: CupertinoButton(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        minimumSize: const Size(0, 30),
+                        color: p.indigo.withValues(alpha: .12),
+                        onPressed: onWaitForImages,
+                        child: Text(
+                          '等待生成并显示',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: p.indigo,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ] else if (imageStatus == 'waiting') ...[
+                    const SizedBox(height: 7),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CupertinoActivityIndicator(radius: 6, color: p.indigo),
+                        const SizedBox(width: 6),
+                        Text(
+                          '正在生成图片…',
+                          style: TextStyle(fontSize: 11, color: p.indigo),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _openImage(BuildContext context, ImageEntry entry) {
+    final p = DawnPalette.of(context);
+    Navigator.of(context).push(
+      CupertinoPageRoute<void>(
+        builder: (ctx) => CupertinoPageScaffold(
+          backgroundColor: p.isDark
+              ? const Color(0xFF0C0D12)
+              : const Color(0xFFE9EAF0),
+          navigationBar: CupertinoNavigationBar(
+            backgroundColor: p.cardBg,
+            border: Border(bottom: BorderSide(color: p.separator)),
+            leading: CupertinoNavigationBarBackButton(
+              color: p.indigo,
+              previousPageTitle: '对话',
+              onPressed: () => Navigator.pop(ctx),
+            ),
+            middle: Text(
+              '生成结果',
+              style: TextStyle(
+                color: p.ink,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          child: SafeArea(
+            top: false,
+            child: InteractiveViewer(
+              minScale: .7,
+              maxScale: 5,
+              boundaryMargin: const EdgeInsets.all(120),
+              child: Center(
+                child: Image.network(
+                  '${HarnessClient.instance.httpBase}/studio/${entry.id}',
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, _, _) =>
+                      Icon(CupertinoIcons.photo, size: 44, color: p.ink3),
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -637,7 +997,8 @@ class _SubPageBack extends StatelessWidget {
       children: [
         child,
         Positioned(
-          top: 0, left: 0,
+          top: 0,
+          left: 0,
           child: SafeArea(
             bottom: false,
             child: Padding(
@@ -659,7 +1020,8 @@ class _ConversationDrawer extends ConsumerStatefulWidget {
   const _ConversationDrawer();
 
   @override
-  ConsumerState<_ConversationDrawer> createState() => _ConversationDrawerState();
+  ConsumerState<_ConversationDrawer> createState() =>
+      _ConversationDrawerState();
 }
 
 class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
@@ -667,8 +1029,9 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
 
   void _open(Widget page, {bool wrap = true}) {
     Navigator.of(context).pop(); // 先收抽屉
-    Navigator.of(context)
-        .push(cupertinoRoute(wrap ? _SubPageBack(child: page) : page));
+    Navigator.of(
+      context,
+    ).push(cupertinoRoute(wrap ? _SubPageBack(child: page) : page));
   }
 
   @override
@@ -709,9 +1072,14 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
                 Expanded(
                   child: conversations.when(
                     data: (list) => _buildGroupedList(list, p),
-                    loading: () => const Center(child: CupertinoActivityIndicator()),
-                    error: (e, _) =>
-                        Center(child: Text('加载失败:$e', style: const TextStyle(fontSize: 12))),
+                    loading: () =>
+                        const Center(child: CupertinoActivityIndicator()),
+                    error: (e, _) => Center(
+                      child: Text(
+                        '加载失败:$e',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
                   ),
                 ),
                 Divider(height: 1, thickness: 0.5, color: p.glassBorder),
@@ -739,23 +1107,38 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
                   child: Row(
                     children: [
                       Container(
-                        width: 28, height: 28,
+                        width: 28,
+                        height: 28,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
                           gradient: LinearGradient(colors: [p.indigo, p.coral]),
                         ),
-                        child: const Icon(CupertinoIcons.person_fill, size: 15, color: Colors.white),
+                        child: const Icon(
+                          CupertinoIcons.person_fill,
+                          size: 15,
+                          color: Colors.white,
+                        ),
                       ),
                       const SizedBox(width: 9),
                       Expanded(
-                        child: Text('我的',
-                            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: p.ink)),
+                        child: Text(
+                          '我的',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                            color: p.ink,
+                          ),
+                        ),
                       ),
                       CupertinoButton(
-                        minSize: 0,
                         padding: const EdgeInsets.all(8),
                         onPressed: () => _open(const SettingsTab()),
-                        child: Icon(CupertinoIcons.gear, size: 17, color: p.ink3),
+                        minimumSize: Size(0, 0),
+                        child: Icon(
+                          CupertinoIcons.gear,
+                          size: 17,
+                          color: p.ink3,
+                        ),
                       ),
                     ],
                   ),
@@ -771,15 +1154,25 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
   Widget _buildGroupedList(List<ConversationMeta> list, DawnPalette p) {
     final filtered = _query.isEmpty
         ? list
-        : list.where((c) => c.title.toLowerCase().contains(_query.toLowerCase())).toList();
+        : list
+              .where(
+                (c) => c.title.toLowerCase().contains(_query.toLowerCase()),
+              )
+              .toList();
     if (filtered.isEmpty) {
-      return Center(child: Text('暂无会话', style: TextStyle(fontSize: 12.5, color: p.ink2)));
+      return Center(
+        child: Text('暂无会话', style: TextStyle(fontSize: 12.5, color: p.ink2)),
+      );
     }
 
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final yesterday = today.subtract(const Duration(days: 1));
-    final groups = <String, List<ConversationMeta>>{'今天': [], '昨天': [], '更早': []};
+    final groups = <String, List<ConversationMeta>>{
+      '今天': [],
+      '昨天': [],
+      '更早': [],
+    };
     for (final c in filtered) {
       final dt = DateTime.tryParse(c.updatedAt)?.toLocal();
       final day = dt == null ? null : DateTime(dt.year, dt.month, dt.day);
@@ -799,9 +1192,15 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
           if (entry.value.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 3),
-              child: Text(entry.key,
-                  style: TextStyle(
-                      fontSize: 9.5, fontWeight: FontWeight.w600, letterSpacing: 1.4, color: p.ink3)),
+              child: Text(
+                entry.key,
+                style: TextStyle(
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.4,
+                  color: p.ink3,
+                ),
+              ),
             ),
             for (final c in entry.value) _buildConversationTile(c, p),
           ],
@@ -817,15 +1216,15 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
         onTap: () async {
           ref.read(currentConversationProvider.notifier).set(c);
           await ref.read(chatProvider.notifier).loadHistory(c);
-          if (context.mounted) Navigator.of(context).pop();
+          if (mounted) Navigator.of(context).pop();
         },
         child: Container(
           padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
           decoration: BoxDecoration(
             color: selected
                 ? (p.isDark
-                    ? Colors.white.withValues(alpha: 0.12)
-                    : Colors.white.withValues(alpha: 0.6))
+                      ? Colors.white.withValues(alpha: 0.12)
+                      : Colors.white.withValues(alpha: 0.6))
                 : null,
             borderRadius: BorderRadius.circular(12),
           ),
@@ -849,7 +1248,8 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
               ),
               _ConversationMenu(
                 conversation: c,
-                onRenamed: () => ref.read(conversationsProvider.notifier).refresh(),
+                onRenamed: () =>
+                    ref.read(conversationsProvider.notifier).refresh(),
                 onDeleted: () {
                   if (ref.read(currentConversationProvider)?.id == c.id) {
                     ref.read(currentConversationProvider.notifier).set(null);
@@ -884,15 +1284,16 @@ class _DrawerEntry extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = DawnPalette.of(context);
     return CupertinoButton(
-      minSize: 0,
       padding: EdgeInsets.zero,
       onPressed: onTap,
+      minimumSize: Size(0, 0),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         child: Row(
           children: [
             Container(
-              width: 24, height: 24,
+              width: 24,
+              height: 24,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(8),
                 gradient: LinearGradient(
@@ -904,7 +1305,14 @@ class _DrawerEntry extends StatelessWidget {
               child: Icon(icon, size: 13, color: Colors.white),
             ),
             const SizedBox(width: 9),
-            Text(label, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: p.ink)),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w500,
+                color: p.ink,
+              ),
+            ),
           ],
         ),
       ),
@@ -933,8 +1341,10 @@ class _AgentPickerSheet extends StatelessWidget {
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 14, 20, 6),
-              child: Text('选择 Agent(新会话)',
-                  style: TextStyle(fontSize: 13, color: p.ink2)),
+              child: Text(
+                '选择 Agent(新会话)',
+                style: TextStyle(fontSize: 13, color: p.ink2),
+              ),
             ),
             IosSection(
               children: [
@@ -980,7 +1390,11 @@ class _ConversationMenu extends StatelessWidget {
       onTap: () => _open(context),
       child: Padding(
         padding: const EdgeInsets.all(6),
-        child: Icon(CupertinoIcons.ellipsis, size: 16, color: DawnPalette.of(context).ink2),
+        child: Icon(
+          CupertinoIcons.ellipsis,
+          size: 16,
+          color: DawnPalette.of(context).ink2,
+        ),
       ),
     );
   }
@@ -1027,7 +1441,10 @@ class _ConversationMenu extends StatelessWidget {
           child: CupertinoTextField(controller: ctrl, autofocus: true),
         ),
         actions: [
-          CupertinoDialogAction(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
           CupertinoDialogAction(
             isDefaultAction: true,
             onPressed: () => Navigator.pop(ctx, ctrl.text),
@@ -1037,7 +1454,10 @@ class _ConversationMenu extends StatelessWidget {
       ),
     );
     if (newTitle != null && newTitle.isNotEmpty) {
-      await HarnessClient.instance.renameConversation(conversation.id, newTitle);
+      await HarnessClient.instance.renameConversation(
+        conversation.id,
+        newTitle,
+      );
       onRenamed();
     }
   }

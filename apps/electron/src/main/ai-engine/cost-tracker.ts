@@ -123,7 +123,9 @@ export class CostTracker {
 
   /** 设置会话预算上限 (美元) */
   setBudgetLimit (limit: number | undefined): void {
-    this.budgetLimit = limit
+    this.budgetLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0
+      ? limit
+      : undefined
   }
 
   /** 记录一次 API 调用的 token 消耗 */

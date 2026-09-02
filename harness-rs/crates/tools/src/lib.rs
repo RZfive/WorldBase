@@ -705,6 +705,35 @@ mod tests {
     }
 
     #[test]
+    fn create_agent_schema_matches_electron_workspace_options() {
+        let tool = builtin_tools()
+            .into_iter()
+            .find(|tool| tool.name() == "create_agent")
+            .expect("create_agent tool");
+        let schema = tool.input_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("create_agent properties");
+        for name in [
+            "reasoning_strength",
+            "allowed_tools",
+            "denied_tools",
+            "memory_scopes",
+            "allow_user_traits",
+            "allow_agent_skills",
+            "allow_steps",
+            "allow_knowledge",
+            "auto_reply_enabled",
+            "auto_reply_require_mention",
+        ] {
+            assert!(
+                properties.contains_key(name),
+                "missing create_agent field: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn desktop_domain_filtered_by_capabilities() {
         let tools = builtin_tools();
         let mut mobile = worldbase_protocol::types::Capabilities::mobile("mobile-ios");

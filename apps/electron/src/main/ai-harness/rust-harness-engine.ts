@@ -51,7 +51,21 @@ const PLAN_MODE_WRITE_TOOLS = new Set([
 // the Electron facade so it can create isolated Rust sessions and preserve
 // host conversation/session routing. This override also keeps Rust's legacy
 // compatibility stub from becoming visible at the nesting limit.
-const ELECTRON_EXECUTION_OVERRIDE_TOOL_NAMES = new Set(['spawn_subagents'])
+// These tools depend on Electron-owned ephemeral state or a live renderer
+// window. Keep Rust in charge of the model/tool loop, but execute the exact
+// Electron implementation through the host `tool.execute` callback so Rust
+// mode does not expose a native stub or a narrower schema.
+const ELECTRON_EXECUTION_OVERRIDE_TOOL_NAMES = new Set([
+  'spawn_subagents',
+  'ask_user',
+  'read_current_page',
+  'interact_current_page',
+  'fill_current_page_form',
+  'save_current_page_as_document',
+  'list_documents',
+  'read_document',
+  'open_project_app'
+])
 
 export interface RustHarnessEngineOptions {
   client: RustHarnessClient
@@ -239,6 +253,8 @@ export class RustHarnessEngine implements AIHarness {
         customTools,
         workspaceRoot: options?.workspaceRoot,
         targetProjectId: options?.targetProjectId ?? this.defaultTargetProjectId,
+        memoryScopes: options?.memoryScopes,
+        memoryQuery: textFromContent(pending.content),
         allowedMcpServerIds: options?.allowedMcpServerIds,
         reasoningEffort: effectiveConfig.reasoningEffort,
         temperature: effectiveConfig.temperature,
@@ -286,8 +302,9 @@ export class RustHarnessEngine implements AIHarness {
   }
 
   getAvailableTools (): ToolDefinition[] {
-    // Rust remains the execution authority for every name it advertises.
-    // Electron only supplements names absent from the native catalog.
+    // Rust remains the execution authority for the loop. Host-only tools are
+    // intentionally replaced with Electron's exact public definitions so the
+    // catalog shown to the renderer matches the handler that will run.
     const tools = this.client.getAvailableTools()
       .map(tool => ({
       name: tool.name,
@@ -296,7 +313,9 @@ export class RustHarnessEngine implements AIHarness {
       }))
     const byName = new Map(tools.map(tool => [tool.name, tool]))
     for (const tool of this.electronTools.getToolDefinitions()) {
-      if (!byName.has(tool.name)) byName.set(tool.name, tool)
+      if (ELECTRON_EXECUTION_OVERRIDE_TOOL_NAMES.has(tool.name) || !byName.has(tool.name)) {
+        byName.set(tool.name, tool)
+      }
     }
     return Array.from(byName.values())
   }
@@ -327,7 +346,7 @@ export class RustHarnessEngine implements AIHarness {
   }
 
   setBudgetLimit (limit: number | null): void {
-    this.budgetLimit = typeof limit === 'number' && Number.isFinite(limit) && limit >= 0 ? limit : null
+    this.budgetLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? limit : null
   }
 
   private recordUsage (frame: RustEventFrame, fallback: AIConfigInput): void {

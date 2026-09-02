@@ -271,7 +271,7 @@ impl GroupEngine {
                         Some(injection.content.clone())
                     })
                     .collect();
-                let prompt = build_prompt(session, member, user_input, round, &injection_text);
+                let prompt = build_prompt(session, member, user_input, &injection_text);
                 let execution = execute_member(member.clone(), prompt);
                 let member = member.clone();
                 runs.push(async move { execution.await.map(|content| (member, content)) });
@@ -606,7 +606,6 @@ fn build_prompt(
     session: &GroupSessionMeta,
     member: &GroupMember,
     user_input: &str,
-    round: u32,
     injections: &[String],
 ) -> String {
     let others: String = session

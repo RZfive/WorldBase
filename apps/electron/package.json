@@ -42,7 +42,6 @@
     "@modelcontextprotocol/client": "^2.0.0-alpha.2",
     "@pdf-lib/fontkit": "^1.1.1",
     "@xmldom/xmldom": "^0.9.10",
-    "better-sqlite3": "^12.8.0",
     "body-parser": "^1.20.4",
     "bytenode": "^1.5.7",
     "emoji-picker-element": "^1.29.1",
@@ -68,7 +67,6 @@
     "vue-i18n": "^9.14.5"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.6",
     "@types/node": "^25.5.0",
     "@types/pdf-parse": "^1.1.5",
@@ -84,7 +82,6 @@
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "better-sqlite3",
       "electron",
       "esbuild",
       "sharp"
