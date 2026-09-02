@@ -7,6 +7,7 @@ use crate::hub::{Hub, RunHandle};
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::Engine;
+use futures::StreamExt;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -100,6 +101,12 @@ pub async fn dispatch(
         MEMORY_SEARCH => memory_search(hub, params),
         MEMORY_ADD => memory_add(hub, params),
         MEMORY_DELETE => memory_delete(hub, params),
+        MEMORY_INGEST => memory_ingest(hub, params),
+        MEMORY_LIST => memory_list(hub, params),
+        MEMORY_SAVE => memory_save(hub, params),
+        MEMORY_PIN => memory_pin(hub, params),
+        MEMORY_COMPACT => memory_compact(hub, params),
+        MEMORY_COMPACT_STATUS => memory_compact_status(hub),
 
         SKILL_LIST => skill_list(hub),
         SKILL_RUN => skill_run(hub, params),
@@ -185,6 +192,7 @@ pub async fn dispatch(
         AGENT_GROUP_DELETE => agent_group_delete(hub, params),
 
         STUDIO_GENERATE => studio_generate(hub, params),
+        STUDIO_PROMPT_OPTIMIZE => studio_prompt_optimize(hub, params).await,
         STUDIO_LIST => studio_list(hub, params),
         STUDIO_DELETE => studio_delete(hub, params),
         STUDIO_TAG => studio_tag(hub, params),
@@ -580,11 +588,74 @@ fn memory_add(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn memory_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    if let Some(id) = params["id"].as_str() {
+        let deleted = hub.store.delete_workspace_memory(id).map_err(internal)?;
+        return Ok(json!({ "deleted": deleted }));
+    }
     let id = params["id"]
         .as_i64()
         .ok_or_else(|| params_err("missing id"))?;
     let deleted = hub.store.delete_memory(id).map_err(internal)?;
     Ok(json!({ "deleted": deleted }))
+}
+
+fn memory_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let options: WorkspaceMemorySearchOptions =
+        serde_json::from_value(params).map_err(|error| params_err(error.to_string()))?;
+    let entries = hub
+        .store
+        .search_workspace_memories(&options)
+        .map_err(internal)?;
+    Ok(json!({ "entries": entries }))
+}
+
+fn memory_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let raw = params.get("entry").cloned().unwrap_or(params);
+    let entry: WorkspaceMemoryEntry =
+        serde_json::from_value(raw).map_err(|error| params_err(error.to_string()))?;
+    if entry.title.trim().is_empty() {
+        return Err(params_err("memory title is required"));
+    }
+    if entry.summary.trim().is_empty() {
+        return Err(params_err("memory summary is required"));
+    }
+    let saved = hub.store.save_workspace_memory(&entry).map_err(internal)?;
+    Ok(json!({ "entry": saved }))
+}
+
+fn memory_pin(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = params["id"]
+        .as_str()
+        .ok_or_else(|| params_err("missing id"))?;
+    let pinned = params["pinned"].as_bool().unwrap_or(false);
+    let updated = hub
+        .store
+        .pin_workspace_memory(id, pinned)
+        .map_err(internal)?;
+    Ok(json!({ "updated": updated }))
+}
+
+fn memory_compact(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let raw = params.get("plan").cloned().unwrap_or(params);
+    let plan: MemoryCompactionPlan =
+        serde_json::from_value(raw).map_err(|error| params_err(error.to_string()))?;
+    let result = hub
+        .store
+        .compact_workspace_memories(&plan)
+        .map_err(internal)?;
+    Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({})))
+}
+
+fn memory_compact_status(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
+    Ok(serde_json::to_value(hub.store.memory_compaction_status()).unwrap_or_else(|_| json!({})))
+}
+
+fn memory_ingest(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let entries = hub
+        .store
+        .ingest_workspace_memories(&params)
+        .map_err(internal)?;
+    Ok(json!({ "entries": entries }))
 }
 
 // ---------- skills ----------
@@ -1800,14 +1871,21 @@ fn agent_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         .as_deref()
         .map(sanitize_agent_id)
         .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| create_agent_id(agent_string(value, "name").as_deref().unwrap_or("custom")));
+        .unwrap_or_else(|| {
+            create_agent_id(agent_string(value, "name").as_deref().unwrap_or("custom"))
+        });
     let name = agent_string(value, "name")
         .or_else(|| existing.as_ref().map(|agent| agent.name.clone()))
         .or_else(|| params["fallbackName"].as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "Untitled agent".into());
-    let icon = agent_string(value, "icon").or_else(|| existing.as_ref().map(|agent| agent.icon.clone()));
+    let icon =
+        agent_string(value, "icon").or_else(|| existing.as_ref().map(|agent| agent.icon.clone()));
     let description = if value.get("description").and_then(Value::as_str).is_some() {
-        value["description"].as_str().unwrap_or_default().trim().to_string()
+        value["description"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
     } else {
         existing
             .as_ref()
@@ -1821,13 +1899,20 @@ fn agent_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         .map(ToOwned::to_owned)
         .or_else(|| existing.as_ref().map(|agent| agent.system_prompt.clone()))
         .unwrap_or_default();
-    let provider_id = agent_string_alias(value, "providerId", "provider_id")
-        .or_else(|| existing.as_ref().and_then(|agent| agent.provider_id.clone()));
+    let provider_id = agent_string_alias(value, "providerId", "provider_id").or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|agent| agent.provider_id.clone())
+    });
     let model_id = agent_string_alias(value, "modelId", "model_id")
         .or_else(|| existing.as_ref().and_then(|agent| agent.model_id.clone()));
     let reasoning_strength = agent_string_alias(value, "reasoningStrength", "reasoning_strength")
         .filter(|strength| matches!(strength.as_str(), "low" | "medium" | "high" | "max"))
-        .or_else(|| existing.as_ref().map(|agent| agent.reasoning_strength.clone()))
+        .or_else(|| {
+            existing
+                .as_ref()
+                .map(|agent| agent.reasoning_strength.clone())
+        })
         .unwrap_or_else(|| "medium".into());
     let skill_ids = agent_string_array_alias(value, "skillIds", "skill_ids")
         .or_else(|| existing.as_ref().map(|agent| agent.skill_ids.clone()))
@@ -1842,7 +1927,12 @@ fn agent_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         .map(|scopes| {
             scopes
                 .into_iter()
-                .filter(|scope| matches!(scope.as_str(), "user" | "agent" | "project" | "group" | "channel"))
+                .filter(|scope| {
+                    matches!(
+                        scope.as_str(),
+                        "user" | "agent" | "project" | "group" | "channel"
+                    )
+                })
                 .collect()
         })
         .or_else(|| existing.as_ref().map(|agent| agent.memory_scopes.clone()))
@@ -1891,7 +1981,9 @@ fn agent_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 fn sanitize_agent_id(value: &str) -> String {
     value
         .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '_' || *character == '-')
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
+        })
         .collect()
 }
 
@@ -2007,7 +2099,9 @@ fn sanitize_group_id(value: &str) -> String {
     // IDs are deliberately restricted to the portable ASCII filename subset.
     value
         .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '_' || *character == '-')
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
+        })
         .collect()
 }
 
@@ -2053,18 +2147,28 @@ fn create_group_id(name: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
-    format!("group_{}_{}", if slug.is_empty() { "team" } else { &slug }, base36(millis))
+    format!(
+        "group_{}_{}",
+        if slug.is_empty() { "team" } else { &slug },
+        base36(millis)
+    )
 }
 
 fn group_number(value: &Value, key: &str) -> Option<f64> {
     value.get(key).and_then(|value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+        value.as_f64().or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+        })
     })
 }
 
-fn group_source_value<'a>(value: &'a Value, existing: Option<&'a Value>, key: &str) -> Option<&'a Value> {
+fn group_source_value<'a>(
+    value: &'a Value,
+    existing: Option<&'a Value>,
+    key: &str,
+) -> Option<&'a Value> {
     value
         .get(key)
         .filter(|candidate| !candidate.is_null())
@@ -2085,7 +2189,9 @@ fn normalize_agent_group(value: &Value, existing: Option<&Value>, fallback_name:
         create_group_id(
             group_string(value, "name")
                 .as_deref()
-                .or(existing.and_then(|group| group_string(group, "name")).as_deref())
+                .or(existing
+                    .and_then(|group| group_string(group, "name"))
+                    .as_deref())
                 .unwrap_or("group"),
         )
     } else {
@@ -2097,9 +2203,14 @@ fn normalize_agent_group(value: &Value, existing: Option<&Value>, fallback_name:
         .unwrap_or_else(|| fallback_name.trim().to_string())
         .trim()
         .to_string();
-    let icon = group_string(value, "icon").or_else(|| existing.and_then(|group| group_string(group, "icon")));
+    let icon = group_string(value, "icon")
+        .or_else(|| existing.and_then(|group| group_string(group, "icon")));
     let description = if value.get("description").and_then(Value::as_str).is_some() {
-        value["description"].as_str().unwrap_or_default().trim().to_string()
+        value["description"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
     } else {
         existing
             .and_then(|group| group.get("description").and_then(Value::as_str))
@@ -2107,8 +2218,14 @@ fn normalize_agent_group(value: &Value, existing: Option<&Value>, fallback_name:
             .trim()
             .to_string()
     };
-    let coordinator = if value.get("coordinatorAgentId").and_then(Value::as_str).is_some()
-        || value.get("coordinator_agent_id").and_then(Value::as_str).is_some()
+    let coordinator = if value
+        .get("coordinatorAgentId")
+        .and_then(Value::as_str)
+        .is_some()
+        || value
+            .get("coordinator_agent_id")
+            .and_then(Value::as_str)
+            .is_some()
     {
         group_string(value, "coordinatorAgentId")
             .or_else(|| group_string(value, "coordinator_agent_id"))
@@ -2180,18 +2297,21 @@ fn normalize_agent_group(value: &Value, existing: Option<&Value>, fallback_name:
         scopes.push("group".into());
     }
 
-    let visibility = if group_string(value, "visibility").as_deref()
-        == Some("expandable_internal_transcript")
-    {
-        "expandable_internal_transcript".to_string()
-    } else {
-        existing
-            .and_then(|group| group_string(group, "visibility"))
-            .unwrap_or_else(|| "summary_only".into())
-    };
+    let visibility =
+        if group_string(value, "visibility").as_deref() == Some("expandable_internal_transcript") {
+            "expandable_internal_transcript".to_string()
+        } else {
+            existing
+                .and_then(|group| group_string(group, "visibility"))
+                .unwrap_or_else(|| "summary_only".into())
+        };
     let created_at = group_string(value, "createdAt")
         .or_else(|| group_string(value, "created_at"))
-        .or_else(|| existing.and_then(|group| group_string(group, "createdAt")).or_else(|| existing.and_then(|group| group_string(group, "created_at"))))
+        .or_else(|| {
+            existing
+                .and_then(|group| group_string(group, "createdAt"))
+                .or_else(|| existing.and_then(|group| group_string(group, "created_at")))
+        })
         .unwrap_or_else(|| now.clone());
 
     json!({
@@ -2248,7 +2368,9 @@ fn agent_group_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject>
     let mut groups = hub.store.get_agent_groups_setting().map_err(internal)?;
     let requested_id = group_string(value, "id").map(|id| sanitize_group_id(&id));
     let existing_index = requested_id.as_deref().and_then(|id| {
-        groups.iter().position(|group| group_string(group, "id").as_deref() == Some(id))
+        groups
+            .iter()
+            .position(|group| group_string(group, "id").as_deref() == Some(id))
     });
     let existing = existing_index.and_then(|index| groups.get(index));
     let fallback_name = params["fallbackName"].as_str().unwrap_or("Untitled group");
@@ -2258,7 +2380,9 @@ fn agent_group_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject>
     } else {
         groups.push(normalized.clone());
     }
-    hub.store.set_agent_groups_setting(&groups).map_err(internal)?;
+    hub.store
+        .set_agent_groups_setting(&groups)
+        .map_err(internal)?;
     let group = serde_json::from_value::<AgentGroupDefinition>(normalized)
         .map_err(|error| internal(error.to_string()))?;
     Ok(json!({ "group": group }))
@@ -2274,7 +2398,9 @@ fn agent_group_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObjec
     groups.retain(|group| group_string(group, "id").as_deref() != Some(id.as_str()));
     let deleted = groups.len() != original_len;
     if deleted {
-        hub.store.set_agent_groups_setting(&groups).map_err(internal)?;
+        hub.store
+            .set_agent_groups_setting(&groups)
+            .map_err(internal)?;
     }
     Ok(json!({ "deleted": deleted }))
 }
@@ -2295,6 +2421,133 @@ fn studio_generate(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
     }
     let stream_id = crate::studio::StudioService::generate(hub.clone(), p).map_err(internal)?;
     Ok(json!({ "streamId": stream_id }))
+}
+
+fn prompt_optimization_text_model(
+    entry: &worldbase_protocol::types::ProviderEntry,
+    requested_model: Option<&str>,
+) -> Option<String> {
+    let supports_text = |model: &str| {
+        entry
+            .models
+            .iter()
+            .find(|candidate| candidate.id == model)
+            .map(|candidate| !candidate.image_generation && !candidate.image_editing)
+            .unwrap_or(true)
+    };
+    if let Some(model) = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        if supports_text(model) {
+            return Some(model.to_string());
+        }
+    }
+    let active = entry.active_model.trim();
+    if !active.is_empty() && supports_text(active) {
+        return Some(active.to_string());
+    }
+    entry
+        .models
+        .iter()
+        .find(|model| !model.image_generation && !model.image_editing)
+        .map(|model| model.id.clone())
+}
+
+fn prompt_optimization_provider(
+    hub: &Hub,
+    requested_provider: Option<&str>,
+    requested_model: Option<&str>,
+) -> Result<worldbase_protocol::types::ProviderEntry> {
+    let config = hub.providers_config();
+    let candidates: Vec<_> = if let Some(provider_id) = requested_provider
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        vec![config
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .ok_or_else(|| anyhow::anyhow!("provider not found: {provider_id}"))?
+            .clone()]
+    } else {
+        let mut ordered = Vec::new();
+        let active_id = config.active_provider_id.as_deref();
+        if let Some(active) = config
+            .providers
+            .iter()
+            .find(|provider| Some(provider.id.as_str()) == active_id)
+        {
+            ordered.push(active.clone());
+        }
+        ordered.extend(
+            config
+                .providers
+                .iter()
+                .filter(|provider| Some(provider.id.as_str()) != active_id)
+                .cloned(),
+        );
+        ordered
+    };
+
+    for mut provider in candidates {
+        if let Some(model) = prompt_optimization_text_model(&provider, requested_model) {
+            provider.active_model = model;
+            return Ok(provider);
+        }
+    }
+    anyhow::bail!("no text model available for prompt optimization")
+}
+
+async fn studio_prompt_optimize(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let prompt = params["prompt"]
+        .as_str()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .ok_or_else(|| params_err("missing prompt"))?;
+    let is_negative = params["isNegative"].as_bool().unwrap_or(false);
+    let provider_id = params["providerId"].as_str();
+    let requested_model = params["model"].as_str();
+    let entry = prompt_optimization_provider(hub, provider_id, requested_model)
+        .map_err(|error| params_err(error.to_string()))?;
+    let provider = worldbase_providers::create_provider_from_entry(&entry).map_err(internal)?;
+    let system = if is_negative {
+        "你是一个专业的AI绘画提示词优化专家。用户会给你一段负向提示词（negative prompt），请优化它使其更加专业、精确、有效。负向提示词用于描述不希望在图片中出现的元素。请直接返回优化后的负向提示词文本，不要添加任何解释或前缀。保持与用户输入相同的语言。"
+    } else {
+        "你是一个专业的AI绘画提示词优化专家。用户会给你一段图片生成提示词（prompt），请优化它使其更加专业、详细、生动，能够帮助AI模型生成更高质量的图片。请直接返回优化后的提示词文本，不要添加任何解释或前缀。保持与用户输入相同的语言。"
+    };
+    let mut stream = provider
+        .chat_stream(
+            Some(system),
+            vec![worldbase_providers::LlmMessage::text(
+                worldbase_providers::LlmRole::User,
+                prompt,
+            )],
+            Vec::new(),
+            1024,
+            worldbase_providers::ChatOptions {
+                temperature: Some(0.8),
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .map_err(|error| internal(error.to_string()))?;
+    let mut optimized = String::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(worldbase_providers::StreamChunk::TextDelta(text)) => optimized.push_str(&text),
+            Ok(worldbase_providers::StreamChunk::Completed { assistant, .. }) => {
+                optimized = assistant.text_view();
+                break;
+            }
+            Err(error) => return Err(internal(error.to_string())),
+        }
+    }
+    let optimized = optimized.trim();
+    if optimized.is_empty() {
+        return Err(params_err("prompt optimization returned an empty response"));
+    }
+    Ok(json!({ "ok": true, "optimizedPrompt": optimized }))
 }
 
 fn studio_library_dir() -> std::path::PathBuf {
@@ -2837,7 +3090,7 @@ fn conversation_fork(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject
 
 // ---------- skills（内容安装/删除）----------
 
-fn skill_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+fn skill_save(_hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let name = params["name"]
         .as_str()
         .ok_or_else(|| params_err("missing name"))?;

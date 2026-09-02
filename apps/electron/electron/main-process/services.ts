@@ -499,9 +499,9 @@ export async function initializeServices (): Promise<void> {
   mainState.projectPackageService = new ProjectPackageService(mainState.projectFS, mainState.dataAccess)
   mainState.asyncTaskManager = new AsyncTaskManager(mainState.builderService)
 
-  // Wire up the external database delegate.
-  // The SqliteAdapter is loaded here (in the shell) so that the data layer
-  // itself doesn't depend on native modules directly.
+  // Wire up the external database delegate. The adapter uses Electron's
+  // built-in node:sqlite implementation, keeping the data layer independent
+  // from any native npm module and its Electron ABI.
   const sqliteDelegate = new SqliteAdapter()
   mainState.dataAccess.setDatabaseDelegate({
     query: (dbPath: string, sql: string, params?: unknown[]) => sqliteDelegate.query(dbPath, sql, params),

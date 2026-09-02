@@ -8,7 +8,7 @@ import { USER_ABORT_MESSAGE } from '../../src/main/ai-engine/abort-utils.js'
 import { resolveModelPricing, type ModelPricing } from '../../src/main/ai-engine/cost-tracker.js'
 import type { MCPServerSnapshot, MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
 import type { AIProvidersConfig, MCPServerConfig } from '../../src/main/settings/settings-store.js'
-import type { AgentDefinition, AgentGroupDefinition } from '../../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
 import type { ImageStudioGenerateRequest, ImageStudioTask } from '../../src/shared/image-studio-types.js'
 import type { ToolDefinition } from '../../src/main/ai-harness/contracts.js'
 
@@ -111,6 +111,10 @@ export interface RustChatOptions {
   planModeActive?: boolean
   /** Stop before the next model-loop iteration once this run reaches the cap. */
   budgetLimit?: number | null
+  /** Resolved Agent Workspace memory scopes owned by the Rust store. */
+  memoryScopes?: MemorySearchScope[]
+  /** Current user message used for Rust-side memory retrieval. */
+  memoryQuery?: string
 }
 
 /** Durable member identity supplied when Electron opens a Rust group session. */
@@ -785,7 +789,9 @@ export class RustHarnessClient {
         reasoningEffort: options?.reasoningEffort || null,
         temperature: normalizeTemperature(options?.temperature),
         planModeActive: options?.planModeActive === true,
-        budgetLimit: normalizeBudgetLimit(options?.budgetLimit)
+        budgetLimit: normalizeBudgetLimit(options?.budgetLimit),
+        memoryScopes: Array.isArray(options?.memoryScopes) ? options.memoryScopes : [],
+        memoryQuery: normalizeOptionalString(options?.memoryQuery || text)
       })
       const streamId = result.streamId || result.stream_id
       if (!streamId) throw new Error('Rust harness did not return a stream id')
@@ -903,6 +909,55 @@ export class RustHarnessClient {
     await this.start()
     await this.syncMcpSettings()
     return await this.request('mcp.disconnect', { serverId }) as unknown as MCPServerSnapshot
+  }
+
+  async listMemory (options: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number } = {}): Promise<MemoryEntry[]> {
+    const result = await this.call<{ entries?: unknown[] }>('memory.list', {
+      query: options.query,
+      scopes: options.scopes,
+      memoryTypes: options.memoryTypes,
+      limit: options.limit
+    })
+    return Array.isArray(result?.entries) ? result.entries as MemoryEntry[] : []
+  }
+
+  async saveMemory (entry: Partial<MemoryEntry>): Promise<MemoryEntry> {
+    const result = await this.call<{ entry?: unknown }>('memory.save', { entry })
+    if (!result?.entry || typeof result.entry !== 'object' || Array.isArray(result.entry)) {
+      throw new Error('Rust harness did not return a saved memory entry.')
+    }
+    return result.entry as MemoryEntry
+  }
+
+  async pinMemory (id: string, pinned: boolean): Promise<boolean> {
+    const result = await this.call<{ updated?: unknown }>('memory.pin', { id, pinned })
+    return result?.updated === true
+  }
+
+  async deleteWorkspaceMemory (id: string): Promise<boolean> {
+    const result = await this.call<{ deleted?: unknown }>('memory.delete', { id })
+    return result?.deleted === true
+  }
+
+  async compactWorkspaceMemory (plan: Record<string, unknown>): Promise<JsonRpcResult> {
+    return await this.call('memory.compact', { plan })
+  }
+
+  async getWorkspaceMemoryCompactionStatus (): Promise<JsonRpcResult> {
+    return await this.call('memory.compactStatus', {})
+  }
+
+  async ingestMemory (input: {
+    scopes: MemorySearchScope[]
+    agent?: unknown
+    userMessages: string[]
+    finalAssistantText?: string
+    toolNames?: string[]
+    sourceConversationId?: string
+    sourceSessionId?: string
+  }): Promise<MemoryEntry[]> {
+    const result = await this.call<{ entries?: unknown[] }>('memory.ingest', input as unknown as Record<string, unknown>)
+    return Array.isArray(result?.entries) ? result.entries as MemoryEntry[] : []
   }
 
   private async syncSettings (): Promise<void> {

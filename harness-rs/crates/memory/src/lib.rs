@@ -6,17 +6,24 @@ use anyhow::{Context, Result};
 use image::io::Reader as ImageReader;
 use image::{GenericImageView, ImageOutputFormat};
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, Row};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use worldbase_protocol::types::{
-    ChatMessage, ConversationMeta, MemoryEntry, Role, ScheduleEntry, ToolCallRecord,
-    ToolResultRecord,
+    ChatMessage, ConversationMeta, MemoryCompactionPlan, MemoryCompactionResult,
+    MemoryCompactionStatus, MemoryEntry, Role, ScheduleEntry, ToolCallRecord, ToolResultRecord,
+    WorkspaceMemoryEntry, WorkspaceMemorySearchOptions,
 };
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// Electron's Agent Workspace memory lives in its own database at
+    /// `agent-memory/memory.sqlite`. Keep it separate from the legacy
+    /// `memories` table used by the original memory tools so both contracts
+    /// remain available during the backend migration.
+    memory_conn: Mutex<Connection>,
+    memory_compaction_status: Mutex<MemoryCompactionStatus>,
 }
 
 /// A bounded preview produced by Rust for an image-library entry.
@@ -82,6 +89,38 @@ fn role_to_str(r: Role) -> &'static str {
     }
 }
 
+/// Older gateways emitted tool calls without ids. OpenAI-compatible APIs
+/// reject those ids on the continuation request, so pair and repair them at
+/// read time without rewriting durable history.
+fn repair_empty_tool_message_ids(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut pending = std::collections::VecDeque::new();
+    for message in &mut messages {
+        if message.role == Role::Assistant {
+            for call in &mut message.tool_calls {
+                if call.id.trim().is_empty() {
+                    let id = format!(
+                        "repaired_call_{}_{}",
+                        message.id,
+                        uuid::Uuid::new_v4().simple()
+                    );
+                    call.id = id.clone();
+                    pending.push_back((id, call.name.clone()));
+                }
+            }
+        } else if message.role == Role::User {
+            for result in &mut message.tool_results {
+                if !result.tool_call_id.trim().is_empty() {
+                    continue;
+                }
+                result.tool_call_id = pending.pop_front().map(|(id, _)| id).unwrap_or_else(|| {
+                    format!("repaired_result_{}", uuid::Uuid::new_v4().simple())
+                });
+            }
+        }
+    }
+    messages
+}
+
 fn str_to_role(s: &str) -> Role {
     match s {
         "assistant" => Role::Assistant,
@@ -107,6 +146,48 @@ fn normalize_image_tags(tags: &[String]) -> Vec<String> {
     normalized
 }
 
+fn normalize_memory_strings(values: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() || !seen.insert(value.to_string()) {
+            continue;
+        }
+        normalized.push(value.to_string());
+    }
+    normalized
+}
+
+fn clean_memory_value(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .trim_matches('`')
+        .trim()
+        .to_string()
+}
+
+fn first_memory_line(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn stable_memory_id(seed: &str) -> String {
+    let mut hash: i32 = 0;
+    for ch in seed.chars() {
+        hash = hash.wrapping_mul(31).wrapping_add(ch as i32);
+    }
+    let magnitude = (hash as i64).unsigned_abs();
+    format!("mem_{magnitude:x}")
+}
+
 // The first Rust images used a comma-delimited column. New entries use JSON so
 // tags containing commas survive a TS <-> Rust migration; the reader accepts
 // both durable formats.
@@ -127,6 +208,38 @@ fn safe_image_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn memory_database_path(store_path: &Path) -> PathBuf {
+    // Electron's MemoryStore always uses <userData>/agent-memory/memory.sqlite.
+    // Tests and other Rust callers pass an app.sqlite path, so derive the same
+    // sibling directory there. Passing memory.sqlite directly is useful for
+    // focused store tests and remains idempotent.
+    if store_path.file_name().and_then(|name| name.to_str()) == Some("memory.sqlite") {
+        return store_path.to_path_buf();
+    }
+    store_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("agent-memory")
+        .join("memory.sqlite")
+}
+
+fn empty_memory_compaction_status() -> worldbase_protocol::types::MemoryCompactionStatus {
+    MemoryCompactionStatus {
+        id: None,
+        status: "idle".into(),
+        stage: "idle".into(),
+        detail: None,
+        scanned: 0,
+        total_chunks: 0,
+        completed_chunks: 0,
+        started_at: None,
+        updated_at: now_ts(),
+        finished_at: None,
+        result: None,
+        error: None,
+    }
 }
 
 impl Store {
@@ -271,8 +384,73 @@ impl Store {
                 "CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC, id DESC);\n                 CREATE INDEX IF NOT EXISTS idx_images_folder ON images(folder);",
             )?;
         }
+        let memory_path = memory_database_path(path);
+        if let Some(dir) = memory_path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("create memory dir {}", dir.display()))?;
+        }
+        let memory_conn = Connection::open(&memory_path)
+            .with_context(|| format!("open memory sqlite at {}", memory_path.display()))?;
+        memory_conn
+            .execute_batch(
+                r#"
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                PRAGMA busy_timeout = 5000;
+
+                CREATE TABLE IF NOT EXISTS memory_entries (
+                    id TEXT PRIMARY KEY,
+                    scope_type TEXT NOT NULL,
+                    scope_id TEXT NOT NULL,
+                    memory_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    details TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    source_conversation_id TEXT,
+                    source_session_id TEXT,
+                    source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+                    importance REAL NOT NULL DEFAULT 0.5,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    last_used_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_entries_scope
+                    ON memory_entries(scope_type, scope_id);
+                CREATE INDEX IF NOT EXISTS idx_memory_entries_type
+                    ON memory_entries(memory_type);
+                CREATE INDEX IF NOT EXISTS idx_memory_entries_last_used
+                    ON memory_entries(last_used_at);
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_entries_fts USING fts5(
+                    id UNINDEXED,
+                    title,
+                    summary,
+                    details,
+                    tags
+                );
+
+                -- A previous Electron process may have created the durable
+                -- rows before FTS population completed. Reinsert only missing
+                -- documents so Rust search has deterministic coverage without
+                -- duplicating existing index rows.
+                INSERT INTO memory_entries_fts (id, title, summary, details, tags)
+                SELECT e.id, e.title, e.summary, COALESCE(e.details, ''),
+                       replace(replace(e.tags_json, '[', ''), ']', '')
+                FROM memory_entries e
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM memory_entries_fts f WHERE f.id = e.id
+                );
+                "#,
+            )
+            .context("migrate memory schema")?;
+
         Ok(Self {
             conn: Mutex::new(conn),
+            memory_conn: Mutex::new(memory_conn),
+            memory_compaction_status: Mutex::new(empty_memory_compaction_status()),
         })
     }
 
@@ -857,32 +1035,27 @@ impl Store {
                 .get::<_, String>("reasoning_strength")
                 .unwrap_or_else(|_| "medium".into()),
             allowed_tools: serde_json::from_str(
-                &row
-                    .get::<_, String>("allowed_tools")
+                &row.get::<_, String>("allowed_tools")
                     .unwrap_or_else(|_| "[]".into()),
             )
             .unwrap_or_default(),
             denied_tools: serde_json::from_str(
-                &row
-                    .get::<_, String>("denied_tools")
+                &row.get::<_, String>("denied_tools")
                     .unwrap_or_else(|_| "[]".into()),
             )
             .unwrap_or_default(),
             memory_scopes: serde_json::from_str(
-                &row
-                    .get::<_, String>("memory_scopes")
+                &row.get::<_, String>("memory_scopes")
                     .unwrap_or_else(|_| "[\"user\",\"agent\",\"project\"]".into()),
             )
             .unwrap_or_else(|_| vec!["user".into(), "agent".into(), "project".into()]),
             memory_write_policy: serde_json::from_str(
-                &row
-                    .get::<_, String>("memory_write_policy")
+                &row.get::<_, String>("memory_write_policy")
                     .unwrap_or_else(|_| "{}".into()),
             )
             .unwrap_or_default(),
             auto_reply_policy: serde_json::from_str(
-                &row
-                    .get::<_, String>("auto_reply_policy")
+                &row.get::<_, String>("auto_reply_policy")
                     .unwrap_or_else(|_| "{}".into()),
             )
             .unwrap_or_default(),
@@ -1352,7 +1525,8 @@ impl Store {
             "SELECT * FROM messages WHERE conversation_id = ?1 ORDER BY id ASC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![conversation_id, limit], Self::row_to_message)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let messages: Vec<_> = rows.filter_map(|r| r.ok()).collect();
+        Ok(repair_empty_tool_message_ids(messages))
     }
 
     // ---------- long-term memory (FTS5) ----------
@@ -1417,6 +1591,826 @@ impl Store {
         })
     }
 
+    // ---------- Electron Agent Workspace memory ----------
+
+    fn normalize_workspace_memory(mut entry: WorkspaceMemoryEntry) -> WorkspaceMemoryEntry {
+        if entry.id.trim().is_empty() {
+            entry.id = format!("mem_{}", uuid::Uuid::new_v4().simple());
+        } else {
+            entry.id = entry.id.trim().to_string();
+        }
+        entry.scope_type = if entry.scope_type.trim().is_empty() {
+            "user".into()
+        } else {
+            entry.scope_type.trim().to_string()
+        };
+        entry.scope_id = if entry.scope_id.trim().is_empty() {
+            "local-user".into()
+        } else {
+            entry.scope_id.trim().to_string()
+        };
+        entry.memory_type = if entry.memory_type.trim().is_empty() {
+            "knowledge".into()
+        } else {
+            entry.memory_type.trim().to_string()
+        };
+        entry.title = entry.title.trim().to_string();
+        entry.summary = entry.summary.trim().to_string();
+        entry.details = entry.details.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        });
+        entry.tags = normalize_memory_strings(&entry.tags);
+        entry.source_message_ids = normalize_memory_strings(&entry.source_message_ids);
+        entry.source_conversation_id = entry.source_conversation_id.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        });
+        entry.source_session_id = entry.source_session_id.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        });
+        entry.last_used_at = entry.last_used_at.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        });
+        entry.importance = entry.importance.clamp(0.0, 1.0);
+        entry.confidence = entry.confidence.clamp(0.0, 1.0);
+        if entry.created_at.trim().is_empty() {
+            entry.created_at = now_ts();
+        } else {
+            entry.created_at = entry.created_at.trim().to_string();
+        }
+        entry.updated_at = now_ts();
+        entry
+    }
+
+    fn row_to_workspace_memory(row: &Row) -> rusqlite::Result<WorkspaceMemoryEntry> {
+        let tags_json: String = row
+            .get::<_, Option<String>>("tags_json")?
+            .unwrap_or_else(|| "[]".into());
+        let source_ids_json: String = row
+            .get::<_, Option<String>>("source_message_ids_json")?
+            .unwrap_or_else(|| "[]".into());
+        let parse_strings = |raw: &str| {
+            serde_json::from_str::<Vec<String>>(raw)
+                .map(|values| normalize_memory_strings(&values))
+                .unwrap_or_default()
+        };
+        Ok(WorkspaceMemoryEntry {
+            id: row.get("id")?,
+            scope_type: row.get("scope_type")?,
+            scope_id: row.get("scope_id")?,
+            memory_type: row.get("memory_type")?,
+            title: row.get("title")?,
+            summary: row.get("summary")?,
+            details: row.get("details")?,
+            tags: parse_strings(&tags_json),
+            source_conversation_id: row.get("source_conversation_id")?,
+            source_session_id: row.get("source_session_id")?,
+            source_message_ids: parse_strings(&source_ids_json),
+            importance: row.get::<_, Option<f64>>("importance")?.unwrap_or(0.5),
+            confidence: row.get::<_, Option<f64>>("confidence")?.unwrap_or(0.5),
+            pinned: row.get::<_, Option<i64>>("pinned")?.unwrap_or(0) != 0,
+            last_used_at: row.get("last_used_at")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+
+    pub fn get_workspace_memory(&self, id: &str) -> Result<Option<WorkspaceMemoryEntry>> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.memory_conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM memory_entries WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_workspace_memory(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn save_workspace_memory(
+        &self,
+        entry: &WorkspaceMemoryEntry,
+    ) -> Result<WorkspaceMemoryEntry> {
+        let normalized = Self::normalize_workspace_memory(entry.clone());
+        let tags_json = serde_json::to_string(&normalized.tags)?;
+        let source_ids_json = serde_json::to_string(&normalized.source_message_ids)?;
+        let mut conn = self.memory_conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO memory_entries (
+                id, scope_type, scope_id, memory_type, title, summary, details,
+                tags_json, source_conversation_id, source_session_id,
+                source_message_ids_json, importance, confidence, pinned,
+                last_used_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            ON CONFLICT(id) DO UPDATE SET
+                scope_type = excluded.scope_type,
+                scope_id = excluded.scope_id,
+                memory_type = excluded.memory_type,
+                title = excluded.title,
+                summary = excluded.summary,
+                details = excluded.details,
+                tags_json = excluded.tags_json,
+                source_conversation_id = excluded.source_conversation_id,
+                source_session_id = excluded.source_session_id,
+                source_message_ids_json = excluded.source_message_ids_json,
+                importance = excluded.importance,
+                confidence = excluded.confidence,
+                pinned = excluded.pinned,
+                last_used_at = excluded.last_used_at,
+                updated_at = excluded.updated_at",
+            params![
+                normalized.id,
+                normalized.scope_type,
+                normalized.scope_id,
+                normalized.memory_type,
+                normalized.title,
+                normalized.summary,
+                normalized.details,
+                tags_json,
+                normalized.source_conversation_id,
+                normalized.source_session_id,
+                source_ids_json,
+                normalized.importance,
+                normalized.confidence,
+                if normalized.pinned { 1i64 } else { 0i64 },
+                normalized.last_used_at,
+                normalized.created_at,
+                normalized.updated_at,
+            ],
+        )?;
+        // This FTS table is intentionally contentless/manual, matching the
+        // Electron implementation and allowing old rows to be rebuilt safely.
+        tx.execute(
+            "DELETE FROM memory_entries_fts WHERE id = ?1",
+            params![normalized.id],
+        )?;
+        tx.execute(
+            "INSERT INTO memory_entries_fts (id, title, summary, details, tags)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                normalized.id,
+                normalized.title,
+                normalized.summary,
+                normalized.details.clone().unwrap_or_default(),
+                normalized.tags.join(" "),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(normalized)
+    }
+
+    pub fn search_workspace_memories(
+        &self,
+        options: &WorkspaceMemorySearchOptions,
+    ) -> Result<Vec<WorkspaceMemoryEntry>> {
+        let limit = options.limit.unwrap_or(20).clamp(1, 50_000);
+        let query = options.query.as_deref().unwrap_or("").trim().to_string();
+        let mut filters = Vec::new();
+        let mut values: Vec<String> = Vec::new();
+        if !options.scopes.is_empty() {
+            let mut scope_filters = Vec::new();
+            for scope in &options.scopes {
+                let scope_type = scope.scope_type.trim();
+                let scope_id = scope.scope_id.trim();
+                if scope_type.is_empty() || scope_id.is_empty() {
+                    continue;
+                }
+                scope_filters.push("(e.scope_type = ? AND e.scope_id = ?)".to_string());
+                values.push(scope_type.to_string());
+                values.push(scope_id.to_string());
+            }
+            if !scope_filters.is_empty() {
+                filters.push(format!("({})", scope_filters.join(" OR ")));
+            }
+        }
+        if !options.memory_types.is_empty() {
+            let types: Vec<String> = options
+                .memory_types
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect();
+            if !types.is_empty() {
+                filters.push(format!(
+                    "e.memory_type IN ({})",
+                    std::iter::repeat("?")
+                        .take(types.len())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                values.extend(types);
+            }
+        }
+
+        let fetch = |use_fts: bool| -> Result<Vec<WorkspaceMemoryEntry>> {
+            let mut sql = if use_fts {
+                "SELECT DISTINCT e.* FROM memory_entries e
+                 JOIN memory_entries_fts f ON e.id = f.id"
+                    .to_string()
+            } else {
+                "SELECT e.* FROM memory_entries e".to_string()
+            };
+            let mut local_values = values.clone();
+            let mut local_filters = filters.clone();
+            if use_fts {
+                let terms: Vec<String> = query
+                    .split_whitespace()
+                    .map(|term| {
+                        term.trim_matches(|character: char| {
+                            !character.is_alphanumeric() && character != '_' && character != '-'
+                        })
+                        .replace('"', "\"\"")
+                    })
+                    .filter(|term| !term.is_empty())
+                    .take(8)
+                    .map(|term| format!("\"{term}\""))
+                    .collect();
+                if terms.is_empty() {
+                    return Ok(Vec::new());
+                }
+                local_filters.push("f MATCH ?".into());
+                local_values.push(terms.join(" AND "));
+            } else if !query.is_empty() {
+                local_filters.push(
+                    "(e.title LIKE '%' || ? || '%' OR e.summary LIKE '%' || ? || '%' OR
+                     COALESCE(e.details, '') LIKE '%' || ? || '%' OR e.tags_json LIKE '%' || ? || '%')"
+                        .replace('\n', " "),
+                );
+                local_values.extend(std::iter::repeat(query.clone()).take(4));
+            }
+            if !local_filters.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&local_filters.join(" AND "));
+            }
+            sql.push_str(&format!(
+                " ORDER BY e.pinned DESC, e.importance DESC, e.confidence DESC,
+                          COALESCE(e.last_used_at, e.updated_at) DESC LIMIT {limit}"
+            ));
+            let conn = self.memory_conn.lock().unwrap();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                params_from_iter(local_values.iter()),
+                Self::row_to_workspace_memory,
+            )?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+
+        if !query.is_empty() {
+            if let Ok(hits) = fetch(true) {
+                if !hits.is_empty() {
+                    return Ok(hits);
+                }
+            }
+        }
+        fetch(false)
+    }
+
+    pub fn list_workspace_memories(&self, limit: u32) -> Result<Vec<WorkspaceMemoryEntry>> {
+        self.search_workspace_memories(&WorkspaceMemorySearchOptions {
+            limit: Some(limit),
+            ..Default::default()
+        })
+    }
+
+    pub fn pin_workspace_memory(&self, id: &str, pinned: bool) -> Result<bool> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.memory_conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE memory_entries SET pinned = ?1, updated_at = ?2 WHERE id = ?3",
+            params![if pinned { 1i64 } else { 0i64 }, now_ts(), id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn delete_workspace_memory(&self, id: &str) -> Result<bool> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Ok(false);
+        }
+        let mut conn = self.memory_conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM memory_entries_fts WHERE id = ?1", params![id])?;
+        let changed = tx.execute("DELETE FROM memory_entries WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+
+    /// Extract durable memory from a completed session.  The input mirrors
+    /// Electron's MemoryEngine context, but extraction and persistence happen
+    /// entirely in Rust so the selected Rust backend never writes through the
+    /// TypeScript MemoryStore.
+    pub fn ingest_workspace_memories(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<Vec<WorkspaceMemoryEntry>> {
+        let scopes = input
+            .get("scopes")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let scope_type = item.get("scopeType")?.as_str()?.trim();
+                        let scope_id = item.get("scopeId")?.as_str()?.trim();
+                        (!scope_type.is_empty() && !scope_id.is_empty())
+                            .then(|| (scope_type.to_string(), scope_id.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let scope = |kind: &str| {
+            scopes
+                .iter()
+                .find(|(scope_type, _)| scope_type == kind)
+                .cloned()
+        };
+        let user_scope = scope("user");
+        let agent_scope = scope("agent");
+        let project_scope = scope("project");
+        let group_scope = scope("group");
+        let source_conversation_id = input
+            .get("sourceConversationId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let source_session_id = input
+            .get("sourceSessionId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let user_messages = input
+            .get("userMessages")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let assistant_text = input
+            .get("finalAssistantText")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let tool_names = input
+            .get("toolNames")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let agent = input.get("agent");
+        let policy = agent
+            .and_then(|value| value.get("memoryWritePolicy"))
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        let allow = |key: &str| {
+            policy
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        };
+        let mut candidates = Vec::new();
+        let mut push_entry = |scope_ref: Option<(String, String)>,
+                              memory_type: &str,
+                              title: String,
+                              summary: String,
+                              details: Option<String>,
+                              tags: Vec<String>,
+                              importance: f64,
+                              confidence: f64| {
+            let Some((scope_type, scope_id)) = scope_ref else {
+                return;
+            };
+            let title = clean_memory_value(&title);
+            let summary = clean_memory_value(&summary);
+            if title.is_empty() || summary.is_empty() {
+                return;
+            }
+            let seed = format!("{scope_type}|{scope_id}|{memory_type}|{title}|{summary}");
+            candidates.push(WorkspaceMemoryEntry {
+                id: stable_memory_id(&seed),
+                scope_type,
+                scope_id,
+                memory_type: memory_type.to_string(),
+                title,
+                summary,
+                details: details
+                    .map(|value| clean_memory_value(&value))
+                    .filter(|value| !value.is_empty()),
+                tags: normalize_memory_strings(&tags),
+                source_conversation_id: source_conversation_id.clone(),
+                source_session_id: source_session_id.clone(),
+                source_message_ids: Vec::new(),
+                importance,
+                confidence,
+                pinned: false,
+                last_used_at: None,
+                created_at: now_ts(),
+                updated_at: now_ts(),
+            });
+        };
+
+        if allow("allowUserTraits") {
+            for message in &user_messages {
+                if regex::Regex::new(r"(?i)(以后|今后|默认|始终).{0,12}(中文|Chinese)")
+                    .unwrap()
+                    .is_match(message)
+                {
+                    push_entry(
+                        user_scope.clone(),
+                        "user_trait",
+                        "偏好使用中文".into(),
+                        "用户偏好默认使用中文沟通和输出。".into(),
+                        Some(first_memory_line(message)),
+                        vec!["language".into(), "preference".into()],
+                        0.85,
+                        0.85,
+                    );
+                }
+                if regex::Regex::new(r"(?i)(先.*方案.*再.*(写|改)代码|先规划后执行|先出方案)")
+                    .unwrap()
+                    .is_match(message)
+                {
+                    push_entry(
+                        user_scope.clone(),
+                        "user_trait",
+                        "偏好先方案后执行".into(),
+                        "用户偏好先看方案或规划，再进入实现。".into(),
+                        Some(first_memory_line(message)),
+                        vec!["workflow".into(), "planning".into()],
+                        0.85,
+                        0.85,
+                    );
+                }
+            }
+        }
+        if allow("allowAgentSkills") {
+            let skill_ids = agent
+                .and_then(|value| value.get("skillIds"))
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !skill_ids.is_empty() {
+                let name = agent
+                    .and_then(|value| value.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Agent");
+                push_entry(
+                    agent_scope.clone(),
+                    "agent_skill",
+                    format!("{name} 默认技能组合"),
+                    format!("默认激活技能: {}", skill_ids.join(", ")),
+                    None,
+                    vec!["skills".into(), "profile".into()],
+                    0.8,
+                    0.95,
+                );
+            }
+        }
+        if allow("allowSteps") && tool_names.len() >= 2 {
+            push_entry(
+                project_scope.clone().or(agent_scope.clone()),
+                "step",
+                "常用执行链路".into(),
+                format!(
+                    "近期高频执行顺序: {}",
+                    tool_names
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                ),
+                Some("该步骤来自已完成会话的工具执行顺序，可在相似任务中优先复用。".into()),
+                vec!["workflow".into(), "tools".into()],
+                0.72,
+                0.7,
+            );
+        }
+        if allow("allowKnowledge") {
+            let knowledge_scope = project_scope
+                .clone()
+                .or(group_scope.clone())
+                .or(agent_scope.clone());
+            let signal = regex::Regex::new(r"(关键|注意|约束|坑|必须|不要|优先|应该|需要|避免|只能|不能|务必|建议|推荐|AI|API|Electron|SQLite|TypeScript|项目|文件|构建|测试|依赖|权限|命令|模型|工具|记忆)").unwrap();
+            for part in assistant_text
+                .split(|c| matches!(c, '\n' | '.' | '。' | '!' | '！' | '?' | '？'))
+                .map(str::trim)
+                .filter(|value| value.len() >= 8)
+                .take(3)
+            {
+                if signal.is_match(part) {
+                    let title = if part.chars().count() > 32 {
+                        format!("{}...", part.chars().take(32).collect::<String>())
+                    } else {
+                        part.to_string()
+                    };
+                    push_entry(
+                        knowledge_scope.clone(),
+                        "knowledge",
+                        title,
+                        part.to_string(),
+                        Some(assistant_text.chars().take(600).collect()),
+                        vec!["knowledge".into(), "insight".into()],
+                        0.75,
+                        0.62,
+                    );
+                }
+            }
+        }
+        let mut saved = Vec::new();
+        let mut seen = HashSet::new();
+        for entry in candidates {
+            if seen.insert(entry.id.clone()) {
+                saved.push(self.save_workspace_memory(&entry)?);
+            }
+        }
+        Ok(saved)
+    }
+
+    pub fn memory_compaction_status(&self) -> MemoryCompactionStatus {
+        self.memory_compaction_status.lock().unwrap().clone()
+    }
+
+    fn remove_workspace_memory_for_compaction(
+        &self,
+        id: &str,
+        by_id: &mut HashMap<String, WorkspaceMemoryEntry>,
+        deleted_ids: &mut HashSet<String>,
+        deleted: &mut u32,
+    ) -> Result<bool> {
+        let Some(entry) = by_id.get(id) else {
+            return Ok(false);
+        };
+        if entry.pinned || deleted_ids.contains(id) {
+            return Ok(false);
+        }
+        if !self.delete_workspace_memory(id)? {
+            return Ok(false);
+        }
+        deleted_ids.insert(id.to_string());
+        by_id.remove(id);
+        *deleted += 1;
+        Ok(true)
+    }
+
+    pub fn compact_workspace_memories(
+        &self,
+        plan: &MemoryCompactionPlan,
+    ) -> Result<MemoryCompactionResult> {
+        let task_id = format!("memory_compact_{}", uuid::Uuid::new_v4().simple());
+        let started_at = now_ts();
+        {
+            let mut status = self.memory_compaction_status.lock().unwrap();
+            *status = MemoryCompactionStatus {
+                id: Some(task_id),
+                status: "running".into(),
+                stage: "applying".into(),
+                detail: None,
+                scanned: 0,
+                total_chunks: 0,
+                completed_chunks: 0,
+                started_at: Some(started_at),
+                updated_at: now_ts(),
+                finished_at: None,
+                result: None,
+                error: None,
+            };
+        }
+
+        let operation = (|| -> Result<MemoryCompactionResult> {
+            let entries = self.list_workspace_memories(50_000)?;
+            let scanned = entries.len() as u32;
+            let mut by_id: HashMap<String, WorkspaceMemoryEntry> = entries
+                .into_iter()
+                .map(|entry| (entry.id.clone(), entry))
+                .collect();
+            let mut deleted_ids = HashSet::new();
+            let mut deleted = 0u32;
+            let mut removed_useless = 0u32;
+            let mut merged = 0u32;
+            let mut updated = 0u32;
+            let mut groups = Vec::new();
+
+            for id in normalize_memory_strings(&plan.delete_ids) {
+                if self.remove_workspace_memory_for_compaction(
+                    &id,
+                    &mut by_id,
+                    &mut deleted_ids,
+                    &mut deleted,
+                )? {
+                    removed_useless += 1;
+                }
+            }
+
+            for group in &plan.merge_groups {
+                let ids = normalize_memory_strings(&group.ids);
+                let cluster: Vec<WorkspaceMemoryEntry> = ids
+                    .iter()
+                    .filter_map(|id| by_id.get(id).cloned())
+                    .filter(|entry| !deleted_ids.contains(&entry.id))
+                    .collect();
+                if cluster.len() <= 1 {
+                    continue;
+                }
+                let first = &cluster[0];
+                if cluster.iter().any(|entry| {
+                    entry.scope_type != first.scope_type
+                        || entry.scope_id != first.scope_id
+                        || entry.memory_type != first.memory_type
+                }) {
+                    continue;
+                }
+                let target_id = group
+                    .target_id
+                    .as_deref()
+                    .filter(|id| cluster.iter().any(|entry| entry.id == *id))
+                    .map(str::to_string)
+                    .or_else(|| {
+                        cluster
+                            .iter()
+                            .find(|entry| entry.pinned)
+                            .or_else(|| cluster.first())
+                            .map(|entry| entry.id.clone())
+                    })
+                    .unwrap_or_else(|| first.id.clone());
+                let target = cluster
+                    .iter()
+                    .find(|entry| entry.id == target_id)
+                    .cloned()
+                    .unwrap_or_else(|| first.clone());
+                let mut merged_entry = target.clone();
+                merged_entry.title = group
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(&target.title)
+                    .to_string();
+                merged_entry.summary = group
+                    .summary
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(&target.summary)
+                    .to_string();
+                merged_entry.details = group
+                    .details
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| target.details.clone());
+                let mut tags = Vec::new();
+                for entry in &cluster {
+                    tags.extend(entry.tags.iter().cloned());
+                }
+                if let Some(group_tags) = &group.tags {
+                    tags.extend(group_tags.iter().cloned());
+                }
+                merged_entry.tags = normalize_memory_strings(&tags);
+                merged_entry.pinned = cluster.iter().any(|entry| entry.pinned);
+                merged_entry.importance = cluster
+                    .iter()
+                    .map(|entry| entry.importance)
+                    .fold(merged_entry.importance, f64::max);
+                merged_entry.confidence = cluster
+                    .iter()
+                    .map(|entry| entry.confidence)
+                    .fold(merged_entry.confidence, f64::max);
+                let saved = self.save_workspace_memory(&merged_entry)?;
+                by_id.insert(saved.id.clone(), saved.clone());
+                updated += 1;
+                let mut merged_ids = Vec::new();
+                for entry in cluster {
+                    if entry.id != saved.id
+                        && self.remove_workspace_memory_for_compaction(
+                            &entry.id,
+                            &mut by_id,
+                            &mut deleted_ids,
+                            &mut deleted,
+                        )?
+                    {
+                        merged_ids.push(entry.id);
+                        merged += 1;
+                    }
+                }
+                if !merged_ids.is_empty() {
+                    groups.push(worldbase_protocol::types::MemoryCompactionGroupResult {
+                        target_id: saved.id,
+                        merged_ids,
+                        title: saved.title,
+                    });
+                }
+            }
+
+            for patch in &plan.updates {
+                let Some(current) = by_id.get(&patch.id).cloned() else {
+                    continue;
+                };
+                if deleted_ids.contains(&current.id) {
+                    continue;
+                }
+                let mut next = current;
+                if let Some(value) = patch
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    next.title = value.to_string();
+                }
+                if let Some(value) = patch
+                    .summary
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    next.summary = value.to_string();
+                }
+                if let Some(value) = patch
+                    .details
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    next.details = Some(value.to_string());
+                }
+                if let Some(tags) = &patch.tags {
+                    let tags = normalize_memory_strings(tags);
+                    if !tags.is_empty() {
+                        next.tags = tags;
+                    }
+                }
+                if let Some(value) = patch.importance {
+                    next.importance = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = patch.confidence {
+                    next.confidence = value.clamp(0.0, 1.0);
+                }
+                if next.title.is_empty() || next.summary.is_empty() {
+                    continue;
+                }
+                let saved = self.save_workspace_memory(&next)?;
+                by_id.insert(saved.id.clone(), saved);
+                updated += 1;
+            }
+
+            Ok(MemoryCompactionResult {
+                scanned,
+                deleted,
+                removed_useless,
+                merged,
+                updated,
+                retained: scanned.saturating_sub(deleted),
+                groups,
+            })
+        })();
+
+        let mut status = self.memory_compaction_status.lock().unwrap();
+        match &operation {
+            Ok(result) => {
+                status.status = "completed".into();
+                status.stage = "done".into();
+                status.scanned = result.scanned;
+                status.completed_chunks = result.scanned;
+                status.result = Some(result.clone());
+                status.finished_at = Some(now_ts());
+                status.error = None;
+            }
+            Err(error) => {
+                status.status = "failed".into();
+                status.stage = "failed".into();
+                status.error = Some(error.to_string());
+                status.finished_at = Some(now_ts());
+            }
+        }
+        status.updated_at = now_ts();
+        operation
+    }
+
     // ---------- settings ----------
 
     pub fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
@@ -1441,9 +2435,10 @@ impl Store {
 
     // ---------- Image Studio task queue ----------
 
-    /// Normalize one persisted Studio task to the subset Electron can resume.
-    /// Running/success rows are intentionally discarded: running work is
-    /// transient and successful images are already represented by the gallery.
+    /// Normalize one persisted Studio task while preserving its lifecycle.
+    /// Mobile chat and Studio share this checkpoint, so completed rows must
+    /// remain visible after a result arrives instead of disappearing from the
+    /// queue immediately.
     fn normalize_studio_task(value: &serde_json::Value) -> Option<serde_json::Value> {
         let object = value.as_object()?;
         let id = object.get("id")?.as_str()?.trim();
@@ -1451,7 +2446,7 @@ impl Store {
             return None;
         }
         let status = object.get("status")?.as_str()?;
-        if status != "queued" && status != "error" {
+        if status != "queued" && status != "running" && status != "success" && status != "error" {
             return None;
         }
         let request = object.get("request")?.as_object()?;
@@ -1470,11 +2465,11 @@ impl Store {
         let Some(normalized_object) = normalized.as_object_mut() else {
             return None;
         };
-        // Electron's loader reconstructs transient renderer fields that are
-        // intentionally omitted from the checkpoint file. Without these
-        // defaults a Vue queue row would attempt `task.entries.length` on
-        // undefined after a Rust-owned reload.
-        normalized_object.insert("entries".into(), serde_json::Value::Array(Vec::new()));
+        // Older checkpoints omitted entries; keep completed image results when
+        // present and provide the renderer-safe empty default otherwise.
+        normalized_object
+            .entry("entries")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
         if !normalized_object.contains_key("label") {
             if let Some(prompt) = request.get("prompt").and_then(serde_json::Value::as_str) {
                 normalized_object.insert("label".into(), serde_json::Value::String(prompt.into()));
@@ -1502,7 +2497,12 @@ impl Store {
         let list = value
             .as_array()
             .cloned()
-            .or_else(|| value.get("tasks").and_then(serde_json::Value::as_array).cloned())
+            .or_else(|| {
+                value
+                    .get("tasks")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+            })
             .unwrap_or_default();
         let mut tasks: Vec<_> = list
             .iter()
@@ -1519,10 +2519,7 @@ impl Store {
         tasks
     }
 
-    fn read_setting_locked(
-        conn: &rusqlite::Connection,
-        key: &str,
-    ) -> Option<serde_json::Value> {
+    fn read_setting_locked(conn: &rusqlite::Connection, key: &str) -> Option<serde_json::Value> {
         conn.query_row(
             "SELECT value FROM settings WHERE key = ?1",
             params![key],
@@ -1545,8 +2542,9 @@ impl Store {
         Ok(())
     }
 
-    /// Load queued/failed tasks. During the first Rust run, import the legacy
-    /// Electron JSON checkpoint so switching engines does not hide work.
+    /// Load the shared Studio task timeline. During the first Rust run, import
+    /// the legacy Electron JSON checkpoint so switching engines does not hide
+    /// queued work.
     pub fn load_studio_tasks(&self) -> Result<Vec<serde_json::Value>> {
         let legacy_path = Self::default_dir().join("studio-tasks.json");
         if let Ok(raw) = std::fs::read_to_string(&legacy_path) {
@@ -1813,6 +2811,29 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+    use worldbase_protocol::types::{MemorySearchScopeEntry, ToolCallRecord, ToolResultRecord};
+
+    fn workspace_entry(id: &str, title: &str, summary: &str) -> WorkspaceMemoryEntry {
+        WorkspaceMemoryEntry {
+            id: id.into(),
+            scope_type: "user".into(),
+            scope_id: "local-user".into(),
+            memory_type: "knowledge".into(),
+            title: title.into(),
+            summary: summary.into(),
+            details: None,
+            tags: vec![" rust ".into(), "rust".into()],
+            source_conversation_id: None,
+            source_session_id: None,
+            source_message_ids: vec![],
+            importance: 1.5,
+            confidence: -1.0,
+            pinned: false,
+            last_used_at: None,
+            created_at: "".into(),
+            updated_at: "".into(),
+        }
+    }
 
     fn temp_store() -> Store {
         let dir = std::env::temp_dir().join(format!("worldbase-test-{}", uuid::Uuid::new_v4()));
@@ -1833,6 +2854,64 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].content, "用户喜欢 Rust 编程语言");
         assert!(hits[0].tags.contains(&"preference".to_string()));
+    }
+
+    #[test]
+    fn workspace_memory_crud_search_and_compaction_match_electron_shape() {
+        let store = temp_store();
+        let first = store
+            .save_workspace_memory(&workspace_entry(
+                "memory-one",
+                "Rust preference",
+                "The user prefers Rust for services",
+            ))
+            .unwrap();
+        assert_eq!(first.tags, vec!["rust"]);
+        assert_eq!(first.importance, 1.0);
+        assert_eq!(first.confidence, 0.0);
+        assert!(!first.created_at.is_empty());
+        assert!(store.get_workspace_memory("memory-one").unwrap().is_some());
+
+        let mut second = workspace_entry(
+            "memory-two",
+            "Rust preference duplicate",
+            "Rust is preferred for backend services",
+        );
+        second.tags = vec!["backend".into()];
+        second.importance = 0.8;
+        second.confidence = 0.9;
+        store.save_workspace_memory(&second).unwrap();
+
+        let hits = store
+            .search_workspace_memories(&WorkspaceMemorySearchOptions {
+                query: Some("Rust".into()),
+                scopes: vec![MemorySearchScopeEntry {
+                    scope_type: "user".into(),
+                    scope_id: "local-user".into(),
+                }],
+                memory_types: vec!["knowledge".into()],
+                limit: Some(10),
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(store.list_workspace_memories(1).unwrap().len(), 1);
+
+        assert!(store.pin_workspace_memory("memory-two", true).unwrap());
+        let result = store
+            .compact_workspace_memories(&MemoryCompactionPlan {
+                delete_ids: vec!["memory-one".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.scanned, 2);
+        assert_eq!(result.deleted, 1);
+        assert_eq!(result.removed_useless, 1);
+        assert_eq!(result.retained, 1);
+        assert!(store.get_workspace_memory("memory-one").unwrap().is_none());
+        assert_eq!(store.memory_compaction_status().status, "completed");
+
+        assert!(store.delete_workspace_memory("memory-two").unwrap());
+        assert!(store.get_workspace_memory("memory-two").unwrap().is_none());
     }
 
     #[test]
@@ -1876,6 +2955,54 @@ mod tests {
         let msgs = store.list_messages(&conv.id, 100).unwrap();
         assert_eq!(msgs[1].tool_calls.len(), 1);
         assert_eq!(msgs[1].tool_results[0].content, "数据");
+    }
+
+    #[test]
+    fn legacy_empty_tool_call_ids_are_paired_at_read_time() {
+        let store = temp_store();
+        let conversation = store.create_conversation("tools", None).unwrap();
+        store
+            .append_message(
+                &conversation.id,
+                &ChatMessage {
+                    id: 0,
+                    role: Role::Assistant,
+                    content: "queued".into(),
+                    parts: vec![],
+                    tool_calls: vec![ToolCallRecord {
+                        id: String::new(),
+                        name: "generate_image".into(),
+                        args: json!({"prompt": "rain"}),
+                    }],
+                    tool_results: vec![],
+                    created_at: None,
+                },
+            )
+            .unwrap();
+        store
+            .append_message(
+                &conversation.id,
+                &ChatMessage {
+                    id: 0,
+                    role: Role::User,
+                    content: String::new(),
+                    parts: vec![],
+                    tool_calls: vec![],
+                    tool_results: vec![ToolResultRecord {
+                        tool_call_id: String::new(),
+                        name: "generate_image".into(),
+                        content: r#"{"queued":1}"#.into(),
+                        is_error: false,
+                    }],
+                    created_at: None,
+                },
+            )
+            .unwrap();
+
+        let messages = store.list_messages(&conversation.id, 10).unwrap();
+        let call_id = messages[0].tool_calls[0].id.as_str();
+        assert!(call_id.starts_with("repaired_call_"));
+        assert_eq!(messages[1].tool_results[0].tool_call_id, call_id);
     }
 
     #[test]
@@ -2132,10 +3259,8 @@ mod tests {
 
     #[test]
     fn studio_task_queue_round_trips_and_drains_pending_requests() {
-        let root = std::env::temp_dir().join(format!(
-            "worldbase-studio-tasks-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("worldbase-studio-tasks-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let previous_home = std::env::var_os("WORLDBASE_HOME");
         std::env::set_var("WORLDBASE_HOME", &root);
@@ -2154,18 +3279,30 @@ mod tests {
             },
             "label": "draw a tree"
         });
-        // Invalid/running rows are filtered like the Electron checkpoint.
+        // Invalid rows are filtered; lifecycle rows and result entries survive
+        // so mobile chat and Studio can render the same task state.
+        let successful = json!({
+            "id": "success",
+            "status": "success",
+            "createdAt": 12,
+            "request": task["request"],
+            "entries": [{ "id": "image-1", "prompt": "draw a tree" }]
+        });
         store
             .save_studio_tasks(&[
                 task.clone(),
-                json!({ "id": "running", "status": "running", "request": task["request"] }),
+                json!({ "id": "running", "status": "running", "createdAt": 11, "request": task["request"] }),
+                successful,
                 json!({ "id": "invalid", "status": "queued" }),
             ])
             .unwrap();
         let loaded = store.load_studio_tasks().unwrap();
-        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.len(), 3);
         assert_eq!(loaded[0]["id"], "task-1");
         assert_eq!(loaded[0]["entries"], json!([]));
+        assert_eq!(loaded[1]["id"], "running");
+        assert_eq!(loaded[2]["status"], "success");
+        assert_eq!(loaded[2]["entries"][0]["id"], "image-1");
 
         let request = json!({
             "providerId": "provider",
@@ -2174,7 +3311,12 @@ mod tests {
             "prompt": "queued by agent",
             "size": "1024x1024"
         });
-        assert_eq!(store.enqueue_studio_pending_tasks(&[request.clone()]).unwrap(), 1);
+        assert_eq!(
+            store
+                .enqueue_studio_pending_tasks(&[request.clone()])
+                .unwrap(),
+            1
+        );
         assert_eq!(store.drain_studio_pending_tasks().unwrap(), vec![request]);
         assert!(store.drain_studio_pending_tasks().unwrap().is_empty());
 

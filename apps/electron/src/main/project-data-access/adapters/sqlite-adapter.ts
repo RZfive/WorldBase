@@ -1,15 +1,5 @@
 import { existsSync } from 'node:fs'
-import { createRequire } from 'node:module'
-
-const nodeRequire = createRequire(import.meta.url)
-
-interface SqliteDatabase {
-  prepare(sql: string): {
-    all(...params: unknown[]): Record<string, unknown>[]
-    run(...params: unknown[]): { changes: number, lastInsertRowid?: number | bigint }
-  }
-  close(): void
-}
+import { openSqliteDatabase, type SqliteDatabase } from '../../sqlite-database.js'
 
 interface TableColumn {
   name: string
@@ -26,10 +16,10 @@ interface TableSchema {
 
 /**
  * SqliteAdapter — SQLite 数据库适配器
- * 使用 better-sqlite3 进行同步只读查询
+ * 使用 Node/Electron 内置的 node:sqlite 进行同步查询。
  *
- * Note: better-sqlite3 is a native module that must be installed.
- * In development, it will be available. In production, it's bundled with Electron.
+ * Keeping this adapter synchronous matches the existing data-access contract,
+ * while avoiding a native npm module tied to Electron's Node ABI.
  */
 export class SqliteAdapter {
   private _connections = new Map<string, SqliteDatabase>()
@@ -42,8 +32,7 @@ export class SqliteAdapter {
       return this._connections.get(dbPath)!
     }
 
-    const Database = nodeRequire('better-sqlite3') as new (dbPath: string) => SqliteDatabase
-    const db = new Database(dbPath) as SqliteDatabase
+    const db = openSqliteDatabase(dbPath)
     this._connections.set(dbPath, db)
     return db
   }

@@ -55,7 +55,8 @@ Future<dynamic> runPageAutomation(Map<String, dynamic> payload) async {
       switch (type) {
         case 'click':
           await controller.runJavaScriptReturningResult(
-              'document.querySelector(${_jsStr(selector)})?.click(); "ok"');
+            'document.querySelector(${_jsStr(selector)})?.click(); "ok"',
+          );
           results.add('click:$selector');
         case 'input' || 'fill':
           final value = a['value'] as String? ?? '';
@@ -70,7 +71,9 @@ Future<dynamic> runPageAutomation(Map<String, dynamic> payload) async {
           results.add('input:$selector');
         case 'scroll':
           final dy = (a['dy'] as num?)?.toInt() ?? 400;
-          await controller.runJavaScriptReturningResult('window.scrollBy(0, $dy); "ok"');
+          await controller.runJavaScriptReturningResult(
+            'window.scrollBy(0, $dy); "ok"',
+          );
           results.add('scroll:$dy');
         case 'evaluate':
           final js = a['js'] as String? ?? '';
@@ -85,7 +88,8 @@ Future<dynamic> runPageAutomation(Map<String, dynamic> payload) async {
   return {'ok': false, 'error': 'unknown action: $action'};
 }
 
-String _jsStr(String s) => "'" + s.replaceAll('\\', '\\\\').replaceAll("'", "\\'") + "'";
+String _jsStr(String s) =>
+    "'${s.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'";
 
 /// 全局弹层：权限确认 + ask_user 反向请求 + 页面自动化反向请求。
 class GlobalDialogHost extends ConsumerStatefulWidget {
@@ -104,7 +108,9 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
   @override
   void initState() {
     super.initState();
-    _permSub = HarnessClient.instance.permissionRequests.listen(_showPermissionDialog);
+    _permSub = HarnessClient.instance.permissionRequests.listen(
+      _showPermissionDialog,
+    );
     _hostSub = HarnessClient.instance.hostRequests.listen(_handleHostRequest);
   }
 
@@ -125,7 +131,10 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
         title: Text('「${req.toolName}」请求执行'),
         content: Padding(
           padding: const EdgeInsets.only(top: 8),
-          child: Text(req.argsSummary, style: TextStyle(fontSize: 13, color: p.ink2)),
+          child: Text(
+            req.argsSummary,
+            style: TextStyle(fontSize: 13, color: p.ink2),
+          ),
         ),
         actions: [
           CupertinoDialogAction(
@@ -141,7 +150,10 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
               Navigator.of(ctx).pop();
               HarnessClient.instance.respondPermission(req.requestId, true);
             },
-            child: const Text('允许', style: TextStyle(color: iosBlue, fontWeight: FontWeight.w600)),
+            child: const Text(
+              '允许',
+              style: TextStyle(color: iosBlue, fontWeight: FontWeight.w600),
+            ),
           ),
         ],
       ),
@@ -151,7 +163,8 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
   Future<void> _handleHostRequest(HostRequest req) async {
     if (req.kind == 'ask_user') {
       final question = req.payload['question'] as String? ?? '';
-      final choices = (req.payload['choices'] as List?)?.cast<String>() ?? const [];
+      final choices =
+          (req.payload['choices'] as List?)?.cast<String>() ?? const [];
       if (!mounted) return;
       final answer = await showCupertinoDialog<String>(
         context: context,
@@ -166,17 +179,21 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
               children: [
                 Text(question, style: const TextStyle(fontSize: 14)),
                 const SizedBox(height: 10),
-                ...choices.map((c) => GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => Navigator.of(ctx).pop(c),
-                      child: Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.symmetric(vertical: 9),
-                        child: Text(c,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 15, color: iosBlue)),
+                ...choices.map(
+                  (c) => GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => Navigator.of(ctx).pop(c),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(vertical: 9),
+                      child: Text(
+                        c,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 15, color: iosBlue),
                       ),
-                    )),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -188,14 +205,18 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
           ],
         ),
       );
-      await HarnessClient.instance.respondHost(req.requestId,
-          answer != null ? {'answer': answer} : {'answer': '', 'ignored': true});
+      await HarnessClient.instance.respondHost(
+        req.requestId,
+        answer != null ? {'answer': answer} : {'answer': '', 'ignored': true},
+      );
     } else if (req.kind == 'page_automation') {
       final result = await runPageAutomation(req.payload);
       await HarnessClient.instance.respondHost(req.requestId, result);
     } else {
-      await HarnessClient.instance
-          .respondHost(req.requestId, {'ok': false, 'error': 'unknown host request: ${req.kind}'});
+      await HarnessClient.instance.respondHost(req.requestId, {
+        'ok': false,
+        'error': 'unknown host request: ${req.kind}',
+      });
     }
   }
 

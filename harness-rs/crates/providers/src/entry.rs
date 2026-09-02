@@ -1,6 +1,6 @@
 //! 供应商条目解析（对齐桌面端 apiProtocol auto 规则）与图像生成。
 
-use super::{ChunkStream, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk};
+use super::Provider;
 use crate::{AnthropicProvider, MockProvider, OpenAIProvider};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -32,12 +32,12 @@ pub fn create_provider_from_entry(entry: &ProviderEntry) -> Result<std::sync::Ar
         "anthropic" => Ok(std::sync::Arc::new(AnthropicProvider::new(
             entry.api_key.clone(),
             entry.active_model.clone(),
-            Some(entry.base_url.clone()).filter(|u| !u.trim().is_empty()),
+            non_empty(Some(entry.base_url.clone())),
         )?)),
         _ => Ok(std::sync::Arc::new(OpenAIProvider::new(
             entry.api_key.clone(),
             entry.active_model.clone(),
-            Some(entry.base_url.clone()).filter(|u| !u.trim().is_empty()),
+            non_empty(Some(entry.base_url.clone())),
         ))),
     }
 }
@@ -85,10 +85,52 @@ pub async fn generate_images(
     params: &ImageParams<'_>,
 ) -> Result<Vec<GeneratedImage>> {
     let n = params.n.clamp(1, 4);
-    let size = params
+    let explicit_size = params
         .size
         .filter(|size| !size.trim().is_empty())
-        .unwrap_or_else(|| size_for(params.aspect, params.resolution));
+        .map(str::trim);
+    let explicit_pixel_size = explicit_size
+        .and_then(|size| size.split_once('x'))
+        .and_then(|(width, height)| {
+            let width = width.trim().parse::<u32>().ok()?;
+            let height = height.trim().parse::<u32>().ok()?;
+            Some(width * height)
+        });
+    // OpenAI's own image endpoints infer or constrain size. Many OpenAI-
+    // compatible services use different pixel-size tiers (for example Ark's
+    // Seedream models require >= 3,686,400 pixels), so let those services pick
+    // their default unless the user explicitly chose a size.
+    let uses_openai_image_sizes = model.starts_with("gpt-image-")
+        || model.starts_with("dall-e-")
+        || entry.base_url.contains("api.openai.com");
+    let uses_ark_image_contract = model.starts_with("doubao-seedream")
+        || model.contains("seedream")
+        || entry.base_url.contains("volces.com");
+    let size = if uses_openai_image_sizes {
+        // Resolution labels such as "1K" are queue metadata, not an OpenAI
+        // size argument. Convert them to an endpoint-supported pixel size.
+        if explicit_pixel_size.is_some() {
+            explicit_size
+        } else {
+            Some(size_for(params.aspect, params.resolution))
+        }
+        .unwrap_or_default()
+    } else {
+        // Queued requests always carry a non-empty size label for restart parity.
+        // Only a real WxH value can be forwarded; tier labels let the provider
+        // select its own (often much larger) default.
+        if explicit_pixel_size.is_some_and(|pixels| {
+            // Seedream 5 Lite rejects smaller OpenAI defaults. Queue requests
+            // carry those defaults, so treat them as a resolution hint instead
+            // of forwarding an unsupported size.
+            !(uses_ark_image_contract && pixels < 3_686_400)
+        }) {
+            explicit_size.unwrap_or_default()
+        } else {
+            ""
+        }
+    };
+    let uses_ark_edit_contract = uses_ark_image_contract;
     if entry.api_key.trim().is_empty() {
         return Ok((0..n)
             .map(|i| mock_placeholder(params.prompt, Some(size), i))
@@ -127,6 +169,44 @@ pub async fn generate_images(
             .unwrap_or_default()
     };
     if !edit_inputs.is_empty() {
+        if uses_ark_edit_contract {
+            let image_values = edit_inputs
+                .iter()
+                .map(|(b64, mime)| format!("data:{mime};base64,{b64}"))
+                .collect::<Vec<_>>();
+            let mut body = json!({
+                "model": model,
+                "prompt": params.prompt,
+                "n": n,
+                "image": if image_values.len() == 1 {
+                    Value::String(image_values[0].clone())
+                } else {
+                    json!(image_values)
+                },
+                "response_format": "url",
+            });
+            if let Some(format) = params.format.filter(|format| !format.trim().is_empty()) {
+                body["output_format"] = json!(format);
+            }
+            let resp = client
+                .post(format!("{base}/images/generations"))
+                .bearer_auth(&entry.api_key)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(180))
+                .send()
+                .await
+                .context("image edit request failed")?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                bail!("image api error ({status}): {text}");
+            }
+            let value: Value = resp.json().await.context("parse image response")?;
+            let out = collect_images(value, &client, ext).await?;
+            anyhow::ensure!(!out.is_empty(), "image api returned no images");
+            return Ok(out);
+        }
+
         use base64::Engine;
         let mut form = reqwest::multipart::Form::new()
             .text("model", model.to_string())
@@ -180,12 +260,10 @@ pub async fn generate_images(
     }
 
     // 生成模式：JSON /images/generations
-    let mut body = json!({
-        "model": model,
-        "prompt": params.prompt,
-        "n": n,
-        "size": size,
-    });
+    let mut body = json!({ "model": model, "prompt": params.prompt, "n": n });
+    if !size.trim().is_empty() {
+        body["size"] = json!(size);
+    }
     if let Some(q) = params.quality {
         if q != "auto" {
             body["quality"] = json!(q);
@@ -253,9 +331,10 @@ fn ext_of(format: Option<&str>) -> &'static str {
     }
 }
 
-/// 宽高比 + 分辨率 → API 尺寸（gpt-image-1 支持 1024x1024 / 1536x1024 / 1024x1536）。
-pub fn size_for(aspect: Option<&str>, resolution: Option<&str>) -> &'static str {
-    // 分辨率档位影响 mock 绘制尺寸；真实 API 取最近支持档
+/// 宽高比 → API 尺寸（gpt-image-1 支持 1024x1024 / 1536x1024 / 1024x1536）。
+pub fn size_for(aspect: Option<&str>, _resolution: Option<&str>) -> &'static str {
+    // Resolution only changes the mock rendering size; the real image API
+    // accepts the fixed sizes above and has no separate resolution tier.
     match aspect.unwrap_or("1:1") {
         "3:2" | "4:3" | "16:9" => "1536x1024",
         "2:3" | "3:4" | "9:16" => "1024x1536",
@@ -477,13 +556,67 @@ mod tests {
         assert_eq!(images[0].bytes, b"hello");
     }
 
+    #[tokio::test]
+    async fn ark_image_edit_uses_generation_endpoint_with_data_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let request = String::from_utf8_lossy(&request).into_owned();
+            assert!(request.starts_with("POST /images/generations HTTP/1.1"));
+            let body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body)
+                .unwrap_or_default();
+            let payload: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(payload["model"], "doubao-seedream-5.0-lite");
+            assert_eq!(payload["image"], "data:image/png;base64,aGVsbG8=");
+            assert_eq!(payload["response_format"], "url");
+            let response = r#"{"data":[{"url":"http://127.0.0.1:9/hello.png"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let entry = ProviderEntry {
+            id: "image".into(),
+            name: "Image".into(),
+            base_url: format!("http://{address}"),
+            api_key: "test-key".into(),
+            api_protocol: "openai".into(),
+            models: vec![],
+            active_model: "doubao-seedream-5.0-lite".into(),
+            temperature: None,
+            image_generation: true,
+        };
+        let params = ImageParams {
+            prompt: "add a yellow border",
+            negative_prompt: None,
+            aspect: Some("1:1"),
+            size: None,
+            resolution: Some("1K"),
+            quality: Some("auto"),
+            format: Some("png"),
+            n: 1,
+            input_image_b64: Some("aGVsbG8="),
+            input_images_b64: vec![],
+            input_image_mimes: vec![],
+        };
+        let result = generate_images(&entry, "doubao-seedream-5.0-lite", &params).await;
+        assert!(
+            result.is_err(),
+            "the local test URL is not fetchable; this test only validates the upstream request"
+        );
+        server.await.unwrap();
+    }
+
     #[test]
     fn aspect_mapping() {
         assert_eq!(size_for(Some("16:9"), None), "1536x1024");
         assert_eq!(size_for(None, None), "1024x1024");
     }
-
-    // 抑制未用告警
-    #[allow(dead_code)]
-    fn _t(_m: LlmMessage, _t2: LlmTool, _s: StreamChunk, _c: ChunkStream) {}
 }

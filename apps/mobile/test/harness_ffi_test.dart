@@ -93,7 +93,7 @@ void main() {
       'protocolVersion': '1.0',
       'capabilities': {
         'platform': 'mobile-ffi',
-        'features': ['lightweight_runtime', 'webview_automation'],
+        'features': ['lightweight_runtime', 'webview_automation', 'interactive'],
         'excludes': ['subprocess', 'port_binding', 'webhook_receiver'],
       },
     });

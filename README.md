@@ -46,7 +46,7 @@ pnpm --dir apps/electron install
 pnpm --dir apps/electron electron:dev
 ```
 
-安装依赖时会自动将 `better-sqlite3` 等原生模块重建为当前 Electron 版本；如果安装时使用了 `--ignore-scripts` 或替换了 `node_modules`，请先运行 `pnpm --dir apps/electron rebuild:native`。
+Electron 主进程使用运行时内置的 `node:sqlite`，不需要额外安装或重建 SQLite 原生 npm 模块。
 
 详细架构见 [docs/rust-harness-architecture.md](docs/rust-harness-architecture.md) 和 [HARNESS.md](HARNESS.md)
 
@@ -140,7 +140,7 @@ pnpm run test:e2e:macos # GUI 集成测试（真实窗口驱动全流程）
 | 前端 | Vue 3 + Vite |
 | 主进程后端 | Node.js (Electron main process) |
 | LAN 服务 | Express.js + http-proxy-middleware |
-| 数据库 | better-sqlite3 |
+| 数据库 | SQLite（Electron `node:sqlite` / Rust bundled `rusqlite`） |
 | AI | OpenAI-compatible API (function calling) |
 
 ## 项目结构

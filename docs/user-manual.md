@@ -45,7 +45,7 @@ pnpm --dir apps/electron install
 pnpm --dir apps/electron electron:dev
 ```
 
-安装阶段会自动为 Electron 重建 `better-sqlite3` 等原生依赖。若使用了 `--ignore-scripts` 或替换了依赖目录，启动前运行 `pnpm --dir apps/electron rebuild:native`。
+Electron 主进程使用运行时内置的 `node:sqlite`，无需重建 SQLite 原生依赖。
 
 如果需要构建安装包，可使用：
 

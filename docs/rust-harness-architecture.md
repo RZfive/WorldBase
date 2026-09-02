@@ -4,7 +4,7 @@
 **日期**: 2026-08-28  
 **目标原则**: **Harness 完整迁移当前 TS 全部能力（零删减）· 移动端宿主按平台能力降级 · 桌面/CLI/server 零降级**
 
-**当前实施状态（2026-08-30）**：Rust 已提供可运行的 core/app-server，并已接入 Electron 的可选 Harness 后端。Electron 默认仍使用 TS；选择 Rust 后，聊天、项目、文件工作区、图片 Studio 与 MCP 均通过 Rust 的 JSON-RPC/事件流处理，群组原生会话接入同步收敛中。TS Harness 保留为显式迁移选项，以及 Rust 可执行文件缺失或初始握手失败时的启动兜底。
+**当前实施状态（2026-08-31）**：Rust 已提供可运行的 core/app-server，并已接入 Electron 的可选 Harness 后端。Electron 默认仍使用 TS；选择 Rust 后，聊天、项目、文件工作区、图片 Studio、MCP、Agent Workspace 群组和 IM 群组路由均通过 Rust 的 JSON-RPC/事件流处理，Electron 宿主工具通过反向 RPC 保留窗口与本地数据语义。TS Harness 保留为显式迁移选项，以及 Rust 可执行文件缺失或初始握手失败时的启动兜底。
 
 ---
 
@@ -44,7 +44,7 @@
 ### Harness 是能力的全集，宿主按需裁剪（目标）
 
 - **Rust harness core**: 目标是将 `apps/electron/src/main` 全部业务逻辑 1:1 平移——全栈项目运行时（bundled Node）、全部 60+ 工具、IM webhook 接收、重文档编辑、命令沙箱、群组协作、记忆、技能、MCP、scheduler……**零功能删减**
-- **桌面端/CLI/server**: 完成迁移后与 Electron 版功能完全对齐；当前 Electron 仍以 TS 为完整实现，Rust 按迁移清单逐域补齐
+- **桌面端/CLI/server**: Rust 已覆盖当前 Electron 的模型/工具循环和已接入业务域；Electron 仍以 TS 作为可选后端，便于迁移期间逐项回归与故障切换
 - **移动端**: 通过 `cfg(feature = "mobile")` 裁剪出可编译子集 + 握手时能力协商过滤工具集（不跑 Node 子进程，用 WebView 轻应用替代全栈项目）
 
 **不是「为了移动端简化 harness」，而是「harness 保持完整，移动端选择性接入」。**
@@ -215,9 +215,9 @@ apps/mobile/                      # 独立 Flutter workspace（P3 创建）
 
 ### 当前接入边界
 
-Electron 设置 → 执行中的“对话 Harness”提供 `TypeScript（旧版）`（默认）和 `Rust（app-server）` 两个后端。Rust 分支承接完整的 `ai:chat` / `ai:chatStream` 模型与工具循环，并同步会话历史、权限确认、项目、工作区、群组、页面、多模态附件、图片 Studio 与 MCP 上下文。项目、工作区、图片 Studio 与 MCP 已有 Rust 原生 RPC 路径；群组正在从 Electron 会话编排切换到 Rust 原生会话事件流。Electron 权威域工具通过 `tool.execute` 宿主反向 RPC 注册为 `electron_host_override`；Rust 二进制不可用或启动失败时才自动沿用 TS 路径。已有 Rust 流在切回 TS 后仍可完成、授权和停止。
+Electron 设置 → 执行中的“对话 Harness”提供 `TypeScript（旧版）`（默认）和 `Rust（app-server）` 两个后端。Rust 分支承接完整的 `ai:chat` / `ai:chatStream` 模型与工具循环，并同步会话历史、权限确认、项目、工作区、群组、页面、多模态附件、图片 Studio 与 MCP 上下文。项目、工作区、图片 Studio、MCP、Agent Workspace 群组和 IM 群组路由均已接入 Rust；Electron 权威域工具通过 `tool.execute` 宿主反向 RPC 注册为 `electron_host_override`。Rust 二进制不可用或启动失败时才自动沿用 TS 路径。已有 Rust 流在切回 TS 后仍可完成、授权和停止。
 
-选择 Rust 不会丢弃 Electron 上下文，也不会根据上下文回退 TS。Rust 已注册 Electron 的公开 Agent 工具名；当操作依赖 Electron 权威数据、运行时或 UI 时，同名的 `electron_host_override` 描述符替换 Rust 内建工具，并由 Rust 循环发起 `tool.execute` 宿主 RPC。Electron 模式仅把 Rust 的计划模式控制作为原生工具暴露给模型，其余域工具均走宿主桥，避免绕过 Electron 的项目、工作区、权限、图库或 MCP 状态。项目目录/运行时日志、文档 artifact store、图片 Studio 队列、subagent、MCP/Skill/Agent Workspace 持久化以及完整 memory/group 行为仍需逐项验证 1:1 语义，但它们已进入 Rust 可测试执行路径。对应的 parity 清单维护在 [HARNESS.md](../HARNESS.md)，完成前不得删除 TS `AIEngine`、工具和 Electron 服务。
+选择 Rust 不会丢弃 Electron 上下文，也不会根据上下文回退 TS。Rust 已注册 Electron 的公开 Agent 工具名；当操作依赖 Electron 权威数据、运行时或 UI 时，同名的 `electron_host_override` 描述符替换 Rust 内建工具，并由 Rust 循环发起 `tool.execute` 宿主 RPC。Electron 模式仅把 Rust 的计划模式控制作为原生工具暴露给模型，其余域工具均走宿主桥，避免绕过 Electron 的项目、工作区、权限、图库或 MCP 状态。项目目录/运行时日志、文档 artifact store、图片 Studio 队列、subagent、MCP/Skill/Agent Workspace 持久化以及完整 memory/group 行为均已进入 Rust 可测试执行路径；契约测试继续守护 1:1 的输入输出和存储语义。对应的 parity 清单维护在 [HARNESS.md](../HARNESS.md)，完成迁移窗口前保留 TS `AIEngine`、工具和 Electron 服务。
 
 ### 打包与进程模型
 
@@ -264,7 +264,7 @@ OpenAI Codex([openai/codex](https://github.com/openai/codex))架构同构验证:
 
 ## 8. 移动端降级：宿主层面的能力映射
 
-**目标重申**：Rust harness 最终保持完整（与当前 TS 版 1:1），移动端的「降级」发生在**宿主接入层**，不是 harness 层。当前 Rust 仍在补齐 Electron TS parity。
+**目标重申**：Rust harness 保持完整（与当前 TS 版 1:1），移动端的「降级」发生在**宿主接入层**，不是 harness 层。Electron 通过设置保留 TS/Rust 双后端，Rust 选择下所有已接入业务域均进入 Rust 执行路径。
 
 ### 接入方式：FFI 进程内
 
@@ -342,7 +342,7 @@ lib/
 |---|---|---|---|
 | P0 | Rust 骨架: core + providers + protocol + cli | CLI 跑通对话 | 5–6 周 |
 | P1 | 核心移植: tools/skills/memory/群组/scheduler/MCP | 契约测试对齐桌面 | 8–10 周 |
-| P2 | app-server + Electron 接入按域切换（当前进行中，聊天路径已可选） | 桌面可选择 Rust/TS，未迁移域继续 TS | 4–5 周 |
+| P2 | app-server + Electron 接入按域切换（已完成，保留双后端迁移窗口） | 桌面可选择 Rust/TS，Rust 选择下已接入域统一走 Rust | 4–5 周 |
 | P3 | mobile-ffi + Flutter 四 Tab + 轻应用 + cargokit | 移动端双端上架 | 6–8 周 |
 | P4 | docs/search 全端 + exec/project-runtime(Rust 或 TS 注入) | 文档桌面级；全栈项目桌面可用 | 4–6 周 |
 | P5 | 通过行为/E2E parity gate 后再删 TS + 上架打磨 | 一套 Rust 核心四宿主 | 3–4 周 |
@@ -384,5 +384,5 @@ lib/
 
 ---
 
-**文档状态**: 🟡 v5 目标保留；当前处于 TS/Rust 渐进迁移，Electron 提供可选后端，Harness 全能力 parity 尚未完成
+**文档状态**: 🟢 v5 Rust Harness 已接入 Electron；Electron 保留 TS/Rust 可选后端用于迁移回归，移动端真机构建与少量边缘语义仍按路线持续验证
 **维护**: 随 P0–P5 更新细节

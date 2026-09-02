@@ -1,6 +1,5 @@
-import Database from 'better-sqlite3'
-import type { Database as BetterSqliteDatabase } from 'better-sqlite3'
 import type { ImageLibraryQuery } from '../../shared/image-studio-types.js'
+import { openSqliteDatabase, type SqliteDatabase } from '../sqlite-database.js'
 
 /** One row of the image index. File names are relative to the image-library dir. */
 export interface ImageIndexRow {
@@ -37,12 +36,11 @@ const SELECT_COLUMNS =
  * from the durable per-image .json files at any time (see ImageLibraryStore).
  */
 export class ImageIndex {
-  private db: BetterSqliteDatabase
+  private db: SqliteDatabase
 
   constructor (dbPath: string) {
-    this.db = new Database(dbPath)
-    this.db.pragma('journal_mode = WAL')
-    this.db.pragma('synchronous = NORMAL')
+    this.db = openSqliteDatabase(dbPath)
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS images (
         id TEXT PRIMARY KEY,
@@ -210,7 +208,7 @@ export class ImageIndex {
     const offset = Math.max(0, opts.offset ?? 0)
     const rows = this.db.prepare(
       `SELECT ${SELECT_COLUMNS} FROM images ${clause} ORDER BY created_at DESC, id DESC LIMIT @limit OFFSET @offset`
-    ).all({ ...params, limit, offset }) as ImageIndexRow[]
+    ).all({ ...params, limit, offset }) as unknown as ImageIndexRow[]
     return { rows, total }
   }
 

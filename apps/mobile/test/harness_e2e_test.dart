@@ -26,7 +26,9 @@ void main() {
     final client = HttpClient();
     for (var i = 0; i < 60; i++) {
       try {
-        final req = await client.getUrl(Uri.parse('http://127.0.0.1:$port/health'));
+        final req = await client.getUrl(
+          Uri.parse('http://127.0.0.1:$port/health'),
+        );
         final resp = await req.close();
         if (resp.statusCode == 200) break;
       } catch (_) {}
@@ -53,7 +55,8 @@ void main() {
 
     ws.stream.listen((raw) {
       final msg = jsonDecode(raw as String) as Map<String, dynamic>;
-      if (msg.containsKey('id') && (msg.containsKey('result') || msg.containsKey('error'))) {
+      if (msg.containsKey('id') &&
+          (msg.containsKey('result') || msg.containsKey('error'))) {
         final completer = pending.remove(msg['id'].toString());
         if (completer != null) {
           if (msg.containsKey('error')) {
@@ -70,12 +73,14 @@ void main() {
         // HITL：权限询问自动允许（验证完整反向流程）
         if (frame['kind'] == 'permission_request') {
           final reqId = frame['requestId'] as String;
-          ws.sink.add(jsonEncode({
-            'jsonrpc': '2.0',
-            'id': 'perm-\$reqId',
-            'method': 'chat.respond',
-            'params': {'requestId': reqId, 'allow': true},
-          }));
+          ws.sink.add(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': 'perm-\$reqId',
+              'method': 'chat.respond',
+              'params': {'requestId': reqId, 'allow': true},
+            }),
+          );
         }
         if (frame['kind'] == 'done' || frame['kind'] == 'error') {
           doneStreams.add(frame['streamId'] as String);
@@ -89,7 +94,14 @@ void main() {
       final id = nextId++;
       final completer = Completer<dynamic>();
       pending['$id'] = completer;
-      ws.sink.add(jsonEncode({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params}));
+      ws.sink.add(
+        jsonEncode({
+          'jsonrpc': '2.0',
+          'id': id,
+          'method': method,
+          'params': params,
+        }),
+      );
       return completer.future.timeout(const Duration(seconds: 30));
     }
 
@@ -104,15 +116,24 @@ void main() {
       'protocolVersion': '1.0',
       'capabilities': {
         'platform': 'mobile-ios',
-        'features': ['lightweight_runtime', 'webview_automation'],
+        'features': [
+          'lightweight_runtime',
+          'webview_automation',
+          'interactive',
+        ],
         'excludes': ['subprocess', 'port_binding', 'webhook_receiver'],
       },
     });
     expect(init['protocolVersion'], '1.0');
-    final toolNames = (init['availableTools'] as List).map((t) => (t as Map)['name']).toSet();
+    final toolNames = (init['availableTools'] as List)
+        .map((t) => (t as Map)['name'])
+        .toSet();
     expect(toolNames, contains('read_file'));
     expect(toolNames, contains('ask_user'), reason: 'webview/交互能力应开放 host 域工具');
     expect(toolNames, contains('read_current_page'));
+    expect(toolNames, contains('list_agent_workspace_catalog'));
+    expect(toolNames, contains('create_agent'));
+    expect(toolNames, contains('create_agent_group'));
     expect(toolNames, isNot(contains('execute_command')));
     expect(toolNames, isNot(contains('create_project')));
 
@@ -136,11 +157,11 @@ void main() {
             'contextWindowK': 64,
             'inputPrice': 4.0,
             'outputPrice': 16.0,
-          }
+          },
         ],
         'activeModel': 'deepseek-chat',
         'imageGeneration': false,
-      }
+      },
     });
     final providers = await call('provider.list', {});
     final providerList = (providers['providers'] as Map)['providers'] as List;
@@ -165,20 +186,71 @@ void main() {
         'systemPrompt': '你是一个精炼的测试助手。',
         'providerId': 'p-ds',
         'skillIds': [],
-      }
+      },
     });
     final agents = await call('agent.list', {});
     final agentList = agents['agents'] as List;
     expect(agentList, isNotEmpty);
     final agentId = (agentList.first as Map)['id'] as String;
 
+    // AI 工具与 Electron 同名，并直接写入 Rust Agent Workspace。
+    final createdByAi = await call('tool.call', {
+      'name': 'create_agent',
+      'args': {
+        'name': 'AI 研究员',
+        'description': '由 AI 工具创建',
+        'system_prompt': '负责调研与事实核验。',
+        'reasoning_strength': 'high',
+        'memory_scopes': ['user', 'agent', 'group'],
+        'allow_user_traits': false,
+        'auto_reply_enabled': true,
+        'auto_reply_require_mention': false,
+      },
+    });
+    expect(createdByAi['success'], isTrue);
+    expect((createdByAi['agent'] as Map)['reasoningStrength'], 'high');
+    expect(
+      ((createdByAi['agent'] as Map)['memoryWritePolicy']
+          as Map)['allowUserTraits'],
+      isFalse,
+    );
+    expect(
+      ((createdByAi['agent'] as Map)['autoReplyPolicy'] as Map)['enabled'],
+      isTrue,
+    );
+    final aiAgentId = (createdByAi['agent'] as Map)['id'] as String;
+    final createdGroupByAi = await call('tool.call', {
+      'name': 'create_agent_group',
+      'args': {
+        'name': 'AI 产品群聊',
+        'description': '移动端可直接进入的持久群组',
+        'coordinator_agent_id': agentId,
+        'member_agent_ids': [agentId, aiAgentId],
+        'max_parallel_workers': 2,
+      },
+    });
+    expect(createdGroupByAi['success'], isTrue);
+    final agentGroups = await call('agentGroup.list', {});
+    final savedGroups = agentGroups['groups'] as List;
+    expect(savedGroups, isNotEmpty);
+    expect((savedGroups.last as Map)['name'], 'AI 产品群聊');
+    expect(
+      (savedGroups.last as Map)['memberAgentIds'],
+      containsAll(<String>[agentId, aiAgentId]),
+    );
+
     // 4) Agent 绑定的会话：系统提示词来自 agent（mock 回显即可验证对话通）
-    final conv = await call('conversation.create', {'title': '全功能 E2E', 'agentId': agentId});
+    final conv = await call('conversation.create', {
+      'title': '全功能 E2E',
+      'agentId': agentId,
+    });
     final convId = conv['id'] as String;
 
     // 5) 对话 + 工具调用 + 宿主反向 RPC（ask_user）
     //    无 key 时 mock provider 回显；脚本化工具调用走默认行为——这里直接 tool.call 验证 host 工具面
-    final send = await call('chat.send', {'conversationId': convId, 'text': '你好 移动端'}) as Map;
+    final send =
+        await call('chat.send', {'conversationId': convId, 'text': '你好 移动端'})
+            as Map;
     final streamId = send['streamId'] as String;
     await waitStreamDone(streamId);
     final messages = await call('conversation.messages', {'id': convId});
@@ -188,11 +260,13 @@ void main() {
 
     // 6) 分叉 + 编辑重发
     final userMsgId = (msgs.first as Map)['id'] as int;
-    final fork = await call('conversation.fork', {
-      'conversationId': convId,
-      'messageId': userMsgId,
-      'mode': 'fork',
-    }) as Map;
+    final fork =
+        await call('conversation.fork', {
+              'conversationId': convId,
+              'messageId': userMsgId,
+              'mode': 'fork',
+            })
+            as Map;
     final forkedId = fork['conversationId'] as String;
     expect(forkedId, isNot(convId));
     final forked = await call('conversation.messages', {'id': forkedId});
@@ -219,28 +293,42 @@ void main() {
     });
     final groupId = group['id'] as String;
     expect(group['coordinator'], '协调者');
-    final gStream = await call('group.message', {'id': groupId, 'text': '开始讨论'}) as Map;
+    final gStream =
+        await call('group.message', {'id': groupId, 'text': '开始讨论'}) as Map;
     await waitStreamDone(gStream['streamId'] as String);
     final groupAfter = await call('group.get', {'id': groupId});
-    expect(((groupAfter as Map)['rounds'] as List).length, 2, reason: 'discussion 模式全员发言');
+    expect(
+      ((groupAfter as Map)['rounds'] as List).length,
+      2,
+      reason: 'discussion 模式全员发言',
+    );
     await call('group.inject', {'id': groupId, 'content': '补充：两周预算'});
-    await call('group.board.update',
-        {'id': groupId, 'field': 'decisions', 'op': 'add', 'value': '选 Rust'});
+    await call('group.board.update', {
+      'id': groupId,
+      'field': 'decisions',
+      'op': 'add',
+      'value': '选 Rust',
+    });
     final boardAfter = await call('group.get', {'id': groupId});
     expect(
-        (((boardAfter as Map)['board'] as Map)['decisions'] as List).contains('选 Rust'),
-        isTrue);
+      (((boardAfter as Map)['board'] as Map)['decisions'] as List).contains(
+        '选 Rust',
+      ),
+      isTrue,
+    );
 
     // 8) Studio：mock 生图（SVG）→ 列表 → /studio/{id} 取图
-    final studioStream = await call('studio.generate', {
-      'prompt': '赛博朋克猫',
-      'mode': 'generate',
-      'aspect': '16:9',
-      'resolution': '2K',
-      'quality': 'high',
-      'format': 'png',
-      'n': 2,
-    }) as Map;
+    final studioStream =
+        await call('studio.generate', {
+              'prompt': '赛博朋克猫',
+              'mode': 'generate',
+              'aspect': '16:9',
+              'resolution': '2K',
+              'quality': 'high',
+              'format': 'png',
+              'n': 2,
+            })
+            as Map;
     final sId = studioStream['streamId'] as String;
     await waitStreamDone(sId);
     final images = await call('studio.list', {'limit': 10});
@@ -248,12 +336,25 @@ void main() {
     expect(imageList.length, 2);
     final firstImage = imageList.first as Map;
     expect(firstImage['file'] as String, endsWith('.svg'));
-    final imgReq = await HttpClient().getUrl(Uri.parse('http://127.0.0.1:$port/studio/${firstImage['id']}'));
+    final imgReq = await HttpClient().getUrl(
+      Uri.parse('http://127.0.0.1:$port/studio/${firstImage['id']}'),
+    );
     final imgResp = await imgReq.close();
     expect(imgResp.statusCode, 200);
     expect(imgResp.headers.contentType.toString(), contains('svg'));
     final imgBytes = await imgResp.fold<List<int>>([], (a, b) => a..addAll(b));
     expect(String.fromCharCodes(imgBytes.take(5)), '<svg ');
+
+    // 对话工具生图：移动端握手声明 interactive 后，ask 权限可应答，
+    // 工具应返回队列回执且待处理任务可被 Studio 消费。
+    final queuedImage = await call('tool.call', {
+      'name': 'generate_image',
+      'args': {'prompt': '移动端队列测试'},
+    });
+    expect((queuedImage as Map)['queued'], 1);
+    final queuedTasks = await call('studio.tasks.drain', {});
+    expect(((queuedTasks as Map)['tasks'] as List).length, 1);
+
     // 图片管理：标签/文件夹 + 过滤查询
     await call('studio.tag', {
       'id': firstImage['id'],
@@ -275,30 +376,46 @@ void main() {
       'instructions': '汇总今日对话要点',
     });
     final skills = await call('skill.list', {});
-    final skillNames = (skills['skills'] as List).map((s) => (s as Map)['name']).toList();
+    final skillNames = (skills['skills'] as List)
+        .map((s) => (s as Map)['name'])
+        .toList();
     expect(skillNames, contains('daily-report'));
     await call('skill.delete', {'name': 'daily-report'});
 
-    await call('schedule.create',
-        {'name': '早报', 'cron': '0 9 * * 1-5', 'task': '汇总昨日'});
+    await call('schedule.create', {
+      'name': '早报',
+      'cron': '0 9 * * 1-5',
+      'task': '汇总昨日',
+    });
     final schedules = await call('schedule.list', {});
     expect((schedules['schedules'] as List), isNotEmpty);
 
-    await call('memory.add', {'content': '用户偏好深色主题', 'tags': ['ui']});
+    await call('memory.add', {
+      'content': '用户偏好深色主题',
+      'tags': ['ui'],
+    });
     final hits = await call('memory.search', {'query': '深色'});
     expect((hits['hits'] as List), isNotEmpty);
 
     // 10) 会话列表含分叉会话 + 持久化校验（HTTP /rpc 通道）
-    final rpcReq = await HttpClient().postUrl(Uri.parse('http://127.0.0.1:$port/rpc'));
+    final rpcReq = await HttpClient().postUrl(
+      Uri.parse('http://127.0.0.1:$port/rpc'),
+    );
     rpcReq.headers.contentType = ContentType.json;
-    rpcReq.add(utf8.encode(jsonEncode({
-      'jsonrpc': '2.0',
-      'id': 99,
-      'method': 'conversation.list',
-      'params': {'limit': 50},
-    })));
+    rpcReq.add(
+      utf8.encode(
+        jsonEncode({
+          'jsonrpc': '2.0',
+          'id': 99,
+          'method': 'conversation.list',
+          'params': {'limit': 50},
+        }),
+      ),
+    );
     final rpcResp = await rpcReq.close();
-    final rpcBody = jsonDecode(await rpcResp.transform(utf8.decoder).join()) as Map<String, dynamic>;
+    final rpcBody =
+        jsonDecode(await rpcResp.transform(utf8.decoder).join())
+            as Map<String, dynamic>;
     final convIds = ((rpcBody['result'] as Map)['conversations'] as List)
         .map((c) => (c as Map)['id'])
         .toSet();
@@ -307,10 +424,12 @@ void main() {
 
     // 10.5) 对话驱动生成轻应用：mock Agent 识别意图 → 权限应答 → 创建 → 列表可见
     final conv2 = await call('conversation.create', {'title': 'AI 做应用'});
-    final send2 = await call('chat.send', {
-      'conversationId': conv2['id'],
-      'text': '帮我做一个「番茄钟」应用',
-    }) as Map;
+    final send2 =
+        await call('chat.send', {
+              'conversationId': conv2['id'],
+              'text': '帮我做一个「番茄钟」应用',
+            })
+            as Map;
     if (!doneStreams.contains(send2['streamId'])) {
       await doneWaiters
           .putIfAbsent(send2['streamId'] as String, () => Completer<void>())
@@ -330,19 +449,25 @@ void main() {
     expect(permEvents, contains('create_lightweight_app'), reason: '创建前应弹权限询问');
 
     // 11) 轻应用：create_lightweight_app 工具（tool.call）→ 列表 → /lightapp/{id} 页面
-    final toolCall = await call('tool.call', {
-      'name': 'create_lightweight_app',
-      'args': {
-        'name': '番茄钟',
-        'html': '<!DOCTYPE html><html><body><h1>番茄钟</h1></body></html>',
-      }
-    }) as Map;
+    final toolCall =
+        await call('tool.call', {
+              'name': 'create_lightweight_app',
+              'args': {
+                'name': '番茄钟',
+                'html': '<!DOCTYPE html><html><body><h1>番茄钟</h1></body></html>',
+              },
+            })
+            as Map;
     final lightAppId = ((toolCall['app'] as Map)['id']) as String;
     final lightApps = await call('lightapp.list', {});
-    expect((lightApps['apps'] as List).length, 2,
-        reason: '对话生成 1 个 + tool.call 创建 1 个');
-    final pageReq = await HttpClient()
-        .getUrl(Uri.parse('http://127.0.0.1:$port/lightapp/$lightAppId'));
+    expect(
+      (lightApps['apps'] as List).length,
+      2,
+      reason: '对话生成 1 个 + tool.call 创建 1 个',
+    );
+    final pageReq = await HttpClient().getUrl(
+      Uri.parse('http://127.0.0.1:$port/lightapp/$lightAppId'),
+    );
     final pageResp = await pageReq.close();
     expect(pageResp.statusCode, 200);
     final pageHtml = await pageResp.transform(utf8.decoder).join();
@@ -351,8 +476,11 @@ void main() {
 
     // 12) 用量统计：对话已记账（mock 估算 tokens）
     final usage = await call('usage.summary', {'days': 30}) as Map;
-    expect((usage['totalInputTokens'] as num).toInt(), greaterThan(0),
-        reason: '对话与工具循环应产生用量记录');
+    expect(
+      (usage['totalInputTokens'] as num).toInt(),
+      greaterThan(0),
+      reason: '对话与工具循环应产生用量记录',
+    );
     expect((usage['daily'] as List), isNotEmpty);
 
     await ws.sink.close();

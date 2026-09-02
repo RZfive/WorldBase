@@ -7,6 +7,8 @@ import '../../core/providers.dart';
 /// 供应商/模型快速切换弹层。
 ///
 /// [imageOnly] 为 true 时仅列出具备生图/编辑能力的供应商与模型（绘图用）；
+/// [imageMode] 可进一步限定为 `generate` 或 `edit`，避免把仅支持编辑的
+/// 模型提交到生成接口（反之亦然）。
 /// 选中后回调 (providerId, model, providerName)，providerId 为 null 表示默认。
 Future<void> showModelPickerSheet(
   BuildContext context, {
@@ -14,12 +16,46 @@ Future<void> showModelPickerSheet(
   String? selectedProviderId,
   String? selectedModel,
   bool imageOnly = false,
+  String? imageMode,
   String title = '选择供应商与模型',
 }) async {
-  final config = await HarnessClient.instance.listProviders();
+  Map<String, dynamic> config;
+  try {
+    config = await HarnessClient.instance.listProviders();
+  } catch (error) {
+    if (!context.mounted) return;
+    await showCupertinoDialog<void>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('无法加载模型'),
+        content: Text('$error'),
+        actions: [
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('好'),
+          ),
+        ],
+      ),
+    );
+    return;
+  }
   final list = (config['providers'] as List? ?? [])
       .map((e) => ProviderEntry.fromJson((e as Map).cast<String, dynamic>()))
       .toList();
+
+  bool supportsImage(ModelInfo model) {
+    if (imageMode == 'generate') return model.imageGeneration;
+    if (imageMode == 'edit') return model.imageEditing;
+    return model.imageGeneration || model.imageEditing;
+  }
+
+  bool providerHasImageCapability(ProviderEntry provider) {
+    if (imageMode == 'generate') return provider.imageGeneration;
+    // ProviderEntry has no separate edit flag; a model-level marker is the
+    // authoritative signal for edit mode when models are configured.
+    return provider.imageGeneration;
+  }
 
   if (!context.mounted) return;
   final pal = DawnPalette.of(context);
@@ -58,18 +94,30 @@ Future<void> showModelPickerSheet(
               IosSection(
                 header: '${p.name}${p.apiProtocol.isEmpty ? '' : ' · ${p.apiProtocol}'}',
                 children: [
-                  if (p.models.isEmpty)
+                  if (p.models.isEmpty && (!imageOnly || providerHasImageCapability(p)))
+                    IosRow(
+                      icon: imageOnly
+                          ? CupertinoIcons.paintbrush_fill
+                          : CupertinoIcons.exclamationmark_circle,
+                      iconColor: imageOnly ? iosBlue : pal.ink2,
+                      title: imageOnly ? '使用供应商默认生图模型' : '该供应商没有配置模型',
+                      subtitle: imageOnly ? '由供应商自动选择图片模型' : null,
+                      onTap: imageOnly
+                          ? () {
+                              onSelected(p.id, null, p.name);
+                              Navigator.pop(ctx);
+                            }
+                          : null,
+                  )
+                  else if (p.models.isEmpty)
                     IosRow(
                       icon: CupertinoIcons.exclamationmark_circle,
                       iconColor: pal.ink2,
-                      title: '该供应商没有配置模型',
+                      title: '该供应商未标记生图能力',
                     )
                   else
                     for (final m in p.models.where((m) =>
-                        !imageOnly ||
-                        m.imageGeneration ||
-                        m.imageEditing ||
-                        !p.models.any((x) => x.imageGeneration || x.imageEditing)))
+                        !imageOnly || supportsImage(m)))
                       IosRow(
                         icon: m.imageEditing
                             ? CupertinoIcons.wand_stars
@@ -90,6 +138,15 @@ Future<void> showModelPickerSheet(
                           Navigator.pop(ctx);
                         },
                       ),
+                  if (imageOnly &&
+                      p.models.isNotEmpty &&
+                      !p.models.any(supportsImage))
+                    IosRow(
+                      icon: CupertinoIcons.exclamationmark_circle,
+                      iconColor: pal.ink2,
+                      title: '该供应商没有图片模型',
+                      subtitle: '请在“我的 → 供应商”中标记生图/编辑能力',
+                    ),
                 ],
               ),
             ],

@@ -77,7 +77,7 @@ export type GroupDeliberationProgressCallback = (
 export interface GroupExecutionEngine extends Pick<AIHarness, 'chat' | 'chatStream' | 'getAvailableTools'> {}
 
 type GroupRunContext = Pick<AIRequestOptions,
-  'authMode' | 'getAuthMode' | 'hostConversationId' | 'hostSessionId' | 'workspaceRoot'
+  'authMode' | 'getAuthMode' | 'hostConversationId' | 'hostSessionId' | 'workspaceRoot' | 'memoryScopes'
 >
 
 /**
@@ -747,7 +747,9 @@ export async function buildGroupRoundCoordinatorPlan (input: {
     }
   }
 
-  const plannerMemory = mainState.memoryEngine?.buildPromptContext({
+  const plannerMemory = mainState.settingsStore?.getAIExecutionPreferences().harnessBackend === 'rust'
+    ? undefined
+    : mainState.memoryEngine?.buildPromptContext({
     agent: input.planner,
     group: input.group,
     channelBinding: input.channelBinding,
@@ -755,7 +757,7 @@ export async function buildGroupRoundCoordinatorPlan (input: {
     targetProjectId: input.targetProjectId,
     userId: 'local-user',
     enabledScopeTypes: resolveGroupMemoryScopes(input.planner.memoryScopes, input.group)
-  })
+      })
   const candidateLines = input.candidateMemberIds.map((memberId) => {
     const member = mainState.agentStore?.get(memberId)
     return `- ${member?.name || memberId} (${memberId})`

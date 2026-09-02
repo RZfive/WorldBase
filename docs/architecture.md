@@ -59,7 +59,7 @@
 | 前端 | Vue 3 + Vite |
 | 主进程后端 | Node.js (Electron main process) |
 | LAN 服务 | Express.js + http-proxy-middleware |
-| 数据库 | better-sqlite3 (主应用 + 子项目) |
+| 数据库 | SQLite（Electron `node:sqlite` + Rust bundled `rusqlite`） |
 | AI | OpenAI-compatible API (function calling) |
 | 进程管理 | Node.js child_process |
 

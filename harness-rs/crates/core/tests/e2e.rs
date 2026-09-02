@@ -1,7 +1,6 @@
 //! 端到端集成测试：mock provider 驱动完整 agent 循环（含工具调用、能力协商、
 //! 持久化、文档、记忆、定时任务）。
 
-use futures::StreamExt;
 use std::sync::Arc;
 use worldbase_core::dispatcher::ConnectionContext;
 use worldbase_core::Hub;
@@ -116,7 +115,10 @@ async fn agent_group_catalog_crud_matches_electron_store_shape() {
     assert_eq!(group["name"], "Rust Review Team");
     assert_eq!(group["description"], "durable catalog");
     assert_eq!(group["coordinatorAgentId"], "coordinator");
-    assert_eq!(group["memberAgentIds"], serde_json::json!(["coordinator", "worker"]));
+    assert_eq!(
+        group["memberAgentIds"],
+        serde_json::json!(["coordinator", "worker"])
+    );
     assert_eq!(group["maxRounds"], 5);
     assert_eq!(group["maxParallelWorkers"], 2);
     assert_eq!(
@@ -152,7 +154,10 @@ async fn agent_group_catalog_crud_matches_electron_store_shape() {
     .unwrap();
     assert_eq!(updated["group"]["id"], group_id);
     assert_eq!(updated["group"]["name"], "Updated team");
-    assert_eq!(updated["group"]["memberAgentIds"], serde_json::json!(["coordinator", "worker"]));
+    assert_eq!(
+        updated["group"]["memberAgentIds"],
+        serde_json::json!(["coordinator", "worker"])
+    );
 
     let deleted = dispatch(
         &hub,
@@ -227,7 +232,10 @@ async fn agent_catalog_crud_preserves_workspace_policy_fields() {
     .unwrap();
     assert_eq!(updated["agent"]["id"], id);
     assert_eq!(updated["agent"]["systemPrompt"], "Use Rust tools.");
-    assert_eq!(updated["agent"]["memoryWritePolicy"]["allowUserTraits"], false);
+    assert_eq!(
+        updated["agent"]["memoryWritePolicy"]["allowUserTraits"],
+        false
+    );
 
     let listed = dispatch(&hub, &ctx, method::AGENT_LIST, serde_json::json!({}))
         .await
@@ -335,6 +343,90 @@ async fn native_mcp_call_waits_for_host_permission_before_any_transport_call() {
         rejected_result,
         "denied MCP calls must not reach the Rust MCP transport"
     );
+}
+
+#[tokio::test]
+async fn mobile_generate_image_is_allowed_queued_and_agent_continues() {
+    let hub = test_hub(vec![
+        MockTurn {
+            text: "我来生成图片。".into(),
+            tool_calls: vec![(
+                "image-call-1".into(),
+                "generate_image".into(),
+                serde_json::json!({"prompt": "一只戴帽子的猫"}),
+            )],
+            stream_in_chunks: false,
+        },
+        MockTurn {
+            text: "图片任务已加入队列，我会继续处理。".into(),
+            tool_calls: vec![],
+            stream_in_chunks: false,
+        },
+    ])
+    .await;
+    let ctx = ConnectionContext::new(Capabilities::mobile("mobile-ios"));
+    let conversation = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_CREATE,
+        serde_json::json!({"title": "mobile image queue"}),
+    )
+    .await
+    .unwrap();
+    let started = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_SEND,
+        serde_json::json!({
+            "conversationId": conversation["id"],
+            "text": "请生成一张戴帽子的猫"
+        }),
+    )
+    .await
+    .unwrap();
+    let stream_id = started["streamId"].as_str().unwrap().to_string();
+    let mut events = hub.event_tx.subscribe();
+    let mut saw_queue = false;
+    let mut continued = String::new();
+    loop {
+        let frame = events.recv().await.unwrap();
+        if frame.stream_id != stream_id {
+            continue;
+        }
+        match frame.kind {
+            EventKind::PermissionRequest { request_id, .. } => {
+                let response = dispatch(
+                    &hub,
+                    &ctx,
+                    method::CHAT_RESPOND,
+                    serde_json::json!({"requestId": request_id, "allow": true}),
+                )
+                .await
+                .unwrap();
+                assert_eq!(response["delivered"], true);
+            }
+            EventKind::ToolResult { name, content, .. } if name == "generate_image" => {
+                saw_queue = content.contains("\"queued\"");
+            }
+            EventKind::Delta { text } => continued.push_str(&text),
+            EventKind::Done { .. } | EventKind::Error { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(saw_queue, "generate_image should return a queue receipt");
+    assert!(
+        continued.contains("继续处理"),
+        "agent should continue after tool result"
+    );
+    let drained = dispatch(
+        &hub,
+        &ctx,
+        method::STUDIO_TASKS_DRAIN,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(drained["tasks"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -1241,7 +1333,7 @@ async fn priced_usage_is_emitted_and_budget_stops_the_next_iteration() {
 
     let mut usage_events = 0usize;
     let mut usage_cost = 0.0;
-    let mut stop_reason = String::new();
+    let stop_reason;
     loop {
         let frame = events.recv().await.unwrap();
         if frame.stream_id != stream_id {
@@ -1483,6 +1575,102 @@ async fn memory_settings_and_skills_via_dispatcher() {
         .unwrap();
     assert_eq!(list["schedules"].as_array().unwrap().len(), 1);
     assert!(list["schedules"][0]["nextRunAt"].is_string());
+}
+
+#[tokio::test]
+async fn workspace_memory_catalog_crud_and_compaction_via_dispatcher() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+
+    let saved = dispatch(
+        &hub,
+        &ctx,
+        method::MEMORY_SAVE,
+        serde_json::json!({
+            "entry": {
+                "id": "electron-memory-1",
+                "scopeType": "user",
+                "scopeId": "local-user",
+                "memoryType": "knowledge",
+                "title": " Rust preference ",
+                "summary": " The user prefers Rust services ",
+                "tags": ["rust", "rust"],
+                "importance": 0.8,
+                "confidence": 0.9,
+                "pinned": false
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["entry"]["id"], "electron-memory-1");
+    assert_eq!(saved["entry"]["tags"], serde_json::json!(["rust"]));
+
+    let listed = dispatch(
+        &hub,
+        &ctx,
+        method::MEMORY_LIST,
+        serde_json::json!({ "query": "Rust", "limit": 10 }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["entries"].as_array().unwrap().len(), 1);
+
+    let pinned = dispatch(
+        &hub,
+        &ctx,
+        method::MEMORY_PIN,
+        serde_json::json!({ "id": "electron-memory-1", "pinned": true }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(pinned["updated"], true);
+
+    let status_before = dispatch(
+        &hub,
+        &ctx,
+        method::MEMORY_COMPACT_STATUS,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status_before["status"], "idle");
+
+    let compacted = dispatch(
+        &hub,
+        &ctx,
+        method::MEMORY_COMPACT,
+        serde_json::json!({
+            "plan": {
+                "deleteIds": ["electron-memory-1"]
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    // Pinned entries are retained, matching Electron's compaction contract.
+    assert_eq!(compacted["deleted"], 0);
+    assert_eq!(compacted["retained"], 1);
+
+    let deleted = dispatch(
+        &hub,
+        &ctx,
+        method::MEMORY_DELETE,
+        serde_json::json!({ "id": "electron-memory-1" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(deleted["deleted"], true);
+
+    let status_after = dispatch(
+        &hub,
+        &ctx,
+        method::MEMORY_COMPACT_STATUS,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status_after["status"], "completed");
 }
 
 #[tokio::test]

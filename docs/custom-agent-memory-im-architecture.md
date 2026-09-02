@@ -78,7 +78,7 @@ Agent 应该是稳定对象，至少包含这些内容：
 
 ### 3.5 先做 SQLite FTS，后做向量检索
 
-当前应用本地存储已经依赖 SQLite，MVP 阶段优先用 `better-sqlite3 + FTS5` 做记忆索引，先把写回、去重、筛选、召回链路跑通。向量检索可以作为第二阶段增强，而不是前置阻塞项。
+当前应用本地存储已经依赖 SQLite，MVP 阶段优先用 Electron 内置 `node:sqlite` 或 Rust bundled `rusqlite` 搭配 FTS5 做记忆索引，先把写回、去重、筛选、召回链路跑通。向量检索可以作为第二阶段增强，而不是前置阻塞项。
 
 ---
 

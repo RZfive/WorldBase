@@ -2,7 +2,6 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/glass.dart';
-import '../../core/harness_client.dart';
 import '../../core/ios_ui.dart';
 import '../../core/providers.dart';
 
@@ -155,11 +154,14 @@ class ProvidersPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SettingsSubPage(title: '模型供应商', child: ListView(children: const [_ProvidersCard()]));
+    return SettingsSubPage(
+      title: '模型供应商',
+      child: ListView(children: const [_ProvidersCard()]),
+    );
   }
 }
 
-/// Agent 工作区子页（对齐桌面 agent-workspace 分区：Agent / 记忆）。
+/// Agent 工作区子页（对齐桌面 agent-workspace 分区：Agent / 群组 / 记忆）。
 class AgentWorkspacePage extends ConsumerStatefulWidget {
   const AgentWorkspacePage({super.key});
 
@@ -181,16 +183,28 @@ class _AgentWorkspacePageState extends ConsumerState<AgentWorkspacePage> {
             child: CupertinoSlidingSegmentedControl<int>(
               groupValue: _tab,
               children: const {
-                0: Padding(padding: EdgeInsets.symmetric(vertical: 5), child: Text('Agent', style: TextStyle(fontSize: 13))),
-                1: Padding(padding: EdgeInsets.symmetric(vertical: 5), child: Text('记忆', style: TextStyle(fontSize: 13))),
+                0: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 5),
+                  child: Text('Agent', style: TextStyle(fontSize: 13)),
+                ),
+                1: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 5),
+                  child: Text('群组', style: TextStyle(fontSize: 13)),
+                ),
+                2: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 5),
+                  child: Text('记忆', style: TextStyle(fontSize: 13)),
+                ),
               },
               onValueChanged: (v) => setState(() => _tab = v ?? 0),
             ),
           ),
           Expanded(
-            child: _tab == 0
-                ? ListView(children: const [_AgentsCard()])
-                : ListView(children: const [_MemoryCard()]),
+            child: switch (_tab) {
+              0 => ListView(children: const [_AgentsCard()]),
+              1 => ListView(children: const [_AgentGroupsCard()]),
+              _ => ListView(children: const [_MemoryCard()]),
+            },
           ),
         ],
       ),
@@ -204,7 +218,10 @@ class UsagePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SettingsSubPage(title: '用量统计', child: ListView(children: const [_UsageCard()]));
+    return SettingsSubPage(
+      title: '用量统计',
+      child: ListView(children: const [_UsageCard()]),
+    );
   }
 }
 
@@ -214,7 +231,10 @@ class SkillsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SettingsSubPage(title: '技能', child: ListView(children: const [_SkillsCard()]));
+    return SettingsSubPage(
+      title: '技能',
+      child: ListView(children: const [_SkillsCard()]),
+    );
   }
 }
 
@@ -224,7 +244,10 @@ class SchedulesPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SettingsSubPage(title: '定时任务', child: ListView(children: const [_SchedulesCard()]));
+    return SettingsSubPage(
+      title: '定时任务',
+      child: ListView(children: const [_SchedulesCard()]),
+    );
   }
 }
 
@@ -234,7 +257,10 @@ class McpPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SettingsSubPage(title: 'MCP 服务', child: ListView(children: const [_McpCard()]));
+    return SettingsSubPage(
+      title: 'MCP 服务',
+      child: ListView(children: const [_McpCard()]),
+    );
   }
 }
 
@@ -246,12 +272,7 @@ class AdvancedPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return SettingsSubPage(
       title: '通用与关于',
-      child: ListView(
-        children: const [
-          _AdvancedCard(),
-          SizedBox(height: 14),
-        ],
-      ),
+      child: ListView(children: const [_AdvancedCard(), SizedBox(height: 14)]),
     );
   }
 }
@@ -281,7 +302,9 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
 
   List<ProviderEntry> _entries() {
     final list = _config?['providers'] as List? ?? [];
-    return list.map((e) => ProviderEntry.fromJson((e as Map).cast<String, dynamic>())).toList();
+    return list
+        .map((e) => ProviderEntry.fromJson((e as Map).cast<String, dynamic>()))
+        .toList();
   }
 
   String? _activeId() => _config?['activeProviderId'] as String?;
@@ -372,19 +395,31 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
     final inCtrls = <TextEditingController>[];
     final outCtrls = <TextEditingController>[];
     void addModel([ModelInfo? seed]) {
-      final m = seed ??
+      final m =
+          seed ??
           ModelInfo(
-              id: '',
-              contextWindowK: 128,
-              inputPrice: 0,
-              outputPrice: 0,
-              imageGeneration: false,
-              imageEditing: false);
+            id: '',
+            contextWindowK: 128,
+            inputPrice: 0,
+            outputPrice: 0,
+            imageGeneration: false,
+            imageEditing: false,
+          );
       models.add(m);
       idCtrls.add(TextEditingController(text: m.id));
-      ctxCtrls.add(TextEditingController(text: m.contextWindowK == 0 ? '' : '${m.contextWindowK}'));
-      inCtrls.add(TextEditingController(text: m.inputPrice == 0 ? '' : '${m.inputPrice}'));
-      outCtrls.add(TextEditingController(text: m.outputPrice == 0 ? '' : '${m.outputPrice}'));
+      ctxCtrls.add(
+        TextEditingController(
+          text: m.contextWindowK == 0 ? '' : '${m.contextWindowK}',
+        ),
+      );
+      inCtrls.add(
+        TextEditingController(text: m.inputPrice == 0 ? '' : '${m.inputPrice}'),
+      );
+      outCtrls.add(
+        TextEditingController(
+          text: m.outputPrice == 0 ? '' : '${m.outputPrice}',
+        ),
+      );
     }
 
     for (final m in existing?.models ?? const <ModelInfo>[]) {
@@ -392,12 +427,16 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
     }
     if (models.isEmpty) addModel();
     var activeModel = existing?.activeModel ?? '';
-    int? expandedIdx;
+    int? expandedIdx = existing == null ? 0 : null;
+    var saving = false;
+    String? saveError;
 
     await showCupertinoModalPopup<void>(
       context: context,
       builder: (ctx) => Container(
-        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.92),
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.92,
+        ),
         decoration: BoxDecoration(
           color: p.groupedBg,
           borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
@@ -410,8 +449,14 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(existing == null ? '添加供应商' : '编辑供应商',
-                      style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600, letterSpacing: -0.4)),
+                  Text(
+                    existing == null ? '添加供应商' : '编辑供应商',
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.4,
+                    ),
+                  ),
                   const SizedBox(height: 12),
                   _field(nameCtrl, '名称'),
                   const SizedBox(height: 10),
@@ -420,28 +465,54 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                   CupertinoSlidingSegmentedControl<String>(
                     groupValue: protocol,
                     children: const {
-                      '': Padding(padding: EdgeInsets.symmetric(vertical: 5), child: Text('auto', style: TextStyle(fontSize: 12))),
-                      'openai': Padding(padding: EdgeInsets.symmetric(vertical: 5), child: Text('OpenAI', style: TextStyle(fontSize: 12))),
-                      'anthropic': Padding(padding: EdgeInsets.symmetric(vertical: 5), child: Text('Anthropic', style: TextStyle(fontSize: 12))),
+                      '': Padding(
+                        padding: EdgeInsets.symmetric(vertical: 5),
+                        child: Text('auto', style: TextStyle(fontSize: 12)),
+                      ),
+                      'openai': Padding(
+                        padding: EdgeInsets.symmetric(vertical: 5),
+                        child: Text('OpenAI', style: TextStyle(fontSize: 12)),
+                      ),
+                      'anthropic': Padding(
+                        padding: EdgeInsets.symmetric(vertical: 5),
+                        child: Text(
+                          'Anthropic',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
                     },
                     onValueChanged: (v) => setSheet(() => protocol = v ?? ''),
                   ),
                   const SizedBox(height: 10),
-                  _field(urlCtrl, 'Base URL', hint: 'https://api.deepseek.com/v1'),
+                  _field(
+                    urlCtrl,
+                    'Base URL',
+                    hint: 'https://api.deepseek.com/v1',
+                  ),
                   const SizedBox(height: 10),
                   _field(keyCtrl, 'API Key', obscure: true),
                   const SizedBox(height: 14),
                   Row(
                     children: [
                       Expanded(
-                        child: Text('模型（逐模型设置能力与价格）',
-                            style: TextStyle(fontSize: 13, color: p.ink2)),
+                        child: Text(
+                          '模型（逐模型设置能力与价格）',
+                          style: TextStyle(fontSize: 13, color: p.ink2),
+                        ),
                       ),
                       CupertinoButton(
-                        minSize: 0,
                         padding: const EdgeInsets.all(4),
-                        onPressed: () => setSheet(() => addModel()),
-                        child: const Icon(CupertinoIcons.add_circled, size: 22, color: iosBlue),
+                        onPressed: () => setSheet(() {
+                          addModel();
+                          expandedIdx = models.length - 1;
+                          saveError = null;
+                        }),
+                        minimumSize: Size(0, 0),
+                        child: const Icon(
+                          CupertinoIcons.add_circled,
+                          size: 22,
+                          color: iosBlue,
+                        ),
                       ),
                     ],
                   ),
@@ -459,44 +530,116 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                           activeModel: activeModel,
                           expandedIdx: expandedIdx,
                           onExpand: (idx) => setSheet(() => expandedIdx = idx),
-                          onSetDefault: () => setSheet(() => activeModel = models[i].id),
+                          onSetDefault: () => setSheet(
+                            () => activeModel = idCtrls[i].text.trim(),
+                          ),
                           onDelete: () => setSheet(() {
                             models.removeAt(i);
-                            idCtrls.removeAt(i);
-                            ctxCtrls.removeAt(i);
-                            inCtrls.removeAt(i);
-                            outCtrls.removeAt(i);
+                            idCtrls.removeAt(i).dispose();
+                            ctxCtrls.removeAt(i).dispose();
+                            inCtrls.removeAt(i).dispose();
+                            outCtrls.removeAt(i).dispose();
+                            expandedIdx = null;
+                            saveError = null;
                           }),
                         ),
                     ],
                   ),
                   const SizedBox(height: 14),
+                  if (saveError != null) ...[
+                    Text(
+                      saveError!,
+                      style: const TextStyle(fontSize: 13, color: iosRed),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
                   SizedBox(
                     width: double.infinity,
                     child: CupertinoButton.filled(
-                      onPressed: () async {
-                        final validModels = models
-                            .map((m) => m..id = m.id.trim())
-                            .where((m) => m.id.isNotEmpty)
-                            .toList();
-                        final entry = ProviderEntry(
-                          id: existing?.id ?? 'p-${DateTime.now().millisecondsSinceEpoch}',
-                          name: nameCtrl.text.trim().isEmpty ? '供应商' : nameCtrl.text.trim(),
-                          baseUrl: urlCtrl.text.trim(),
-                          apiKey: keyCtrl.text.trim(),
-                          apiProtocol: protocol,
-                          models: validModels,
-                          activeModel: validModels.any((m) => m.id == activeModel)
-                              ? activeModel
-                              : (validModels.isEmpty ? '' : validModels.first.id),
-                          imageGeneration: validModels.any((m) => m.imageGeneration),
-                        );
-                        await HarnessClient.instance.saveProvider(entry);
-                        if (ctx.mounted) Navigator.pop(ctx);
-                        await _load();
-                        ref.read(providersProvider.notifier).refresh();
-                      },
-                      child: const Text('保存', style: TextStyle(fontWeight: FontWeight.w600)),
+                      onPressed: saving
+                          ? null
+                          : () async {
+                              final validModels = <ModelInfo>[];
+                              for (var i = 0; i < models.length; i++) {
+                                final id = idCtrls[i].text.trim();
+                                if (id.isEmpty) continue;
+                                validModels.add(
+                                  ModelInfo(
+                                    id: id,
+                                    contextWindowK:
+                                        int.tryParse(ctxCtrls[i].text.trim()) ??
+                                        0,
+                                    inputPrice:
+                                        double.tryParse(
+                                          inCtrls[i].text.trim(),
+                                        ) ??
+                                        0,
+                                    outputPrice:
+                                        double.tryParse(
+                                          outCtrls[i].text.trim(),
+                                        ) ??
+                                        0,
+                                    imageGeneration: models[i].imageGeneration,
+                                    imageEditing: models[i].imageEditing,
+                                  ),
+                                );
+                              }
+                              if (validModels.isEmpty) {
+                                setSheet(() {
+                                  saveError = '请先添加模型并填写模型名称 / ID';
+                                  expandedIdx = models.isEmpty ? null : 0;
+                                });
+                                return;
+                              }
+                              final entry = ProviderEntry(
+                                id:
+                                    existing?.id ??
+                                    'p-${DateTime.now().millisecondsSinceEpoch}',
+                                name: nameCtrl.text.trim().isEmpty
+                                    ? '供应商'
+                                    : nameCtrl.text.trim(),
+                                baseUrl: urlCtrl.text.trim(),
+                                apiKey: keyCtrl.text.trim(),
+                                apiProtocol: protocol,
+                                models: validModels,
+                                activeModel:
+                                    validModels.any((m) => m.id == activeModel)
+                                    ? activeModel
+                                    : (validModels.isEmpty
+                                          ? ''
+                                          : validModels.first.id),
+                                temperature: existing?.temperature,
+                                imageGeneration: validModels.any(
+                                  (m) => m.imageGeneration,
+                                ),
+                              );
+                              setSheet(() {
+                                saving = true;
+                                saveError = null;
+                              });
+                              try {
+                                await HarnessClient.instance.saveProvider(
+                                  entry,
+                                );
+                                if (ctx.mounted) Navigator.pop(ctx);
+                                await _load();
+                                ref.read(providersProvider.notifier).refresh();
+                              } catch (e) {
+                                if (ctx.mounted) {
+                                  setSheet(() => saveError = '保存失败：$e');
+                                }
+                              } finally {
+                                if (ctx.mounted) setSheet(() => saving = false);
+                              }
+                            },
+                      child: saving
+                          ? const CupertinoActivityIndicator(
+                              color: CupertinoColors.white,
+                            )
+                          : const Text(
+                              '保存',
+                              style: TextStyle(fontWeight: FontWeight.w600),
+                            ),
                     ),
                   ),
                 ],
@@ -540,7 +683,9 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
             child: Row(
               children: [
                 Icon(
-                  isDefault ? CupertinoIcons.checkmark_circle_fill : CupertinoIcons.circle,
+                  isDefault
+                      ? CupertinoIcons.checkmark_circle_fill
+                      : CupertinoIcons.circle,
                   size: 20,
                   color: isDefault ? iosGreen : p.separator,
                 ),
@@ -549,9 +694,15 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(m.id.isEmpty ? '（未命名模型）' : m.id,
-                          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      Text(
+                        m.id.isEmpty ? '（未命名模型）' : m.id,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                       const SizedBox(height: 2),
                       Text(
                         '上下文 ${m.contextWindowK}K · 入 ${m.inputPrice}/M · 出 ${m.outputPrice}/M',
@@ -563,16 +714,29 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                 if (m.imageGeneration)
                   const Padding(
                     padding: EdgeInsets.only(left: 4),
-                    child: Icon(CupertinoIcons.paintbrush_fill, size: 14, color: iosPink),
+                    child: Icon(
+                      CupertinoIcons.paintbrush_fill,
+                      size: 14,
+                      color: iosPink,
+                    ),
                   ),
                 if (m.imageEditing)
                   const Padding(
                     padding: EdgeInsets.only(left: 4),
-                    child: Icon(CupertinoIcons.wand_stars, size: 14, color: iosPurple),
+                    child: Icon(
+                      CupertinoIcons.wand_stars,
+                      size: 14,
+                      color: iosPurple,
+                    ),
                   ),
                 const SizedBox(width: 6),
-                Icon(expanded ? CupertinoIcons.chevron_up : CupertinoIcons.chevron_down,
-                    size: 14, color: p.ink2),
+                Icon(
+                  expanded
+                      ? CupertinoIcons.chevron_up
+                      : CupertinoIcons.chevron_down,
+                  size: 14,
+                  color: p.ink2,
+                ),
               ],
             ),
           ),
@@ -584,39 +748,94 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _miniField(idCtrls[i], '模型 ID'),
+                _miniField(
+                  idCtrls[i],
+                  '模型名称 / ID',
+                  keyboardType: TextInputType.text,
+                  onChanged: (value) =>
+                      setSheet(() => models[i].id = value.trim()),
+                ),
                 const SizedBox(height: 8),
-                Row(children: [
-                  Expanded(child: _miniField(ctxCtrls[i], '上下文 (K)')),
-                  const SizedBox(width: 6),
-                  Expanded(child: _miniField(inCtrls[i], '输入价 /1M')),
-                  const SizedBox(width: 6),
-                  Expanded(child: _miniField(outCtrls[i], '输出价 /1M')),
-                ]),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _miniField(
+                        ctxCtrls[i],
+                        '上下文 (K)',
+                        onChanged: (value) => setSheet(
+                          () => models[i].contextWindowK =
+                              int.tryParse(value.trim()) ?? 0,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: _miniField(
+                        inCtrls[i],
+                        '输入价 /1M',
+                        onChanged: (value) => setSheet(
+                          () => models[i].inputPrice =
+                              double.tryParse(value.trim()) ?? 0,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: _miniField(
+                        outCtrls[i],
+                        '输出价 /1M',
+                        onChanged: (value) => setSheet(
+                          () => models[i].outputPrice =
+                              double.tryParse(value.trim()) ?? 0,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 10),
-                _capSwitch('支持图片生成', m.imageGeneration,
-                    (v) => setSheet(() => models[i].imageGeneration = v)),
-                _capSwitch('支持图片编辑（参考图）', m.imageEditing,
-                    (v) => setSheet(() => models[i].imageEditing = v)),
+                _capSwitch(
+                  '支持图片生成',
+                  m.imageGeneration,
+                  (v) => setSheet(() => models[i].imageGeneration = v),
+                ),
+                _capSwitch(
+                  '支持图片编辑（参考图）',
+                  m.imageEditing,
+                  (v) => setSheet(() => models[i].imageEditing = v),
+                ),
                 const SizedBox(height: 8),
-                Row(children: [
-                  CupertinoButton(
-                    minSize: 0,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    onPressed: onSetDefault,
-                    child: Text(isDefault ? '已是默认 ✓' : '设为默认',
+                Row(
+                  children: [
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      onPressed: onSetDefault,
+                      minimumSize: Size(0, 0),
+                      child: Text(
+                        isDefault ? '已是默认 ✓' : '设为默认',
                         style: TextStyle(
-                            fontSize: 13, color: isDefault ? iosGreen : iosBlue)),
-                  ),
-                  const Spacer(),
-                  CupertinoButton(
-                    minSize: 0,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    onPressed: onDelete,
-                    child: const Text('删除',
-                        style: TextStyle(fontSize: 13, color: iosRed)),
-                  ),
-                ]),
+                          fontSize: 13,
+                          color: isDefault ? iosGreen : iosBlue,
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      onPressed: onDelete,
+                      minimumSize: Size(0, 0),
+                      child: const Text(
+                        '删除',
+                        style: TextStyle(fontSize: 13, color: iosRed),
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -629,14 +848,30 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
-          Expanded(child: Text(label, style: const TextStyle(fontSize: 14, letterSpacing: -0.2))),
-          CupertinoSwitch(activeColor: iosGreen, value: value, onChanged: onChanged),
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(fontSize: 14, letterSpacing: -0.2),
+            ),
+          ),
+          CupertinoSwitch(
+            activeTrackColor: iosGreen,
+            value: value,
+            onChanged: onChanged,
+          ),
         ],
       ),
     );
   }
 
-  Widget _miniField(TextEditingController ctrl, String label) {
+  Widget _miniField(
+    TextEditingController ctrl,
+    String label, {
+    TextInputType keyboardType = const TextInputType.numberWithOptions(
+      decimal: true,
+    ),
+    ValueChanged<String>? onChanged,
+  }) {
     final p = DawnPalette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -652,13 +887,19 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
             border: Border.all(color: p.separator),
           ),
           style: TextStyle(fontSize: 12, color: p.ink),
-          keyboardType: TextInputType.numberWithOptions(decimal: true),
+          keyboardType: keyboardType,
+          onChanged: onChanged,
         ),
       ],
     );
   }
 
-  Widget _field(TextEditingController ctrl, String label, {String? hint, bool obscure = false}) {
+  Widget _field(
+    TextEditingController ctrl,
+    String label, {
+    String? hint,
+    bool obscure = false,
+  }) {
     final p = DawnPalette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -712,7 +953,10 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
       footer: '对话页新建会话时可绑定 Agent（人设 + 独立供应商/模型）',
       children: [
         if (_agents == null)
-          const Padding(padding: EdgeInsets.all(16), child: CupertinoActivityIndicator())
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: CupertinoActivityIndicator(),
+          )
         else if (_agents!.isEmpty)
           IosRow(
             icon: CupertinoIcons.person_crop_circle_badge_plus,
@@ -738,15 +982,22 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
     final providers = await HarnessClient.instance.listProviders();
     final providerList = (providers['providers'] as List?)?.cast<Map>() ?? [];
     final nameCtrl = TextEditingController(text: existing?.name ?? '');
-    final iconCtrl = TextEditingController(text: existing?.icon.isEmpty == true ? '🤖' : existing?.icon ?? '🤖');
+    final iconCtrl = TextEditingController(
+      text: existing?.icon.isEmpty == true ? '🤖' : existing?.icon ?? '🤖',
+    );
     final descCtrl = TextEditingController(text: existing?.description ?? '');
-    final promptCtrl = TextEditingController(text: existing?.systemPrompt ?? '');
+    final promptCtrl = TextEditingController(
+      text: existing?.systemPrompt ?? '',
+    );
     String? providerId = existing?.providerId;
 
+    if (!mounted) return;
     await showCupertinoModalPopup<void>(
       context: context,
       builder: (ctx) => Container(
-        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.9),
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.9,
+        ),
         decoration: BoxDecoration(
           color: p.groupedBg,
           borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
@@ -759,8 +1010,14 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(existing == null ? '新建 Agent' : '编辑 Agent',
-                      style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600, letterSpacing: -0.4)),
+                  Text(
+                    existing == null ? '新建 Agent' : '编辑 Agent',
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.4,
+                    ),
+                  ),
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -786,23 +1043,30 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
                   const SizedBox(height: 10),
                   _field(promptCtrl, '人设（系统提示词）'),
                   const SizedBox(height: 12),
-                  Text('绑定供应商（可选）', style: TextStyle(fontSize: 13, color: p.ink2)),
+                  Text(
+                    '绑定供应商（可选）',
+                    style: TextStyle(fontSize: 13, color: p.ink2),
+                  ),
                   const SizedBox(height: 6),
                   CupertinoSlidingSegmentedControl<String>(
                     groupValue: providerId ?? '',
                     children: {
                       '': const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 5),
-                          child: Text('默认', style: TextStyle(fontSize: 12))),
+                        padding: EdgeInsets.symmetric(vertical: 5),
+                        child: Text('默认', style: TextStyle(fontSize: 12)),
+                      ),
                       for (final p in providerList)
                         p['id'] as String: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 5),
-                          child: Text((p['name'] as String?) ?? '',
-                              style: const TextStyle(fontSize: 12)),
+                          child: Text(
+                            (p['name'] as String?) ?? '',
+                            style: const TextStyle(fontSize: 12),
+                          ),
                         ),
                     },
-                    onValueChanged: (v) =>
-                        setSheet(() => providerId = (v == null || v.isEmpty) ? null : v),
+                    onValueChanged: (v) => setSheet(
+                      () => providerId = (v == null || v.isEmpty) ? null : v,
+                    ),
                   ),
                   const SizedBox(height: 14),
                   SizedBox(
@@ -810,20 +1074,49 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
                     child: CupertinoButton.filled(
                       onPressed: () async {
                         if (nameCtrl.text.trim().isEmpty) return;
-                        await HarnessClient.instance.saveAgent(AgentDefinition(
-                          id: existing?.id ?? '',
-                          name: nameCtrl.text.trim(),
-                          icon: iconCtrl.text.trim(),
-                          description: descCtrl.text.trim(),
-                          systemPrompt: promptCtrl.text,
-                          providerId: providerId,
-                          modelId: existing?.modelId,
-                        ));
+                        await HarnessClient.instance.saveAgent(
+                          AgentDefinition(
+                            id: existing?.id ?? '',
+                            name: nameCtrl.text.trim(),
+                            icon: iconCtrl.text.trim(),
+                            description: descCtrl.text.trim(),
+                            systemPrompt: promptCtrl.text,
+                            providerId: providerId,
+                            modelId: existing?.modelId,
+                            reasoningStrength:
+                                existing?.reasoningStrength ?? 'medium',
+                            skillIds: existing?.skillIds ?? const [],
+                            allowedTools: existing?.allowedTools ?? const [],
+                            deniedTools: existing?.deniedTools ?? const [],
+                            memoryScopes:
+                                existing?.memoryScopes ??
+                                const ['user', 'agent', 'project'],
+                            memoryWritePolicy:
+                                existing?.memoryWritePolicy ??
+                                const {
+                                  'allowUserTraits': true,
+                                  'allowAgentSkills': true,
+                                  'allowSteps': true,
+                                  'allowKnowledge': true,
+                                },
+                            autoReplyPolicy:
+                                existing?.autoReplyPolicy ??
+                                const {
+                                  'enabled': false,
+                                  'requireMention': true,
+                                },
+                            createdAt: existing?.createdAt ?? '',
+                            updatedAt: existing?.updatedAt ?? '',
+                          ),
+                        );
                         if (ctx.mounted) Navigator.pop(ctx);
                         await _load();
                         ref.read(agentsProvider.notifier).refresh();
                       },
-                      child: const Text('保存', style: TextStyle(fontWeight: FontWeight.w600)),
+                      child: const Text(
+                        '保存',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
                     ),
                   ),
                 ],
@@ -855,6 +1148,107 @@ class _AgentsCardState extends ConsumerState<_AgentsCard> {
           style: TextStyle(fontSize: 15, letterSpacing: -0.3, color: p.ink),
         ),
       ],
+    );
+  }
+}
+
+class _AgentGroupsCard extends ConsumerWidget {
+  const _AgentGroupsCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final agents = ref.watch(agentsProvider).value ?? const <AgentDefinition>[];
+    final agentsById = {for (final agent in agents) agent.id: agent};
+    return ref
+        .watch(agentGroupsProvider)
+        .when(
+          loading: () => const IosSection(
+            header: 'Agent 群组',
+            children: [
+              Padding(
+                padding: EdgeInsets.all(16),
+                child: CupertinoActivityIndicator(),
+              ),
+            ],
+          ),
+          error: (error, _) => IosSection(
+            header: 'Agent 群组',
+            children: [
+              IosRow(
+                icon: CupertinoIcons.exclamationmark_circle_fill,
+                iconColor: iosRed,
+                title: '群组加载失败',
+                subtitle: '$error',
+                onTap: () => ref.read(agentGroupsProvider.notifier).refresh(),
+              ),
+            ],
+          ),
+          data: (groups) => IosSection(
+            header: 'Agent 群组',
+            footer: 'AI 可通过 create_agent_group 创建群组；群组协作页可直接选择并发起讨论',
+            children: groups.isEmpty
+                ? const [
+                    IosRow(
+                      icon: CupertinoIcons.person_2_fill,
+                      iconColor: iosIndigo,
+                      title: '暂无群组',
+                      subtitle: '在对话中让 AI 创建，创建后会自动出现在这里',
+                    ),
+                  ]
+                : [
+                    for (final group in groups)
+                      IosRow(
+                        icon: CupertinoIcons.person_2_fill,
+                        iconColor: iosIndigo,
+                        title:
+                            '${group.icon.isEmpty ? '👥' : group.icon} ${group.name}',
+                        subtitle: _groupSummary(group, agentsById),
+                        onTap: () => _showActions(context, ref, group),
+                      ),
+                  ],
+          ),
+        );
+  }
+
+  String _groupSummary(
+    AgentGroupDefinition group,
+    Map<String, AgentDefinition> agentsById,
+  ) {
+    final coordinator =
+        agentsById[group.coordinatorAgentId]?.name ?? group.coordinatorAgentId;
+    final members = group.memberAgentIds
+        .map((id) => agentsById[id]?.name ?? id)
+        .where((name) => name.isNotEmpty)
+        .join('、');
+    return '协调者：$coordinator · 成员：$members';
+  }
+
+  void _showActions(
+    BuildContext context,
+    WidgetRef ref,
+    AgentGroupDefinition group,
+  ) {
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => CupertinoActionSheet(
+        title: Text(group.name),
+        message: group.description.isEmpty ? null : Text(group.description),
+        actions: [
+          CupertinoActionSheetAction(
+            isDestructiveAction: true,
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await HarnessClient.instance.deleteAgentGroup(group.id);
+              await ref.read(agentGroupsProvider.notifier).refresh();
+            },
+            child: const Text('删除群组'),
+          ),
+        ],
+        cancelButton: CupertinoActionSheetAction(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('取消'),
+        ),
+      ),
     );
   }
 }
@@ -892,10 +1286,14 @@ class _MemoryCardState extends ConsumerState<_MemoryCard> {
               ),
               const SizedBox(width: 8),
               CupertinoButton(
-                minSize: 0,
                 padding: const EdgeInsets.all(6),
                 onPressed: () => _showAddDialog(context),
-                child: const Icon(CupertinoIcons.add_circled, size: 22, color: iosBlue),
+                minimumSize: Size(0, 0),
+                child: const Icon(
+                  CupertinoIcons.add_circled,
+                  size: 22,
+                  color: iosBlue,
+                ),
               ),
             ],
           ),
@@ -930,9 +1328,11 @@ class _MemoryCardState extends ConsumerState<_MemoryCard> {
       final result = await HarnessClient.instance.searchMemory(query);
       setState(() => _hits = result?['hits'] as List? ?? []);
     } catch (e) {
-      setState(() => _hits = [
-            {'content': '检索失败：$e'}
-          ]);
+      setState(
+        () => _hits = [
+          {'content': '检索失败：$e'},
+        ],
+      );
     }
   }
 
@@ -944,10 +1344,17 @@ class _MemoryCardState extends ConsumerState<_MemoryCard> {
         title: const Text('添加记忆'),
         content: Padding(
           padding: const EdgeInsets.only(top: 10),
-          child: CupertinoTextField(controller: ctrl, maxLines: 3, autofocus: true),
+          child: CupertinoTextField(
+            controller: ctrl,
+            maxLines: 3,
+            autofocus: true,
+          ),
         ),
         actions: [
-          CupertinoDialogAction(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
           CupertinoDialogAction(
             isDefaultAction: true,
             onPressed: () async {
@@ -1005,23 +1412,30 @@ class _McpCardState extends ConsumerState<_McpCard> {
           title: '已连接 $servers 个 server',
           subtitle: '共 ${tools.length} 个工具',
           trailing: CupertinoButton(
-            minSize: 0,
             padding: const EdgeInsets.all(4),
             onPressed: _loading
                 ? null
                 : () async {
                     setState(() => _loading = true);
                     try {
-                      final cfg = await HarnessClient.instance.getSetting('mcpServers');
-                      await HarnessClient.instance.mcpReload((cfg?['value'] as List?) ?? []);
+                      final cfg = await HarnessClient.instance.getSetting(
+                        'mcpServers',
+                      );
+                      await HarnessClient.instance.mcpReload(
+                        (cfg?['value'] as List?) ?? [],
+                      );
                       await _load();
                     } finally {
                       if (mounted) setState(() => _loading = false);
                     }
                   },
+            minimumSize: Size(0, 0),
             child: _loading
                 ? const CupertinoActivityIndicator()
-                : const Text('重载', style: TextStyle(fontSize: 14, color: iosBlue)),
+                : const Text(
+                    '重载',
+                    style: TextStyle(fontSize: 14, color: iosBlue),
+                  ),
           ),
         ),
         for (final t in tools.take(8))
@@ -1103,7 +1517,10 @@ class _UsageCardState extends ConsumerState<_UsageCard> {
       footer: '每次对话按供应商模型单价（/1M tokens）记账',
       children: [
         if (s == null)
-          const Padding(padding: EdgeInsets.all(16), child: CupertinoActivityIndicator())
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: CupertinoActivityIndicator(),
+          )
         else ...[
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
@@ -1111,9 +1528,17 @@ class _UsageCardState extends ConsumerState<_UsageCard> {
               children: [
                 _statBlock('成本', s.totalCost.toStringAsFixed(4), iosBlue),
                 const SizedBox(width: 12),
-                _statBlock('输入 tokens', _fmtTokens(s.totalInputTokens), iosGreen),
+                _statBlock(
+                  '输入 tokens',
+                  _fmtTokens(s.totalInputTokens),
+                  iosGreen,
+                ),
                 const SizedBox(width: 12),
-                _statBlock('输出 tokens', _fmtTokens(s.totalOutputTokens), iosOrange),
+                _statBlock(
+                  '输出 tokens',
+                  _fmtTokens(s.totalOutputTokens),
+                  iosOrange,
+                ),
               ],
             ),
           ),
@@ -1123,13 +1548,15 @@ class _UsageCardState extends ConsumerState<_UsageCard> {
               child: SizedBox(height: 64, child: _DailyBars(daily: s.daily)),
             ),
           CupertinoButton(
-            minSize: 0,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             onPressed: () => setState(() => _expanded = !_expanded),
+            minimumSize: Size(0, 0),
             child: Align(
               alignment: Alignment.centerLeft,
-              child: Text(_expanded ? '收起按模型明细 ▲' : '按模型明细 ▼',
-                  style: const TextStyle(fontSize: 13, color: iosBlue)),
+              child: Text(
+                _expanded ? '收起按模型明细 ▲' : '按模型明细 ▼',
+                style: const TextStyle(fontSize: 13, color: iosBlue),
+              ),
             ),
           ),
           if (_expanded)
@@ -1140,14 +1567,20 @@ class _UsageCardState extends ConsumerState<_UsageCard> {
                 title: m['model']?.toString() ?? '',
                 subtitle:
                     '输入 ${_fmtTokens((m['inputTokens'] as num?)?.toInt() ?? 0)} · 输出 ${_fmtTokens((m['outputTokens'] as num?)?.toInt() ?? 0)}',
-                trailing: Text('¥${((m['cost'] as num?)?.toDouble() ?? 0).toStringAsFixed(4)}',
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                trailing: Text(
+                  '¥${((m['cost'] as num?)?.toDouble() ?? 0).toStringAsFixed(4)}',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
               ),
           if (s.byModel.isEmpty && _expanded)
             IosRow(
-                icon: CupertinoIcons.chart_bar,
-                iconColor: p.ink2,
-                title: '暂无用量记录'),
+              icon: CupertinoIcons.chart_bar,
+              iconColor: p.ink2,
+              title: '暂无用量记录',
+            ),
         ],
       ],
     );
@@ -1167,8 +1600,14 @@ class _UsageCardState extends ConsumerState<_UsageCard> {
           children: [
             Text(label, style: TextStyle(fontSize: 11, color: p.ink2)),
             const SizedBox(height: 2),
-            Text(value,
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: color)),
+            Text(
+              value,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: color,
+              ),
+            ),
           ],
         ),
       ),
@@ -1202,8 +1641,10 @@ class _DailyBars extends StatelessWidget {
                   FractionallySizedBox(
                     widthFactor: 1,
                     child: Container(
-                      height: 54 *
-                          (((d['cost'] as num?)?.toDouble() ?? 0) / maxCost).clamp(0.04, 1.0),
+                      height:
+                          54 *
+                          (((d['cost'] as num?)?.toDouble() ?? 0) / maxCost)
+                              .clamp(0.04, 1.0),
                       decoration: BoxDecoration(
                         color: iosBlue.withValues(alpha: 0.75),
                         borderRadius: BorderRadius.circular(3),
@@ -1211,9 +1652,11 @@ class _DailyBars extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 4),
-                  Text((d['day'] as String).substring(5),
-                      style: TextStyle(fontSize: 8, color: p.ink2),
-                      overflow: TextOverflow.ellipsis),
+                  Text(
+                    (d['day'] as String).substring(5),
+                    style: TextStyle(fontSize: 8, color: p.ink2),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ],
               ),
             ),
@@ -1256,7 +1699,10 @@ class _SkillsCardState extends ConsumerState<_SkillsCard> {
       footer: '技能以 YAML 存于 harness，Agent 可调用',
       children: [
         if (_skills == null)
-          const Padding(padding: EdgeInsets.all(16), child: CupertinoActivityIndicator())
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: CupertinoActivityIndicator(),
+          )
         else if (_skills!.isEmpty)
           IosRow(
             icon: CupertinoIcons.sparkles,
@@ -1299,15 +1745,22 @@ class _SkillsCardState extends ConsumerState<_SkillsCard> {
             children: [
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 14, 20, 6),
-                child: Text(skill.name,
-                    style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+                child: Text(
+                  skill.name,
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
               IosSection(
                 children: [
                   IosRow(
                     icon: CupertinoIcons.doc_plaintext,
                     iconColor: iosBlue,
-                    title: skill.description.isEmpty ? '（无描述）' : skill.description,
+                    title: skill.description.isEmpty
+                        ? '（无描述）'
+                        : skill.description,
                     subtitle: skill.instructions,
                   ),
                   IosRow(
@@ -1340,32 +1793,54 @@ class _SkillsCardState extends ConsumerState<_SkillsCard> {
         title: const Text('新建技能（YAML）'),
         content: Padding(
           padding: const EdgeInsets.only(top: 12),
-          child: Column(children: [
-            CupertinoTextField(
+          child: Column(
+            children: [
+              CupertinoTextField(
                 controller: nameCtrl,
                 placeholder: '名称（英文标识）',
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
-            const SizedBox(height: 8),
-            CupertinoTextField(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+              ),
+              const SizedBox(height: 8),
+              CupertinoTextField(
                 controller: descCtrl,
                 placeholder: '描述',
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
-            const SizedBox(height: 8),
-            CupertinoTextField(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+              ),
+              const SizedBox(height: 8),
+              CupertinoTextField(
                 controller: instrCtrl,
                 placeholder: '指令内容',
                 maxLines: 3,
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
-          ]),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
-          CupertinoDialogAction(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
           CupertinoDialogAction(
             isDefaultAction: true,
             onPressed: () async {
-              if (nameCtrl.text.trim().isEmpty || instrCtrl.text.isEmpty) return;
-              await HarnessClient.instance
-                  .saveSkill(nameCtrl.text.trim(), descCtrl.text.trim(), instrCtrl.text);
+              if (nameCtrl.text.trim().isEmpty || instrCtrl.text.isEmpty) {
+                return;
+              }
+              await HarnessClient.instance.saveSkill(
+                nameCtrl.text.trim(),
+                descCtrl.text.trim(),
+                instrCtrl.text,
+              );
               if (ctx.mounted) Navigator.pop(ctx);
               _load();
             },
@@ -1410,13 +1885,12 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
       footer: '移动端语义降级：iOS 后台触发受限，由系统补跑',
       children: [
         if (_schedules == null)
-          const Padding(padding: EdgeInsets.all(16), child: CupertinoActivityIndicator())
-        else if (_schedules!.isEmpty)
-          IosRow(
-            icon: CupertinoIcons.alarm,
-            iconColor: p.ink2,
-            title: '暂无任务',
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: CupertinoActivityIndicator(),
           )
+        else if (_schedules!.isEmpty)
+          IosRow(icon: CupertinoIcons.alarm, iconColor: p.ink2, title: '暂无任务')
         else
           for (final s in _schedules!)
             IosRow(
@@ -1471,33 +1945,53 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
         title: const Text('新建定时任务'),
         content: Padding(
           padding: const EdgeInsets.only(top: 12),
-          child: Column(children: [
-            CupertinoTextField(
+          child: Column(
+            children: [
+              CupertinoTextField(
                 controller: nameCtrl,
                 placeholder: '名称',
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
-            const SizedBox(height: 8),
-            CupertinoTextField(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+              ),
+              const SizedBox(height: 8),
+              CupertinoTextField(
                 controller: cronCtrl,
                 placeholder: 'cron（5 段）',
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
-            const SizedBox(height: 8),
-            CupertinoTextField(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+              ),
+              const SizedBox(height: 8),
+              CupertinoTextField(
                 controller: taskCtrl,
                 placeholder: '任务描述',
                 maxLines: 2,
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
-          ]),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
-          CupertinoDialogAction(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
           CupertinoDialogAction(
             isDefaultAction: true,
             onPressed: () async {
               if (nameCtrl.text.isEmpty || taskCtrl.text.isEmpty) return;
               try {
-                await HarnessClient.instance
-                    .createSchedule(nameCtrl.text, cronCtrl.text, taskCtrl.text);
+                await HarnessClient.instance.createSchedule(
+                  nameCtrl.text,
+                  cronCtrl.text,
+                  taskCtrl.text,
+                );
               } catch (e) {
                 if (ctx.mounted) {
                   showCupertinoDialog<void>(
@@ -1507,7 +2001,9 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
                       content: Text('$e'),
                       actions: [
                         CupertinoDialogAction(
-                            onPressed: () => Navigator.pop(d), child: const Text('好')),
+                          onPressed: () => Navigator.pop(d),
+                          child: const Text('好'),
+                        ),
                       ],
                     ),
                   );

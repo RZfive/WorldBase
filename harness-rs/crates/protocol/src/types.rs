@@ -284,6 +284,22 @@ pub struct ChatRunContext {
     /// another agent-loop iteration.
     #[serde(default)]
     pub budget_limit: Option<f64>,
+    /// Rust-owned long-term memory scopes for this run.  Electron supplies
+    /// the resolved IDs so Rust can build the prompt without consulting the
+    /// TypeScript memory store.
+    #[serde(default)]
+    pub memory_scopes: Vec<MemoryScopeRef>,
+    /// The current user message used for scoped memory retrieval.
+    #[serde(default)]
+    pub memory_query: Option<String>,
+}
+
+/// A concrete memory scope selected for one agent run.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryScopeRef {
+    pub scope_type: String,
+    pub scope_id: String,
 }
 
 /// chat.send 返回：流 id，事件经通知下发。
@@ -864,6 +880,169 @@ pub struct MemoryEntry {
     pub created_at: String,
     #[serde(default)]
     pub score: Option<f64>,
+}
+
+/// Electron Agent Workspace memory entry.  The legacy `MemoryEntry` above is
+/// retained for the `memory.add/search` tool contract; this richer shape is
+/// used by the `memory.list/save/...` RPCs and maps one-to-one to Electron's
+/// `memory_entries` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMemoryEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default = "default_memory_scope_type")]
+    pub scope_type: String,
+    #[serde(default)]
+    pub scope_id: String,
+    #[serde(default = "default_memory_type")]
+    pub memory_type: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session_id: Option<String>,
+    #[serde(default)]
+    pub source_message_ids: Vec<String>,
+    #[serde(default = "default_memory_score")]
+    pub importance: f64,
+    #[serde(default = "default_memory_score")]
+    pub confidence: f64,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+fn default_memory_scope_type() -> String {
+    "user".into()
+}
+
+fn default_memory_type() -> String {
+    "knowledge".into()
+}
+
+fn default_memory_score() -> f64 {
+    0.5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMemorySearchOptions {
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<MemorySearchScopeEntry>,
+    #[serde(default)]
+    pub memory_types: Vec<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemorySearchScopeEntry {
+    pub scope_type: String,
+    pub scope_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCompactionPlan {
+    #[serde(default)]
+    pub delete_ids: Vec<String>,
+    #[serde(default)]
+    pub merge_groups: Vec<MemoryMergeGroup>,
+    #[serde(default)]
+    pub updates: Vec<MemoryUpdatePatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryMergeGroup {
+    #[serde(default)]
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub details: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryUpdatePatch {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub details: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub importance: Option<f64>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCompactionGroupResult {
+    pub target_id: String,
+    pub merged_ids: Vec<String>,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCompactionResult {
+    pub scanned: u32,
+    pub deleted: u32,
+    pub removed_useless: u32,
+    pub merged: u32,
+    pub updated: u32,
+    pub retained: u32,
+    pub groups: Vec<MemoryCompactionGroupResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCompactionStatus {
+    pub id: Option<String>,
+    pub status: String,
+    pub stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub scanned: u32,
+    pub total_chunks: u32,
+    pub completed_chunks: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<MemoryCompactionResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// 技能描述。

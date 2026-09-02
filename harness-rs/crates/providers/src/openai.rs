@@ -20,6 +20,32 @@ pub struct OpenAIProvider {
     base_url: String,
 }
 
+/// Some OpenAI-compatible gateways (notably Volcano Ark) reject JSON Schema
+/// composition such as `anyOf` in tool declarations. Keep the execution schema
+/// unchanged, but advertise a compatible projection of it to the model.
+fn compatible_tool_schema(schema: &Value) -> Value {
+    let mut value = schema.clone();
+    strip_schema_composition(&mut value);
+    value
+}
+
+fn strip_schema_composition(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("anyOf");
+            for child in map.values_mut() {
+                strip_schema_composition(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_schema_composition(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl OpenAIProvider {
     pub fn new(api_key: String, model: String, base_url: Option<String>) -> Self {
         Self {
@@ -41,7 +67,7 @@ impl OpenAIProvider {
                     for b in &m.content {
                         match b {
                             ContentBlock::Text { text } => text_parts.push(text.clone()),
-                            ContentBlock::ImageUrl { url } => text_parts.push(String::new()),
+                            ContentBlock::ImageUrl { .. } => {}
                             ContentBlock::ToolResult { .. } => tool_results.push(b),
                             ContentBlock::ToolUse { .. } => {}
                         }
@@ -107,6 +133,33 @@ impl OpenAIProvider {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_schemas_strip_unsupported_composition_recursively() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "anyOf": [{ "required": ["prompt"] }, { "required": ["tasks"] }],
+            "properties": {
+                "nested": {
+                    "type": "array",
+                    "items": { "type": "object", "anyOf": [{ "required": ["id"] }] }
+                }
+            }
+        });
+
+        let compatible = compatible_tool_schema(&schema);
+
+        assert_eq!(compatible["type"], "object");
+        assert!(compatible.get("anyOf").is_none());
+        assert!(compatible["properties"]["nested"]["items"]
+            .get("anyOf")
+            .is_none());
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for OpenAIProvider {
     fn name(&self) -> &str {
@@ -154,10 +207,12 @@ impl Provider for OpenAIProvider {
         if !tools.is_empty() {
             body["tools"] = json!(tools
                 .iter()
-                .map(|t| json!({
-                    "type": "function",
-                    "function": { "name": t.name, "description": t.description, "parameters": t.input_schema },
-                }))
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": { "name": t.name, "description": t.description, "parameters": compatible_tool_schema(&t.input_schema) },
+                    })
+                })
                 .collect::<Vec<_>>());
         }
 
@@ -194,14 +249,25 @@ impl Provider for OpenAIProvider {
                 let content = std::mem::take(&mut self.text);
                 let tool_blocks: Vec<ContentBlock> = std::mem::take(&mut self.tool_calls)
                     .into_values()
-                    .map(|(id, name, args)| ContentBlock::ToolUse {
-                        id,
-                        name,
-                        input: if args.trim().is_empty() {
-                            json!({})
+                    .enumerate()
+                    .map(|(index, (id, name, args))| {
+                        // Some OpenAI-compatible gateways stream tool calls
+                        // without an id. The next request would reject an
+                        // assistant.tool_calls entry with an empty id.
+                        let id = if id.trim().is_empty() {
+                            format!("call_{}_{}", index, uuid::Uuid::new_v4().simple())
                         } else {
-                            serde_json::from_str(&args).unwrap_or(json!({}))
-                        },
+                            id
+                        };
+                        ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input: if args.trim().is_empty() {
+                                json!({})
+                            } else {
+                                serde_json::from_str(&args).unwrap_or(json!({}))
+                            },
+                        }
                     })
                     .collect();
                 let mut blocks = Vec::new();

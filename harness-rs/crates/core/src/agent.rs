@@ -10,9 +10,7 @@ use worldbase_protocol::types::{
     Capabilities, ChatContentPart, ChatMessage, ChatRunContext, Role, ToolCallRecord,
     ToolDescriptor, ToolResultRecord,
 };
-use worldbase_providers::{
-    ChatOptions, ContentBlock, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk,
-};
+use worldbase_providers::{ChatOptions, ContentBlock, LlmMessage, LlmRole, LlmTool, StreamChunk};
 
 /// 单轮/多轮工具循环的最大步数（防失控）。
 // Keep the segment budget aligned with Electron's agent loop.  A terminal
@@ -25,6 +23,12 @@ const MAX_TOKENS: u32 = 8192;
 /// ChatMessage 历史 → LLM 消息历史。
 pub fn to_llm_messages(messages: &[ChatMessage]) -> Vec<LlmMessage> {
     let mut out = Vec::new();
+    let answered_tool_calls: std::collections::HashSet<String> = messages
+        .iter()
+        .flat_map(|message| message.tool_results.iter())
+        .map(|result| result.tool_call_id.clone())
+        .filter(|id| !id.trim().is_empty())
+        .collect();
     for msg in messages {
         let mut blocks = Vec::new();
         match msg.role {
@@ -82,10 +86,35 @@ pub fn to_llm_messages(messages: &[ChatMessage]) -> Vec<LlmMessage> {
             Role::Assistant => LlmRole::Assistant,
             _ => LlmRole::User,
         };
-        out.push(LlmMessage {
+        let llm_message = LlmMessage {
             role,
             content: blocks,
-        });
+        };
+        out.push(llm_message);
+
+        // A queued image tool returns before the image exists. OpenAI-style
+        // APIs still require every assistant tool_call to be answered before
+        // the next turn, so synthesize a compact receipt for unmatched calls.
+        if msg.role == Role::Assistant {
+            let receipts: Vec<_> = msg
+                .tool_calls
+                .iter()
+                .filter(|call| {
+                    !call.id.trim().is_empty() && !answered_tool_calls.contains(&call.id)
+                })
+                .map(|call| LlmMessage {
+                    role: LlmRole::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content:
+                            "该任务已加入绘图队列，结果稍后会出现在图片库。请继续对话，不要等待。"
+                                .into(),
+                        is_error: false,
+                    }],
+                })
+                .collect();
+            out.extend(receipts);
+        }
     }
     out
 }
@@ -137,7 +166,106 @@ fn system_prompt(
             "\n\n## Active target project\n- This conversation is currently bound to existing project ID: {project_id}.\n- Prefer that project for all read/write/build/runtime actions unless the user explicitly switches to another project.\n- Do not create a new project; use the existing project ID when a project tool requires `project_id`."
         ));
     }
+    // Rust owns memory retrieval when the Electron backend selector is set to
+    // Rust.  The host passes concrete scope IDs and the current user query;
+    // keeping retrieval here means prompt construction no longer opens the
+    // TypeScript MemoryStore on the Rust path.
+    if !context.memory_scopes.is_empty() {
+        let options = worldbase_protocol::types::WorkspaceMemorySearchOptions {
+            query: context.memory_query.clone(),
+            scopes: context
+                .memory_scopes
+                .iter()
+                .map(|scope| worldbase_protocol::types::MemorySearchScopeEntry {
+                    scope_type: scope.scope_type.clone(),
+                    scope_id: scope.scope_id.clone(),
+                })
+                .collect(),
+            memory_types: Vec::new(),
+            limit: Some(40),
+        };
+        if let Ok(entries) = hub.store.search_workspace_memories(&options) {
+            let mut sections = Vec::new();
+            for (kind, title) in [
+                ("user_trait", "User traits memory"),
+                ("agent_skill", "Agent skills memory"),
+                ("step", "Reusable steps memory"),
+                ("knowledge", "Knowledge memory"),
+            ] {
+                let lines: Vec<String> = entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.memory_type == kind
+                            && !entry.title.is_empty()
+                            && !entry.summary.is_empty()
+                    })
+                    .take(8)
+                    .map(|entry| {
+                        if entry.title == entry.summary {
+                            format!("- {}", entry.summary)
+                        } else {
+                            format!("- {}: {}", entry.title, entry.summary)
+                        }
+                    })
+                    .collect();
+                if !lines.is_empty() {
+                    sections.push(format!("## {title}\n{}", lines.join("\n")));
+                }
+            }
+            if !sections.is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str(&sections.join("\n\n"));
+            }
+        }
+    }
     prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use worldbase_protocol::types::{ToolCallRecord, ToolResultRecord};
+
+    #[test]
+    fn queued_tool_calls_receive_a_synthetic_tool_receipt() {
+        let history = vec![
+            ChatMessage {
+                id: 1,
+                role: Role::Assistant,
+                content: "Queued.".into(),
+                parts: vec![],
+                tool_calls: vec![ToolCallRecord {
+                    id: "call-1".into(),
+                    name: "generate_image".into(),
+                    args: serde_json::json!({"prompt": "rain"}),
+                }],
+                tool_results: vec![],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 2,
+                role: Role::User,
+                content: "again".into(),
+                parts: vec![],
+                tool_calls: vec![],
+                tool_results: vec![ToolResultRecord {
+                    tool_call_id: "answered".into(),
+                    name: String::new(),
+                    content: "ok".into(),
+                    is_error: false,
+                }],
+                created_at: None,
+            },
+        ];
+
+        let messages = to_llm_messages(&history);
+
+        assert_eq!(messages.len(), 3);
+        assert!(messages[1].content.iter().any(|block| matches!(
+            block,
+            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call-1"
+        )));
+    }
 }
 
 fn llm_tools(tools: &[Arc<dyn worldbase_tools::Tool>]) -> Vec<LlmTool> {
@@ -268,7 +396,7 @@ pub fn start_chat_with_stream_id(
     interactive: bool,
     provider_id: Option<String>,
     model: Option<String>,
-    mut context: ChatRunContext,
+    context: ChatRunContext,
     stream_id: Option<String>,
 ) -> Result<ChatRun> {
     start_chat_with_stream_id_and_group_runtime(
@@ -665,7 +793,7 @@ async fn run_chat_inner(
             break;
         }
         if let Some(limit) = context.budget_limit {
-            if limit.is_finite() && limit >= 0.0 && total_cost >= limit {
+            if limit.is_finite() && limit > 0.0 && total_cost >= limit {
                 let message = format!(
                     "预算上限已达到（已用 {total_cost:.6} / 上限 {limit:.6}），已停止下一轮模型调用。"
                 );
@@ -739,7 +867,6 @@ async fn run_chat_inner(
                     usage,
                 }) => {
                     stop_reason = reason;
-                    assistant = Some(msg.clone());
                     // 用量记账（成本按供应商模型单价换算）
                     let model_name = model_override.as_deref().unwrap_or(provider.model());
                     let (pin, pout, pcache) = hub.model_prices(provider_entry.as_ref(), model_name);

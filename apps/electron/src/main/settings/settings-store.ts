@@ -401,9 +401,12 @@ function normalizeCostSettings (value: unknown): CostSettings {
       .map(normalizeModelPricingEntry)
       .filter((entry): entry is NonNullable<ReturnType<typeof normalizeModelPricingEntry>> => Boolean(entry))
     : []
-  const budgetLimit = input.budgetLimit == null
-    ? null
-    : (Number.isFinite(Number(input.budgetLimit)) ? Number(input.budgetLimit) : null)
+  const rawBudgetLimit = input.budgetLimit == null ? null : Number(input.budgetLimit)
+  // Empty and legacy zero values mean "no cap"; the input uses 0 as its HTML
+  // minimum but a $0 session budget would otherwise silently block every call.
+  const budgetLimit = rawBudgetLimit != null && Number.isFinite(rawBudgetLimit) && rawBudgetLimit > 0
+    ? rawBudgetLimit
+    : null
 
   const seenModels = new Set<string>()
   return {

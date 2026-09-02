@@ -43,7 +43,6 @@ await build({
     : undefined,
   external: [
     'electron',
-    'better-sqlite3',
     'sharp',
     'pnpm'
   ],

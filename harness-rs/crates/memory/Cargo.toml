@@ -10,4 +10,5 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+regex = { workspace = true }
 worldbase-protocol = { path = "../protocol" }

@@ -3,9 +3,12 @@
 use super::{require_str, Tool, ToolServices};
 use anyhow::Result;
 use async_trait::async_trait;
-use sha1::{Digest, Sha1};
 use serde_json::{json, Map, Value};
-use std::{path::Path, time::{SystemTime, UNIX_EPOCH}};
+use sha1::{Digest, Sha1};
+use std::{
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
@@ -752,15 +755,16 @@ mod tests {
         assert_eq!(parts.next(), Some("planner"));
         let suffix = parts.next().unwrap_or_default();
         assert_eq!(suffix.len(), 8);
-        assert!(suffix.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(suffix
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
         let root = services.projects.project_root(project_id).unwrap();
         assert!(root.join("app/layout.tsx").is_file());
         assert!(root.join("app/globals.css").is_file());
         assert!(root.join("next.config.js").is_file());
-        let package: Value = serde_json::from_str(
-            &std::fs::read_to_string(root.join("package.json")).unwrap(),
-        )
-        .unwrap();
+        let package: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("package.json")).unwrap())
+                .unwrap();
         assert_eq!(package["dependencies"]["next"], "^15.0.0");
         assert_eq!(package["scripts"]["start"], "next start");
     }
@@ -784,7 +788,9 @@ mod tests {
         let project_id = result["projectId"].as_str().unwrap();
         let suffix = project_id.strip_prefix("proj_").unwrap();
         assert_eq!(suffix.len(), 20);
-        assert!(suffix.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(suffix
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
     }
 
     #[tokio::test]

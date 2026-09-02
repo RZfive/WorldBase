@@ -1,6 +1,7 @@
 import type { AILogSessionLogger } from '../settings/ai-log-store.js'
 import type { AIExecutionAuthMode } from '../settings/settings-store.js'
 import type { ChatMessage, ToolDefinition } from './contracts.js'
+import type { MemorySearchScope } from '../../shared/agent-workspace-types.js'
 
 export type { ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
 
@@ -78,6 +79,8 @@ export interface AIRequestOptions {
   systemPromptSections?: string[]
   allowedToolNames?: string[]
   deniedToolNames?: string[]
+  /** Resolved scopes for Rust-owned memory retrieval. */
+  memoryScopes?: MemorySearchScope[]
   customTools?: CustomToolRegistration[]
   /** Internal nesting depth for Electron-hosted subagent runs. */
   subagentNestingDepth?: number

@@ -34,7 +34,6 @@ pub async fn run(hub: Arc<Hub>, port: u16, capabilities: Capabilities) -> anyhow
         capabilities: Arc::new(capabilities),
     };
     let image_hub = state.hub.clone();
-    let lightapp_hub = state.hub.clone();
     let app = Router::new()
         .route(
             "/health",
@@ -59,20 +58,18 @@ pub async fn run(hub: Arc<Hub>, port: u16, capabilities: Capabilities) -> anyhow
         )
         .route(
             "/lightapp/{id}",
-            get(move |Path(id): Path<String>| {
-                let hub = lightapp_hub.clone();
-                async move {
-                    match worldbase_core::studio::StudioService::read_lightapp(&id) {
-                        Ok(html) => (
-                            [(
-                                axum::http::header::CONTENT_TYPE,
-                                "text/html; charset=utf-8".to_string(),
-                            )],
-                            html,
-                        )
-                            .into_response(),
-                        Err(e) => (StatusCode::NOT_FOUND, format!("{{ \"error\": \"{e}\" }}"))
-                            .into_response(),
+            get(move |Path(id): Path<String>| async move {
+                match worldbase_core::studio::StudioService::read_lightapp(&id) {
+                    Ok(html) => (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "text/html; charset=utf-8".to_string(),
+                        )],
+                        html,
+                    )
+                        .into_response(),
+                    Err(e) => {
+                        (StatusCode::NOT_FOUND, format!("{{ \"error\": \"{e}\" }}")).into_response()
                     }
                 }
             }),
@@ -122,7 +119,6 @@ async fn ws_handler(
 }
 
 async fn ws_connection(state: TransportState, socket: WebSocket) {
-    let ctx = ConnectionContext::new((*state.capabilities).clone());
     let (mut ws_tx, mut ws_rx) = socket.split();
     // 派发任务可能长时间等待（权限询问/宿主反向请求），响应经 mpsc 回单一写者
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
