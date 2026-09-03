@@ -7,7 +7,7 @@ import '../features/chat/chat_tab.dart';
 import 'host_bridge_ui.dart';
 
 /// WorldBase 移动端(晨昏 2.0):对话即主页,无底部 Tab。
-/// 历史会话进左侧抽屉;应用 / 绘图 / 设置从抽屉或「+」面板进入。
+/// 历史会话、应用、绘图和设置从左侧抽屉进入；输入栏回形针导入附件。
 class WorldBaseApp extends ConsumerStatefulWidget {
   const WorldBaseApp({super.key});
 

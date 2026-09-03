@@ -9,7 +9,9 @@ import '../../core/providers.dart';
 
 /// 群组协作页：创建（5 模式 + 成员编辑）→ 讨论 → 黑板 → HITL 注入（iOS 风格）。
 class GroupPage extends ConsumerStatefulWidget {
-  const GroupPage({super.key});
+  const GroupPage({this.initialGroupId, super.key});
+
+  final String? initialGroupId;
 
   @override
   ConsumerState<GroupPage> createState() => _GroupPageState();
@@ -38,10 +40,30 @@ class _GroupPageState extends ConsumerState<GroupPage> {
     super.initState();
     _groupController = ref.read(groupChatProvider.notifier);
     _inputCtrl.addListener(_updateMentionState);
-    Future.microtask(() {
-      ref.read(agentsProvider.notifier).refresh();
-      ref.read(agentGroupsProvider.notifier).refresh();
-    });
+    Future.microtask(_refreshCatalogAndOpenInitialGroup);
+  }
+
+  Future<void> _refreshCatalogAndOpenInitialGroup() async {
+    await Future.wait([
+      ref.read(agentsProvider.notifier).refresh(),
+      ref.read(agentGroupsProvider.notifier).refresh(),
+    ]);
+    final initialGroupId = widget.initialGroupId;
+    if (!mounted || initialGroupId == null || initialGroupId.isEmpty) return;
+    final groups = ref.read(agentGroupsProvider).value ?? const [];
+    final agents = ref.read(agentsProvider).value ?? const [];
+    AgentGroupDefinition? target;
+    for (final group in groups) {
+      if (group.id == initialGroupId) {
+        target = group;
+        break;
+      }
+    }
+    if (target == null) {
+      setState(() => _catalogError = '群聊不存在或已删除');
+      return;
+    }
+    await _openSavedGroup(target, agents);
   }
 
   @override
@@ -90,12 +112,16 @@ class _GroupPageState extends ConsumerState<GroupPage> {
   }
 
   Future<void> _backToGroupList() async {
+    final conversations = ref.read(conversationsProvider.notifier);
     await ref.read(groupChatProvider.notifier).close();
+    unawaited(conversations.refresh());
   }
 
   Future<void> _exitGroupPage() async {
+    final conversations = ref.read(conversationsProvider.notifier);
     await ref.read(groupChatProvider.notifier).close();
     if (mounted) Navigator.of(context).pop();
+    unawaited(conversations.refresh());
   }
 
   Future<void> _send() async {
@@ -169,7 +195,10 @@ class _GroupPageState extends ConsumerState<GroupPage> {
     return PopScope(
       onPopInvokedWithResult: (didPop, _) {
         if (didPop && _groupController.session != null) {
-          unawaited(_groupController.close());
+          final conversations = ref.read(conversationsProvider.notifier);
+          unawaited(
+            _groupController.close().then((_) => conversations.refresh()),
+          );
         }
       },
       child: IosScreen(
@@ -491,9 +520,12 @@ class _GroupPageState extends ConsumerState<GroupPage> {
     }
   }
 
-  void _showBoard(BuildContext context, GroupChatController controller) {
-    final session = controller.session;
-    if (session == null) return;
+  Future<void> _showBoard(
+    BuildContext context,
+    GroupChatController controller,
+  ) async {
+    final session = await controller.refreshSession();
+    if (session == null || !context.mounted) return;
     final board = session.board;
     List<String> asList(dynamic v) =>
         (v as List?)?.map((e) => e.toString()).toList() ?? [];

@@ -1089,6 +1089,7 @@ interface ElectronAPI {
   getAISettings: () => Promise<{ apiKey: string; baseUrl: string; model: string }>
   saveAISettings: (config: { apiKey: string; baseUrl: string; model: string }) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
+  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: 'openai' | 'anthropic' }) => Promise<{ models: string[] }>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>

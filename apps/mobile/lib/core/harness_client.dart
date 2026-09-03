@@ -75,6 +75,12 @@ class ConversationMeta {
   final String? forkedFrom;
   final int forkDepth;
 
+  /// Rust-native group transcripts use one stable parent conversation. Member
+  /// execution conversations carry an Agent ID and are filtered server-side.
+  String? get groupId =>
+      id.startsWith('group-') && agentId == null ? id.substring(6) : null;
+  bool get isGroup => groupId != null;
+
   static ConversationMeta fromJson(Map<String, dynamic> j) => ConversationMeta(
     id: j['id'] as String,
     title: j['title'] as String? ?? '',
@@ -92,12 +98,14 @@ class ChatMessage {
     required this.id,
     required this.role,
     required this.content,
+    this.parts = const [],
     this.toolCalls = const [],
     this.toolResults = const [],
   });
   final int id;
   final String role;
   final String content;
+  final List<Map<String, dynamic>> parts;
   final List<dynamic> toolCalls;
   final List<dynamic> toolResults;
   bool get isTool => toolCalls.isNotEmpty || toolResults.isNotEmpty;
@@ -106,6 +114,10 @@ class ChatMessage {
     id: (j['id'] as num?)?.toInt() ?? 0,
     role: j['role'] as String? ?? 'user',
     content: j['content'] as String? ?? '',
+    parts: (j['parts'] as List? ?? const [])
+        .whereType<Map>()
+        .map((part) => part.cast<String, dynamic>())
+        .toList(),
     toolCalls: j['toolCalls'] as List? ?? const [],
     toolResults: j['toolResults'] as List? ?? const [],
   );
@@ -568,6 +580,7 @@ class GroupSession {
     required this.members,
     required this.status,
     this.coordinator,
+    this.conversationId = '',
     this.board = const {},
     this.rounds = const [],
   });
@@ -577,6 +590,7 @@ class GroupSession {
   final List<dynamic> members;
   final String status;
   final String? coordinator;
+  final String conversationId;
   final Map<String, dynamic> board;
   final List<dynamic> rounds;
 
@@ -613,6 +627,8 @@ class GroupSession {
     members: j['members'] as List? ?? [],
     status: j['status'] as String? ?? 'open',
     coordinator: j['coordinator'] as String?,
+    conversationId:
+        j['conversationId'] as String? ?? 'group-${j['id'] as String}',
     board: (j['board'] as Map?)?.cast<String, dynamic>() ?? {},
     rounds: j['rounds'] as List? ?? [],
   );
@@ -974,6 +990,7 @@ class HarnessClient {
     String? reasoningEffort,
     double? temperature,
     bool? webSearch,
+    List<Map<String, dynamic>> contentParts = const [],
   }) async {
     final params = <String, dynamic>{
       'conversationId': conversationId,
@@ -983,6 +1000,7 @@ class HarnessClient {
       if (reasoningEffort != null && reasoningEffort.trim().isNotEmpty)
         'reasoningEffort': reasoningEffort.trim(),
       if (temperature != null) 'temperature': temperature.clamp(0, 2),
+      if (contentParts.isNotEmpty) 'contentParts': contentParts,
     };
     if (webSearch == true) {
       params['systemPromptSections'] = <String>[
@@ -996,6 +1014,11 @@ class HarnessClient {
     // Do not overwrite a sequence received in the tiny RPC/notification race.
     _lastSeq.putIfAbsent(streamId, () => -1);
     return streamId;
+  }
+
+  Future<Map<String, dynamic>> parseDocumentFile(String path) async {
+    final result = await call('doc.parse', {'path': path});
+    return (result as Map).cast<String, dynamic>();
   }
 
   String _readStreamId(dynamic result, {required String method}) {
@@ -1045,6 +1068,26 @@ class HarnessClient {
       };
     }
     return result.cast<String, dynamic>();
+  }
+
+  Future<List<String>> fetchProviderModels({
+    required String baseUrl,
+    required String apiKey,
+    String apiProtocol = '',
+  }) async {
+    final result = await call('provider.fetchModels', {
+      'baseUrl': baseUrl,
+      'apiKey': apiKey,
+      'apiProtocol': apiProtocol,
+    });
+    final models = result is Map ? result['models'] as List? : null;
+    return (models ?? const [])
+        .whereType<String>()
+        .map((model) => model.trim())
+        .where((model) => model.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
   }
 
   Future<Map<String, dynamic>> saveProvider(ProviderEntry entry) async {
@@ -1311,6 +1354,7 @@ class HarnessClient {
     required String mode,
     required List<Map<String, String>> members,
     String? coordinator,
+    String? sessionId,
     int maxParallelWorkers = 2,
   }) async {
     final result = await call('group.create', {
@@ -1318,6 +1362,7 @@ class HarnessClient {
       'mode': mode,
       'members': members,
       'coordinator': ?coordinator,
+      'sessionId': ?sessionId,
       'maxParallelWorkers': maxParallelWorkers,
     });
     return GroupSession.fromJson((result as Map).cast<String, dynamic>());

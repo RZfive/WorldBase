@@ -178,6 +178,7 @@ pub async fn dispatch(
         EXEC_RUN => exec_run(hub, ctx, params).await,
 
         PROVIDER_LIST => Ok(json!({ "providers": hub.providers_config() })),
+        PROVIDER_FETCH_MODELS => provider_fetch_models(params).await,
         PROVIDER_SAVE => provider_save(hub, params),
         PROVIDER_DELETE => provider_delete(hub, params),
         PROVIDER_SET_ACTIVE => provider_set_active(hub, params),
@@ -394,7 +395,20 @@ fn conv_sync(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 
 fn conv_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let limit = params["limit"].as_u64().unwrap_or(50) as u32;
-    let list = hub.store.list_conversations(limit).map_err(internal)?;
+    // Native group member runs need isolated histories for correct parallel
+    // execution, but those implementation conversations must never appear as
+    // separate chats in a client sidebar. The group page owns their shared,
+    // user-visible transcript.
+    let list = hub
+        .store
+        .list_conversations(limit.saturating_mul(4).max(limit))
+        .map_err(internal)?
+        .into_iter()
+        .filter(|conversation| {
+            !(conversation.id.starts_with("group-") && conversation.agent_id.is_some())
+        })
+        .take(limit as usize)
+        .collect::<Vec<_>>();
     Ok(json!({ "conversations": list }))
 }
 
@@ -735,6 +749,50 @@ fn schedule_run(
 
 // ---------- group ----------
 
+const GROUP_MEMBER_HISTORY_PREFIX: &str = "[[worldbase-group-member]]";
+
+fn group_conversation_id(group_id: &str) -> String {
+    format!("group-{group_id}")
+}
+
+fn persist_group_user_message(hub: &Arc<Hub>, group_id: &str, content: String) -> Result<()> {
+    hub.store.append_message(
+        &group_conversation_id(group_id),
+        &ChatMessage {
+            id: 0,
+            role: Role::User,
+            content,
+            parts: vec![],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        },
+    )?;
+    Ok(())
+}
+
+fn persist_group_member_message(
+    hub: &Arc<Hub>,
+    group_id: &str,
+    member: &str,
+    content: &str,
+) -> Result<()> {
+    let header = serde_json::to_string(&json!({ "name": member }))?;
+    hub.store.append_message(
+        &group_conversation_id(group_id),
+        &ChatMessage {
+            id: 0,
+            role: Role::Assistant,
+            content: format!("{GROUP_MEMBER_HISTORY_PREFIX}{header}\n{content}"),
+            parts: vec![],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        },
+    )?;
+    Ok(())
+}
+
 fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let topic = params["topic"]
         .as_str()
@@ -758,7 +816,7 @@ fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(worldbase_group::GroupEngine::DEFAULT_MAX_PARALLEL_WORKERS);
-    let session = worldbase_group::GroupEngine::create_with_max_parallel_workers(
+    let mut session = worldbase_group::GroupEngine::create_with_max_parallel_workers(
         topic,
         mode,
         members,
@@ -766,6 +824,29 @@ fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         max_parallel_workers,
     )
     .map_err(internal)?;
+    if let Some(session_id) = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        session.id = session_id.to_string();
+    }
+    if let Some(existing) = hub.group_sessions.lock().unwrap().get(&session.id).cloned() {
+        session.created_at = existing.created_at;
+        session.board = existing.board;
+        session.board_updates = existing.board_updates;
+        session.rounds = existing.rounds;
+        session.pending_injections = existing.pending_injections;
+    }
+    let conversation_id = group_conversation_id(&session.id);
+    hub.store
+        .ensure_conversation(&conversation_id, topic, None)
+        .map_err(internal)?;
+    hub.store
+        .rename_conversation(&conversation_id, topic)
+        .map_err(internal)?;
     hub.group_sessions
         .lock()
         .unwrap()
@@ -829,6 +910,7 @@ fn group_inject(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
             target_agent_ids = session.active_member_ids.clone();
         }
     }
+    persist_group_user_message(hub, id, format!("[补充说明] {content}")).map_err(internal)?;
     worldbase_group::GroupEngine::inject(session, content, target_agent_ids);
     if let Some(injection) = session.pending_injections.last_mut() {
         injection.round = params["round"].as_u64().unwrap_or(0) as u32;
@@ -1000,7 +1082,8 @@ impl NativeGroupCollaborationRuntime {
             .agent_id
             .as_deref()
             .filter(|agent_id| !agent_id.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("native group member has no durable agent ID"))
+            .or_else(|| (!self.member.name.trim().is_empty()).then_some(self.member.name.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("native group member has no identifier"))
     }
 
     fn next_for_member(&self, member: GroupMember) -> anyhow::Result<Self> {
@@ -1008,7 +1091,8 @@ impl NativeGroupCollaborationRuntime {
             .agent_id
             .as_deref()
             .filter(|agent_id| !agent_id.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("target member has no durable agent ID"))?
+            .or_else(|| (!member.name.trim().is_empty()).then_some(member.name.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("target member has no identifier"))?
             .to_string();
         let mut ancestry = self.ancestry.clone();
         ancestry.push(agent_id);
@@ -1060,7 +1144,10 @@ impl worldbase_tools::GroupCollaborationRuntime for NativeGroupCollaborationRunt
             let target = session
                 .members
                 .iter()
-                .find(|member| member.agent_id.as_deref() == Some(target_agent_id))
+                .find(|member| {
+                    member.agent_id.as_deref() == Some(target_agent_id)
+                        || (member.agent_id.is_none() && member.name == target_agent_id)
+                })
                 .cloned()
                 .ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1215,6 +1302,8 @@ impl worldbase_tools::GroupCollaborationRuntime for NativeGroupCollaborationRunt
 
     async fn reply_to_user(&self, content: &str) -> anyhow::Result<Value> {
         let agent_id = self.member_id()?.to_string();
+        let content = worldbase_group::GroupEngine::sanitize_member_output(content);
+        anyhow::ensure!(!content.is_empty(), "reply_to_user content is empty");
         let group_name = self
             .hub
             .group_sessions
@@ -1229,11 +1318,12 @@ impl worldbase_tools::GroupCollaborationRuntime for NativeGroupCollaborationRunt
             group_name,
             agent_id,
             agent_name: self.member.name.clone(),
-            content: content.to_string(),
+            content: content.clone(),
             round: self.round,
             endorsed: false,
             at: worldbase_protocol::event::now_rfc3339(),
         };
+        persist_group_member_message(&self.hub, &self.group_id, &self.member.name, &content)?;
         self.hub
             .emit(
                 &self.group_id,
@@ -1262,16 +1352,19 @@ async fn run_native_group_member(
     group_abort: CancellationToken,
     group_collaboration: Option<Arc<dyn worldbase_tools::GroupCollaborationRuntime>>,
 ) -> anyhow::Result<String> {
-    let agent_id = member
+    let persisted_agent_id = member
         .agent_id
         .as_deref()
-        .filter(|id| !id.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("native group member has no agent id"))?;
-    let conversation_id = format!("group-{group_id}-{agent_id}");
+        .filter(|id| !id.trim().is_empty());
+    let member_key = persisted_agent_id.unwrap_or(&member.name);
+    let conversation_agent_id = persisted_agent_id
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("__group_adhoc__{group_id}:{member_key}"));
+    let conversation_id = format!("group-{group_id}-{member_key}");
     hub.store.ensure_conversation(
         &conversation_id,
         &format!("Native group: {}", member.name),
-        Some(agent_id),
+        Some(&conversation_agent_id),
     )?;
     if context.allowed_tool_names.is_empty() {
         context.allowed_tool_names = member.allowed_tool_names.clone();
@@ -1285,7 +1378,7 @@ async fn run_native_group_member(
     ));
 
     let child_stream_id = format!(
-        "{group_id}:member:{agent_id}:{}",
+        "{group_id}:member:{member_key}:{}",
         uuid::Uuid::new_v4().simple()
     );
     // Subscribe before creating the child so an instant mock/provider result
@@ -1430,6 +1523,10 @@ fn group_message(
             },
         );
     }
+    if let Err(error) = persist_group_user_message(hub, &id, text.clone()) {
+        hub.runs.lock().unwrap().remove(&id);
+        return Err(internal(error));
+    }
     let group_abort = hub
         .runs
         .lock()
@@ -1504,41 +1601,37 @@ fn group_message(
                     if group_abort.is_cancelled() {
                         anyhow::bail!("native group aborted");
                     }
-                    if member.agent_id.is_some() {
-                        let member_runtime = Arc::new(NativeGroupCollaborationRuntime {
-                            hub: hub.clone(),
-                            group_id: group_id.clone(),
-                            ancestry: member
-                                .agent_id
-                                .clone()
-                                .into_iter()
-                                .filter(|agent_id| !agent_id.trim().is_empty())
-                                .collect(),
-                            member: member.clone(),
-                            round,
-                            context: context.clone(),
-                            capabilities: capabilities.clone(),
-                            interactive,
-                            group_abort: group_abort.clone(),
-                            depth: 0,
-                        });
-                        let result = run_native_group_member(
-                            hub,
-                            &group_id,
-                            member.clone(),
-                            prompt,
-                            context,
-                            capabilities,
-                            interactive,
-                            group_abort,
-                            Some(member_runtime),
-                        )
-                        .await;
-                        mark_native_group_member_finished(&hub_for_finish, &group_id, &member);
-                        result
-                    } else {
-                        worldbase_group::run_member_provider(&member, &prompt).await
-                    }
+                    let member_runtime = Arc::new(NativeGroupCollaborationRuntime {
+                        hub: hub.clone(),
+                        group_id: group_id.clone(),
+                        ancestry: vec![member
+                            .agent_id
+                            .clone()
+                            .filter(|agent_id| !agent_id.trim().is_empty())
+                            .unwrap_or_else(|| member.name.clone())],
+                        member: member.clone(),
+                        round,
+                        context: context.clone(),
+                        capabilities: capabilities.clone(),
+                        interactive,
+                        group_abort: group_abort.clone(),
+                        depth: 0,
+                    })
+                        as Arc<dyn worldbase_tools::GroupCollaborationRuntime>;
+                    let result = run_native_group_member(
+                        hub,
+                        &group_id,
+                        member.clone(),
+                        prompt,
+                        context,
+                        capabilities,
+                        interactive,
+                        group_abort,
+                        Some(member_runtime),
+                    )
+                    .await;
+                    mark_native_group_member_finished(&hub_for_finish, &group_id, &member);
+                    result
                 }
             },
             |local, _member| {
@@ -1561,6 +1654,16 @@ fn group_message(
                 let drained: Vec<(String, String, u32)> =
                     collected.lock().unwrap().drain(..).collect();
                 for (member, content, r) in drained {
+                    if let Err(error) = persist_group_member_message(&hub2, &id, &member, &content)
+                    {
+                        hub2.emit(
+                            &id,
+                            EventKind::Notice {
+                                text: format!("Persist group message failed: {error}"),
+                            },
+                        )
+                        .await;
+                    }
                     hub2.emit(
                         &id,
                         EventKind::GroupMessage {
@@ -1787,6 +1890,20 @@ fn doc_blocks(params: &Value) -> Vec<worldbase_docs::edit::DocBlock> {
 }
 
 // ---------- providers（供应商管理，对齐桌面 settings:providers）----------
+
+async fn provider_fetch_models(params: Value) -> Result<Value, ErrorObject> {
+    let base_url = params["baseUrl"]
+        .as_str()
+        .ok_or_else(|| params_err("missing baseUrl"))?;
+    let api_key = params["apiKey"]
+        .as_str()
+        .ok_or_else(|| params_err("missing apiKey"))?;
+    let api_protocol = params["apiProtocol"].as_str().unwrap_or_default();
+    let models = worldbase_providers::fetch_remote_models(base_url, api_key, api_protocol)
+        .await
+        .map_err(internal)?;
+    Ok(json!({ "models": models }))
+}
 
 fn provider_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let entry: ProviderEntry =

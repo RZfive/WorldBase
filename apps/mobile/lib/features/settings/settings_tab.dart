@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -491,6 +493,38 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                   ),
                   const SizedBox(height: 10),
                   _field(keyCtrl, 'API Key', obscure: true),
+                  const SizedBox(height: 12),
+                  _RemoteModelPicker(
+                    urlController: urlCtrl,
+                    apiKeyController: keyCtrl,
+                    apiProtocol: protocol,
+                    existingModelIds: idCtrls
+                        .map((controller) => controller.text.trim())
+                        .where((id) => id.isNotEmpty)
+                        .toList(),
+                    onAdd: (modelIds) => setSheet(() {
+                      if (models.length == 1 &&
+                          idCtrls.first.text.trim().isEmpty) {
+                        models.removeAt(0);
+                        idCtrls.removeAt(0).dispose();
+                        ctxCtrls.removeAt(0).dispose();
+                        inCtrls.removeAt(0).dispose();
+                        outCtrls.removeAt(0).dispose();
+                      }
+                      final existingIds = idCtrls
+                          .map((controller) => controller.text.trim())
+                          .toSet();
+                      for (final modelId in modelIds) {
+                        if (!existingIds.add(modelId)) continue;
+                        addModel(ModelInfo(id: modelId, contextWindowK: 128));
+                      }
+                      if (activeModel.isEmpty && modelIds.isNotEmpty) {
+                        activeModel = modelIds.first;
+                      }
+                      expandedIdx = models.isEmpty ? null : models.length - 1;
+                      saveError = null;
+                    }),
+                  ),
                   const SizedBox(height: 14),
                   Row(
                     children: [
@@ -649,6 +683,21 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
         ),
       ),
     );
+    nameCtrl.dispose();
+    urlCtrl.dispose();
+    keyCtrl.dispose();
+    for (final controller in idCtrls) {
+      controller.dispose();
+    }
+    for (final controller in ctxCtrls) {
+      controller.dispose();
+    }
+    for (final controller in inCtrls) {
+      controller.dispose();
+    }
+    for (final controller in outCtrls) {
+      controller.dispose();
+    }
   }
 
   /// 模型卡片：折叠显示摘要与能力徽章，展开后逐项编辑（移动端友好）。
@@ -917,6 +966,379 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
             border: Border.all(color: p.separator),
           ),
           style: TextStyle(fontSize: 15, letterSpacing: -0.3, color: p.ink),
+        ),
+      ],
+    );
+  }
+}
+
+class _RemoteModelPicker extends StatefulWidget {
+  const _RemoteModelPicker({
+    required this.urlController,
+    required this.apiKeyController,
+    required this.apiProtocol,
+    required this.existingModelIds,
+    required this.onAdd,
+  });
+
+  final TextEditingController urlController;
+  final TextEditingController apiKeyController;
+  final String apiProtocol;
+  final List<String> existingModelIds;
+  final ValueChanged<List<String>> onAdd;
+
+  @override
+  State<_RemoteModelPicker> createState() => _RemoteModelPickerState();
+}
+
+class _RemoteModelPickerState extends State<_RemoteModelPicker> {
+  Timer? _debounce;
+  int _requestId = 0;
+  List<String> _models = const [];
+  bool _loading = false;
+  String? _error;
+
+  List<String> get _availableModels {
+    final configured = widget.existingModelIds.toSet();
+    return _models.where((model) => !configured.contains(model)).toList();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.urlController.addListener(_scheduleFetch);
+    widget.apiKeyController.addListener(_scheduleFetch);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scheduleFetch();
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _RemoteModelPicker oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.urlController != widget.urlController) {
+      oldWidget.urlController.removeListener(_scheduleFetch);
+      widget.urlController.addListener(_scheduleFetch);
+    }
+    if (oldWidget.apiKeyController != widget.apiKeyController) {
+      oldWidget.apiKeyController.removeListener(_scheduleFetch);
+      widget.apiKeyController.addListener(_scheduleFetch);
+    }
+    if (oldWidget.apiProtocol != widget.apiProtocol) _scheduleFetch();
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _requestId += 1;
+    widget.urlController.removeListener(_scheduleFetch);
+    widget.apiKeyController.removeListener(_scheduleFetch);
+    super.dispose();
+  }
+
+  void _scheduleFetch() {
+    if (!mounted) return;
+    _debounce?.cancel();
+    _requestId += 1;
+    final ready =
+        widget.urlController.text.trim().isNotEmpty &&
+        widget.apiKeyController.text.trim().isNotEmpty;
+    if (!ready) {
+      if (mounted) {
+        setState(() {
+          _models = const [];
+          _loading = false;
+          _error = null;
+        });
+      }
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _models = const [];
+        _loading = false;
+        _error = null;
+      });
+    }
+    _debounce = Timer(const Duration(milliseconds: 700), _fetchModels);
+  }
+
+  Future<void> _fetchModels() async {
+    _debounce?.cancel();
+    _debounce = null;
+    final baseUrl = widget.urlController.text.trim();
+    final apiKey = widget.apiKeyController.text.trim();
+    if (baseUrl.isEmpty || apiKey.isEmpty) return;
+
+    final requestId = ++_requestId;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final models = await HarnessClient.instance.fetchProviderModels(
+        baseUrl: baseUrl,
+        apiKey: apiKey,
+        apiProtocol: widget.apiProtocol,
+      );
+      if (!mounted || requestId != _requestId) return;
+      setState(() {
+        _models = models;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted || requestId != _requestId) return;
+      setState(() {
+        _models = const [];
+        _loading = false;
+        _error = error.toString();
+      });
+    }
+  }
+
+  Future<void> _showSelector() async {
+    final available = _availableModels;
+    if (available.isEmpty) return;
+    final queryController = TextEditingController();
+    final selected = <String>{};
+    final result = await showCupertinoModalPopup<List<String>>(
+      context: context,
+      builder: (sheetContext) {
+        final palette = DawnPalette.of(sheetContext);
+        return StatefulBuilder(
+          builder: (sheetContext, setSheet) {
+            final query = queryController.text.trim().toLowerCase();
+            final visible = query.isEmpty
+                ? available
+                : available
+                      .where((model) => model.toLowerCase().contains(query))
+                      .toList();
+            return Container(
+              height: MediaQuery.of(sheetContext).size.height * 0.72,
+              decoration: BoxDecoration(
+                color: palette.groupedBg,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(14),
+                ),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            '选择远端模型',
+                            style: TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          CupertinoSearchTextField(
+                            controller: queryController,
+                            placeholder: '模糊搜索模型名称',
+                            onChanged: (_) => setSheet(() {}),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(height: 1, color: palette.separator),
+                    Expanded(
+                      child: visible.isEmpty
+                          ? Center(
+                              child: Text(
+                                '没有匹配的模型',
+                                style: TextStyle(color: palette.ink2),
+                              ),
+                            )
+                          : ListView.builder(
+                              itemCount: visible.length,
+                              itemBuilder: (context, index) {
+                                final model = visible[index];
+                                final checked = selected.contains(model);
+                                return GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => setSheet(() {
+                                    if (!selected.add(model)) {
+                                      selected.remove(model);
+                                    }
+                                  }),
+                                  child: Container(
+                                    constraints: const BoxConstraints(
+                                      minHeight: 48,
+                                    ),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 10,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      border: Border(
+                                        bottom: BorderSide(
+                                          color: palette.separator,
+                                          width: 0.5,
+                                        ),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            model,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              fontSize: 14,
+                                              color: palette.ink,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Icon(
+                                          checked
+                                              ? CupertinoIcons
+                                                    .checkmark_square_fill
+                                              : CupertinoIcons.square,
+                                          size: 21,
+                                          color: checked
+                                              ? iosBlue
+                                              : palette.ink2,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                    Container(height: 1, color: palette.separator),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
+                      child: Row(
+                        children: [
+                          CupertinoButton(
+                            onPressed: () => Navigator.pop(sheetContext),
+                            child: const Text('取消'),
+                          ),
+                          const Spacer(),
+                          CupertinoButton.filled(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 18,
+                              vertical: 9,
+                            ),
+                            onPressed: selected.isEmpty
+                                ? null
+                                : () => Navigator.pop(
+                                    sheetContext,
+                                    selected.toList()..sort(),
+                                  ),
+                            child: Text('添加所选 (${selected.length})'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    queryController.dispose();
+    if (mounted && result != null && result.isNotEmpty) widget.onAdd(result);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = DawnPalette.of(context);
+    final available = _availableModels;
+    final ready =
+        widget.urlController.text.trim().isNotEmpty &&
+        widget.apiKeyController.text.trim().isNotEmpty;
+    final status = !ready
+        ? '填写 Base URL 和 API Key 后自动拉取'
+        : _loading
+        ? '正在拉取远端模型...'
+        : _error != null
+        ? '拉取失败：$_error'
+        : _models.isEmpty
+        ? '暂无远端模型'
+        : available.isEmpty
+        ? '拉取到的模型均已添加'
+        : '已拉取 ${_models.length} 个模型，可添加 ${available.length} 个';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '从供应商选择模型（可多选）',
+          style: TextStyle(fontSize: 13, color: palette.ink2),
+        ),
+        const SizedBox(height: 5),
+        Row(
+          children: [
+            Expanded(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: available.isEmpty ? null : _showSelector,
+                child: Container(
+                  constraints: const BoxConstraints(minHeight: 42),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: palette.cardBg,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: palette.separator),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          available.isEmpty
+                              ? '选择远端模型'
+                              : '选择远端模型（${available.length}）',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: available.isEmpty
+                                ? palette.ink2
+                                : palette.ink,
+                          ),
+                        ),
+                      ),
+                      Icon(
+                        CupertinoIcons.chevron_down,
+                        size: 14,
+                        color: palette.ink2,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            CupertinoButton(
+              padding: const EdgeInsets.all(9),
+              minimumSize: const Size(40, 40),
+              onPressed: ready && !_loading ? _fetchModels : null,
+              child: _loading
+                  ? const CupertinoActivityIndicator(radius: 8)
+                  : const Icon(CupertinoIcons.refresh, size: 20),
+            ),
+          ],
+        ),
+        const SizedBox(height: 5),
+        Text(
+          status,
+          style: TextStyle(
+            fontSize: 11,
+            color: _error == null ? palette.ink2 : iosRed,
+          ),
         ),
       ],
     );

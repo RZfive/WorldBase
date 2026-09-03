@@ -12,6 +12,7 @@ import type { CreateSelectionPayload } from '../../src/main/ai-engine/agent/tool
 import { readDocumentRenderAsset } from '../../src/main/document-preview/document-render-service.js'
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../../src/main/settings/settings-transfer.js'
 import { runImageStudioRequest } from '../../src/main/settings/image-generation-service.js'
+import { fetchProviderModels } from '../../src/main/settings/provider-model-service.js'
 import type { AIExecutionAuthMode, AIExecutionPreferences, AIProvidersConfig, ChatFontPreferences, LanguagePreference, LaunchpadLayout, PinnedDockApp, PortableSettingsConfig, WebAppShortcut } from '../../src/main/settings/settings-store.js'
 import { setMainLocale, t } from '../../src/main/i18n/main-i18n.js'
 import type { Conversation } from '../../src/main/settings/chat-history.js'
@@ -2130,6 +2131,10 @@ export function setupIPC (): void {
   // Settings — multi-provider
   ipcMain.handle('settings:getProviders', async () => {
     return settingsStore!.getProviders()
+  })
+
+  ipcMain.handle('settings:fetchProviderModels', async (_event: IpcMainInvokeEvent, input: { baseUrl: string; apiKey: string; apiProtocol?: 'openai' | 'anthropic' }) => {
+    return { models: await fetchProviderModels(input) }
   })
 
   ipcMain.handle('settings:saveProviders', async (_event: IpcMainInvokeEvent, config: AIProvidersConfig) => {

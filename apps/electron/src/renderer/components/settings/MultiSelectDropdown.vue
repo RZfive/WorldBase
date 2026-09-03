@@ -140,7 +140,9 @@ function closePanel (): void {
   open.value = false
 }
 
-function handleViewportChange (): void {
+function handleViewportChange (event: Event): void {
+  const target = event.target
+  if (target instanceof Node && panelRef.value?.contains(target)) return
   closePanel()
 }
 
@@ -440,12 +442,15 @@ watch(open, (isOpen) => {
 }
 
 .multi-select-options {
+  flex: 1;
   padding: 10px 12px 12px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: var(--app-scrollbar) transparent;
 }

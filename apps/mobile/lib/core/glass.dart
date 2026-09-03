@@ -160,6 +160,8 @@ class GlassContainer extends StatelessWidget {
     this.padding,
     this.radius = 20,
     this.fill,
+    this.showSheen = true,
+    this.showShadow = true,
     this.onTap,
     super.key,
   });
@@ -171,6 +173,8 @@ class GlassContainer extends StatelessWidget {
 
   /// 覆盖默认填充色（如抽屉需要更实的玻璃底）。
   final Color? fill;
+  final bool showSheen;
+  final bool showShadow;
   final VoidCallback? onTap;
 
   @override
@@ -197,21 +201,22 @@ class GlassContainer extends StatelessWidget {
           child: Stack(
             children: [
               // 135° 斜向 sheen + 顶部内高光:透镜曲面感。
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(radius),
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [p.glassHighlight, const Color(0x00FFFFFF)],
-                        stops: const [0.0, 0.45],
+              if (showSheen)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(radius),
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [p.glassHighlight, const Color(0x00FFFFFF)],
+                          stops: const [0.0, 0.45],
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
               child,
             ],
           ),
@@ -219,19 +224,21 @@ class GlassContainer extends StatelessWidget {
       ),
     );
 
-    glass = Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(radius),
-        boxShadow: [
-          BoxShadow(
-            color: p.shadowColor.withValues(alpha: shadow),
-            blurRadius: level == GlassLevel.l1 ? 24 : 16,
-            offset: Offset(0, level == GlassLevel.l1 ? 10 : 6),
-          ),
-        ],
-      ),
-      child: glass,
-    );
+    if (showShadow) {
+      glass = Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(radius),
+          boxShadow: [
+            BoxShadow(
+              color: p.shadowColor.withValues(alpha: shadow),
+              blurRadius: level == GlassLevel.l1 ? 24 : 16,
+              offset: Offset(0, level == GlassLevel.l1 ? 10 : 6),
+            ),
+          ],
+        ),
+        child: glass,
+      );
+    }
 
     if (onTap != null) {
       return GestureDetector(behavior: HitTestBehavior.opaque, onTap: onTap, child: glass);
