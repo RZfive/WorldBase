@@ -85,6 +85,30 @@ void main() {
     expect(session.mentionedMemberIds('请全员讨论'), isEmpty);
   });
 
+  test('Only the shared group transcript is recognized as a group chat', () {
+    final transcript = ConversationMeta(
+      id: 'group-product-team',
+      title: '产品群聊',
+      updatedAt: '2026-09-03T00:00:00Z',
+    );
+    final internalMemberRun = ConversationMeta(
+      id: 'group-product-team-engineer',
+      title: 'Native group: 工程师',
+      updatedAt: '2026-09-03T00:00:00Z',
+      agentId: 'engineer',
+    );
+    final ordinary = ConversationMeta(
+      id: 'conversation-1',
+      title: '普通对话',
+      updatedAt: '2026-09-03T00:00:00Z',
+    );
+
+    expect(transcript.groupId, 'product-team');
+    expect(transcript.isGroup, isTrue);
+    expect(internalMemberRun.groupId, isNull);
+    expect(ordinary.isGroup, isFalse);
+  });
+
   test('Provider round-trip preserves Electron model temperature', () {
     final provider = ProviderEntry(
       id: 'openai',

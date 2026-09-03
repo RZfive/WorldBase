@@ -1,6 +1,6 @@
-//! 文档引擎：解析（xlsx/pdf/docx/md/csv/json/txt，全端）与基础编辑（docx/xlsx/csv/md 写入）。
+//! 文档引擎：解析（xlsx/pdf/docx/pptx/md/csv/json/txt，全端）与基础编辑（docx/xlsx/csv/md 写入）。
 //!
-//! 解析用 Rust 生态：calamine（xlsx）、lopdf（pdf）、自研 OOXML 读取（docx）。
+//! 解析用 Rust 生态：calamine（xlsx）、lopdf（pdf）、自研 OOXML 读取（docx/pptx）。
 
 use anyhow::Result;
 use serde_json::Value;
@@ -18,7 +18,8 @@ pub fn parse_file(path: &std::path::Path) -> Result<Value> {
     match ext.as_str() {
         "xlsx" | "xls" => parse::xlsx(path),
         "pdf" => parse::pdf(path),
-        "docx" => parse::docx(path),
+        "docx" | "doc" => parse::docx(path),
+        "pptx" | "ppt" => parse::pptx(path),
         "csv" => parse::csv(path),
         "json" => parse::json_file(path),
         "md" | "markdown" => parse::markdown(path),
@@ -85,5 +86,30 @@ mod tests {
         assert_eq!(parsed["kind"], "xlsx");
         let sheets = parsed["sheets"].as_array().unwrap();
         assert_eq!(sheets[0]["rows"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parse_pptx_slide_text() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("slides.pptx");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "ppt/slides/slide1.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive
+            .write_all(br#"<p:sld><a:p><a:r><a:t>Flutter &amp; Rust</a:t></a:r></a:p></p:sld>"#)
+            .unwrap();
+        archive.finish().unwrap();
+
+        let parsed = parse_file(&path).unwrap();
+        assert_eq!(parsed["kind"], "pptx");
+        assert_eq!(parsed["slides"], 1);
+        assert!(parsed["text"].as_str().unwrap().contains("Flutter & Rust"));
     }
 }

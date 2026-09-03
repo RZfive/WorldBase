@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ModelPricing } from '../../../main/ai-engine/cost-tracker'
 import { resolveDefaultModelPricing } from '../../../main/ai-engine/cost-tracker'
+import MultiSelectDropdown from './MultiSelectDropdown.vue'
 
 interface ModelPricingEntry {
   inputPerMillion: number
@@ -55,6 +56,12 @@ const searchQuery = ref('')
 const selectedProviderId = ref('')
 const editing = ref(false)
 const editDraft = ref<AIProvider | null>(null)
+const remoteModels = ref<string[]>([])
+const selectedRemoteModels = ref<string[]>([])
+const remoteModelsLoading = ref(false)
+const remoteModelsError = ref('')
+let remoteModelsTimer: number | undefined
+let remoteModelsRequestId = 0
 
 const filteredProviders = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
@@ -78,6 +85,13 @@ const editingProviderLabel = computed(() => {
     : t('settings.provider.addProvider')
 })
 
+const remoteModelOptions = computed(() => {
+  const configured = new Set(editDraft.value?.models ?? [])
+  return remoteModels.value
+    .filter(model => !configured.has(model))
+    .map(model => ({ value: model, label: model }))
+})
+
 /** Select proxy with '' meaning "auto-detect from base URL". */
 const editApiProtocol = computed<'openai' | 'anthropic' | ''>({
   get: () => editDraft.value?.apiProtocol ?? '',
@@ -97,6 +111,55 @@ function providerProtocolLabel (provider: AIProvider): string {
 onMounted(async () => {
   await loadSettings()
 })
+
+onBeforeUnmount(() => {
+  if (remoteModelsTimer !== undefined) window.clearTimeout(remoteModelsTimer)
+  remoteModelsRequestId += 1
+})
+
+watch(
+  () => [editDraft.value?.baseUrl.trim() ?? '', editDraft.value?.apiKey.trim() ?? '', editDraft.value?.apiProtocol ?? ''],
+  ([baseUrl, apiKey]) => {
+    if (remoteModelsTimer !== undefined) window.clearTimeout(remoteModelsTimer)
+    remoteModelsRequestId += 1
+    remoteModels.value = []
+    selectedRemoteModels.value = []
+    remoteModelsError.value = ''
+    remoteModelsLoading.value = false
+    if (!editing.value || !baseUrl || !apiKey) return
+    remoteModelsTimer = window.setTimeout(() => void fetchRemoteModels(), 700)
+  }
+)
+
+async function fetchRemoteModels () {
+  const draft = editDraft.value
+  if (!draft?.baseUrl.trim() || !draft.apiKey.trim() || !window.electronAPI?.fetchProviderModels) return
+
+  if (remoteModelsTimer !== undefined) {
+    window.clearTimeout(remoteModelsTimer)
+    remoteModelsTimer = undefined
+  }
+  const requestId = ++remoteModelsRequestId
+  remoteModelsLoading.value = true
+  remoteModelsError.value = ''
+  try {
+    const result = await window.electronAPI.fetchProviderModels({
+      baseUrl: draft.baseUrl.trim(),
+      apiKey: draft.apiKey.trim(),
+      apiProtocol: draft.apiProtocol
+    })
+    if (requestId !== remoteModelsRequestId) return
+    remoteModels.value = result.models
+    selectedRemoteModels.value = []
+  } catch (err) {
+    if (requestId !== remoteModelsRequestId) return
+    remoteModels.value = []
+    selectedRemoteModels.value = []
+    remoteModelsError.value = (err as Error).message
+  } finally {
+    if (requestId === remoteModelsRequestId) remoteModelsLoading.value = false
+  }
+}
 
 function clonePricing (pricing?: Partial<ModelPricing> | Partial<ModelPricingEntry>): ModelPricingEntry {
   return {
@@ -199,6 +262,7 @@ function startAdd () {
   selectedProviderId.value = id
   editing.value = true
   newModelInput.value = ''
+  resetRemoteModels()
 }
 
 function startEdit () {
@@ -224,6 +288,7 @@ function startEdit () {
   }
   editing.value = true
   newModelInput.value = ''
+  resetRemoteModels()
 }
 
 function cancelEdit () {
@@ -234,16 +299,13 @@ function cancelEdit () {
   editDraft.value = null
   editing.value = false
   newModelInput.value = ''
+  resetRemoteModels()
 }
 
-function addModel () {
-  if (!editDraft.value) return
-
-  const model = newModelInput.value.trim()
-  if (!model) return
+function addModelByName (model: string): boolean {
+  if (!editDraft.value || !model) return false
   if (editDraft.value.models.includes(model)) {
-    statusMsg.value = t('settings.provider.modelExists')
-    return
+    return false
   }
 
   editDraft.value.models.push(model)
@@ -254,8 +316,39 @@ function addModel () {
   editDraft.value.modelPricing[model] = getDefaultPricing(model)
   editDraft.value.modelCapabilities[model] = { imageGeneration: false, imageEditing: false }
   if (!editDraft.value.activeModel) editDraft.value.activeModel = model
+  return true
+}
+
+function addModel () {
+  const model = newModelInput.value.trim()
+  if (!model) return
+  if (!addModelByName(model)) {
+    statusMsg.value = t('settings.provider.modelExists')
+    return
+  }
   newModelInput.value = ''
   statusMsg.value = ''
+}
+
+function addSelectedRemoteModels () {
+  let added = 0
+  for (const model of selectedRemoteModels.value) {
+    if (addModelByName(model)) added += 1
+  }
+  selectedRemoteModels.value = []
+  statusMsg.value = added > 0 ? t('settings.provider.remoteModelsAdded', { count: added }) : ''
+}
+
+function resetRemoteModels () {
+  if (remoteModelsTimer !== undefined) {
+    window.clearTimeout(remoteModelsTimer)
+    remoteModelsTimer = undefined
+  }
+  remoteModelsRequestId += 1
+  remoteModels.value = []
+  selectedRemoteModels.value = []
+  remoteModelsLoading.value = false
+  remoteModelsError.value = ''
 }
 
 function removeModel (index: number) {
@@ -480,6 +573,7 @@ async function saveEdit () {
   editDraft.value = null
   editing.value = false
   newModelInput.value = ''
+  resetRemoteModels()
   await saveAll()
 }
 
@@ -648,6 +742,44 @@ function formatContextWindow (value: number): string {
             <label>{{ $t('settings.provider.apiKey') }}</label>
             <input v-model="editDraft.apiKey" type="password" placeholder="sk-..." />
             <span class="pp-hint">{{ $t('settings.provider.apiKeyHint') }}</span>
+          </div>
+
+          <div class="pp-separator" />
+
+          <div class="pp-field">
+            <MultiSelectDropdown
+              v-model="selectedRemoteModels"
+              :options="remoteModelOptions"
+              :label="$t('settings.provider.remoteModels')"
+              :placeholder="remoteModelsLoading ? $t('settings.provider.remoteModelsLoading') : $t('settings.provider.remoteModelsPlaceholder')"
+              :search-placeholder="$t('settings.provider.remoteModelsSearch')"
+              :empty-text="remoteModels.length > 0 ? $t('settings.provider.remoteModelsAllAdded') : $t('settings.provider.remoteModelsEmpty')"
+              :disabled="remoteModelsLoading || remoteModelOptions.length === 0"
+            />
+            <div class="pp-remote-model-actions">
+              <span v-if="remoteModelsLoading" class="pp-hint">{{ $t('settings.provider.remoteModelsLoading') }}</span>
+              <span v-else-if="remoteModelsError" class="pp-remote-model-error">{{ $t('settings.provider.remoteModelsFailed', { message: remoteModelsError }) }}</span>
+              <span v-else-if="remoteModels.length > 0" class="pp-hint">{{ $t('settings.provider.remoteModelsLoaded', { count: remoteModels.length }) }}</span>
+              <span v-else class="pp-hint">{{ $t('settings.provider.remoteModelsHint') }}</span>
+              <div class="pp-remote-model-buttons">
+                <button
+                  class="pp-btn-ghost pp-btn-small"
+                  type="button"
+                  :disabled="remoteModelsLoading || !editDraft.baseUrl.trim() || !editDraft.apiKey.trim()"
+                  @click="fetchRemoteModels"
+                >
+                  {{ $t('settings.provider.remoteModelsRefresh') }}
+                </button>
+                <button
+                  class="pp-btn-primary pp-btn-small"
+                  type="button"
+                  :disabled="selectedRemoteModels.length === 0"
+                  @click="addSelectedRemoteModels"
+                >
+                  {{ $t('settings.provider.remoteModelsAdd', { count: selectedRemoteModels.length }) }}
+                </button>
+              </div>
+            </div>
           </div>
 
           <div class="pp-separator" />
@@ -922,6 +1054,34 @@ function formatContextWindow (value: number): string {
   gap: 8px;
   margin-top: 10px;
   flex-wrap: wrap;
+}
+
+.pp-remote-model-actions,
+.pp-remote-model-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pp-remote-model-actions {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.pp-remote-model-buttons {
+  margin-left: auto;
+}
+
+.pp-remote-model-error {
+  color: #ef4444;
+  font-size: 0.8em;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.pp-remote-model-buttons button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .pp-capability-chip {

@@ -49,7 +49,11 @@ fn sheets_text(sheets: &[Value]) -> String {
                 if let Some(cells) = row.as_array() {
                     let line: Vec<String> = cells
                         .iter()
-                        .map(|c| c.as_str().unwrap_or("").to_string())
+                        .map(|cell| match cell {
+                            Value::String(value) => value.clone(),
+                            Value::Null => String::new(),
+                            value => value.to_string(),
+                        })
                         .collect();
                     out.push_str(&line.join("\t"));
                     out.push('\n');
@@ -108,7 +112,7 @@ pub fn extract_docx_paragraphs(xml: &str) -> Vec<String> {
             let Some(end) = body.find("</w:t>") else {
                 break;
             };
-            text.push_str(&body[..end]);
+            text.push_str(&decode_xml_text(&body[..end]));
             rest = &body[end + 6..];
         }
         if !text.trim().is_empty() {
@@ -116,6 +120,87 @@ pub fn extract_docx_paragraphs(xml: &str) -> Vec<String> {
         }
     }
     paragraphs
+}
+
+pub fn pptx(path: &std::path::Path) -> Result<Value> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("open pptx {}", path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    let mut slide_names: Vec<String> = archive
+        .file_names()
+        .filter(|name| {
+            name.starts_with("ppt/slides/slide")
+                && name.ends_with(".xml")
+                && slide_number(name).is_some()
+        })
+        .map(ToOwned::to_owned)
+        .collect();
+    slide_names.sort_by_key(|name| slide_number(name).unwrap_or(u32::MAX));
+
+    let mut slides = Vec::new();
+    let mut text = String::new();
+    for (index, name) in slide_names.iter().enumerate() {
+        let mut entry = archive.by_name(name)?;
+        let mut xml = String::new();
+        use std::io::Read;
+        entry.read_to_string(&mut xml)?;
+        let paragraphs = extract_pptx_paragraphs(&xml);
+        let slide = index + 1;
+        text.push_str(&format!("## 幻灯片 {slide}\n"));
+        for paragraph in &paragraphs {
+            text.push_str(paragraph);
+            text.push('\n');
+        }
+        slides.push(json!({ "number": slide, "paragraphs": paragraphs }));
+    }
+    anyhow::ensure!(!slides.is_empty(), "pptx contains no slides");
+    Ok(json!({
+        "kind": "pptx",
+        "text": text.trim(),
+        "slides": slides.len(),
+        "items": slides,
+    }))
+}
+
+fn slide_number(name: &str) -> Option<u32> {
+    name.strip_prefix("ppt/slides/slide")?
+        .strip_suffix(".xml")?
+        .parse()
+        .ok()
+}
+
+pub fn extract_pptx_paragraphs(xml: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    for paragraph in xml.split("<a:p").skip(1) {
+        let paragraph = paragraph.split("</a:p>").next().unwrap_or(paragraph);
+        let mut text = String::new();
+        let mut rest = paragraph;
+        while let Some(start) = rest.find("<a:t") {
+            let after = &rest[start..];
+            let Some(tag_end) = after.find('>') else {
+                break;
+            };
+            let body = &after[tag_end + 1..];
+            let Some(end) = body.find("</a:t>") else {
+                break;
+            };
+            text.push_str(&decode_xml_text(&body[..end]));
+            rest = &body[end + 6..];
+        }
+        if !text.trim().is_empty() {
+            paragraphs.push(text.trim().to_string());
+        }
+    }
+    paragraphs
+}
+
+fn decode_xml_text(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 pub fn csv(path: &std::path::Path) -> Result<Value> {

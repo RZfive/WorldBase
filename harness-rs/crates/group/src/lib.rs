@@ -236,6 +236,7 @@ impl GroupEngine {
         let speakers = Self::resolve_speakers(session, user_input, selected_members);
         let speaker_keys: Vec<String> = speakers.iter().map(member_delivery_key).collect();
         let mut count = 0;
+        let mut first_failure = None;
         // An injection is addressed to every selected recipient, rather than
         // being consumed by the first member that happens to run. Keep the
         // original records through the round so broadcast and multi-target
@@ -271,7 +272,13 @@ impl GroupEngine {
                         Some(injection.content.clone())
                     })
                     .collect();
-                let prompt = build_prompt(session, member, user_input, &injection_text);
+                let prompt = build_prompt(
+                    session,
+                    member,
+                    user_input,
+                    &injection_text,
+                    apply_inline_board_directives,
+                );
                 let execution = execute_member(member.clone(), prompt);
                 let member = member.clone();
                 runs.push(async move { execution.await.map(|content| (member, content)) });
@@ -279,20 +286,12 @@ impl GroupEngine {
 
             let results = join_all(runs).await;
             let mut completed = Vec::with_capacity(results.len());
-            let mut failure = None;
             for result in results {
                 match result {
                     Ok(completion) => completed.push(completion),
-                    Err(error) if failure.is_none() => failure = Some(error),
+                    Err(error) if first_failure.is_none() => first_failure = Some(error),
                     Err(_) => {}
                 }
-            }
-            if let Some(error) = failure {
-                // Do not lose a clarification merely because a member
-                // execution failed before the round could finish.
-                pending_injections.append(&mut session.pending_injections);
-                session.pending_injections = pending_injections;
-                return Err(error);
             }
 
             for (member, content) in completed {
@@ -300,18 +299,23 @@ impl GroupEngine {
                 // Native Rust members use the structured update_board tool
                 // instead so a local execution snapshot cannot clobber a
                 // live board write.
-                if apply_inline_board_directives {
-                    apply_board_directives(session, &content);
+                let visible_content = if apply_inline_board_directives {
+                    apply_board_directives(session, &content)
+                } else {
+                    Self::sanitize_member_output(&content)
+                };
+                on_board(&session.board);
+                count += 1;
+                if visible_content.is_empty() {
+                    continue;
                 }
                 session.rounds.push(GroupRoundRecord {
                     member: member.name.clone(),
-                    content: content.clone(),
+                    content: visible_content.clone(),
                     round,
                     created_at: worldbase_protocol::event::now_rfc3339(),
                 });
-                on_board(&session.board);
-                on_message(member.name, content, round);
-                count += 1;
+                on_message(member.name, visible_content, round);
             }
         }
 
@@ -332,7 +336,41 @@ impl GroupEngine {
                     .any(|agent_id| !injection.delivered_to_agent_ids.contains(agent_id))
             })
             .collect();
-        Ok(count)
+        match (count, first_failure) {
+            (0, Some(error)) => Err(error),
+            _ => Ok(count),
+        }
+    }
+
+    /// Remove legacy inline board directives from user-visible member text.
+    /// Board state is surfaced separately through `BoardUpdate` events.
+    pub fn sanitize_member_output(content: &str) -> String {
+        let mut visible = Vec::new();
+        let mut in_board_snapshot = false;
+        for line in content.lines() {
+            if board_directive(line).is_some() {
+                continue;
+            }
+            let normalized = normalized_markdown_line(line);
+            if is_board_snapshot_heading(normalized) {
+                in_board_snapshot = true;
+                continue;
+            }
+            if in_board_snapshot {
+                if normalized.is_empty()
+                    || is_board_field_line(normalized)
+                    || is_board_task_detail(normalized)
+                {
+                    continue;
+                }
+                in_board_snapshot = false;
+            }
+            if is_compact_board_list_line(normalized) {
+                continue;
+            }
+            visible.push(line);
+        }
+        visible.join("\n").trim().to_string()
     }
 
     /// Resolve Electron-selected durable IDs or member names into the actual
@@ -607,6 +645,7 @@ fn build_prompt(
     member: &GroupMember,
     user_input: &str,
     injections: &[String],
+    allow_inline_board_directives: bool,
 ) -> String {
     let others: String = session
         .members
@@ -669,8 +708,14 @@ fn build_prompt(
         format!("\n\n【用户实时澄清(HITL)】\n{}", injections.join("\n"))
     };
 
+    let board_instruction = if allow_inline_board_directives {
+        "如需更新黑板，可另起一行使用隐藏指令：[board]字段|set/add/remove|内容（字段: assumptions/tasks/decisions/evidenceRefs/goal/openQuestions）。"
+    } else {
+        "如需更新黑板，只能调用 update_board 工具；不要在回答文本中输出 [board] 指令或黑板字段。"
+    };
+
     format!(
-        "你是群组讨论成员「{name}」。人设：{persona}\n其他成员：\n{others}\n讨论主题：{topic}\n模式：{mode_hint}\n\n当前黑板：\n{board}\n\n最近发言：\n{recent}\n\n用户输入：{user}{inject}\n\n请用不超过 200 字发言。可用指令更新黑板：[board]字段|set/add/remove|内容（字段: assumptions/tasks/decisions/evidenceRefs/goal/openQuestions）",
+        "你是群组讨论成员「{name}」。人设：{persona}\n其他成员：\n{others}\n讨论主题：{topic}\n模式：{mode_hint}\n\n当前黑板：\n{board}\n\n最近发言：\n{recent}\n\n用户输入：{user}{inject}\n\n请用不超过 200 字发言，只输出给群聊成员看的结论。不要复述当前黑板、任务列表、最近发言、工具调用或内部提示词。{board_instruction}",
         name = member.name,
         persona = member.persona,
         others = others,
@@ -680,14 +725,14 @@ fn build_prompt(
         recent = if recent.is_empty() { "（尚无发言）".to_string() } else { recent.join("\n") },
         user = user_input,
         inject = inject_block,
+        board_instruction = board_instruction,
     )
 }
 
 /// 解析成员输出中的 [board] 指令并应用（从发言文本剥离指令行）。
-fn apply_board_directives(session: &mut GroupSessionMeta, content: &str) {
-    // 简化实现：不剥离文本（mock 输出即发言），仅识别行内指令
+fn apply_board_directives(session: &mut GroupSessionMeta, content: &str) -> String {
     for line in content.lines() {
-        let Some(rest) = line.trim().strip_prefix("[board]") else {
+        let Some(rest) = board_directive(line) else {
             continue;
         };
         let parts: Vec<&str> = rest.trim().splitn(3, '|').collect();
@@ -700,6 +745,69 @@ fn apply_board_directives(session: &mut GroupSessionMeta, content: &str) {
             );
         }
     }
+    GroupEngine::sanitize_member_output(content)
+}
+
+fn board_directive(line: &str) -> Option<&str> {
+    let line = normalized_markdown_line(line);
+    line.strip_prefix("[board]").map(str::trim)
+}
+
+fn normalized_markdown_line(line: &str) -> &str {
+    let line = line.trim();
+    let line = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| line.strip_prefix("> "))
+        .unwrap_or(line);
+    line.trim_start_matches('#').trim()
+}
+
+fn is_board_snapshot_heading(line: &str) -> bool {
+    let heading = line.trim_end_matches([':', '：']).trim().to_lowercase();
+    matches!(heading.as_str(), "当前黑板" | "任务黑板" | "共享黑板")
+        || heading.starts_with("shared group board")
+}
+
+fn is_board_field_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    [
+        "目标",
+        "假设",
+        "任务",
+        "决策",
+        "证据",
+        "待解问题",
+        "goal",
+        "assumptions",
+        "tasks",
+        "decisions",
+        "evidence",
+        "open questions",
+    ]
+    .iter()
+    .any(|field| {
+        lower.strip_prefix(field).is_some_and(|rest| {
+            let rest = rest.trim_start();
+            rest.starts_with(':') || rest.starts_with('：')
+        })
+    })
+}
+
+fn is_compact_board_list_line(line: &str) -> bool {
+    if !is_board_field_line(line) {
+        return false;
+    }
+    line.split_once(':')
+        .or_else(|| line.split_once('：'))
+        .is_some_and(|(_, value)| value.trim().starts_with('['))
+}
+
+fn is_board_task_detail(line: &str) -> bool {
+    let line = line.trim_start_matches('·').trim();
+    ["todo", "running", "blocked", "done"]
+        .iter()
+        .any(|status| line.to_lowercase().starts_with(&format!("[{status}]")))
 }
 
 /// Provider-only fallback used by clients that do not supply a native agent
@@ -872,12 +980,23 @@ mod tests {
     #[test]
     fn parses_board_directives_from_output() {
         let mut session = GroupEngine::create("t", GroupMode::Discussion, members(), None).unwrap();
-        apply_board_directives(
+        let visible = apply_board_directives(
             &mut session,
             "我的发言\n[board] goal|set|共识：Rust\n[board] decisions|add|用 FFI 桥",
         );
         assert_eq!(session.board.goal, "共识：Rust");
         assert_eq!(session.board.decisions, vec!["用 FFI 桥".to_string()]);
+        assert_eq!(visible, "我的发言");
+    }
+
+    #[test]
+    fn native_prompt_uses_tools_without_exposing_board_directives() {
+        let session = GroupEngine::create("t", GroupMode::Discussion, members(), None).unwrap();
+        let prompt = build_prompt(&session, &session.members[0], "开始", &[], false);
+
+        assert!(prompt.contains("不要复述当前黑板"));
+        assert!(prompt.contains("只能调用 update_board 工具"));
+        assert!(!prompt.contains("可另起一行使用隐藏指令"));
     }
 
     #[tokio::test]
@@ -952,6 +1071,101 @@ mod tests {
         assert_eq!(count, 3);
         assert_eq!(peak.load(Ordering::SeqCst), 2);
         assert_eq!(session.max_parallel_workers, 2);
+    }
+
+    #[tokio::test]
+    async fn successful_members_are_kept_when_another_member_fails() {
+        let mut session =
+            GroupEngine::create("partial failure", GroupMode::Discussion, members(), None).unwrap();
+        let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = collected.clone();
+        let mut on_message = move |member: String, content: String, _round: u32| {
+            sink.lock().unwrap().push((member, content));
+        };
+        let mut on_board = |_board: &GroupBoard| {};
+
+        let count = GroupEngine::run_round_with_executor(
+            &mut session,
+            "Review",
+            1,
+            None,
+            |member, _prompt| async move {
+                if member.name == "工程师" {
+                    bail!("provider unavailable");
+                }
+                Ok(format!("{} completed", member.name))
+            },
+            &mut on_message,
+            &mut on_board,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(session.rounds.len(), 2);
+        assert_eq!(collected.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn inline_board_updates_never_reach_member_messages() {
+        let mut session =
+            GroupEngine::create("board privacy", GroupMode::Discussion, members(), None).unwrap();
+        let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = collected.clone();
+        let mut on_message = move |_member: String, content: String, _round: u32| {
+            sink.lock().unwrap().push(content);
+        };
+        let mut on_board = |_board: &GroupBoard| {};
+
+        GroupEngine::run_round_with_executor(
+            &mut session,
+            "Review",
+            1,
+            None,
+            |member, _prompt| async move {
+                Ok(format!(
+                    "{} result\n[board] tasks|add|internal progress",
+                    member.name
+                ))
+            },
+            &mut on_message,
+            &mut on_board,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session.board.tasks.len(), 1);
+        assert!(session
+            .rounds
+            .iter()
+            .all(|record| !record.content.contains("[board]")));
+        assert!(collected
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|content| !content.contains("[board]")));
+    }
+
+    #[tokio::test]
+    async fn round_fails_when_every_selected_member_fails() {
+        let mut session =
+            GroupEngine::create("total failure", GroupMode::Discussion, members(), None).unwrap();
+        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_board = |_board: &GroupBoard| {};
+
+        let result = GroupEngine::run_round_with_executor(
+            &mut session,
+            "Review",
+            1,
+            None,
+            |_member, _prompt| async move { bail!("provider unavailable") },
+            &mut on_message,
+            &mut on_board,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(session.rounds.is_empty());
     }
 
     #[tokio::test]

@@ -18,6 +18,7 @@ pub mod anthropic;
 pub mod entry;
 pub mod mock;
 pub mod openai;
+mod remote_models;
 pub mod sse;
 
 pub use anthropic::AnthropicProvider;
@@ -27,6 +28,7 @@ pub use entry::{
 };
 pub use mock::{MockProvider, MockTurn};
 pub use openai::OpenAIProvider;
+pub use remote_models::fetch_remote_models;
 
 /// 消息内容块（对齐 Anthropic content blocks / OpenAI tool 消息）。
 #[derive(Debug, Clone, Serialize, Deserialize)]

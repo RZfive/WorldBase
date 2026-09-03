@@ -6,10 +6,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'chat_attachments.dart';
 import 'harness_client.dart';
 import 'harness_ffi.dart';
 
 export 'harness_client.dart';
+export 'chat_attachments.dart';
 
 export 'harness_client.dart'
     show
@@ -302,6 +304,7 @@ class UiMessage {
     this.imageExpected = 0,
     this.imageReceived = 0,
     this.imagePrompts = const [],
+    this.attachments = const [],
   });
 
   final String id;
@@ -317,6 +320,7 @@ class UiMessage {
   int imageExpected;
   int imageReceived;
   List<String> imagePrompts;
+  List<ChatAttachment> attachments;
   bool get isTool => role == 'tool';
   bool get isGroup => role == 'group';
 }
@@ -388,9 +392,16 @@ class ChatController extends Notifier<List<UiMessage>> {
           result['isError'] == true || result['is_error'] == true,
         );
       }
-      if (m.content.isNotEmpty) {
+      if (m.content.isNotEmpty || m.parts.isNotEmpty) {
+        final projection = projectChatAttachments(m.content, m.parts);
         list.add(
-          UiMessage(id: _newId(), role: m.role, text: m.content, dbId: m.id),
+          UiMessage(
+            id: _newId(),
+            role: m.role,
+            text: projection.text,
+            attachments: projection.attachments,
+            dbId: m.id,
+          ),
         );
       }
     }
@@ -508,8 +519,12 @@ class ChatController extends Notifier<List<UiMessage>> {
   }
 
   /// 发送用户消息并跟踪流式回复。
-  Future<void> send(String text) async {
-    if (_busy || text.trim().isEmpty) return;
+  Future<bool> send(
+    String text, {
+    List<ChatAttachment> attachments = const [],
+  }) async {
+    final normalized = text.trim();
+    if (_busy || (normalized.isEmpty && attachments.isEmpty)) return false;
     _busy = true;
 
     final client = HarnessClient.instance;
@@ -520,25 +535,48 @@ class ChatController extends Notifier<List<UiMessage>> {
     final switches = ref.read(chatSwitchesProvider);
     try {
       var conversation = ref.read(currentConversationProvider);
+      final filesPrompt = buildChatUploadedFilesPrompt(attachments);
+      final modelText = [
+        normalized,
+        filesPrompt,
+      ].where((part) => part.isNotEmpty).join('\n\n');
+      final contentParts = <Map<String, dynamic>>[
+        if (modelText.isNotEmpty) {'type': 'text', 'text': modelText},
+        for (final attachment in attachments)
+          if (attachment.isImage)
+            {
+              'type': 'image_url',
+              'image_url': {'url': attachment.dataUrl},
+            },
+      ];
+      final titleSeed = normalized.isNotEmpty
+          ? normalized
+          : '附件：${attachments.map((item) => item.name).join('、')}';
       conversation ??= await client.createConversation(
-        text.length > 16 ? '${text.substring(0, 16)}…' : text,
+        titleSeed.length > 16 ? '${titleSeed.substring(0, 16)}…' : titleSeed,
         agentId: ref.read(selectedAgentProvider)?.id,
       );
       ref.read(currentConversationProvider.notifier).state = conversation;
 
       state = [
         ...state,
-        UiMessage(id: _newId(), role: 'user', text: text),
+        UiMessage(
+          id: _newId(),
+          role: 'user',
+          text: normalized,
+          attachments: [...attachments],
+        ),
         UiMessage(id: 'pending', role: 'assistant', text: '', streaming: true),
       ];
 
       final streamId = await client.sendChat(
         conversation.id,
-        text,
+        modelText,
         providerId: target.providerId,
         model: target.model,
         reasoningEffort: switches.reasoningStrength,
         temperature: switches.temperature,
+        contentParts: contentParts,
       );
 
       _activeStreamId = streamId;
@@ -551,6 +589,7 @@ class ChatController extends Notifier<List<UiMessage>> {
               if (_activeStreamId == streamId) _busy = false;
             },
           );
+      return true;
     } catch (e) {
       _busy = false;
       // Conversation creation can fail before a pending bubble exists.
@@ -564,6 +603,10 @@ class ChatController extends Notifier<List<UiMessage>> {
           UiMessage(id: _newId(), role: 'assistant', text: '⚠️ 发送失败：$e'),
         ];
       }
+      // Once the optimistic user bubble exists, the composer payload belongs
+      // to that failed turn and must not remain queued for an accidental
+      // duplicate retry.
+      return hadPending;
     }
   }
 
@@ -1017,6 +1060,8 @@ final chatProvider = NotifierProvider<ChatController, List<UiMessage>>(
 
 /// 群组 UI 状态。
 class GroupChatController extends Notifier<List<UiMessage>> {
+  static const _memberHistoryPrefix = '[[worldbase-group-member]]';
+
   @override
   List<UiMessage> build() => [];
 
@@ -1037,6 +1082,7 @@ class GroupChatController extends Notifier<List<UiMessage>> {
     required String mode,
     required List<Map<String, String>> members,
     String? coordinator,
+    String? sessionId,
     int maxParallelWorkers = 2,
   }) async {
     _session = await HarnessClient.instance.groupCreate(
@@ -1044,9 +1090,10 @@ class GroupChatController extends Notifier<List<UiMessage>> {
       mode: mode,
       members: members,
       coordinator: coordinator,
+      sessionId: sessionId,
       maxParallelWorkers: maxParallelWorkers,
     );
-    state = [];
+    await _restoreHistory();
   }
 
   Future<void> openAgentGroup(
@@ -1078,8 +1125,77 @@ class GroupChatController extends Notifier<List<UiMessage>> {
       mode: 'discussion',
       members: members,
       coordinator: coordinator.name,
+      sessionId: group.id,
       maxParallelWorkers: group.maxParallelWorkers.clamp(1, 5),
     );
+  }
+
+  Future<void> _restoreHistory() async {
+    final conversationId = _session?.conversationId;
+    if (conversationId == null || conversationId.isEmpty) {
+      state = [];
+      return;
+    }
+    final messages = await HarnessClient.instance.listMessages(conversationId);
+    _setPersistedHistory(messages);
+  }
+
+  void _setPersistedHistory(List<ChatMessage> messages) {
+    final restored = <UiMessage>[];
+    for (final message in messages) {
+      if (message.isTool || message.content.trim().isEmpty) continue;
+      final decoded = _decodeMemberHistory(message.content);
+      final visibleText = message.role == 'user'
+          ? decoded.text.trim()
+          : _sanitizeGroupReply(decoded.text);
+      if (visibleText.isEmpty) continue;
+      restored.add(
+        UiMessage(
+          id: 'history-${message.id}',
+          role: decoded.member == null ? message.role : 'group',
+          member: decoded.member,
+          text: visibleText,
+          dbId: message.id,
+        ),
+      );
+    }
+    state = restored;
+  }
+
+  ({String? member, String text}) _decodeMemberHistory(String content) {
+    if (!content.startsWith(_memberHistoryPrefix)) {
+      return (member: null, text: content);
+    }
+    final lineEnd = content.indexOf('\n');
+    if (lineEnd < 0) return (member: null, text: content);
+    try {
+      final metadata = jsonDecode(
+        content.substring(_memberHistoryPrefix.length, lineEnd),
+      );
+      final member = metadata is Map ? metadata['name'] as String? : null;
+      if (member == null || member.trim().isEmpty) {
+        return (member: null, text: content.substring(lineEnd + 1));
+      }
+      return (member: member, text: content.substring(lineEnd + 1));
+    } catch (_) {
+      return (member: null, text: content);
+    }
+  }
+
+  @visibleForTesting
+  void restoreHistoryForTesting(List<ChatMessage> messages) =>
+      _setPersistedHistory(messages);
+
+  Future<GroupSession?> refreshSession() async {
+    final sessionId = _session?.id;
+    if (sessionId == null) return null;
+    try {
+      final snapshot = await HarnessClient.instance.groupGet(sessionId);
+      if (_session?.id == sessionId) _session = snapshot;
+    } catch (_) {
+      // Keep the last valid snapshot when a transient refresh fails.
+    }
+    return _session;
   }
 
   Future<bool> send(String text) async {
@@ -1148,12 +1264,11 @@ class GroupChatController extends Notifier<List<UiMessage>> {
         final notice = frame.data['text'] as String? ?? '';
         if (notice.trim().isEmpty) return;
         _latestNotice = notice.trim();
-        if (_assistantBuffer.isEmpty) _updatePendingText(_latestNotice!);
       case 'delta':
         final delta = frame.data['text'] as String? ?? '';
         if (delta.isEmpty) return;
         _assistantBuffer += delta;
-        _updatePendingText(_assistantBuffer);
+        _updatePendingText(_sanitizeGroupReply(_assistantBuffer));
       case 'assistant_message':
         final content = frame.data['content'] as String? ?? _assistantBuffer;
         _assistantBuffer = '';
@@ -1177,12 +1292,7 @@ class GroupChatController extends Notifier<List<UiMessage>> {
           content: reply['content'] as String? ?? '',
         );
       case 'board_update':
-        final sessionId = _session?.id;
-        if (sessionId == null) return;
-        // 黑板更新后刷新 session 快照。
-        HarnessClient.instance.groupGet(sessionId).then((snapshot) {
-          if (_session?.id == sessionId) _session = snapshot;
-        });
+        unawaited(refreshSession());
       case 'error':
         _finishWithError(frame.data['message'] as String? ?? '群聊执行失败');
       case 'done':
@@ -1206,14 +1316,57 @@ class GroupChatController extends Notifier<List<UiMessage>> {
     required String content,
     String? member,
   }) {
-    if (content.trim().isEmpty) return;
+    final visibleContent = _sanitizeGroupReply(content);
+    if (visibleContent.isEmpty) return;
     final pending = state.where((message) => message.streaming).toList();
     state = [
       ...state.where((message) => !message.streaming),
-      UiMessage(id: id, role: 'group', member: member, text: content),
+      UiMessage(id: id, role: 'group', member: member, text: visibleContent),
       ...pending,
     ];
     _receivedReply = true;
+  }
+
+  String _sanitizeGroupReply(String content) {
+    final visible = <String>[];
+    var inBoardSnapshot = false;
+    for (final line in content.split('\n')) {
+      var normalized = line.trim();
+      if (normalized.startsWith('- ') ||
+          normalized.startsWith('* ') ||
+          normalized.startsWith('> ')) {
+        normalized = normalized.substring(2).trimLeft();
+      }
+      normalized = normalized.replaceFirst(RegExp(r'^#{1,6}\s*'), '');
+      if (normalized.startsWith('[board]')) continue;
+
+      final heading = normalized
+          .replaceAll(RegExp(r'[：:]$'), '')
+          .trim()
+          .toLowerCase();
+      if (const {'当前黑板', '任务黑板', '共享黑板'}.contains(heading) ||
+          heading.startsWith('shared group board')) {
+        inBoardSnapshot = true;
+        continue;
+      }
+
+      final isBoardField = RegExp(
+        r'^(目标|假设|任务|决策|证据|待解问题|goal|assumptions|tasks|decisions|evidence|open questions)\s*[：:]',
+        caseSensitive: false,
+      ).hasMatch(normalized);
+      final isBoardTask = RegExp(
+        r'^(?:·\s*)?\[(todo|running|blocked|done)\]',
+        caseSensitive: false,
+      ).hasMatch(normalized);
+      if (inBoardSnapshot) {
+        if (normalized.isEmpty || isBoardField || isBoardTask) continue;
+        inBoardSnapshot = false;
+      }
+      final isCompactBoardList =
+          isBoardField && RegExp(r'[：:]\s*\[').hasMatch(normalized);
+      if (!isCompactBoardList) visible.add(line);
+    }
+    return visible.join('\n').trim();
   }
 
   void _updatePendingText(String text) {

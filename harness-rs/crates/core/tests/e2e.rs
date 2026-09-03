@@ -605,6 +605,7 @@ async fn native_group_tools_emit_rust_owned_board_peer_and_direct_reply_events()
         &ctx,
         method::GROUP_CREATE,
         serde_json::json!({
+            "sessionId": "native-group-tools",
             "topic": "Native group tool exercise",
             "mode": "discussion",
             "members": [
@@ -617,6 +618,7 @@ async fn native_group_tools_emit_rust_owned_board_peer_and_direct_reply_events()
     .await
     .unwrap();
     let group_id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(group_id, "native-group-tools");
 
     dispatch(
         &hub,
@@ -692,6 +694,127 @@ async fn native_group_tools_emit_rust_owned_board_peer_and_direct_reply_events()
         persisted["boardUpdates"][0]["reason"],
         "The coordinator owns the integration check."
     );
+
+    let transcript = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_MESSAGES,
+        serde_json::json!({ "id": format!("group-{group_id}") }),
+    )
+    .await
+    .unwrap();
+    let messages = transcript["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 4);
+    assert_eq!(
+        messages[0]["content"],
+        "Exercise every native group collaboration tool."
+    );
+    assert!(messages[1..].iter().all(|message| message["content"]
+        .as_str()
+        .unwrap()
+        .starts_with("[[worldbase-group-member]]")));
+    assert!(messages[1..]
+        .iter()
+        .any(|message| message["content"].as_str().unwrap().contains("Coordinator")));
+    assert!(messages[1..]
+        .iter()
+        .any(|message| message["content"].as_str().unwrap().contains("Engineer")));
+
+    let visible_conversations = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_LIST,
+        serde_json::json!({ "limit": 100 }),
+    )
+    .await
+    .unwrap();
+    let visible_conversations = visible_conversations["conversations"].as_array().unwrap();
+    assert_eq!(visible_conversations.len(), 1);
+    assert_eq!(visible_conversations[0]["id"], format!("group-{group_id}"));
+    assert!(visible_conversations
+        .iter()
+        .all(|conversation| !conversation["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Native group: ")));
+}
+
+#[tokio::test]
+async fn ad_hoc_group_members_use_active_provider_and_keep_internal_text_hidden() {
+    let hub = test_hub(vec![
+        MockTurn {
+            text: "Coordinator result.\n[board] tasks|add|internal task".into(),
+            tool_calls: vec![],
+            stream_in_chunks: false,
+        },
+        MockTurn {
+            text: "Engineer result.".into(),
+            tool_calls: vec![],
+            stream_in_chunks: false,
+        },
+    ])
+    .await;
+    let ctx = ConnectionContext::new(Capabilities::mobile("mobile-ios"));
+    let mut events = hub.event_tx.subscribe();
+    let created = dispatch(
+        &hub,
+        &ctx,
+        method::GROUP_CREATE,
+        serde_json::json!({
+            "sessionId": "mobile-ad-hoc-group",
+            "topic": "Mobile ad hoc group",
+            "mode": "discussion",
+            "members": [
+                { "name": "Coordinator", "persona": "Coordinate" },
+                { "name": "Engineer", "persona": "Implement" }
+            ],
+            "coordinator": "Coordinator"
+        }),
+    )
+    .await
+    .unwrap();
+    let group_id = created["id"].as_str().unwrap().to_string();
+
+    dispatch(
+        &hub,
+        &ctx,
+        method::GROUP_MESSAGE,
+        serde_json::json!({ "id": group_id, "text": "Review the mobile flow." }),
+    )
+    .await
+    .unwrap();
+
+    let mut replies = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("ad hoc group event timeout")
+            .expect("ad hoc group event channel closed");
+        if frame.stream_id != group_id {
+            continue;
+        }
+        match frame.kind {
+            EventKind::GroupMessage { content, .. } => replies.push(content),
+            EventKind::Done { stop_reason } if stop_reason == "group_complete" => break,
+            EventKind::Done { stop_reason } => panic!("unexpected stop reason: {stop_reason}"),
+            _ => {}
+        }
+    }
+
+    assert_eq!(replies.len(), 2);
+    assert!(replies.iter().all(|reply| !reply.contains("[board]")));
+
+    let visible_conversations = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_LIST,
+        serde_json::json!({ "limit": 100 }),
+    )
+    .await
+    .unwrap();
+    let visible_conversations = visible_conversations["conversations"].as_array().unwrap();
+    assert_eq!(visible_conversations.len(), 1);
+    assert_eq!(visible_conversations[0]["id"], format!("group-{group_id}"));
 }
 
 #[tokio::test]

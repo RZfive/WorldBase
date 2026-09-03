@@ -13,7 +13,7 @@ impl Tool for DocParseTool {
         "doc_parse"
     }
     fn description(&self) -> &str {
-        "解析文档（xlsx/pdf/docx/csv/json/md/txt）为结构化文本"
+        "解析文档（xlsx/pdf/docx/pptx/csv/json/md/txt）为结构化文本"
     }
     fn input_schema(&self) -> Value {
         json!({

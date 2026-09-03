@@ -630,6 +630,7 @@ export interface ElectronAPI {
   getAISettings: () => Promise<AISettings>
   saveAISettings: (config: AISettings) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
+  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: 'openai' | 'anthropic' }) => Promise<{ models: string[] }>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
@@ -917,6 +918,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAISettings: () => ipcRenderer.invoke('settings:getAI'),
   saveAISettings: (config: AISettings) => ipcRenderer.invoke('settings:saveAI', config),
   getProviders: () => ipcRenderer.invoke('settings:getProviders'),
+  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: 'openai' | 'anthropic' }) => ipcRenderer.invoke('settings:fetchProviderModels', input),
   saveProviders: (config: AIProvidersConfig) => ipcRenderer.invoke('settings:saveProviders', config),
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, config: AIProvidersConfig) => callback(config)

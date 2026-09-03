@@ -1,9 +1,13 @@
+import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show Colors, Divider, Drawer, Scaffold;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../../core/glass.dart';
 import '../../core/ios_ui.dart';
@@ -27,7 +31,10 @@ class ChatTab extends ConsumerStatefulWidget {
 
 class _ChatTabState extends ConsumerState<ChatTab> {
   final _inputCtrl = TextEditingController();
+  final List<ChatAttachment> _pendingAttachments = [];
   bool _advancedExpanded = false;
+  bool _isImportingAttachments = false;
+  String? _attachmentError;
 
   static const _reasoningLevels = ['low', 'medium', 'high', 'max'];
   static const _reasoningLabels = {
@@ -58,11 +65,19 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     super.dispose();
   }
 
-  void _send([String? preset]) {
+  Future<void> _send([String? preset]) async {
     final text = (preset ?? _inputCtrl.text).trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty && _pendingAttachments.isEmpty) return;
+    final attachments = [..._pendingAttachments];
+    final sent = await ref
+        .read(chatProvider.notifier)
+        .send(text, attachments: attachments);
+    if (!sent || !mounted) return;
     _inputCtrl.clear();
-    ref.read(chatProvider.notifier).send(text);
+    setState(() {
+      _pendingAttachments.clear();
+      _attachmentError = null;
+    });
   }
 
   Future<void> _newConversation() async {
@@ -88,47 +103,128 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     ref.read(selectedAgentProvider.notifier).set(picked);
     ref.read(currentConversationProvider.notifier).set(null);
     ref.read(chatProvider.notifier).clear();
+    if (mounted) {
+      setState(() {
+        _pendingAttachments.clear();
+        _attachmentError = null;
+      });
+    }
   }
 
-  /// 「+」能力面板:应用 / 绘图 / 群组是对话的输入,不是平级 Tab。
-  void _openCapabilities() {
-    showCupertinoModalPopup<void>(
-      context: context,
-      builder: (ctx) => CupertinoActionSheet(
-        actions: [
-          CupertinoActionSheetAction(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _pushSubPage(const LaunchpadTab());
-            },
-            child: const Text('应用广场'),
-          ),
-          CupertinoActionSheetAction(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _pushSubPage(const StudioTab());
-            },
-            child: const Text('绘图工作室'),
-          ),
-          CupertinoActionSheetAction(
-            onPressed: () {
-              Navigator.pop(ctx);
-              Navigator.of(context).push(cupertinoRoute(const GroupPage()));
-            },
-            child: const Text('群组协作'),
-          ),
-        ],
-        cancelButton: CupertinoActionSheetAction(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('取消'),
-        ),
-      ),
+  Future<void> _pickAttachments() async {
+    if (_isImportingAttachments || ref.read(chatProvider.notifier).busy) return;
+    setState(() {
+      _isImportingAttachments = true;
+      _attachmentError = null;
+    });
+    final imported = <ChatAttachment>[];
+    final errors = <String>[];
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        withData: true,
+      );
+      if (result == null) return;
+      for (final file in result.files) {
+        try {
+          imported.add(await _importAttachment(file));
+        } catch (error) {
+          errors.add('${file.name}：$error');
+        }
+      }
+    } catch (error) {
+      errors.add('打开文件选择器失败：$error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _pendingAttachments.addAll(imported);
+          _attachmentError = errors.isEmpty ? null : errors.join('\n');
+          _isImportingAttachments = false;
+        });
+      }
+    }
+  }
+
+  Future<ChatAttachment> _importAttachment(PlatformFile file) async {
+    final size = file.size;
+    final isImage = isChatImageAttachment(file.name);
+    final limit = isImage
+        ? maxChatImageAttachmentBytes
+        : maxChatFileAttachmentBytes;
+    if (size > limit) {
+      throw FormatException(
+        '${isImage ? '图片' : '文件'}不能超过 ${limit ~/ 1024 ~/ 1024}MB',
+      );
+    }
+
+    final bytes = await _readPickedFile(file);
+    final id =
+        'attachment-${DateTime.now().microsecondsSinceEpoch}-${_pendingAttachments.length}';
+    if (isImage) {
+      return ChatAttachment(
+        id: id,
+        name: file.name,
+        fileType: chatAttachmentExtension(file.name),
+        size: size,
+        imageData: bytes,
+      );
+    }
+
+    String content;
+    String fileType;
+    if (isChatDocumentAttachment(file.name)) {
+      final path = await _attachmentPath(file, bytes);
+      try {
+        final parsed = await HarnessClient.instance.parseDocumentFile(path);
+        content = trimChatAttachmentContent(parsed['text'] as String? ?? '');
+        fileType =
+            parsed['kind'] as String? ?? chatAttachmentFileType(file.name);
+      } finally {
+        try {
+          await File(path).delete();
+        } catch (_) {}
+      }
+    } else if (isSupportedChatTextAttachment(file.name) ||
+        looksLikeChatText(bytes)) {
+      content = decodeChatTextAttachment(bytes);
+      fileType = chatAttachmentFileType(file.name);
+    } else {
+      final extension = chatAttachmentExtension(file.name);
+      throw FormatException(
+        '暂不支持的附件格式：${extension.isEmpty ? '未知' : extension}',
+      );
+    }
+    return ChatAttachment(
+      id: id,
+      name: file.name,
+      fileType: fileType,
+      size: size,
+      promptContent: content,
     );
   }
 
-  /// 推送子页(应用 / 绘图 / 设置):自带悬浮玻璃返回按钮。
-  void _pushSubPage(Widget page) {
-    Navigator.of(context).push(cupertinoRoute(_SubPageBack(child: page)));
+  Future<Uint8List> _readPickedFile(PlatformFile file) async {
+    if (file.bytes != null) return file.bytes!;
+    final path = file.path;
+    if (path == null || path.isEmpty) throw const FileSystemException('无法读取文件');
+    return File(path).readAsBytes();
+  }
+
+  Future<String> _attachmentPath(PlatformFile file, Uint8List bytes) async {
+    final temp = await getTemporaryDirectory();
+    final safeName = file.name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    final target = File(
+      '${temp.path}${Platform.pathSeparator}worldbase-attachment-${DateTime.now().microsecondsSinceEpoch}-$safeName',
+    );
+    await target.writeAsBytes(bytes, flush: true);
+    return target.path;
+  }
+
+  void _removeAttachment(String id) {
+    setState(() {
+      _pendingAttachments.removeWhere((item) => item.id == id);
+      if (_pendingAttachments.isEmpty) _attachmentError = null;
+    });
   }
 
   @override
@@ -147,7 +243,14 @@ class _ChatTabState extends ConsumerState<ChatTab> {
             // 内容层:延伸到浮岛之下滚动,玻璃把它们柔化成背景色。
             Positioned.fill(
               child: messages.isEmpty
-                  ? _EmptyState(onChipTap: _send)
+                  ? _EmptyState(
+                      bottomInset:
+                          128 +
+                          (_pendingAttachments.isEmpty ? 0 : 76) +
+                          ((_attachmentError != null || _isImportingAttachments)
+                              ? 34
+                              : 0),
+                    )
                   : _buildMessageList(messages),
             ),
             // L1 浮岛:顶部三件套。
@@ -175,9 +278,18 @@ class _ChatTabState extends ConsumerState<ChatTab> {
 
   Widget _buildMessageList(List<UiMessage> messages) {
     final topPad = MediaQuery.paddingOf(context).top + 54;
+    final attachmentDockHeight = _pendingAttachments.isEmpty ? 0.0 : 76.0;
+    final feedbackHeight = (_attachmentError != null || _isImportingAttachments)
+        ? 34.0
+        : 0.0;
     return ListView.builder(
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-      padding: EdgeInsets.fromLTRB(0, topPad, 0, _advancedExpanded ? 244 : 112),
+      padding: EdgeInsets.fromLTRB(
+        0,
+        topPad,
+        0,
+        (_advancedExpanded ? 244 : 112) + attachmentDockHeight + feedbackHeight,
+      ),
       itemCount: messages.length,
       itemBuilder: (ctx, i) {
         final m = messages[i];
@@ -197,6 +309,7 @@ class _ChatTabState extends ConsumerState<ChatTab> {
           text: m.text,
           isUser: m.role == 'user',
           isStreaming: m.streaming,
+          attachments: m.attachments,
           onLongPress: m.role == 'user' && m.dbId > 0
               ? () => _showMessageActions(m)
               : null,
@@ -217,10 +330,51 @@ class _ChatTabState extends ConsumerState<ChatTab> {
       child: GlassContainer(
         level: GlassLevel.l1,
         radius: 8,
+        showSheen: false,
         padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (_pendingAttachments.isNotEmpty) ...[
+              _PendingAttachmentStrip(
+                attachments: _pendingAttachments,
+                onRemove: _removeAttachment,
+              ),
+              const SizedBox(height: 6),
+            ],
+            if (_isImportingAttachments || _attachmentError != null) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_isImportingAttachments)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 1),
+                        child: CupertinoActivityIndicator(radius: 7),
+                      )
+                    else
+                      const Icon(
+                        CupertinoIcons.exclamationmark_circle_fill,
+                        size: 14,
+                        color: iosRed,
+                      ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _isImportingAttachments ? '正在读取附件…' : _attachmentError!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: _isImportingAttachments ? p.ink2 : iosRed,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             if (_advancedExpanded) ...[
               Padding(
                 padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
@@ -270,11 +424,23 @@ class _ChatTabState extends ConsumerState<ChatTab> {
                     color: _advancedExpanded ? p.indigo : p.ink2,
                   ),
                 ),
-                CupertinoButton(
-                  padding: EdgeInsets.zero,
-                  minimumSize: const Size(34, 34),
-                  onPressed: _openCapabilities,
-                  child: Icon(CupertinoIcons.add, size: 22, color: p.indigo),
+                Semantics(
+                  button: true,
+                  label: '导入附件',
+                  child: CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(34, 34),
+                    onPressed: busy || _isImportingAttachments
+                        ? null
+                        : _pickAttachments,
+                    child: Icon(
+                      CupertinoIcons.paperclip,
+                      size: 21,
+                      color: busy || _isImportingAttachments
+                          ? p.ink3
+                          : p.indigo,
+                    ),
+                  ),
                 ),
                 Expanded(
                   child: CupertinoTextField(
@@ -519,14 +685,19 @@ class _TopBar extends ConsumerWidget {
           Builder(
             builder: (ctx) => _GlassIconButton(
               icon: CupertinoIcons.sidebar_left,
-              onTap: () => Scaffold.of(ctx).openDrawer(),
+              onTap: () {
+                unawaited(ref.read(conversationsProvider.notifier).refresh());
+                Scaffold.of(ctx).openDrawer();
+              },
             ),
           ),
           Expanded(
             child: Center(
               child: GlassContainer(
+                key: const ValueKey('chat-model-selector'),
                 level: GlassLevel.l1,
                 radius: 19,
+                showSheen: false,
                 padding: const EdgeInsets.symmetric(
                   horizontal: 14,
                   vertical: 9,
@@ -601,6 +772,7 @@ class _GlassIconButton extends StatelessWidget {
     return GlassContainer(
       level: GlassLevel.l1,
       radius: 99,
+      showSheen: false,
       padding: const EdgeInsets.all(10),
       onTap: onTap,
       child: Icon(icon, size: 17, color: p.ink),
@@ -608,66 +780,178 @@ class _GlassIconButton extends StatelessWidget {
   }
 }
 
-/// 空态:呼吸 Orb + 时间问候 + 每日建议 chips。
+/// 空态:只保留品牌呼吸 Orb 与时间问候，不用预设提示词干扰输入。
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.onChipTap});
+  const _EmptyState({required this.bottomInset});
 
-  final ValueChanged<String> onChipTap;
-
-  static const _chips = [
-    (CupertinoIcons.envelope, '帮我写一封得体的请假邮件'),
-    (CupertinoIcons.calendar, '看看今天的日程,留个喘息的空档'),
-    (CupertinoIcons.sparkles, '用大白话解释「量子纠缠」'),
-  ];
+  final double bottomInset;
 
   @override
   Widget build(BuildContext context) {
     final p = DawnPalette.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 18),
-      child: Column(
-        children: [
-          const Spacer(flex: 3),
-          const DawnOrb(size: 56),
-          const SizedBox(height: 14),
-          Text(
-            dawnGreeting(),
-            style: TextStyle(
-              fontSize: 21,
-              fontWeight: FontWeight.w600,
-              color: p.ink,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '我是晨昏,今天想做点什么?',
-            style: TextStyle(fontSize: 12.5, color: p.ink2),
-          ),
-          const Spacer(flex: 2),
-          for (final (icon, text) in _chips) ...[
-            GlassContainer(
-              level: GlassLevel.l3,
-              radius: 16,
-              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
-              onTap: () => onChipTap(text),
-              child: Row(
-                children: [
-                  Icon(icon, size: 14, color: p.indigo),
-                  const SizedBox(width: 9),
-                  Expanded(
-                    child: Text(
-                      text,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 12.5, color: p.ink),
-                    ),
-                  ),
-                ],
+      padding: EdgeInsets.fromLTRB(18, 72, 18, bottomInset),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const DawnOrb(size: 56),
+            const SizedBox(height: 14),
+            Text(
+              dawnGreeting(),
+              style: TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.w600,
+                color: p.ink,
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
+            Text(
+              '我是晨昏,今天想做点什么?',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12.5, color: p.ink2),
+            ),
           ],
-          const SizedBox(height: 128), // 给输入胶囊与开关留出悬浮空间
+        ),
+      ),
+    );
+  }
+}
+
+class _PendingAttachmentStrip extends StatelessWidget {
+  const _PendingAttachmentStrip({
+    required this.attachments,
+    required this.onRemove,
+  });
+
+  final List<ChatAttachment> attachments;
+  final ValueChanged<String> onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 62,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        itemCount: attachments.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 6),
+        itemBuilder: (_, index) => _ChatAttachmentTile(
+          attachment: attachments[index],
+          onRemove: () => onRemove(attachments[index].id),
+        ),
+      ),
+    );
+  }
+}
+
+class _ChatAttachmentTile extends StatelessWidget {
+  const _ChatAttachmentTile({
+    required this.attachment,
+    this.onRemove,
+    this.onUserBubble = false,
+  });
+
+  final ChatAttachment attachment;
+  final VoidCallback? onRemove;
+  final bool onUserBubble;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
+    final foreground = onUserBubble ? CupertinoColors.white : p.ink;
+    final secondary = onUserBubble
+        ? CupertinoColors.white.withValues(alpha: 0.76)
+        : p.ink2;
+    final fill = onUserBubble
+        ? CupertinoColors.white.withValues(alpha: 0.16)
+        : p.glassFill2;
+    final border = onUserBubble
+        ? CupertinoColors.white.withValues(alpha: 0.22)
+        : p.separator;
+    final imageBytes = attachment.imageBytes;
+
+    return Container(
+      width: attachment.isImage ? 92 : 184,
+      height: 58,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: fill,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: border),
+      ),
+      child: Stack(
+        children: [
+          if (attachment.isImage && imageBytes != null)
+            Positioned.fill(
+              child: Image.memory(
+                imageBytes,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => Center(
+                  child: Icon(CupertinoIcons.photo, color: foreground),
+                ),
+              ),
+            )
+          else
+            Positioned.fill(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(9, 7, 26, 7),
+                child: Row(
+                  children: [
+                    Icon(CupertinoIcons.doc_fill, size: 19, color: foreground),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            attachment.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: foreground,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            attachment.size > 0
+                                ? '${attachment.fileType.toUpperCase()} · ${attachment.sizeLabel}'
+                                : attachment.fileType.toUpperCase(),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 9.5, color: secondary),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          if (onRemove != null)
+            Positioned(
+              top: 3,
+              right: 3,
+              child: GestureDetector(
+                onTap: onRemove,
+                child: Container(
+                  width: 20,
+                  height: 20,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: CupertinoColors.black.withValues(alpha: 0.58),
+                  ),
+                  child: const Icon(
+                    CupertinoIcons.xmark,
+                    size: 10,
+                    color: CupertinoColors.white,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -680,12 +964,14 @@ class _DawnBubble extends StatelessWidget {
     required this.text,
     required this.isUser,
     this.isStreaming = false,
+    this.attachments = const [],
     this.onLongPress,
   });
 
   final String text;
   final bool isUser;
   final bool isStreaming;
+  final List<ChatAttachment> attachments;
   final VoidCallback? onLongPress;
 
   @override
@@ -743,7 +1029,21 @@ class _DawnBubble extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (!(isStreaming && text.isEmpty))
+              if (attachments.isNotEmpty) ...[
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (final attachment in attachments)
+                      _ChatAttachmentTile(
+                        attachment: attachment,
+                        onUserBubble: isUser,
+                      ),
+                  ],
+                ),
+                if (text.isNotEmpty) const SizedBox(height: 7),
+              ],
+              if (text.isNotEmpty && !(isStreaming && text.isEmpty))
                 MarkdownMessage(
                   data: text,
                   isUser: isUser,
@@ -1051,6 +1351,8 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
             level: GlassLevel.l1,
             radius: 26,
             fill: p.drawerFill,
+            showSheen: false,
+            showShadow: false,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1209,11 +1511,20 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
   }
 
   Widget _buildConversationTile(ConversationMeta c, DawnPalette p) {
-    final selected = ref.watch(currentConversationProvider)?.id == c.id;
+    final groupId = c.groupId;
+    final selected =
+        groupId == null && ref.watch(currentConversationProvider)?.id == c.id;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
       child: GestureDetector(
         onTap: () async {
+          if (groupId != null) {
+            Navigator.of(context).pop();
+            await Navigator.of(
+              context,
+            ).push(cupertinoRoute(GroupPage(initialGroupId: groupId)));
+            return;
+          }
           ref.read(currentConversationProvider.notifier).set(c);
           await ref.read(chatProvider.notifier).loadHistory(c);
           if (mounted) Navigator.of(context).pop();
@@ -1230,7 +1541,10 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
           ),
           child: Row(
             children: [
-              if (c.forkedFrom != null) ...[
+              if (groupId != null) ...[
+                Icon(CupertinoIcons.person_2_fill, size: 14, color: p.indigo),
+                const SizedBox(width: 6),
+              ] else if (c.forkedFrom != null) ...[
                 Icon(CupertinoIcons.arrow_branch, size: 12, color: p.indigo),
                 const SizedBox(width: 6),
               ],
@@ -1329,43 +1643,58 @@ class _AgentPickerSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = DawnPalette.of(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: p.groupedBg,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
-      ),
-      child: SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 14, 20, 6),
-              child: Text(
-                '选择 Agent(新会话)',
-                style: TextStyle(fontSize: 13, color: p.ink2),
-              ),
-            ),
-            IosSection(
-              children: [
-                IosRow(
-                  icon: CupertinoIcons.sparkles,
-                  iconColor: iosBlue,
-                  title: '默认助手',
-                  onTap: () => Navigator.pop(context),
+    final media = MediaQuery.of(context);
+    final contentHeight =
+        52.0 + ((agents.length + 1) * 56.0) + media.padding.bottom;
+    final sheetHeight = math.min(media.size.height * 0.72, contentHeight);
+    return SizedBox(
+      height: sheetHeight,
+      child: Container(
+        decoration: BoxDecoration(
+          color: p.groupedBg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 6),
+                child: Text(
+                  '选择 Agent(新会话)',
+                  style: TextStyle(fontSize: 13, color: p.ink2),
                 ),
-                for (final a in agents)
-                  IosRow(
-                    icon: CupertinoIcons.person_crop_circle,
-                    iconColor: iosIndigo,
-                    title: '${a.icon.isEmpty ? '🤖' : a.icon} ${a.name}',
-                    subtitle: a.description,
-                    onTap: () => Navigator.pop(context, a),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 12),
-          ],
+              ),
+              Expanded(
+                child: ListView(
+                  key: const ValueKey('agent-picker-list'),
+                  padding: const EdgeInsets.only(bottom: 12),
+                  children: [
+                    IosSection(
+                      children: [
+                        IosRow(
+                          icon: CupertinoIcons.sparkles,
+                          iconColor: iosBlue,
+                          title: '默认助手',
+                          onTap: () => Navigator.pop(context),
+                        ),
+                        for (final a in agents)
+                          IosRow(
+                            icon: CupertinoIcons.person_crop_circle,
+                            iconColor: iosIndigo,
+                            title:
+                                '${a.icon.isEmpty ? '🤖' : a.icon} ${a.name}',
+                            subtitle: a.description,
+                            onTap: () => Navigator.pop(context, a),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

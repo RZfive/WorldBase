@@ -114,6 +114,7 @@ pub const EXEC_RUN: &str = "exec.run";
 
 // 供应商 / Agent / Studio / 分叉 / 宿主应答（对齐桌面端能力）
 pub const PROVIDER_LIST: &str = "provider.list";
+pub const PROVIDER_FETCH_MODELS: &str = "provider.fetchModels";
 pub const PROVIDER_SAVE: &str = "provider.save";
 pub const PROVIDER_DELETE: &str = "provider.delete";
 pub const PROVIDER_SET_ACTIVE: &str = "provider.setActive";
@@ -314,6 +315,7 @@ pub const ALL_METHODS: &[&str] = &[
     WORKSPACE_READ,
     EXEC_RUN,
     PROVIDER_LIST,
+    PROVIDER_FETCH_MODELS,
     PROVIDER_SAVE,
     PROVIDER_DELETE,
     PROVIDER_SET_ACTIVE,

@@ -91,6 +91,10 @@ void main() {
       await _rpc('provider.setActive', {'id': 'e2e-mock-provider'});
       expect(find.text('深度思考'), findsNothing);
       expect(find.text('联网搜索'), findsNothing);
+      expect(find.text('帮我写一封得体的请假邮件'), findsNothing);
+      expect(find.text('看看今天的日程,留个喘息的空档'), findsNothing);
+      expect(find.text('用大白话解释「量子纠缠」'), findsNothing);
+      expect(find.byIcon(CupertinoIcons.paperclip), findsOneWidget);
       await tester.tap(find.byIcon(CupertinoIcons.gear_alt));
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('思考强度 (最高)'), findsOneWidget);
@@ -148,8 +152,8 @@ void main() {
           'memberAgentIds': ['e2e-product-agent', 'e2e-engineer-agent'],
         },
       });
-      await tester.tap(find.byIcon(CupertinoIcons.add).first);
-      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.byIcon(CupertinoIcons.sidebar_left));
+      await tester.pump(const Duration(milliseconds: 500));
       await tester.tap(find.text('群组协作'));
       await tester.pump(const Duration(seconds: 1));
       expect(find.textContaining('集成测试群聊'), findsOneWidget);
@@ -163,9 +167,17 @@ void main() {
       await tester.tap(groupInput);
       await tester.enterText(groupInput, '请 @');
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('@产品测试'), findsOneWidget);
-      expect(find.text('@工程测试'), findsOneWidget);
-      await tester.tap(find.text('@工程测试'));
+      final productMention = find.widgetWithText(
+        CupertinoButton,
+        '@产品测试',
+      );
+      final engineerMention = find.widgetWithText(
+        CupertinoButton,
+        '@工程测试',
+      );
+      expect(productMention, findsOneWidget);
+      expect(engineerMention, findsOneWidget);
+      await tester.tap(engineerMention);
       await tester.pump(const Duration(milliseconds: 300));
       final editable = tester.widget<EditableText>(
         find.descendant(of: groupInput, matching: find.byType(EditableText)),
@@ -187,13 +199,26 @@ void main() {
       debugPrint('[gui] group reply rendered');
       await tester.tap(find.byIcon(CupertinoIcons.chevron_left).first);
       await tester.pump(const Duration(milliseconds: 600));
+
+      // 群组主会话应留在聊天抽屉中，点击后直接恢复同一群聊历史。
+      await tester.tap(find.byIcon(CupertinoIcons.sidebar_left));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('集成测试群聊'), findsOneWidget);
+      await tester.tap(find.text('集成测试群聊'));
+      await tester.pump(const Duration(seconds: 1));
+      expect(groupInput, findsOneWidget);
+      expect(find.textContaining('（mock）已收到'), findsWidgets);
+      debugPrint('[gui] group transcript reopened from chat drawer');
+      await tester.pageBack();
+      await tester.pump(const Duration(milliseconds: 600));
+
       if (previousProviderId != null && previousProviderId.isNotEmpty) {
         await _rpc('provider.setActive', {'id': previousProviderId});
       }
 
-      // 4) 应用广场：从主对话「+」能力菜单进入
-      await tester.tap(find.byIcon(CupertinoIcons.add).first);
-      await tester.pump(const Duration(milliseconds: 300));
+      // 4) 应用广场：从主对话侧边栏进入
+      await tester.tap(find.byIcon(CupertinoIcons.sidebar_left));
+      await tester.pump(const Duration(milliseconds: 500));
       await tester.tap(find.text('应用广场'));
       await tester.pump(const Duration(seconds: 2));
       expect(find.byIcon(CupertinoIcons.add_circled), findsOneWidget);
@@ -205,9 +230,9 @@ void main() {
       await tester.tap(find.byIcon(CupertinoIcons.chevron_left).first);
       await tester.pump(const Duration(milliseconds: 600));
 
-      // 5) 绘图 Studio：从主对话「+」能力菜单进入
-      await tester.tap(find.byIcon(CupertinoIcons.add).first);
-      await tester.pump(const Duration(milliseconds: 300));
+      // 5) 绘图 Studio：从主对话侧边栏进入
+      await tester.tap(find.byIcon(CupertinoIcons.sidebar_left));
+      await tester.pump(const Duration(milliseconds: 500));
       await tester.tap(find.text('绘图工作室'));
       await tester.pump(const Duration(seconds: 1));
       expect(find.text('生成'), findsWidgets, reason: '顶部分段切换');
