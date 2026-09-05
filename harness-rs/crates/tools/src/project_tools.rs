@@ -497,6 +497,17 @@ impl Tool for ProjectListTool {
 
 pub struct ProjectDevStartTool;
 
+/// `start_project_server` is the Electron-facing alias for this tool.  The
+/// Electron contract has no `install` argument and the runtime manager owns
+/// first-run dependency installation, so an omitted flag must mean "start"
+/// rather than the legacy Rust-only "install then return" behavior.
+fn install_requested(input: &Value) -> bool {
+    input
+        .get("install")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 #[async_trait]
 impl Tool for ProjectDevStartTool {
     fn name(&self) -> &str {
@@ -529,7 +540,7 @@ impl Tool for ProjectDevStartTool {
             .or_else(|| input.get("project"))
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing required string parameter: project_id"))?;
-        if input["install"].as_bool().unwrap_or(true) {
+        if install_requested(&input) {
             let path = services.projects.list_projects()?;
             let found = path.iter().find(|p| p.id == project);
             if let Some(p) = found {
@@ -669,6 +680,7 @@ mod tests {
             plan_goal: Arc::new(Mutex::new(None)),
             todo_items: Arc::new(Mutex::new(Vec::new())),
             read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            visible_tool_catalog: None,
             store: store.clone(),
             skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
@@ -676,6 +688,21 @@ mod tests {
             projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(projects)),
             group_collaboration: None,
         }
+    }
+
+    #[test]
+    fn project_server_start_does_not_install_when_flag_is_omitted() {
+        assert!(!install_requested(&json!({ "project_id": "demo" })));
+        assert!(!install_requested(&json!({ "project": "demo" })));
+        assert!(!install_requested(
+            &json!({ "project_id": "demo", "install": null })
+        ));
+        assert!(install_requested(
+            &json!({ "project_id": "demo", "install": true })
+        ));
+        assert!(!install_requested(
+            &json!({ "project_id": "demo", "install": false })
+        ));
     }
 
     #[tokio::test]

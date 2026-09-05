@@ -124,7 +124,8 @@ pub struct ChatMessage {
     /// 纯文本视图（渲染用）；工具调用见 `tool_calls` / `tool_results`。
     pub content: String,
     /// 原始多模态内容块。`content` 始终保留可检索的纯文本视图，`parts` 则保留
-    /// 图片等提供商需要的 payload，避免 Electron -> Rust 同步时丢失附件。
+    /// 图片及 provider continuation payload，避免 Electron -> Rust 同步时丢失附件
+    /// 或 Anthropic thinking signatures。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<ChatContentPart>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -137,13 +138,28 @@ pub struct ChatMessage {
 
 /// 与 Electron 的 `MessageContent` 对齐的可持久化消息内容块。
 ///
-/// 当前公开聊天协议支持文本和 data/HTTP image URL；未知块由 Electron 在发送前
-/// 归一为文本附件摘要，确保旧客户端仍能与新 app-server 互通。
+/// 文本和图片是跨客户端公开的内容块。Thinking/redacted-thinking 是 provider
+/// 私有的、不可展示的 Anthropic continuation 块；它们仍需落库，才能在 Rust
+/// app-server 重启后把签名/密文原样发回 Messages API。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatContentPart {
-    Text { text: String },
-    ImageUrl { image_url: ImageUrl },
+    Text {
+        text: String,
+    },
+    ImageUrl {
+        image_url: ImageUrl,
+    },
+    /// Anthropic extended-thinking block. The signature is opaque and must be
+    /// replayed byte-for-byte when a tool result continues the response.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    /// Anthropic encrypted/redacted thinking payload. Keep it opaque.
+    RedactedThinking {
+        data: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +223,11 @@ pub struct ConversationSyncParams {
     pub title: String,
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// When true, `messages` is the host's complete persisted snapshot and
+    /// replaces Rust's copy, including an explicitly empty history. Older
+    /// clients retain the append-only reconciliation behavior by default.
+    #[serde(default)]
+    pub authoritative: bool,
     #[serde(default)]
     pub messages: Vec<ChatMessage>,
 }
@@ -270,6 +291,8 @@ pub struct ChatRunContext {
     /// explicit empty list deliberately exposes no MCP server.
     #[serde(default)]
     pub allowed_mcp_server_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub enable_thinking: Option<bool>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
@@ -399,6 +422,10 @@ pub struct ProviderEntry {
     /// 0.0–2.0，缺省由 provider 决定。
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// Saved provider default. Per-run ChatRunContext can explicitly override
+    /// this in either direction.
+    #[serde(default)]
+    pub enable_thinking: bool,
     /// 生图能力（OpenAI images 接口）。
     #[serde(default)]
     pub image_generation: bool,

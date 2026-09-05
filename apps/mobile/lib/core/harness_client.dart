@@ -1,6 +1,6 @@
-/// WorldBase Harness 客户端（WebSocket JSON-RPC）——完整协议面。
+/// WorldBase 进程内 Harness 客户端（WebSocket JSON-RPC）——完整协议面。
 ///
-/// 对接 `worldbase serve`（WS/HTTP transport）：
+/// 对接 mobile FFI 在同一应用进程内开放的 loopback WS/HTTP transport：
 /// - initialize 握手 + 移动端 capabilities（排除 subprocess/port_binding/webhook）
 /// - 会话/消息/分叉编辑、供应商、Agent、群组（5 模式/黑板/HITL 注入）、
 ///   Studio 生图、技能、定时任务、记忆、MCP、设置
@@ -13,6 +13,87 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
+
+/// Replaces malformed UTF-16 before a Dart string crosses the JSON-RPC wire.
+/// Valid surrogate pairs are preserved as their Unicode scalar value.
+String sanitizeUtf16ForTransport(String value) {
+  final output = StringBuffer();
+  final units = value.codeUnits;
+  for (var index = 0; index < units.length; index++) {
+    final unit = units[index];
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      if (index + 1 < units.length) {
+        final low = units[index + 1];
+        if (low >= 0xDC00 && low <= 0xDFFF) {
+          final scalar = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
+          output.writeCharCode(scalar);
+          index++;
+          continue;
+        }
+      }
+      output.writeCharCode(0xFFFD);
+    } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+      output.writeCharCode(0xFFFD);
+    } else {
+      output.writeCharCode(unit);
+    }
+  }
+  return output.toString();
+}
+
+/// Recursively sanitizes every string value and map key in an RPC payload.
+Object? sanitizeJsonForTransport(Object? value) {
+  if (value is String) return sanitizeUtf16ForTransport(value);
+  if (value is List) {
+    return value.map<Object?>(sanitizeJsonForTransport).toList();
+  }
+  if (value is Map) {
+    final output = <Object?, Object?>{};
+    for (final entry in value.entries) {
+      final key = entry.key is String
+          ? sanitizeUtf16ForTransport(entry.key as String)
+          : entry.key;
+      output[key] = sanitizeJsonForTransport(entry.value);
+    }
+    return output;
+  }
+  return value;
+}
+
+/// Builds the flattened `chat.send` contract shared by the UI and tests.
+Map<String, dynamic> buildChatSendParams({
+  required String conversationId,
+  required String text,
+  String? providerId,
+  String? model,
+  bool enableThinking = false,
+  String? reasoningEffort,
+  double? temperature,
+  bool? webSearch,
+  List<Map<String, dynamic>> contentParts = const [],
+}) {
+  final params = <String, dynamic>{
+    'conversationId': conversationId,
+    'text': text,
+    'providerId': ?providerId,
+    if (model != null && model.isNotEmpty) 'model': model,
+    'enableThinking': enableThinking,
+    if (enableThinking &&
+        reasoningEffort != null &&
+        reasoningEffort.trim().isNotEmpty)
+      'reasoningEffort': reasoningEffort.trim(),
+    if (temperature != null) 'temperature': temperature.clamp(0, 2),
+    if (contentParts.isNotEmpty) 'contentParts': contentParts,
+  };
+  if (webSearch == true) {
+    params['systemPromptSections'] = <String>[
+      '联网搜索已开启：涉及外部信息时优先调用 web_search；必要时再调用 fetch_webpage。',
+    ];
+  } else if (webSearch == false) {
+    params['deniedToolNames'] = <String>['web_search', 'fetch_webpage'];
+  }
+  return params;
+}
 
 /// 事件帧（对齐 protocol::event::EventFrame，camelCase）。
 class EventFrame {
@@ -46,15 +127,39 @@ class ToolDescriptor {
     required this.name,
     required this.description,
     required this.domain,
+    this.inputSchema = const <String, dynamic>{},
+    this.permission = 'allow',
   });
   final String name;
   final String description;
   final String domain;
+  /// JSON Schema advertised by Rust for direct tool callers and UI tooling.
+  /// Keep this instead of projecting descriptors down to name/description;
+  /// otherwise Flutter cannot construct valid `tool.call` arguments from the
+  /// same contract Electron presents to the model.
+  final Map<String, dynamic> inputSchema;
+  final String permission;
+
   static ToolDescriptor fromJson(Map<String, dynamic> j) => ToolDescriptor(
     name: j['name'] as String,
     description: j['description'] as String? ?? '',
     domain: j['domain'] as String? ?? 'core',
+    inputSchema: _readObject(j['inputSchema'] ?? j['input_schema']),
+    permission: j['permission'] as String? ?? 'allow',
   );
+
+  static Map<String, dynamic> _readObject(Object? value) {
+    if (value is Map) return value.cast<String, dynamic>();
+    return const <String, dynamic>{};
+  }
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'description': description,
+    'domain': domain,
+    'inputSchema': inputSchema,
+    'permission': permission,
+  };
 }
 
 class ConversationMeta {
@@ -169,6 +274,7 @@ class ProviderEntry {
     this.models = const [],
     this.activeModel = '',
     this.temperature,
+    this.enableThinking = false,
     this.imageGeneration = false,
   });
   String id;
@@ -179,6 +285,7 @@ class ProviderEntry {
   List<ModelInfo> models;
   String activeModel;
   double? temperature;
+  bool enableThinking;
   bool imageGeneration;
 
   Map<String, dynamic> toJson() => {
@@ -190,6 +297,7 @@ class ProviderEntry {
     'models': models.map((m) => m.toJson()).toList(),
     'activeModel': activeModel,
     'temperature': temperature,
+    'enableThinking': enableThinking,
     'imageGeneration': imageGeneration,
   };
 
@@ -206,6 +314,7 @@ class ProviderEntry {
         [],
     activeModel: j['activeModel'] as String? ?? '',
     temperature: (j['temperature'] as num?)?.toDouble(),
+    enableThinking: j['enableThinking'] as bool? ?? false,
     imageGeneration: j['imageGeneration'] as bool? ?? false,
   );
 }
@@ -679,10 +788,12 @@ enum HarnessState { disconnected, connecting, connected }
 
 class PendingPermission {
   PendingPermission({
+    required this.streamId,
     required this.requestId,
     required this.toolName,
     required this.argsSummary,
   });
+  final String streamId;
   final String requestId;
   final String toolName;
   final String argsSummary;
@@ -691,10 +802,12 @@ class PendingPermission {
 /// 宿主反向请求（ask_user / page_automation）。
 class HostRequest {
   HostRequest({
+    required this.streamId,
     required this.requestId,
     required this.kind,
     required this.payload,
   });
+  final String streamId;
   final String requestId;
   final String kind; // ask_user / page_automation
   final Map<String, dynamic> payload;
@@ -736,7 +849,9 @@ class HarnessClient {
 
   String _host = '127.0.0.1';
   int _port = 19527;
+  String _authToken = '';
   bool _handshaked = false;
+  bool _disposed = false;
   Timer? _reconnectTimer;
 
   Stream<HarnessState> get stateStream => _stateCtrl.stream;
@@ -751,17 +866,39 @@ class HarnessClient {
       _activeStudioStreams.contains(streamId);
   String get host => _host;
   int get port => _port;
-  String get httpBase => 'http://$_host:$_port';
 
-  void configure({required String host, required int port}) {
+  void configure({
+    required String host,
+    required int port,
+    required String authToken,
+  }) {
+    if (authToken.isEmpty) {
+      throw ArgumentError.value(authToken, 'authToken', 'must not be empty');
+    }
     _host = host;
     _port = port;
+    _authToken = authToken;
   }
+
+  Uri resourceUri(String path) => Uri(
+    scheme: 'http',
+    host: _host,
+    port: _port,
+    path: path.startsWith('/') ? path : '/$path',
+    queryParameters: {'token': _authToken},
+  );
 
   Future<void> connect() async {
     if (_channel != null) return;
+    _disposed = false;
     _stateCtrl.add(HarnessState.connecting);
-    final url = Uri.parse('ws://$_host:$_port/ws');
+    final url = Uri(
+      scheme: 'ws',
+      host: _host,
+      port: _port,
+      path: '/ws',
+      queryParameters: {'token': _authToken},
+    );
     try {
       final channel = WebSocketChannel.connect(url);
       await channel.ready.timeout(const Duration(seconds: 5));
@@ -802,7 +939,9 @@ class HarnessClient {
   void _onDisconnected() {
     _channel = null;
     _handshaked = false;
+    _failAllPending(Exception('harness connection closed'));
     _stateCtrl.add(HarnessState.disconnected);
+    if (_disposed) return;
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(const Duration(seconds: 2), () async {
       try {
@@ -835,15 +974,20 @@ class HarnessClient {
     final msg = jsonDecode(raw as String) as Map<String, dynamic>;
     if (msg.containsKey('id') &&
         (msg.containsKey('result') || msg.containsKey('error'))) {
-      final completer = _pending.remove(msg['id'].toString());
-      if (completer != null) {
-        if (msg.containsKey('error')) {
-          completer.completeError(
-            Exception(msg['error']?['message'] ?? 'rpc error'),
-          );
+      final id = msg['id'];
+      final completer = id == null ? null : _pending.remove(id.toString());
+      if (msg.containsKey('error')) {
+        final error = Exception(msg['error']?['message'] ?? 'rpc error');
+        if (completer != null) {
+          completer.completeError(error);
         } else {
-          completer.complete(msg['result']);
+          // Parse/invalid-request responses use id=null because the server
+          // cannot correlate them. They invalidate the in-flight batch rather
+          // than leaving every caller blocked until its timeout.
+          _failAllPending(error);
         }
+      } else {
+        completer?.complete(msg['result']);
       }
       return;
     }
@@ -880,6 +1024,7 @@ class HarnessClient {
     if (frame.kind == 'permission_request') {
       _permissionsCtrl.add(
         PendingPermission(
+          streamId: frame.streamId,
           requestId: frame.data['requestId'] as String? ?? '',
           toolName: frame.data['toolName'] as String? ?? '',
           argsSummary: frame.data['argsSummary'] as String? ?? '',
@@ -888,6 +1033,7 @@ class HarnessClient {
     } else if (frame.kind == 'host_request') {
       _hostRequestsCtrl.add(
         HostRequest(
+          streamId: frame.streamId,
           requestId: frame.data['requestId'] as String? ?? '',
           kind: frame.data['requestKind'] as String? ?? '',
           payload:
@@ -911,14 +1057,30 @@ class HarnessClient {
     final completer = Completer<dynamic>();
     _pending['$id'] = completer;
     channel.sink.add(
-      jsonEncode({
-        'jsonrpc': '2.0',
-        'id': id,
-        'method': method,
-        'params': params,
-      }),
+      jsonEncode(
+        sanitizeJsonForTransport({
+          'jsonrpc': '2.0',
+          'id': id,
+          'method': method,
+          'params': params,
+        }),
+      ),
     );
-    return completer.future.timeout(const Duration(seconds: 60));
+    try {
+      return await completer.future.timeout(const Duration(seconds: 60));
+    } finally {
+      if (identical(_pending['$id'], completer)) {
+        _pending.remove('$id');
+      }
+    }
+  }
+
+  void _failAllPending(Object error) {
+    final pending = _pending.values.toList();
+    _pending.clear();
+    for (final completer in pending) {
+      if (!completer.isCompleted) completer.completeError(error);
+    }
   }
 
   Stream<EventFrame> subscribeStream(String streamId) {
@@ -987,28 +1149,23 @@ class HarnessClient {
     String text, {
     String? providerId,
     String? model,
+    bool enableThinking = false,
     String? reasoningEffort,
     double? temperature,
     bool? webSearch,
     List<Map<String, dynamic>> contentParts = const [],
   }) async {
-    final params = <String, dynamic>{
-      'conversationId': conversationId,
-      'text': text,
-      'providerId': ?providerId,
-      if (model != null && model.isNotEmpty) 'model': model,
-      if (reasoningEffort != null && reasoningEffort.trim().isNotEmpty)
-        'reasoningEffort': reasoningEffort.trim(),
-      if (temperature != null) 'temperature': temperature.clamp(0, 2),
-      if (contentParts.isNotEmpty) 'contentParts': contentParts,
-    };
-    if (webSearch == true) {
-      params['systemPromptSections'] = <String>[
-        '联网搜索已开启：涉及外部信息时优先调用 web_search；必要时再调用 fetch_webpage。',
-      ];
-    } else if (webSearch == false) {
-      params['deniedToolNames'] = <String>['web_search', 'fetch_webpage'];
-    }
+    final params = buildChatSendParams(
+      conversationId: conversationId,
+      text: text,
+      providerId: providerId,
+      model: model,
+      enableThinking: enableThinking,
+      reasoningEffort: reasoningEffort,
+      temperature: temperature,
+      webSearch: webSearch,
+      contentParts: contentParts,
+    );
     final result = await call('chat.send', params);
     final streamId = _readStreamId(result, method: 'chat.send');
     // Do not overwrite a sequence received in the tiny RPC/notification race.
@@ -1478,7 +1635,9 @@ class HarnessClient {
   }
 
   void dispose() {
+    _disposed = true;
     _reconnectTimer?.cancel();
+    _failAllPending(Exception('harness client disposed'));
     _channel?.sink.close();
     _channel = null;
   }

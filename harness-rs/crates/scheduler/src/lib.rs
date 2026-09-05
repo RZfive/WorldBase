@@ -3,7 +3,7 @@
 //! 移动端语义降级（iOS 补跑）在宿主层处理；harness 保持完整 cron 语义。
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use std::str::FromStr;
 use std::sync::Arc;
 use worldbase_memory::Store;
@@ -39,8 +39,15 @@ impl Scheduler {
     pub fn list(&self) -> Result<Vec<ScheduleEntry>> {
         let mut entries = self.store.list_schedules()?;
         for e in &mut entries {
-            if let Ok(Some(t)) = next_run(&e.cron) {
-                e.next_run_at = Some(t.to_rfc3339());
+            let has_valid_next = e
+                .next_run_at
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .is_some();
+            if !has_valid_next {
+                e.next_run_at = next_run(&e.cron)?.map(|time| time.to_rfc3339());
+                self.store
+                    .set_schedule_next_run(&e.id, e.next_run_at.as_deref())?;
             }
         }
         Ok(entries)
@@ -53,34 +60,42 @@ impl Scheduler {
     /// 后台调度循环：每 30s 扫描到期任务并触发回调。
     pub async fn run_loop(&self, on_due: OnDue) -> Result<()> {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             if let Err(e) = self.tick(&on_due).await {
                 tracing::warn!(error = %e, "scheduler tick failed");
             }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     }
 
     async fn tick(&self, on_due: &OnDue) -> Result<()> {
-        for entry in self.list()? {
+        self.tick_at(Utc::now(), on_due).await
+    }
+
+    async fn tick_at(&self, now: DateTime<Utc>, on_due: &OnDue) -> Result<()> {
+        for mut entry in self.list()? {
             if !entry.enabled {
                 continue;
             }
-            let Some(next) = next_run(&entry.cron)? else {
+            let Some(next) = entry
+                .next_run_at
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc))
+            else {
                 continue;
             };
-            let now = Utc::now();
-            // 到期判定：上次未运行过且 next <= now（30s 粒度的近似）。
-            let due = match &entry.last_run_at {
-                Some(last) => DateTime::parse_from_rfc3339(last)
-                    .map(|l| l.with_timezone(&Utc) < next && next <= now)
-                    .unwrap_or(false),
-                None => next <= now,
-            };
-            if due {
-                self.store.mark_schedule_ran(&entry.id)?;
-                tracing::info!(schedule = %entry.name, "schedule due");
-                on_due(entry);
+            if next > now {
+                continue;
             }
+
+            let last_run_at = now.to_rfc3339();
+            let following = next_run_after(&entry.cron, now)?.map(|time| time.to_rfc3339());
+            self.store
+                .advance_schedule(&entry.id, &last_run_at, following.as_deref())?;
+            entry.last_run_at = Some(last_run_at);
+            entry.next_run_at = following;
+            tracing::info!(schedule = %entry.name, "schedule due");
+            on_due(entry);
         }
         Ok(())
     }
@@ -135,11 +150,20 @@ fn remap_dow(field: &str) -> Result<String> {
     Ok(out.join(","))
 }
 
-/// 下一次运行时间（本地时区语义按 UTC 近似，移动端由宿主补跑修正）。
+/// 下一次运行时间。Cron fields use the host process's local timezone; the
+/// persisted RFC 3339 value is converted back to an absolute UTC instant.
 pub fn next_run(expr: &str) -> Result<Option<DateTime<Utc>>> {
+    next_run_after(expr, Utc::now())
+}
+
+fn next_run_after(expr: &str, after: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
     let schedule = cron::Schedule::from_str(&to_crate_cron(expr)?)
         .with_context(|| format!("invalid cron: {expr}"))?;
-    Ok(schedule.upcoming(Utc).next())
+    let after_local = after.with_timezone(&Local);
+    Ok(schedule
+        .after(&after_local)
+        .next()
+        .map(|time| time.with_timezone(&Utc)))
 }
 
 #[cfg(test)]
@@ -157,8 +181,10 @@ mod tests {
     fn computes_next_run() {
         let next = next_run("0 9 * * 1-5").unwrap().unwrap();
         assert!(next > Utc::now());
-        // 周一到周五
-        let weekday = chrono::Datelike::weekday(&next);
+        // Cron weekdays and wall-clock hours are interpreted locally even
+        // though persisted deadlines are absolute RFC 3339 timestamps.
+        let local_next = next.with_timezone(&Local);
+        let weekday = chrono::Datelike::weekday(&local_next);
         assert!(matches!(
             weekday,
             chrono::Weekday::Mon
@@ -167,6 +193,8 @@ mod tests {
                 | chrono::Weekday::Thu
                 | chrono::Weekday::Fri
         ));
+        assert_eq!(chrono::Timelike::hour(&local_next), 9);
+        assert_eq!(chrono::Timelike::minute(&local_next), 0);
     }
 
     #[test]
@@ -181,5 +209,54 @@ mod tests {
         assert!(list[0].next_run_at.is_some());
         assert!(sched.delete(&entry.id).unwrap());
         assert!(sched.list().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn due_tick_uses_persisted_deadline_and_advances_it() {
+        let dir = std::env::temp_dir().join(format!("ws-sched-due-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(Store::open(&dir.join("db.sqlite")).unwrap());
+        let now = DateTime::parse_from_rfc3339("2030-01-01T12:00:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        store
+            .create_schedule(&ScheduleEntry {
+                id: "due-task".into(),
+                name: "Due task".into(),
+                cron: "* * * * *".into(),
+                task: "run".into(),
+                enabled: true,
+                last_run_at: None,
+                next_run_at: Some("2030-01-01T12:00:00+00:00".into()),
+            })
+            .unwrap();
+        let scheduler = Scheduler::new(store.clone());
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = observed.clone();
+        let on_due: OnDue = Arc::new(move |entry| captured.lock().unwrap().push(entry));
+
+        scheduler.tick_at(now, &on_due).await.unwrap();
+
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].id, "due-task");
+        assert_eq!(
+            observed[0].last_run_at.as_deref(),
+            Some("2030-01-01T12:00:30+00:00")
+        );
+        assert_eq!(
+            observed[0].next_run_at.as_deref(),
+            Some("2030-01-01T12:01:00+00:00")
+        );
+        drop(observed);
+
+        let persisted = store.list_schedules().unwrap();
+        assert_eq!(
+            persisted[0].last_run_at.as_deref(),
+            Some("2030-01-01T12:00:30+00:00")
+        );
+        assert_eq!(
+            persisted[0].next_run_at.as_deref(),
+            Some("2030-01-01T12:01:00+00:00")
+        );
     }
 }

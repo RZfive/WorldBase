@@ -55,6 +55,44 @@ impl ConnectionContext {
         *self.negotiated_capabilities.lock().unwrap() = Some(capabilities);
     }
 
+    fn constrain_capabilities(&self, requested: Capabilities) -> Capabilities {
+        let bootstrap = &self.capabilities;
+        let mut excludes = bootstrap.excludes.clone();
+        for excluded in requested.excludes {
+            if !excludes.contains(&excluded) {
+                excludes.push(excluded);
+            }
+        }
+
+        let mut features = Vec::new();
+        for feature in requested.features {
+            if bootstrap.has(&feature)
+                && !excludes.contains(&feature)
+                && !features.contains(&feature)
+            {
+                features.push(feature);
+            }
+        }
+
+        // The in-process mobile transport is the trust boundary. A peer may
+        // identify a more specific mobile OS, but initialize cannot turn that
+        // connection into a desktop/electron runtime. Desktop bootstraps still
+        // accept a mobile platform request so clients can narrow themselves.
+        let platform = if bootstrap.platform.starts_with("mobile")
+            && !requested.platform.starts_with("mobile")
+        {
+            bootstrap.platform.clone()
+        } else {
+            requested.platform
+        };
+
+        Capabilities {
+            platform,
+            features,
+            excludes,
+        }
+    }
+
     fn desktop_allowed(&self) -> bool {
         let capabilities = self.effective_capabilities();
         !capabilities.excluded("subprocess") && !capabilities.excluded("port_binding")
@@ -125,7 +163,7 @@ pub async fn dispatch(
             json!({ "servers": hub.mcp.server_names().await, "tools": hub.mcp.list_tools().await }),
         ),
         MCP_CALL => mcp_call(hub, params).await,
-        MCP_RELOAD => mcp_reload(hub, params).await,
+        MCP_RELOAD => mcp_reload(hub, ctx, params).await,
         MCP_STATUS => Ok(serde_json::to_value(hub.mcp.state_snapshot().await).unwrap()),
         MCP_REFRESH => mcp_refresh(hub, params).await,
         MCP_DISCONNECT => mcp_disconnect(hub, params).await,
@@ -278,11 +316,12 @@ fn initialize(
             format!("unsupported protocol version: {}", init.protocol_version),
         ));
     }
-    // The transport's bootstrap capabilities are only a pre-handshake
-    // default.  Electron and mobile clients send their authoritative
-    // capabilities in initialize, so persist them for every subsequent
-    // method/tool dispatch on this connection.
-    ctx.set_negotiated_capabilities(init.capabilities.clone());
+    // A handshake may narrow the transport bootstrap, but it cannot grant
+    // capabilities the transport did not start with. This is particularly
+    // important for the in-process mobile transport: untrusted initialize
+    // params must not recover subprocess or desktop access.
+    let capabilities = ctx.constrain_capabilities(init.capabilities);
+    ctx.set_negotiated_capabilities(capabilities.clone());
     // `available_domains` is capability metadata, not a duplicate method
     // catalog. Individual callable methods remain in `ALL_METHODS` and are
     // enforced by dispatch; report the literal domain names promised by the
@@ -295,7 +334,7 @@ fn initialize(
     Ok(serde_json::to_value(InitializeResult {
         protocol_version: worldbase_protocol::PROTOCOL_VERSION.into(),
         server_version: worldbase_protocol::SERVER_VERSION.into(),
-        available_tools: worldbase_tools::descriptors(&hub.tools_for(&init.capabilities)),
+        available_tools: worldbase_tools::descriptors(&hub.tools_for(&capabilities)),
         available_domains,
     })
     .unwrap())
@@ -335,6 +374,28 @@ fn conv_sync(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     hub.store
         .ensure_conversation(&sync.id, &sync.title, sync.agent_id.as_deref())
         .map_err(internal)?;
+    if sync.authoritative {
+        // Electron's public chat model intentionally stores only visible
+        // reasoning text. Rust's provider history may additionally contain
+        // opaque Anthropic thinking signatures/redacted payloads. Preserve
+        // those blocks when a restart re-syncs an otherwise identical host
+        // snapshot, or the next tool continuation will fail signature
+        // validation with a 400.
+        let existing = hub
+            .store
+            .list_messages(&sync.id, 10_000)
+            .map_err(internal)?;
+        let messages = merge_provider_parts(&existing, &sync.messages);
+        hub.store
+            .replace_messages(&sync.id, &messages)
+            .map_err(internal)?;
+        return Ok(json!({
+            "id": sync.id,
+            "messageCount": messages.len(),
+            "synced": true,
+            "authoritative": true
+        }));
+    }
     let existing = hub
         .store
         .list_messages(&sync.id, 10_000)
@@ -391,6 +452,175 @@ fn conv_sync(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         "messageCount": message_count,
         "synced": true
     }))
+}
+
+/// Reattach provider-private content blocks that are absent from the host's
+/// visible message snapshot. Electron can only round-trip text/images today,
+/// while Anthropic requires a prior thinking signature (or redacted payload)
+/// to be sent unchanged with a subsequent tool result. Matching the complete
+/// visible message shape avoids carrying a signature across edits or forks.
+fn merge_provider_parts(existing: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut last_existing_index = 0usize;
+    let mut can_reuse_existing = true;
+    let mut merged_messages = Vec::with_capacity(incoming.len());
+    for message in incoming {
+        // Host snapshots can omit system/developer rows or legacy tool result
+        // rows, so positional matching is not stable across a restart. Find
+        // the corresponding prior visible message instead.
+        let previous_index = if can_reuse_existing {
+            existing
+                .iter()
+                .enumerate()
+                .skip(last_existing_index)
+                .find_map(|(index, previous)| {
+                    same_message_shape(previous, message).then_some(index)
+                })
+        } else {
+            None
+        };
+        let Some(previous_index) = previous_index else {
+            can_reuse_existing = false;
+            merged_messages.push(message.clone());
+            continue;
+        };
+        // The host omits Rust's hidden tool-call/result rows. Reinsert only
+        // those rows between two matching visible messages; ordinary omitted
+        // rows must remain omitted from an authoritative snapshot.
+        merged_messages.extend(
+            existing[last_existing_index..previous_index]
+                .iter()
+                .filter(|hidden| !hidden.tool_calls.is_empty() || !hidden.tool_results.is_empty())
+                .cloned(),
+        );
+        last_existing_index = previous_index + 1;
+        let previous = &existing[previous_index];
+
+        let provider_parts: Vec<_> = previous
+            .parts
+            .iter()
+            .filter(|part| {
+                matches!(
+                    part,
+                    ChatContentPart::Thinking { .. } | ChatContentPart::RedactedThinking { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        if provider_parts.is_empty() {
+            merged_messages.push(message.clone());
+            continue;
+        }
+
+        let mut merged = message.clone();
+        if merged.tool_calls.is_empty()
+            && merged.tool_results.is_empty()
+            && (!previous.tool_calls.is_empty() || !previous.tool_results.is_empty())
+        {
+            // Electron's renderer history intentionally carries only visible
+            // content. Restore the old tool metadata when the visible message
+            // is unchanged, otherwise the reinserted result row would have no
+            // corresponding assistant tool call.
+            merged.tool_calls = previous.tool_calls.clone();
+            merged.tool_results = previous.tool_results.clone();
+        }
+        let has_provider_parts = merged.parts.iter().any(|part| {
+            matches!(
+                part,
+                ChatContentPart::Thinking { .. } | ChatContentPart::RedactedThinking { .. }
+            )
+        });
+        if !has_provider_parts {
+            let old_visible_parts: Vec<_> = previous
+                .parts
+                .iter()
+                .filter(|part| !is_provider_part(part))
+                .collect();
+            let mut incoming_visible_parts: Vec<ChatContentPart> = merged
+                .parts
+                .iter()
+                .filter(|part| !is_provider_part(part))
+                .cloned()
+                .collect();
+            // Legacy Electron snapshots carry the visible projection in
+            // `content` and leave `parts` empty. Recreate that text slot
+            // before comparing/rebuilding, otherwise provider blocks
+            // would be retained while the assistant answer disappears.
+            if incoming_visible_parts.is_empty() && !merged.content.is_empty() {
+                incoming_visible_parts.push(ChatContentPart::Text {
+                    text: merged.content.clone(),
+                });
+            }
+            if serde_json::to_value(&old_visible_parts).ok()
+                == serde_json::to_value(&incoming_visible_parts).ok()
+            {
+                // The host snapshot is an exact visible replay. Keep the
+                // complete old order (thinking, text, images, ...) so
+                // Anthropic receives the canonical block sequence.
+                merged.parts = previous.parts.clone();
+            } else {
+                // Keep opaque blocks in their prior positions while
+                // replacing only the host-visible slots. This handles
+                // legacy text-only snapshots as well as newly attached
+                // images without leaking stale visible attachments.
+                let mut visible_index = 0usize;
+                let mut parts = Vec::new();
+                for previous_part in &previous.parts {
+                    if is_provider_part(previous_part) {
+                        parts.push(previous_part.clone());
+                    } else if let Some(visible) = incoming_visible_parts.get(visible_index) {
+                        parts.push(visible.clone());
+                        visible_index += 1;
+                    }
+                }
+                parts.extend(incoming_visible_parts.iter().skip(visible_index).cloned());
+                merged.parts = parts;
+            }
+        }
+        merged_messages.push(merged);
+    }
+    merged_messages
+}
+
+fn is_provider_part(part: &ChatContentPart) -> bool {
+    matches!(
+        part,
+        ChatContentPart::Thinking { .. } | ChatContentPart::RedactedThinking { .. }
+    )
+}
+
+/// Return the host-visible content projection used for authoritative history
+/// matching. Older Electron snapshots sometimes carry text only in `content`
+/// and leave `parts` empty; normalize that representation to the same text
+/// block Rust stores so it can still reattach provider-private blocks.
+fn visible_parts(message: &ChatMessage) -> Vec<ChatContentPart> {
+    let mut parts = message
+        .parts
+        .iter()
+        .filter(|part| !is_provider_part(part))
+        .cloned()
+        .collect::<Vec<_>>();
+    if parts.is_empty() && !message.content.is_empty() {
+        parts.push(ChatContentPart::Text {
+            text: message.content.clone(),
+        });
+    }
+    parts
+}
+
+fn same_message_shape(left: &ChatMessage, right: &ChatMessage) -> bool {
+    if left.role != right.role {
+        return false;
+    }
+    let visible_matches = serde_json::to_value(visible_parts(left)).ok()
+        == serde_json::to_value(visible_parts(right)).ok();
+    if !visible_matches {
+        return false;
+    }
+    let metadata_matches = serde_json::to_value(&left.tool_calls).ok()
+        == serde_json::to_value(&right.tool_calls).ok()
+        && serde_json::to_value(&left.tool_results).ok()
+            == serde_json::to_value(&right.tool_results).ok();
+    metadata_matches || (right.tool_calls.is_empty() && right.tool_results.is_empty())
 }
 
 fn conv_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
@@ -460,6 +690,7 @@ fn chat_send(hub: &Arc<Hub>, ctx: &ConnectionContext, params: Value) -> Result<V
         p.content_parts.clone(),
         ctx.effective_capabilities(),
         ctx.effective_interactive(),
+        p.agent_id.clone(),
         p.provider_id.clone(),
         p.model.clone(),
         p.context.clone(),
@@ -517,10 +748,29 @@ async fn tool_call(
     ctx: &ConnectionContext,
     params: Value,
 ) -> Result<Value, ErrorObject> {
-    let name = params["name"]
-        .as_str()
+    // Accept the field spellings used by the Electron bridge, Flutter's
+    // older client, and generic JSON-RPC callers.  The public contract is
+    // still `{ name, args }`; aliases only keep existing clients from
+    // silently turning their arguments into `{}` and producing misleading
+    // "missing parameter" tool errors.
+    let name = ["name", "tool", "toolName", "tool_name"]
+        .into_iter()
+        .find_map(|key| params.get(key).and_then(Value::as_str))
         .ok_or_else(|| params_err("missing name"))?;
-    let args = params.get("args").cloned().unwrap_or(json!({}));
+    let raw_args = ["args", "arguments", "input", "parameters"]
+        .into_iter()
+        .find_map(|key| params.get(key).filter(|value| !value.is_null()))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let args = if let Some(serialized) = raw_args.as_str() {
+        serde_json::from_str::<Value>(serialized)
+            .map_err(|error| params_err(format!("tool arguments must be valid JSON: {error}")))?
+    } else {
+        raw_args
+    };
+    if !args.is_object() {
+        return Err(params_err("tool arguments must be an object"));
+    }
     let tools = hub.tools_for(&ctx.effective_capabilities());
     let tool = tools
         .iter()
@@ -541,6 +791,7 @@ async fn tool_call(
         name,
         &args,
         ctx.effective_interactive(),
+        None,
     )
     .await;
     if !allowed {
@@ -549,7 +800,8 @@ async fn tool_call(
             format!("permission denied: {name}"),
         ));
     }
-    let services = hub.services();
+    let mut services = hub.services();
+    services.visible_tool_catalog = Some(Arc::new(worldbase_tools::descriptors(&tools)));
     services.set_current_stream("tool-call");
     let value = tool.execute(args, &services).await.map_err(internal)?;
     Ok(value)
@@ -741,6 +993,7 @@ fn schedule_run(
         ctx.effective_interactive(),
         None,
         None,
+        None,
         ChatRunContext::default(),
     )
     .map_err(internal)?;
@@ -883,7 +1136,7 @@ fn group_inject(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         !session
             .members
             .iter()
-            .any(|member| member.agent_id.as_deref() == Some(target.as_str()))
+            .any(|member| group_member_id(member) == Some(target.as_str()))
     });
     if let Some(target) = unknown_target {
         return Err(ErrorObject::invalid_params(format!(
@@ -1023,12 +1276,20 @@ fn apply_group_board_update(
     Ok((session.board.clone(), update))
 }
 
-fn mark_native_group_member_finished(hub: &Arc<Hub>, group_id: &str, member: &GroupMember) {
-    let Some(agent_id) = member
+fn group_member_id(member: &GroupMember) -> Option<&str> {
+    member
         .agent_id
         .as_deref()
-        .filter(|agent_id| !agent_id.trim().is_empty())
-    else {
+        .map(str::trim)
+        .filter(|agent_id| !agent_id.is_empty())
+        .or_else(|| {
+            let name = member.name.trim();
+            (!name.is_empty()).then_some(name)
+        })
+}
+
+fn mark_native_group_member_finished(hub: &Arc<Hub>, group_id: &str, member: &GroupMember) {
+    let Some(agent_id) = group_member_id(member) else {
         return;
     };
     if let Some(session) = hub.group_sessions.lock().unwrap().get_mut(group_id) {
@@ -1078,20 +1339,12 @@ impl NativeGroupCollaborationRuntime {
     const PEER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
     fn member_id(&self) -> anyhow::Result<&str> {
-        self.member
-            .agent_id
-            .as_deref()
-            .filter(|agent_id| !agent_id.trim().is_empty())
-            .or_else(|| (!self.member.name.trim().is_empty()).then_some(self.member.name.as_str()))
+        group_member_id(&self.member)
             .ok_or_else(|| anyhow::anyhow!("native group member has no identifier"))
     }
 
     fn next_for_member(&self, member: GroupMember) -> anyhow::Result<Self> {
-        let agent_id = member
-            .agent_id
-            .as_deref()
-            .filter(|agent_id| !agent_id.trim().is_empty())
-            .or_else(|| (!member.name.trim().is_empty()).then_some(member.name.as_str()))
+        let agent_id = group_member_id(&member)
             .ok_or_else(|| anyhow::anyhow!("target member has no identifier"))?
             .to_string();
         let mut ancestry = self.ancestry.clone();
@@ -1144,10 +1397,7 @@ impl worldbase_tools::GroupCollaborationRuntime for NativeGroupCollaborationRunt
             let target = session
                 .members
                 .iter()
-                .find(|member| {
-                    member.agent_id.as_deref() == Some(target_agent_id)
-                        || (member.agent_id.is_none() && member.name == target_agent_id)
-                })
+                .find(|member| group_member_id(member) == Some(target_agent_id))
                 .cloned()
                 .ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1341,6 +1591,19 @@ impl worldbase_tools::GroupCollaborationRuntime for NativeGroupCollaborationRunt
 /// run handle and terminal cleanup cannot overwrite the parent group run. The
 /// Electron client recognizes the child-stream prefix and attaches those
 /// events to the owning group session.
+struct CancelRunOnDrop {
+    hub: Arc<Hub>,
+    stream_id: String,
+}
+
+impl Drop for CancelRunOnDrop {
+    fn drop(&mut self) {
+        if let Some(run) = self.hub.runs.lock().unwrap().get(&self.stream_id) {
+            run.abort.cancel();
+        }
+    }
+}
+
 async fn run_native_group_member(
     hub: Arc<Hub>,
     group_id: &str,
@@ -1396,6 +1659,7 @@ async fn run_native_group_member(
         interactive,
         None,
         None,
+        None,
         context,
         Some(child_stream_id.clone()),
         group_collaboration,
@@ -1404,6 +1668,13 @@ async fn run_native_group_member(
         run.stream_id == child_stream_id,
         "native group member was assigned an unexpected stream"
     );
+    // The caller may wrap this waiter in a timeout. The agent loop itself is a
+    // spawned task, so dropping only the waiter would otherwise leave a live
+    // child capable of executing tools and mutating the shared group board.
+    let _cancel_on_drop = CancelRunOnDrop {
+        hub: hub.clone(),
+        stream_id: child_stream_id.clone(),
+    };
     let mut last_assistant_message = String::new();
 
     loop {
@@ -1411,7 +1682,7 @@ async fn run_native_group_member(
         for frame in replay {
             after_seq = after_seq.max(frame.seq as i64);
             match frame.kind {
-                EventKind::AssistantMessage { content } => {
+                EventKind::AssistantMessage { content, .. } => {
                     last_assistant_message = content;
                 }
                 EventKind::Done { .. } => return Ok(last_assistant_message),
@@ -1433,7 +1704,7 @@ async fn run_native_group_member(
             Ok(frame) if frame.seq as i64 > after_seq => {
                 after_seq = frame.seq as i64;
                 match frame.kind {
-                    EventKind::AssistantMessage { content } => {
+                    EventKind::AssistantMessage { content, .. } => {
                         last_assistant_message = content;
                     }
                     EventKind::Done { .. } => return Ok(last_assistant_message),
@@ -1516,6 +1787,7 @@ fn group_message(
                 abort: CancellationToken::new(),
                 capabilities: capabilities.clone(),
                 interactive,
+                agent_id: None,
                 provider_id: None,
                 model: None,
                 context: run_context.clone(),
@@ -1551,8 +1823,8 @@ fn group_message(
         live.status = "running".into();
         live.active_member_ids = active_members
             .iter()
-            .filter_map(|member| member.agent_id.clone())
-            .filter(|agent_id| !agent_id.trim().is_empty())
+            .filter_map(group_member_id)
+            .map(ToOwned::to_owned)
             .collect();
         let mut local = live.clone();
         local.pending_injections = std::mem::take(&mut live.pending_injections);
@@ -1731,13 +2003,26 @@ fn group_blackboard_add(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObj
 // ---------- mcp ----------
 
 async fn mcp_call(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let server = params["server"]
-        .as_str()
+    // Keep the protocol tolerant of the same camelCase/snake_case spellings
+    // accepted by direct `tool.call` requests. Electron's generic MCP tool
+    // uses `server`/`tool`/`arguments`, while older mobile callers used the
+    // durable `server_id` and `args` names.
+    let server = ["server", "serverId", "server_id"]
+        .into_iter()
+        .find_map(|key| params.get(key).and_then(Value::as_str))
         .ok_or_else(|| params_err("missing server"))?;
-    let tool = params["tool"]
-        .as_str()
+    let tool = ["tool", "toolName", "tool_name"]
+        .into_iter()
+        .find_map(|key| params.get(key).and_then(Value::as_str))
         .ok_or_else(|| params_err("missing tool"))?;
-    let args = params.get("args").cloned().unwrap_or(json!({}));
+    let args = ["args", "arguments", "input", "parameters"]
+        .into_iter()
+        .find_map(|key| params.get(key).filter(|value| !value.is_null()))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !args.is_object() {
+        return Err(params_err("MCP arguments must be an object"));
+    }
     let result = hub
         .mcp
         .call_tool(server, tool, args)
@@ -1746,12 +2031,38 @@ async fn mcp_call(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     Ok(result)
 }
 
-async fn mcp_reload(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let configs: Vec<worldbase_mcp_client::McpServerConfig> =
+async fn mcp_reload(
+    hub: &Arc<Hub>,
+    ctx: &ConnectionContext,
+    params: Value,
+) -> Result<Value, ErrorObject> {
+    let mut configs: Vec<worldbase_mcp_client::McpServerConfig> =
         serde_json::from_value(params.get("servers").cloned().unwrap_or_else(|| json!([])))
             .map_err(|e| params_err(e.to_string()))?;
+    let is_mobile = ctx.effective_capabilities().platform.starts_with("mobile");
+    let mut ignored_unsupported = Vec::new();
+    if is_mobile {
+        configs.retain(|config| {
+            let supported = matches!(
+                config.transport.as_str(),
+                "http" | "streamable-http" | "sse"
+            );
+            if !supported {
+                ignored_unsupported.push(config.name.clone());
+            }
+            supported
+        });
+    }
     hub.mcp.configure(configs).await;
-    Ok(json!({ "servers": hub.mcp.server_names().await }))
+    let servers = hub.mcp.server_names().await;
+    if is_mobile {
+        Ok(json!({
+            "servers": servers,
+            "ignoredUnsupportedServers": ignored_unsupported
+        }))
+    } else {
+        Ok(json!({ "servers": servers }))
+    }
 }
 
 async fn mcp_refresh(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
@@ -2644,6 +2955,7 @@ async fn studio_prompt_optimize(hub: &Arc<Hub>, params: Value) -> Result<Value, 
             1024,
             worldbase_providers::ChatOptions {
                 temperature: Some(0.8),
+                enable_thinking: false,
                 reasoning_effort: None,
             },
         )
@@ -2653,6 +2965,7 @@ async fn studio_prompt_optimize(hub: &Arc<Hub>, params: Value) -> Result<Value, 
     while let Some(chunk) = stream.next().await {
         match chunk {
             Ok(worldbase_providers::StreamChunk::TextDelta(text)) => optimized.push_str(&text),
+            Ok(worldbase_providers::StreamChunk::ThinkingDelta(_)) => {}
             Ok(worldbase_providers::StreamChunk::Completed { assistant, .. }) => {
                 optimized = assistant.text_view();
                 break;
@@ -3706,6 +4019,7 @@ async fn exec_run(
         "execute_command",
         &params,
         ctx.effective_interactive(),
+        None,
     )
     .await;
     if !allowed {
@@ -3718,4 +4032,451 @@ async fn exec_run(
         .await
         .map_err(internal)?;
     Ok(serde_json::to_value(&result).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CancelRunOnDrop;
+    use crate::hub::{Hub, RunHandle};
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    use worldbase_protocol::types::{
+        Capabilities, ChatContentPart, ChatMessage, ChatRunContext, Role,
+    };
+
+    #[test]
+    fn dropping_native_group_waiter_cancels_its_spawned_child_run() {
+        let workspace = std::env::temp_dir().join(format!(
+            "worldbase-group-drop-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = Arc::new(
+            worldbase_memory::Store::open(&workspace.join("app.sqlite")).expect("open test store"),
+        );
+        let hub = Hub::new(workspace.clone(), store).expect("create test hub");
+        let stream_id = "group:member:timed-out".to_string();
+        let abort = CancellationToken::new();
+        hub.runs.lock().unwrap().insert(
+            stream_id.clone(),
+            RunHandle {
+                conversation_id: "group-child".into(),
+                abort: abort.clone(),
+                capabilities: Capabilities::desktop(),
+                interactive: true,
+                agent_id: None,
+                provider_id: None,
+                model: None,
+                context: ChatRunContext::default(),
+                group_collaboration: None,
+            },
+        );
+
+        drop(CancelRunOnDrop { hub, stream_id });
+
+        assert!(abort.is_cancelled());
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn authoritative_sync_preserves_matching_anthropic_provider_parts() {
+        let existing = vec![ChatMessage {
+            id: 7,
+            role: Role::Assistant,
+            content: "I found it.".into(),
+            parts: vec![
+                ChatContentPart::Thinking {
+                    thinking: "inspect the file".into(),
+                    signature: "opaque-signature".into(),
+                },
+                ChatContentPart::Text {
+                    text: "I found it.".into(),
+                },
+                ChatContentPart::RedactedThinking {
+                    data: "opaque-redacted".into(),
+                },
+            ],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        }];
+        let incoming = vec![ChatMessage {
+            id: 0,
+            role: Role::Assistant,
+            content: "I found it.".into(),
+            parts: vec![ChatContentPart::Text {
+                text: "I found it.".into(),
+            }],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        }];
+
+        let merged = super::merge_provider_parts(&existing, &incoming);
+
+        assert!(matches!(
+            &merged[0].parts[..],
+            [
+                ChatContentPart::Thinking { signature, .. },
+                ChatContentPart::Text { text },
+                ChatContentPart::RedactedThinking { data }
+            ] if signature == "opaque-signature"
+                && text == "I found it."
+                && data == "opaque-redacted"
+        ));
+    }
+
+    #[test]
+    fn authoritative_sync_rebuilds_legacy_text_around_provider_parts() {
+        let existing = vec![ChatMessage {
+            id: 7,
+            role: Role::Assistant,
+            content: "I found it.".into(),
+            parts: vec![
+                ChatContentPart::Thinking {
+                    thinking: "inspect the file".into(),
+                    signature: "opaque-signature".into(),
+                },
+                ChatContentPart::Text {
+                    text: "I found it.".into(),
+                },
+                ChatContentPart::RedactedThinking {
+                    data: "opaque-redacted".into(),
+                },
+            ],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        }];
+        let incoming = vec![ChatMessage {
+            id: 0,
+            role: Role::Assistant,
+            content: "I found it.".into(),
+            parts: vec![],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        }];
+
+        let merged = super::merge_provider_parts(&existing, &incoming);
+
+        assert!(matches!(
+            &merged[0].parts[..],
+            [
+                ChatContentPart::Thinking { signature, .. },
+                ChatContentPart::Text { text },
+                ChatContentPart::RedactedThinking { data }
+            ] if signature == "opaque-signature"
+                && text == "I found it."
+                && data == "opaque-redacted"
+        ));
+    }
+
+    #[test]
+    fn authoritative_sync_restores_omitted_tool_metadata_between_visible_rows() {
+        let existing = vec![
+            ChatMessage {
+                id: 1,
+                role: Role::User,
+                content: "look up the file".into(),
+                parts: vec![],
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 2,
+                role: Role::Assistant,
+                content: "I will inspect it".into(),
+                parts: vec![ChatContentPart::Text {
+                    text: "I will inspect it".into(),
+                }],
+                tool_calls: vec![worldbase_protocol::types::ToolCallRecord {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({ "path": "a.txt" }),
+                }],
+                tool_results: vec![],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 3,
+                role: Role::User,
+                content: String::new(),
+                parts: vec![],
+                tool_calls: vec![],
+                tool_results: vec![worldbase_protocol::types::ToolResultRecord {
+                    tool_call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    content: "contents".into(),
+                    is_error: false,
+                }],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 4,
+                role: Role::Assistant,
+                content: "The file says hello.".into(),
+                parts: vec![ChatContentPart::Text {
+                    text: "The file says hello.".into(),
+                }],
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            },
+        ];
+        let incoming = vec![
+            ChatMessage {
+                id: 0,
+                role: Role::User,
+                content: "look up the file".into(),
+                parts: vec![],
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 0,
+                role: Role::Assistant,
+                content: "The file says hello.".into(),
+                parts: vec![ChatContentPart::Text {
+                    text: "The file says hello.".into(),
+                }],
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            },
+        ];
+
+        let merged = super::merge_provider_parts(&existing, &incoming);
+
+        assert_eq!(merged.len(), 4);
+        assert_eq!(merged[1].tool_calls[0].id, "call-1");
+        assert_eq!(merged[2].tool_results[0].tool_call_id, "call-1");
+    }
+
+    #[test]
+    fn authoritative_sync_drops_provider_parts_after_an_assistant_edit() {
+        let existing = vec![ChatMessage {
+            id: 7,
+            role: Role::Assistant,
+            content: "old answer".into(),
+            parts: vec![ChatContentPart::Thinking {
+                thinking: "old reasoning".into(),
+                signature: "old-signature".into(),
+            }],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        }];
+        let incoming = vec![ChatMessage {
+            id: 0,
+            role: Role::Assistant,
+            content: "edited answer".into(),
+            parts: vec![],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        }];
+
+        let merged = super::merge_provider_parts(&existing, &incoming);
+
+        assert!(merged[0].parts.is_empty());
+    }
+
+    #[test]
+    fn authoritative_sync_matches_repeated_visible_messages_in_order() {
+        let existing = vec![
+            ChatMessage {
+                id: 1,
+                role: Role::User,
+                content: "repeat".into(),
+                parts: vec![ChatContentPart::Text {
+                    text: "repeat".into(),
+                }],
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 2,
+                role: Role::Assistant,
+                content: "same answer".into(),
+                parts: vec![
+                    ChatContentPart::Thinking {
+                        thinking: "first".into(),
+                        signature: "sig-1".into(),
+                    },
+                    ChatContentPart::Text {
+                        text: "same answer".into(),
+                    },
+                ],
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 3,
+                role: Role::User,
+                content: "repeat".into(),
+                parts: vec![ChatContentPart::Text {
+                    text: "repeat".into(),
+                }],
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 4,
+                role: Role::Assistant,
+                content: "same answer".into(),
+                parts: vec![
+                    ChatContentPart::Thinking {
+                        thinking: "second".into(),
+                        signature: "sig-2".into(),
+                    },
+                    ChatContentPart::Text {
+                        text: "same answer".into(),
+                    },
+                ],
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            },
+        ];
+        let incoming = existing
+            .iter()
+            .map(|message| ChatMessage {
+                id: 0,
+                role: message.role,
+                content: message.content.clone(),
+                parts: super::visible_parts(message),
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            })
+            .collect::<Vec<_>>();
+
+        let merged = super::merge_provider_parts(&existing, &incoming);
+
+        assert!(matches!(
+            &merged[1].parts[0],
+            ChatContentPart::Thinking { signature, .. } if signature == "sig-1"
+        ));
+        assert!(matches!(
+            &merged[3].parts[0],
+            ChatContentPart::Thinking { signature, .. } if signature == "sig-2"
+        ));
+    }
+
+    #[test]
+    fn authoritative_sync_does_not_reuse_metadata_for_changed_visible_images() {
+        let existing = vec![ChatMessage {
+            id: 1,
+            role: Role::Assistant,
+            content: "image answer".into(),
+            parts: vec![
+                ChatContentPart::Thinking {
+                    thinking: "old".into(),
+                    signature: "old-signature".into(),
+                },
+                ChatContentPart::Text {
+                    text: "image answer".into(),
+                },
+                ChatContentPart::ImageUrl {
+                    image_url: worldbase_protocol::types::ImageUrl {
+                        url: "data:image/png;base64,old".into(),
+                    },
+                },
+            ],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        }];
+        let incoming = vec![ChatMessage {
+            id: 0,
+            role: Role::Assistant,
+            content: "image answer".into(),
+            parts: vec![
+                ChatContentPart::Text {
+                    text: "image answer".into(),
+                },
+                ChatContentPart::ImageUrl {
+                    image_url: worldbase_protocol::types::ImageUrl {
+                        url: "data:image/png;base64,new".into(),
+                    },
+                },
+            ],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        }];
+
+        let merged = super::merge_provider_parts(&existing, &incoming);
+
+        assert!(merged[0]
+            .parts
+            .iter()
+            .all(|part| { !matches!(part, ChatContentPart::Thinking { .. }) }));
+    }
+
+    #[test]
+    fn authoritative_sync_drops_trailing_hidden_tool_rows_after_a_branch_edit() {
+        let existing = vec![
+            ChatMessage {
+                id: 1,
+                role: Role::User,
+                content: "question".into(),
+                parts: vec![ChatContentPart::Text {
+                    text: "question".into(),
+                }],
+                tool_calls: vec![],
+                tool_results: vec![],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 2,
+                role: Role::Assistant,
+                content: String::new(),
+                parts: vec![],
+                tool_calls: vec![worldbase_protocol::types::ToolCallRecord {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({ "path": "a.txt" }),
+                }],
+                tool_results: vec![],
+                created_at: None,
+            },
+            ChatMessage {
+                id: 3,
+                role: Role::User,
+                content: String::new(),
+                parts: vec![],
+                tool_calls: vec![],
+                tool_results: vec![worldbase_protocol::types::ToolResultRecord {
+                    tool_call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    content: "old result".into(),
+                    is_error: false,
+                }],
+                created_at: None,
+            },
+        ];
+        let incoming = vec![ChatMessage {
+            id: 0,
+            role: Role::User,
+            content: "question".into(),
+            parts: vec![ChatContentPart::Text {
+                text: "question".into(),
+            }],
+            tool_calls: vec![],
+            tool_results: vec![],
+            created_at: None,
+        }];
+
+        let merged = super::merge_provider_parts(&existing, &incoming);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].tool_calls.is_empty());
+        assert!(merged[0].tool_results.is_empty());
+    }
 }

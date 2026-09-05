@@ -27,8 +27,7 @@ class _LaunchpadTabState extends ConsumerState<LaunchpadTab> {
     super.initState();
     _loadGenerated();
     // 连接建立/恢复后重载(首帧时 WS 可能尚未就绪)
-    _connSub =
-        HarnessClient.instance.stateStream.listen((state) {
+    _connSub = HarnessClient.instance.stateStream.listen((state) {
       if (state == HarnessState.connected) _loadGenerated();
     });
   }
@@ -69,7 +68,10 @@ class _LaunchpadTabState extends ConsumerState<LaunchpadTab> {
         padding: const EdgeInsets.fromLTRB(0, 4, 0, 20),
         children: [
           if (loading)
-            const Padding(padding: EdgeInsets.all(24), child: CupertinoActivityIndicator())
+            const Padding(
+              padding: EdgeInsets.all(24),
+              child: CupertinoActivityIndicator(),
+            )
           else if (empty)
             _EmptyApps()
           else
@@ -90,18 +92,18 @@ class _LaunchpadTabState extends ConsumerState<LaunchpadTab> {
                     final app = generated[i];
                     return _AppIcon(
                       name: app.name,
-                      onOpen: () => Navigator.of(context).push(
-                        cupertinoRoute(_LightAppPage(app: app)),
-                      ),
+                      onOpen: () => Navigator.of(
+                        context,
+                      ).push(cupertinoRoute(_LightAppPage(app: app))),
                       onLongPress: () => _confirmRemoveGenerated(context, app),
                     );
                   }
                   final web = webApps[i - generated.length];
                   return _AppIcon(
                     name: web.name,
-                    onOpen: () => Navigator.of(context).push(
-                      cupertinoRoute(_WebviewPage(app: web)),
-                    ),
+                    onOpen: () => Navigator.of(
+                      context,
+                    ).push(cupertinoRoute(_WebviewPage(app: web))),
                     onLongPress: () =>
                         _confirmRemoveWeb(context, ref, i - generated.length),
                   );
@@ -113,7 +115,10 @@ class _LaunchpadTabState extends ConsumerState<LaunchpadTab> {
     );
   }
 
-  Future<void> _confirmRemoveGenerated(BuildContext context, LightApp app) async {
+  Future<void> _confirmRemoveGenerated(
+    BuildContext context,
+    LightApp app,
+  ) async {
     _confirmRemove(
       context,
       name: app.name,
@@ -124,7 +129,11 @@ class _LaunchpadTabState extends ConsumerState<LaunchpadTab> {
     );
   }
 
-  Future<void> _confirmRemoveWeb(BuildContext context, WidgetRef ref, int index) async {
+  Future<void> _confirmRemoveWeb(
+    BuildContext context,
+    WidgetRef ref,
+    int index,
+  ) async {
     final apps = ref.read(webAppsProvider).value ?? [];
     if (index >= apps.length) return;
     _confirmRemove(
@@ -134,8 +143,11 @@ class _LaunchpadTabState extends ConsumerState<LaunchpadTab> {
     );
   }
 
-  void _confirmRemove(BuildContext context,
-      {required String name, required Future<void> Function() onRemove}) {
+  void _confirmRemove(
+    BuildContext context, {
+    required String name,
+    required Future<void> Function() onRemove,
+  }) {
     showCupertinoModalPopup<void>(
       context: context,
       builder: (ctx) => CupertinoActionSheet(
@@ -167,31 +179,48 @@ class _LaunchpadTabState extends ConsumerState<LaunchpadTab> {
         title: const Text('添加网页快捷方式'),
         content: Padding(
           padding: const EdgeInsets.only(top: 12),
-          child: Column(children: [
-            CupertinoTextField(
-              controller: nameCtrl,
-              placeholder: '名称',
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            ),
-            const SizedBox(height: 8),
-            CupertinoTextField(
-              controller: urlCtrl,
-              placeholder: 'https://example.com',
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            ),
-          ]),
+          child: Column(
+            children: [
+              CupertinoTextField(
+                controller: nameCtrl,
+                placeholder: '名称',
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+              ),
+              const SizedBox(height: 8),
+              CupertinoTextField(
+                controller: urlCtrl,
+                placeholder: 'https://example.com',
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
-          CupertinoDialogAction(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
           CupertinoDialogAction(
             isDefaultAction: true,
             onPressed: () {
               final url = urlCtrl.text.trim();
               if (url.isEmpty) return;
-              ref.read(webAppsProvider.notifier).add(WebApp(
-                    name: nameCtrl.text.trim().isEmpty ? url : nameCtrl.text.trim(),
-                    url: url.startsWith('http') ? url : 'https://$url',
-                  ));
+              ref
+                  .read(webAppsProvider.notifier)
+                  .add(
+                    WebApp(
+                      name: nameCtrl.text.trim().isEmpty
+                          ? url
+                          : nameCtrl.text.trim(),
+                      url: url.startsWith('http') ? url : 'https://$url',
+                    ),
+                  );
               Navigator.pop(ctx);
             },
             child: const Text('添加'),
@@ -204,7 +233,11 @@ class _LaunchpadTabState extends ConsumerState<LaunchpadTab> {
 
 /// 统一的应用图标:晨昏渐变首字块(不区分轻应用/网页)。
 class _AppIcon extends StatelessWidget {
-  const _AppIcon({required this.name, required this.onOpen, required this.onLongPress});
+  const _AppIcon({
+    required this.name,
+    required this.onOpen,
+    required this.onLongPress,
+  });
 
   final String name;
   final VoidCallback onOpen;
@@ -257,11 +290,13 @@ class _AppIcon extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 5),
-          Text(name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 11, color: p.ink)),
+          Text(
+            name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 11, color: p.ink),
+          ),
         ],
       ),
     );
@@ -284,11 +319,20 @@ class _EmptyApps extends StatelessWidget {
         children: [
           Icon(CupertinoIcons.square_grid_2x2, size: 38, color: p.ink3),
           const SizedBox(height: 10),
-          Text('还没有应用', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: p.ink)),
+          Text(
+            '还没有应用',
+            style: TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w600,
+              color: p.ink,
+            ),
+          ),
           const SizedBox(height: 4),
-          Text('在对话里让 Agent「做一个记事本应用」,\n或点右上角添加网页快捷方式',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: p.ink2, height: 1.5)),
+          Text(
+            '在对话里让 Agent「做一个记事本应用」,\n或点右上角添加网页快捷方式',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, color: p.ink2, height: 1.5),
+          ),
         ],
       ),
     );
@@ -317,7 +361,9 @@ class _LightAppPage extends StatelessWidget {
         child: WebViewWidget(
           controller: WebViewController()
             ..setJavaScriptMode(JavaScriptMode.unrestricted)
-            ..loadRequest(Uri.parse('${HarnessClient.instance.httpBase}/lightapp/${app.id}')),
+            ..loadRequest(
+              HarnessClient.instance.resourceUri('/lightapp/${app.id}'),
+            ),
         ),
       ),
     );
@@ -342,14 +388,19 @@ class _WebviewPageState extends State<_WebviewPage> {
     super.initState();
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(NavigationDelegate(
-        onPageFinished: (url) {
-          WebviewControllerHolder.instance.url = url;
-          _controller.runJavaScriptReturningResult('document.title').then((t) {
-            WebviewControllerHolder.instance.title = t.toString();
-          }).catchError((_) {});
-        },
-      ))
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageFinished: (url) {
+            WebviewControllerHolder.instance.url = url;
+            _controller
+                .runJavaScriptReturningResult('document.title')
+                .then((t) {
+                  WebviewControllerHolder.instance.title = t.toString();
+                })
+                .catchError((_) {});
+          },
+        ),
+      )
       ..loadRequest(Uri.parse(widget.app.url));
     WebviewControllerHolder.instance.controller = _controller;
     WebviewControllerHolder.instance.url = widget.app.url;

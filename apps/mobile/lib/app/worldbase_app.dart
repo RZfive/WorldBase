@@ -15,13 +15,19 @@ class WorldBaseApp extends ConsumerStatefulWidget {
   ConsumerState<WorldBaseApp> createState() => _WorldBaseAppState();
 }
 
-class _WorldBaseAppState extends ConsumerState<WorldBaseApp> with WidgetsBindingObserver {
+class _WorldBaseAppState extends ConsumerState<WorldBaseApp>
+    with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     Future.microtask(() async {
       await ref.read(connectionProvider.notifier).connect();
+      // These application-level controllers own long-running chat and image
+      // streams, so navigation never controls their lifetime.
+      ref.read(chatProvider);
+      ref.read(groupChatProvider);
+      ref.read(studioQueueProvider);
       ref.read(conversationsProvider.notifier).refresh();
     });
   }

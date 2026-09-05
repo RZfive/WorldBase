@@ -21,6 +21,9 @@ pub struct RunHandle {
     pub capabilities: Capabilities,
     /// 宿主是否可应答权限询问（交互式宿主 = true）。
     pub interactive: bool,
+    /// Explicit per-run Agent selection from `chat.send`. This takes
+    /// precedence over the conversation's persisted default Agent.
+    pub agent_id: Option<String>,
     /// 本轮对话的供应商/模型覆盖（客户端快速切换）。
     pub provider_id: Option<String>,
     pub model: Option<String>,
@@ -59,6 +62,17 @@ pub struct Hub {
     /// 宿主反向请求挂起表（host.request → host.respond）。
     pub pending_host_requests:
         std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>,
+}
+
+struct PendingHostRequestGuard<'a> {
+    pending: &'a std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>,
+    request_id: String,
+}
+
+impl Drop for PendingHostRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.request_id);
+    }
 }
 
 impl Hub {
@@ -106,30 +120,24 @@ impl Hub {
             .lock()
             .unwrap()
             .insert(request_id.clone(), tx);
+        // This future can be dropped when chat.abort wins a select in the
+        // agent loop. Keep cleanup tied to the future's lifetime so cancelled
+        // or timed-out Electron callbacks never remain in the pending map.
+        let _pending_guard = PendingHostRequestGuard {
+            pending: &self.pending_host_requests,
+            request_id: request_id.clone(),
+        };
 
         let frame_kind = EventKind::HostRequest {
             request_id: request_id.clone(),
             request_kind: kind.to_string(),
             payload: payload.clone(),
         };
-        // 事件经流通道 + 全局广播下发
-        let channel = self.streams.lock().unwrap().get(stream_id).cloned();
-        let seq = match &channel {
-            Some(ch) => ch.publish(stream_id, frame_kind.clone()).await,
-            None => 0,
-        };
-        let _ = self.event_tx.send(worldbase_protocol::event::EventFrame {
-            stream_id: stream_id.to_string(),
-            seq,
-            ts: worldbase_protocol::event::now_rfc3339(),
-            kind: frame_kind,
-        });
+        // Use the common publisher so direct `tool.call` host requests share
+        // the same monotonic replay/deduplication contract as chat streams.
+        self.emit(stream_id, frame_kind).await;
 
         let result = tokio::time::timeout(timeout, rx).await;
-        self.pending_host_requests
-            .lock()
-            .unwrap()
-            .remove(&request_id);
         match result {
             Ok(Ok(value)) => Ok(value),
             _ => anyhow::bail!("host request timeout or cancelled: {kind}"),
@@ -327,6 +335,7 @@ impl Hub {
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
+            visible_tool_catalog: None,
             store: self.store.clone(),
             skills: self.skills.clone(),
             scheduler: self.scheduler.clone(),

@@ -1,19 +1,20 @@
 //! 进程内 loopback 传输（mobile-ffi 私有实现，非独立部署层）：
 //! Dart UI ↔ 同进程 harness 的 WS/HTTP 桥。
 //! - `GET /health`：存活检查
-//! - `POST /rpc`：单请求单响应
-//! - `GET /ws`：WS 全双工（事件帧下行 + 请求上行）
+//! - `POST /rpc`：无状态单请求单响应（每次使用 transport bootstrap capabilities）
+//! - `GET /ws`：WS 全双工（事件帧下行 + 请求上行），`initialize` 能力在连接内持久
 //! - `GET /studio/{id}`：图库图片
 //! - `GET /lightapp/{id}`：Agent 生成的单页应用
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{StatusCode, Uri};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response as AxumResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
-use std::net::SocketAddr;
+use std::collections::HashMap;
 use std::sync::Arc;
 use worldbase_core::dispatcher::ConnectionContext;
 use worldbase_core::{dispatcher, Hub};
@@ -25,13 +26,21 @@ use worldbase_protocol::types::Capabilities;
 struct TransportState {
     hub: Arc<Hub>,
     capabilities: Arc<Capabilities>,
+    auth_token: Arc<str>,
 }
 
 /// 启动 loopback 传输（阻塞）。
-pub async fn run(hub: Arc<Hub>, port: u16, capabilities: Capabilities) -> anyhow::Result<()> {
+pub async fn run(
+    hub: Arc<Hub>,
+    listener: tokio::net::TcpListener,
+    capabilities: Capabilities,
+    auth_token: String,
+    ready: std::sync::mpsc::SyncSender<()>,
+) -> anyhow::Result<()> {
     let state = TransportState {
         hub,
         capabilities: Arc::new(capabilities),
+        auth_token: auth_token.into(),
     };
     let image_hub = state.hub.clone();
     let app = Router::new()
@@ -74,19 +83,43 @@ pub async fn run(hub: Arc<Hub>, port: u16, capabilities: Capabilities) -> anyhow
                 }
             }),
         )
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let addr = listener.local_addr()?;
     tracing::info!(%addr, "embedded harness transport listening");
+    let _ = ready.send(());
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn has_valid_auth(uri: &Uri, expected: &str) -> bool {
+    let Ok(Query(params)) = Query::<HashMap<String, String>>::try_from_uri(uri) else {
+        return false;
+    };
+    params
+        .get("token")
+        .is_some_and(|supplied| supplied == expected)
+}
+
+async fn require_auth(
+    State(state): State<TransportState>,
+    request: Request,
+    next: Next,
+) -> AxumResponse {
+    if !has_valid_auth(request.uri(), &state.auth_token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(request).await
 }
 
 async fn rpc_handler(
     State(state): State<TransportState>,
     Json(incoming): Json<Incoming>,
 ) -> (StatusCode, Json<Response>) {
+    // HTTP has no connection-scoped negotiation state and is intentionally
+    // stateless. Capability-sensitive request sequences must use /ws, where
+    // one ConnectionContext lives for the socket lifetime.
     let ctx = ConnectionContext::new((*state.capabilities).clone());
     match incoming {
         Incoming::Request(req) => {
@@ -120,6 +153,10 @@ async fn ws_handler(
 
 async fn ws_connection(state: TransportState, socket: WebSocket) {
     let (mut ws_tx, mut ws_rx) = socket.split();
+    // Capability negotiation belongs to the WebSocket connection, not an
+    // individual request. `initialize` mutates this context and every later
+    // request on the same socket must observe the negotiated capabilities.
+    let ctx = Arc::new(ConnectionContext::new((*state.capabilities).clone()));
     // 派发任务可能长时间等待（权限询问/宿主反向请求），响应经 mpsc 回单一写者
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let mut event_rx = state.hub.event_tx.subscribe();
@@ -158,11 +195,11 @@ async fn ws_connection(state: TransportState, socket: WebSocket) {
                         match incoming {
                             Incoming::Request(req) => {
                                 let hub = state.hub.clone();
-                                let ctx_ctx = ConnectionContext::new((*state.capabilities).clone());
+                                let ctx = ctx.clone();
                                 let id = req.id.clone();
                                 let resp_tx_task = resp_tx.clone();
                                 tokio::spawn(async move {
-                                    let result = dispatcher::dispatch(&hub, &ctx_ctx, &req.method, req.params).await;
+                                    let result = dispatcher::dispatch(&hub, &ctx, &req.method, req.params).await;
                                     let resp = match result {
                                         Ok(value) => Response::success(id, value),
                                         Err(err) => Response::error(id, err),
@@ -172,9 +209,9 @@ async fn ws_connection(state: TransportState, socket: WebSocket) {
                             }
                             Incoming::Notification(n) => {
                                 let hub = state.hub.clone();
-                                let ctx_ctx = ConnectionContext::new((*state.capabilities).clone());
+                                let ctx = ctx.clone();
                                 tokio::spawn(async move {
-                                    let _ = dispatcher::dispatch(&hub, &ctx_ctx, &n.method, n.params).await;
+                                    let _ = dispatcher::dispatch(&hub, &ctx, &n.method, n.params).await;
                                 });
                             }
                         }
@@ -187,4 +224,25 @@ async fn ws_connection(state: TransportState, socket: WebSocket) {
         }
     }
     writer.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_valid_auth;
+
+    #[test]
+    fn auth_query_requires_an_exact_token() {
+        let expected = "token+with/special=value";
+        assert!(has_valid_auth(
+            &"/health?token=token%2Bwith%2Fspecial%3Dvalue"
+                .parse()
+                .unwrap(),
+            expected
+        ));
+        assert!(!has_valid_auth(&"/health".parse().unwrap(), expected));
+        assert!(!has_valid_auth(
+            &"/health?token=wrong".parse().unwrap(),
+            expected
+        ));
+    }
 }

@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
@@ -9,8 +8,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/glass.dart';
-import '../../core/harness_client.dart';
 import '../../core/ios_ui.dart';
+import '../../core/providers.dart';
 import '../common/model_picker.dart';
 
 /// 绘图 Studio：生成 / 编辑 / 图库 / 队列四个并列功能（顶部分段切换），参数对齐桌面端。
@@ -39,12 +38,10 @@ class _StudioTabState extends ConsumerState<StudioTab> {
   String? _providerId; // null = 默认
   String? _model;
   String _providerName = '';
-  List<StudioTask> _tasks = [];
-  int _maxConcurrentTasks = 2;
-  final Map<String, StreamSubscription<EventFrame>> _taskSubs = {};
-  StreamSubscription<EventFrame>? _agentTaskSub;
-  StreamSubscription<void>? _studioTaskChangedSub;
-  Future<void> _taskSaveQueue = Future<void>.value();
+
+  List<StudioTask> get _tasks => ref.read(studioQueueProvider).tasks;
+  int get _maxConcurrentTasks =>
+      ref.read(studioQueueProvider).maxConcurrentTasks;
 
   static const _aspects = ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4'];
   static const _resolutions = ['1K', '2K', '4K'];
@@ -254,25 +251,11 @@ class _StudioTabState extends ConsumerState<StudioTab> {
     super.initState();
     _loadGallery();
     _loadFolders();
-    _loadTasks();
-    _loadConcurrency();
-    _drainAgentTasks();
-    _listenForAgentQueuedTasks();
-    _studioTaskChangedSub = HarnessClient.instance.studioTasksChanged.listen((
-      _,
-    ) {
-      _loadTasks(preserveRunning: true);
-    });
+    ref.read(studioQueueProvider.notifier);
   }
 
   @override
   void dispose() {
-    for (final sub in _taskSubs.values) {
-      sub.cancel();
-    }
-    _taskSubs.clear();
-    _agentTaskSub?.cancel();
-    _studioTaskChangedSub?.cancel();
     _promptCtrl.dispose();
     _negativeCtrl.dispose();
     _searchCtrl.dispose();
@@ -322,276 +305,32 @@ class _StudioTabState extends ConsumerState<StudioTab> {
     } catch (_) {}
   }
 
-  Future<void> _loadTasks({bool preserveRunning = false}) async {
-    try {
-      final loaded = await HarnessClient.instance.loadStudioTasks();
-      if (!mounted) return;
-      setState(() {
-        _tasks = loaded.reversed.map((task) {
-          if (task.status != 'running' || preserveRunning) return task;
-          final streamId = task.request['_streamId'] as String?;
-          if (task.request['_chatControlled'] == true &&
-              streamId != null &&
-              HarnessClient.instance.isStudioStreamActive(streamId)) {
-            return task;
-          }
-          return task.copyWith(status: 'queued');
-        }).toList();
-      });
-      _runScheduler();
-    } catch (_) {}
-  }
-
-  Future<void> _loadConcurrency() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final value = prefs.getInt('studio:maxConcurrentTasks') ?? 2;
-      if (mounted) {
-        setState(() {
-          _maxConcurrentTasks = value.clamp(1, 8);
-        });
-        _runScheduler();
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _setConcurrency(int next) async {
-    final value = next.clamp(1, 8);
-    if (value == _maxConcurrentTasks) return;
-    setState(() => _maxConcurrentTasks = value);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setInt('studio:maxConcurrentTasks', value);
-    } catch (_) {}
-    _runScheduler();
-  }
-
-  Future<void> _saveTasks() async {
-    final snapshot = [..._tasks];
-    _taskSaveQueue = _taskSaveQueue
-        .then((_) => HarnessClient.instance.saveStudioTasks(snapshot))
-        .catchError((_) {});
-    await _taskSaveQueue;
-  }
-
-  Future<void> _drainAgentTasks() async {
-    try {
-      final pending = await HarnessClient.instance.drainStudioTasks();
-      for (final request in pending) {
-        _enqueueTask(request, createdByAgent: true);
-      }
-    } catch (_) {}
-  }
-
-  void _listenForAgentQueuedTasks() {
-    _agentTaskSub = HarnessClient.instance.events.listen((frame) {
-      if (frame.kind != 'tool_result') return;
-      final name = frame.data['name'] as String? ?? '';
-      if (name != 'generate_image' && name != 'edit_image') return;
-      final content = frame.data['content'] as String? ?? '';
-      try {
-        final result = jsonDecode(content);
-        if (result is Map && ((result['queued'] as num?)?.toInt() ?? 0) > 0) {
-          _drainAgentTasks();
-        }
-      } catch (_) {}
-    });
-  }
-
-  StudioTask? _taskById(String id) {
-    for (final task in _tasks) {
-      if (task.id == id) return task;
-    }
-    return null;
-  }
-
-  void _replaceTask(StudioTask task) {
-    if (!mounted) return;
-    setState(() {
-      _tasks = [
-        for (final item in _tasks)
-          if (item.id == task.id) task else item,
-      ];
-    });
-  }
-
   void _enqueueTask(
     Map<String, dynamic> request, {
     bool createdByAgent = false,
   }) {
-    final now = DateTime.now().microsecondsSinceEpoch;
-    final task = StudioTask(
-      id: 'studio-$now',
-      status: 'queued',
-      createdAt: now,
-      request: request,
-      label: request['prompt'] as String? ?? '',
-      createdByAgent: createdByAgent,
-    );
-    setState(() => _tasks = [task, ..._tasks]);
-    _saveTasks();
-    _runScheduler();
+    ref
+        .read(studioQueueProvider.notifier)
+        .enqueue(request, createdByAgent: createdByAgent);
   }
 
-  void _runScheduler() {
-    if (!mounted) return;
-    var running = _tasks.where((task) => task.status == 'running').length;
-    while (running < _maxConcurrentTasks) {
-      StudioTask? next;
-      for (final task in _tasks.reversed) {
-        if (task.status == 'queued') {
-          next = task;
-          break;
-        }
-      }
-      if (next == null) break;
-      running += 1;
-      _executeTask(next);
-    }
-  }
+  Future<void> _loadTasks() =>
+      ref.read(studioQueueProvider.notifier).refresh(preserveRunning: true);
 
-  Future<void> _executeTask(StudioTask queuedTask) async {
-    final task = queuedTask.copyWith(status: 'running');
-    _replaceTask(task);
-    _saveTasks();
-    final request = task.request;
-    final taskId = task.id;
-    try {
-      final streamId = await HarnessClient.instance.studioGenerate(
-        prompt: request['prompt'] as String? ?? '',
-        mode: request['mode'] as String? ?? 'generate',
-        negativePrompt: request['negativePrompt'] as String?,
-        aspect:
-            request['aspect'] as String? ?? request['aspectRatio'] as String?,
-        resolution: request['resolution'] as String?,
-        quality: request['quality'] as String?,
-        format:
-            request['format'] as String? ?? request['outputFormat'] as String?,
-        size: request['size'] as String?,
-        n: (request['n'] as num?)?.toInt() ?? 1,
-        inputImageB64: request['inputImageB64'] as String?,
-        inputImages:
-            (request['inputImages'] as List?)?.whereType<String>().toList() ??
-            const [],
-        folder: request['folder'] as String?,
-        tags:
-            (request['tags'] as List?)?.whereType<String>().toList() ??
-            const [],
-        providerId: request['providerId'] as String?,
-        model: request['model'] as String?,
-      );
-      final sub = HarnessClient.instance
-          .subscribeStream(streamId)
-          .listen(
-            (frame) {
-              final current = _taskById(taskId);
-              if (current == null) return;
-              if (frame.kind == 'image_ready') {
-                final entry = ImageEntry.fromJson(
-                  (frame.data['entry'] as Map).cast<String, dynamic>(),
-                );
-                _replaceTask(
-                  current.copyWith(entries: [...current.entries, entry]),
-                );
-                _saveTasks();
-                _loadGallery();
-              } else if (frame.kind == 'done' || frame.kind == 'error') {
-                final latest = _taskById(taskId);
-                if (latest?.status == 'running') {
-                  final terminal = frame.kind == 'error'
-                      ? latest!.copyWith(
-                          status: 'error',
-                          error: frame.data['message'] as String? ?? '生成失败',
-                        )
-                      : latest!.copyWith(status: 'success');
-                  _replaceTask(terminal);
-                  _saveTasks();
-                }
-                HarnessClient.instance.markStudioStreamFinished(streamId);
-                _taskSubs.remove(taskId)?.cancel();
-                _runScheduler();
-              }
-            },
-            onError: (Object error) {
-              final current = _taskById(taskId);
-              if (current?.status == 'running') {
-                _replaceTask(
-                  current!.copyWith(status: 'error', error: '$error'),
-                );
-                _saveTasks();
-              }
-              HarnessClient.instance.markStudioStreamFinished(streamId);
-              _taskSubs.remove(taskId)?.cancel();
-              _runScheduler();
-            },
-            onDone: () {
-              final current = _taskById(taskId);
-              if (current?.status == 'running') {
-                _replaceTask(
-                  current!.entries.isNotEmpty
-                      ? current.copyWith(status: 'success')
-                      : current.copyWith(status: 'error', error: '连接中断'),
-                );
-                _saveTasks();
-              }
-              HarnessClient.instance.markStudioStreamFinished(streamId);
-              _runScheduler();
-            },
-          );
-      _taskSubs[taskId] = sub;
-    } catch (e) {
-      final current = _taskById(taskId);
-      if (current != null) {
-        _replaceTask(current.copyWith(status: 'error', error: '$e'));
-        _saveTasks();
-      }
-      _runScheduler();
-    }
-  }
+  Future<void> _setConcurrency(int next) =>
+      ref.read(studioQueueProvider.notifier).setConcurrency(next);
 
-  void _retryTask(String id) {
-    final task = _taskById(id);
-    if (task == null || task.status == 'running') return;
-    _replaceTask(
-      task.copyWith(status: 'queued', clearError: true, entries: const []),
-    );
-    _saveTasks();
-    _runScheduler();
-  }
+  void _retryTask(String id) =>
+      ref.read(studioQueueProvider.notifier).retryTask(id);
 
-  void _removeTask(String id) {
-    setState(() {
-      _tasks = _tasks.where((task) => task.id != id).toList();
-    });
-    _saveTasks();
-  }
+  void _removeTask(String id) =>
+      ref.read(studioQueueProvider.notifier).removeTask(id);
 
-  void _clearFinishedTasks() {
-    setState(() {
-      _tasks = _tasks
-          .where((task) => task.status == 'queued' || task.status == 'running')
-          .toList();
-    });
-    _saveTasks();
-  }
+  void _clearFinishedTasks() =>
+      ref.read(studioQueueProvider.notifier).clearFinishedTasks();
 
-  void _retryAllFailedTasks() {
-    setState(() {
-      _tasks = _tasks
-          .map(
-            (task) => task.status == 'error'
-                ? task.copyWith(
-                    status: 'queued',
-                    clearError: true,
-                    entries: const [],
-                  )
-                : task,
-          )
-          .toList();
-    });
-    _saveTasks();
-    _runScheduler();
-  }
+  void _retryAllFailedTasks() =>
+      ref.read(studioQueueProvider.notifier).retryAllFailedTasks();
 
   Future<void> _runGenerate({required bool editMode}) async {
     final prompt = _promptCtrl.text.trim();
@@ -606,9 +345,7 @@ class _StudioTabState extends ConsumerState<StudioTab> {
         final client = HttpClient();
         try {
           final req = await client.getUrl(
-            Uri.parse(
-              '${HarnessClient.instance.httpBase}/studio/${_editSource!.id}',
-            ),
+            HarnessClient.instance.resourceUri('/studio/${_editSource!.id}'),
           );
           final resp = await req.close();
           if (resp.statusCode < 200 || resp.statusCode >= 300) {
@@ -701,7 +438,9 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(8),
                       child: Image.network(
-                        '${HarnessClient.instance.httpBase}/studio/${_gallery[i].id}',
+                        HarnessClient.instance
+                            .resourceUri('/studio/${_gallery[i].id}')
+                            .toString(),
                         fit: BoxFit.cover,
                         errorBuilder: (ctx, e, _) =>
                             const ColoredBox(color: Color(0xFFE5E5EA)),
@@ -971,7 +710,9 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(14),
                           child: Image.network(
-                            '${HarnessClient.instance.httpBase}/studio/${task.entries[i].id}',
+                            HarnessClient.instance
+                                .resourceUri('/studio/${task.entries[i].id}')
+                                .toString(),
                             width: 220,
                             fit: BoxFit.cover,
                           ),
@@ -1172,7 +913,9 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                                   },
                                   child: Center(
                                     child: Image.network(
-                                      '${HarnessClient.instance.httpBase}/studio/${entry.id}',
+                                      HarnessClient.instance
+                                          .resourceUri('/studio/${entry.id}')
+                                          .toString(),
                                       fit: BoxFit.contain,
                                       errorBuilder: (_, _, _) => Icon(
                                         CupertinoIcons.photo,
@@ -1544,7 +1287,14 @@ class _StudioTabState extends ConsumerState<StudioTab> {
 
   @override
   Widget build(BuildContext context) {
-    final activeTaskCount = _tasks
+    final queueState = ref.watch(studioQueueProvider);
+    ref.listen<int>(
+      studioQueueProvider.select((value) => value.galleryRevision),
+      (previous, next) {
+        if (previous != next) _loadGallery();
+      },
+    );
+    final activeTaskCount = queueState.tasks
         .where((task) => task.status == 'queued' || task.status == 'running')
         .length;
     final queueLabel = activeTaskCount > 0 ? '队列 ($activeTaskCount)' : '队列';
@@ -1809,7 +1559,9 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                             ClipRRect(
                               borderRadius: BorderRadius.circular(6),
                               child: Image.network(
-                                '${HarnessClient.instance.httpBase}/studio/${_editSource!.id}',
+                                HarnessClient.instance
+                                    .resourceUri('/studio/${_editSource!.id}')
+                                    .toString(),
                                 width: 52,
                                 height: 52,
                                 fit: BoxFit.cover,
@@ -2236,7 +1988,11 @@ class _StudioTabState extends ConsumerState<StudioTab> {
                               ClipRRect(
                                 borderRadius: BorderRadius.circular(8),
                                 child: Image.network(
-                                  '${HarnessClient.instance.httpBase}/studio/${task.entries.first.id}',
+                                  HarnessClient.instance
+                                      .resourceUri(
+                                        '/studio/${task.entries.first.id}',
+                                      )
+                                      .toString(),
                                   width: 40,
                                   height: 40,
                                   fit: BoxFit.cover,
@@ -2435,7 +2191,9 @@ class _ImageCard extends StatelessWidget {
                   ColoredBox(
                     color: p.groupedBg,
                     child: Image.network(
-                      '${HarnessClient.instance.httpBase}/studio/${entry.id}',
+                      HarnessClient.instance
+                          .resourceUri('/studio/${entry.id}')
+                          .toString(),
                       fit: BoxFit.cover,
                       errorBuilder: (ctx, e, _) => const Center(
                         child: Icon(

@@ -153,6 +153,50 @@ test('buildAnthropicRequestBody converts image data URLs to base64 sources', () 
   assert.deepEqual(blocks[2].source, { type: 'url', url: 'https://cdn.example.com/cat.png' })
 })
 
+test('buildAnthropicRequestBody replays signed and redacted thinking blocks unchanged', () => {
+  const runtime = anthropicRuntime()
+  const body = buildAnthropicRequestBody(runtime, [
+    { role: 'user', content: 'continue the lookup' },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'inspect the file', signature: 'opaque-signature' },
+        { type: 'text', text: 'I found it.' },
+        { type: 'redacted_thinking', data: 'opaque-redacted-payload' }
+      ],
+      tool_calls: [{
+        id: 'toolu_signed',
+        type: 'function',
+        function: { name: 'read_file', arguments: '{"path":"/tmp/x"}' }
+      }]
+    },
+    { role: 'tool', tool_call_id: 'toolu_signed', content: 'contents' }
+  ], [], false)
+
+  assert.deepEqual(body.messages[1].content.slice(0, 3), [
+    { type: 'thinking', thinking: 'inspect the file', signature: 'opaque-signature' },
+    { type: 'text', text: 'I found it.' },
+    { type: 'redacted_thinking', data: 'opaque-redacted-payload' }
+  ])
+})
+
+test('normalizeAnthropicResponse retains replayable thinking blocks', () => {
+  const { message } = normalizeAnthropicResponse({
+    content: [
+      { type: 'thinking', thinking: 'inspect', signature: 'sig-1' },
+      { type: 'redacted_thinking', data: 'redacted-1' },
+      { type: 'text', text: 'done' }
+    ]
+  })
+
+  assert.deepEqual(message.content, [
+    { type: 'thinking', thinking: 'inspect', signature: 'sig-1' },
+    { type: 'redacted_thinking', data: 'redacted-1' },
+    { type: 'text', text: 'done' }
+  ])
+  assert.equal(message.reasoning_content, 'inspect')
+})
+
 test('normalizeAnthropicResponse assembles text, thinking and tool calls', () => {
   const { message, usage } = normalizeAnthropicResponse({
     content: [
@@ -298,6 +342,50 @@ test('anthropic streaming end-to-end with a mocked fetch', async () => {
     total_tokens: 92,
     prompt_tokens_details: { cached_tokens: 30 }
   }])
+})
+
+test('anthropic streaming preserves thinking signatures and redacted payloads', async () => {
+  const provider = createAnthropicProvider()
+  provider.setApiKey('test-key')
+  provider.setEnableThinking(true)
+
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => {
+    const events = [
+      { type: 'message_start', message: { usage: { input_tokens: 1 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'inspect' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: '1' } },
+      { type: 'content_block_start', index: 1, content_block: { type: 'redacted_thinking', data: 'opaque' } },
+      { type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'done' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
+      { type: 'message_stop' }
+    ]
+    const payload = events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+    const body = new ReadableStream({
+      start (controller) {
+        controller.enqueue(new TextEncoder().encode(payload))
+        controller.close()
+      }
+    })
+    return new Response(body, { status: 200 })
+  }
+
+  try {
+    let doneMessage
+    for await (const event of provider.chatCompletionStream([{ role: 'user', content: 'go' }])) {
+      if (event.type === 'done') doneMessage = event.message
+    }
+    assert.deepEqual(doneMessage?.content, [
+      { type: 'thinking', thinking: 'inspect', signature: 'sig-1' },
+      { type: 'redacted_thinking', data: 'opaque' },
+      { type: 'text', text: 'done' }
+    ])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('anthropic non-streaming completion routes to /messages', async () => {

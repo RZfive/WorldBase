@@ -21,7 +21,6 @@ class _GroupPageState extends ConsumerState<GroupPage> {
   final _inputCtrl = TextEditingController();
   final _inputFocus = FocusNode();
   final _messageScrollCtrl = ScrollController();
-  late final GroupChatController _groupController;
   String? _openingGroupId;
   String? _catalogError;
   int? _mentionStart;
@@ -38,7 +37,6 @@ class _GroupPageState extends ConsumerState<GroupPage> {
   @override
   void initState() {
     super.initState();
-    _groupController = ref.read(groupChatProvider.notifier);
     _inputCtrl.addListener(_updateMentionState);
     Future.microtask(_refreshCatalogAndOpenInitialGroup);
   }
@@ -112,16 +110,14 @@ class _GroupPageState extends ConsumerState<GroupPage> {
   }
 
   Future<void> _backToGroupList() async {
+    if (ref.read(groupChatProvider.notifier).busy) return;
     final conversations = ref.read(conversationsProvider.notifier);
     await ref.read(groupChatProvider.notifier).close();
     unawaited(conversations.refresh());
   }
 
-  Future<void> _exitGroupPage() async {
-    final conversations = ref.read(conversationsProvider.notifier);
-    await ref.read(groupChatProvider.notifier).close();
+  void _exitGroupPage() {
     if (mounted) Navigator.of(context).pop();
-    unawaited(conversations.refresh());
   }
 
   Future<void> _send() async {
@@ -194,11 +190,8 @@ class _GroupPageState extends ConsumerState<GroupPage> {
 
     return PopScope(
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop && _groupController.session != null) {
-          final conversations = ref.read(conversationsProvider.notifier);
-          unawaited(
-            _groupController.close().then((_) => conversations.refresh()),
-          );
+        if (didPop) {
+          unawaited(ref.read(conversationsProvider.notifier).refresh());
         }
       },
       child: IosScreen(
@@ -211,7 +204,7 @@ class _GroupPageState extends ConsumerState<GroupPage> {
             if (session != null)
               IosIconButton(
                 icon: CupertinoIcons.person_2_fill,
-                onPressed: _backToGroupList,
+                onPressed: controller.busy ? null : _backToGroupList,
               ),
             if (session != null)
               IosIconButton(

@@ -16,10 +16,13 @@ use worldbase_protocol::types::ProviderConfig;
 
 pub mod anthropic;
 pub mod entry;
+mod http;
 pub mod mock;
 pub mod openai;
 mod remote_models;
 pub mod sse;
+mod tool_input;
+mod urls;
 
 pub use anthropic::AnthropicProvider;
 pub use entry::{
@@ -38,15 +41,34 @@ pub enum ContentBlock {
         text: String,
     },
     /// A data URL or remote URL supplied by the host as a user image part.
-    /// OpenAI-compatible endpoints accept this directly; Anthropic converts
-    /// data URLs to an image source block.
+    /// OpenAI-compatible endpoints accept this directly; Anthropic maps data
+    /// URLs to base64 sources and remote URLs to URL sources.
     ImageUrl {
         url: String,
+    },
+    /// Anthropic extended-thinking content. The signature is opaque and must
+    /// be replayed byte-for-byte when a tool result continues the response.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    /// Anthropic may encrypt thinking that trips a safety classifier. This
+    /// opaque payload must also be replayed unchanged on continuation.
+    RedactedThinking {
+        data: String,
     },
     ToolUse {
         id: String,
         name: String,
         input: Value,
+        /// Original provider text when arguments could not be parsed. OpenAI
+        /// can replay it verbatim; object-only protocols use `input` instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_input: Option<String>,
+        /// Parsing failures remain a tool-level error so the model can repair
+        /// its next call instead of terminating the entire response stream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_error: Option<String>,
     },
     ToolResult {
         tool_use_id: String,
@@ -96,9 +118,9 @@ impl LlmMessage {
         self.content
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, name, input } => {
-                    Some((id.clone(), name.clone(), input.clone()))
-                }
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => Some((id.clone(), name.clone(), input.clone())),
                 _ => None,
             })
             .collect()
@@ -119,6 +141,10 @@ pub struct LlmTool {
 #[derive(Debug, Clone, Default)]
 pub struct ChatOptions {
     pub temperature: Option<f32>,
+    /// Reasoning controls are opt-in. An effort value can remain selected in
+    /// the UI while thinking is disabled, so providers must check this flag
+    /// before adding any provider-specific reasoning parameter.
+    pub enable_thinking: bool,
     pub reasoning_effort: Option<String>,
 }
 
@@ -137,6 +163,7 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     TextDelta(String),
+    ThinkingDelta(String),
     Completed {
         stop_reason: String,
         assistant: LlmMessage,
@@ -199,6 +226,8 @@ mod tests {
                     id: "t1".into(),
                     name: "read_file".into(),
                     input: serde_json::json!({}),
+                    raw_input: None,
+                    input_error: None,
                 },
                 ContentBlock::Text {
                     text: "world".into(),

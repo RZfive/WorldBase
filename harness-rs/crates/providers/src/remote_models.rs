@@ -42,13 +42,14 @@ pub async fn fetch_remote_models(
         );
     }
 
-    let response = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .context("failed to create HTTP client")?
-        .get(endpoint)
-        .headers(headers)
-        .send()
+    let client = crate::http::client();
+    let response =
+        crate::http::send_with_retry_timeout("provider model catalog", REQUEST_TIMEOUT, || {
+            client
+                .get(endpoint.clone())
+                .headers(headers.clone())
+                .timeout(REQUEST_TIMEOUT)
+        })
         .await
         .context("failed to fetch provider models")?;
     let status = response.status();

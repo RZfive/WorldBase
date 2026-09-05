@@ -183,7 +183,10 @@ class ChatAttachment {
   final String? _dataUrl;
 
   bool get isImage =>
-      imageData != null || _dataUrl?.startsWith('data:image/') == true;
+      imageData != null ||
+      _dataUrl?.startsWith('data:image/') == true ||
+      _dataUrl?.startsWith('https://') == true ||
+      _dataUrl?.startsWith('http://') == true;
   String? get dataUrl =>
       _dataUrl ??
       (imageData == null
@@ -253,9 +256,16 @@ ChatAttachmentProjection projectChatAttachments(
     if (part['type'] != 'image_url') continue;
     final image = part['image_url'] ?? part['imageUrl'];
     final url = image is Map ? image['url'] as String? : null;
-    if (url?.startsWith('data:image/') != true) continue;
-    final mimeEnd = url!.indexOf(';');
-    final type = mimeEnd > 11 ? url.substring(11, mimeEnd) : 'image';
+    if (url == null ||
+        !(url.startsWith('data:image/') ||
+            url.startsWith('https://') ||
+            url.startsWith('http://'))) {
+      continue;
+    }
+    final mimeEnd = url.indexOf(';');
+    final type = url.startsWith('data:image/') && mimeEnd > 11
+        ? url.substring(11, mimeEnd)
+        : 'image';
     attachments.add(
       ChatAttachment(
         id: 'history-image-${index++}',

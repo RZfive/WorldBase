@@ -833,6 +833,7 @@ pub async fn run_member_provider(member: &GroupMember, prompt: &str) -> Result<S
     while let Some(chunk) = stream.next().await {
         match chunk? {
             worldbase_providers::StreamChunk::TextDelta(t) => text.push_str(&t),
+            worldbase_providers::StreamChunk::ThinkingDelta(_) => {}
             worldbase_providers::StreamChunk::Completed { assistant, .. } => {
                 let full = assistant.text_view();
                 if !full.is_empty() {

@@ -30,7 +30,7 @@ export 'harness_client.dart'
         ToolDescriptor,
         WebApp;
 
-/// 连接状态（FFI 进程内优先，外部 serve 为静默降级，UI 不展示）。
+/// 连接状态（仅使用应用进程内的 FFI harness）。
 class ConnectionNotifier extends Notifier<HarnessState> {
   @override
   HarnessState build() {
@@ -43,8 +43,13 @@ class ConnectionNotifier extends Notifier<HarnessState> {
   Future<void> connect() async {
     // FFI 进程内 harness（唯一路径；serve 部署层已删除）
     final port = await _startFfi();
-    if (port != null && port > 0) {
-      HarnessClient.instance.configure(host: '127.0.0.1', port: port);
+    final authToken = HarnessFfi.authToken;
+    if (port != null && port > 0 && authToken != null) {
+      HarnessClient.instance.configure(
+        host: '127.0.0.1',
+        port: port,
+        authToken: authToken,
+      );
       try {
         await HarnessClient.instance.connect();
         return;
@@ -241,18 +246,28 @@ final chatTargetProvider = NotifierProvider<ChatTargetNotifier, ChatTarget>(
 /// 对话运行参数，对齐 Electron 输入框折叠面板。
 /// 状态按发送消息读取，并映射到 Rust chat.send 的临时运行上下文。
 class ChatSwitches {
-  const ChatSwitches({this.reasoningStrength = 'max', this.temperature});
+  const ChatSwitches({
+    this.enableThinking = false,
+    this.reasoningStrength = 'max',
+    this.temperature,
+  });
 
+  final bool enableThinking;
   final String reasoningStrength;
   final double? temperature;
 
-  ChatSwitches copyWith({String? reasoningStrength, double? temperature}) =>
-      ChatSwitches(
-        reasoningStrength: reasoningStrength ?? this.reasoningStrength,
-        temperature: temperature ?? this.temperature,
-      );
+  ChatSwitches copyWith({
+    bool? enableThinking,
+    String? reasoningStrength,
+    double? temperature,
+  }) => ChatSwitches(
+    enableThinking: enableThinking ?? this.enableThinking,
+    reasoningStrength: reasoningStrength ?? this.reasoningStrength,
+    temperature: temperature ?? this.temperature,
+  );
 
   ChatSwitches withTemperature(double value) => ChatSwitches(
+    enableThinking: enableThinking,
     reasoningStrength: reasoningStrength,
     temperature: value.clamp(0, 2).toDouble(),
   );
@@ -261,6 +276,10 @@ class ChatSwitches {
 class ChatSwitchesNotifier extends Notifier<ChatSwitches> {
   @override
   ChatSwitches build() => const ChatSwitches();
+
+  void setEnableThinking(bool value) {
+    state = state.copyWith(enableThinking: value);
+  }
 
   void setReasoningStrength(String value) {
     if (!const {'low', 'medium', 'high', 'max'}.contains(value)) return;
@@ -325,33 +344,110 @@ class UiMessage {
   bool get isGroup => role == 'group';
 }
 
+class _ChatImageTarget {
+  const _ChatImageTarget({
+    required this.conversationId,
+    required this.messageId,
+  });
+
+  final String conversationId;
+  final String messageId;
+}
+
 /// 聊天控制器：流式接收、工具渲染、分叉/编辑。
 class ChatController extends Notifier<List<UiMessage>> {
+  static const _draftConversationId = '__new_conversation__';
+
   @override
   List<UiMessage> build() {
     _imageSub = HarnessClient.instance.events.listen(_onImageEvent);
-    ref.onDispose(() => _imageSub?.cancel());
-    return [];
+    ref.onDispose(() {
+      _imageSub?.cancel();
+      for (final sub in _chatSubscriptions.values) {
+        sub.cancel();
+      }
+      for (final sub in _imageStreams.values) {
+        sub.cancel();
+      }
+    });
+    return _conversationMessages.putIfAbsent(
+      _draftConversationId,
+      () => <UiMessage>[],
+    );
   }
 
-  StreamSubscription<EventFrame>? _sub;
   StreamSubscription<EventFrame>? _imageSub;
-  final Map<String, String> _imageStreamMessages = {};
+  final Map<String, List<UiMessage>> _conversationMessages = {};
+  final Map<String, String> _streamConversationIds = {};
+  final Map<String, String> _conversationStreamIds = {};
+  final Map<String, StreamSubscription<EventFrame>> _chatSubscriptions = {};
+  final Set<String> _startingConversationIds = {};
+  final Set<String> _deletedConversationIds = {};
+  final Map<String, _ChatImageTarget> _imageStreamMessages = {};
   final Map<String, StreamSubscription<EventFrame>> _imageStreams = {};
   final Map<String, Set<String>> _messageImageStreams = {};
+  final Map<String, Set<String>> _messageStudioQueueTasks = {};
+  final Map<String, String> _messageStudioQueueErrors = {};
   Future<void> _studioTaskWrites = Future<void>.value();
-  String? _activeStreamId;
-  bool _busy = false;
   int _seq = 0;
 
-  bool get busy => _busy;
+  String get _currentConversationId =>
+      ref.read(currentConversationProvider)?.id ?? _draftConversationId;
+
+  bool get busy => isConversationRunning(_currentConversationId);
+
+  Set<String> get runningConversationIds =>
+      {..._conversationStreamIds.keys, ..._startingConversationIds}
+        ..remove(_draftConversationId);
+
+  bool isConversationRunning(String conversationId) =>
+      _startingConversationIds.contains(conversationId) ||
+      _conversationStreamIds.containsKey(conversationId);
+
+  String _imageMessageKey(String conversationId, String messageId) =>
+      '$conversationId\u0000$messageId';
+
+  List<UiMessage> _messagesFor(String conversationId) =>
+      _conversationMessages.putIfAbsent(conversationId, () => <UiMessage>[]);
+
+  void _publishMessages(String conversationId, List<UiMessage> messages) {
+    if (_deletedConversationIds.contains(conversationId)) return;
+    _conversationMessages[conversationId] = messages;
+    if (_currentConversationId == conversationId) {
+      state = [...messages];
+    } else {
+      // The visible messages are unchanged, but listeners such as the
+      // conversation drawer still need a rebuild for background run status.
+      state = [...state];
+    }
+  }
+
+  void _publishRuntimeChange(String conversationId) {
+    if (_deletedConversationIds.contains(conversationId)) return;
+    if (_currentConversationId == conversationId) {
+      state = [..._messagesFor(conversationId)];
+    } else {
+      state = [...state];
+    }
+  }
 
   String _newId() =>
       '${DateTime.now().microsecondsSinceEpoch}-${_seq++ % 1000}';
 
-  Future<void> loadHistory(ConversationMeta conversation) async {
-    clear();
+  Future<void> loadHistory(
+    ConversationMeta conversation, {
+    bool force = false,
+  }) async {
+    if (_deletedConversationIds.contains(conversation.id)) return;
+    ref.read(currentConversationProvider.notifier).set(conversation);
+    final cached = _conversationMessages[conversation.id];
+    if (!force && cached != null) {
+      state = [...cached];
+      return;
+    }
+    state = cached == null ? [] : [...cached];
     final messages = await HarnessClient.instance.listMessages(conversation.id);
+    if (_deletedConversationIds.contains(conversation.id)) return;
     final list = <UiMessage>[];
     for (final m in messages) {
       for (final call in m.toolCalls) {
@@ -405,7 +501,101 @@ class ChatController extends Notifier<List<UiMessage>> {
         );
       }
     }
-    state = list;
+    _conversationMessages[conversation.id] = list;
+    if (_currentConversationId == conversation.id) state = [...list];
+  }
+
+  void startNewConversation() {
+    ref.read(currentConversationProvider.notifier).set(null);
+    _conversationMessages[_draftConversationId] = <UiMessage>[];
+    state = [];
+  }
+
+  String? _detachConversationRuntime(String conversationId) {
+    final streamId = _conversationStreamIds.remove(conversationId);
+    if (streamId != null) {
+      _streamConversationIds.remove(streamId);
+      _chatSubscriptions.remove(streamId)?.cancel();
+    }
+    _startingConversationIds.remove(conversationId);
+    final imagePrefix = '$conversationId\u0000';
+    final imageStreamIds = _messageImageStreams.entries
+        .where((entry) => entry.key.startsWith(imagePrefix))
+        .expand((entry) => entry.value)
+        .toList();
+    for (final imageStreamId in imageStreamIds) {
+      _cleanupImageStream(imageStreamId, finalizeMessage: false);
+    }
+    _messageStudioQueueTasks.removeWhere(
+      (key, _) => key.startsWith(imagePrefix),
+    );
+    _messageStudioQueueErrors.removeWhere(
+      (key, _) => key.startsWith(imagePrefix),
+    );
+    return streamId;
+  }
+
+  void _removeConversationCache(String conversationId) {
+    _conversationMessages.remove(conversationId);
+    if (_currentConversationId == conversationId) startNewConversation();
+  }
+
+  /// Delete is coordinated through the controller so a running Rust task is
+  /// cancelled before its conversation disappears. The tombstone prevents
+  /// already-queued callbacks from recreating the removed cache.
+  Future<void> deleteConversation(String conversationId) => _deleteConversation(
+    conversationId,
+    abortRemote: (streamId, id) => HarnessClient.instance.abortChat(
+      streamId: streamId,
+      conversationId: id,
+    ),
+    deleteRemote: HarnessClient.instance.deleteConversation,
+  );
+
+  Future<void> _deleteConversation(
+    String conversationId, {
+    required Future<void> Function(String? streamId, String conversationId)
+    abortRemote,
+    required Future<void> Function(String conversationId) deleteRemote,
+  }) async {
+    if (_deletedConversationIds.contains(conversationId)) return;
+    final selected = ref.read(currentConversationProvider);
+    final cached = _conversationMessages[conversationId];
+    final wasSelected = selected?.id == conversationId;
+    final streamId = _conversationStreamIds[conversationId];
+    final wasRunning =
+        streamId != null || _startingConversationIds.contains(conversationId);
+
+    _deletedConversationIds.add(conversationId);
+    _detachConversationRuntime(conversationId);
+    if (wasSelected) startNewConversation();
+
+    try {
+      if (wasRunning) {
+        try {
+          await abortRemote(streamId, conversationId);
+        } catch (_) {
+          // Deletion is still authoritative when the run already terminated.
+        }
+      }
+      await deleteRemote(conversationId);
+      _removeConversationCache(conversationId);
+    } catch (_) {
+      _deletedConversationIds.remove(conversationId);
+      if (cached != null) _conversationMessages[conversationId] = cached;
+      if (wasSelected && selected != null) {
+        ref.read(currentConversationProvider.notifier).set(selected);
+        state = [...?cached];
+      }
+      rethrow;
+    }
+  }
+
+  /// Drop local state after an externally completed deletion.
+  void forgetConversation(String conversationId) {
+    _deletedConversationIds.add(conversationId);
+    _detachConversationRuntime(conversationId);
+    _removeConversationCache(conversationId);
   }
 
   void _appendHistoricalToolResult(
@@ -479,28 +669,21 @@ class ChatController extends Notifier<List<UiMessage>> {
     if (frame.kind != 'image_ready') return;
     final raw = frame.data['entry'];
     if (raw is! Map) return;
-    final entry = ImageEntry.fromJson(raw.cast<String, dynamic>());
-    final messageId = _imageStreamMessages[frame.streamId];
-    final messages = [...state];
-    UiMessage? target;
-    if (messageId != null) {
-      for (final message in messages) {
-        if (message.id == messageId) {
-          target = message;
-          break;
-        }
-      }
+    final imageTarget = _imageStreamMessages[frame.streamId];
+    if (imageTarget == null ||
+        _deletedConversationIds.contains(imageTarget.conversationId)) {
+      return;
     }
-    if (target == null) {
-      for (final message in messages.reversed) {
-        if (message.isTool &&
-            (message.imageStatus == 'queued' ||
-                message.imageStatus == 'waiting') &&
-            (message.imagePrompts.isEmpty ||
-                message.imagePrompts.contains(entry.prompt))) {
-          target = message;
-          break;
-        }
+    final entry = ImageEntry.fromJson(raw.cast<String, dynamic>());
+    final conversationId = imageTarget.conversationId;
+    final cachedMessages = _conversationMessages[conversationId];
+    if (cachedMessages == null) return;
+    final messages = [...cachedMessages];
+    UiMessage? target;
+    for (final message in messages) {
+      if (message.id == imageTarget.messageId) {
+        target = message;
+        break;
       }
     }
     if (target == null) return;
@@ -515,7 +698,7 @@ class ChatController extends Notifier<List<UiMessage>> {
     target.text = target.imageStatus == 'done'
         ? '图片生成完成 · ${target.imageEntries.length} 张'
         : '正在生成图片 · ${target.imageEntries.length}${target.imageExpected > 0 ? '/${target.imageExpected}' : ''}';
-    state = messages;
+    _publishMessages(conversationId, messages);
   }
 
   /// 发送用户消息并跟踪流式回复。
@@ -524,8 +707,14 @@ class ChatController extends Notifier<List<UiMessage>> {
     List<ChatAttachment> attachments = const [],
   }) async {
     final normalized = text.trim();
-    if (_busy || (normalized.isEmpty && attachments.isEmpty)) return false;
-    _busy = true;
+    var conversation = ref.read(currentConversationProvider);
+    final initialConversationId = conversation?.id ?? _draftConversationId;
+    if (isConversationRunning(initialConversationId) ||
+        (normalized.isEmpty && attachments.isEmpty)) {
+      return false;
+    }
+    _startingConversationIds.add(initialConversationId);
+    _publishRuntimeChange(initialConversationId);
 
     final client = HarnessClient.instance;
     // Snapshot per-turn controls before any async conversation creation. A
@@ -533,8 +722,8 @@ class ChatController extends Notifier<List<UiMessage>> {
     // message, not this one.
     final target = ref.read(chatTargetProvider);
     final switches = ref.read(chatSwitchesProvider);
+    var conversationId = initialConversationId;
     try {
-      var conversation = ref.read(currentConversationProvider);
       final filesPrompt = buildChatUploadedFilesPrompt(attachments);
       final modelText = [
         normalized,
@@ -552,14 +741,28 @@ class ChatController extends Notifier<List<UiMessage>> {
       final titleSeed = normalized.isNotEmpty
           ? normalized
           : '附件：${attachments.map((item) => item.name).join('、')}';
-      conversation ??= await client.createConversation(
-        titleSeed.length > 16 ? '${titleSeed.substring(0, 16)}…' : titleSeed,
-        agentId: ref.read(selectedAgentProvider)?.id,
-      );
-      ref.read(currentConversationProvider.notifier).state = conversation;
+      if (conversation == null) {
+        conversation = await client.createConversation(
+          titleSeed.length > 16 ? '${titleSeed.substring(0, 16)}…' : titleSeed,
+          agentId: ref.read(selectedAgentProvider)?.id,
+        );
+        conversationId = conversation.id;
+        _startingConversationIds.remove(_draftConversationId);
+        _startingConversationIds.add(conversationId);
+        if (ref.read(currentConversationProvider) == null) {
+          ref.read(currentConversationProvider.notifier).set(conversation);
+        }
+        unawaited(ref.read(conversationsProvider.notifier).refresh());
+      }
 
-      state = [
-        ...state,
+      if (_deletedConversationIds.contains(conversationId)) {
+        _startingConversationIds
+          ..remove(initialConversationId)
+          ..remove(conversationId);
+        return false;
+      }
+      _publishMessages(conversationId, [
+        ..._messagesFor(conversationId),
         UiMessage(
           id: _newId(),
           role: 'user',
@@ -567,41 +770,62 @@ class ChatController extends Notifier<List<UiMessage>> {
           attachments: [...attachments],
         ),
         UiMessage(id: 'pending', role: 'assistant', text: '', streaming: true),
-      ];
+      ]);
 
       final streamId = await client.sendChat(
-        conversation.id,
+        conversationId,
         modelText,
         providerId: target.providerId,
         model: target.model,
+        enableThinking: switches.enableThinking,
         reasoningEffort: switches.reasoningStrength,
         temperature: switches.temperature,
         contentParts: contentParts,
       );
 
-      _activeStreamId = streamId;
-      _sub?.cancel();
-      _sub = client
+      if (_deletedConversationIds.contains(conversationId)) {
+        _startingConversationIds.remove(conversationId);
+        try {
+          await client.abortChat(
+            streamId: streamId,
+            conversationId: conversationId,
+          );
+        } catch (_) {}
+        return false;
+      }
+      _startingConversationIds.remove(conversationId);
+      _conversationStreamIds[conversationId] = streamId;
+      _streamConversationIds[streamId] = conversationId;
+      final sub = client
           .subscribeStream(streamId)
           .listen(
             _onEvent,
-            onDone: () {
-              if (_activeStreamId == streamId) _busy = false;
+            onError: (Object error) {
+              if (_streamConversationIds[streamId] != conversationId) return;
+              _replacePending(conversationId, '⚠️ $error');
+              _finishChatStream(streamId, conversationId);
             },
+            onDone: () => _finishChatStream(streamId, conversationId),
           );
+      _chatSubscriptions[streamId] = sub;
+      _publishRuntimeChange(conversationId);
       return true;
     } catch (e) {
-      _busy = false;
+      _startingConversationIds
+        ..remove(initialConversationId)
+        ..remove(conversationId);
+      if (_deletedConversationIds.contains(conversationId)) return false;
       // Conversation creation can fail before a pending bubble exists.
       // `_replacePending` is a no-op in that case; keep the error visible.
-      final hadPending = state.any((message) => message.id == 'pending');
+      final messages = _messagesFor(conversationId);
+      final hadPending = messages.any((message) => message.id == 'pending');
       if (hadPending) {
-        _replacePending('⚠️ 发送失败：$e');
+        _replacePending(conversationId, '⚠️ 发送失败：$e');
       } else {
-        state = [
-          ...state,
+        _publishMessages(conversationId, [
+          ...messages,
           UiMessage(id: _newId(), role: 'assistant', text: '⚠️ 发送失败：$e'),
-        ];
+        ]);
       }
       // Once the optimistic user bubble exists, the composer payload belongs
       // to that failed turn and must not remain queued for an accidental
@@ -611,24 +835,33 @@ class ChatController extends Notifier<List<UiMessage>> {
   }
 
   void _onEvent(EventFrame frame) {
-    // A cancelled previous subscription can still deliver a queued callback;
-    // never let it mutate the current turn's assistant bubble/state.
-    if (_activeStreamId == null || frame.streamId != _activeStreamId) return;
+    final conversationId = _streamConversationIds[frame.streamId];
+    if (conversationId == null ||
+        _conversationStreamIds[conversationId] != frame.streamId) {
+      return;
+    }
     // ignore: avoid_print
     print(
       '[chat] evt ${frame.kind} ${frame.kind == 'delta' ? frame.data['text'] : ''}',
     );
     switch (frame.kind) {
       case 'delta':
-        _appendToLastAssistant(frame.data['text'] as String? ?? '');
+        _appendToLastAssistant(
+          conversationId,
+          frame.data['text'] as String? ?? '',
+        );
+      case 'assistant_message':
+        _applyAssistantMessage(conversationId, frame.data);
       case 'tool_call':
         _insertToolCall(
+          conversationId,
           frame.data['name'] as String? ?? '',
           (frame.data['args'] as Map?)?.toString() ?? '',
         );
       case 'tool_result':
         final toolName = frame.data['name'] as String? ?? '';
         _insertToolResult(
+          conversationId,
           toolName,
           frame.data['content'] as String? ?? '',
           frame.data['isError'] as bool? ?? false,
@@ -647,29 +880,74 @@ class ChatController extends Notifier<List<UiMessage>> {
         }
       case 'done' || 'error':
         _replacePending(
+          conversationId,
           frame.kind == 'error' ? '⚠️ ${frame.data['message'] ?? '出错了'}' : null,
         );
-        _busy = false;
-        _activeStreamId = null;
+        _finishChatStream(frame.streamId, conversationId);
       default:
         break;
     }
   }
 
-  void _appendToLastAssistant(String delta) {
-    if (delta.isEmpty) return;
-    final messages = [...state];
+  void _finishChatStream(String streamId, String conversationId) {
+    if (_streamConversationIds[streamId] != conversationId) return;
+    _streamConversationIds.remove(streamId);
+    if (_conversationStreamIds[conversationId] == streamId) {
+      _conversationStreamIds.remove(conversationId);
+    }
+    _chatSubscriptions.remove(streamId)?.cancel();
+    _publishRuntimeChange(conversationId);
+  }
+
+  void _appendToLastAssistant(String conversationId, String delta) {
+    final cached = _conversationMessages[conversationId];
+    if (delta.isEmpty ||
+        cached == null ||
+        _deletedConversationIds.contains(conversationId)) {
+      return;
+    }
+    final messages = [...cached];
     for (var i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role == 'assistant') {
         messages[i].text += delta;
-        state = messages;
+        _publishMessages(conversationId, messages);
         return;
       }
     }
   }
 
-  void _replacePending([String? finalText]) {
-    final messages = [...state];
+  void _applyAssistantMessage(
+    String conversationId,
+    Map<String, dynamic> data,
+  ) {
+    final cached = _conversationMessages[conversationId];
+    if (cached == null || _deletedConversationIds.contains(conversationId)) {
+      return;
+    }
+    final parts = (data['parts'] as List? ?? const [])
+        .whereType<Map>()
+        .map((part) => part.cast<String, dynamic>())
+        .toList();
+    final projection = projectChatAttachments(
+      data['content'] as String? ?? '',
+      parts,
+    );
+    final messages = [...cached];
+    for (var i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role != 'assistant') continue;
+      messages[i].text = projection.text;
+      messages[i].attachments = projection.attachments;
+      _publishMessages(conversationId, messages);
+      return;
+    }
+  }
+
+  void _replacePending(String conversationId, [String? finalText]) {
+    final cached = _conversationMessages[conversationId];
+    if (cached == null || _deletedConversationIds.contains(conversationId)) {
+      return;
+    }
+    final messages = [...cached];
     for (var i = messages.length - 1; i >= 0; i--) {
       if (messages[i].id == 'pending') {
         final m = messages[i];
@@ -678,21 +956,26 @@ class ChatController extends Notifier<List<UiMessage>> {
           role: 'assistant',
           text: finalText ?? m.text,
           streaming: false,
+          attachments: m.attachments,
         );
-        state = messages;
+        _publishMessages(conversationId, messages);
         return;
       }
     }
     if (finalText != null && finalText.isNotEmpty) {
-      state = [
+      _publishMessages(conversationId, [
         ...messages,
         UiMessage(id: _newId(), role: 'assistant', text: finalText),
-      ];
+      ]);
     }
   }
 
-  void _insertToolCall(String name, String argsSummary) {
-    final messages = [...state];
+  void _insertToolCall(String conversationId, String name, String argsSummary) {
+    final cached = _conversationMessages[conversationId];
+    if (cached == null || _deletedConversationIds.contains(conversationId)) {
+      return;
+    }
+    final messages = [...cached];
     for (var i = messages.length - 1; i >= 0; i--) {
       if (messages[i].id == 'pending') {
         messages[i] = UiMessage(
@@ -701,7 +984,7 @@ class ChatController extends Notifier<List<UiMessage>> {
           toolName: name,
           text: argsSummary.isEmpty ? '执行中…' : argsSummary,
         );
-        state = [
+        _publishMessages(conversationId, [
           ...messages,
           UiMessage(
             id: 'pending',
@@ -709,13 +992,22 @@ class ChatController extends Notifier<List<UiMessage>> {
             text: '',
             streaming: true,
           ),
-        ];
+        ]);
         return;
       }
     }
   }
 
-  void _insertToolResult(String name, String content, bool isError) {
+  void _insertToolResult(
+    String conversationId,
+    String name,
+    String content,
+    bool isError,
+  ) {
+    final messages = _conversationMessages[conversationId];
+    if (messages == null || _deletedConversationIds.contains(conversationId)) {
+      return;
+    }
     final short = content.length > 160
         ? '${content.substring(0, 160)}…'
         : content;
@@ -723,32 +1015,43 @@ class ChatController extends Notifier<List<UiMessage>> {
       try {
         final result = jsonDecode(content);
         if (result is Map && ((result['queued'] as num?)?.toInt() ?? 0) > 0) {
-          final tasks = result['tasks'] as List? ?? const [];
+          final tasks = (result['tasks'] as List? ?? const [])
+              .whereType<Map>()
+              .map((task) => task.cast<String, dynamic>())
+              .toList();
           final expected = tasks.fold<int>(0, (sum, task) {
-            final map = task is Map ? task : const <String, dynamic>{};
-            return sum + ((map['n'] as num?)?.toInt() ?? 1).clamp(1, 4);
+            return sum + ((task['n'] as num?)?.toInt() ?? 1).clamp(1, 4);
           });
           final prompts = tasks
-              .whereType<Map>()
-              .map((task) => task['prompt'])
-              .whereType<String>()
-              .where((prompt) => prompt.trim().isNotEmpty)
+              .map((task) => task['prompt'] as String? ?? '')
+              .toList();
+          final queueIds = tasks
+              .map((task) => task['_queueId'] as String? ?? '')
               .toList();
           final expectedCount = expected > 0
               ? expected
               : ((result['queued'] as num?)?.toInt() ?? 1);
-          state = [
-            ...state,
-            UiMessage(
-              id: _newId(),
-              role: 'tool',
-              toolName: name,
-              text: '已加入图片队列 · ${result['queued']} 个任务',
-              imageStatus: 'queued',
-              imageExpected: expectedCount,
-              imagePrompts: prompts,
-            ),
-          ];
+          final imageMessage = UiMessage(
+            id: _newId(),
+            role: 'tool',
+            toolName: name,
+            text: '已加入图片队列 · ${result['queued']} 个任务',
+            imageStatus: 'waiting',
+            imageExpected: expectedCount,
+            imagePrompts: prompts
+                .where((prompt) => prompt.trim().isNotEmpty)
+                .toList(),
+          );
+          _publishMessages(conversationId, [...messages, imageMessage]);
+          ref
+              .read(studioQueueProvider.notifier)
+              .registerChatTasks(
+                conversationId: conversationId,
+                messageId: imageMessage.id,
+                prompts: prompts,
+                queueIds: queueIds,
+                taskCount: (result['queued'] as num?)?.toInt() ?? 1,
+              );
           return;
         }
         final images = result is Map ? result['images'] as List? : null;
@@ -757,8 +1060,8 @@ class ChatController extends Notifier<List<UiMessage>> {
               .whereType<Map>()
               .map((item) => ImageEntry.fromJson(item.cast<String, dynamic>()))
               .toList();
-          state = [
-            ...state,
+          _publishMessages(conversationId, [
+            ...messages,
             UiMessage(
               id: _newId(),
               role: 'tool',
@@ -769,15 +1072,15 @@ class ChatController extends Notifier<List<UiMessage>> {
               imageExpected: entries.length,
               imageReceived: entries.length,
             ),
-          ];
+          ]);
           return;
         }
       } catch (_) {
         // Fall through to the compact text receipt for older hosts.
       }
     }
-    state = [
-      ...state,
+    _publishMessages(conversationId, [
+      ...messages,
       UiMessage(
         id: _newId(),
         role: 'tool',
@@ -785,12 +1088,14 @@ class ChatController extends Notifier<List<UiMessage>> {
         text: isError ? '❌ $short' : '✅ $short',
         isError: isError,
       ),
-    ];
+    ]);
   }
 
   Future<void> waitForImages(String messageId) async {
+    final conversationId = _currentConversationId;
+    final messages = _messagesFor(conversationId);
     UiMessage? message;
-    for (final item in state) {
+    for (final item in messages) {
       if (item.id == messageId) {
         message = item;
         break;
@@ -799,18 +1104,18 @@ class ChatController extends Notifier<List<UiMessage>> {
     if (message == null || message.imageStatus != 'queued') return;
     message.imageStatus = 'waiting';
     message.text = '正在准备图片生成…';
-    state = [...state];
+    _publishMessages(conversationId, [...messages]);
     final requests = await HarnessClient.instance.drainStudioTasks();
     if (requests.isEmpty) {
       message.text = '已由绘图工作室接管，生成后会自动显示';
-      state = [...state];
+      _publishMessages(conversationId, [...messages]);
       return;
     }
     final assignments = <String, List<Map<String, dynamic>>>{};
     for (final request in requests) {
       final prompt = request['prompt'] as String? ?? '';
       var targetId = messageId;
-      for (final candidate in state.reversed) {
+      for (final candidate in messages.reversed) {
         if (candidate.isTool &&
             (candidate.imageStatus == 'queued' ||
                 candidate.imageStatus == 'waiting') &&
@@ -823,7 +1128,7 @@ class ChatController extends Notifier<List<UiMessage>> {
     }
     for (final assignment in assignments.entries) {
       UiMessage? target;
-      for (final item in state) {
+      for (final item in messages) {
         if (item.id == assignment.key) {
           target = item;
           break;
@@ -841,19 +1146,25 @@ class ChatController extends Notifier<List<UiMessage>> {
           .where((prompt) => prompt.trim().isNotEmpty)
           .toList();
     }
-    state = [...state];
+    _publishMessages(conversationId, [...messages]);
     var taskIndex = 0;
     for (final assignment in assignments.entries) {
       for (final request in assignment.value) {
         final taskId =
             'chat-studio-${DateTime.now().microsecondsSinceEpoch}-${taskIndex++}';
-        _runImageRequest(request, assignment.key, taskId: taskId);
+        _runImageRequest(
+          request,
+          conversationId,
+          assignment.key,
+          taskId: taskId,
+        );
       }
     }
   }
 
   Future<void> _runImageRequest(
     Map<String, dynamic> request,
+    String conversationId,
     String messageId, {
     required String taskId,
   }) async {
@@ -881,14 +1192,29 @@ class ChatController extends Notifier<List<UiMessage>> {
         providerId: request['providerId'] as String?,
         model: request['model'] as String?,
       );
+      if (_deletedConversationIds.contains(conversationId) ||
+          !_conversationMessages.containsKey(conversationId)) {
+        HarnessClient.instance.markStudioStreamFinished(streamId);
+        return;
+      }
       final taskRequest = <String, dynamic>{
         ...request,
         '_chatControlled': true,
+        '_conversationId': conversationId,
+        '_messageId': messageId,
         '_streamId': streamId,
       };
       await _persistChatTask(taskId, taskRequest, status: 'running');
-      _imageStreamMessages[streamId] = messageId;
-      _messageImageStreams.putIfAbsent(messageId, () => {}).add(streamId);
+      _imageStreamMessages[streamId] = _ChatImageTarget(
+        conversationId: conversationId,
+        messageId: messageId,
+      );
+      _messageImageStreams
+          .putIfAbsent(
+            _imageMessageKey(conversationId, messageId),
+            () => <String>{},
+          )
+          .add(streamId);
       final sub = HarnessClient.instance
           .subscribeStream(streamId)
           .listen(
@@ -903,6 +1229,7 @@ class ChatController extends Notifier<List<UiMessage>> {
                 }
               } else if (frame.kind == 'error') {
                 _markImageError(
+                  conversationId,
                   messageId,
                   frame.data['message'] as String? ?? '生成失败',
                 );
@@ -919,22 +1246,28 @@ class ChatController extends Notifier<List<UiMessage>> {
               }
             },
             onError: (Object error) {
-              _markImageError(messageId, error.toString());
+              _markImageError(conversationId, messageId, error.toString());
               _persistChatTask(
                 taskId,
                 taskRequest,
                 status: 'error',
                 error: error.toString(),
               );
+              _cleanupImageStream(streamId);
             },
             onDone: () => _cleanupImageStream(streamId),
           );
       _imageStreams[streamId] = sub;
     } catch (error) {
-      _markImageError(messageId, error.toString());
+      _markImageError(conversationId, messageId, error.toString());
       await _persistChatTask(
         taskId,
-        request,
+        {
+          ...request,
+          '_chatControlled': true,
+          '_conversationId': conversationId,
+          '_messageId': messageId,
+        },
         status: 'error',
         error: error.toString(),
       );
@@ -995,29 +1328,129 @@ class ChatController extends Notifier<List<UiMessage>> {
     await _studioTaskWrites;
   }
 
-  void _markImageError(String messageId, String error) {
-    for (final message in state) {
+  void _markImageError(String conversationId, String messageId, String error) {
+    final messages = _conversationMessages[conversationId];
+    if (messages == null || _deletedConversationIds.contains(conversationId)) {
+      return;
+    }
+    for (final message in messages) {
       if (message.id == messageId) {
         message.imageStatus = 'error';
         message.isError = true;
         message.text = '图片生成失败：$error';
-        state = [...state];
+        _publishMessages(conversationId, [...messages]);
         return;
       }
     }
   }
 
-  void _cleanupImageStream(String streamId) {
+  void trackStudioQueueTask(
+    String taskId,
+    String conversationId,
+    String messageId,
+  ) {
+    if (_deletedConversationIds.contains(conversationId)) return;
+    final key = _imageMessageKey(conversationId, messageId);
+    _messageStudioQueueTasks.putIfAbsent(key, () => <String>{}).add(taskId);
+    final messages = _conversationMessages[conversationId];
+    if (messages == null) return;
+    for (final message in messages) {
+      if (message.id != messageId || message.imageStatus == 'done') continue;
+      message.imageStatus = 'waiting';
+      message.isError = false;
+      message.text = '正在生成图片…';
+      _publishMessages(conversationId, [...messages]);
+      return;
+    }
+  }
+
+  void appendStudioQueueImage(
+    String conversationId,
+    String messageId,
+    ImageEntry entry,
+  ) {
+    if (_deletedConversationIds.contains(conversationId)) return;
+    final messages = _conversationMessages[conversationId];
+    if (messages == null) return;
+    for (final message in messages) {
+      if (message.id != messageId) continue;
+      if (!message.imageEntries.any((item) => item.id == entry.id)) {
+        message.imageEntries = [...message.imageEntries, entry];
+        message.imageReceived += 1;
+      }
+      message.isError = false;
+      message.imageStatus =
+          message.imageExpected > 0 &&
+              message.imageReceived >= message.imageExpected
+          ? 'done'
+          : 'waiting';
+      message.text = message.imageStatus == 'done'
+          ? '图片生成完成 · ${message.imageEntries.length} 张'
+          : '正在生成图片 · ${message.imageEntries.length}${message.imageExpected > 0 ? '/${message.imageExpected}' : ''}';
+      _publishMessages(conversationId, [...messages]);
+      return;
+    }
+  }
+
+  void finishStudioQueueTask(
+    String taskId,
+    String conversationId,
+    String messageId, {
+    String? error,
+  }) {
+    if (_deletedConversationIds.contains(conversationId)) return;
+    final key = _imageMessageKey(conversationId, messageId);
+    if (error != null) _messageStudioQueueErrors[key] = error;
+    final active = _messageStudioQueueTasks[key];
+    active?.remove(taskId);
+    if (active?.isNotEmpty == true) return;
+    _messageStudioQueueTasks.remove(key);
+    final lastError = _messageStudioQueueErrors.remove(key);
+    final messages = _conversationMessages[conversationId];
+    if (messages == null) return;
+    for (final message in messages) {
+      if (message.id != messageId || message.imageStatus == 'done') continue;
+      if (message.imageEntries.isNotEmpty) {
+        message.imageStatus = 'done';
+        message.text = '图片生成完成 · ${message.imageEntries.length} 张';
+      } else if (lastError != null) {
+        message.imageStatus = 'error';
+        message.isError = true;
+        message.text = '图片生成失败：$lastError';
+      } else {
+        message.imageStatus = 'error';
+        message.isError = true;
+        message.text = '图片生成未返回结果';
+      }
+      _publishMessages(conversationId, [...messages]);
+      return;
+    }
+  }
+
+  void _cleanupImageStream(String streamId, {bool finalizeMessage = true}) {
     HarnessClient.instance.markStudioStreamFinished(streamId);
-    final messageId = _imageStreamMessages.remove(streamId);
+    final imageTarget = _imageStreamMessages.remove(streamId);
     _imageStreams.remove(streamId)?.cancel();
-    if (messageId == null) return;
-    final active = _messageImageStreams[messageId];
+    if (imageTarget == null) return;
+    final imageMessageKey = _imageMessageKey(
+      imageTarget.conversationId,
+      imageTarget.messageId,
+    );
+    final active = _messageImageStreams[imageMessageKey];
     active?.remove(streamId);
     if (active?.isNotEmpty == true) return;
-    _messageImageStreams.remove(messageId);
-    for (final message in state) {
-      if (message.id != messageId || message.imageStatus != 'waiting') continue;
+    _messageImageStreams.remove(imageMessageKey);
+    if (!finalizeMessage) return;
+    final messages = _conversationMessages[imageTarget.conversationId];
+    if (messages == null ||
+        _deletedConversationIds.contains(imageTarget.conversationId)) {
+      return;
+    }
+    for (final message in messages) {
+      if (message.id != imageTarget.messageId ||
+          message.imageStatus != 'waiting') {
+        continue;
+      }
       if (message.imageEntries.isNotEmpty) {
         message.imageStatus = 'done';
         message.text = '图片生成完成 · ${message.imageEntries.length} 张';
@@ -1026,37 +1459,656 @@ class ChatController extends Notifier<List<UiMessage>> {
         message.isError = true;
         message.text = '图片生成未返回结果';
       }
-      state = [...state];
+      _publishMessages(imageTarget.conversationId, [...messages]);
       return;
     }
   }
 
   Future<void> abort() async {
     final conversation = ref.read(currentConversationProvider);
-    await HarnessClient.instance.abortChat(conversationId: conversation?.id);
-    _replacePending(null);
-    _busy = false;
-    _activeStreamId = null;
+    final conversationId = conversation?.id ?? _draftConversationId;
+    final streamId = _conversationStreamIds[conversationId];
+    await HarnessClient.instance.abortChat(
+      streamId: streamId,
+      conversationId: conversation?.id,
+    );
+    _replacePending(conversationId);
+    _startingConversationIds.remove(conversationId);
+    if (streamId != null) _finishChatStream(streamId, conversationId);
   }
 
-  void clear() {
-    _sub?.cancel();
-    _sub = null;
-    for (final sub in _imageStreams.values) {
-      sub.cancel();
-    }
-    _imageStreams.clear();
-    _imageStreamMessages.clear();
-    _messageImageStreams.clear();
-    _activeStreamId = null;
-    _busy = false;
-    state = [];
+  void clear() => startNewConversation();
+
+  @visibleForTesting
+  void restoreConversationForTesting(
+    String conversationId,
+    List<UiMessage> messages, {
+    bool select = false,
+  }) {
+    _conversationMessages[conversationId] = [...messages];
+    if (select) selectConversationForTesting(conversationId);
   }
+
+  @visibleForTesting
+  void selectConversationForTesting(String conversationId) {
+    ref
+        .read(currentConversationProvider.notifier)
+        .set(
+          ConversationMeta(
+            id: conversationId,
+            title: conversationId,
+            updatedAt: '',
+          ),
+        );
+    state = [..._messagesFor(conversationId)];
+  }
+
+  @visibleForTesting
+  void startConversationRunForTesting(String conversationId, String streamId) {
+    _conversationStreamIds[conversationId] = streamId;
+    _streamConversationIds[streamId] = conversationId;
+    _publishRuntimeChange(conversationId);
+  }
+
+  @visibleForTesting
+  void handleFrameForTesting(EventFrame frame) => _onEvent(frame);
+
+  @visibleForTesting
+  void bindImageStreamForTesting(
+    String streamId,
+    String conversationId,
+    String messageId,
+  ) {
+    _imageStreamMessages[streamId] = _ChatImageTarget(
+      conversationId: conversationId,
+      messageId: messageId,
+    );
+  }
+
+  @visibleForTesting
+  void handleImageFrameForTesting(EventFrame frame) => _onImageEvent(frame);
+
+  @visibleForTesting
+  Future<void> deleteConversationForTesting(
+    String conversationId, {
+    required Future<void> Function(String? streamId, String conversationId)
+    abortRemote,
+    required Future<void> Function(String conversationId) deleteRemote,
+  }) => _deleteConversation(
+    conversationId,
+    abortRemote: abortRemote,
+    deleteRemote: deleteRemote,
+  );
+
+  @visibleForTesting
+  bool hasConversationForTesting(String conversationId) =>
+      _conversationMessages.containsKey(conversationId);
 }
 
 final chatProvider = NotifierProvider<ChatController, List<UiMessage>>(
   ChatController.new,
 );
+
+class _PendingChatImageTask {
+  const _PendingChatImageTask({
+    required this.conversationId,
+    required this.messageId,
+    required this.prompt,
+    this.queueId,
+  });
+
+  final String conversationId;
+  final String messageId;
+  final String prompt;
+  final String? queueId;
+}
+
+class StudioQueueState {
+  const StudioQueueState({
+    this.tasks = const [],
+    this.maxConcurrentTasks = 2,
+    this.initialized = false,
+    this.galleryRevision = 0,
+  });
+
+  final List<StudioTask> tasks;
+  final int maxConcurrentTasks;
+  final bool initialized;
+  final int galleryRevision;
+
+  StudioQueueState copyWith({
+    List<StudioTask>? tasks,
+    int? maxConcurrentTasks,
+    bool? initialized,
+    int? galleryRevision,
+  }) => StudioQueueState(
+    tasks: tasks ?? this.tasks,
+    maxConcurrentTasks: maxConcurrentTasks ?? this.maxConcurrentTasks,
+    initialized: initialized ?? this.initialized,
+    galleryRevision: galleryRevision ?? this.galleryRevision,
+  );
+}
+
+/// 应用级绘图队列。页面切换只销毁表单，不会销毁任务和事件订阅。
+class StudioQueueController extends Notifier<StudioQueueState> {
+  @override
+  StudioQueueState build() {
+    _agentTaskSub = HarnessClient.instance.events.listen((frame) {
+      if (frame.kind != 'tool_result') return;
+      final name = frame.data['name'] as String? ?? '';
+      if (name != 'generate_image' && name != 'edit_image') return;
+      final content = frame.data['content'] as String? ?? '';
+      try {
+        final result = jsonDecode(content);
+        if (result is Map && ((result['queued'] as num?)?.toInt() ?? 0) > 0) {
+          unawaited(drainAgentTasks());
+        }
+      } catch (_) {}
+    });
+    _studioTaskChangedSub = HarnessClient.instance.studioTasksChanged.listen((
+      _,
+    ) {
+      unawaited(refresh(preserveRunning: true));
+    });
+    ref.onDispose(() {
+      _agentTaskSub?.cancel();
+      _studioTaskChangedSub?.cancel();
+      for (final sub in _taskSubscriptions.values) {
+        sub.cancel();
+      }
+    });
+    Future.microtask(_initialize);
+    return const StudioQueueState();
+  }
+
+  final Map<String, StreamSubscription<EventFrame>> _taskSubscriptions = {};
+  StreamSubscription<EventFrame>? _agentTaskSub;
+  StreamSubscription<void>? _studioTaskChangedSub;
+  Future<void> _taskSaveQueue = Future<void>.value();
+  Future<void>? _drainFuture;
+  final List<_PendingChatImageTask> _pendingChatTasks = [];
+  int _taskSequence = 0;
+
+  Future<void> _initialize() async {
+    await _loadConcurrency();
+    if (!ref.mounted) return;
+    await refresh();
+    if (!ref.mounted) return;
+    await drainAgentTasks();
+    if (!ref.mounted) return;
+    state = state.copyWith(initialized: true);
+    _runScheduler();
+  }
+
+  List<StudioTask> _sortTasks(Iterable<StudioTask> tasks) {
+    final sorted = [...tasks];
+    sorted.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return sorted;
+  }
+
+  Future<void> refresh({bool preserveRunning = false}) async {
+    try {
+      final loaded = await HarnessClient.instance.loadStudioTasks();
+      if (!ref.mounted) return;
+      final localById = {for (final task in state.tasks) task.id: task};
+      final restored = loaded.map((task) {
+        if (task.status != 'running') return task;
+        final local = localById[task.id];
+        if (_taskSubscriptions.containsKey(task.id) && local != null) {
+          return local;
+        }
+        final streamId = task.request['_streamId'] as String?;
+        if (preserveRunning && local?.status == 'running') return local!;
+        if (task.request['_chatControlled'] == true &&
+            streamId != null &&
+            HarnessClient.instance.isStudioStreamActive(streamId)) {
+          return task;
+        }
+        return task.copyWith(status: 'queued');
+      });
+      state = state.copyWith(tasks: _sortTasks(restored));
+      for (final task in state.tasks) {
+        if (task.status == 'queued') _trackChatTask(task);
+      }
+      _runScheduler();
+    } catch (_) {}
+  }
+
+  Future<void> _loadConcurrency() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!ref.mounted) return;
+      final value = (prefs.getInt('studio:maxConcurrentTasks') ?? 2).clamp(
+        1,
+        8,
+      );
+      state = state.copyWith(maxConcurrentTasks: value);
+    } catch (_) {}
+  }
+
+  Future<void> setConcurrency(int next) async {
+    final value = next.clamp(1, 8);
+    if (value == state.maxConcurrentTasks) return;
+    state = state.copyWith(maxConcurrentTasks: value);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('studio:maxConcurrentTasks', value);
+    } catch (_) {}
+    _runScheduler();
+  }
+
+  Future<void> _saveTasks() async {
+    final snapshot = [...state.tasks];
+    _taskSaveQueue = _taskSaveQueue
+        .catchError((_) {})
+        .then((_) => HarnessClient.instance.saveStudioTasks(snapshot));
+    try {
+      await _taskSaveQueue;
+    } catch (_) {}
+  }
+
+  Future<void> drainAgentTasks() {
+    final active = _drainFuture;
+    if (active != null) return active;
+    final future = _drainAgentTasksOnce();
+    _drainFuture = future;
+    return future.whenComplete(() {
+      if (identical(_drainFuture, future)) _drainFuture = null;
+    });
+  }
+
+  void registerChatTasks({
+    required String conversationId,
+    required String messageId,
+    required List<String> prompts,
+    List<String> queueIds = const [],
+    required int taskCount,
+  }) => _registerChatTasks(
+    conversationId: conversationId,
+    messageId: messageId,
+    prompts: prompts,
+    queueIds: queueIds,
+    taskCount: taskCount,
+    scheduleDrain: true,
+  );
+
+  void _registerChatTasks({
+    required String conversationId,
+    required String messageId,
+    required List<String> prompts,
+    required List<String> queueIds,
+    required int taskCount,
+    required bool scheduleDrain,
+  }) {
+    final count = taskCount.clamp(1, 32);
+    for (var index = 0; index < count; index++) {
+      final prompt = prompts.isEmpty
+          ? ''
+          : prompts[index.clamp(0, prompts.length - 1)];
+      final rawQueueId = queueIds.isEmpty
+          ? ''
+          : queueIds[index.clamp(0, queueIds.length - 1)];
+      _pendingChatTasks.add(
+        _PendingChatImageTask(
+          conversationId: conversationId,
+          messageId: messageId,
+          prompt: prompt,
+          queueId: rawQueueId.trim().isEmpty ? null : rawQueueId.trim(),
+        ),
+      );
+    }
+    if (scheduleDrain) unawaited(drainAgentTasks());
+  }
+
+  _PendingChatImageTask? _takePendingChatTask(Map<String, dynamic> request) {
+    final rawQueueId = request['_queueId'];
+    final queueId = rawQueueId is String && rawQueueId.trim().isNotEmpty
+        ? rawQueueId.trim()
+        : null;
+    int index;
+    if (queueId != null) {
+      // An identified handoff must never fall back to prompt matching.
+      index = _pendingChatTasks.indexWhere(
+        (target) => target.queueId == queueId,
+      );
+    } else {
+      final prompt = request['prompt'] as String? ?? '';
+      index = _pendingChatTasks.indexWhere(
+        (target) => target.queueId == null && target.prompt == prompt,
+      );
+      if (index < 0) {
+        index = _pendingChatTasks.indexWhere(
+          (target) => target.queueId == null && target.prompt.isEmpty,
+        );
+      }
+    }
+    return index < 0 ? null : _pendingChatTasks.removeAt(index);
+  }
+
+  Map<String, dynamic> _attachPendingChatTarget(Map<String, dynamic> request) {
+    final chatTarget = _takePendingChatTask(request);
+    if (chatTarget == null) return request;
+    return <String, dynamic>{
+      ...request,
+      '_conversationId': chatTarget.conversationId,
+      '_messageId': chatTarget.messageId,
+    };
+  }
+
+  Future<void> _drainAgentTasksOnce() async {
+    try {
+      final pending = await HarnessClient.instance.drainStudioTasks();
+      if (!ref.mounted) return;
+      if (pending.isEmpty) return;
+      final tasks = [...state.tasks];
+      final chatTasks = <StudioTask>[];
+      for (final request in pending) {
+        final taskRequest = _attachPendingChatTarget(request);
+        final task = _newTask(taskRequest, createdByAgent: true);
+        tasks.insert(0, task);
+        if (_chatTargetFor(task) != null) chatTasks.add(task);
+      }
+      state = state.copyWith(tasks: _sortTasks(tasks));
+      for (final task in chatTasks) {
+        _trackChatTask(task);
+      }
+      await _saveTasks();
+      _runScheduler();
+    } catch (_) {}
+  }
+
+  StudioTask _newTask(
+    Map<String, dynamic> request, {
+    required bool createdByAgent,
+  }) {
+    final now = DateTime.now().microsecondsSinceEpoch;
+    return StudioTask(
+      id: 'studio-$now-${_taskSequence++}',
+      status: 'queued',
+      createdAt: now,
+      request: Map<String, dynamic>.from(request),
+      label: request['prompt'] as String? ?? '',
+      createdByAgent: createdByAgent,
+    );
+  }
+
+  void enqueue(Map<String, dynamic> request, {bool createdByAgent = false}) {
+    final task = _newTask(request, createdByAgent: createdByAgent);
+    state = state.copyWith(tasks: [task, ...state.tasks]);
+    unawaited(_saveTasks());
+    _runScheduler();
+  }
+
+  StudioTask? _taskById(String id) {
+    for (final task in state.tasks) {
+      if (task.id == id) return task;
+    }
+    return null;
+  }
+
+  ({String conversationId, String messageId})? _chatTargetFor(StudioTask task) {
+    final conversationId = task.request['_conversationId'] as String?;
+    final messageId = task.request['_messageId'] as String?;
+    if (conversationId == null || messageId == null) return null;
+    return (conversationId: conversationId, messageId: messageId);
+  }
+
+  void _trackChatTask(StudioTask task) {
+    final target = _chatTargetFor(task);
+    if (target == null) return;
+    ref
+        .read(chatProvider.notifier)
+        .trackStudioQueueTask(task.id, target.conversationId, target.messageId);
+  }
+
+  void _appendChatImage(StudioTask task, ImageEntry entry) {
+    final target = _chatTargetFor(task);
+    if (target == null) return;
+    ref
+        .read(chatProvider.notifier)
+        .appendStudioQueueImage(target.conversationId, target.messageId, entry);
+  }
+
+  void _completeChatTask(StudioTask task, {String? error}) {
+    final target = _chatTargetFor(task);
+    if (target == null) return;
+    ref
+        .read(chatProvider.notifier)
+        .finishStudioQueueTask(
+          task.id,
+          target.conversationId,
+          target.messageId,
+          error: error,
+        );
+  }
+
+  void _replaceTask(StudioTask task, {bool imageAdded = false}) {
+    state = state.copyWith(
+      tasks: [
+        for (final item in state.tasks)
+          if (item.id == task.id) task else item,
+      ],
+      galleryRevision: imageAdded
+          ? state.galleryRevision + 1
+          : state.galleryRevision,
+    );
+  }
+
+  void _runScheduler() {
+    var running = state.tasks.where((task) => task.status == 'running').length;
+    while (running < state.maxConcurrentTasks) {
+      StudioTask? next;
+      for (final task in state.tasks.reversed) {
+        if (task.status == 'queued') {
+          next = task;
+          break;
+        }
+      }
+      if (next == null) break;
+      running += 1;
+      unawaited(_executeTask(next));
+    }
+  }
+
+  Future<void> _executeTask(StudioTask queuedTask) async {
+    if (_taskById(queuedTask.id)?.status != 'queued') return;
+    var task = queuedTask.copyWith(status: 'running');
+    _trackChatTask(task);
+    _replaceTask(task);
+    unawaited(_saveTasks());
+    final request = task.request;
+    final taskId = task.id;
+    try {
+      final streamId = await HarnessClient.instance.studioGenerate(
+        prompt: request['prompt'] as String? ?? '',
+        mode: request['mode'] as String? ?? 'generate',
+        negativePrompt: request['negativePrompt'] as String?,
+        aspect:
+            request['aspect'] as String? ?? request['aspectRatio'] as String?,
+        resolution: request['resolution'] as String?,
+        quality: request['quality'] as String?,
+        format:
+            request['format'] as String? ?? request['outputFormat'] as String?,
+        size: request['size'] as String?,
+        n: (request['n'] as num?)?.toInt() ?? 1,
+        inputImageB64: request['inputImageB64'] as String?,
+        inputImages:
+            (request['inputImages'] as List?)?.whereType<String>().toList() ??
+            const [],
+        folder: request['folder'] as String?,
+        tags:
+            (request['tags'] as List?)?.whereType<String>().toList() ??
+            const [],
+        providerId: request['providerId'] as String?,
+        model: request['model'] as String?,
+      );
+      task = StudioTask(
+        id: task.id,
+        status: task.status,
+        createdAt: task.createdAt,
+        request: {...task.request, '_streamId': streamId},
+        label: task.label,
+        createdByAgent: task.createdByAgent,
+        error: task.error,
+        entries: task.entries,
+      );
+      _replaceTask(task);
+      unawaited(_saveTasks());
+      final sub = HarnessClient.instance
+          .subscribeStream(streamId)
+          .listen(
+            (frame) {
+              final current = _taskById(taskId);
+              if (current == null) return;
+              if (frame.kind == 'image_ready') {
+                final raw = frame.data['entry'];
+                if (raw is! Map) return;
+                final entry = ImageEntry.fromJson(raw.cast<String, dynamic>());
+                final entries =
+                    current.entries.any((item) => item.id == entry.id)
+                    ? current.entries
+                    : [...current.entries, entry];
+                _replaceTask(
+                  current.copyWith(entries: entries),
+                  imageAdded: entries.length != current.entries.length,
+                );
+                _appendChatImage(current, entry);
+                unawaited(_saveTasks());
+              } else if (frame.kind == 'done' || frame.kind == 'error') {
+                _finishTask(
+                  taskId,
+                  streamId,
+                  error: frame.kind == 'error'
+                      ? frame.data['message'] as String? ?? '生成失败'
+                      : null,
+                );
+              }
+            },
+            onError: (Object error) =>
+                _finishTask(taskId, streamId, error: error.toString()),
+            onDone: () {
+              final current = _taskById(taskId);
+              if (current?.status != 'running') return;
+              _finishTask(
+                taskId,
+                streamId,
+                error: current!.entries.isEmpty ? '连接中断' : null,
+              );
+            },
+          );
+      _taskSubscriptions[taskId] = sub;
+    } catch (error) {
+      final current = _taskById(taskId);
+      if (current != null) {
+        _replaceTask(current.copyWith(status: 'error', error: '$error'));
+        _completeChatTask(current, error: '$error');
+        unawaited(_saveTasks());
+      }
+      _runScheduler();
+    }
+  }
+
+  void _finishTask(String taskId, String streamId, {String? error}) {
+    final current = _taskById(taskId);
+    if (current?.status == 'running') {
+      _replaceTask(
+        error == null
+            ? current!.copyWith(status: 'success')
+            : current!.copyWith(status: 'error', error: error),
+      );
+      _completeChatTask(current, error: error);
+      unawaited(_saveTasks());
+    }
+    HarnessClient.instance.markStudioStreamFinished(streamId);
+    _taskSubscriptions.remove(taskId)?.cancel();
+    _runScheduler();
+  }
+
+  void retryTask(String id) {
+    final task = _taskById(id);
+    if (task == null || task.status == 'running') return;
+    _replaceTask(
+      task.copyWith(status: 'queued', clearError: true, entries: const []),
+    );
+    _trackChatTask(task);
+    unawaited(_saveTasks());
+    _runScheduler();
+  }
+
+  void removeTask(String id) {
+    final task = _taskById(id);
+    if (task?.status == 'running') return;
+    if (task?.status == 'queued') {
+      _completeChatTask(task!, error: '任务已移除');
+    }
+    state = state.copyWith(
+      tasks: state.tasks.where((task) => task.id != id).toList(),
+    );
+    unawaited(_saveTasks());
+  }
+
+  void clearFinishedTasks() {
+    state = state.copyWith(
+      tasks: state.tasks
+          .where((task) => task.status == 'queued' || task.status == 'running')
+          .toList(),
+    );
+    unawaited(_saveTasks());
+  }
+
+  void retryAllFailedTasks() {
+    state = state.copyWith(
+      tasks: state.tasks
+          .map(
+            (task) => task.status == 'error'
+                ? task.copyWith(
+                    status: 'queued',
+                    clearError: true,
+                    entries: const [],
+                  )
+                : task,
+          )
+          .toList(),
+    );
+    for (final task in state.tasks.where((task) => task.status == 'queued')) {
+      _trackChatTask(task);
+    }
+    unawaited(_saveTasks());
+    _runScheduler();
+  }
+
+  @visibleForTesting
+  void restoreTasksForTesting(List<StudioTask> tasks) {
+    state = state.copyWith(tasks: _sortTasks(tasks), initialized: true);
+  }
+
+  @visibleForTesting
+  void registerChatTasksForTesting({
+    required String conversationId,
+    required String messageId,
+    required List<String> prompts,
+    required List<String> queueIds,
+  }) {
+    _registerChatTasks(
+      conversationId: conversationId,
+      messageId: messageId,
+      prompts: prompts,
+      queueIds: queueIds,
+      taskCount: prompts.length,
+      scheduleDrain: false,
+    );
+  }
+
+  @visibleForTesting
+  Map<String, dynamic> attachPendingChatTargetForTesting(
+    Map<String, dynamic> request,
+  ) => _attachPendingChatTarget(request);
+}
+
+final studioQueueProvider =
+    NotifierProvider<StudioQueueController, StudioQueueState>(
+      StudioQueueController.new,
+    );
 
 /// 群组 UI 状态。
 class GroupChatController extends Notifier<List<UiMessage>> {
@@ -1100,6 +2152,13 @@ class GroupChatController extends Notifier<List<UiMessage>> {
     AgentGroupDefinition group,
     List<AgentDefinition> agents,
   ) async {
+    if (_session?.id == group.id) {
+      if (!_busy) await refreshSession();
+      return;
+    }
+    if (_busy) {
+      throw StateError('“${_session?.topic ?? '当前群聊'}”仍在执行，请等待完成后再切换群聊');
+    }
     final agentsById = {for (final agent in agents) agent.id: agent};
     final members = <Map<String, String>>[];
     for (final id in group.memberAgentIds) {

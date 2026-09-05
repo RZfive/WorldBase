@@ -50,7 +50,7 @@ export function toolAskUser (context: AskUserToolContext): Tool {
               required: ['question', 'options']
             },
             minItems: 1,
-            maxItems: 6
+            maxItems: 4
           }
         },
         required: ['questions']
@@ -63,7 +63,7 @@ export function toolAskUser (context: AskUserToolContext): Tool {
       }
 
       const normalized: AskUserQuestion[] = []
-      for (let i = 0; i < rawQuestions.length; i++) {
+      for (let i = 0; i < Math.min(rawQuestions.length, 4); i++) {
         const item = rawQuestions[i]
         if (!item || typeof item !== 'object') {
           return { error: `question[${i}] must be an object with { question, options }.` }

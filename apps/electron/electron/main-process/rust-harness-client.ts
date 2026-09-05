@@ -105,6 +105,8 @@ export interface RustChatOptions {
   targetProjectId?: string | null
   /** Restrict native Rust MCP calls to servers authorized for this run. */
   allowedMcpServerIds?: string[]
+  /** Match the Node providers: reasoning is sent only when thinking is enabled. */
+  enableThinking?: boolean
   reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
   temperature?: number
   /** Initialize Rust's per-run plan guard before the first provider call. */
@@ -145,6 +147,8 @@ export interface RustNativeGroupRoundOptions {
   memberIds?: string[]
   authMode?: 'strict' | 'auto'
   context?: RustChatOptions
+  /** Build isolated Electron handlers lazily for each Rust member stream. */
+  customToolsForStream?: (streamId: string) => RustCustomToolRegistration[]
   onEvent?: (frame: RustEventFrame) => void
 }
 
@@ -205,6 +209,11 @@ export class RustHarnessClient {
   private readonly sessionCustomTools = new Map<string, Map<string, RustCustomToolRegistration>>()
   /** Electron stream session -> durable Rust group session. */
   private readonly nativeGroups = new Map<string, string>()
+  /** Electron stream session -> factory for isolated native-group member tools. */
+  private readonly nativeGroupToolFactories = new Map<string, (streamId: string) => RustCustomToolRegistration[]>()
+  /** Original Rust member stream -> its stateful Electron handler set. */
+  private readonly nativeGroupMemberTools = new Map<string, Map<string, RustCustomToolRegistration>>()
+  private readonly nativeGroupMemberStreams = new Map<string, Set<string>>()
   private modelPricing: Record<string, ModelPricing> = {}
   private availableTools: RustToolDescriptor[] = []
   private providerSyncFingerprint: string | null = null
@@ -331,7 +340,14 @@ export class RustHarnessClient {
     if (!this.child?.stdin.writable) throw new Error('Rust harness is not running')
 
     const id = String(this.nextRequestId++)
-    const message = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'
+    // JSON.stringify preserves lone UTF-16 surrogates as \udXXX escapes, but
+    // serde_json correctly rejects those escapes. Sanitize every value and
+    // object key at the transport boundary so page/tool payloads cannot turn
+    // into an uncorrelated JSON-RPC parse error.
+    const message = JSON.stringify(
+      sanitizeJsonRpcValue({ jsonrpc: '2.0', id, method, params }),
+      (_key, value) => typeof value === 'string' ? sanitizeJsonRpcText(value) : value
+    ) + '\n'
     return await new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
@@ -666,6 +682,11 @@ export class RustHarnessClient {
     this.nativeGroups.set(sessionId, groupId)
     this.streamToSession.set(groupId, sessionId)
     this.sessionToStream.set(sessionId, groupId)
+    if (options.customToolsForStream) {
+      this.nativeGroupToolFactories.set(sessionId, options.customToolsForStream)
+    } else {
+      this.nativeGroupToolFactories.delete(sessionId)
+    }
 
     try {
       await this.start()
@@ -768,6 +789,8 @@ export class RustHarnessClient {
       if (this.stopRequested.delete(sessionId)) {
         throw new Error(USER_ABORT_MESSAGE)
       }
+      const enableThinking = options?.enableThinking
+      const reasoningEffort = enableThinking === false ? undefined : options?.reasoningEffort
       const result = await this.request<{ streamId?: string; stream_id?: string }>('chat.send', {
         conversationId,
         text,
@@ -786,7 +809,8 @@ export class RustHarnessClient {
         // on that contract instead of turning an empty persisted array into a
         // deny-all policy.
         allowedMcpServerIds: normalizeMcpServerSelection(options?.allowedMcpServerIds),
-        reasoningEffort: options?.reasoningEffort || null,
+        ...(enableThinking !== undefined ? { enableThinking } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
         temperature: normalizeTemperature(options?.temperature),
         planModeActive: options?.planModeActive === true,
         budgetLimit: normalizeBudgetLimit(options?.budgetLimit),
@@ -874,7 +898,10 @@ export class RustHarnessClient {
   }
 
   async respondHost (requestId: string, result: JsonRpcResult): Promise<void> {
-    await this.call('host.respond', { requestId, result })
+    // Host handlers can finish after their originating stream or process has
+    // already exited. Never let that late reply start a fresh harness and
+    // deliver an obsolete request id to the replacement process.
+    await this.callRunning('host.respond', { requestId, result })
   }
 
   /** Refresh provider definitions after Electron settings change or before a chat. */
@@ -980,16 +1007,27 @@ export class RustHarnessClient {
   }
 
   private async syncConversationHistory (conversationId: string, messages: RustSyncMessage[]): Promise<void> {
-    const normalized = messages
-      .map(message => ({
-        role: message.role === 'assistant' ? 'assistant' : message.role === 'system' ? 'system' : 'user',
-        content: textFromMessageContent(message.content),
-        parts: normalizeContentParts(message.content),
-        toolCalls: normalizeToolCalls(message.tool_calls),
-        toolResults: normalizeToolResults(message)
-      }))
+    const normalized = sanitizeSyncMessageSequence(messages)
+      .map(message => {
+        const isToolResult = message.role === 'tool'
+        return {
+          role: message.role === 'assistant' ? 'assistant' : message.role === 'system' || message.role === 'developer' ? 'system' : 'user',
+          // Rust represents provider tool responses as a user-role message whose
+          // content consists only of ToolResult blocks. Copying the text field as
+          // well would emit a second ordinary user message to OpenAI-compatible
+          // providers.
+          content: isToolResult ? '' : textFromMessageContent(message.content),
+          parts: isToolResult ? [] : normalizeContentParts(message.content),
+          toolCalls: normalizeToolCalls(message.tool_calls),
+          toolResults: normalizeToolResults(message)
+        }
+      })
       .filter(message => message.content.length > 0 || message.parts.length > 0 || message.toolCalls.length > 0 || message.toolResults.length > 0)
-    await this.call('conversation.sync', { id: conversationId, messages: normalized })
+    await this.call('conversation.sync', {
+      id: conversationId,
+      authoritative: true,
+      messages: normalized
+    })
   }
 
   dispose (): void {
@@ -1014,6 +1052,9 @@ export class RustHarnessClient {
     this.backlog.clear()
     this.sessionCustomTools.clear()
     this.nativeGroups.clear()
+    this.nativeGroupToolFactories.clear()
+    this.nativeGroupMemberTools.clear()
+    this.nativeGroupMemberStreams.clear()
     for (const waiters of this.terminalWaiters.values()) {
       for (const finish of waiters) finish()
     }
@@ -1137,6 +1178,8 @@ export class RustHarnessClient {
           apiProtocol: provider.apiProtocol || '',
           models,
           activeModel: provider.activeModel,
+          temperature: normalizeTemperature(provider.temperature),
+          enableThinking: provider.enableThinking === true,
           imageGeneration: provider.modelCapabilities?.[provider.activeModel]?.imageGeneration === true
         }
       })
@@ -1240,7 +1283,21 @@ export class RustHarnessClient {
       this.handleEvent(message.params)
       return
     }
-    if (message.id === undefined || message.id === null) return
+    if (message.id === undefined || message.id === null) {
+      if (message.error && this.pending.size > 0) {
+        const code = typeof message.error.code === 'number' ? ` (${message.error.code})` : ''
+        const error = new Error(`Rust harness rejected an uncorrelated JSON-RPC request${code}: ${message.error.message || 'unknown protocol error'}`)
+        // The server cannot identify which NDJSON line failed to parse. Fail
+        // every in-flight request immediately; otherwise chat.send can hang
+        // for five minutes and the remaining responses are ambiguous anyway.
+        for (const [pendingId, request] of this.pending) {
+          clearTimeout(request.timer)
+          request.reject(error)
+          this.pending.delete(pendingId)
+        }
+      }
+      return
+    }
     const id = String(message.id)
     const request = this.pending.get(id)
     if (!request) return
@@ -1289,6 +1346,9 @@ export class RustHarnessClient {
       void this.handlePermissionRequest(routedFrame, sessionId)
     }
     if (groupId) {
+      if (isNativeGroupMemberFrame && (frame.kind === 'done' || frame.kind === 'error')) {
+        this.releaseNativeGroupMemberTools(sessionId, frame.streamId)
+      }
       // Child agents publish their own Done/Error events. They are not the
       // native group terminal: the dispatcher publishes group_complete or
       // group_error only after aggregation/board updates have finished.
@@ -1323,7 +1383,9 @@ export class RustHarnessClient {
             argsSummary: String(frame.argsSummary || ''),
             sessionId
           })
-      await this.call('chat.respond', { requestId, allow: Boolean(allow) })
+      // A permission dialog may resolve after the run has been cancelled or
+      // the process has exited. Replies belong only to the current process.
+      await this.callRunning('chat.respond', { requestId, allow: Boolean(allow) })
     } catch (error) {
       // The associated stream will receive the transport failure through
       // handleExit. Avoid an unhandled rejection from this event callback.
@@ -1335,11 +1397,20 @@ export class RustHarnessClient {
     const requestId = String(frame.requestId || '')
     if (!requestId) return
     try {
+      const requestKind = String(frame.requestKind || '')
+      const memberStreamId = typeof frame.groupMemberStreamId === 'string'
+        ? frame.groupMemberStreamId
+        : ''
       const request: RustHostRequest = {
         requestId,
-        requestKind: String(frame.requestKind || ''),
+        requestKind,
         payload: (frame.payload && typeof frame.payload === 'object') ? frame.payload as Record<string, unknown> : {},
-        streamId: frame.streamId || sessionId
+        // UI host requests remain attached to the parent Electron stream. A
+        // stateful tool handler, however, must be selected by the original
+        // Rust member stream rather than the rewritten group stream.
+        streamId: requestKind === 'tool.execute' && memberStreamId
+          ? memberStreamId
+          : frame.streamId || sessionId
       }
       const result = request.requestKind === 'tool.execute'
         ? await this.executeSessionCustomTool(sessionId, request)
@@ -1370,19 +1441,62 @@ export class RustHarnessClient {
     const args = rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? rawArgs as Record<string, unknown>
       : {}
-    const tool = this.sessionCustomTools.get(sessionId)?.get(name)
+    const memberStream = this.nativeGroupSessionForMemberStream(request.streamId) === sessionId
+      ? request.streamId
+      : ''
+    const tools = memberStream
+      ? this.nativeGroupToolsForStream(sessionId, memberStream)
+      : this.sessionCustomTools.get(sessionId)
+    const tool = tools?.get(name)
     if (!tool) throw new Error(`Rust requested unavailable Electron custom tool: ${name || '(missing name)'}`)
     const result = await tool.handler(args, (stage, detail) => {
+      const groupId = memberStream ? this.nativeGroups.get(sessionId) : null
       this.handlers.get(sessionId)?.({
-        streamId: request.streamId,
+        streamId: groupId || request.streamId,
         seq: -1,
         ts: new Date().toISOString(),
         kind: 'progress',
         stage,
-        detail
+        detail,
+        ...(groupId ? { groupMemberStreamId: memberStream } : {})
       })
     })
     return (result ?? null) as JsonRpcResult
+  }
+
+  private nativeGroupToolsForStream (
+    sessionId: string,
+    streamId: string
+  ): Map<string, RustCustomToolRegistration> | undefined {
+    const existing = this.nativeGroupMemberTools.get(streamId)
+    if (existing) return existing
+    const factory = this.nativeGroupToolFactories.get(sessionId)
+    if (!factory) return undefined
+    const registrations = factory(streamId)
+    const tools = new Map(registrations
+      .filter(tool => Boolean(tool.definition?.name?.trim()))
+      .map(tool => [tool.definition.name, tool]))
+    this.nativeGroupMemberTools.set(streamId, tools)
+    const streams = this.nativeGroupMemberStreams.get(sessionId) || new Set<string>()
+    streams.add(streamId)
+    this.nativeGroupMemberStreams.set(sessionId, streams)
+    return tools
+  }
+
+  private releaseNativeGroupMemberTools (sessionId: string, streamId: string): void {
+    this.nativeGroupMemberTools.delete(streamId)
+    const streams = this.nativeGroupMemberStreams.get(sessionId)
+    if (!streams) return
+    streams.delete(streamId)
+    if (streams.size === 0) this.nativeGroupMemberStreams.delete(sessionId)
+  }
+
+  private releaseNativeGroupTools (sessionId: string): void {
+    this.nativeGroupToolFactories.delete(sessionId)
+    const streams = this.nativeGroupMemberStreams.get(sessionId)
+    if (!streams) return
+    for (const streamId of streams) this.nativeGroupMemberTools.delete(streamId)
+    this.nativeGroupMemberStreams.delete(sessionId)
   }
 
   private handleExit (error: Error): void {
@@ -1411,6 +1525,9 @@ export class RustHarnessClient {
     this.backlog.clear()
     this.sessionCustomTools.clear()
     this.nativeGroups.clear()
+    this.nativeGroupToolFactories.clear()
+    this.nativeGroupMemberTools.clear()
+    this.nativeGroupMemberStreams.clear()
     for (const waiters of this.terminalWaiters.values()) {
       for (const finish of waiters) finish()
     }
@@ -1427,6 +1544,7 @@ export class RustHarnessClient {
     if (streamId) this.streamToSession.delete(streamId)
     this.handlers.delete(sessionId)
     this.sessionCustomTools.delete(sessionId)
+    this.releaseNativeGroupTools(sessionId)
     this.nativeGroups.delete(sessionId)
     this.sessionAuthModes.delete(sessionId)
     this.stopRequested.delete(sessionId)
@@ -1501,13 +1619,28 @@ function normalizeContentParts (content: unknown): Array<Record<string, unknown>
   const parts: Array<Record<string, unknown>> = []
   for (const part of content) {
     if (!part || typeof part !== 'object') continue
-    const item = part as { type?: unknown; text?: unknown; image_url?: { url?: unknown } }
+    const item = part as {
+      type?: unknown
+      text?: unknown
+      thinking?: unknown
+      signature?: unknown
+      data?: unknown
+      image_url?: { url?: unknown }
+    }
     if (item.type === 'text' && typeof item.text === 'string' && item.text.length > 0) {
       parts.push({ type: 'text', text: item.text })
       continue
     }
     if (item.type === 'image_url' && typeof item.image_url?.url === 'string' && item.image_url.url.trim()) {
       parts.push({ type: 'image_url', image_url: { url: item.image_url.url } })
+      continue
+    }
+    if (item.type === 'thinking' && typeof item.thinking === 'string' && typeof item.signature === 'string') {
+      parts.push({ type: 'thinking', thinking: item.thinking, signature: item.signature })
+      continue
+    }
+    if (item.type === 'redacted_thinking' && typeof item.data === 'string') {
+      parts.push({ type: 'redacted_thinking', data: item.data })
     }
   }
   return parts
@@ -1542,18 +1675,24 @@ function normalizeBudgetLimit (value: unknown): number | null {
 
 /** Serialize the portable portion of a chat run for Rust group members. */
 function nativeGroupContext (options?: RustChatOptions): Record<string, unknown> {
+  const enableThinking = options?.enableThinking
+  const reasoningEffort = enableThinking === false ? undefined : options?.reasoningEffort
   return {
     systemPromptSections: normalizeStringArray(options?.systemPromptSections),
     activeSkillContents: normalizeStringArray(options?.activeSkillContents),
     allowedToolNames: normalizeStringArray(options?.allowedToolNames),
     deniedToolNames: normalizeStringArray(options?.deniedToolNames),
+    customTools: (options?.customTools || []).map(toRustToolDescriptor),
     workspaceRoot: normalizeOptionalString(options?.workspaceRoot),
     targetProjectId: normalizeOptionalString(options?.targetProjectId),
     allowedMcpServerIds: normalizeMcpServerSelection(options?.allowedMcpServerIds),
-    reasoningEffort: options?.reasoningEffort || null,
+    ...(enableThinking !== undefined ? { enableThinking } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
     temperature: normalizeTemperature(options?.temperature),
     planModeActive: options?.planModeActive === true,
-    budgetLimit: normalizeBudgetLimit(options?.budgetLimit)
+    budgetLimit: normalizeBudgetLimit(options?.budgetLimit),
+    memoryScopes: Array.isArray(options?.memoryScopes) ? options.memoryScopes : [],
+    memoryQuery: normalizeOptionalString(options?.memoryQuery)
   }
 }
 
@@ -1579,16 +1718,24 @@ function normalizeToolCalls (value: unknown): Array<Record<string, unknown>> {
   return value.flatMap((call) => {
     if (!call || typeof call !== 'object') return []
     const record = call as { id?: unknown; function?: { name?: unknown; arguments?: unknown } }
-    const id = typeof record.id === 'string' ? record.id : ''
-    const name = typeof record.function?.name === 'string' ? record.function.name : ''
+    const id = typeof record.id === 'string' ? record.id.trim() : ''
+    const name = typeof record.function?.name === 'string' ? record.function.name.trim() : ''
     if (!id || !name) return []
-    let args: unknown = {}
-    if (typeof record.function?.arguments === 'string') {
+
+    let args: Record<string, unknown> = {}
+    const rawArguments = record.function?.arguments
+    if (typeof rawArguments === 'string' && rawArguments.trim()) {
       try {
-        args = JSON.parse(record.function.arguments)
+        const parsed = JSON.parse(rawArguments) as unknown
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
+        args = parsed as Record<string, unknown>
       } catch {
-        args = { _raw: record.function.arguments }
+        return []
       }
+    } else if (rawArguments && typeof rawArguments === 'object' && !Array.isArray(rawArguments)) {
+      args = rawArguments as Record<string, unknown>
+    } else if (rawArguments !== undefined && rawArguments !== null && rawArguments !== '') {
+      return []
     }
     return [{ id, name, args }]
   })
@@ -1604,4 +1751,92 @@ function normalizeToolResults (message: RustSyncMessage): Array<Record<string, u
     content: textFromMessageContent(message.content),
     isError: false
   }]
+}
+
+/** Keep only complete assistant tool-call batches and their exact responses. */
+function sanitizeSyncMessageSequence (messages: RustSyncMessage[]): RustSyncMessage[] {
+  const sanitized: RustSyncMessage[] = []
+
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+    if (message.role === 'tool') continue
+
+    const rawCalls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+    if (message.role !== 'assistant' || rawCalls.length === 0) {
+      sanitized.push(message)
+      continue
+    }
+
+    const calls = normalizeToolCalls(rawCalls)
+    const expectedIds = new Set(calls.map(call => String(call.id || '').trim()).filter(Boolean))
+    const toolMessages: RustSyncMessage[] = []
+    let nextIndex = index + 1
+    while (nextIndex < messages.length && messages[nextIndex].role === 'tool') {
+      toolMessages.push(messages[nextIndex])
+      nextIndex++
+    }
+
+    const malformedCalls = calls.length !== rawCalls.length || expectedIds.size !== calls.length
+    if (malformedCalls) {
+      // A damaged persisted call cannot be replayed safely, but prose from the
+      // assistant turn is still useful context. Its adjacent tool responses
+      // are consumed here and omitted as orphans.
+      sanitized.push({ ...message, tool_calls: undefined })
+      index = nextIndex - 1
+      continue
+    }
+
+    const matchedIds = new Set<string>()
+    let invalid = toolMessages.length === 0
+    for (const toolMessage of toolMessages) {
+      const id = typeof toolMessage.tool_call_id === 'string' ? toolMessage.tool_call_id.trim() : ''
+      if (!id || !expectedIds.has(id) || matchedIds.has(id)) {
+        invalid = true
+        break
+      }
+      matchedIds.add(id)
+    }
+
+    if (!invalid && matchedIds.size === expectedIds.size) {
+      sanitized.push(message, ...toolMessages)
+    }
+    index = nextIndex - 1
+  }
+
+  return sanitized
+}
+
+const LONE_SURROGATE_PATTERN = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+
+function sanitizeJsonRpcText (value: string): string {
+  return value ? value.replace(LONE_SURROGATE_PATTERN, '\uFFFD') : value
+}
+
+/** Recursively sanitize both JSON values and property names before encoding. */
+function sanitizeJsonRpcValue (value: unknown, ancestors = new WeakSet<object>()): unknown {
+  if (typeof value === 'string') return sanitizeJsonRpcText(value)
+  if (value === null || typeof value !== 'object') return value
+  if (ancestors.has(value)) throw new TypeError('Converting circular structure to JSON')
+
+  ancestors.add(value)
+  try {
+    if (Array.isArray(value)) {
+      return value.map(item => sanitizeJsonRpcValue(item, ancestors))
+    }
+
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) {
+      // Preserve JSON.stringify/toJSON behavior for non-record values while
+      // still sanitizing their eventual string representation via a replacer.
+      return value
+    }
+
+    const result: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value)) {
+      result[sanitizeJsonRpcText(key)] = sanitizeJsonRpcValue(item, ancestors)
+    }
+    return result
+  } finally {
+    ancestors.delete(value)
+  }
 }

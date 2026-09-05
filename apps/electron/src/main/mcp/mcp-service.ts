@@ -471,9 +471,9 @@ export class MCPService extends EventEmitter {
   }
 
   /**
-   * Execute an MCP tool by its Electron server id and remote name. This keeps
-   * the generic Rust `mcp_call` compatibility tool on the same authenticated
-   * Electron connection as dynamically discovered MCP tools.
+   * Execute an MCP tool by its Electron server id and remote name. Rust-selected
+   * runs route the generic `mcp_call` here so it uses the live Electron server
+   * catalog and the same authenticated connection as the legacy Node harness.
    */
   async executeServerTool (
     serverId: string,

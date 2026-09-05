@@ -363,6 +363,7 @@ fn resolve_studio_image_target(
                         models: Vec::new(),
                         active_model: "mock-image".into(),
                         temperature: None,
+                        enable_thinking: false,
                         image_generation: true,
                     },
                     params
@@ -551,6 +552,7 @@ mod tests {
             }],
             active_model: "text-model".into(),
             temperature: None,
+            enable_thinking: false,
             image_generation: false,
         };
         assert_eq!(

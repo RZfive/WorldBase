@@ -6,13 +6,74 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use worldbase_protocol::types::ProviderEntry;
 
-/// auto 规则：baseUrl 含 anthropic → anthropic 协议，否则 openai（对齐桌面 resolveApiProtocol）。
+const IMAGE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn is_dall_e_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    normalized.contains("dall-e") || normalized.contains("dalle")
+}
+
+fn is_dall_e_2_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    normalized.contains("dall-e-2")
+        || normalized.contains("dalle-2")
+        || normalized.contains("dalle2")
+}
+
+fn is_dall_e_3_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    normalized.contains("dall-e-3")
+        || normalized.contains("dalle-3")
+        || normalized.contains("dalle3")
+}
+
+fn dall_e_3_size_for(aspect: Option<&str>) -> &'static str {
+    match aspect.unwrap_or("1:1") {
+        "3:2" | "4:3" | "16:9" => "1792x1024",
+        "2:3" | "3:4" | "9:16" => "1024x1792",
+        _ => "1024x1024",
+    }
+}
+
+fn normalized_dall_e_size<'a>(
+    model: &str,
+    explicit_size: Option<&'a str>,
+    aspect: Option<&str>,
+) -> Option<&'a str> {
+    if is_dall_e_2_model(model) {
+        return Some(
+            explicit_size
+                .filter(|size| matches!(*size, "256x256" | "512x512" | "1024x1024"))
+                .unwrap_or("1024x1024"),
+        );
+    }
+    if is_dall_e_3_model(model) {
+        return Some(
+            explicit_size
+                .filter(|size| matches!(*size, "1024x1024" | "1792x1024" | "1024x1792"))
+                .unwrap_or_else(|| dall_e_3_size_for(aspect)),
+        );
+    }
+    None
+}
+
+fn is_gpt_image_model(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("gpt-image")
+}
+
+/// Auto protocol selection matches Electron exactly: only the official
+/// anthropic.com base URL implies the native Messages API. Third-party paths
+/// containing "anthropic" remain OpenAI-compatible unless explicitly set.
 pub fn resolve_protocol(entry: &ProviderEntry) -> &'static str {
     match entry.api_protocol.as_str() {
         "anthropic" => "anthropic",
         "openai" => "openai",
         _ => {
-            if entry.base_url.contains("anthropic") {
+            if entry
+                .base_url
+                .to_ascii_lowercase()
+                .contains("anthropic.com")
+            {
                 "anthropic"
             } else {
                 "openai"
@@ -34,11 +95,22 @@ pub fn create_provider_from_entry(entry: &ProviderEntry) -> Result<std::sync::Ar
             entry.active_model.clone(),
             non_empty(Some(entry.base_url.clone())),
         )?)),
-        _ => Ok(std::sync::Arc::new(OpenAIProvider::new(
-            entry.api_key.clone(),
-            entry.active_model.clone(),
-            non_empty(Some(entry.base_url.clone())),
-        ))),
+        _ => {
+            let (image_generation, image_editing) = entry
+                .models
+                .iter()
+                .find(|model| model.id == entry.active_model)
+                .map(|model| (model.image_generation, model.image_editing))
+                .unwrap_or((entry.image_generation, false));
+            Ok(std::sync::Arc::new(
+                OpenAIProvider::new(
+                    entry.api_key.clone(),
+                    entry.active_model.clone(),
+                    non_empty(Some(entry.base_url.clone())),
+                )
+                .with_image_capabilities(image_generation, image_editing),
+            ))
+        }
     }
 }
 
@@ -77,6 +149,132 @@ pub struct ImageParams<'a> {
     pub input_image_mimes: Vec<&'a str>,
 }
 
+#[derive(Clone)]
+struct ImageRequestOptions {
+    negative_prompt: Option<String>,
+    quality: Option<String>,
+    output_format: Option<String>,
+    response_format: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+enum ImageRequestKind {
+    Generation,
+    StandardEdit,
+    ArkEdit,
+}
+
+impl ImageRequestOptions {
+    fn new(model: &str, params: &ImageParams<'_>, kind: ImageRequestKind) -> Self {
+        let is_dall_e = is_dall_e_model(model);
+        let is_gpt_image = is_gpt_image_model(model);
+        let quality = params.quality.and_then(|quality| {
+            let quality = quality.trim();
+            if quality.is_empty() {
+                None
+            } else if is_dall_e {
+                (quality == "high").then(|| "hd".to_string())
+            } else {
+                Some(quality.to_string())
+            }
+        });
+        let output_format = (!is_dall_e)
+            .then(|| params.format.map(str::trim))
+            .flatten()
+            .filter(|format| !format.is_empty())
+            .map(str::to_string);
+        let response_format = match (is_gpt_image, kind) {
+            (true, _) | (_, ImageRequestKind::StandardEdit) => None,
+            (false, ImageRequestKind::ArkEdit) => Some("url"),
+            (false, ImageRequestKind::Generation) => Some("b64_json"),
+        };
+        Self {
+            negative_prompt: (!matches!(kind, ImageRequestKind::StandardEdit))
+                .then(|| params.negative_prompt.map(str::trim))
+                .flatten()
+                .filter(|prompt| !prompt.is_empty())
+                .map(str::to_string),
+            quality,
+            output_format,
+            response_format,
+        }
+    }
+
+    fn ext(&self) -> &'static str {
+        ext_of(self.output_format.as_deref())
+    }
+
+    fn remove_rejected_field(&mut self, status: reqwest::StatusCode, error: &str) -> bool {
+        if !matches!(status.as_u16(), 400 | 422) {
+            return false;
+        }
+        for (field, present) in [
+            ("negative_prompt", self.negative_prompt.is_some()),
+            ("quality", self.quality.is_some()),
+            ("output_format", self.output_format.is_some()),
+            ("response_format", self.response_format.is_some()),
+        ] {
+            if present && rejected_image_field(error, field) {
+                match field {
+                    "negative_prompt" => self.negative_prompt = None,
+                    "quality" => self.quality = None,
+                    "output_format" => self.output_format = None,
+                    "response_format" => self.response_format = None,
+                    _ => unreachable!(),
+                }
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn rejected_image_field(error: &str, field: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    let spaced_field = field.replace('_', " ");
+    let markers = [
+        "unsupported",
+        "not supported",
+        "does not support",
+        "unknown",
+        "unrecognized",
+        "invalid",
+        "extra",
+        "not permitted",
+        "unexpected",
+    ];
+    [field, spaced_field.as_str()].iter().any(|needle| {
+        error.match_indices(needle).any(|(index, _)| {
+            let mut start = index.saturating_sub(128);
+            while !error.is_char_boundary(start) {
+                start += 1;
+            }
+            let mut end = (index + needle.len() + 128).min(error.len());
+            while !error.is_char_boundary(end) {
+                end -= 1;
+            }
+            markers
+                .iter()
+                .any(|marker| error[start..end].contains(marker))
+        })
+    })
+}
+
+fn apply_json_image_options(body: &mut Value, options: &ImageRequestOptions) {
+    if let Some(value) = &options.negative_prompt {
+        body["negative_prompt"] = json!(value);
+    }
+    if let Some(value) = &options.quality {
+        body["quality"] = json!(value);
+    }
+    if let Some(value) = &options.output_format {
+        body["output_format"] = json!(value);
+    }
+    if let Some(value) = options.response_format {
+        body["response_format"] = json!(value);
+    }
+}
+
 /// OpenAI images 接口生图/改图（gpt-image-1 / dall-e-3 等任意 openai 协议端点）。
 /// 无 api_key 时生成确定性 SVG 占位图（mock 演示链路）。
 pub async fn generate_images(
@@ -84,7 +282,15 @@ pub async fn generate_images(
     model: &str,
     params: &ImageParams<'_>,
 ) -> Result<Vec<GeneratedImage>> {
-    let n = params.n.clamp(1, 4);
+    let requested_n = params.n.clamp(1, 4);
+    // DALL-E 3 accepts exactly one image per HTTP request. The Studio contract
+    // still promises up to four outputs, so generation fans out below instead
+    // of silently reducing the requested count.
+    let n = if is_dall_e_3_model(model) {
+        1
+    } else {
+        requested_n
+    };
     let explicit_size = params
         .size
         .filter(|size| !size.trim().is_empty())
@@ -94,19 +300,23 @@ pub async fn generate_images(
         .and_then(|(width, height)| {
             let width = width.trim().parse::<u32>().ok()?;
             let height = height.trim().parse::<u32>().ok()?;
-            Some(width * height)
+            width.checked_mul(height)
         });
     // OpenAI's own image endpoints infer or constrain size. Many OpenAI-
     // compatible services use different pixel-size tiers (for example Ark's
     // Seedream models require >= 3,686,400 pixels), so let those services pick
     // their default unless the user explicitly chose a size.
-    let uses_openai_image_sizes = model.starts_with("gpt-image-")
-        || model.starts_with("dall-e-")
-        || entry.base_url.contains("api.openai.com");
-    let uses_ark_image_contract = model.starts_with("doubao-seedream")
-        || model.contains("seedream")
-        || entry.base_url.contains("volces.com");
-    let size = if uses_openai_image_sizes {
+    let normalized_model = model.to_ascii_lowercase();
+    let normalized_base_url = entry.base_url.to_ascii_lowercase();
+    let uses_openai_image_sizes = is_gpt_image_model(model)
+        || is_dall_e_model(model)
+        || normalized_base_url.contains("api.openai.com");
+    let uses_ark_image_contract = normalized_model.contains("doubao-seedream")
+        || normalized_model.contains("seedream")
+        || normalized_base_url.contains("volces.com");
+    let size = if let Some(size) = normalized_dall_e_size(model, explicit_size, params.aspect) {
+        size
+    } else if uses_openai_image_sizes {
         // Resolution labels such as "1K" are queue metadata, not an OpenAI
         // size argument. Convert them to an endpoint-supported pixel size.
         if explicit_pixel_size.is_some() {
@@ -132,18 +342,15 @@ pub async fn generate_images(
     };
     let uses_ark_edit_contract = uses_ark_image_contract;
     if entry.api_key.trim().is_empty() {
-        return Ok((0..n)
+        return Ok((0..requested_n)
             .map(|i| mock_placeholder(params.prompt, Some(size), i))
             .collect());
     }
 
-    let base = if entry.base_url.trim().is_empty() {
-        "https://api.openai.com/v1".to_string()
-    } else {
-        entry.base_url.trim().trim_end_matches('/').to_string()
-    };
-    let client = reqwest::Client::new();
-    let ext = ext_of(params.format);
+    let base = entry.base_url.trim();
+    let generations_url = crate::urls::image_generations_url(base)?;
+    let edits_url = crate::urls::image_edits_url(base)?;
+    let client = crate::http::client();
 
     // 编辑模式：multipart /images/edits. Electron sends one image as
     // `image`, and more than one as repeated `image[]` fields.
@@ -169,131 +376,173 @@ pub async fn generate_images(
             .unwrap_or_default()
     };
     if !edit_inputs.is_empty() {
+        if is_dall_e_3_model(model) {
+            bail!("DALL-E 3 does not support image editing");
+        }
+        if is_dall_e_2_model(model) && edit_inputs.len() > 1 {
+            bail!("DALL-E 2 image editing accepts exactly one input image");
+        }
         if uses_ark_edit_contract {
             let image_values = edit_inputs
                 .iter()
                 .map(|(b64, mime)| format!("data:{mime};base64,{b64}"))
                 .collect::<Vec<_>>();
-            let mut body = json!({
-                "model": model,
-                "prompt": params.prompt,
-                "n": n,
-                "image": if image_values.len() == 1 {
-                    Value::String(image_values[0].clone())
-                } else {
-                    json!(image_values)
-                },
-                "response_format": "url",
-            });
-            if let Some(format) = params.format.filter(|format| !format.trim().is_empty()) {
-                body["output_format"] = json!(format);
-            }
-            let resp = client
-                .post(format!("{base}/images/generations"))
-                .bearer_auth(&entry.api_key)
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(180))
-                .send()
-                .await
-                .context("image edit request failed")?;
-            let status = resp.status();
-            if !status.is_success() {
+            let image = if image_values.len() == 1 {
+                Value::String(image_values[0].clone())
+            } else {
+                json!(image_values)
+            };
+            let mut options = ImageRequestOptions::new(model, params, ImageRequestKind::ArkEdit);
+            let request_timeout = IMAGE_REQUEST_TIMEOUT;
+            let resp = loop {
+                let mut body = json!({
+                    "model": model,
+                    "prompt": params.prompt,
+                    "n": n,
+                    "image": image,
+                });
+                apply_json_image_options(&mut body, &options);
+                let resp =
+                    crate::http::send_with_retry_timeout("image edit", request_timeout, || {
+                        client
+                            .post(generations_url.clone())
+                            .bearer_auth(&entry.api_key)
+                            .json(&body)
+                            .timeout(request_timeout)
+                    })
+                    .await
+                    .context("image edit request failed")?;
+                let status = resp.status();
+                if status.is_success() {
+                    break resp;
+                }
                 let text = resp.text().await.unwrap_or_default();
-                bail!("image api error ({status}): {text}");
-            }
+                if !options.remove_rejected_field(status, &text) {
+                    bail!("image api error ({status}): {text}");
+                }
+            };
             let value: Value = resp.json().await.context("parse image response")?;
-            let out = collect_images(value, &client, ext).await?;
+            let out = collect_images(value, &client, options.ext()).await?;
             anyhow::ensure!(!out.is_empty(), "image api returned no images");
             return Ok(out);
         }
 
         use base64::Engine;
-        let mut form = reqwest::multipart::Form::new()
-            .text("model", model.to_string())
-            .text("prompt", params.prompt.to_string())
-            .text("n", n.to_string());
-        if !size.trim().is_empty() {
-            form = form.text("size", size.to_string());
-        }
-        if let Some(q) = params.quality {
-            if q != "auto" {
-                form = form.text("quality", (*q).to_string());
-            }
-        }
-        if let Some(format) = params.format.filter(|format| !format.trim().is_empty()) {
-            form = form.text("output_format", format.to_string());
-        }
         let multiple = edit_inputs.len() > 1;
-        for (index, (b64, mime)) in edit_inputs.iter().enumerate() {
-            let image_bytes = base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .with_context(|| format!("decode input image {index}"))?;
-            let extension = match *mime {
-                "image/jpeg" | "image/jpg" => "jpg",
-                "image/webp" => "webp",
-                "image/gif" => "gif",
-                "image/svg+xml" => "svg",
-                _ => "png",
-            };
-            let part = reqwest::multipart::Part::bytes(image_bytes)
-                .file_name(format!("image-{index}.{extension}"))
-                .mime_str(mime)?;
-            form = form.part(if multiple { "image[]" } else { "image" }, part);
-        }
-        let resp = client
-            .post(format!("{base}/images/edits"))
-            .bearer_auth(&entry.api_key)
-            .multipart(form)
-            .timeout(std::time::Duration::from_secs(180))
-            .send()
+        let uploads = edit_inputs
+            .iter()
+            .enumerate()
+            .map(|(index, (b64, mime))| {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .with_context(|| format!("decode input image {index}"))?;
+                let extension = match *mime {
+                    "image/jpeg" | "image/jpg" => "jpg",
+                    "image/webp" => "webp",
+                    "image/gif" => "gif",
+                    "image/svg+xml" => "svg",
+                    _ => "png",
+                };
+                Ok((bytes, (*mime).to_string(), extension))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut options = ImageRequestOptions::new(model, params, ImageRequestKind::StandardEdit);
+        let request_timeout = IMAGE_REQUEST_TIMEOUT;
+        let resp = loop {
+            let resp = crate::http::send_fallible_with_retry_timeout(
+                "image edit",
+                request_timeout,
+                || {
+                    let mut form = reqwest::multipart::Form::new()
+                        .text("model", model.to_string())
+                        .text("prompt", params.prompt.to_string())
+                        .text("n", n.to_string());
+                    if !size.trim().is_empty() {
+                        form = form.text("size", size.to_string());
+                    }
+                    if let Some(negative_prompt) = &options.negative_prompt {
+                        form = form.text("negative_prompt", negative_prompt.clone());
+                    }
+                    if let Some(quality) = &options.quality {
+                        form = form.text("quality", quality.clone());
+                    }
+                    if let Some(format) = &options.output_format {
+                        form = form.text("output_format", format.clone());
+                    }
+                    if let Some(format) = options.response_format {
+                        form = form.text("response_format", format.to_string());
+                    }
+                    for (index, (bytes, mime, extension)) in uploads.iter().enumerate() {
+                        let part = reqwest::multipart::Part::bytes(bytes.clone())
+                            .file_name(format!("image-{index}.{extension}"))
+                            .mime_str(mime)?;
+                        form = form.part(if multiple { "image[]" } else { "image" }, part);
+                    }
+                    Ok(client
+                        .post(edits_url.clone())
+                        .bearer_auth(&entry.api_key)
+                        .multipart(form)
+                        .timeout(request_timeout))
+                },
+            )
             .await
             .context("image edit request failed")?;
-        let status = resp.status();
-        if !status.is_success() {
+            let status = resp.status();
+            if status.is_success() {
+                break resp;
+            }
             let text = resp.text().await.unwrap_or_default();
-            bail!("image api error ({status}): {text}");
-        }
+            if !options.remove_rejected_field(status, &text) {
+                bail!("image api error ({status}): {text}");
+            }
+        };
         let value: Value = resp.json().await.context("parse image response")?;
-        let out = collect_images(value, &client, ext).await?;
+        let out = collect_images(value, &client, options.ext()).await?;
         anyhow::ensure!(!out.is_empty(), "image api returned no images");
         return Ok(out);
     }
 
     // 生成模式：JSON /images/generations
-    let mut body = json!({ "model": model, "prompt": params.prompt, "n": n });
-    if !size.trim().is_empty() {
-        body["size"] = json!(size);
+    let mut options = ImageRequestOptions::new(model, params, ImageRequestKind::Generation);
+    let request_timeout = IMAGE_REQUEST_TIMEOUT;
+    let request_count = if is_dall_e_3_model(model) {
+        requested_n
+    } else {
+        1
+    };
+    let mut out = Vec::new();
+    for _ in 0..request_count {
+        let resp = loop {
+            let mut body = json!({ "model": model, "prompt": params.prompt, "n": n });
+            if !size.trim().is_empty() {
+                body["size"] = json!(size);
+            }
+            apply_json_image_options(&mut body, &options);
+            let resp =
+                crate::http::send_with_retry_timeout("image generation", request_timeout, || {
+                    client
+                        .post(generations_url.clone())
+                        .bearer_auth(&entry.api_key)
+                        .json(&body)
+                        .timeout(request_timeout)
+                })
+                .await
+                .context("image generation request failed")?;
+            let status = resp.status();
+            if status.is_success() {
+                break resp;
+            }
+            let text = resp.text().await.unwrap_or_default();
+            if !options.remove_rejected_field(status, &text) {
+                bail!("image api error ({status}): {text}");
+            }
+        };
+        let value: Value = resp.json().await.context("parse image response")?;
+        let mut generated = collect_images(value, &client, options.ext()).await?;
+        anyhow::ensure!(!generated.is_empty(), "image api returned no images");
+        out.append(&mut generated);
     }
-    if let Some(q) = params.quality {
-        if q != "auto" {
-            body["quality"] = json!(q);
-        }
-    }
-    if let Some(negative_prompt) = params
-        .negative_prompt
-        .filter(|negative_prompt| !negative_prompt.trim().is_empty())
-    {
-        body["negative_prompt"] = json!(negative_prompt);
-    }
-    if let Some(format) = params.format.filter(|format| !format.trim().is_empty()) {
-        body["output_format"] = json!(format);
-    }
-    let resp = client
-        .post(format!("{base}/images/generations"))
-        .bearer_auth(&entry.api_key)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(120))
-        .send()
-        .await
-        .context("image generation request failed")?;
-    let status = resp.status();
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        bail!("image api error ({status}): {text}");
-    }
-    let value: Value = resp.json().await.context("parse image response")?;
-    let out = collect_images(value, &client, ext).await?;
-    anyhow::ensure!(!out.is_empty(), "image api returned no images");
+    out.truncate(requested_n as usize);
     Ok(out)
 }
 
@@ -310,9 +559,25 @@ async fn collect_images(
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(b64)
                     .context("decode b64 image")?;
+                let ext = image_ext_from_bytes(&bytes).unwrap_or(ext);
                 out.push(GeneratedImage { bytes, ext });
             } else if let Some(url) = item["url"].as_str() {
-                let bytes = client.get(url).send().await?.bytes().await?;
+                let response = crate::http::send_with_retry("image download", || client.get(url))
+                    .await
+                    .context("image download request failed")?;
+                let status = response.status();
+                if !status.is_success() {
+                    bail!("image download failed with HTTP {status}");
+                }
+                let content_type_ext = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(image_ext_from_content_type);
+                let bytes = response.bytes().await.context("read downloaded image")?;
+                let ext = content_type_ext
+                    .or_else(|| image_ext_from_bytes(&bytes))
+                    .unwrap_or(ext);
                 out.push(GeneratedImage {
                     bytes: bytes.to_vec(),
                     ext,
@@ -321,6 +586,37 @@ async fn collect_images(
         }
     }
     Ok(out)
+}
+
+fn image_ext_from_content_type(content_type: &str) -> Option<&'static str> {
+    match content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        "image/png" => Some("png"),
+        _ => None,
+    }
+}
+
+fn image_ext_from_bytes(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
 }
 
 fn ext_of(format: Option<&str>) -> &'static str {
@@ -442,6 +738,33 @@ mod tests {
     }
 
     #[test]
+    fn dall_e_omits_non_hd_quality_levels() {
+        for quality in ["auto", "low", "medium"] {
+            let mut params = image_test_params();
+            params.quality = Some(quality);
+            let options =
+                ImageRequestOptions::new("dall-e-3", &params, ImageRequestKind::Generation);
+            assert!(options.quality.is_none(), "quality {quality}");
+            assert!(options.output_format.is_none());
+            assert_eq!(options.response_format, Some("b64_json"));
+        }
+    }
+
+    #[test]
+    fn detects_actual_image_extension() {
+        assert_eq!(image_ext_from_bytes(b"\x89PNG\r\n\x1a\nrest"), Some("png"));
+        assert_eq!(image_ext_from_bytes(&[0xff, 0xd8, 0xff, 0]), Some("jpg"));
+        assert_eq!(
+            image_ext_from_bytes(b"RIFF\x00\x00\x00\x00WEBP"),
+            Some("webp")
+        );
+        assert_eq!(
+            image_ext_from_content_type("image/jpeg; charset=binary"),
+            Some("jpg")
+        );
+    }
+
+    #[test]
     fn protocol_auto_rules() {
         let mut e = ProviderEntry {
             id: "p1".into(),
@@ -460,12 +783,23 @@ mod tests {
             }],
             active_model: "claude-sonnet-4".into(),
             temperature: None,
+            enable_thinking: false,
             image_generation: false,
         };
         assert_eq!(resolve_protocol(&e), "anthropic");
         e.base_url = "https://api.deepseek.com/v1".into();
         assert_eq!(resolve_protocol(&e), "openai");
         e.api_protocol = "anthropic".into();
+        assert_eq!(resolve_protocol(&e), "anthropic");
+
+        e.api_protocol.clear();
+        e.base_url = "https://gateway.example/api/anthropic".into();
+        assert_eq!(
+            resolve_protocol(&e),
+            "openai",
+            "third-party Anthropic-compatible paths require an explicit protocol"
+        );
+        e.base_url = "HTTPS://API.ANTHROPIC.COM/V1".into();
         assert_eq!(resolve_protocol(&e), "anthropic");
     }
 
@@ -480,9 +814,10 @@ mod tests {
             models: vec![],
             active_model: "mock-image".into(),
             temperature: None,
+            enable_thinking: false,
             image_generation: true,
         };
-        let params = ImageParams {
+        let mut params = ImageParams {
             prompt: "一只赛博朋克猫",
             negative_prompt: None,
             aspect: Some("1:1"),
@@ -499,28 +834,40 @@ mod tests {
         assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0].ext, "svg");
         assert!(imgs[0].bytes.starts_with(b"<svg"));
+
+        params.n = 4;
+        let imgs = generate_images(&e, "dall-e-3", &params).await.unwrap();
+        assert_eq!(imgs.len(), 4);
     }
 
     #[tokio::test]
-    async fn image_edit_forwards_multiple_inputs_and_studio_options() {
+    async fn image_edit_retries_and_rebuilds_all_multipart_fields() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut socket).await;
-            let request = String::from_utf8_lossy(&request);
-            assert!(request.starts_with("POST /images/edits HTTP/1.1"));
-            assert!(request.contains("name=\"size\"\r\n\r\n1536x1024"));
-            assert!(request.contains("name=\"quality\"\r\n\r\nhigh"));
-            assert!(request.contains("name=\"output_format\"\r\n\r\nwebp"));
-            assert_eq!(request.matches("name=\"image[]\"").count(), 2);
-            let body = r#"{"data":[{"b64_json":"aGVsbG8="}]}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let request = String::from_utf8_lossy(&request);
+                assert!(request.starts_with("POST /images/edits HTTP/1.1"));
+                assert!(request.contains("name=\"size\"\r\n\r\n1536x1024"));
+                assert!(request.contains("name=\"quality\"\r\n\r\nhigh"));
+                assert!(request.contains("name=\"output_format\"\r\n\r\nwebp"));
+                assert!(!request.contains("name=\"negative_prompt\""));
+                assert!(!request.contains("name=\"response_format\""));
+                assert_eq!(request.matches("name=\"image[]\"").count(), 2);
+                let (status, body) = if attempt == 0 {
+                    ("503 Service Unavailable", r#"{"error":"retry"}"#)
+                } else {
+                    ("200 OK", r#"{"data":[{"b64_json":"aGVsbG8="}]}"#)
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
         });
 
         let entry = ProviderEntry {
@@ -530,13 +877,14 @@ mod tests {
             api_key: "test-key".into(),
             api_protocol: "openai".into(),
             models: vec![],
-            active_model: "gpt-image-1".into(),
+            active_model: "compatible-image-edit".into(),
             temperature: None,
+            enable_thinking: false,
             image_generation: true,
         };
         let params = ImageParams {
             prompt: "combine the references",
-            negative_prompt: None,
+            negative_prompt: Some("no text"),
             aspect: Some("3:2"),
             size: Some("1536x1024"),
             resolution: Some("2K"),
@@ -547,13 +895,206 @@ mod tests {
             input_images_b64: vec!["aGVsbG8=", "d29ybGQ="],
             input_image_mimes: vec!["image/png", "image/jpeg"],
         };
-        let images = generate_images(&entry, "gpt-image-1", &params)
+        let images = generate_images(&entry, "compatible-image-edit", &params)
             .await
             .unwrap();
         server.await.unwrap();
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].ext, "webp");
         assert_eq!(images[0].bytes, b"hello");
+    }
+
+    #[tokio::test]
+    async fn dall_e_3_fans_out_single_image_requests_with_valid_parameters() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let body = String::from_utf8_lossy(&request)
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body.to_string())
+                    .unwrap();
+                let payload: Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(payload["quality"], "hd");
+                assert_eq!(payload["response_format"], "b64_json");
+                assert_eq!(payload["n"], 1);
+                assert_eq!(payload["size"], "1792x1024");
+                assert!(payload.get("output_format").is_none());
+                let response = r#"{"data":[{"b64_json":"aGVsbG8="}]}"#;
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                            response.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let entry = image_test_entry(address);
+        let mut params = image_test_params();
+        params.quality = Some("high");
+        params.format = Some("webp");
+        params.aspect = Some("16:9");
+        // The shared UI may restore a GPT Image size and a multi-image count;
+        // both must be normalized before they reach DALL-E 3.
+        params.size = Some("1536x1024");
+        params.n = 4;
+        let images = generate_images(&entry, "dall-e-3", &params).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(images.len(), 4);
+        assert!(images.iter().all(|image| image.ext == "png"));
+    }
+
+    #[test]
+    fn dall_e_versions_use_only_their_documented_sizes() {
+        assert_eq!(
+            normalized_dall_e_size("dall-e-2", Some("1536x1024"), Some("9:16")),
+            Some("1024x1024")
+        );
+        assert_eq!(
+            normalized_dall_e_size("dall-e-2", Some("512x512"), Some("9:16")),
+            Some("512x512")
+        );
+        assert_eq!(
+            normalized_dall_e_size("dall-e-3", Some("1536x1024"), Some("9:16")),
+            Some("1024x1792")
+        );
+        assert_eq!(
+            normalized_dall_e_size("dall-e-3", Some("1792x1024"), Some("9:16")),
+            Some("1792x1024")
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_removes_explicitly_rejected_optional_fields_in_order() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let rejected = [
+                ("negative_prompt", "unknown parameter negative_prompt"),
+                ("quality", "quality is unsupported"),
+                ("output_format", "invalid output_format"),
+                ("response_format", "response_format is an extra field"),
+            ];
+            for attempt in 0..=rejected.len() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let body = String::from_utf8_lossy(&request)
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body.to_string())
+                    .unwrap();
+                let payload: Value = serde_json::from_str(&body).unwrap();
+                for (index, (field, _)) in rejected.iter().enumerate() {
+                    assert_eq!(
+                        payload.get(*field).is_some(),
+                        index >= attempt,
+                        "field {field} on attempt {attempt}: {payload}"
+                    );
+                }
+                let (status, response) = if attempt < rejected.len() {
+                    ("422 Unprocessable Entity", rejected[attempt].1)
+                } else {
+                    ("200 OK", r#"{"data":[{"b64_json":"aGVsbG8="}]}"#)
+                };
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                            response.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let entry = image_test_entry(address);
+        let params = image_test_params();
+        let images = generate_images(&entry, "compatible-image-model", &params)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(images[0].ext, "png");
+    }
+
+    #[tokio::test]
+    async fn multipart_edit_removes_rejected_output_format_and_rebuilds_form() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let request = String::from_utf8_lossy(&request).into_owned();
+                assert_eq!(request.contains("name=\"output_format\""), attempt == 0);
+                assert!(!request.contains("name=\"response_format\""));
+                assert!(request.contains("name=\"image\""));
+                let (status, response) = if attempt == 0 {
+                    ("400 Bad Request", "output_format is not supported")
+                } else {
+                    ("200 OK", r#"{"data":[{"b64_json":"aGVsbG8="}]}"#)
+                };
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                            response.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let entry = image_test_entry(address);
+        let mut params = image_test_params();
+        params.negative_prompt = None;
+        params.quality = Some("auto");
+        params.input_image_b64 = Some("aGVsbG8=");
+        let images = generate_images(&entry, "compatible-image-model", &params)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(images[0].ext, "png");
+    }
+
+    fn image_test_entry(address: std::net::SocketAddr) -> ProviderEntry {
+        ProviderEntry {
+            id: "image".into(),
+            name: "Image".into(),
+            base_url: format!("http://{address}"),
+            api_key: "test-key".into(),
+            api_protocol: "openai".into(),
+            models: vec![],
+            active_model: "image-model".into(),
+            temperature: None,
+            enable_thinking: false,
+            image_generation: true,
+        }
+    }
+
+    fn image_test_params() -> ImageParams<'static> {
+        ImageParams {
+            prompt: "draw a cat",
+            negative_prompt: Some("text"),
+            aspect: Some("1:1"),
+            size: None,
+            resolution: Some("1K"),
+            quality: Some("high"),
+            format: Some("webp"),
+            n: 1,
+            input_image_b64: None,
+            input_images_b64: vec![],
+            input_image_mimes: vec![],
+        }
     }
 
     #[tokio::test]
@@ -591,6 +1132,7 @@ mod tests {
             models: vec![],
             active_model: "doubao-seedream-5.0-lite".into(),
             temperature: None,
+            enable_thinking: false,
             image_generation: true,
         };
         let params = ImageParams {

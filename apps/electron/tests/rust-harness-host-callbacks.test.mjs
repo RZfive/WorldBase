@@ -6,9 +6,51 @@ import test from 'node:test'
 import './register-ts-hooks.mjs'
 import { RustHarnessEngine } from '../src/main/ai-harness/rust-harness-engine.ts'
 import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-registry.ts'
+import { MCPService } from '../src/main/mcp/mcp-service.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
+import { normalizeRustAskUserQuestions, normalizeRustAskUserResponse } from '../electron/main-process/ai/rust-ask-user-contract.ts'
 
 const SESSION_ID = 'rust-host-test-session'
+
+test('Rust ask_user host contract preserves one bundled 1-4 question request', () => {
+  const questions = normalizeRustAskUserQuestions({
+    questions: [
+      { id: 'mode', question: 'Mode?', options: ['Fast', 'Careful'] },
+      { id: 'format', question: 'Format?', options: ['JSON', 'Text'] },
+      { id: 'third', question: 'Third?', options: ['A'] },
+      { id: 'fourth', question: 'Fourth?', options: ['B'] },
+      { id: 'ignored', question: 'Ignored?', options: ['C'] }
+    ]
+  }, 'request-batch')
+  assert.equal(questions.length, 4)
+
+  const response = normalizeRustAskUserResponse([
+    { questionId: 'mode', selectedOption: 'Careful', customAnswer: null },
+    { questionId: 'format', selectedOption: 'JSON', customAnswer: 'Markdown' }
+  ], questions.slice(0, 2))
+  assert.deepEqual(response, {
+    answers: [
+      { question: 'Mode?', answer: 'Careful' },
+      { question: 'Format?', answer: 'Markdown' }
+    ]
+  })
+})
+
+test('Rust ask_user host contract retains legacy single payload and response aliases', () => {
+  const questions = normalizeRustAskUserQuestions({
+    question: 'Continue?',
+    choices: ['Yes', 'No']
+  }, 'request-legacy')
+  assert.deepEqual(questions, [{
+    id: 'request-legacy-question-1',
+    question: 'Continue?',
+    options: ['Yes', 'No']
+  }])
+  assert.deepEqual(normalizeRustAskUserResponse({ answer: 'Yes' }, questions), {
+    answers: [{ question: 'Continue?', answer: 'Yes' }],
+    answer: 'Yes'
+  })
+})
 
 function createNativeToolClient (domainToolNames = []) {
   return {
@@ -215,7 +257,7 @@ test('Rust tool.execute falls back to Electron Studio image services when needed
   }]])
 })
 
-test('Rust-advertised project, workspace, image, and MCP tools are not registered as Electron fallbacks', async () => {
+test('Rust-advertised Electron domain tools use Node overrides while plan controls stay native', async () => {
   const services = createServices({
     mcpService: {
       async executeServerTool () { return {} }
@@ -235,12 +277,200 @@ test('Rust-advertised project, workspace, image, and MCP tools are not registere
     workspaceRoot: process.cwd()
   })
 
-  for (const name of nativeNames) {
-    assert.equal(
-      registrations.some(tool => tool.definition.name === name),
-      false,
-      `${name} must remain Rust-native once the app-server advertises it`
+  for (const name of ['write_project_file', 'write_workspace_file', 'generate_image', 'mcp_call']) {
+    const registration = getTool(registrations, name)
+    assert.equal(registration.domain, 'electron_host_override', `${name} must use the exact Electron handler`)
+  }
+  for (const name of ['enter_plan_mode', 'exit_plan_mode']) {
+    assert.equal(registrations.some(tool => tool.definition.name === name), false, `${name} must remain Rust-native`)
+  }
+})
+
+test('canonical discovery includes intrinsic plan schemas without registering Node plan handlers', () => {
+  const registry = new ElectronToolRegistry({
+    services: createServices(),
+    getNativeToolDefinitions: () => []
+  })
+  const definitions = registry.getToolDefinitions()
+  const registrations = registry.createRegistrations({})
+
+  for (const name of ['enter_plan_mode', 'exit_plan_mode']) {
+    const definition = definitions.find(tool => tool.name === name)
+    assert.ok(definition, `${name} must be part of the canonical contract catalog`)
+    assert.equal(definition.parameters.type, 'object')
+    assert.equal(registrations.some(tool => tool.definition.name === name), false)
+  }
+})
+
+test('all 68 canonical Electron tools have an explicit execution owner', async () => {
+  const services = createServices({
+    documentStore: {},
+    skillStore: {},
+    agentStore: {},
+    agentGroupStore: {},
+    settingsStore: {},
+    imageLibraryStore: {},
+    enqueueStudioImageTasks: () => {},
+    readActivePage: async () => ({
+      title: '',
+      url: '',
+      textPreview: '',
+      fullTextAvailable: false,
+      interactiveElements: [],
+      formFields: []
+    }),
+    interactWithActivePage: async () => ({ ok: true, type: 'wait', timeoutMs: 0 }),
+    mcpService: new MCPService(),
+    scheduledTaskService: {}
+  })
+  const catalog = new ElectronToolRegistry({
+    services,
+    getNativeToolDefinitions: () => [],
+    runSubagents: async () => []
+  }).getToolDefinitions()
+  const canonicalNames = catalog.map(tool => tool.name).sort()
+  assert.equal(canonicalNames.length, 68)
+  assert.equal(new Set(canonicalNames).size, 68)
+
+  const registrations = await collectHostTools(
+    createHarnessEngine(services, canonicalNames),
+    { authMode: 'auto', workspaceRoot: process.cwd() }
+  )
+  const hostNames = registrations
+    .filter(tool => tool.domain === 'electron_host_override')
+    .map(tool => tool.definition.name)
+    .sort()
+  const nativeNames = ['enter_plan_mode', 'exit_plan_mode']
+  const expectedHostNames = canonicalNames.filter(name => !nativeNames.includes(name))
+
+  assert.deepEqual(hostNames, expectedHostNames)
+  assert.deepEqual(canonicalNames.filter(name => !hostNames.includes(name)), nativeNames)
+})
+
+test('fixed MCP discovery and resource tools execute through the Node MCP service', async () => {
+  const mcpService = new MCPService()
+  const names = [
+    'mcp_list_servers',
+    'mcp_list_resources',
+    'mcp_read_resource',
+    'mcp_list_prompts',
+    'mcp_get_prompt'
+  ]
+  const registrations = await collectHostTools(
+    createHarnessEngine(createServices({ mcpService }), names),
+    { authMode: 'strict' }
+  )
+
+  for (const name of names) {
+    assert.equal(getTool(registrations, name).domain, 'electron_host_override')
+  }
+  const { result } = await dispatchToolExecute(registrations, 'mcp_list_servers', {})
+  assert.deepEqual(result.servers, [])
+  assert.equal(typeof result.updatedAt, 'string')
+})
+
+test('a server installed during a Rust turn is immediately available to generic mcp_call', async () => {
+  let savedServers = []
+  let activeServers = []
+  const calls = []
+  const mcpService = {
+    async updateServers (servers) {
+      activeServers = servers
+    },
+    async refreshServer (serverId) {
+      const server = activeServers.find(candidate => candidate.id === serverId)
+      assert.ok(server, 'installed server must be active before refresh')
+      return { id: server.id, name: server.name, status: 'connected' }
+    },
+    async executeServerTool (...args) {
+      calls.push(args)
+      return { source: 'same-turn-mcp' }
+    }
+  }
+  const services = createServices({
+    settingsStore: {
+      getMcpServers: () => savedServers,
+      saveMcpServers: servers => { savedServers = servers }
+    },
+    mcpService,
+    getMainWindow: () => ({
+      isDestroyed: () => false,
+      webContents: { send () {} }
+    })
+  })
+  const context = {
+    authMode: 'auto',
+    allowedMcpServerIds: ['mcp_docs']
+  }
+  const registrations = await collectHostTools(
+    createHarnessEngine(services, ['install_mcp_server', 'mcp_call']),
+    context
+  )
+
+  assert.equal(getTool(registrations, 'install_mcp_server').domain, 'electron_host_override')
+  assert.equal(getTool(registrations, 'mcp_call').domain, 'electron_host_override')
+
+  const installed = await dispatchToolExecute(registrations, 'install_mcp_server', {
+    name: 'Docs',
+    transport: 'streamable-http',
+    url: 'https://mcp.example.test'
+  })
+  assert.equal(installed.result.success, true)
+  assert.equal(installed.result.server.id, 'mcp_docs')
+
+  const called = await dispatchToolExecute(registrations, 'mcp_call', {
+    server: 'mcp_docs',
+    tool: 'lookup',
+    arguments: { query: 'new server' }
+  })
+  assert.equal(called.result.source, 'same-turn-mcp')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][0], 'mcp_docs')
+  assert.equal(calls[0][1], 'lookup')
+  assert.deepEqual(calls[0][2], { query: 'new server' })
+  assert.deepEqual(calls[0][4], ['mcp_docs'])
+})
+
+test('Rust project command callbacks share the exact Electron command status registry', async () => {
+  const projectsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'worldbase-rust-command-'))
+  try {
+    await fs.mkdir(path.join(projectsDir, 'project-alpha'))
+    const services = createServices({
+      projectFS: {
+        projectsDir,
+        async readFile () { return '' },
+        async writeFile () {},
+        async listProjects () { return [] }
+      },
+      builderService: {
+        async syncManualBuildState () { return { synced: true } }
+      }
+    })
+    const registrations = await collectHostTools(
+      createHarnessEngine(services, ['run_project_command', 'get_project_command_status']),
+      { authMode: 'auto' }
     )
+
+    for (const name of ['run_project_command', 'get_project_command_status']) {
+      assert.equal(getTool(registrations, name).domain, 'electron_host_override')
+    }
+    const started = await dispatchToolExecute(registrations, 'run_project_command', {
+      project_id: 'project-alpha',
+      command: 'node -e "process.stdout.write(\'node-exact-command\')"',
+      timeout_seconds: 5
+    })
+    assert.equal(started.result.status, 'completed')
+    assert.equal(started.result.exitCode, 0)
+    assert.equal(started.result.stdout, 'node-exact-command')
+
+    const polled = await dispatchToolExecute(registrations, 'get_project_command_status', {
+      command_id: started.result.command_id
+    })
+    assert.equal(polled.result.command_id, started.result.command_id)
+    assert.equal(polled.result.status, 'completed')
+    assert.equal(polled.result.stdout, 'node-exact-command')
+  } finally {
+    await fs.rm(projectsDir, { recursive: true, force: true })
   }
 })
 
@@ -326,197 +556,24 @@ test('Rust-advertised Electron document and page tools use host overrides', asyn
   }
 })
 
-test('native Rust project, workspace, image, and MCP tool results notify the Electron bridge', async () => {
+test('native Rust dynamic MCP results notify the Electron bridge', async () => {
   const nativeResults = []
-  const client = createNativeToolClient([
-    'write_project_file',
-    'write_workspace_file',
-    'generate_image',
-    'mcp_call'
-  ])
+  const client = createNativeToolClient(['mcp__docs__lookup__abc123'])
   const engine = new RustHarnessEngine({
     client,
     services: createServices(),
     onNativeToolResult: async (name, result) => nativeResults.push({ name, result })
   })
 
-  for (const [name, content] of [
-    ['write_project_file', '{"success":true,"file_path":"src/main.ts"}'],
-    ['write_workspace_file', '{"success":true,"file_path":"notes/from-rust.md"}'],
-    ['generate_image', JSON.stringify({
-      images: [{
-        id: 'rust-image-1',
-        file: 'rust-image-1.webp',
-        createdAt: '2026-08-30T12:00:00.000Z',
-        providerId: 'provider-a',
-        model: 'image-model',
-        prompt: 'Rust image',
-        folder: 'rust-runs',
-        tags: ['generated'],
-        meta: {
-          mode: 'edit',
-          negativePrompt: 'blur',
-          aspect: '16:9',
-          size: '1792x1024',
-          quality: 'high',
-          format: 'webp'
-        }
-      }]
-    })],
-    ['mcp_call', '{"ok":true,"content":[{"type":"text","text":"done"}]}']
-  ]) {
-    await engine.handleNativeToolResult({ kind: 'tool_result', name, content })
-  }
-
-  assert.deepEqual(nativeResults, [
-    { name: 'write_project_file', result: { success: true, file_path: 'src/main.ts' } },
-    { name: 'write_workspace_file', result: { success: true, file_path: 'notes/from-rust.md' } },
-    { name: 'generate_image', result: {
-      images: [{
-        id: 'rust-image-1',
-        file: 'rust-image-1.webp',
-        createdAt: '2026-08-30T12:00:00.000Z',
-        providerId: 'provider-a',
-        model: 'image-model',
-        prompt: 'Rust image',
-        folder: 'rust-runs',
-        tags: ['generated'],
-        meta: {
-          mode: 'edit',
-          negativePrompt: 'blur',
-          aspect: '16:9',
-          size: '1792x1024',
-          quality: 'high',
-          format: 'webp'
-        }
-      }]
-    } },
-    { name: 'mcp_call', result: { ok: true, content: [{ type: 'text', text: 'done' }] } }
-  ])
-})
-
-test('native Rust agent workspace mutations reach the Electron result bridge', async () => {
-  const nativeResults = []
-  const engine = new RustHarnessEngine({
-    client: createNativeToolClient(['create_agent', 'create_agent_group', 'install_mcp_server']),
-    services: createServices(),
-    onNativeToolResult: async (name, result) => nativeResults.push({ name, result })
-  })
-
   await engine.handleNativeToolResult({
     kind: 'tool_result',
-    name: 'create_agent',
-    content: JSON.stringify({
-      success: true,
-      agent: { id: 'agent_rust', name: 'Rust Agent', systemPrompt: 'Use Rust tools.' }
-    })
-  })
-  await engine.handleNativeToolResult({
-    kind: 'tool_result',
-    name: 'create_agent_group',
-    content: JSON.stringify({
-      success: true,
-      group: {
-        id: 'group_rust',
-        name: 'Rust Group',
-        coordinatorAgentId: 'agent_rust',
-        memberAgentIds: ['agent_rust']
-      }
-    })
-  })
-  await engine.handleNativeToolResult({
-    kind: 'tool_result',
-    name: 'install_mcp_server',
-    content: JSON.stringify({
-      success: true,
-      server_id: 'mcp_rust',
-      server: { name: 'mcp_rust', displayName: 'Rust MCP', transport: 'stdio', target: 'npx' }
-    })
+    name: 'mcp__docs__lookup__abc123',
+    content: '{"ok":true,"content":[{"type":"text","text":"done"}]}'
   })
 
   assert.deepEqual(nativeResults, [
-    {
-      name: 'create_agent',
-      result: {
-        success: true,
-        agent: { id: 'agent_rust', name: 'Rust Agent', systemPrompt: 'Use Rust tools.' }
-      }
-    },
-    {
-      name: 'create_agent_group',
-      result: {
-        success: true,
-        group: {
-          id: 'group_rust',
-          name: 'Rust Group',
-          coordinatorAgentId: 'agent_rust',
-          memberAgentIds: ['agent_rust']
-        }
-      }
-    },
-    {
-      name: 'install_mcp_server',
-      result: {
-        success: true,
-        server_id: 'mcp_rust',
-        server: { name: 'mcp_rust', displayName: 'Rust MCP', transport: 'stdio', target: 'npx' }
-      }
-    }
+    { name: 'mcp__docs__lookup__abc123', result: { ok: true, content: [{ type: 'text', text: 'done' }] } }
   ])
-})
-
-test('Rust chat streams preserve native image results without registering an Electron image fallback', async () => {
-  const nativeResults = []
-  let runOptions
-  const client = {
-    ...createNativeToolClient(['generate_image']),
-    async chatStream (_sessionId, _conversationId, _text, options, onFrame) {
-      runOptions = options
-      onFrame({
-        kind: 'tool_result',
-        name: 'generate_image',
-        content: JSON.stringify({
-          images: [{
-            id: 'streamed-rust-image',
-            file: 'streamed-rust-image.png',
-            createdAt: '2026-08-30T12:00:00.000Z',
-            providerId: 'provider-a',
-            model: 'image-model',
-            prompt: 'A streamed Rust image',
-            meta: { mode: 'generate', format: 'png' }
-          }]
-        })
-      })
-      onFrame({ kind: 'done' })
-      return { streamId: 'streamed-rust-run' }
-    }
-  }
-  const engine = new RustHarnessEngine({
-    client,
-    services: createServices(),
-    onNativeToolResult: async (name, result) => nativeResults.push({ name, result })
-  })
-  const events = []
-  for await (const event of engine.chatStream([{ role: 'user', content: 'draw an image' }])) {
-    events.push(event)
-  }
-
-  assert.equal(runOptions.customTools.some(tool => tool.definition.name === 'generate_image'), false)
-  assert.deepEqual(events.map(event => event.type), ['tool_end', 'done'])
-  assert.deepEqual(nativeResults, [{
-    name: 'generate_image',
-    result: {
-      images: [{
-        id: 'streamed-rust-image',
-        file: 'streamed-rust-image.png',
-        createdAt: '2026-08-30T12:00:00.000Z',
-        providerId: 'provider-a',
-        model: 'image-model',
-        prompt: 'A streamed Rust image',
-        meta: { mode: 'generate', format: 'png' }
-      }]
-    }
-  }])
 })
 
 test('Rust Studio client replays image events published before its RPC response is mapped', async () => {
@@ -653,7 +710,137 @@ test('Rust native group keeps its Electron session through child completion and 
   assert.deepEqual(calls.map(call => call.method), ['group.create', 'group.message', 'group.inject'])
 })
 
-test('Rust MCP host callbacks retain Electron permission checks and MCP routing', async () => {
+test('Rust native group routes stateful Electron tools by original member stream', async () => {
+  const calls = []
+  const responses = []
+  const progress = []
+  const factoryCalls = []
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-native-group-tools-test'),
+    onEvent: () => {}
+  })
+  client.start = async () => {}
+  client.syncSettings = async () => {}
+  client.request = async (method, params) => {
+    calls.push({ method, params })
+    assert.equal(method, 'group.message')
+    return { streamId: 'native-group-tools', round: 1 }
+  }
+  client.respondHost = async (requestId, result) => {
+    responses.push({ requestId, result })
+  }
+
+  const definition = {
+    name: 'stateful_group_tool',
+    description: 'Verify isolated member state',
+    parameters: {
+      type: 'object',
+      properties: { value: { type: 'string' } },
+      required: ['value'],
+      additionalProperties: false
+    }
+  }
+  const registrationFor = streamId => {
+    let invocationCount = 0
+    return {
+      definition,
+      domain: 'electron_host_override',
+      permission: 'allow',
+      async handler (args, onProgress) {
+        invocationCount++
+        onProgress?.('member-tool', `${streamId}:${invocationCount}`)
+        return { streamId, invocationCount, value: args.value }
+      }
+    }
+  }
+  const customToolsForStream = streamId => {
+    factoryCalls.push(streamId)
+    return [registrationFor(streamId)]
+  }
+
+  await client.startNativeGroupRound({
+    sessionId: 'electron-group-tools-session',
+    groupId: 'native-group-tools',
+    text: 'Exercise the host tool',
+    context: {
+      customTools: [registrationFor('catalog-only')],
+      memoryScopes: [{ scopeType: 'group', scopeId: 'logical-group' }],
+      memoryQuery: 'Exercise the host tool'
+    },
+    customToolsForStream,
+    onEvent: frame => progress.push(frame)
+  })
+
+  assert.deepEqual(calls[0].params.context.customTools, [{
+    name: definition.name,
+    description: definition.description,
+    inputSchema: definition.parameters,
+    domain: 'electron_host_override',
+    permission: 'allow'
+  }])
+  assert.deepEqual(calls[0].params.context.memoryScopes, [{ scopeType: 'group', scopeId: 'logical-group' }])
+  assert.equal(calls[0].params.context.memoryQuery, 'Exercise the host tool')
+
+  const childOne = 'native-group-tools:member:reviewer:child-1'
+  const childTwo = 'native-group-tools:member:writer:child-2'
+  const emitTool = (requestId, streamId, value) => client.handleEvent({
+    streamId,
+    seq: 1,
+    ts: new Date().toISOString(),
+    kind: 'host_request',
+    requestId,
+    requestKind: 'tool.execute',
+    payload: { name: definition.name, args: { value } }
+  })
+  emitTool('child-one-first', childOne, 'a')
+  emitTool('child-one-second', childOne, 'b')
+  emitTool('child-two-first', childTwo, 'c')
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(factoryCalls, [childOne, childTwo])
+  assert.deepEqual(responses.sort((left, right) => left.requestId.localeCompare(right.requestId)), [
+    {
+      requestId: 'child-one-first',
+      result: { streamId: childOne, invocationCount: 1, value: 'a' }
+    },
+    {
+      requestId: 'child-one-second',
+      result: { streamId: childOne, invocationCount: 2, value: 'b' }
+    },
+    {
+      requestId: 'child-two-first',
+      result: { streamId: childTwo, invocationCount: 1, value: 'c' }
+    }
+  ])
+  const toolProgress = progress.filter(frame => frame.kind === 'progress')
+  assert.equal(toolProgress.length, 3)
+  assert.ok(toolProgress.every(frame => frame.streamId === 'native-group-tools'))
+  assert.deepEqual(toolProgress.map(frame => frame.groupMemberStreamId), [childOne, childOne, childTwo])
+
+  client.handleEvent({
+    streamId: childOne,
+    seq: 2,
+    ts: new Date().toISOString(),
+    kind: 'done',
+    stopReason: 'stop'
+  })
+  assert.equal(client.nativeGroupMemberTools.has(childOne), false)
+  assert.equal(client.nativeGroupMemberTools.has(childTwo), true)
+
+  client.handleEvent({
+    streamId: 'native-group-tools',
+    seq: 3,
+    ts: new Date().toISOString(),
+    kind: 'done',
+    stopReason: 'group_complete'
+  })
+  assert.equal(client.nativeGroupToolFactories.has('electron-group-tools-session'), false)
+  assert.equal(client.nativeGroupMemberTools.size, 0)
+  assert.equal(client.nativeGroupMemberStreams.size, 0)
+})
+
+test('Rust MCP ownership routes generic calls through Electron while dynamic callbacks retain permission routing', async () => {
   const genericCalls = []
   const dynamicCalls = []
   const dynamicDefinition = {
@@ -693,18 +880,19 @@ test('Rust MCP host callbacks retain Electron permission checks and MCP routing'
       )
     })
   ]
-  const denied = await dispatchToolExecute(deniedRegistrations, 'mcp_call', {
+  assert.equal(getTool(deniedRegistrations, 'mcp_call').domain, 'electron_host_override')
+  const deniedGeneric = await dispatchToolExecute(deniedRegistrations, 'mcp_call', {
     server: 'docs-server',
     tool: 'lookup',
-    arguments: { query: 'host callback' }
+    arguments: { query: 'generic callback' }
   })
   const deniedDynamic = await dispatchToolExecute(deniedRegistrations, 'mcp__docs__lookup__abc123', {
     query: 'dynamic callback'
   })
 
-  assert.match(denied.result.error, /^Permission denied: External MCP tool invocation$/)
+  assert.match(deniedGeneric.result.error, /^Permission denied: External MCP tool invocation$/)
   assert.match(deniedDynamic.result.error, /^Permission denied: External MCP tool invocation$/)
-  assert.equal(genericCalls.length, 0, 'strict mode without a renderer approval must not call MCP')
+  assert.equal(genericCalls.length, 0, 'denied generic MCP tools must not reach Electron MCP execution')
   assert.equal(dynamicCalls.length, 0, 'dynamic MCP tools must use the same Electron permission path')
 
   const permissionEvents = []
@@ -745,7 +933,7 @@ test('Rust MCP host callbacks retain Electron permission checks and MCP routing'
   const generic = await dispatchToolExecute(approvedRegistrations, 'mcp_call', {
     server: 'docs-server',
     tool: 'lookup',
-    arguments: { query: 'host callback' }
+    arguments: { query: 'generic callback' }
   })
   const dynamic = await dispatchToolExecute(approvedRegistrations, 'mcp__docs__lookup__abc123', {
     query: 'dynamic callback'
@@ -754,13 +942,13 @@ test('Rust MCP host callbacks retain Electron permission checks and MCP routing'
   assert.equal(generic.result.source, 'generic-mcp')
   assert.equal(dynamic.result.source, 'dynamic-mcp')
   assert.equal(genericCalls.length, 1)
-  const [serverId, remoteTool, genericArgs, genericProgress, genericAllowedServers] = genericCalls[0]
-  assert.equal(serverId, 'docs-server')
-  assert.equal(remoteTool, 'lookup')
-  assert.deepEqual(genericArgs, { query: 'host callback' })
+  assert.equal(dynamicCalls.length, 1)
+  const [genericServer, genericTool, genericArgs, genericProgress, genericAllowedServers] = genericCalls[0]
+  assert.equal(genericServer, 'docs-server')
+  assert.equal(genericTool, 'lookup')
+  assert.deepEqual(genericArgs, { query: 'generic callback' })
   assert.equal(typeof genericProgress, 'function')
   assert.deepEqual(genericAllowedServers, ['docs-server'])
-  assert.equal(dynamicCalls.length, 1)
   const [dynamicName, dynamicArgs, dynamicProgress, dynamicAllowedServers] = dynamicCalls[0]
   assert.equal(dynamicName, 'mcp__docs__lookup__abc123')
   assert.deepEqual(dynamicArgs, { query: 'dynamic callback' })
@@ -781,6 +969,88 @@ test('Rust MCP host callbacks retain Electron permission checks and MCP routing'
     { channel: 'auth:request', conversationId: 'electron-parent-conversation', sessionId: 'electron-parent-session' },
     { channel: 'auth:resolved', approved: true }
   ])
+})
+
+test('Rust-native dynamic MCP permission requests are answered through the Electron client', async () => {
+  const permissionRequests = []
+  const responses = []
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-native-mcp-permission-test'),
+    onEvent: () => {},
+    onPermissionRequest: async request => {
+      permissionRequests.push(request)
+      return false
+    }
+  })
+  client.callRunning = async (method, params) => {
+    responses.push({ method, params })
+    return { delivered: true }
+  }
+
+  client.sessionAuthModes.set('strict-session', 'strict')
+  await client.handlePermissionRequest({
+    kind: 'permission_request',
+    requestId: 'strict-mcp-request',
+    toolName: 'mcp__docs__lookup__abc123',
+    argsSummary: 'docs-server.lookup'
+  }, 'strict-session')
+
+  client.sessionAuthModes.set('auto-session', 'auto')
+  await client.handlePermissionRequest({
+    kind: 'permission_request',
+    requestId: 'auto-mcp-request',
+    toolName: 'mcp__docs__lookup__abc123',
+    argsSummary: 'docs-server.lookup'
+  }, 'auto-session')
+
+  assert.deepEqual(permissionRequests, [{
+    requestId: 'strict-mcp-request',
+    toolName: 'mcp__docs__lookup__abc123',
+    argsSummary: 'docs-server.lookup',
+    sessionId: 'strict-session'
+  }])
+  assert.deepEqual(responses, [
+    { method: 'chat.respond', params: { requestId: 'strict-mcp-request', allow: false } },
+    { method: 'chat.respond', params: { requestId: 'auto-mcp-request', allow: true } }
+  ])
+})
+
+test('late host and permission replies cannot restart an exited Rust harness', async () => {
+  let releasePermission
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-late-callback-test'),
+    onEvent: () => {},
+    onPermissionRequest: async () => await new Promise(resolve => {
+      releasePermission = resolve
+    })
+  })
+  let startCalls = 0
+  let requestCalls = 0
+  client.start = async () => { startCalls++ }
+  client.request = async () => {
+    requestCalls++
+    return { delivered: true }
+  }
+  client.sessionAuthModes.set('late-session', 'strict')
+
+  const permissionReply = client.handlePermissionRequest({
+    kind: 'permission_request',
+    requestId: 'late-permission-request',
+    toolName: 'mcp_call',
+    argsSummary: 'docs-server.lookup'
+  }, 'late-session')
+  client.handleExit(new Error('test harness exited'))
+  releasePermission(true)
+  await permissionReply
+
+  await assert.rejects(
+    client.respondHost('late-host-request', { ok: true }),
+    /Rust harness is not running/
+  )
+  assert.equal(startCalls, 0)
+  assert.equal(requestCalls, 0)
 })
 
 test('Rust MCP settings control plane stays on the Rust transport', async () => {
@@ -848,4 +1118,293 @@ test('Rust MCP settings control plane stays on the Rust transport', async () => 
     { method: 'mcp.refresh', params: { serverId: 'docs-server' } },
     { method: 'mcp.disconnect', params: { serverId: 'docs-server' } }
   ])
+})
+
+test('Rust JSON-RPC transport sanitizes lone UTF-16 surrogates at every depth', async () => {
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-unicode-test'),
+    onEvent: () => {}
+  })
+  const writes = []
+  client.child = {
+    stdin: {
+      writable: true,
+      write (message, callback) {
+        writes.push(message)
+        callback?.()
+        const request = JSON.parse(message)
+        queueMicrotask(() => client.handleLine(JSON.stringify({
+          jsonrpc: '2.0',
+          id: request.id,
+          result: { ok: true }
+        })))
+      }
+    }
+  }
+
+  const loneHigh = String.fromCharCode(0xD800)
+  const loneLow = String.fromCharCode(0xDC00)
+  const badKey = `key-${loneHigh}`
+  await client.request('test.unicode', {
+    text: `before${loneHigh}after`,
+    nested: { [badKey]: [`low-${loneLow}`, 'valid-\uD83D\uDE00'] }
+  })
+
+  const request = JSON.parse(writes[0])
+  assert.equal(request.params.text, 'before\uFFFDafter')
+  assert.deepEqual(request.params.nested['key-\uFFFD'], ['low-\uFFFD', 'valid-\uD83D\uDE00'])
+  assert.equal(writes[0].includes('\\ud800'), false)
+  assert.equal(writes[0].includes('\\udc00'), false)
+})
+
+test('Rust JSON-RPC uncorrelated protocol errors reject pending requests immediately', async () => {
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-rpc-error-test'),
+    onEvent: () => {}
+  })
+  client.child = {
+    stdin: {
+      writable: true,
+      write (_message, callback) {
+        callback?.()
+        queueMicrotask(() => client.handleLine(JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32700, message: 'invalid json' }
+        })))
+      }
+    }
+  }
+
+  await assert.rejects(
+    client.request('chat.send', { text: 'test' }),
+    /uncorrelated JSON-RPC request \(-32700\): invalid json/
+  )
+  assert.equal(client.pending.size, 0)
+})
+
+test('Rust chat preserves provider thinking defaults and omits reasoning only when explicitly disabled', async () => {
+  const captured = []
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-reasoning-test'),
+    onEvent: () => {}
+  })
+  client.start = async () => {}
+  client.syncSettings = async () => {}
+  client.ensureConversation = async () => {}
+  client.request = async (method, params) => {
+    assert.equal(method, 'chat.send')
+    captured.push(params)
+    return { streamId: `stream-${captured.length}` }
+  }
+
+  await client.chatStream('session-default', 'conversation-default', 'hello', {
+    reasoningEffort: 'max'
+  })
+  await client.chatStream('session-off', 'conversation-off', 'hello', {
+    enableThinking: false,
+    reasoningEffort: 'max'
+  })
+  await client.chatStream('session-on', 'conversation-on', 'hello', {
+    enableThinking: true,
+    reasoningEffort: 'high'
+  })
+
+  assert.equal(Object.hasOwn(captured[0], 'enableThinking'), false)
+  assert.equal(captured[0].reasoningEffort, 'max')
+  assert.equal(captured[1].enableThinking, false)
+  assert.equal(Object.hasOwn(captured[1], 'reasoningEffort'), false)
+  assert.equal(captured[2].enableThinking, true)
+  assert.equal(captured[2].reasoningEffort, 'high')
+})
+
+test('Electron provider sync preserves saved temperature and thinking defaults', async () => {
+  const calls = []
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-provider-sync-test'),
+    getProviders: () => ({
+      providers: [{
+        id: 'provider-1',
+        name: 'Compatible provider',
+        baseUrl: 'https://gateway.example/v1',
+        apiKey: 'secret',
+        apiProtocol: 'openai',
+        models: ['model-1'],
+        activeModel: 'model-1',
+        temperature: 0.65,
+        enableThinking: true,
+        modelCapabilities: {},
+        modelContextWindows: {}
+      }],
+      activeProviderId: 'provider-1'
+    }),
+    onEvent: () => {}
+  })
+  client.request = async (method, params) => {
+    calls.push({ method, params })
+    if (method === 'provider.list') return { providers: { providers: [] } }
+    return {}
+  }
+
+  await client.syncProviderSettings()
+
+  const saved = calls.find(call => call.method === 'provider.save')
+  assert.ok(saved)
+  assert.equal(saved.params.provider.temperature, 0.65)
+  assert.equal(saved.params.provider.enableThinking, true)
+})
+
+test('Rust facade promotes historical system and developer messages into run-scoped system sections', async () => {
+  const runs = []
+  const client = {
+    ...createNativeToolClient(),
+    async chatStream (sessionId, conversationId, text, options, onFrame) {
+      runs.push({ sessionId, conversationId, text, options })
+      onFrame({ kind: 'assistant_message', content: 'done' })
+      onFrame({ kind: 'done' })
+      return { streamId: 'system-history-stream' }
+    },
+    setModelPricing () {}
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+
+  for await (const _event of engine.chatStream([
+    { role: 'system', content: 'System policy' },
+    { role: 'developer', content: 'Developer policy' },
+    { role: 'user', content: 'Earlier question' },
+    { role: 'assistant', content: 'Earlier answer' },
+    { role: 'user', content: 'Current question' }
+  ])) {}
+
+  assert.equal(runs.length, 1)
+  assert.deepEqual(runs[0].options.systemPromptSections, ['System policy', 'Developer policy'])
+  assert.deepEqual(runs[0].options.history, [
+    { role: 'user', content: 'Earlier question' },
+    { role: 'assistant', content: 'Earlier answer' }
+  ])
+})
+
+test('Rust facade preserves assistant image parts in the completed message', async () => {
+  const parts = [
+    { type: 'text', text: 'generated' },
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,aGVsbG8=' } }
+  ]
+  const client = {
+    ...createNativeToolClient(),
+    async chatStream (_sessionId, _conversationId, _text, _options, onFrame) {
+      onFrame({ kind: 'assistant_message', content: 'generated', parts })
+      onFrame({ kind: 'done', stopReason: 'stop' })
+      return { streamId: 'image-output-stream' }
+    },
+    setModelPricing () {}
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  const events = []
+
+  for await (const event of engine.chatStream([
+    { role: 'user', content: 'draw an image' }
+  ])) {
+    events.push(event)
+  }
+
+  const done = events.find(event => event.type === 'done')
+  assert.ok(done)
+  assert.deepEqual(done.message.content, parts)
+})
+
+test('Rust history sync keeps only exactly paired tool calls and does not duplicate result text', async () => {
+  const calls = []
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-history-test'),
+    onEvent: () => {}
+  })
+  client.call = async (method, params) => {
+    calls.push({ method, params })
+    return {}
+  }
+
+  await client.syncConversationHistory('conversation-history', [
+    { role: 'tool', tool_call_id: 'orphan', content: 'must be removed' },
+    {
+      role: 'assistant',
+      content: 'Running the tool.',
+      tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.txt"}' } }]
+    },
+    { role: 'tool', tool_call_id: 'call-1', content: '{"text":"ok"}' },
+    {
+      role: 'assistant',
+      content: 'Keep this explanation despite damaged metadata.',
+      tool_calls: [{ id: 'call-bad', type: 'function', function: { name: 'read_file', arguments: '{not-json}' } }]
+    },
+    { role: 'tool', tool_call_id: 'call-bad', content: 'must be removed with damaged metadata' },
+    {
+      role: 'assistant',
+      content: 'Incomplete tool batch.',
+      tool_calls: [{ id: 'call-2', type: 'function', function: { name: 'read_file', arguments: '{}' } }]
+    },
+    { role: 'user', content: 'Continue.' }
+  ])
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].method, 'conversation.sync')
+  assert.equal(calls[0].params.authoritative, true)
+  assert.deepEqual(calls[0].params.messages, [
+    {
+      role: 'assistant',
+      content: 'Running the tool.',
+      parts: [{ type: 'text', text: 'Running the tool.' }],
+      toolCalls: [{ id: 'call-1', name: 'read_file', args: { path: 'a.txt' } }],
+      toolResults: []
+    },
+    {
+      role: 'user',
+      content: '',
+      parts: [],
+      toolCalls: [],
+      toolResults: [{ toolCallId: 'call-1', name: '', content: '{"text":"ok"}', isError: false }]
+    },
+    {
+      role: 'assistant',
+      content: 'Keep this explanation despite damaged metadata.',
+      parts: [{ type: 'text', text: 'Keep this explanation despite damaged metadata.' }],
+      toolCalls: [],
+      toolResults: []
+    },
+    {
+      role: 'user',
+      content: 'Continue.',
+      parts: [{ type: 'text', text: 'Continue.' }],
+      toolCalls: [],
+      toolResults: []
+    }
+  ])
+})
+
+test('Rust history sync sends an explicit authoritative empty reset', async () => {
+  const calls = []
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-history-reset-test'),
+    onEvent: () => {}
+  })
+  client.call = async (method, params) => {
+    calls.push({ method, params })
+    return {}
+  }
+
+  await client.syncConversationHistory('conversation-reset', [])
+
+  assert.deepEqual(calls, [{
+    method: 'conversation.sync',
+    params: {
+      id: 'conversation-reset',
+      authoritative: true,
+      messages: []
+    }
+  }])
 })

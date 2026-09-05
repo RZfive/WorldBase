@@ -8,7 +8,155 @@ use worldbase_protocol::event::EventKind;
 use worldbase_protocol::method;
 use worldbase_protocol::rpc::ErrorObject;
 use worldbase_protocol::types::{Capabilities, ChatContentPart, ChatMessage, ImageUrl, Role};
-use worldbase_providers::{ContentBlock, MockProvider, MockTurn};
+use worldbase_providers::{
+    ChatOptions, ChunkStream, ContentBlock, LlmMessage, LlmTool, MockProvider, MockTurn, Provider,
+    StreamChunk, TokenUsage,
+};
+
+#[derive(Clone, Copy)]
+enum BlockingProviderStage {
+    BeforeStream,
+    DuringStream,
+}
+
+struct BlockingProvider {
+    stage: BlockingProviderStage,
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Default)]
+struct RepairingInvalidToolProvider {
+    turn: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedProviderRequest {
+    system: Option<String>,
+    tools: Vec<String>,
+    options: ChatOptions,
+}
+
+#[derive(Default)]
+struct CapturingProvider {
+    requests: std::sync::Mutex<Vec<CapturedProviderRequest>>,
+}
+
+impl CapturingProvider {
+    fn requests(&self) -> Vec<CapturedProviderRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for CapturingProvider {
+    fn name(&self) -> &str {
+        "capturing-test"
+    }
+
+    fn model(&self) -> &str {
+        "capturing-test-model"
+    }
+
+    async fn chat_stream(
+        &self,
+        system: Option<&str>,
+        _messages: Vec<LlmMessage>,
+        tools: Vec<LlmTool>,
+        _max_tokens: u32,
+        options: ChatOptions,
+    ) -> anyhow::Result<ChunkStream> {
+        self.requests.lock().unwrap().push(CapturedProviderRequest {
+            system: system.map(ToOwned::to_owned),
+            tools: tools.into_iter().map(|tool| tool.name).collect(),
+            options,
+        });
+        Ok(Box::pin(futures::stream::iter([Ok(
+            StreamChunk::Completed {
+                stop_reason: "stop".into(),
+                assistant: LlmMessage::text(
+                    worldbase_providers::LlmRole::Assistant,
+                    "Captured policy request.",
+                ),
+                usage: TokenUsage::default(),
+            },
+        )])))
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for RepairingInvalidToolProvider {
+    fn name(&self) -> &str {
+        "repairing-invalid-tool-test"
+    }
+
+    fn model(&self) -> &str {
+        "repairing-invalid-tool-model"
+    }
+
+    async fn chat_stream(
+        &self,
+        _system: Option<&str>,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<LlmTool>,
+        _max_tokens: u32,
+        _options: ChatOptions,
+    ) -> anyhow::Result<ChunkStream> {
+        let turn = self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let content = if turn == 0 {
+            vec![ContentBlock::ToolUse {
+                id: "invalid-call".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({ "_raw": "{broken" }),
+                raw_input: Some("{broken".into()),
+                input_error: Some(
+                    "openai returned invalid JSON arguments for tool `read_file`: {broken".into(),
+                ),
+            }]
+        } else {
+            vec![ContentBlock::Text {
+                text: "Recovered after the tool error.".into(),
+            }]
+        };
+        Ok(Box::pin(futures::stream::iter([Ok(
+            StreamChunk::Completed {
+                stop_reason: if turn == 0 { "tool_calls" } else { "stop" }.into(),
+                assistant: LlmMessage {
+                    role: worldbase_providers::LlmRole::Assistant,
+                    content,
+                },
+                usage: TokenUsage::default(),
+            },
+        )])))
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for BlockingProvider {
+    fn name(&self) -> &str {
+        "blocking-test"
+    }
+
+    fn model(&self) -> &str {
+        "blocking-test-model"
+    }
+
+    async fn chat_stream(
+        &self,
+        _system: Option<&str>,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<LlmTool>,
+        _max_tokens: u32,
+        _options: ChatOptions,
+    ) -> anyhow::Result<ChunkStream> {
+        self.started.notify_one();
+        match self.stage {
+            BlockingProviderStage::BeforeStream => {
+                std::future::pending::<anyhow::Result<ChunkStream>>().await
+            }
+            BlockingProviderStage::DuringStream => Ok(Box::pin(futures::stream::pending())),
+        }
+    }
+}
 
 async fn test_hub(mock_script: Vec<MockTurn>) -> Arc<Hub> {
     let dir = std::env::temp_dir().join(format!("ws-e2e-{}", uuid::Uuid::new_v4()));
@@ -82,6 +230,133 @@ async fn mcp_control_plane_returns_electron_compatible_rust_snapshot() {
     .unwrap();
     assert_eq!(disconnected["id"], "settings-mcp");
     assert_eq!(disconnected["status"], "disconnected");
+}
+
+#[tokio::test]
+async fn mobile_mcp_reload_drops_process_transports_at_the_rpc_boundary() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::mobile("mobile-ios"));
+
+    let reloaded = dispatch(
+        &hub,
+        &ctx,
+        method::MCP_RELOAD,
+        serde_json::json!({
+            "servers": [
+                {
+                    "name": "local-process",
+                    "displayName": "Local process",
+                    "enabled": true,
+                    "transport": "stdio",
+                    "target": "must-never-be-spawned",
+                    "args": [],
+                    "env": {},
+                    "headers": {}
+                },
+                {
+                    "name": "remote-docs",
+                    "displayName": "Remote docs",
+                    "enabled": true,
+                    "transport": "streamable-http",
+                    "target": "https://mcp.example.test",
+                    "args": [],
+                    "env": {},
+                    "headers": {}
+                }
+            ]
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(reloaded["servers"], serde_json::json!(["remote-docs"]));
+    assert_eq!(
+        reloaded["ignoredUnsupportedServers"],
+        serde_json::json!(["local-process"])
+    );
+}
+
+#[tokio::test]
+async fn mobile_initialize_cannot_upgrade_the_transport_capability_ceiling() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::mobile("mobile-ffi"));
+
+    let initialized = dispatch(
+        &hub,
+        &ctx,
+        method::INITIALIZE,
+        serde_json::json!({
+            "protocolVersion": "1.0",
+            "capabilities": {
+                "platform": "desktop",
+                "features": [
+                    "subprocess",
+                    "port_binding",
+                    "webhook_receiver",
+                    "webview_automation",
+                    "interactive"
+                ],
+                "excludes": []
+            }
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(initialized["availableDomains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|domain| domain != "desktop"));
+    assert!(initialized["availableTools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tool| tool["name"] != "execute_command"));
+
+    let listed = dispatch(&hub, &ctx, method::TOOL_LIST, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tool| tool["name"] != "execute_command"));
+
+    let exec_error = dispatch(
+        &hub,
+        &ctx,
+        method::EXEC_RUN,
+        serde_json::json!({ "program": "echo", "args": ["must-not-run"] }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(exec_error.code, worldbase_protocol::rpc::METHOD_NOT_FOUND);
+
+    let reloaded = dispatch(
+        &hub,
+        &ctx,
+        method::MCP_RELOAD,
+        serde_json::json!({
+            "servers": [{
+                "name": "forged-local-process",
+                "displayName": "Forged local process",
+                "enabled": true,
+                "transport": "stdio",
+                "target": "must-never-be-spawned",
+                "args": [],
+                "env": {},
+                "headers": {}
+            }]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reloaded["servers"], serde_json::json!([]));
+    assert_eq!(
+        reloaded["ignoredUnsupportedServers"],
+        serde_json::json!(["forged-local-process"])
+    );
 }
 
 #[tokio::test]
@@ -531,6 +806,97 @@ async fn native_group_injection_preserves_directed_recipients() {
         session["pendingInjections"][1]["targetAgentIds"],
         serde_json::json!(["coordinator", "engineer"])
     );
+}
+
+#[tokio::test]
+async fn live_ad_hoc_group_uses_member_names_for_hitl_routing() {
+    let hub = test_hub(vec![]).await;
+    let provider_started = Arc::new(tokio::sync::Notify::new());
+    hub.set_custom_provider(Arc::new(BlockingProvider {
+        stage: BlockingProviderStage::DuringStream,
+        started: provider_started.clone(),
+    }));
+    let ctx = ConnectionContext::new(Capabilities::mobile("mobile-ios"));
+    let mut events = hub.event_tx.subscribe();
+    let created = dispatch(
+        &hub,
+        &ctx,
+        method::GROUP_CREATE,
+        serde_json::json!({
+            "topic": "Ad-hoc mobile group",
+            "mode": "discussion",
+            "members": [
+                { "name": "Coordinator", "persona": "Coordinate" },
+                { "name": "Engineer", "persona": "Implement" }
+            ],
+            "coordinator": "Coordinator"
+        }),
+    )
+    .await
+    .unwrap();
+    let group_id = created["id"].as_str().unwrap().to_string();
+
+    dispatch(
+        &hub,
+        &ctx,
+        method::GROUP_MESSAGE,
+        serde_json::json!({ "id": group_id, "text": "Review the mobile flow" }),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        provider_started.notified(),
+    )
+    .await
+    .expect("ad-hoc member provider did not start");
+
+    let session = dispatch(
+        &hub,
+        &ctx,
+        method::GROUP_GET,
+        serde_json::json!({ "id": group_id }),
+    )
+    .await
+    .unwrap();
+    assert!(session["activeMemberIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "Engineer"));
+
+    let injected = dispatch(
+        &hub,
+        &ctx,
+        method::GROUP_INJECT,
+        serde_json::json!({
+            "id": group_id,
+            "content": "Check cancellation as well.",
+            "targetAgentIds": ["Engineer"]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(injected["queued"], 1);
+
+    dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_ABORT,
+        serde_json::json!({ "streamId": group_id }),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            if frame.stream_id == group_id && matches!(frame.kind, EventKind::Done { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("aborted ad-hoc group did not finish promptly");
 }
 
 #[tokio::test]
@@ -1023,6 +1389,171 @@ async fn chat_flow_with_tool_call_end_to_end() {
 }
 
 #[tokio::test]
+async fn persisted_agent_policy_and_skills_reach_the_actual_model_request() {
+    let hub = test_hub(vec![]).await;
+    let skill_dir = hub.workspace.join(".worldbase").join("skills");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("policy-skill.yaml"),
+        "name: policy-skill\ndescription: Policy test\ninstructions: Always cite the persisted policy evidence.\n",
+    )
+    .unwrap();
+    let provider = Arc::new(CapturingProvider::default());
+    hub.set_custom_provider(provider.clone());
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+
+    dispatch(
+        &hub,
+        &ctx,
+        method::AGENT_SAVE,
+        serde_json::json!({
+            "agent": {
+                "id": "persisted-policy-agent",
+                "name": "Persisted policy agent",
+                "systemPrompt": "Use the persisted agent policy.",
+                "skillIds": ["policy-skill"],
+                "reasoningStrength": "high",
+                "allowedTools": ["read_file", "write_file"],
+                "deniedTools": ["write_file"]
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    let conversation = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_CREATE,
+        serde_json::json!({"title": "Persisted policy E2E"}),
+    )
+    .await
+    .unwrap();
+    let conversation_id = conversation["id"].as_str().unwrap();
+    let mut events = hub.event_tx.subscribe();
+    let result = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_SEND,
+        serde_json::json!({
+            "conversationId": conversation_id,
+            "text": "Inspect policy.",
+            "agentId": "persisted-policy-agent",
+            "allowedToolNames": ["read_file", "memory_search"],
+            "deniedToolNames": ["memory_search"]
+        }),
+    )
+    .await
+    .unwrap();
+    let stream_id = result["streamId"].as_str().unwrap();
+    loop {
+        let frame = events.recv().await.unwrap();
+        if frame.stream_id == stream_id
+            && matches!(frame.kind, EventKind::Done { .. } | EventKind::Error { .. })
+        {
+            break;
+        }
+    }
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].tools, vec!["read_file"]);
+    assert_eq!(
+        requests[0].options.reasoning_effort.as_deref(),
+        Some("high")
+    );
+    let system = requests[0].system.as_deref().unwrap_or_default();
+    assert!(system.contains("Use the persisted agent policy."));
+    assert!(system.contains("Always cite the persisted policy evidence."));
+}
+
+#[tokio::test]
+async fn agent_workspace_catalog_stays_platform_wide_inside_a_restricted_agent_run() {
+    let hub = test_hub(vec![
+        MockTurn {
+            text: "Inspect the platform catalog.".into(),
+            tool_calls: vec![(
+                "catalog-call".into(),
+                "list_agent_workspace_catalog".into(),
+                serde_json::json!({}),
+            )],
+            stream_in_chunks: false,
+        },
+        MockTurn {
+            text: "Catalog inspected.".into(),
+            tool_calls: vec![],
+            stream_in_chunks: false,
+        },
+    ])
+    .await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    dispatch(
+        &hub,
+        &ctx,
+        method::AGENT_SAVE,
+        serde_json::json!({
+            "agent": {
+                "id": "catalog-only-agent",
+                "name": "Catalog only",
+                "systemPrompt": "Inspect available Agent Workspace choices.",
+                "allowedTools": ["list_agent_workspace_catalog"]
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    let conversation = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_CREATE,
+        serde_json::json!({
+            "title": "Catalog policy E2E",
+            "agentId": "catalog-only-agent"
+        }),
+    )
+    .await
+    .unwrap();
+    let mut events = hub.event_tx.subscribe();
+    let result = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_SEND,
+        serde_json::json!({
+            "conversationId": conversation["id"],
+            "text": "List choices."
+        }),
+    )
+    .await
+    .unwrap();
+    let stream_id = result["streamId"].as_str().unwrap();
+    let mut catalog = None;
+    loop {
+        let frame = events.recv().await.unwrap();
+        if frame.stream_id != stream_id {
+            continue;
+        }
+        if let EventKind::ToolResult { name, content, .. } = &frame.kind {
+            if name == "list_agent_workspace_catalog" {
+                catalog = Some(serde_json::from_str::<serde_json::Value>(content).unwrap());
+            }
+        }
+        if matches!(frame.kind, EventKind::Done { .. } | EventKind::Error { .. }) {
+            break;
+        }
+    }
+
+    let catalog = catalog.expect("catalog tool should complete");
+    let names = catalog["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"list_agent_workspace_catalog"));
+    assert!(names.contains(&"read_file"));
+    assert!(names.contains(&"execute_command"));
+}
+
+#[tokio::test]
 async fn rust_chat_uses_native_folder_workspace_tools() {
     let folder =
         std::env::temp_dir().join(format!("folder-workspace-e2e-{}", uuid::Uuid::new_v4()));
@@ -1241,6 +1772,434 @@ async fn electron_host_override_replaces_same_named_rust_tool() {
         host_result_received,
         "same-name override result must feed the Rust loop"
     );
+}
+
+#[tokio::test]
+async fn abort_interrupts_provider_setup_and_stalled_stream_reads() {
+    for stage in [
+        BlockingProviderStage::BeforeStream,
+        BlockingProviderStage::DuringStream,
+    ] {
+        let hub = test_hub(vec![]).await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        hub.set_custom_provider(Arc::new(BlockingProvider {
+            stage,
+            started: started.clone(),
+        }));
+        let ctx = ConnectionContext::new(Capabilities::desktop());
+        let mut events = hub.event_tx.subscribe();
+        let conv = dispatch(
+            &hub,
+            &ctx,
+            method::CONVERSATION_CREATE,
+            serde_json::json!({"title": "Abort provider wait"}),
+        )
+        .await
+        .unwrap();
+        let run = dispatch(
+            &hub,
+            &ctx,
+            method::CHAT_SEND,
+            serde_json::json!({
+                "conversationId": conv["id"],
+                "text": "Wait indefinitely."
+            }),
+        )
+        .await
+        .unwrap();
+        let stream_id = run["streamId"].as_str().unwrap().to_string();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("provider did not enter the blocking stage");
+        let aborted = dispatch(
+            &hub,
+            &ctx,
+            method::CHAT_ABORT,
+            serde_json::json!({"streamId": stream_id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(aborted["aborted"], 1);
+
+        let stop_reason = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let frame = events.recv().await.unwrap();
+                if frame.stream_id != stream_id {
+                    continue;
+                }
+                if let EventKind::Done { stop_reason } = frame.kind {
+                    break stop_reason;
+                }
+            }
+        })
+        .await
+        .expect("provider wait did not terminate promptly after abort");
+        assert_eq!(stop_reason, "aborted");
+    }
+}
+
+#[tokio::test]
+async fn abort_during_permission_wait_prevents_a_late_allow_from_executing() {
+    let marker = "must-not-be-written-after-abort.txt";
+    let script = vec![MockTurn {
+        text: "Request a protected write.".into(),
+        tool_calls: vec![(
+            "protected-write".into(),
+            "write_file".into(),
+            serde_json::json!({ "path": marker, "content": "too late" }),
+        )],
+        stream_in_chunks: false,
+    }];
+    let hub = test_hub(script).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let mut events = hub.event_tx.subscribe();
+    let conv = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_CREATE,
+        serde_json::json!({"title": "Abort permission request"}),
+    )
+    .await
+    .unwrap();
+    let started = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_SEND,
+        serde_json::json!({
+            "conversationId": conv["id"],
+            "text": "Write the marker file."
+        }),
+    )
+    .await
+    .unwrap();
+    let stream_id = started["streamId"].as_str().unwrap().to_string();
+
+    let request_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            if frame.stream_id != stream_id {
+                continue;
+            }
+            if let EventKind::PermissionRequest {
+                request_id,
+                tool_name,
+                ..
+            } = frame.kind
+            {
+                assert_eq!(tool_name, "write_file");
+                break request_id;
+            }
+        }
+    })
+    .await
+    .expect("permission request was not emitted");
+
+    let aborted = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_ABORT,
+        serde_json::json!({"streamId": stream_id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(aborted["aborted"], 1);
+
+    // Race a stale UI callback against cancellation. Whether the callback
+    // reaches the oneshot or observes its removal, it must never authorize
+    // execution once the run's token has been cancelled.
+    let _ = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_RESPOND,
+        serde_json::json!({ "requestId": request_id, "allow": true }),
+    )
+    .await
+    .unwrap();
+
+    let stop_reason = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            if frame.stream_id != stream_id {
+                continue;
+            }
+            if let EventKind::Done { stop_reason } = frame.kind {
+                break stop_reason;
+            }
+        }
+    })
+    .await
+    .expect("permission wait did not terminate promptly after abort");
+    assert_eq!(stop_reason, "aborted");
+    assert!(!hub.workspace.join(marker).exists());
+    assert!(hub.pending_permissions.lock().unwrap().is_empty());
+
+    let stale = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_RESPOND,
+        serde_json::json!({ "requestId": request_id, "allow": true }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stale["delivered"], false);
+}
+
+#[tokio::test]
+async fn malformed_provider_tool_arguments_return_an_error_to_the_model() {
+    let hub = test_hub(vec![]).await;
+    hub.set_custom_provider(Arc::new(RepairingInvalidToolProvider::default()));
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let mut events = hub.event_tx.subscribe();
+    let conv = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_CREATE,
+        serde_json::json!({"title": "Repair malformed arguments"}),
+    )
+    .await
+    .unwrap();
+    let started = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_SEND,
+        serde_json::json!({
+            "conversationId": conv["id"],
+            "text": "Read a file."
+        }),
+    )
+    .await
+    .unwrap();
+    let stream_id = started["streamId"].as_str().unwrap().to_string();
+
+    let mut saw_tool_error = false;
+    let mut recovered = false;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            if frame.stream_id != stream_id {
+                continue;
+            }
+            match frame.kind {
+                EventKind::ToolResult {
+                    name,
+                    content,
+                    is_error,
+                    ..
+                } if name == "read_file" => {
+                    saw_tool_error = is_error && content.contains("invalid JSON arguments");
+                }
+                EventKind::AssistantMessage { content, .. } => {
+                    recovered |= content.contains("Recovered after the tool error");
+                }
+                EventKind::Done { .. } => break,
+                EventKind::Error { message } => {
+                    panic!("run terminated instead of repairing: {message}")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("repairing provider run did not finish");
+
+    assert!(saw_tool_error);
+    assert!(recovered);
+}
+
+#[tokio::test]
+async fn aborting_electron_host_override_releases_the_pending_request() {
+    let script = vec![MockTurn {
+        text: "Wait for Electron.".into(),
+        tool_calls: vec![(
+            "call-host-abort".into(),
+            "slow_host_tool".into(),
+            serde_json::json!({"delay": "long"}),
+        )],
+        stream_in_chunks: false,
+    }];
+    let hub = test_hub(script).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let mut events = hub.event_tx.subscribe();
+    let conv = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_CREATE,
+        serde_json::json!({"title": "Abort Electron host override"}),
+    )
+    .await
+    .unwrap();
+
+    let started = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_SEND,
+        serde_json::json!({
+            "conversationId": conv["id"],
+            "text": "Call the slow host tool.",
+            "customTools": [{
+                "name": "slow_host_tool",
+                "description": "Waits in the Electron host.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"delay": {"type": "string"}}
+                },
+                "domain": "electron_host_override",
+                "permission": "allow"
+            }]
+        }),
+    )
+    .await
+    .unwrap();
+    let stream_id = started["streamId"].as_str().unwrap().to_string();
+
+    let request_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            if frame.stream_id != stream_id {
+                continue;
+            }
+            if let EventKind::HostRequest {
+                request_id,
+                request_kind,
+                ..
+            } = frame.kind
+            {
+                assert_eq!(request_kind, "tool.execute");
+                break request_id;
+            }
+        }
+    })
+    .await
+    .expect("host request was not emitted");
+    assert!(hub
+        .pending_host_requests
+        .lock()
+        .unwrap()
+        .contains_key(&request_id));
+
+    let aborted = dispatch(
+        &hub,
+        &ctx,
+        method::CHAT_ABORT,
+        serde_json::json!({"streamId": stream_id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(aborted["aborted"], 1);
+
+    let stop_reason = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            if frame.stream_id != stream_id {
+                continue;
+            }
+            if let EventKind::Done { stop_reason } = frame.kind {
+                break stop_reason;
+            }
+        }
+    })
+    .await
+    .expect("aborted host request did not terminate promptly");
+    assert_eq!(stop_reason, "aborted");
+    assert!(hub.pending_host_requests.lock().unwrap().is_empty());
+    assert!(!hub.host_respond(&request_id, serde_json::json!({"late": true})));
+}
+
+#[tokio::test]
+async fn aborting_builtin_host_tools_releases_ask_user_and_page_requests() {
+    let cases = vec![
+        (
+            "ask_user",
+            serde_json::json!({
+                "questions": [{ "question": "Continue?", "options": ["Yes", "No"] }]
+            }),
+            "ask_user",
+        ),
+        (
+            "read_current_page",
+            serde_json::json!({ "max_chars": 400 }),
+            "page_automation",
+        ),
+    ];
+
+    for (tool_name, input, expected_request_kind) in cases {
+        let hub = test_hub(vec![MockTurn {
+            text: format!("Wait for built-in host tool {tool_name}."),
+            tool_calls: vec![(format!("call-{tool_name}"), tool_name.into(), input)],
+            stream_in_chunks: false,
+        }])
+        .await;
+        let ctx = ConnectionContext::new(Capabilities::desktop());
+        let mut events = hub.event_tx.subscribe();
+        let conv = dispatch(
+            &hub,
+            &ctx,
+            method::CONVERSATION_CREATE,
+            serde_json::json!({"title": format!("Abort {tool_name}")}),
+        )
+        .await
+        .unwrap();
+        let started = dispatch(
+            &hub,
+            &ctx,
+            method::CHAT_SEND,
+            serde_json::json!({
+                "conversationId": conv["id"],
+                "text": format!("Call {tool_name} and wait.")
+            }),
+        )
+        .await
+        .unwrap();
+        let stream_id = started["streamId"].as_str().unwrap().to_string();
+
+        let request_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let frame = events.recv().await.unwrap();
+                if frame.stream_id != stream_id {
+                    continue;
+                }
+                if let EventKind::HostRequest {
+                    request_id,
+                    request_kind,
+                    ..
+                } = frame.kind
+                {
+                    assert_eq!(request_kind, expected_request_kind);
+                    break request_id;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{tool_name} host request was not emitted"));
+
+        let aborted = dispatch(
+            &hub,
+            &ctx,
+            method::CHAT_ABORT,
+            serde_json::json!({"streamId": stream_id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(aborted["aborted"], 1);
+
+        let stop_reason = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let frame = events.recv().await.unwrap();
+                if frame.stream_id != stream_id {
+                    continue;
+                }
+                if let EventKind::Done { stop_reason } = frame.kind {
+                    break stop_reason;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{tool_name} did not terminate promptly after abort"));
+        assert_eq!(stop_reason, "aborted");
+        assert!(hub.pending_host_requests.lock().unwrap().is_empty());
+        assert!(!hub.host_respond(&request_id, serde_json::json!({"late": true})));
+    }
 }
 
 #[tokio::test]
@@ -1587,6 +2546,80 @@ async fn conversation_sync_replaces_host_history_without_duplicates() {
 }
 
 #[tokio::test]
+async fn authoritative_conversation_sync_replaces_branches_and_allows_empty_reset() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let conv_id = "authoritative-host-conversation";
+
+    let first = serde_json::json!({
+        "id": conv_id,
+        "authoritative": true,
+        "messages": [
+            { "role": "user", "content": "original question" },
+            {
+                "role": "assistant",
+                "content": "using a tool",
+                "toolCalls": [{
+                    "id": "call-1",
+                    "name": "read_file",
+                    "args": { "path": "old.txt" }
+                }]
+            },
+            {
+                "role": "user",
+                "content": "",
+                "toolResults": [{
+                    "toolCallId": "call-1",
+                    "name": "read_file",
+                    "content": "old contents",
+                    "isError": false
+                }]
+            }
+        ]
+    });
+    let result = dispatch(&hub, &ctx, method::CONVERSATION_SYNC, first)
+        .await
+        .unwrap();
+    assert_eq!(result["synced"], true);
+    assert_eq!(result["authoritative"], true);
+    assert_eq!(result["messageCount"], 3);
+
+    let branch = serde_json::json!({
+        "id": conv_id,
+        "authoritative": true,
+        "messages": [
+            { "role": "user", "content": "edited question" },
+            { "role": "assistant", "content": "edited answer" }
+        ]
+    });
+    dispatch(&hub, &ctx, method::CONVERSATION_SYNC, branch)
+        .await
+        .unwrap();
+    let messages = hub.store.list_messages(conv_id, 100).unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].content, "edited question");
+    assert_eq!(messages[1].content, "edited answer");
+    assert!(messages
+        .iter()
+        .all(|message| { message.tool_calls.is_empty() && message.tool_results.is_empty() }));
+
+    let reset = dispatch(
+        &hub,
+        &ctx,
+        method::CONVERSATION_SYNC,
+        serde_json::json!({
+            "id": conv_id,
+            "authoritative": true,
+            "messages": []
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reset["messageCount"], 0);
+    assert!(hub.store.list_messages(conv_id, 100).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn tool_list_respects_capability_filter() {
     let hub = test_hub(vec![]).await;
     let desktop = ConnectionContext::new(Capabilities::desktop());
@@ -1621,6 +2654,210 @@ async fn tool_list_respects_capability_filter() {
         !names.contains(&"create_project"),
         "mobile must not see create_project"
     );
+}
+
+#[tokio::test]
+async fn direct_agent_workspace_catalog_uses_the_connections_mobile_tool_surface() {
+    let hub = test_hub(vec![]).await;
+    let mobile = ConnectionContext::new(Capabilities::mobile("mobile-ios"));
+
+    let catalog = dispatch(
+        &hub,
+        &mobile,
+        method::TOOL_CALL,
+        serde_json::json!({
+            "name": "list_agent_workspace_catalog",
+            "args": {}
+        }),
+    )
+    .await
+    .unwrap();
+    let tool_names = catalog["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(tool_names.contains(&"read_file"));
+    assert!(tool_names.contains(&"ask_user"));
+    assert!(!tool_names.contains(&"read_project_file"));
+    assert!(!tool_names.contains(&"execute_command"));
+}
+
+#[tokio::test]
+async fn direct_tool_call_accepts_legacy_argument_aliases() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let root = hub.workspace.join("alias-test.txt");
+    std::fs::write(&root, "alias works").unwrap();
+
+    for params in [
+        serde_json::json!({
+            "toolName": "read_file",
+            "arguments": {"path": "alias-test.txt"}
+        }),
+        serde_json::json!({
+            "tool_name": "read_file",
+            "input": {"path": "alias-test.txt"}
+        }),
+        serde_json::json!({
+            "tool": "read_file",
+            "arguments": "{\"path\":\"alias-test.txt\"}"
+        }),
+    ] {
+        let result = dispatch(&hub, &ctx, method::TOOL_CALL, params)
+            .await
+            .unwrap();
+        assert_eq!(result["path"], "alias-test.txt");
+        assert_eq!(result["content"], "alias works");
+    }
+}
+
+#[tokio::test]
+async fn direct_tool_call_rejects_non_object_arguments() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let error = dispatch(
+        &hub,
+        &ctx,
+        method::TOOL_CALL,
+        serde_json::json!({"name": "read_file", "arguments": ["bad"]}),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.message.contains("tool arguments must be an object"));
+}
+
+#[tokio::test]
+async fn repeated_direct_tool_permissions_keep_monotonic_event_sequences() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    dispatch(
+        &hub,
+        &ctx,
+        method::SETTINGS_SET,
+        serde_json::json!({
+            "key": "permissions",
+            "value": {"read_file": "ask"}
+        }),
+    )
+    .await
+    .unwrap();
+    let mut events = hub.event_tx.subscribe();
+    let mut sequences = Vec::new();
+
+    for _ in 0..2 {
+        let call = dispatch(
+            &hub,
+            &ctx,
+            method::TOOL_CALL,
+            serde_json::json!({
+                "name": "read_file",
+                "args": {"path": "notes.txt"}
+            }),
+        );
+        tokio::pin!(call);
+        let (request_id, seq, stream_id) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                loop {
+                    tokio::select! {
+                        result = &mut call => panic!("tool.call completed before permission response: {result:?}"),
+                        event = events.recv() => {
+                            let frame = event.unwrap();
+                            if let EventKind::PermissionRequest { request_id, .. } = frame.kind {
+                                break (request_id, frame.seq, frame.stream_id);
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .expect("permission event should arrive");
+        sequences.push(seq);
+        assert_eq!(stream_id, "tool-call");
+        dispatch(
+            &hub,
+            &ctx,
+            method::CHAT_RESPOND,
+            serde_json::json!({"requestId": request_id, "allow": true}),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut call)
+            .await
+            .expect("allowed direct tool call should finish")
+            .unwrap();
+    }
+
+    assert!(sequences[1] > sequences[0], "sequences: {sequences:?}");
+}
+
+#[tokio::test]
+async fn repeated_direct_ask_user_requests_keep_monotonic_event_sequences() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let mut events = hub.event_tx.subscribe();
+    let mut sequences = Vec::new();
+
+    for index in 0..2 {
+        let call = dispatch(
+            &hub,
+            &ctx,
+            method::TOOL_CALL,
+            serde_json::json!({
+                "name": "ask_user",
+                "args": {
+                    "questions": [{
+                        "question": format!("Continue {index}?"),
+                        "options": ["Yes", "No"]
+                    }]
+                }
+            }),
+        );
+        tokio::pin!(call);
+        let (request_id, seq, stream_id) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                loop {
+                    tokio::select! {
+                        result = &mut call => panic!("ask_user completed before host response: {result:?}"),
+                        event = events.recv() => {
+                            let frame = event.unwrap();
+                            if let EventKind::HostRequest { request_id, request_kind, .. } = frame.kind {
+                                if request_kind == "ask_user" {
+                                    break (request_id, frame.seq, frame.stream_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .expect("host request should arrive");
+        sequences.push(seq);
+        assert_eq!(stream_id, "tool-call");
+        dispatch(
+            &hub,
+            &ctx,
+            method::HOST_RESPOND,
+            serde_json::json!({
+                "requestId": request_id,
+                "result": {"answers": [{"answer": "Yes"}]}
+            }),
+        )
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), &mut call)
+            .await
+            .expect("answered ask_user should finish")
+            .unwrap();
+        assert_eq!(result["answers"][0]["answer"], "Yes");
+    }
+
+    assert!(sequences[1] > sequences[0], "sequences: {sequences:?}");
 }
 
 #[tokio::test]

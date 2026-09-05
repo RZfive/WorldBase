@@ -44,6 +44,7 @@ import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, resolveProv
 import { getSelectedExecutionEngine, isRustHarnessSelected, startSelectedRustHarness } from './ai/selected-execution-engine.js'
 import { enqueueStudioImageTasks } from './media/image-studio-queue.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
+import { normalizeRustAskUserQuestions, normalizeRustAskUserResponse } from './ai/rust-ask-user-contract.js'
 import { broadcastToAppWindows, getActiveAiRequestWindow, getProjectsDir, getSnapshotsDir, requestPageAutomationFromRenderer } from './windows.js'
 import { migrateUserDataForRename } from './user-data-migration.js'
 import { RustHarnessClient, type JsonRpcResult, type RustHostRequest } from './rust-harness-client.js'
@@ -386,10 +387,8 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
   if (request.requestKind === 'ask_user') {
     const win = getActiveAiRequestWindow()
     if (!win || win.isDestroyed()) throw new Error('No active Electron window for ask_user')
-    const question = typeof request.payload.question === 'string' ? request.payload.question : ''
-    const choices = Array.isArray(request.payload.choices)
-      ? request.payload.choices.filter((item): item is string => typeof item === 'string')
-      : []
+    const questions = normalizeRustAskUserQuestions(request.payload, request.requestId)
+    if (questions.length === 0) throw new Error('Rust ask_user request has no valid questions')
     return await new Promise<JsonRpcResult>((resolve) => {
       let settled = false
       const finish = (value: JsonRpcResult) => {
@@ -401,14 +400,14 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
       }
       const onResponse = (_event: unknown, payload: { requestId?: string; answers?: unknown }) => {
         if (payload?.requestId !== request.requestId) return
-        finish((payload.answers ?? null) as unknown as JsonRpcResult)
+        finish(normalizeRustAskUserResponse(payload.answers ?? null, questions))
       }
       const timeout = setTimeout(() => finish(null), 300_000)
       ipcMain.on('askUser:response', onResponse)
       win.webContents.send('askUser:request', {
         requestId: request.requestId,
         sessionId: request.streamId,
-        questions: [{ id: `${request.requestId}-question`, question, options: choices }]
+        questions
       })
     })
   }

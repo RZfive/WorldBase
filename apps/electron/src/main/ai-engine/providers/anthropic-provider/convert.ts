@@ -204,8 +204,26 @@ function toUserBlocks (message: ChatMessage): AnthropicContentBlock[] {
 
 function toAssistantBlocks (message: ChatMessage): AnthropicContentBlock[] {
   const blocks: AnthropicContentBlock[] = []
-  const text = contentToText(message.content)
-  if (text) blocks.push({ type: 'text', text })
+  if (typeof message.content === 'string') {
+    if (message.content) blocks.push({ type: 'text', text: message.content })
+  } else if (Array.isArray(message.content)) {
+    for (const part of message.content) {
+      if (part.type === 'text') {
+        if (part.text) blocks.push({ type: 'text', text: part.text })
+      } else if (part.type === 'image_url') {
+        const image = toImageBlock(part)
+        if (image) blocks.push(image)
+      } else if (part.type === 'thinking') {
+        blocks.push({
+          type: 'thinking',
+          thinking: part.thinking,
+          signature: part.signature
+        })
+      } else if (part.type === 'redacted_thinking') {
+        blocks.push({ type: 'redacted_thinking', data: part.data })
+      }
+    }
+  }
 
   for (const toolCall of message.tool_calls || []) {
     blocks.push({
@@ -308,12 +326,22 @@ export function normalizeAnthropicResponse (data: AnthropicMessagesResponse): An
   const textParts: string[] = []
   const thinkingParts: string[] = []
   const toolCalls: ToolCall[] = []
+  const contentParts: ChatContentPart[] = []
+  let hasReplayableProviderThinking = false
 
   for (const block of data.content || []) {
     if (block.type === 'text') {
       textParts.push(block.text)
+      contentParts.push({ type: 'text', text: block.text })
     } else if (block.type === 'thinking') {
       thinkingParts.push(block.thinking)
+      if (block.signature) {
+        hasReplayableProviderThinking = true
+        contentParts.push({ type: 'thinking', thinking: block.thinking, signature: block.signature })
+      }
+    } else if (block.type === 'redacted_thinking') {
+      hasReplayableProviderThinking = true
+      contentParts.push({ type: 'redacted_thinking', data: block.data })
     } else if (block.type === 'tool_use') {
       toolCalls.push({
         id: block.id,
@@ -328,7 +356,7 @@ export function normalizeAnthropicResponse (data: AnthropicMessagesResponse): An
 
   const message: ChatMessage = {
     role: 'assistant',
-    content: textParts.join('')
+    content: hasReplayableProviderThinking ? contentParts : textParts.join('')
   }
   if (thinkingParts.length > 0) {
     message.reasoning_content = thinkingParts.join('')

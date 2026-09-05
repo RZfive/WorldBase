@@ -2771,7 +2771,9 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
  "worldbase-core",
+ "worldbase-mcp-client",
  "worldbase-memory",
  "worldbase-protocol",
 ]
@@ -2890,6 +2892,7 @@ dependencies = [
  "worldbase-scheduler",
  "worldbase-search",
  "worldbase-skills",
+ "zip",
 ]
 
 [[package]]

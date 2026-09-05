@@ -114,11 +114,13 @@ void main() {
       id: 'openai',
       name: 'OpenAI',
       temperature: 0.7,
+      enableThinking: true,
       models: [ModelInfo(id: 'gpt-test')],
     );
 
     final restored = ProviderEntry.fromJson(provider.toJson());
 
     expect(restored.temperature, 0.7);
+    expect(restored.enableThinking, isTrue);
   });
 }

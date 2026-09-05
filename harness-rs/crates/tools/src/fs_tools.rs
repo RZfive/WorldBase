@@ -805,6 +805,7 @@ mod tests {
             plan_goal: Arc::new(std::sync::Mutex::new(None)),
             todo_items: Arc::new(std::sync::Mutex::new(Vec::new())),
             read_files: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            visible_tool_catalog: None,
             store: store.clone(),
             skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),

@@ -135,6 +135,8 @@ impl Provider for MockProvider {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
+                    raw_input: None,
+                    input_error: None,
                 });
             }
             c
@@ -332,6 +334,7 @@ mod tests {
         while let Some(chunk) = s1.next().await {
             match chunk.unwrap() {
                 StreamChunk::TextDelta(t) => deltas.push_str(&t),
+                StreamChunk::ThinkingDelta(_) => {}
                 StreamChunk::Completed { assistant, .. } => completed = Some(assistant),
             }
         }

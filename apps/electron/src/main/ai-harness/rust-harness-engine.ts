@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { USER_ABORT_MESSAGE } from '../ai-engine/abort-utils.js'
 import type { UsageStore } from '../settings/usage-store.js'
-import type { ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
+import type { ChatContentPart, ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
 import {
   RustHarnessClient,
   type RustChatOptions,
@@ -47,25 +47,20 @@ const PLAN_MODE_WRITE_TOOLS = new Set([
   'clear_project_build_flag'
 ])
 
-// Rust owns the model/tool loop, but parallel child-run orchestration needs
-// the Electron facade so it can create isolated Rust sessions and preserve
-// host conversation/session routing. This override also keeps Rust's legacy
-// compatibility stub from becoming visible at the nesting limit.
-// These tools depend on Electron-owned ephemeral state or a live renderer
-// window. Keep Rust in charge of the model/tool loop, but execute the exact
-// Electron implementation through the host `tool.execute` callback so Rust
-// mode does not expose a native stub or a narrower schema.
-const ELECTRON_EXECUTION_OVERRIDE_TOOL_NAMES = new Set([
-  'spawn_subagents',
-  'ask_user',
-  'read_current_page',
-  'interact_current_page',
-  'fill_current_page_form',
-  'save_current_page_as_document',
-  'list_documents',
-  'read_document',
-  'open_project_app'
+// Rust owns the model/tool loop and the two intrinsic plan-mode controls.
+// Electron remains the execution authority for its public domain tools so
+// Rust mode keeps the exact Node behavior: project backups/lifecycle,
+// command allowlists and background polling, Office I/O, scheduler/UI stores,
+// page automation, generic MCP calls, and all other host-owned state. Rust
+// still owns dynamic MCP discovery/execution and its per-run allow-list.
+const RUST_NATIVE_EXECUTION_TOOL_NAMES = new Set([
+  'enter_plan_mode',
+  'exit_plan_mode'
 ])
+
+function shouldExecuteInElectronHost (name: string): boolean {
+  return !RUST_NATIVE_EXECUTION_TOOL_NAMES.has(name)
+}
 
 export interface RustHarnessEngineOptions {
   client: RustHarnessClient
@@ -77,9 +72,9 @@ export interface RustHarnessEngineOptions {
 
 /**
  * Electron-facing facade for the Rust harness. Rust owns the provider, agent
- * loop, and every Rust-native domain tool. Electron host callbacks are kept
- * only for capabilities that have no Rust implementation or require a live
- * window (for example the shared group board and page automation).
+ * loop, plan state, and dynamic MCP discovery. Public Electron domain tools
+ * execute through the existing Node handlers so selecting Rust does not fork
+ * project, command, document, scheduler, or UI-store behavior.
  */
 export class RustHarnessEngine implements AIHarness {
   private readonly client: RustHarnessClient
@@ -174,17 +169,25 @@ export class RustHarnessEngine implements AIHarness {
       options?.deniedToolNames,
       this.planModeDefault ? Array.from(PLAN_MODE_WRITE_TOOLS) : undefined
     )
+    const priorMessages = pendingIndex >= 0 ? messages.slice(0, pendingIndex) : messages.slice(0, -1)
+    const historySystemPromptSections = priorMessages
+      .filter(message => message.role === 'system' || message.role === 'developer')
+      .map(message => textFromContent(message.content))
+      .filter(Boolean)
     const systemPromptSections = mergeStrings(
+      historySystemPromptSections,
       options?.systemPromptSections,
       this.planModeDefault
         ? ['Plan mode is active. Do not perform mutations, installs, builds, process control, or MCP calls until exit_plan_mode has completed.']
         : undefined
     )
-    const history = (pendingIndex >= 0 ? messages.slice(0, pendingIndex) : messages.slice(0, -1)) as RustSyncMessage[]
+    const history = priorMessages
+      .filter(message => message.role !== 'system' && message.role !== 'developer') as RustSyncMessage[]
     const queue: StreamEvent[] = []
     let terminal = false
     let wake: (() => void) | null = null
     let assistantText = ''
+    let assistantContent: MessageContent = ''
     let streamError: Error | null = null
     let streamWasAborted = false
     let nativeSideEffects = Promise.resolve()
@@ -204,8 +207,15 @@ export class RustHarnessEngine implements AIHarness {
       wake = null
     }
     const onFrame = (frame: RustEventFrame): void => {
-      if (frame.kind === 'delta' && typeof frame.text === 'string') assistantText += frame.text
-      if (frame.kind === 'assistant_message' && typeof frame.content === 'string') assistantText = frame.content
+      if (frame.kind === 'delta' && typeof frame.text === 'string') {
+        assistantText += frame.text
+        assistantContent = assistantText
+      }
+      if (frame.kind === 'assistant_message' && typeof frame.content === 'string') {
+        assistantText = frame.content
+        const parts = normalizeAssistantParts(frame.parts)
+        assistantContent = parts.length > 0 ? parts : assistantText
+      }
       if (frame.kind === 'usage') this.recordUsage(frame, effectiveConfig)
       if (frame.kind === 'tool_result' && this.isNativeToolResult(frame, customTools)) {
         nativeSideEffects = nativeSideEffects
@@ -230,7 +240,7 @@ export class RustHarnessEngine implements AIHarness {
           return
         }
       }
-      const event = frameToStreamEvent(frame, assistantText)
+      const event = frameToStreamEvent(frame, assistantContent)
       if (event) emit(event)
     }
     const onAbort = () => {
@@ -256,6 +266,7 @@ export class RustHarnessEngine implements AIHarness {
         memoryScopes: options?.memoryScopes,
         memoryQuery: textFromContent(pending.content),
         allowedMcpServerIds: options?.allowedMcpServerIds,
+        enableThinking: effectiveConfig.enableThinking,
         reasoningEffort: effectiveConfig.reasoningEffort,
         temperature: effectiveConfig.temperature,
         planModeActive: this.planModeDefault,
@@ -288,7 +299,7 @@ export class RustHarnessEngine implements AIHarness {
       await nativeSideEffects
       if (providerCallId) {
         options?.aiLogger?.logProviderCallSuccess(providerCallId, {
-          message: { role: 'assistant', content: assistantText }
+          message: { role: 'assistant', content: assistantContent }
         })
       }
     } catch (error) {
@@ -313,7 +324,7 @@ export class RustHarnessEngine implements AIHarness {
       }))
     const byName = new Map(tools.map(tool => [tool.name, tool]))
     for (const tool of this.electronTools.getToolDefinitions()) {
-      if (ELECTRON_EXECUTION_OVERRIDE_TOOL_NAMES.has(tool.name) || !byName.has(tool.name)) {
+      if (shouldExecuteInElectronHost(tool.name) || !byName.has(tool.name)) {
         byName.set(tool.name, tool)
       }
     }
@@ -374,14 +385,10 @@ export class RustHarnessEngine implements AIHarness {
 
   private async collectCustomTools (options?: AIRequestOptions): Promise<RustCustomToolRegistration[]> {
     const nativeNames = this.nativeToolNames()
-    // A host handler may fill a capability Rust does not implement, but it
-    // must not silently replace project/workspace/image/MCP native execution.
-    const hostFallbacks = this.electronTools.createRegistrations(options || {})
-      .filter(tool => (!nativeNames.has(tool.definition.name) || ELECTRON_EXECUTION_OVERRIDE_TOOL_NAMES.has(tool.definition.name)) &&
-        // Dynamic MCP tools are discovered and executed natively after Rust
-        // receives the run's MCP allow-list. They are absent from the static
-        // initialize catalog, so name-based exclusion alone is insufficient.
-        !tool.definition.name.startsWith('mcp__'))
+    // Electron's public domain tools deliberately override same-name Rust
+    // implementations. Only intrinsic plan controls and dynamically discovered
+    // MCP tools remain on the app-server side for an Electron run.
+    const hostFallbacks = this.createElectronHostToolRegistrations(options)
     const registered: RustCustomToolRegistration[] = [
       ...hostFallbacks,
       ...(options?.customTools || []).map(toRustCustomTool)
@@ -394,6 +401,21 @@ export class RustHarnessEngine implements AIHarness {
       unique.set(name, tool)
     }
     return Array.from(unique.values())
+  }
+
+  /**
+   * Build a fresh Electron handler set for one Rust-owned agent stream.
+   * Native group members call this lazily per child stream so mutable Node
+   * handler state (read tracking, created project, todos, and active skills)
+   * cannot leak from one member to another.
+   */
+  createElectronHostToolRegistrations (options: AIRequestOptions = {}): RustCustomToolRegistration[] {
+    return this.electronTools.createRegistrations(options)
+      .filter(tool => shouldExecuteInElectronHost(tool.definition.name) &&
+        // Dynamic MCP tools are discovered and executed natively after Rust
+        // receives the run's MCP allow-list. They are absent from the static
+        // initialize catalog, so name-based exclusion alone is insufficient.
+        !tool.definition.name.startsWith('mcp__'))
   }
 
   private nativeToolNames (): Set<string> {
@@ -550,10 +572,42 @@ function positiveInteger (value: unknown): number {
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0
 }
 
-function frameToStreamEvent (frame: RustEventFrame, assistantText: string): StreamEvent | null {
+function normalizeAssistantParts (value: unknown): ChatContentPart[] {
+  if (!Array.isArray(value)) return []
+  const parts: ChatContentPart[] = []
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue
+    const part = raw as Record<string, unknown>
+    if (part.type === 'text' && typeof part.text === 'string' && part.text.length > 0) {
+      parts.push({ type: 'text', text: part.text })
+      continue
+    }
+    if (part.type === 'thinking' && typeof part.thinking === 'string' && typeof part.signature === 'string') {
+      parts.push({ type: 'thinking', thinking: part.thinking, signature: part.signature })
+      continue
+    }
+    if (part.type === 'redacted_thinking' && typeof part.data === 'string') {
+      parts.push({ type: 'redacted_thinking', data: part.data })
+      continue
+    }
+    if (part.type === 'image_url') {
+      const image = part.image_url ?? part.imageUrl
+      if (!image || typeof image !== 'object') continue
+      const url = (image as Record<string, unknown>).url
+      if (typeof url === 'string' && url.length > 0) {
+        parts.push({ type: 'image_url', image_url: { url } })
+      }
+    }
+  }
+  return parts
+}
+
+function frameToStreamEvent (frame: RustEventFrame, assistantContent: MessageContent): StreamEvent | null {
   switch (frame.kind) {
     case 'delta':
       return typeof frame.text === 'string' ? { type: 'token', content: frame.text } : null
+    case 'thinking_delta':
+      return typeof frame.text === 'string' ? { type: 'thinking', content: frame.text } : null
     case 'tool_call':
       return { type: 'tool_start', name: typeof frame.name === 'string' ? frame.name : 'tool' }
     case 'tool_result':
@@ -584,7 +638,7 @@ function frameToStreamEvent (frame: RustEventFrame, assistantText: string): Stre
       }
       return { type: 'progress', stage: typeof frame.stage === 'string' ? frame.stage : 'tool', detail: typeof frame.detail === 'string' ? frame.detail : undefined }
     case 'done':
-      return { type: 'done', message: { role: 'assistant', content: assistantText } }
+      return { type: 'done', message: { role: 'assistant', content: assistantContent } }
     case 'error':
       return { type: 'error', error: String(frame.message || 'Rust harness error') }
     default:

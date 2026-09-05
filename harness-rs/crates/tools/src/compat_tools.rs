@@ -3,6 +3,7 @@
 //! These tools preserve the public Electron contracts so prompts and persisted
 //! tool calls continue to work while the underlying services migrate to Rust.
 
+use crate::host_tools::{interact_page_actions, normalize_page_actions};
 use crate::{require_str, EditFileTool, PatchFileTool, Tool, ToolServices, WriteFileTool};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -229,10 +230,44 @@ async fn run_shell(command: &str, cwd: &Path, timeout: Option<u64>) -> Result<Va
         args,
         cwd: Some(cwd.display().to_string()),
         env: Default::default(),
-        timeout_secs: Some(timeout.unwrap_or(90).clamp(1, 180)),
+        timeout_secs: Some(timeout.unwrap_or(90).max(1)),
         sandbox: true,
     };
     Ok(serde_json::to_value(worldbase_exec::run(&req, cwd).await?)?)
+}
+
+fn timeout_argument(
+    input: &Value,
+    canonical: &str,
+    legacy: &str,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+) -> u64 {
+    input
+        .get(canonical)
+        .or_else(|| input.get(legacy))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.floor() as u64)
+        .unwrap_or(default)
+        .clamp(minimum, maximum)
+}
+
+fn grep_output_mode(input: &Value) -> worldbase_search::GrepOutputMode {
+    match input.get("output_mode").and_then(Value::as_str) {
+        Some("files_with_matches") => worldbase_search::GrepOutputMode::FilesWithMatches,
+        Some("count") => worldbase_search::GrepOutputMode::Count,
+        _ => worldbase_search::GrepOutputMode::Content,
+    }
+}
+
+fn output_mode_name(mode: worldbase_search::GrepOutputMode) -> &'static str {
+    match mode {
+        worldbase_search::GrepOutputMode::Content => "content",
+        worldbase_search::GrepOutputMode::FilesWithMatches => "files_with_matches",
+        worldbase_search::GrepOutputMode::Count => "count",
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -532,16 +567,58 @@ impl Tool for WorkspaceGrepTool {
             .get("is_regexp")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let case_sensitive = input
+            .get("case_sensitive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let output_mode = grep_output_mode(&input);
         let limit = input
             .get("max_results")
             .and_then(Value::as_u64)
             .unwrap_or(50)
             .clamp(1, 200) as usize;
-        let hits = worldbase_search::grep(&base, pattern, literal, limit)?;
-        let matches = hits.into_iter().map(|hit| json!({"file": hit.path, "line": hit.line, "content": hit.text, "context_before": [], "context_after": []})).collect::<Vec<_>>();
-        Ok(
-            json!({"pattern": pattern, "dir_path": dir, "output_mode": "content", "case_sensitive": input.get("case_sensitive").and_then(Value::as_bool).unwrap_or(true), "matches": matches, "total_matches": matches.len(), "files_searched": 0, "files_matched": 0, "truncated": matches.len() >= limit}),
-        )
+        let summary = worldbase_search::grep_with_options(
+            &base,
+            pattern,
+            worldbase_search::GrepOptions {
+                literal,
+                case_sensitive,
+                include_pattern: input
+                    .get("include_pattern")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                output_mode,
+                max_results: limit,
+                context_lines: input
+                    .get("context_lines")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(2)
+                    .min(5) as usize,
+            },
+        )?;
+        let worldbase_search::GrepSummary {
+            hits,
+            files,
+            counts,
+            total_matches,
+            files_searched,
+            files_matched,
+            truncated,
+        } = summary;
+        let matches = hits.into_iter().map(|hit| json!({"file": hit.path, "line": hit.line, "content": hit.text, "context_before": hit.context_before, "context_after": hit.context_after})).collect::<Vec<_>>();
+        let counts = counts
+            .into_iter()
+            .map(|(file, count)| json!({"file": file, "count": count}))
+            .collect::<Vec<_>>();
+        let mut result = json!({"pattern": pattern, "dir_path": dir, "output_mode": output_mode_name(output_mode), "case_sensitive": case_sensitive, "total_matches": total_matches, "files_searched": files_searched, "files_matched": files_matched, "truncated": truncated});
+        if output_mode == worldbase_search::GrepOutputMode::Content {
+            result["matches"] = Value::Array(matches);
+        } else if output_mode == worldbase_search::GrepOutputMode::FilesWithMatches {
+            result["files"] = Value::Array(files.into_iter().map(Value::String).collect());
+        } else {
+            result["counts"] = Value::Array(counts);
+        }
+        Ok(result)
     }
 }
 
@@ -575,7 +652,14 @@ impl Tool for WorkspaceCommandTool {
         run_shell(
             command,
             &cwd,
-            input.get("timeout_seconds").and_then(Value::as_u64),
+            Some(timeout_argument(
+                &input,
+                "timeout_seconds",
+                "timeout",
+                90,
+                5,
+                180,
+            )),
         )
         .await
     }
@@ -650,6 +734,40 @@ impl Tool for LocalReadFileTool {
             meta.len() <= MAX_FILE_BYTES,
             "file is too large (maximum 10 MB)"
         );
+        let is_office = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "xlsx" | "xls" | "docx" | "doc" | "pptx" | "ppt"
+                )
+            })
+            .unwrap_or(false);
+        if is_office {
+            let parsed = worldbase_docs::parse_file(&path)?;
+            let content = parsed
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(100_000)
+                .collect::<String>();
+            return Ok(json!({
+                "file_path": path,
+                "size": meta.len(),
+                "file_type": parsed.get("kind").cloned().unwrap_or(Value::Null),
+                "content": content
+            }));
+        }
+        let encoding = input
+            .get("encoding")
+            .and_then(Value::as_str)
+            .unwrap_or("utf-8");
+        anyhow::ensure!(
+            encoding.eq_ignore_ascii_case("utf-8"),
+            "unsupported encoding: {encoding}"
+        );
         let content = tokio::fs::read_to_string(&path).await?;
         let content: String = content.chars().take(100_000).collect();
         Ok(json!({"file_path": path, "size": meta.len(), "content": content}))
@@ -666,26 +784,285 @@ impl Tool for LocalWriteFileTool {
         "Create or write a file on the user's local computer."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"},"office_data":{"type":"object"}},"required":["file_path"]})
+        json!({
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Absolute save path"},
+                "content": {"type": "string", "description": "Text file content. For office files, use office_data instead."},
+                "office_data": {
+                    "type": "object",
+                    "description": "Structured office document data. type selects xlsx/docx/pptx.",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["xlsx", "docx", "pptx"]},
+                        "sheets": {
+                            "type": "array",
+                            "items": {"type": "object", "properties": {
+                                "name": {"type": "string"},
+                                "headers": {"type": "array", "items": {"type": "string"}},
+                                "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}
+                            }}
+                        },
+                        "paragraphs": {
+                            "type": "array",
+                            "items": {"type": "object", "properties": {
+                                "text": {"type": "string"},
+                                "heading": {"type": "boolean"},
+                                "bold": {"type": "boolean"}
+                            }}
+                        },
+                        "slides": {
+                            "type": "array",
+                            "items": {"type": "object", "properties": {
+                                "title": {"type": "string"},
+                                "content": {"type": "array", "items": {"type": "string"}}
+                            }}
+                        }
+                    },
+                    "required": ["type"]
+                }
+            },
+            "required": ["file_path"]
+        })
     }
     fn permission(&self) -> &str {
         "ask"
     }
     async fn execute(&self, input: Value, _services: &ToolServices) -> Result<Value> {
-        let path = PathBuf::from(require_str(&input, "file_path")?);
-        let content = input
-            .get("content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "content is required; office_data is not supported by the Rust harness"
-                )
-            })?;
+        let requested_path = PathBuf::from(require_str(&input, "file_path")?);
+        let path = if requested_path.is_absolute() {
+            requested_path
+        } else {
+            std::env::current_dir()?.join(requested_path)
+        };
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        if let Some(office_data) = input.get("office_data").filter(|value| !value.is_null()) {
+            let office_type = office_data
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("office_data.type is required"))?;
+            match office_type {
+                "xlsx" => {
+                    let sheets = office_data
+                        .get("sheets")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| anyhow::anyhow!("Excel files require sheets data."))?;
+                    anyhow::ensure!(!sheets.is_empty(), "Excel files require sheets data.");
+                    let sheets = sheets
+                        .iter()
+                        .map(|sheet| {
+                            let name = sheet
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Sheet1")
+                                .to_string();
+                            let mut rows = Vec::new();
+                            let headers = sheet
+                                .get("headers")
+                                .and_then(Value::as_array)
+                                .map(|values| values.iter().map(value_to_cell).collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            if !headers.is_empty() {
+                                rows.push(headers);
+                            }
+                            if let Some(data_rows) = sheet.get("rows").and_then(Value::as_array) {
+                                rows.extend(data_rows.iter().map(|row| {
+                                    row.as_array()
+                                        .map(|values| values.iter().map(value_to_cell).collect())
+                                        .unwrap_or_default()
+                                }));
+                            }
+                            worldbase_docs::edit::Sheet { name, rows }
+                        })
+                        .collect::<Vec<_>>();
+                    worldbase_docs::edit::write_xlsx(&path, &sheets)?;
+                }
+                "docx" => {
+                    let paragraphs = office_data
+                        .get("paragraphs")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| anyhow::anyhow!("Word files require paragraphs data."))?;
+                    anyhow::ensure!(
+                        !paragraphs.is_empty(),
+                        "Word files require paragraphs data."
+                    );
+                    let blocks = paragraphs
+                        .iter()
+                        .map(|paragraph| {
+                            let text = paragraph
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            if paragraph
+                                .get("heading")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                            {
+                                worldbase_docs::edit::DocBlock::Heading(text, 1)
+                            } else if paragraph
+                                .get("bold")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                            {
+                                worldbase_docs::edit::DocBlock::Bold(text)
+                            } else {
+                                worldbase_docs::edit::DocBlock::Paragraph(text)
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    worldbase_docs::edit::write_docx(&path, &blocks)?;
+                }
+                "pptx" => {
+                    let slides = office_data
+                        .get("slides")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| anyhow::anyhow!("PowerPoint files require slides data."))?;
+                    anyhow::ensure!(!slides.is_empty(), "PowerPoint files require slides data.");
+                    let slides = slides
+                        .iter()
+                        .map(|slide| worldbase_docs::edit::Slide {
+                            title: slide
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            content: slide
+                                .get("content")
+                                .and_then(Value::as_array)
+                                .map(|values| values.iter().map(value_to_cell).collect())
+                                .unwrap_or_default(),
+                        })
+                        .collect::<Vec<_>>();
+                    worldbase_docs::edit::write_pptx(&path, &slides)?;
+                }
+                other => anyhow::bail!(
+                    "Unsupported office file type: {other}. Supported types: xlsx, docx, pptx."
+                ),
+            }
+            let size = tokio::fs::metadata(&path).await?.len();
+            return Ok(json!({
+                "success": true,
+                "file_path": path,
+                "file_type": office_type,
+                "size": size,
+                "message": format!("{} file saved: {}", office_type.to_ascii_uppercase(), path.display())
+            }));
+        }
+        let content = input
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("You must provide either content for plain text or office_data for an office document."))?;
         tokio::fs::write(&path, content).await?;
-        Ok(json!({"success": true, "file_path": path, "size": content.len()}))
+        Ok(json!({
+            "success": true,
+            "file_path": path,
+            "size": content.len(),
+            "message": format!("File saved: {}", path.display())
+        }))
+    }
+}
+
+fn value_to_cell(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod local_file_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn services(root: &Path) -> ToolServices {
+        let workspace = root.join("workspace");
+        let projects = root.join("projects");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+        let store = Arc::new(worldbase_memory::Store::open(&root.join("store.sqlite")).unwrap());
+        ToolServices {
+            host: Arc::new(crate::HostBridge::new()),
+            current_stream: Arc::new(Mutex::new(String::new())),
+            workspace,
+            folder_workspace: None,
+            target_project_id: None,
+            allowed_mcp_server_ids: None,
+            plan_goal: Arc::new(Mutex::new(None)),
+            todo_items: Arc::new(Mutex::new(Vec::new())),
+            read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            visible_tool_catalog: None,
+            store: store.clone(),
+            skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
+            scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
+            mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(projects)),
+            group_collaboration: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_write_supports_electron_office_data_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+
+        let xlsx = temp.path().join("report.xlsx");
+        let result = LocalWriteFileTool
+            .execute(
+                json!({
+                    "file_path": xlsx,
+                    "office_data": {
+                        "type": "xlsx",
+                        "sheets": [{"name": "Summary", "headers": ["Name", "Count"], "rows": [["Rust", "1"]]}]
+                    }
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(worldbase_docs::parse_file(&xlsx).unwrap()["kind"], "xlsx");
+
+        let docx = temp.path().join("report.docx");
+        LocalWriteFileTool
+            .execute(
+                json!({
+                    "file_path": docx,
+                    "office_data": {
+                        "type": "docx",
+                        "paragraphs": [{"text": "Title", "heading": true}, {"text": "Body", "bold": true}]
+                    }
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(worldbase_docs::parse_file(&docx).unwrap()["kind"], "docx");
+
+        let pptx = temp.path().join("report.pptx");
+        LocalWriteFileTool
+            .execute(
+                json!({
+                    "file_path": pptx,
+                    "office_data": {
+                        "type": "pptx",
+                        "slides": [{"title": "Status", "content": ["Ready"]}]
+                    }
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(worldbase_docs::parse_file(&pptx).unwrap()["kind"], "pptx");
+
+        let read = LocalReadFileTool
+            .execute(json!({"file_path": docx}), &services)
+            .await
+            .unwrap();
+        assert_eq!(read["file_type"], "docx");
+        assert!(read["content"].as_str().unwrap().contains("Body"));
     }
 }
 
@@ -699,7 +1076,7 @@ impl Tool for LocalCommandTool {
         "Run a command on the local computer after user approval."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_seconds":{"type":"integer"}},"required":["command"]})
+        json!({"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]})
     }
     fn domain(&self) -> &str {
         "desktop"
@@ -716,7 +1093,14 @@ impl Tool for LocalCommandTool {
         run_shell(
             require_str(&input, "command")?,
             &cwd,
-            input.get("timeout_seconds").and_then(Value::as_u64),
+            Some(timeout_argument(
+                &input,
+                "timeout",
+                "timeout_seconds",
+                60,
+                1,
+                300,
+            )),
         )
         .await
     }
@@ -787,16 +1171,58 @@ impl Tool for GrepSearchTool {
             .get("is_regexp")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let case_sensitive = input
+            .get("case_sensitive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let output_mode = grep_output_mode(&input);
         let limit = input
             .get("max_results")
             .and_then(Value::as_u64)
             .unwrap_or(50)
             .clamp(1, 200) as usize;
-        let hits = worldbase_search::grep(&base, pattern, literal, limit)?;
-        let matches = hits.into_iter().map(|hit| json!({"file": Path::new(&hit.path).strip_prefix(&root).unwrap_or(Path::new(&hit.path)).to_string_lossy().replace('\\', "/"), "line": hit.line, "content": hit.text, "context_before": [], "context_after": []})).collect::<Vec<_>>();
-        Ok(
-            json!({"project_id": id, "pattern": pattern, "dir_path": input.get("dir_path").and_then(Value::as_str).unwrap_or("."), "output_mode": "content", "case_sensitive": input.get("case_sensitive").and_then(Value::as_bool).unwrap_or(true), "matches": matches, "total_matches": matches.len(), "files_searched": 0, "files_matched": 0, "truncated": matches.len() >= limit}),
-        )
+        let summary = worldbase_search::grep_with_options(
+            &base,
+            pattern,
+            worldbase_search::GrepOptions {
+                literal,
+                case_sensitive,
+                include_pattern: input
+                    .get("include_pattern")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                output_mode,
+                max_results: limit,
+                context_lines: input
+                    .get("context_lines")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(2)
+                    .min(5) as usize,
+            },
+        )?;
+        let worldbase_search::GrepSummary {
+            hits,
+            files,
+            counts,
+            total_matches,
+            files_searched,
+            files_matched,
+            truncated,
+        } = summary;
+        let matches = hits.into_iter().map(|hit| json!({"file": hit.path, "line": hit.line, "content": hit.text, "context_before": hit.context_before, "context_after": hit.context_after})).collect::<Vec<_>>();
+        let counts = counts
+            .into_iter()
+            .map(|(file, count)| json!({"file": file, "count": count}))
+            .collect::<Vec<_>>();
+        let mut result = json!({"project_id": id, "pattern": pattern, "dir_path": input.get("dir_path").and_then(Value::as_str).unwrap_or("."), "output_mode": output_mode_name(output_mode), "case_sensitive": case_sensitive, "total_matches": total_matches, "files_searched": files_searched, "files_matched": files_matched, "truncated": truncated});
+        if output_mode == worldbase_search::GrepOutputMode::Content {
+            result["matches"] = Value::Array(matches);
+        } else if output_mode == worldbase_search::GrepOutputMode::FilesWithMatches {
+            result["files"] = Value::Array(files.into_iter().map(Value::String).collect());
+        } else {
+            result["counts"] = Value::Array(counts);
+        }
+        Ok(result)
     }
 }
 
@@ -810,7 +1236,7 @@ impl Tool for RunProjectCommandTool {
         "Run a short-lived diagnostic command inside a managed project."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"command":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"integer"}},"required":["project_id","command"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string"},"command":{"type":"string"},"cwd":{"type":"string"},"timeout_seconds":{"type":"integer"}},"required":["project_id","command"]})
     }
     fn domain(&self) -> &str {
         "desktop"
@@ -827,7 +1253,19 @@ impl Tool for RunProjectCommandTool {
             .transpose()?
             .unwrap_or(root.clone());
         let command = require_str(&input, "command")?;
-        let result = run_shell(command, &cwd, input.get("timeout").and_then(Value::as_u64)).await?;
+        let result = run_shell(
+            command,
+            &cwd,
+            Some(timeout_argument(
+                &input,
+                "timeout_seconds",
+                "timeout",
+                90,
+                5,
+                180,
+            )),
+        )
+        .await?;
         let command_id = format!("project-command-{}", uuid::Uuid::new_v4());
         let mut output = result.clone();
         if let Value::Object(map) = &mut output {
@@ -899,6 +1337,33 @@ impl Tool for CallProjectApiTool {
     }
 }
 
+fn project_data_schema(
+    services: &ToolServices,
+    project_id: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    let meta_path = project_relative_path(services, project_id, ".world-meta.json")?;
+    if !meta_path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&meta_path)
+        .with_context(|| format!("read project metadata: {}", meta_path.display()))?;
+    let meta: Value = serde_json::from_str(&text)
+        .with_context(|| format!("parse project metadata: {}", meta_path.display()))?;
+    let Some(config) = meta.get("dataSchema").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let database = config
+        .get("database")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let db_path = config
+        .get("dbPath")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    Ok(Some((database, db_path)))
+}
+
 fn find_database(
     services: &ToolServices,
     project_id: &str,
@@ -908,6 +1373,22 @@ fn find_database(
         let path = project_relative_path(services, project_id, path)?;
         anyhow::ensure!(path.is_file(), "database file not found");
         return Ok(path);
+    }
+
+    // Electron resolves the database from the project's dataSchema.  Keep
+    // that metadata-driven path ahead of legacy filename discovery so native
+    // Flutter calls work for projects created by either client.
+    if let Some((database, relative)) = project_data_schema(services, project_id)? {
+        anyhow::ensure!(
+            database == "sqlite",
+            "project does not have SQLite configured"
+        );
+        if let Some(relative) = relative {
+            let path = project_relative_path(services, project_id, &relative)?;
+            anyhow::ensure!(path.is_file(), "database file not found");
+            return Ok(path);
+        }
+        anyhow::bail!("SQLite dataSchema is missing dbPath");
     }
     for candidate in [
         "data.db",
@@ -992,6 +1473,138 @@ impl Tool for QueryProjectDatabaseTool {
 }
 
 pub struct AnalyzeProjectDataTool;
+
+fn supported_project_analysis_type(input: &Value) -> Result<&str> {
+    let analysis_type = require_str(input, "analysis_type")?;
+    anyhow::ensure!(
+        matches!(
+            analysis_type,
+            "summary" | "trend" | "distribution" | "comparison"
+        ),
+        "Unknown analysis type: {analysis_type}"
+    );
+    Ok(analysis_type)
+}
+
+fn analysis_options(input: &Value) -> serde_json::Map<String, Value> {
+    let mut options = input
+        .get("options")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    // Older native callers placed the analysis options at the top level. Keep
+    // accepting those fields while making the Electron `options` object the
+    // canonical shape.
+    for (canonical, aliases) in [
+        ("table", &["table"] as &[&str]),
+        ("dateColumn", &["dateColumn", "date_column"]),
+        ("valueColumn", &["valueColumn", "value_column"]),
+        ("groupBy", &["groupBy", "group_by"]),
+        ("column", &["column"]),
+        ("groupColumn", &["groupColumn", "group_column"]),
+        ("aggregation", &["aggregation"]),
+    ] {
+        if options.contains_key(canonical) {
+            continue;
+        }
+        if let Some(value) = aliases.iter().find_map(|alias| input.get(*alias)) {
+            options.insert(canonical.to_string(), value.clone());
+        }
+    }
+    options
+}
+
+fn analysis_option_str<'a>(
+    options: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<&'a str> {
+    options
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_sql_identifier(value: &str) -> Result<&str> {
+    let mut chars = value.chars();
+    let first = chars
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Invalid SQL identifier: {value}"))?;
+    anyhow::ensure!(
+        first == '_' || first.is_ascii_alphabetic(),
+        "Invalid SQL identifier: {value}"
+    );
+    anyhow::ensure!(
+        chars.all(|character| character == '_' || character.is_ascii_alphanumeric()),
+        "Invalid SQL identifier: {value}"
+    );
+    Ok(value)
+}
+
+fn sqlite_rows(
+    connection: &rusqlite::Connection,
+    sql: &str,
+) -> Result<Vec<serde_json::Map<String, Value>>> {
+    let mut statement = connection.prepare(sql)?;
+    let names = statement
+        .column_names()
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    let mut query = statement.query([])?;
+    while let Some(row) = query.next()? {
+        let mut object = serde_json::Map::new();
+        for (index, name) in names.iter().enumerate() {
+            object.insert(name.clone(), sqlite_value(row.get_ref(index)?));
+        }
+        rows.push(object);
+        if rows.len() >= 100_000 {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
+fn sqlite_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn summarize_sqlite(connection: &rusqlite::Connection, project_id: &str) -> Result<Value> {
+    let table_rows = sqlite_rows(
+        connection,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )?;
+    let mut tables = Vec::new();
+    for row in table_rows {
+        let Some(table) = row.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if validate_sql_identifier(table).is_err() {
+            continue;
+        }
+        let sql = format!("SELECT COUNT(*) AS count FROM \"{table}\"");
+        let count = sqlite_rows(connection, &sql)?
+            .first()
+            .and_then(|value| value.get("count"))
+            .cloned()
+            .unwrap_or_else(|| json!(0));
+        tables.push(json!({"name": table, "rowCount": count}));
+    }
+    Ok(json!({
+        "type": "summary",
+        "projectId": project_id,
+        "hasData": true,
+        "database": "sqlite",
+        "tables": tables
+    }))
+}
+
 #[async_trait]
 impl Tool for AnalyzeProjectDataTool {
     fn name(&self) -> &str {
@@ -1001,34 +1614,372 @@ impl Tool for AnalyzeProjectDataTool {
         "Inspect the schema and basic statistics of a project database."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"analysis_type":{"type":"string"},"database_path":{"type":"string"}},"required":["project_id","analysis_type"]})
+        json!({
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "analysis_type": {"type": "string", "enum": ["summary", "trend", "distribution", "comparison"]},
+                "database_path": {"type": "string"},
+                "options": {
+                    "type": "object",
+                    "properties": {
+                        "table": {"type": "string"},
+                        "dateColumn": {"type": "string"},
+                        "valueColumn": {"type": "string"},
+                        "groupBy": {"type": "string"},
+                        "column": {"type": "string"},
+                        "groupColumn": {"type": "string"},
+                        "aggregation": {"type": "string", "enum": ["SUM", "AVG", "COUNT", "MIN", "MAX"]}
+                    }
+                }
+            },
+            "required": ["project_id", "analysis_type"]
+        })
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let analysis_type = supported_project_analysis_type(&input)?;
         let (id, _root) = project_path(&input, services)?;
-        let db = find_database(
-            services,
-            &id,
-            input.get("database_path").and_then(Value::as_str),
-        )?;
+        let requested_database = input.get("database_path").and_then(Value::as_str);
+        if analysis_type == "summary" && requested_database.is_none() {
+            // Summary follows ProjectDataAccess semantics: a project without
+            // dataSchema is a no-data project, even if an unrelated legacy
+            // database file happens to exist in its directory.
+            match project_data_schema(services, &id)? {
+                None => return Ok(json!({"type": "summary", "projectId": id, "hasData": false})),
+                Some((database, _relative)) if database != "sqlite" => {
+                    return Ok(json!({
+                        "type": "summary",
+                        "projectId": id,
+                        "hasData": true,
+                        "database": database,
+                        "tables": []
+                    }));
+                }
+                Some((_, Some(relative))) => {
+                    let db = project_relative_path(services, &id, &relative)?;
+                    if !db.is_file() {
+                        return Ok(json!({
+                            "type": "summary",
+                            "projectId": id,
+                            "hasData": false,
+                            "reason": "Database file not found"
+                        }));
+                    }
+                    let conn = rusqlite::Connection::open_with_flags(
+                        db,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                    )?;
+                    return summarize_sqlite(&conn, &id);
+                }
+                Some((_, None)) => {
+                    return Ok(json!({
+                        "type": "summary",
+                        "projectId": id,
+                        "hasData": false,
+                        "reason": "SQLite dataSchema is missing dbPath"
+                    }));
+                }
+            }
+        }
+        let db = find_database(services, &id, requested_database)?;
         let conn =
             rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
-        let tables = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .filter_map(|v| v.ok())
-            .collect::<Vec<_>>();
-        let mut stats = Vec::new();
-        for table in &tables {
-            if !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                continue;
+        let options = analysis_options(&input);
+
+        match analysis_type {
+            "summary" => summarize_sqlite(&conn, &id),
+            "trend" => {
+                let table = analysis_option_str(&options, "table").ok_or_else(|| {
+                    anyhow::anyhow!("Trend analysis requires: table, dateColumn, valueColumn")
+                })?;
+                let date_column = analysis_option_str(&options, "dateColumn").ok_or_else(|| {
+                    anyhow::anyhow!("Trend analysis requires: table, dateColumn, valueColumn")
+                })?;
+                let value_column =
+                    analysis_option_str(&options, "valueColumn").ok_or_else(|| {
+                        anyhow::anyhow!("Trend analysis requires: table, dateColumn, valueColumn")
+                    })?;
+                validate_sql_identifier(table)?;
+                validate_sql_identifier(date_column)?;
+                validate_sql_identifier(value_column)?;
+                let group_by = analysis_option_str(&options, "groupBy");
+                if let Some(group_by) = group_by {
+                    validate_sql_identifier(group_by)?;
+                }
+                let group_select = group_by
+                    .map(|value| format!(", \"{value}\" AS \"__worldbase_group\""))
+                    .unwrap_or_default();
+                let group_clause = group_by
+                    .map(|value| format!(", \"{value}\""))
+                    .unwrap_or_default();
+                let sql = format!(
+                    "SELECT \"{date_column}\" AS \"__worldbase_date\"{group_select}, SUM(\"{value_column}\") AS total, AVG(\"{value_column}\") AS average, COUNT(*) AS count FROM \"{table}\" GROUP BY \"{date_column}\"{group_clause} ORDER BY \"{date_column}\" ASC"
+                );
+                let rows = sqlite_rows(&conn, &sql)?;
+                let data = rows
+                    .into_iter()
+                    .map(|row| {
+                        let mut result = serde_json::Map::new();
+                        result.insert(
+                            date_column.to_string(),
+                            row.get("__worldbase_date").cloned().unwrap_or(Value::Null),
+                        );
+                        if let Some(group_by) = group_by {
+                            result.insert(
+                                group_by.to_string(),
+                                row.get("__worldbase_group").cloned().unwrap_or(Value::Null),
+                            );
+                        }
+                        for key in ["total", "average", "count"] {
+                            if let Some(value) = row.get(key) {
+                                result.insert(key.to_string(), value.clone());
+                            }
+                        }
+                        Value::Object(result)
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json!({
+                    "type": "trend",
+                    "projectId": id,
+                    "table": table,
+                    "dateColumn": date_column,
+                    "valueColumn": value_column,
+                    "data": data
+                }))
             }
-            let sql = format!("SELECT COUNT(*) FROM \"{table}\"");
-            let count: i64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap_or(0);
-            stats.push(json!({"table": table, "rowCount": count}));
+            "distribution" => {
+                let table = analysis_option_str(&options, "table").ok_or_else(|| {
+                    anyhow::anyhow!("Distribution analysis requires: table, column")
+                })?;
+                let column = analysis_option_str(&options, "column").ok_or_else(|| {
+                    anyhow::anyhow!("Distribution analysis requires: table, column")
+                })?;
+                validate_sql_identifier(table)?;
+                validate_sql_identifier(column)?;
+                let sql = format!(
+                    "SELECT \"{column}\" AS \"__worldbase_value\", COUNT(*) AS count FROM \"{table}\" GROUP BY \"{column}\" ORDER BY count DESC"
+                );
+                let rows = sqlite_rows(&conn, &sql)?;
+                let total = rows
+                    .iter()
+                    .filter_map(|row| row.get("count").and_then(sqlite_number))
+                    .sum::<f64>();
+                let data = rows
+                    .into_iter()
+                    .map(|row| {
+                        let count = row.get("count").cloned().unwrap_or_else(|| json!(0));
+                        let percentage = match (sqlite_number(&count), total > 0.0) {
+                            (Some(count), true) => format!("{:.1}%", count / total * 100.0),
+                            _ => "0%".to_string(),
+                        };
+                        json!({
+                            "value": row.get("__worldbase_value").cloned().unwrap_or(Value::Null),
+                            "count": count,
+                            "percentage": percentage
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let total_value = if total.fract() == 0.0 {
+                    json!(total as i64)
+                } else {
+                    json!(total)
+                };
+                Ok(json!({
+                    "type": "distribution",
+                    "projectId": id,
+                    "table": table,
+                    "column": column,
+                    "total": total_value,
+                    "data": data
+                }))
+            }
+            "comparison" => {
+                let table = analysis_option_str(&options, "table").ok_or_else(|| {
+                    anyhow::anyhow!("Comparison analysis requires: table, groupColumn, valueColumn")
+                })?;
+                let group_column =
+                    analysis_option_str(&options, "groupColumn").ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Comparison analysis requires: table, groupColumn, valueColumn"
+                        )
+                    })?;
+                let value_column =
+                    analysis_option_str(&options, "valueColumn").ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Comparison analysis requires: table, groupColumn, valueColumn"
+                        )
+                    })?;
+                validate_sql_identifier(table)?;
+                validate_sql_identifier(group_column)?;
+                validate_sql_identifier(value_column)?;
+                let requested_aggregation = analysis_option_str(&options, "aggregation")
+                    .unwrap_or("SUM")
+                    .to_ascii_uppercase();
+                let aggregation = match requested_aggregation.as_str() {
+                    "SUM" | "AVG" | "COUNT" | "MIN" | "MAX" => requested_aggregation,
+                    _ => "SUM".to_string(),
+                };
+                let sql = format!(
+                    "SELECT \"{group_column}\" AS \"__worldbase_group\", {aggregation}(\"{value_column}\") AS value FROM \"{table}\" GROUP BY \"{group_column}\" ORDER BY value DESC"
+                );
+                let rows = sqlite_rows(&conn, &sql)?;
+                let data = rows
+                    .into_iter()
+                    .map(|row| {
+                        json!({
+                            group_column: row.get("__worldbase_group").cloned().unwrap_or(Value::Null),
+                            "value": row.get("value").cloned().unwrap_or(Value::Null)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json!({
+                    "type": "comparison",
+                    "projectId": id,
+                    "table": table,
+                    "groupColumn": group_column,
+                    "valueColumn": value_column,
+                    "aggregation": aggregation,
+                    "data": data
+                }))
+            }
+            _ => unreachable!("validated analysis type"),
         }
-        Ok(
-            json!({"project_id": id, "analysis_type": input["analysis_type"], "database": db, "tables": stats}),
+    }
+}
+
+#[cfg(test)]
+mod project_analysis_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn services(root: &Path) -> ToolServices {
+        let workspace = root.join("workspace");
+        let projects = root.join("projects");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+        let store = Arc::new(worldbase_memory::Store::open(&root.join("store.sqlite")).unwrap());
+        ToolServices {
+            host: Arc::new(crate::HostBridge::new()),
+            current_stream: Arc::new(Mutex::new(String::new())),
+            workspace,
+            folder_workspace: None,
+            target_project_id: None,
+            allowed_mcp_server_ids: None,
+            plan_goal: Arc::new(Mutex::new(None)),
+            todo_items: Arc::new(Mutex::new(Vec::new())),
+            read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            visible_tool_catalog: None,
+            store: store.clone(),
+            skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
+            scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
+            mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(projects)),
+            group_collaboration: None,
+        }
+    }
+
+    #[test]
+    fn native_analyzer_accepts_all_electron_analysis_types() {
+        for analysis_type in ["summary", "trend", "distribution", "comparison"] {
+            assert_eq!(
+                supported_project_analysis_type(&json!({"analysis_type": analysis_type})).unwrap(),
+                analysis_type
+            );
+        }
+        let error = supported_project_analysis_type(&json!({
+            "analysis_type": "unknown"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Unknown analysis type"));
+    }
+
+    #[tokio::test]
+    async fn native_analyzer_matches_electron_analysis_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+        let project = temp.path().join("projects/analytics");
+        std::fs::create_dir_all(project.join("data")).unwrap();
+        std::fs::write(
+            project.join(".world-meta.json"),
+            serde_json::to_vec(&json!({
+                "id": "analytics",
+                "name": "Analytics",
+                "dataSchema": {"database": "sqlite", "dbPath": "data/analytics.sqlite"}
+            }))
+            .unwrap(),
         )
+        .unwrap();
+        let database = project.join("data/analytics.sqlite");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE metrics (event_date TEXT, category TEXT, amount REAL, state TEXT); \
+                 INSERT INTO metrics VALUES ('2026-01-01', 'a', 10, 'ok'); \
+                 INSERT INTO metrics VALUES ('2026-01-01', 'a', 5, 'ok'); \
+                 INSERT INTO metrics VALUES ('2026-01-02', 'b', 7, 'pending');",
+            )
+            .unwrap();
+
+        let trend = AnalyzeProjectDataTool
+            .execute(
+                json!({
+                    "project_id": "analytics",
+                    "analysis_type": "trend",
+                    "options": {"table": "metrics", "dateColumn": "event_date", "valueColumn": "amount"}
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(trend["type"], "trend");
+        assert_eq!(trend["projectId"], "analytics");
+        assert_eq!(trend["data"][0]["event_date"], "2026-01-01");
+        assert_eq!(trend["data"][0]["total"], 15.0);
+        assert_eq!(trend["data"][0]["count"], 2);
+
+        let summary = AnalyzeProjectDataTool
+            .execute(
+                json!({
+                    "project_id": "analytics",
+                    "analysis_type": "summary"
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary["type"], "summary");
+        assert_eq!(summary["projectId"], "analytics");
+
+        let distribution = AnalyzeProjectDataTool
+            .execute(
+                json!({
+                    "project_id": "analytics",
+                    "analysis_type": "distribution",
+                    "options": {"table": "metrics", "column": "state"}
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(distribution["total"], 3);
+        assert_eq!(distribution["data"][0]["value"], "ok");
+        assert_eq!(distribution["data"][0]["percentage"], "66.7%");
+
+        let comparison = AnalyzeProjectDataTool
+            .execute(
+                json!({
+                    "project_id": "analytics",
+                    "analysis_type": "comparison",
+                    "options": {"table": "metrics", "groupColumn": "category", "valueColumn": "amount", "aggregation": "SUM"}
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(comparison["aggregation"], "SUM");
+        assert_eq!(comparison["data"][0]["category"], "a");
+        assert_eq!(comparison["data"][0]["value"], 15.0);
     }
 }
 
@@ -1257,7 +2208,7 @@ impl Tool for OpenProjectAppTool {
         json!({"type":"object","properties":{"project_id":{"type":"string"}},"required":["project_id"]})
     }
     fn domain(&self) -> &str {
-        "desktop"
+        "electron_host"
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let id = require_str(&input, "project_id")?;
@@ -1396,6 +2347,238 @@ impl Tool for ManageTodoListTool {
 }
 
 pub struct InstallSkillTool;
+
+const MAX_SKILL_IMPORT_FILES: usize = 500;
+const MAX_SKILL_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
+
+fn skill_file_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(character.to_ascii_lowercase());
+            separator = false;
+        } else if character == '-' || character == '_' || character.is_whitespace() {
+            separator = !slug.is_empty();
+        }
+        if slug.len() >= 48 {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        use sha1::{Digest, Sha1};
+        let digest = format!("{:x}", Sha1::digest(name.as_bytes()));
+        format!("imported-skill-{}", &digest[..10])
+    } else {
+        slug
+    }
+}
+
+fn markdown_frontmatter(content: &str) -> (Option<Value>, &str) {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let Some(rest) = content.strip_prefix("---") else {
+        return (None, content);
+    };
+    let Some(rest) = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+    else {
+        return (None, content);
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (None, content);
+    };
+    let yaml = rest[..end].trim();
+    let body = rest[end + 4..]
+        .strip_prefix("\r\n")
+        .or_else(|| rest[end + 4..].strip_prefix('\n'))
+        .unwrap_or(&rest[end + 4..])
+        .trim();
+    (serde_yaml::from_str(yaml).ok(), body)
+}
+
+fn first_markdown_heading(content: &str) -> Option<&str> {
+    content.lines().find_map(|line| {
+        let line = line.trim();
+        let heading = line.strip_prefix('#')?.trim_start_matches('#').trim();
+        (!heading.is_empty()).then_some(heading)
+    })
+}
+
+fn normalize_skill_content(
+    content: &str,
+    explicit_name: Option<&str>,
+    explicit_description: Option<&str>,
+    fallback_name: &str,
+) -> Result<(String, String, String)> {
+    let content = content.trim();
+    anyhow::ensure!(!content.is_empty(), "skill content is empty");
+
+    // Native YAML skill files can be imported without first converting them to
+    // markdown. Markdown uses the same frontmatter fields as Electron.
+    let yaml_document = serde_yaml::from_str::<Value>(content).ok().filter(|value| {
+        value.get("instructions").and_then(Value::as_str).is_some()
+            && value.get("name").and_then(Value::as_str).is_some()
+    });
+    let (frontmatter, body) = markdown_frontmatter(content);
+    let metadata = yaml_document.as_ref().or(frontmatter.as_ref());
+    let metadata_name = metadata
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let instructions = yaml_document
+        .as_ref()
+        .and_then(|value| value.get("instructions"))
+        .and_then(Value::as_str)
+        .unwrap_or(body)
+        .trim();
+    anyhow::ensure!(!instructions.is_empty(), "skill instructions are empty");
+    let name = explicit_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(metadata_name)
+        .or_else(|| first_markdown_heading(body))
+        .unwrap_or(fallback_name)
+        .trim()
+        .to_string();
+    anyhow::ensure!(!name.is_empty(), "skill name could not be determined");
+    let description = explicit_description
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            metadata
+                .and_then(|value| value.get("description"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_default()
+        .to_string();
+    Ok((name, description, instructions.to_string()))
+}
+
+fn copy_skill_directory(
+    source: &Path,
+    destination: &Path,
+    file_count: &mut usize,
+    byte_count: &mut u64,
+) -> Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_skill_directory(&entry.path(), &target, file_count, byte_count)?;
+        } else if file_type.is_file() {
+            *file_count += 1;
+            *byte_count = byte_count.saturating_add(entry.metadata()?.len());
+            anyhow::ensure!(
+                *file_count <= MAX_SKILL_IMPORT_FILES,
+                "skill package exceeds {MAX_SKILL_IMPORT_FILES} files"
+            );
+            anyhow::ensure!(
+                *byte_count <= MAX_SKILL_IMPORT_BYTES,
+                "skill package exceeds {} bytes",
+                MAX_SKILL_IMPORT_BYTES
+            );
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_skill_archive(source: &Path, destination: &Path) -> Result<()> {
+    let file = std::fs::File::open(source)?;
+    let mut archive = zip::ZipArchive::new(file).context("open skill zip archive")?;
+    anyhow::ensure!(
+        archive.len() <= MAX_SKILL_IMPORT_FILES,
+        "skill archive exceeds {MAX_SKILL_IMPORT_FILES} entries"
+    );
+    let mut byte_count = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let Some(relative) = entry.enclosed_name() else {
+            anyhow::bail!("skill archive contains an unsafe path");
+        };
+        if relative
+            .components()
+            .any(|component| component.as_os_str() == "__MACOSX")
+        {
+            continue;
+        }
+        let target = destination.join(relative);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            continue;
+        }
+        byte_count = byte_count.saturating_add(entry.size());
+        anyhow::ensure!(
+            byte_count <= MAX_SKILL_IMPORT_BYTES,
+            "skill archive exceeds {} bytes",
+            MAX_SKILL_IMPORT_BYTES
+        );
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut output = std::fs::File::create(target)?;
+        std::io::copy(&mut entry, &mut output)?;
+    }
+    Ok(())
+}
+
+fn skill_text_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("md" | "markdown" | "mdx" | "txt" | "yaml" | "yml")
+    )
+}
+
+fn find_primary_skill_file(root: &Path) -> Result<PathBuf> {
+    fn visit(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                visit(&entry.path(), files)?;
+            } else if file_type.is_file() && skill_text_file(&entry.path()) {
+                files.push(entry.path());
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    visit(root, &mut files)?;
+    files.sort();
+    const PRIMARY_NAMES: &[&str] = &["skill.md", "readme.md", "index.md", "main.md"];
+    files
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| PRIMARY_NAMES.contains(&name.to_ascii_lowercase().as_str()))
+        })
+        .cloned()
+        .or_else(|| files.into_iter().next())
+        .ok_or_else(|| anyhow::anyhow!("skill package contains no readable skill file"))
+}
+
 #[async_trait]
 impl Tool for InstallSkillTool {
     fn name(&self) -> &str {
@@ -1405,43 +2588,294 @@ impl Tool for InstallSkillTool {
         "Install a skill into the harness skill registry."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"content":{"type":"string"},"instructions":{"type":"string"}},"required":["name"]})
+        json!({"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"content":{"type":"string"},"file_path":{"type":"string"},"activate_now":{"type":"boolean"}}})
     }
     fn permission(&self) -> &str {
         "ask"
     }
-    async fn execute(&self, input: Value, _services: &ToolServices) -> Result<Value> {
-        let name = require_str(&input, "name")?;
-        let safe: String = name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        anyhow::ensure!(!safe.is_empty(), "name is required");
-        let instructions = input
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let inline_content = input
             .get("content")
             .or_else(|| input.get("instructions"))
             .and_then(Value::as_str)
-            .unwrap_or("");
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let source_path = input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
         anyhow::ensure!(
-            !instructions.trim().is_empty(),
-            "content or instructions is required"
+            inline_content.is_some() || source_path.is_some(),
+            "Either content or file_path is required to install a skill."
         );
-        let value = json!({"name": safe, "description": input.get("description").and_then(Value::as_str).unwrap_or(""), "instructions": instructions});
+
         let dir = worldbase_skills::worldbase_default_skills_dir();
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{safe}.yaml"));
+        let mut imported_files = None;
+        let (raw_content, fallback_name) = if let Some(source) = source_path {
+            let source = source.canonicalize()?;
+            let fallback = source
+                .file_stem()
+                .or_else(|| source.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("Imported Skill")
+                .to_string();
+            let staging = dir.join(format!(".import-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&staging)?;
+            let import_result = if source.is_dir() {
+                let mut files = 0;
+                let mut bytes = 0;
+                copy_skill_directory(&source, &staging, &mut files, &mut bytes)
+            } else if source
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+            {
+                extract_skill_archive(&source, &staging)
+            } else {
+                anyhow::ensure!(source.is_file(), "skill source is not a file or directory");
+                let metadata = std::fs::metadata(&source)?;
+                anyhow::ensure!(
+                    metadata.len() <= MAX_SKILL_IMPORT_BYTES,
+                    "skill file exceeds {} bytes",
+                    MAX_SKILL_IMPORT_BYTES
+                );
+                std::fs::copy(
+                    &source,
+                    staging.join(source.file_name().unwrap_or_default()),
+                )?;
+                Ok(())
+            };
+            if let Err(error) = import_result {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+            let primary = find_primary_skill_file(&staging)?;
+            let content = std::fs::read_to_string(&primary)
+                .with_context(|| format!("read imported skill {}", primary.display()))?;
+            imported_files = Some(staging);
+            (content, fallback)
+        } else {
+            (
+                inline_content.unwrap_or_default().to_string(),
+                "Imported Skill".into(),
+            )
+        };
+
+        let explicit_name = input.get("name").and_then(Value::as_str);
+        let explicit_description = input.get("description").and_then(Value::as_str);
+        let (name, description, instructions) = normalize_skill_content(
+            &raw_content,
+            explicit_name,
+            explicit_description,
+            &fallback_name,
+        )?;
+        let id = format!(
+            "{}_{}",
+            skill_file_slug(&name),
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        let path = dir.join(format!("{id}.yaml"));
+        let value = json!({"name": name, "description": description, "instructions": instructions});
         std::fs::write(&path, serde_yaml::to_string(&value)?)?;
-        Ok(json!({"success": true, "skill": {"name": safe, "path": path}}))
+        let files_path = if let Some(staging) = imported_files {
+            let destination = dir.join(format!("{id}.files"));
+            if let Err(error) = std::fs::rename(&staging, &destination) {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(error.into());
+            }
+            Some(destination)
+        } else {
+            None
+        };
+        let installed = services
+            .skills
+            .get(&name)?
+            .ok_or_else(|| anyhow::anyhow!("installed skill was not visible in the registry"))?;
+        let activate = input
+            .get("activate_now")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let now = worldbase_protocol::event::now_rfc3339();
+        Ok(json!({
+            "success": true,
+            "installed": {
+                "id": id,
+                "name": installed.name,
+                "description": installed.description,
+                "created_at": now,
+                "updated_at": now,
+                "path": installed.path,
+                "files_path": files_path,
+            },
+            "activation": {
+                "activated": activate,
+                "skill_name": if activate { json!(name) } else { Value::Null },
+            },
+            "message": if activate {
+                format!("Skill {name} 已安装，并已在当前会话中可用。")
+            } else {
+                format!("Skill {name} 已安装。")
+            }
+        }))
+    }
+}
+
+#[cfg(test)]
+mod install_skill_tests {
+    use super::*;
+
+    #[test]
+    fn derives_skill_metadata_from_markdown_frontmatter() {
+        let (name, description, instructions) = normalize_skill_content(
+            "---\nname: Release helper\ndescription: Ships releases\n---\n# Workflow\nRun ${channel} checks.",
+            None,
+            None,
+            "fallback",
+        )
+        .unwrap();
+        assert_eq!(name, "Release helper");
+        assert_eq!(description, "Ships releases");
+        assert_eq!(instructions, "# Workflow\nRun ${channel} checks.");
+    }
+
+    #[test]
+    fn imports_native_yaml_and_preserves_non_latin_display_name() {
+        let (name, description, instructions) = normalize_skill_content(
+            "name: 文档助手\ndescription: 处理文档\ninstructions: |\n  先读取文件。\n  再输出摘要。\n",
+            None,
+            None,
+            "fallback",
+        )
+        .unwrap();
+        assert_eq!(name, "文档助手");
+        assert_eq!(description, "处理文档");
+        assert!(instructions.contains("先读取文件"));
+        assert!(skill_file_slug(&name).starts_with("imported-skill-"));
+    }
+
+    #[test]
+    fn explicit_skill_metadata_takes_priority() {
+        let (name, description, _) = normalize_skill_content(
+            "# Inferred\nDo the work.",
+            Some("Explicit"),
+            Some("Explicit description"),
+            "fallback",
+        )
+        .unwrap();
+        assert_eq!(name, "Explicit");
+        assert_eq!(description, "Explicit description");
     }
 }
 
 pub struct CreateScheduledTaskTool;
+
+fn required_time_of_day(input: &Value) -> Result<(u32, u32)> {
+    let value = input
+        .get("time_of_day")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("time_of_day is required for this schedule_kind"))?;
+    let (hour, minute) = value
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("time_of_day must use HH:mm format"))?;
+    anyhow::ensure!(
+        hour.len() == 2 && minute.len() == 2,
+        "time_of_day must use HH:mm format"
+    );
+    let hour = hour
+        .parse::<u32>()
+        .map_err(|_| anyhow::anyhow!("time_of_day must use HH:mm format"))?;
+    let minute = minute
+        .parse::<u32>()
+        .map_err(|_| anyhow::anyhow!("time_of_day must use HH:mm format"))?;
+    anyhow::ensure!(
+        hour <= 23 && minute <= 59,
+        "time_of_day must be a valid local time"
+    );
+    Ok((hour, minute))
+}
+
+fn reject_unsupported_schedule_options(input: &Value) -> Result<()> {
+    if input.get("enabled").and_then(Value::as_bool) == Some(false) {
+        anyhow::bail!("enabled=false is not supported by the Rust cron scheduler");
+    }
+    for field in ["selected_skill_ids", "selected_mcp_server_ids"] {
+        if input
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+        {
+            anyhow::bail!("{field} is not supported by the Rust cron scheduler");
+        }
+    }
+    if input
+        .get("max_retries")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        anyhow::bail!("max_retries is not supported by the Rust cron scheduler");
+    }
+    if input.get("retry_delay_minutes").is_some() {
+        anyhow::bail!("retry_delay_minutes is not supported by the Rust cron scheduler");
+    }
+    Ok(())
+}
+
+fn canonical_schedule_cron(input: &Value) -> Result<String> {
+    reject_unsupported_schedule_options(input)?;
+    let kind = require_str(input, "schedule_kind")?;
+    match kind {
+        "daily" => {
+            let (hour, minute) = required_time_of_day(input)?;
+            Ok(format!("{minute} {hour} * * *"))
+        }
+        "weekly" => {
+            let (hour, minute) = required_time_of_day(input)?;
+            let raw_weekdays = input
+                .get("weekdays")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow::anyhow!("weekdays is required for weekly schedules"))?;
+            let mut weekdays = raw_weekdays
+                .iter()
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .filter(|value| (1..=7).contains(value))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "weekdays must contain ISO weekday integers from 1 to 7"
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            weekdays.sort_unstable();
+            weekdays.dedup();
+            anyhow::ensure!(!weekdays.is_empty(), "weekdays must not be empty");
+            Ok(format!(
+                "{minute} {hour} * * {}",
+                weekdays
+                    .into_iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
+        }
+        "once" | "dates" => anyhow::bail!(
+            "schedule_kind={kind} is not supported by the Rust cron scheduler; use the Electron scheduler or a daily/weekly schedule"
+        ),
+        "interval" => anyhow::bail!(
+            "schedule_kind=interval is not supported by the Rust cron scheduler because arbitrary intervals and start_at cannot be represented faithfully"
+        ),
+        _ => anyhow::bail!("unsupported schedule_kind: {kind}"),
+    }
+}
+
 #[async_trait]
 impl Tool for CreateScheduledTaskTool {
     fn name(&self) -> &str {
@@ -1458,72 +2892,58 @@ impl Tool for CreateScheduledTaskTool {
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let prompt = require_str(&input, "prompt")?;
-        let kind = require_str(&input, "schedule_kind")?;
-        let cron = match kind {
-            "daily" => format!(
-                "{} {} * * *",
-                input
-                    .get("time_of_day")
-                    .and_then(Value::as_str)
-                    .unwrap_or("09:00")
-                    .split(':')
-                    .nth(1)
-                    .unwrap_or("00"),
-                input
-                    .get("time_of_day")
-                    .and_then(Value::as_str)
-                    .unwrap_or("09:00")
-                    .split(':')
-                    .next()
-                    .unwrap_or("09")
-            ),
-            "weekly" => {
-                let weekdays = input
-                    .get("weekdays")
-                    .and_then(Value::as_array)
-                    .map(|v| {
-                        v.iter()
-                            .filter_map(Value::as_u64)
-                            .map(|n| n.to_string())
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    })
-                    .unwrap_or_else(|| "1".into());
-                format!(
-                    "{} {} * * {}",
-                    input
-                        .get("time_of_day")
-                        .and_then(Value::as_str)
-                        .unwrap_or("09:00")
-                        .split(':')
-                        .nth(1)
-                        .unwrap_or("00"),
-                    input
-                        .get("time_of_day")
-                        .and_then(Value::as_str)
-                        .unwrap_or("09:00")
-                        .split(':')
-                        .next()
-                        .unwrap_or("09"),
-                    weekdays
-                )
-            }
-            "interval" => format!(
-                "*/{} * * * *",
-                input
-                    .get("every_minutes")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(60)
-                    .clamp(1, 59)
-            ),
-            _ => "0 9 * * *".into(),
-        };
+        let cron = canonical_schedule_cron(&input)?;
         let name = input
             .get("title")
             .and_then(Value::as_str)
             .unwrap_or("AI scheduled task");
         let entry = services.scheduler.create(name, &cron, prompt)?;
         Ok(json!({"success": true, "task": entry}))
+    }
+}
+
+#[cfg(test)]
+mod scheduled_task_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_daily_and_weekly_schedules_map_without_defaults() {
+        assert_eq!(
+            canonical_schedule_cron(&json!({
+                "schedule_kind": "daily",
+                "time_of_day": "09:30"
+            }))
+            .unwrap(),
+            "30 9 * * *"
+        );
+        assert_eq!(
+            canonical_schedule_cron(&json!({
+                "schedule_kind": "weekly",
+                "time_of_day": "18:05",
+                "weekdays": [5, 1, 5]
+            }))
+            .unwrap(),
+            "5 18 * * 1,5"
+        );
+    }
+
+    #[test]
+    fn unsupported_schedule_semantics_fail_instead_of_becoming_daily() {
+        for input in [
+            json!({ "schedule_kind": "once", "run_at": "2030-01-01T09:00:00Z" }),
+            json!({ "schedule_kind": "dates", "dates": ["2030-01-01T09:00:00Z"] }),
+            json!({ "schedule_kind": "interval", "every_minutes": 60 }),
+        ] {
+            assert!(canonical_schedule_cron(&input).is_err());
+        }
+        assert!(canonical_schedule_cron(&json!({
+            "schedule_kind": "daily",
+            "time_of_day": "09:00",
+            "enabled": false
+        }))
+        .unwrap_err()
+        .to_string()
+        .contains("enabled=false"));
     }
 }
 
@@ -1645,6 +3065,173 @@ impl Tool for InstallMcpServerTool {
     }
 }
 
+fn agent_workspace_providers(
+    services: &ToolServices,
+) -> Result<worldbase_protocol::types::ProvidersConfig> {
+    Ok(services
+        .store
+        .get_setting("providers")?
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default())
+}
+
+fn agent_workspace_provider_catalog(
+    providers: &worldbase_protocol::types::ProvidersConfig,
+) -> Vec<Value> {
+    providers
+        .providers
+        .iter()
+        .map(|provider| {
+            json!({
+                "id": provider.id,
+                "name": provider.name,
+                "activeModel": provider.active_model,
+                "models": provider.models.iter().map(|model| model.id.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+fn agent_workspace_skill_catalog(
+    skills: &[worldbase_protocol::types::SkillDescriptor],
+) -> Vec<Value> {
+    // Native skills use their unique YAML name as their durable identifier.
+    // Expose that identity explicitly so the catalog and create validation use
+    // the same contract as Electron's `{ id, name, description }` entries.
+    skills
+        .iter()
+        .map(|skill| {
+            json!({
+                "id": skill.name,
+                "name": skill.name,
+                "description": skill.description,
+            })
+        })
+        .collect()
+}
+
+async fn agent_workspace_tool_catalog(services: &ToolServices) -> Vec<Value> {
+    let mut tools = if let Some(catalog) = &services.visible_tool_catalog {
+        catalog
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        crate::builtin_tools()
+            .into_iter()
+            .filter(|tool| crate::is_electron_tool_name(tool.name()))
+            .map(|tool| {
+                json!({
+                    "name": tool.name(),
+                    "description": tool.description(),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // MCP discovery happens before the first model request. The manager keeps
+    // that discovered metadata in its state snapshot, which mirrors Node's
+    // `getToolDefinitions()` without reconnecting to every server here.
+    let allowed_servers = services.allowed_mcp_server_ids();
+    for server in services.mcp.state_snapshot().await.servers {
+        if !server.enabled
+            || allowed_servers
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(&server.id))
+        {
+            continue;
+        }
+        tools.extend(server.tools.into_iter().map(|tool| {
+            json!({
+                "name": tool.local_name,
+                "description": tool.description,
+            })
+        }));
+    }
+
+    tools.sort_by(|left, right| {
+        left["name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["name"].as_str().unwrap_or_default())
+    });
+    tools.dedup_by(|left, right| left["name"] == right["name"]);
+    tools
+}
+
+fn agent_workspace_string(input: &Value, key: &str) -> String {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn agent_workspace_string_array(input: &Value, key: &str, legacy_key: &str) -> Vec<String> {
+    input
+        .get(key)
+        .or_else(|| input.get(legacy_key))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn unique_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn validate_agent_provider_and_model(
+    providers: &worldbase_protocol::types::ProvidersConfig,
+    provider_id: &str,
+    model_id: &str,
+) -> Option<String> {
+    if provider_id.is_empty() && model_id.is_empty() {
+        return None;
+    }
+    let Some(provider) = providers
+        .providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+    else {
+        return Some(format!("Unknown providerId: {provider_id}"));
+    };
+    if !model_id.is_empty() && !provider.models.iter().any(|model| model.id == model_id) {
+        return Some(format!(
+            "Model {model_id} is not registered under provider {provider_id}"
+        ));
+    }
+    None
+}
+
+fn unknown_agent_workspace_entries<'a>(
+    requested: &'a [String],
+    known: &std::collections::HashSet<&str>,
+) -> Vec<&'a str> {
+    requested
+        .iter()
+        .map(String::as_str)
+        .filter(|value| !known.contains(value))
+        .collect()
+}
+
 pub struct ListAgentWorkspaceCatalogTool;
 #[async_trait]
 impl Tool for ListAgentWorkspaceCatalogTool {
@@ -1658,9 +3245,15 @@ impl Tool for ListAgentWorkspaceCatalogTool {
         json!({"type":"object","properties":{}})
     }
     async fn execute(&self, _input: Value, services: &ToolServices) -> Result<Value> {
-        Ok(
-            json!({"providers": services.store.get_setting("providers")?.unwrap_or_else(|| json!({"providers":[]})), "skills": services.skills.list()?, "agents": services.store.list_agents()?, "groups": services.store.get_setting("agent_groups")?.unwrap_or_else(|| json!([]))}),
-        )
+        let providers = agent_workspace_providers(services)?;
+        let skills = services.skills.list()?;
+        Ok(json!({
+            "providers": agent_workspace_provider_catalog(&providers),
+            "skills": agent_workspace_skill_catalog(&skills),
+            "tools": agent_workspace_tool_catalog(services).await,
+            "agents": services.store.list_agents()?,
+            "groups": services.store.get_agent_groups_setting()?,
+        }))
     }
 }
 
@@ -1703,94 +3296,130 @@ impl Tool for CreateAgentTool {
         })
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let now = worldbase_protocol::event::now_rfc3339();
-        let id = input
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "")
-            .to_string();
-        let id = if id.is_empty() {
+        let name = agent_workspace_string(&input, "name");
+        let system_prompt = agent_workspace_string(&input, "system_prompt");
+        if name.is_empty() || system_prompt.is_empty() {
+            return Ok(json!({"error": "name and system_prompt are required."}));
+        }
+
+        let requested_id = agent_workspace_string(&input, "id");
+        let id = if requested_id.is_empty() {
             uuid::Uuid::new_v4().to_string()
         } else {
-            id
+            requested_id
         };
         let existing = services.store.get_agent(&id)?;
+        let provider_id = agent_workspace_string(&input, "provider_id");
+        let model_id = agent_workspace_string(&input, "model_id");
+        let skill_ids = agent_workspace_string_array(&input, "skill_ids", "skillIds");
+        let allowed_tools = agent_workspace_string_array(&input, "allowed_tools", "allowedTools");
+        let denied_tools = agent_workspace_string_array(&input, "denied_tools", "deniedTools");
+        let resolved_provider_id = (!provider_id.is_empty())
+            .then_some(provider_id.clone())
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|agent| agent.provider_id.clone())
+            });
+        let provider_changed = !provider_id.is_empty()
+            && existing
+                .as_ref()
+                .and_then(|agent| agent.provider_id.as_deref())
+                != Some(provider_id.as_str());
+        let resolved_model_id = (!model_id.is_empty())
+            .then_some(model_id.clone())
+            .or_else(|| {
+                (!provider_changed)
+                    .then(|| existing.as_ref().and_then(|agent| agent.model_id.clone()))
+                    .flatten()
+            });
+        let providers = agent_workspace_providers(services)?;
+        if let Some(error) = validate_agent_provider_and_model(
+            &providers,
+            resolved_provider_id.as_deref().unwrap_or_default(),
+            resolved_model_id.as_deref().unwrap_or_default(),
+        ) {
+            return Ok(json!({"error": error}));
+        }
+
+        let skills = services.skills.list()?;
+        let known_skill_ids = skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let invalid_skill_ids = unknown_agent_workspace_entries(&skill_ids, &known_skill_ids);
+        if !invalid_skill_ids.is_empty() {
+            return Ok(json!({
+                "error": format!("Unknown skillIds: {}", invalid_skill_ids.join(", "))
+            }));
+        }
+
+        let tool_catalog = agent_workspace_tool_catalog(services).await;
+        let known_tool_names = tool_catalog
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<std::collections::HashSet<_>>();
+        for requested in [&allowed_tools, &denied_tools] {
+            let invalid_tool_names = unknown_agent_workspace_entries(requested, &known_tool_names);
+            if !invalid_tool_names.is_empty() {
+                return Ok(json!({
+                    "error": format!("Unknown tool names: {}", invalid_tool_names.join(", "))
+                }));
+            }
+        }
+
+        let now = worldbase_protocol::event::now_rfc3339();
         let agent = worldbase_protocol::types::AgentDefinition {
             id: id.clone(),
-            name: require_str(&input, "name")?.to_string(),
+            name,
             icon: input
                 .get("icon")
                 .and_then(Value::as_str)
-                .unwrap_or("")
-                .into(),
-            description: input
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .into(),
-            system_prompt: require_str(&input, "system_prompt")?.into(),
-            provider_id: input
-                .get("provider_id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            model_id: input
-                .get("model_id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            skill_ids: input
-                .get("skill_ids")
-                .and_then(Value::as_array)
-                .map(|v| {
-                    v.iter()
-                        .filter_map(Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .collect()
-                })
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| existing.as_ref().map(|agent| agent.icon.clone()))
                 .unwrap_or_default(),
+            description: agent_workspace_string(&input, "description"),
+            system_prompt,
+            provider_id: resolved_provider_id,
+            model_id: resolved_model_id,
+            skill_ids: unique_strings(skill_ids),
             reasoning_strength: input
                 .get("reasoning_strength")
                 .or_else(|| input.get("reasoningStrength"))
                 .and_then(Value::as_str)
                 .filter(|value| matches!(*value, "low" | "medium" | "high" | "max"))
-                .unwrap_or("medium")
-                .into(),
-            allowed_tools: input
-                .get("allowed_tools")
-                .or_else(|| input.get("allowedTools"))
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .collect()
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .map(|agent| agent.reasoning_strength.clone())
                 })
-                .unwrap_or_default(),
-            denied_tools: input
-                .get("denied_tools")
-                .or_else(|| input.get("deniedTools"))
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            memory_scopes: input
-                .get("memory_scopes")
-                .or_else(|| input.get("memoryScopes"))
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .collect()
-                })
-                .unwrap_or_else(|| vec!["user".into(), "agent".into(), "project".into()]),
+                .unwrap_or_else(|| "medium".into()),
+            allowed_tools: unique_strings(allowed_tools),
+            denied_tools: unique_strings(denied_tools),
+            memory_scopes: {
+                let scopes = unique_strings(
+                    agent_workspace_string_array(&input, "memory_scopes", "memoryScopes")
+                        .into_iter()
+                        .filter(|scope| {
+                            matches!(
+                                scope.as_str(),
+                                "user" | "agent" | "project" | "group" | "channel"
+                            )
+                        })
+                        .collect(),
+                );
+                if scopes.is_empty() {
+                    existing
+                        .as_ref()
+                        .map(|agent| agent.memory_scopes.clone())
+                        .unwrap_or_else(|| vec!["user".into(), "agent".into(), "project".into()])
+                } else {
+                    scopes
+                }
+            },
             memory_write_policy: input
                 .get("memory_write_policy")
                 .or_else(|| input.get("memoryWritePolicy"))
@@ -1836,7 +3465,354 @@ impl Tool for CreateAgentTool {
             updated_at: now,
         };
         services.store.upsert_agent(&agent)?;
-        Ok(json!({"success": true, "agent": agent}))
+        Ok(json!({
+            "success": true,
+            "agent": agent,
+            "message": format!("Agent {} 已保存。", agent.name),
+        }))
+    }
+}
+
+#[cfg(test)]
+mod agent_workspace_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn services(root: &Path) -> ToolServices {
+        let workspace = root.join("workspace");
+        let projects = root.join("projects");
+        let skills = root.join("skills");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(
+            skills.join("research.yaml"),
+            "name: skill-a\ndescription: Research skill\ninstructions: Verify sources.\n",
+        )
+        .unwrap();
+
+        let store = Arc::new(worldbase_memory::Store::open(&root.join("store.sqlite")).unwrap());
+        store
+            .set_setting(
+                "providers",
+                &json!({
+                    "providers": [{
+                        "id": "provider-a",
+                        "name": "Provider A",
+                        "baseUrl": "https://example.invalid/v1",
+                        "apiKey": "must-not-leak",
+                        "models": [{"id": "model-a"}],
+                        "activeModel": "model-a"
+                    }],
+                    "activeProviderId": "provider-a"
+                }),
+            )
+            .unwrap();
+        store
+            .set_agent_groups_setting(&[json!({
+                "id": "group-a",
+                "name": "Group A",
+                "coordinatorAgentId": "agent-a",
+                "memberAgentIds": ["agent-a"]
+            })])
+            .unwrap();
+
+        ToolServices {
+            host: Arc::new(crate::HostBridge::new()),
+            current_stream: Arc::new(Mutex::new(String::new())),
+            workspace,
+            folder_workspace: None,
+            target_project_id: None,
+            allowed_mcp_server_ids: None,
+            plan_goal: Arc::new(Mutex::new(None)),
+            todo_items: Arc::new(Mutex::new(Vec::new())),
+            read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            visible_tool_catalog: None,
+            store: store.clone(),
+            skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![skills])),
+            scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
+            mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(projects)),
+            group_collaboration: None,
+        }
+    }
+
+    fn valid_agent_input() -> Value {
+        json!({
+            "name": "Researcher",
+            "system_prompt": "Verify the answer.",
+            "provider_id": "provider-a",
+            "model_id": "model-a",
+            "skill_ids": ["skill-a"],
+            "allowed_tools": ["read_project_file"],
+            "denied_tools": ["web_search"]
+        })
+    }
+
+    #[tokio::test]
+    async fn catalog_matches_electron_shape_without_provider_secrets() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+
+        let catalog = ListAgentWorkspaceCatalogTool
+            .execute(json!({}), &services)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            catalog["providers"],
+            json!([{
+                "id": "provider-a",
+                "name": "Provider A",
+                "activeModel": "model-a",
+                "models": ["model-a"]
+            }])
+        );
+        assert_eq!(
+            catalog["skills"],
+            json!([{
+                "id": "skill-a",
+                "name": "skill-a",
+                "description": "Research skill"
+            }])
+        );
+        assert_eq!(catalog["groups"][0]["id"], "group-a");
+        assert!(catalog["agents"].is_array());
+
+        let tools = catalog["tools"].as_array().expect("tool catalog");
+        let names = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        let mut sorted_names = names.clone();
+        sorted_names.sort();
+        assert_eq!(names, sorted_names);
+        assert!(names.contains(&"create_agent"));
+        assert!(names.contains(&"read_project_file"));
+        assert!(!names.contains(&"execute_command"));
+        assert!(tools.iter().all(|tool| tool["description"].is_string()));
+    }
+
+    #[tokio::test]
+    async fn mobile_catalog_and_validation_use_the_executable_mobile_surface() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut services = services(temp.path());
+        let capabilities = worldbase_protocol::types::Capabilities::mobile("mobile-ios");
+        let builtins = crate::builtin_tools();
+        let visible = crate::filter_tools(&builtins, &capabilities);
+        services.visible_tool_catalog = Some(Arc::new(crate::descriptors(&visible)));
+
+        let catalog = ListAgentWorkspaceCatalogTool
+            .execute(json!({}), &services)
+            .await
+            .unwrap();
+        let names = catalog["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"read_file"));
+        assert!(!names.contains(&"read_project_file"));
+
+        let accepted = CreateAgentTool
+            .execute(
+                json!({
+                    "name": "Mobile agent",
+                    "system_prompt": "Use mobile tools.",
+                    "allowed_tools": ["read_file"]
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted["success"], true);
+
+        let rejected = CreateAgentTool
+            .execute(
+                json!({
+                    "name": "Desktop agent",
+                    "system_prompt": "Use desktop tools.",
+                    "allowed_tools": ["read_project_file"]
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected["error"], "Unknown tool names: read_project_file");
+    }
+
+    #[tokio::test]
+    async fn create_agent_rejects_unknown_catalog_references_without_persisting() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+
+        let cases = [
+            (
+                json!({
+                    "name": "Agent",
+                    "system_prompt": "Prompt",
+                    "provider_id": "missing"
+                }),
+                "Unknown providerId: missing",
+            ),
+            (
+                json!({
+                    "name": "Agent",
+                    "system_prompt": "Prompt",
+                    "provider_id": "provider-a",
+                    "model_id": "missing"
+                }),
+                "Model missing is not registered under provider provider-a",
+            ),
+            (
+                json!({
+                    "name": "Agent",
+                    "system_prompt": "Prompt",
+                    "skill_ids": ["missing-a", "missing-b"]
+                }),
+                "Unknown skillIds: missing-a, missing-b",
+            ),
+            (
+                json!({
+                    "name": "Agent",
+                    "system_prompt": "Prompt",
+                    "allowed_tools": ["missing-a", "missing-b"]
+                }),
+                "Unknown tool names: missing-a, missing-b",
+            ),
+            (
+                json!({
+                    "name": "Agent",
+                    "system_prompt": "Prompt",
+                    "denied_tools": ["missing"]
+                }),
+                "Unknown tool names: missing",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let result = CreateAgentTool.execute(input, &services).await.unwrap();
+            assert_eq!(result["error"], expected);
+        }
+        assert!(services.store.list_agents().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_agent_normalizes_and_deduplicates_valid_catalog_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+        let mut input = valid_agent_input();
+        input["name"] = json!("  Researcher  ");
+        input["description"] = json!("  Checks sources  ");
+        input["system_prompt"] = json!("  Verify the answer.  ");
+        input["provider_id"] = json!(" provider-a ");
+        input["model_id"] = json!(" model-a ");
+        input["skill_ids"] = json!([" skill-a ", "skill-a", ""]);
+        input["allowed_tools"] = json!([" read_project_file ", "read_project_file", ""]);
+        input["memory_scopes"] = json!([" project ", "project", "invalid"]);
+
+        let result = CreateAgentTool.execute(input, &services).await.unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["agent"]["name"], "Researcher");
+        assert_eq!(result["agent"]["description"], "Checks sources");
+        assert_eq!(result["agent"]["systemPrompt"], "Verify the answer.");
+        assert_eq!(result["agent"]["providerId"], "provider-a");
+        assert_eq!(result["agent"]["modelId"], "model-a");
+        assert_eq!(result["agent"]["skillIds"], json!(["skill-a"]));
+        assert_eq!(
+            result["agent"]["allowedTools"],
+            json!(["read_project_file"])
+        );
+        assert_eq!(result["agent"]["memoryScopes"], json!(["project"]));
+        assert_eq!(services.store.list_agents().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_agent_validates_the_resolved_provider_model_on_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+        services
+            .store
+            .set_setting(
+                "providers",
+                &json!({
+                    "providers": [
+                        {
+                            "id": "provider-a",
+                            "name": "Provider A",
+                            "models": [{"id": "model-a"}],
+                            "activeModel": "model-a"
+                        },
+                        {
+                            "id": "provider-b",
+                            "name": "Provider B",
+                            "models": [{"id": "model-b"}],
+                            "activeModel": "model-b"
+                        }
+                    ],
+                    "activeProviderId": "provider-a"
+                }),
+            )
+            .unwrap();
+
+        let created = CreateAgentTool
+            .execute(valid_agent_input(), &services)
+            .await
+            .unwrap();
+        let id = created["agent"]["id"].as_str().unwrap();
+
+        let changed_provider = CreateAgentTool
+            .execute(
+                json!({
+                    "id": id,
+                    "name": "Researcher",
+                    "system_prompt": "Verify the answer.",
+                    "provider_id": "provider-b"
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed_provider["agent"]["providerId"], "provider-b");
+        assert!(changed_provider["agent"]["modelId"].is_null());
+
+        let changed_model = CreateAgentTool
+            .execute(
+                json!({
+                    "id": id,
+                    "name": "Researcher",
+                    "system_prompt": "Verify the answer.",
+                    "model_id": "model-b"
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed_model["agent"]["providerId"], "provider-b");
+        assert_eq!(changed_model["agent"]["modelId"], "model-b");
+
+        let invalid = CreateAgentTool
+            .execute(
+                json!({
+                    "id": id,
+                    "name": "Researcher",
+                    "system_prompt": "Verify the answer.",
+                    "model_id": "model-a"
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            invalid["error"],
+            "Model model-a is not registered under provider provider-b"
+        );
+        assert_eq!(
+            services.store.get_agent(id).unwrap().unwrap().model_id,
+            Some("model-b".into())
+        );
     }
 }
 
@@ -2110,6 +4086,9 @@ impl Tool for SpawnSubagentsTool {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object"}}},"required":["tasks"]})
     }
+    fn domain(&self) -> &str {
+        "electron_host"
+    }
     async fn execute(&self, _input: Value, _services: &ToolServices) -> Result<Value> {
         Ok(json!({"error": "subagent service is not available in the Rust harness"}))
     }
@@ -2136,17 +4115,11 @@ impl Tool for FillCurrentPageFormTool {
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow::anyhow!("fields must be an array"))?;
         anyhow::ensure!(!fields.is_empty(), "at least one field is required");
-        let stream = services.current_stream.lock().unwrap().clone();
-        let result = services
-            .host
-            .request(
-                &stream,
-                "page_automation",
-                json!({"action":"interact", "actions":[{"type":"batch_input", "fields": fields}]}),
-                Duration::from_secs(30),
-            )
-            .await?;
-        Ok(json!({"ok": true, "action_result": result}))
+        let actions = normalize_page_actions(&json!({
+            "action": "batch_input",
+            "fields": fields,
+        }))?;
+        interact_page_actions(actions, services).await
     }
 }
 
@@ -2163,7 +4136,7 @@ impl Tool for SaveCurrentPageAsDocumentTool {
         json!({"type":"object","properties":{"selector":{"type":"string"},"file_name":{"type":"string"}}})
     }
     fn domain(&self) -> &str {
-        "host"
+        "electron_host"
     }
     fn permission(&self) -> &str {
         "ask"
@@ -2209,6 +4182,9 @@ impl Tool for DocumentListTool {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{}})
     }
+    fn domain(&self) -> &str {
+        "electron_host"
+    }
     async fn execute(&self, _input: Value, _services: &ToolServices) -> Result<Value> {
         Ok(
             json!({"documents": [], "note": "Electron document artifact store is not persisted by the Rust harness"}),
@@ -2227,6 +4203,9 @@ impl Tool for DocumentReadTool {
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"artifact_id":{"type":"string"},"offset":{"type":"integer"},"max_chars":{"type":"integer"}},"required":["artifact_id"]})
+    }
+    fn domain(&self) -> &str {
+        "electron_host"
     }
     async fn execute(&self, input: Value, _services: &ToolServices) -> Result<Value> {
         Ok(
@@ -2637,6 +4616,7 @@ fn resolve_image_provider(
                         models: Vec::new(),
                         active_model: "mock-image".into(),
                         temperature: None,
+                        enable_thinking: false,
                         image_generation: true,
                     },
                     requested_model
@@ -2876,6 +4856,31 @@ async fn prepare_studio_request(
     }))
 }
 
+fn attach_studio_queue_id(request: &mut Value) -> Result<String> {
+    let queue_id = format!("studio-queue-{}", uuid::Uuid::new_v4());
+    request
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("studio queue request must be an object"))?
+        .insert("_queueId".into(), json!(queue_id));
+    Ok(queue_id)
+}
+
+fn queued_studio_metadata(index: usize, request: &Value, queue_id: &str) -> Value {
+    json!({
+        "index": index,
+        "_queueId": queue_id,
+        "prompt": request.get("prompt"),
+        "mode": request.get("mode"),
+        "providerId": request.get("providerId"),
+        "model": request.get("model"),
+        "size": request.get("size"),
+        "quality": request.get("quality"),
+        "outputFormat": request.get("outputFormat"),
+        "n": request.get("n"),
+        "inputCount": request.get("inputImages").and_then(Value::as_array).map(Vec::len),
+    })
+}
+
 async fn enqueue_studio_batch(input: &Value, services: &ToolServices, edit: bool) -> Result<Value> {
     let raw_tasks = match input.get("tasks").and_then(Value::as_array) {
         Some(tasks) => tasks.clone(),
@@ -2904,19 +4909,9 @@ async fn enqueue_studio_batch(input: &Value, services: &ToolServices, edit: bool
             }
         }
         match prepare_studio_request(&merged, services, edit).await {
-            Ok(request) => {
-                queued.push(json!({
-                    "index": index,
-                    "prompt": request.get("prompt"),
-                    "mode": request.get("mode"),
-                    "providerId": request.get("providerId"),
-                    "model": request.get("model"),
-                    "size": request.get("size"),
-                    "quality": request.get("quality"),
-                    "outputFormat": request.get("outputFormat"),
-                    "n": request.get("n"),
-                    "inputCount": request.get("inputImages").and_then(Value::as_array).map(Vec::len),
-                }));
+            Ok(mut request) => {
+                let queue_id = attach_studio_queue_id(&mut request)?;
+                queued.push(queued_studio_metadata(index, &request, &queue_id));
                 requests.push(request);
             }
             Err(error) => errors.push(json!({
@@ -3003,6 +4998,7 @@ mod image_provider_tests {
             }],
             active_model: "text-model".into(),
             temperature: None,
+            enable_thinking: false,
             image_generation: false,
         }
     }
@@ -3039,6 +5035,25 @@ mod image_provider_tests {
         };
 
         assert!(resolve_image_provider(&config, Some("mobile-demo"), None, false).is_err());
+    }
+
+    #[test]
+    fn studio_queue_ids_are_unique_and_match_returned_metadata() {
+        let mut first = json!({
+            "prompt": "same prompt",
+            "mode": "generate",
+            "inputImages": []
+        });
+        let mut second = first.clone();
+        let first_id = attach_studio_queue_id(&mut first).unwrap();
+        let second_id = attach_studio_queue_id(&mut second).unwrap();
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(first["_queueId"], first_id);
+        assert_eq!(second["_queueId"], second_id);
+        let metadata = queued_studio_metadata(0, &first, &first_id);
+        assert_eq!(metadata["_queueId"], first["_queueId"]);
+        assert_eq!(metadata["prompt"], "same prompt");
     }
 }
 

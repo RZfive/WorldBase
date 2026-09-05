@@ -51,6 +51,12 @@ export interface AnthropicToolResultBlock {
 export interface AnthropicThinkingBlock {
   type: 'thinking'
   thinking: string
+  signature: string
+}
+
+export interface AnthropicRedactedThinkingBlock {
+  type: 'redacted_thinking'
+  data: string
 }
 
 export type AnthropicContentBlock =
@@ -59,6 +65,7 @@ export type AnthropicContentBlock =
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock
   | AnthropicThinkingBlock
+  | AnthropicRedactedThinkingBlock
 
 export interface AnthropicApiMessage {
   role: 'user' | 'assistant'
@@ -114,8 +121,8 @@ export interface AnthropicMessagesResponse {
 
 export type AnthropicStreamEvent =
   | { type: 'message_start'; message?: { usage?: AnthropicUsage } }
-  | { type: 'content_block_start'; index: number; content_block?: { type?: string; id?: string; name?: string } }
-  | { type: 'content_block_delta'; index: number; delta?: { type?: string; text?: string; thinking?: string; partial_json?: string } }
+  | { type: 'content_block_start'; index: number; content_block?: { type?: string; id?: string; name?: string; text?: string; thinking?: string; signature?: string; data?: string } }
+  | { type: 'content_block_delta'; index: number; delta?: { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string } }
   | { type: 'content_block_stop'; index: number }
   | { type: 'message_delta'; delta?: { stop_reason?: string | null }; usage?: AnthropicUsage }
   | { type: 'message_stop' }

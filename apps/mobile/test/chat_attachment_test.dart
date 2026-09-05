@@ -64,4 +64,20 @@ void main() {
       maxChatAttachmentContentLength,
     );
   });
+
+  test('keeps signed remote assistant image URLs renderable', () {
+    final projection = projectChatAttachments('', [
+      {
+        'type': 'image_url',
+        'image_url': {'url': 'https://images.example.test/output.png?sig=1'},
+      },
+    ]);
+
+    expect(projection.attachments, hasLength(1));
+    expect(projection.attachments.single.isImage, isTrue);
+    expect(
+      projection.attachments.single.dataUrl,
+      'https://images.example.test/output.png?sig=1',
+    );
+  });
 }

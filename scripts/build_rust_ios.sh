@@ -5,17 +5,35 @@
 
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MANIFEST="$SCRIPT_DIR/../harness-rs/Cargo.toml"
+HARNESS_DIR="$SCRIPT_DIR/../harness-rs"
 
-# rustc 优先取 rustup 工具链（homebrew rust 不含跨目标 std）
-if [ -z "${RUSTC:-}" ]; then
-  RUSTUP_RUSTC="$(ls "$HOME"/.rustup/toolchains/*/bin/rustc 2>/dev/null | head -1 || true)"
-  if [ -n "$RUSTUP_RUSTC" ]; then
-    export RUSTC="$RUSTUP_RUSTC"
-  fi
+# Xcode 的 PATH 通常不包含 ~/.cargo/bin；直接解析当前 rustup 工具链。
+RUSTUP_BIN="$(command -v rustup 2>/dev/null || true)"
+if [ -z "$RUSTUP_BIN" ]; then
+  for candidate in "${CARGO_HOME:-$HOME/.cargo}/bin/rustup" /opt/homebrew/bin/rustup /usr/local/bin/rustup; do
+    if [ -x "$candidate" ]; then
+      RUSTUP_BIN="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -n "${CARGO:-}" ]; then
+  CARGO_BIN="$CARGO"
+elif [ -n "$RUSTUP_BIN" ] && CARGO_BIN="$("$RUSTUP_BIN" which cargo 2>/dev/null)"; then
+  :
+elif CARGO_BIN="$(command -v cargo 2>/dev/null)"; then
+  :
+else
+  echo "error: cargo not found; install the iOS Rust target with rustup" >&2
+  exit 1
+fi
+
+RUSTC_BIN="${RUSTC:-}"
+if [ -z "$RUSTC_BIN" ] && [ -n "$RUSTUP_BIN" ]; then
+  RUSTC_BIN="$("$RUSTUP_BIN" which rustc 2>/dev/null || true)"
 fi
 
 PROFILE="debug"
@@ -44,13 +62,23 @@ if [ -z "$TARGET" ]; then
 fi
 
 echo "==> cargo build -p worldbase-mobile-ffi --target $TARGET ($PROFILE)"
-BUILD_ARGS=(--manifest-path "$MANIFEST" -p worldbase-mobile-ffi --target "$TARGET")
+BUILD_ARGS=(--manifest-path "$MANIFEST" -p worldbase-mobile-ffi --target "$TARGET" --no-default-features)
 if [ "$PROFILE" = "release" ]; then
   BUILD_ARGS+=(--release)
 fi
-cargo build "${BUILD_ARGS[@]}"
+if [ -n "$RUSTC_BIN" ]; then
+  (cd "$HARNESS_DIR" && RUSTC="$RUSTC_BIN" "$CARGO_BIN" build "${BUILD_ARGS[@]}")
+else
+  (cd "$HARNESS_DIR" && "$CARGO_BIN" build "${BUILD_ARGS[@]}")
+fi
 
-SRC="$SCRIPT_DIR/../harness-rs/target/$TARGET/$PROFILE/libworldbase_mobile_ffi.a"
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+case "$TARGET_DIR" in
+  /*) ;;
+  *) TARGET_DIR="$HARNESS_DIR/$TARGET_DIR" ;;
+esac
+SRC="$TARGET_DIR/$TARGET/$PROFILE/libworldbase_mobile_ffi.a"
 OUT_DIR="${RUST_OUT_DIR:-${BUILT_PRODUCTS_DIR:-.}}"
+mkdir -p "$OUT_DIR"
 cp "$SRC" "$OUT_DIR/libworldbase_mobile_ffi.a"
 echo "==> Rust 静态库已复制到 $OUT_DIR/libworldbase_mobile_ffi.a"

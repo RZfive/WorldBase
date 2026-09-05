@@ -13,6 +13,7 @@ import {
 import { getAnthropicMessagesUrl } from '../openai-provider/runtime/urls.js'
 import type {
   ChatCompletionStreamEvent,
+  ChatContentPart,
   ChatMessage,
   RequestOptions,
   ToolDefinition
@@ -99,7 +100,9 @@ export async function * anthropicChatCompletionStream (
     const fullContentChunks: string[] = []
     const fullThinkingChunks: string[] = []
     const toolUses = new Map<number, { id: string; name: string; json: string }>()
-    const order: number[] = []
+    const contentBlocks = new Map<number, ChatContentPart>()
+    const contentOrder: number[] = []
+    const toolOrder: number[] = []
     let startUsage: AnthropicUsage | undefined
     let endUsage: AnthropicUsage | undefined
 
@@ -138,14 +141,28 @@ export async function * anthropicChatCompletionStream (
           }
 
           if (parsed.type === 'content_block_start') {
-            if (parsed.content_block?.type === 'tool_use') {
+            const contentBlock = parsed.content_block
+            if (contentBlock?.type === 'tool_use') {
               const index = parsed.index
-              if (!toolUses.has(index)) order.push(index)
+              if (!toolUses.has(index)) toolOrder.push(index)
               toolUses.set(index, {
-                id: parsed.content_block.id || '',
-                name: parsed.content_block.name || '',
+                id: contentBlock.id || '',
+                name: contentBlock.name || '',
                 json: ''
               })
+            } else if (contentBlock?.type === 'text') {
+              contentBlocks.set(parsed.index, { type: 'text', text: contentBlock.text || '' })
+              contentOrder.push(parsed.index)
+            } else if (contentBlock?.type === 'thinking') {
+              contentBlocks.set(parsed.index, {
+                type: 'thinking',
+                thinking: contentBlock.thinking || '',
+                signature: contentBlock.signature || ''
+              })
+              contentOrder.push(parsed.index)
+            } else if (contentBlock?.type === 'redacted_thinking') {
+              contentBlocks.set(parsed.index, { type: 'redacted_thinking', data: contentBlock.data || '' })
+              contentOrder.push(parsed.index)
             }
             continue
           }
@@ -155,10 +172,17 @@ export async function * anthropicChatCompletionStream (
             if (!delta) continue
             if (delta.type === 'text_delta' && delta.text) {
               fullContentChunks.push(delta.text)
+              const existing = contentBlocks.get(parsed.index)
+              if (existing?.type === 'text') existing.text += delta.text
               yield { type: 'token', content: delta.text }
             } else if (delta.type === 'thinking_delta' && delta.thinking) {
               fullThinkingChunks.push(delta.thinking)
+              const existing = contentBlocks.get(parsed.index)
+              if (existing?.type === 'thinking') existing.thinking += delta.thinking
               yield { type: 'thinking', content: delta.thinking }
+            } else if (delta.type === 'signature_delta' && delta.signature) {
+              const existing = contentBlocks.get(parsed.index)
+              if (existing?.type === 'thinking') existing.signature += delta.signature
             } else if (delta.type === 'input_json_delta' && delta.partial_json) {
               const entry = toolUses.get(parsed.index)
               if (entry) entry.json += delta.partial_json
@@ -189,17 +213,23 @@ export async function * anthropicChatCompletionStream (
 
     const fullContent = fullContentChunks.join('')
     const fullThinking = fullThinkingChunks.join('')
+    const replayableParts = contentOrder
+      .map(index => contentBlocks.get(index))
+      .filter((part): part is NonNullable<typeof part> => part !== undefined)
+      .filter(part => part.type === 'text' ? part.text.length > 0 : true)
     const message: ChatMessage = {
       role: 'assistant',
-      content: fullContent || ''
+      content: replayableParts.some(part => part.type === 'thinking' || part.type === 'redacted_thinking')
+        ? replayableParts
+        : fullContent || ''
     }
 
     if (fullThinking) {
       message.reasoning_content = fullThinking
     }
 
-    if (order.length > 0) {
-      message.tool_calls = order.map(index => {
+    if (toolOrder.length > 0) {
+      message.tool_calls = toolOrder.map(index => {
         const entry = toolUses.get(index)!
         return {
           id: entry.id,
