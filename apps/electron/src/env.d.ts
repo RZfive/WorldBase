@@ -775,7 +775,14 @@ interface ProjectLanUrlInfo {
   lanIp: string
 }
 
-type MessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+type MessageContent = string | Array<{
+  type: string
+  text?: string
+  image_url?: { url: string }
+  thinking?: string
+  signature?: string
+  data?: string
+}>
 
 interface ManagedProcessInfo {
   projectId: string

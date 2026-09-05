@@ -47,6 +47,7 @@ export async function generateImGatewayReply (binding: ChannelBinding, event: Ch
           group: runtimeContext.group,
           routing: groupRouting || parseGroupRouting(runtimeContext.group, getLastUserMessageText(messages)),
           targetProjectId: runtimeContext.effectiveTargetProjectId,
+          enableThinking: runtimeContext.providerConfig?.enableThinking,
           reasoningEffort: runtimeContext.providerConfig?.reasoningEffort,
           temperature: runtimeContext.providerConfig?.temperature,
           activeSkillContents: runtimeContext.activeSkillContents,
@@ -128,6 +129,7 @@ async function buildNativeImGroupDeliberation (input: {
   group: NonNullable<ReturnType<typeof resolveAgentRuntimeContext>['group']>
   routing: NonNullable<ReturnType<typeof parseGroupRouting>>
   targetProjectId: string | null
+  enableThinking?: boolean
   reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
   temperature?: number
   activeSkillContents: string[]
@@ -157,6 +159,7 @@ async function buildNativeImGroupDeliberation (input: {
     sessionId: `im-rust-group-${input.binding.id}-${input.event.messageId}-${randomUUID()}`,
     context: {
       targetProjectId: input.targetProjectId,
+      enableThinking: input.enableThinking,
       reasoningEffort: input.reasoningEffort,
       temperature: input.temperature,
       systemPromptSections: sharedSections,

@@ -5,7 +5,7 @@ AI 驱动的项目生成器与管理平台。通过自然语言对话创建完�
 ## 🚀 当前状态
 
 - **Electron App**: 生产版本 (TypeScript) — `apps/electron/` 独立 workspace
-- **Rust Harness**: P0–P1 完成并三端跑通 ✅ — `harness-rs/` 唯一 Cargo workspace（17 个 crate，50 个测试）
+- **Rust Harness**: P0–P1 完成并三端跑通 ✅ — `harness-rs/` 唯一 Cargo workspace（17 个 crate，核心/协议/提供商/移动 FFI 均有 workspace 测试）
 - **Flutter 移动端**: 已建成并接入 harness ✅ — `apps/mobile/`（iOS 风格四 Tab，FFI 进程内连接）
 
 ## 项目结构
@@ -55,8 +55,9 @@ Electron 主进程使用运行时内置的 `node:sqlite`，不需要额外安装
 ## 📱 移动端（Flutter + Rust FFI）
 
 移动端是完整的 Flutter 应用，Rust harness 通过 **FFI 进程内**运行（`dart:ffi` 加载
-`libworldbase_mobile_ffi`，`worldbase_start` 在应用进程内启动完整 harness，UI 经
-loopback WS 同协议通信）——无需任何外部服务，界面上也没有连接配置。
+`libworldbase_mobile_ffi`，`worldbase_start` 在应用进程内启动完整 harness，
+`worldbase_get_auth_token` 读取本次启动的随机 token，UI 经鉴权 loopback WS 同协议通信）——
+无需任何外部服务，界面上也没有连接配置。
 
 ### 一键启动（根目录）
 
@@ -91,7 +92,7 @@ pnpm run dev:ios        # iOS 模拟器端
 |------|------|
 | Android Studio | 提供 JBR（Java）与 SDK 管理器 |
 | Android SDK | API 35/36 + platform-tools + emulator |
-| NDK | r27（`~/Library/Android/sdk/ndk/`），Rust 交叉编译链接器与 ring 的 C 工具链 |
+| NDK | Android SDK 下已安装的现代 NDK，提供 Rust 交叉编译 linker 与 C 工具链 |
 | rustup target | `rustup target add aarch64-linux-android` |
 | AVD | 任一手机模拟器（默认找 `Medium_Phone_API_36.1`，可用 `ANDROID_AVD` 覆盖） |
 
@@ -107,17 +108,27 @@ pnpm run dev:ios        # iOS 模拟器端
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `ANDROID_AVD` | Android 启动用的模拟器名称 | `Medium_Phone_API_36.1` |
-| `ANDROID_SDK` | Android SDK 路径 | `~/Library/Android/sdk` |
+| `ANDROID_SDK_ROOT` / `ANDROID_HOME` / `ANDROID_SDK` | Android SDK 路径（按此顺序解析） | macOS `~/Library/Android/sdk`；Linux `~/Android/Sdk` |
+| `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` | 固定 Android NDK 路径；CI 推荐显式设置 | 缺省从 SDK 的 `ndk/` 自动选择 |
+| `ANDROID_NDK_VERSION` | 从 SDK 的 `ndk/` 选择指定版本 | 缺省选择已安装的最新版本 |
 | `ANDROID_ABI` | Android 构建架构 | `arm64-v8a` |
+| `ANDROID_TARGET` / `ANDROID_API` | Rust Android target 与最小 API（独立构建脚本） | `aarch64-linux-android` / `21` |
+| `RUSTUP_TOOLCHAIN` | 覆盖 rustup 当前工具链，适合 CI 固定 Rust 版本 | rustup 当前/目录覆盖工具链 |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | 真实模型（可选） | 缺省用内置 mock（支持对话里"做一个「XX」应用"生成轻应用） |
 
 ### 移动端测试
 
 ```bash
-pnpm run test:rust      # Rust 全量测试（50 个）
-pnpm run test:flutter   # Flutter E2E（全功能面 + FFI 生命周期专项）
+pnpm run test:rust      # Rust workspace 全量测试
+pnpm run test:flutter   # 重建无桌面 feature 的宿主 dylib，再跑 Flutter 全量测试
+pnpm run harness:test:android-build # 探测 SDK/NDK 后交叉编译 Android arm64 release
 pnpm run test:e2e:macos # GUI 集成测试（真实窗口驱动全流程）
 ```
+
+Android 和 iOS 的 Rust 构建入口分别为 `scripts/build_rust_android.sh` 与
+`scripts/build_rust_ios.sh`，两者都会使用当前 rustup 工具链并为移动产物传入
+`--no-default-features`。iOS 脚本通常由 CocoaPods 构建阶段调用；手动构建前需先用
+`rustup target add aarch64-apple-ios aarch64-apple-ios-sim` 安装对应 target。
 
 > 移动端细节（架构、能力协商、轻应用、已知遗留）见 [HARNESS.md](HARNESS.md)。
 
@@ -149,7 +160,7 @@ pnpm run test:e2e:macos # GUI 集成测试（真实窗口驱动全流程）
 the-world/
 ├── apps/electron/             # Electron workspace（已完成迁移）
 ├── harness-rs/                # Rust Harness workspace
-├── apps/mobile/               # Flutter workspace（未来）
+├── apps/mobile/               # Flutter workspace（已接入 Rust Harness）
 ├── docs/                      # 跨 workspace 架构文档
 ├── scripts/                   # 跨 workspace 编排脚本
 └── package.json               # 根编排入口（迁移后不持有 Electron 依赖）

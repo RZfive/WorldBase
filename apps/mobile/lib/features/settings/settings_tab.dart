@@ -389,6 +389,7 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
     final urlCtrl = TextEditingController(text: existing?.baseUrl ?? '');
     final keyCtrl = TextEditingController(text: existing?.apiKey ?? '');
     var protocol = existing?.apiProtocol ?? '';
+    var enableThinking = existing?.enableThinking ?? false;
 
     // 模型编辑的持久控制器（与 models 下标一一对应）
     final models = <ModelInfo>[];
@@ -493,6 +494,12 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                   ),
                   const SizedBox(height: 10),
                   _field(keyCtrl, 'API Key', obscure: true),
+                  const SizedBox(height: 8),
+                  _capSwitch(
+                    '默认启用深度思考',
+                    enableThinking,
+                    (value) => setSheet(() => enableThinking = value),
+                  ),
                   const SizedBox(height: 12),
                   _RemoteModelPicker(
                     urlController: urlCtrl,
@@ -643,6 +650,7 @@ class _ProvidersCardState extends ConsumerState<_ProvidersCard> {
                                           ? ''
                                           : validModels.first.id),
                                 temperature: existing?.temperature,
+                                enableThinking: enableThinking,
                                 imageGeneration: validModels.any(
                                   (m) => m.imageGeneration,
                                 ),

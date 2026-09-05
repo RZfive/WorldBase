@@ -49,7 +49,21 @@ impl Tool for DocWriteTool {
                 "kind": { "type": "string", "enum": ["markdown", "csv", "docx", "xlsx", "text", "json"] },
                 "content": { "type": "string", "description": "markdown/text/json 内容" },
                 "header": { "type": "array", "items": { "type": "string" }, "description": "csv 表头" },
-                "rows": { "type": "array", "items": { "type": "array" }, "description": "csv/xlsx 行" }
+                "rows": { "type": "array", "items": { "type": "array" }, "description": "csv/xlsx 行" },
+                "sheet_name": { "type": "string", "description": "xlsx 工作表名称，默认 Sheet1" },
+                "blocks": {
+                    "type": "array",
+                    "description": "docx 文档块；type 可为 heading、paragraph 或 bullet",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": { "type": "string", "enum": ["heading", "paragraph", "bullet"] },
+                            "text": { "type": "string" },
+                            "level": { "type": "integer", "description": "heading 层级，默认 1" }
+                        },
+                        "required": ["text"]
+                    }
+                }
             },
             "required": ["path", "kind"]
         })
@@ -152,4 +166,23 @@ fn blocks_from_input(input: &Value) -> Result<Vec<worldbase_docs::edit::DocBlock
         }
     }
     Ok(blocks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doc_write_schema_advertises_format_specific_fields() {
+        let schema = DocWriteTool.input_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("doc_write properties");
+        assert!(properties.contains_key("sheet_name"));
+        assert!(properties.contains_key("blocks"));
+        assert_eq!(
+            properties["blocks"]["items"]["properties"]["type"]["enum"],
+            json!(["heading", "paragraph", "bullet"])
+        );
+    }
 }

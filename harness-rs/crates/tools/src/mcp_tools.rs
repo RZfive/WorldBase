@@ -1,9 +1,9 @@
 //! Rust-native MCP discovery and execution tools.
 //!
-//! These mirror Electron's MCP tool surface while keeping the actual network
-//! connection inside the Rust harness. Electron supplies configuration and
-//! answers permission cards; it does not execute a second MCP client in a
-//! Rust-selected run.
+//! Mobile uses this complete surface. In an Electron-selected run, dynamic
+//! `mcp__*` tools remain native, while the canonical generic `mcp_call` is
+//! replaced by an Electron host override so a server installed during the
+//! current turn is immediately available through Electron's live MCPService.
 
 use super::{require_str, Tool, ToolServices};
 use anyhow::{bail, Result};
@@ -43,10 +43,16 @@ impl Tool for McpCallTool {
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let server = require_str(&input, "server")?;
+        let server = required_string_alias(&input, &["server", "serverId", "server_id"])?;
         ensure_server_allowed(services, server)?;
-        let tool = require_str(&input, "tool")?;
-        let arguments = object_argument(&input, "arguments");
+        let tool = required_string_alias(&input, &["tool", "toolName", "tool_name"])?;
+        // `arguments` is Electron's canonical field.  Direct mobile callers
+        // historically used `args` (and a few generic JSON-RPC clients use
+        // `input`/`parameters`), so preserve those aliases here as well as in
+        // the app-server dispatcher.  Without this, `tool.call` would pass an
+        // empty object to the remote MCP tool while appearing successful.
+        let arguments =
+            object_argument_aliases(&input, &["arguments", "args", "input", "parameters"]);
         let result = services.mcp.call_tool(server, tool, arguments).await?;
         Ok(normalize_tool_result(server, tool, None, result))
     }
@@ -256,7 +262,11 @@ impl Tool for McpGetPromptTool {
         let name = require_str(&input, "name")?;
         let result = services
             .mcp
-            .get_prompt(server, name, object_argument(&input, "arguments"))
+            .get_prompt(
+                server,
+                name,
+                object_argument_aliases(&input, &["arguments", "args", "input", "parameters"]),
+            )
             .await?;
         Ok(json!({
             "server_id": server,
@@ -360,10 +370,21 @@ fn ensure_server_allowed(services: &ToolServices, server: &str) -> Result<()> {
     bail!("MCP server {server} is not authorized for this run")
 }
 
-fn object_argument(input: &Value, key: &str) -> Value {
-    input
-        .get(key)
-        .filter(|value| value.is_object())
+fn required_string_alias<'a>(input: &'a Value, keys: &[&str]) -> Result<&'a str> {
+    keys.iter()
+        .find_map(|key| {
+            input
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| anyhow::anyhow!("missing required string parameter: {}", keys[0]))
+}
+
+fn object_argument_aliases(input: &Value, keys: &[&str]) -> Value {
+    keys.iter()
+        .find_map(|key| input.get(*key).filter(|value| value.is_object()))
         .cloned()
         .unwrap_or_else(|| json!({}))
 }
@@ -431,5 +452,46 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert!(tools[0].name().starts_with("mcp__server__lookup__"));
         assert_eq!(tools[0].permission(), "ask");
+    }
+
+    #[test]
+    fn mcp_argument_aliases_prefer_canonical_and_ignore_non_objects() {
+        let canonical = object_argument_aliases(
+            &json!({
+                "arguments": { "query": "canonical" },
+                "args": { "query": "legacy" }
+            }),
+            &["arguments", "args", "input", "parameters"],
+        );
+        assert_eq!(canonical["query"], "canonical");
+
+        let legacy = object_argument_aliases(
+            &json!({ "arguments": ["invalid"], "args": { "query": "legacy" } }),
+            &["arguments", "args", "input", "parameters"],
+        );
+        assert_eq!(legacy["query"], "legacy");
+
+        assert_eq!(
+            object_argument_aliases(&json!({ "args": "invalid" }), &["arguments", "args"]),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn mcp_call_string_aliases_trim_and_require_values() {
+        let value = json!({
+            "server": "  canonical ",
+            "server_id": "legacy",
+            "tool_name": " remote_tool "
+        });
+        assert_eq!(
+            required_string_alias(&value, &["server", "serverId", "server_id"]).unwrap(),
+            "canonical"
+        );
+        assert_eq!(
+            required_string_alias(&value, &["tool", "toolName", "tool_name"]).unwrap(),
+            "remote_tool"
+        );
+        assert!(required_string_alias(&json!({}), &["server", "server_id"]).is_err());
     }
 }

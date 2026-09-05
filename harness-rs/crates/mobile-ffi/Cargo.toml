@@ -8,7 +8,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [features]
 default = ["desktop-support"]
-# iOS/Android 构建时关闭，排除 exec/webhook 等桌面能力。
+# 兼容既有构建命令；当前移动端工具隔离由 runtime capabilities 执行。
 desktop-support = []
 
 [dependencies]
@@ -18,7 +18,9 @@ futures = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 worldbase-core = { path = "../core" }
+worldbase-mcp-client = { path = "../mcp-client" }
 worldbase-memory = { path = "../memory" }
 worldbase-protocol = { path = "../protocol" }

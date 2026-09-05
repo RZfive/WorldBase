@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, watch, Mutex, Notify};
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
     /// Electron's durable server ID. This is the value carried in tool calls.
@@ -61,6 +61,94 @@ impl McpServerConfig {
         } else {
             display_name.to_string()
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for McpServerConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Electron sends a compact bridge shape (`name` + `target`), while
+        // Flutter persists the settings shape (`id` + `command`/`url`).
+        // Parse both here so direct mobile `mcp.reload` calls cannot silently
+        // discard every configured server before `mcp_call` runs.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawMcpServerConfig {
+            #[serde(default)]
+            id: Option<String>,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            #[serde(alias = "display_name")]
+            display_name: Option<String>,
+            #[serde(default)]
+            transport: String,
+            #[serde(default)]
+            target: Option<String>,
+            #[serde(default)]
+            command: Option<String>,
+            #[serde(default)]
+            url: Option<String>,
+            #[serde(default)]
+            args: Vec<String>,
+            #[serde(default)]
+            cwd: Option<String>,
+            #[serde(default)]
+            env: BTreeMap<String, String>,
+            #[serde(default)]
+            headers: BTreeMap<String, String>,
+            #[serde(default)]
+            #[serde(alias = "timeout_ms")]
+            timeout_ms: Option<u64>,
+            #[serde(default)]
+            enabled: bool,
+        }
+
+        let raw = RawMcpServerConfig::deserialize(deserializer)?;
+        let durable_name = raw
+            .id
+            .clone()
+            .or_else(|| raw.name.clone())
+            .unwrap_or_default();
+        let name = durable_name.trim().to_string();
+        if name.is_empty() {
+            return Err(de::Error::custom("MCP server requires id or name"));
+        }
+
+        let display_name = raw
+            .display_name
+            .filter(|value| !value.trim().is_empty())
+            // Flutter's persisted shape uses `name` for the human-facing
+            // label and `id` for the durable identifier.
+            .or_else(|| {
+                raw.id
+                    .is_some()
+                    .then(|| raw.name.clone().unwrap_or_default())
+            })
+            .unwrap_or_default();
+        let target = raw
+            .target
+            .or_else(|| raw.command.clone())
+            .or_else(|| raw.url.clone())
+            .unwrap_or_default();
+        let transport = raw.transport.trim().to_string();
+        if transport.is_empty() {
+            return Err(de::Error::custom("MCP server requires transport"));
+        }
+        Ok(Self {
+            name,
+            display_name,
+            transport,
+            target,
+            args: raw.args,
+            cwd: raw.cwd,
+            env: raw.env,
+            headers: raw.headers,
+            timeout_ms: raw.timeout_ms,
+            enabled: raw.enabled,
+        })
     }
 }
 
@@ -1482,6 +1570,45 @@ mod tests {
         assert_eq!(config.cwd.as_deref(), Some("/tmp/project"));
         assert_eq!(config.headers["Authorization"], "Bearer token");
         assert_eq!(config.timeout(), Duration::from_millis(12345));
+    }
+
+    #[test]
+    fn flutter_settings_fields_deserialize_without_loss() {
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "id": "server-id",
+            "name": "My MCP",
+            "enabled": true,
+            "transport": "stdio",
+            "command": "node",
+            "args": ["server.js"],
+            "cwd": "/tmp/project",
+            "env": { "TOKEN": "secret" },
+            "headers": { "Authorization": "Bearer token" },
+            "timeoutMs": 12345
+        }))
+        .unwrap();
+
+        assert_eq!(config.name, "server-id");
+        assert_eq!(config.display_name, "My MCP");
+        assert_eq!(config.target, "node");
+        assert_eq!(config.args, vec!["server.js"]);
+        assert_eq!(config.timeout(), Duration::from_millis(12345));
+    }
+
+    #[test]
+    fn flutter_http_settings_use_url_as_target() {
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "id": "remote",
+            "name": "Remote MCP",
+            "enabled": true,
+            "transport": "streamable-http",
+            "url": "https://example.test/mcp",
+        }))
+        .unwrap();
+
+        assert_eq!(config.name, "remote");
+        assert_eq!(config.display_name, "Remote MCP");
+        assert_eq!(config.target, "https://example.test/mcp");
     }
 
     #[tokio::test]

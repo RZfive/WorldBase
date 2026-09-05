@@ -14,6 +14,7 @@ use worldbase_protocol::types::ToolDescriptor;
 pub mod command;
 pub mod compat_tools;
 pub mod document;
+mod electron_contract;
 pub mod fs_tools;
 pub mod group_tools;
 pub mod host_bridge;
@@ -66,7 +67,7 @@ pub use project_tools::{
 pub use schedule_tools::{ScheduleCreateTool, ScheduleDeleteTool, ScheduleListTool};
 pub use skill_tools::{SkillListTool, SkillRunTool};
 pub use todo::{TodoReadTool, TodoWriteTool};
-pub use web::{WebFetchTool, WebSearchTool};
+pub use web::{FetchWebpageTool, WebFetchTool, WebSearchTool};
 pub use worldbase_search::{glob as search_glob, grep as search_grep, GrepHit};
 
 /// 工具运行时依赖（由 core 注入）。
@@ -96,6 +97,10 @@ pub struct ToolServices {
     /// Files observed or written during this run. Exact-string editors use
     /// this to reject blind edits, matching Electron's ReadFileTracker.
     pub read_files: Arc<std::sync::Mutex<HashSet<PathBuf>>>,
+    /// Tool catalog that is actually executable for this connection's
+    /// platform before an Agent-specific allow/deny policy is applied.
+    /// Agent Workspace uses it to avoid offering Electron-only tools on mobile.
+    pub visible_tool_catalog: Option<Arc<Vec<ToolDescriptor>>>,
     pub store: Arc<worldbase_memory::Store>,
     pub skills: Arc<worldbase_skills::SkillRegistry>,
     pub scheduler: Arc<worldbase_scheduler::Scheduler>,
@@ -336,9 +341,124 @@ impl dyn Tool {
     }
 }
 
+struct MobileInstallMcpServerTool {
+    inner: Arc<dyn Tool>,
+}
+
+#[async_trait]
+impl Tool for MobileInstallMcpServerTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        "Install or update a remote MCP server configuration. Mobile supports streamable HTTP and SSE transports only."
+    }
+
+    fn input_schema(&self) -> Value {
+        let mut schema = self.inner.input_schema();
+        if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+            for unsupported in ["command", "args", "cwd", "env", "overwrite_existing"] {
+                properties.remove(unsupported);
+            }
+            if let Some(transport) = properties
+                .get_mut("transport")
+                .and_then(Value::as_object_mut)
+            {
+                transport.insert("enum".into(), json!(["streamable-http", "sse"]));
+                transport.insert(
+                    "description".into(),
+                    json!("Remote transport used by the MCP server. Mobile cannot launch stdio subprocesses."),
+                );
+            }
+        }
+        schema
+    }
+
+    fn domain(&self) -> &str {
+        self.inner.domain()
+    }
+
+    fn permission(&self) -> &str {
+        self.inner.permission()
+    }
+
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        ensure_mobile_mcp_transport(&input)?;
+        self.inner.execute(input, services).await
+    }
+}
+
+fn ensure_mobile_mcp_transport(input: &Value) -> Result<()> {
+    let transport = require_str(input, "transport")?;
+    anyhow::ensure!(
+        matches!(transport, "streamable-http" | "sse"),
+        "MCP transport `{transport}` is unavailable on mobile; use `streamable-http` or `sse`"
+    );
+    Ok(())
+}
+
+/// Mobile has no selected Electron folder/project runtime and cannot launch
+/// subprocesses. Keep this an explicit allow-list so newly added desktop
+/// compatibility tools do not silently leak into the mobile model contract.
+fn mobile_tool_supported(name: &str) -> bool {
+    name.starts_with("mcp__")
+        || matches!(
+            name,
+            "read_file"
+                | "write_file"
+                | "edit_file"
+                | "list_dir"
+                | "delete_file"
+                | "patch_file"
+                | "glob"
+                | "grep"
+                | "web_search"
+                | "web_fetch"
+                | "fetch_webpage"
+                | "todo_read"
+                | "todo_write"
+                | "doc_parse"
+                | "doc_write"
+                | "memory_add"
+                | "memory_search"
+                | "memory_delete"
+                | "skill_list"
+                | "skill_run"
+                | "list_skills"
+                | "run_skill"
+                | "schedule_create"
+                | "schedule_list"
+                | "schedule_delete"
+                | "list_scheduled_tasks"
+                | "mcp_call"
+                | "mcp_list_servers"
+                | "mcp_list_resources"
+                | "mcp_read_resource"
+                | "mcp_list_prompts"
+                | "mcp_get_prompt"
+                | "install_mcp_server"
+                | "create_lightweight_app"
+                | "ask_user"
+                | "read_current_page"
+                | "interact_current_page"
+                | "fill_current_page_form"
+                | "enter_plan_mode"
+                | "exit_plan_mode"
+                | "manage_todo_list"
+                | "install_skill"
+                | "list_agent_workspace_catalog"
+                | "create_agent"
+                | "create_agent_group"
+                | "generate_image"
+                | "edit_image"
+        )
+}
+
 /// 能力协商过滤：
 /// - excludes 含 subprocess/port_binding → 隐藏 desktop 域
-/// - features 缺 webview_automation → 隐藏 host 域（浏览器自动化/宿主交互）
+/// - ask_user 需要 interactive；其余 host 工具需要 webview_automation
+/// - mobile 仅暴露当前进程内运行时能够完整执行的显式工具集
 pub fn filter_tools<'a>(
     tools: &'a [Arc<dyn Tool>],
     caps: &worldbase_protocol::types::Capabilities,
@@ -348,15 +468,45 @@ pub fn filter_tools<'a>(
         .iter()
         .any(|e| e == "subprocess" || e == "port_binding");
     let has_webview = caps.features.iter().any(|f| f == "webview_automation");
+    let is_mobile = caps.platform.starts_with("mobile");
     tools
         .iter()
-        .filter(|t| match t.domain() {
-            "desktop" => !hide_desktop,
-            "host" => has_webview,
-            _ => true,
+        .filter_map(|tool| {
+            if caps.platform == "electron" && !is_electron_tool_name(tool.name()) {
+                return None;
+            }
+            if is_mobile && !mobile_tool_supported(tool.name()) {
+                return None;
+            }
+            let domain_available = match tool.domain() {
+                "desktop" => !hide_desktop,
+                "host" if tool.name() == "ask_user" => caps.has("interactive"),
+                "host" => has_webview,
+                "electron_host" => caps.platform == "electron",
+                _ => true,
+            };
+            if !domain_available {
+                return None;
+            }
+
+            if is_mobile && tool.name() == "install_mcp_server" {
+                return Some(Arc::new(MobileInstallMcpServerTool {
+                    inner: tool.clone(),
+                }) as Arc<dyn Tool>);
+            }
+            Some(tool.clone())
         })
-        .cloned()
         .collect()
+}
+
+/// Whether a tool belongs to Electron's generated canonical agent surface.
+pub fn is_electron_tool_name(name: &str) -> bool {
+    electron_contract::contains(name)
+}
+
+/// Sorted canonical tool names advertised during an Electron handshake.
+pub fn electron_tool_names() -> Vec<String> {
+    electron_contract::names()
 }
 
 pub fn descriptors(tools: &[Arc<dyn Tool>]) -> Vec<ToolDescriptor> {
@@ -393,6 +543,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(GrepTool),
         Arc::new(WebSearchTool),
         Arc::new(WebFetchTool),
+        Arc::new(FetchWebpageTool),
         Arc::new(TodoReadTool),
         Arc::new(TodoWriteTool),
         Arc::new(DocParseTool),
@@ -492,8 +643,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
             "start_project_server" | "restart_project_server" => json!({
                 "type": "object",
                 "properties": {
-                    "project_id": { "type": "string" },
-                    "install": { "type": "boolean" }
+                    "project_id": { "type": "string" }
                 },
                 "required": ["project_id"]
             }),
@@ -535,7 +685,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         tools.push(Arc::new(AliasTool::new(alias, inner, schema)));
     }
 
-    tools
+    electron_contract::apply(tools)
 }
 
 // ---------- search-backed tools ----------
@@ -705,6 +855,61 @@ mod tests {
     }
 
     #[test]
+    fn electron_descriptors_exactly_match_every_generated_contract() {
+        let capabilities = worldbase_protocol::types::Capabilities {
+            platform: "electron".into(),
+            features: worldbase_protocol::types::Capabilities::desktop().features,
+            excludes: vec![],
+        };
+        let actual = descriptors(&filter_tools(&builtin_tools(), &capabilities));
+        let contracts = electron_contract::all();
+
+        assert_eq!(
+            contracts.len(),
+            68,
+            "expected the exact Electron tool catalog"
+        );
+        assert_eq!(
+            actual.len(),
+            contracts.len(),
+            "Rust must expose exactly the generated Electron catalog"
+        );
+
+        let mut actual_by_name = std::collections::HashMap::new();
+        for descriptor in actual {
+            let name = descriptor.name.clone();
+            assert!(
+                actual_by_name.insert(name.clone(), descriptor).is_none(),
+                "duplicate Rust Electron descriptor: {name}"
+            );
+        }
+
+        let mut contract_names = std::collections::HashSet::new();
+        for contract in contracts {
+            assert!(
+                contract_names.insert(contract.name.clone()),
+                "duplicate generated Electron contract: {}",
+                contract.name
+            );
+            let descriptor = actual_by_name
+                .get(&contract.name)
+                .unwrap_or_else(|| panic!("missing Rust Electron descriptor: {}", contract.name));
+            assert_eq!(descriptor.name, contract.name);
+            assert_eq!(
+                descriptor.description, contract.description,
+                "description mismatch for {}",
+                descriptor.name
+            );
+            assert_eq!(
+                descriptor.input_schema, contract.parameters,
+                "input schema mismatch for {}",
+                descriptor.name
+            );
+        }
+        assert_eq!(actual_by_name.len(), contract_names.len());
+    }
+
+    #[test]
     fn create_agent_schema_matches_electron_workspace_options() {
         let tool = builtin_tools()
             .into_iter()
@@ -740,15 +945,174 @@ mod tests {
         let filtered = filter_tools(&tools, &mobile);
         assert!(filtered.iter().all(|t| t.domain() != "desktop"));
         assert!(filtered.iter().any(|t| t.name() == "read_file"));
-        // host 域工具需要 webview_automation 能力
+        // 页面 host 工具需要 webview_automation，ask_user 只需要交互宿主。
         assert!(filtered.iter().any(|t| t.name() == "read_current_page"));
 
         mobile.features.retain(|f| f != "webview_automation");
         let no_webview = filter_tools(&tools, &mobile);
-        assert!(no_webview.iter().all(|t| t.domain() != "host"));
+        assert!(no_webview.iter().any(|t| t.name() == "ask_user"));
+        assert!(no_webview
+            .iter()
+            .filter(|t| t.domain() == "host")
+            .all(|t| t.name() == "ask_user"));
+        assert!(no_webview.iter().all(|t| t.domain() != "electron_host"));
+
+        mobile.features.retain(|f| f != "interactive");
+        let no_interactive = filter_tools(&tools, &mobile);
+        assert!(no_interactive.iter().all(|t| t.name() != "ask_user"));
+
+        for unavailable in [
+            "create_scheduled_task",
+            "spawn_subagents",
+            "save_current_page_as_document",
+            "list_documents",
+            "read_document",
+            "open_project_app",
+        ] {
+            assert!(
+                filtered.iter().all(|tool| tool.name() != unavailable),
+                "mobile must not advertise Electron-only host tool {unavailable}"
+            );
+        }
 
         let full = filter_tools(&tools, &worldbase_protocol::types::Capabilities::desktop());
         assert!(full.iter().any(|t| t.name() == "execute_command"));
+    }
+
+    #[test]
+    fn mobile_advertises_only_its_executable_tool_contract() {
+        let mobile_tools = filter_tools(
+            &builtin_tools(),
+            &worldbase_protocol::types::Capabilities::mobile("mobile-ios"),
+        );
+        let mut actual = mobile_tools
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        actual.sort();
+
+        let mut expected = [
+            "ask_user",
+            "create_agent",
+            "create_agent_group",
+            "create_lightweight_app",
+            "delete_file",
+            "doc_parse",
+            "doc_write",
+            "edit_file",
+            "edit_image",
+            "enter_plan_mode",
+            "exit_plan_mode",
+            "fetch_webpage",
+            "fill_current_page_form",
+            "generate_image",
+            "glob",
+            "grep",
+            "install_mcp_server",
+            "install_skill",
+            "interact_current_page",
+            "list_agent_workspace_catalog",
+            "list_dir",
+            "list_scheduled_tasks",
+            "list_skills",
+            "manage_todo_list",
+            "mcp_call",
+            "mcp_get_prompt",
+            "mcp_list_prompts",
+            "mcp_list_resources",
+            "mcp_list_servers",
+            "mcp_read_resource",
+            "memory_add",
+            "memory_delete",
+            "memory_search",
+            "patch_file",
+            "read_current_page",
+            "read_file",
+            "run_skill",
+            "schedule_create",
+            "schedule_delete",
+            "schedule_list",
+            "skill_list",
+            "skill_run",
+            "todo_read",
+            "todo_write",
+            "web_fetch",
+            "web_search",
+            "write_file",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        expected.sort();
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            mobile_tools
+                .iter()
+                .find(|tool| tool.name() == "interact_current_page")
+                .expect("mobile page interaction tool")
+                .permission(),
+            "ask",
+            "mobile page interaction must retain Electron's confirmation boundary"
+        );
+    }
+
+    #[test]
+    fn mobile_mcp_install_contract_is_remote_only() {
+        let mobile_tools = filter_tools(
+            &builtin_tools(),
+            &worldbase_protocol::types::Capabilities::mobile("mobile-android"),
+        );
+        let install = mobile_tools
+            .iter()
+            .find(|tool| tool.name() == "install_mcp_server")
+            .expect("mobile remote MCP installer");
+        let schema = install.input_schema();
+
+        assert_eq!(
+            schema["properties"]["transport"]["enum"],
+            json!(["streamable-http", "sse"])
+        );
+        for unsupported in ["command", "args", "cwd", "env", "overwrite_existing"] {
+            assert!(schema["properties"].get(unsupported).is_none());
+        }
+        assert!(ensure_mobile_mcp_transport(&json!({
+            "transport": "stdio"
+        }))
+        .unwrap_err()
+        .to_string()
+        .contains("unavailable on mobile"));
+        assert!(ensure_mobile_mcp_transport(&json!({
+            "transport": "streamable-http"
+        }))
+        .is_ok());
+        assert!(ensure_mobile_mcp_transport(&json!({
+            "transport": "sse"
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn electron_only_advertises_the_canonical_generated_catalog() {
+        let tools = builtin_tools();
+        let capabilities = worldbase_protocol::types::Capabilities {
+            platform: "electron".into(),
+            features: worldbase_protocol::types::Capabilities::desktop().features,
+            excludes: vec![],
+        };
+        let filtered = filter_tools(&tools, &capabilities);
+        let expected = electron_tool_names();
+        let mut actual = filtered
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        actual.sort();
+
+        assert_eq!(actual, expected);
+        assert!(!actual.contains(&"web_fetch".to_string()));
+        assert!(!actual.contains(&"project_dev_start".to_string()));
+        assert!(actual.contains(&"fetch_webpage".to_string()));
+        assert!(actual.contains(&"start_project_server".to_string()));
     }
 
     #[test]
@@ -770,6 +1134,7 @@ mod tests {
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
+            visible_tool_catalog: None,
             store,
             skills: std::sync::Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: std::sync::Arc::new(worldbase_scheduler::Scheduler::new(
@@ -810,6 +1175,7 @@ mod tests {
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
+            visible_tool_catalog: None,
             store,
             skills: std::sync::Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: std::sync::Arc::new(worldbase_scheduler::Scheduler::new(

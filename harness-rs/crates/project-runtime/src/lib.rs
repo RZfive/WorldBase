@@ -194,9 +194,12 @@ async fn wait_for_port_or_exit(
         if child.try_wait().ok().flatten().is_some() {
             return false;
         }
-        if tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(("127.0.0.1", port)))
-            .await
-            .is_ok_and(|result| result.is_ok())
+        if tokio::time::timeout(
+            Duration::from_secs(1),
+            TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
         {
             return true;
         }
@@ -581,7 +584,9 @@ fn detect_next_project_files(files: &Map<String, Value>, meta: &Map<String, Valu
 }
 
 fn has_typescript_sources(files: &Map<String, Value>) -> bool {
-    files.keys().any(|path| path.ends_with(".ts") || path.ends_with(".tsx"))
+    files
+        .keys()
+        .any(|path| path.ends_with(".ts") || path.ends_with(".tsx"))
 }
 
 fn app_root_for_files(files: &Map<String, Value>) -> &'static str {
@@ -634,8 +639,14 @@ fn apply_next_starter_template(
 
     let uses_typescript = has_typescript_sources(&next_files);
     let app_root = app_root_for_files(&next_files);
-    let layout_path = format!("{app_root}/layout.{}", if uses_typescript { "tsx" } else { "js" });
-    let page_path = format!("{app_root}/page.{}", if uses_typescript { "tsx" } else { "js" });
+    let layout_path = format!(
+        "{app_root}/layout.{}",
+        if uses_typescript { "tsx" } else { "js" }
+    );
+    let page_path = format!(
+        "{app_root}/page.{}",
+        if uses_typescript { "tsx" } else { "js" }
+    );
     let globals_path = format!("{app_root}/globals.css");
 
     let parsed_package = next_files
@@ -645,7 +656,10 @@ fn apply_next_starter_template(
         .and_then(|value| value.as_object().cloned());
     let mut package = parsed_package.clone().unwrap_or_default();
     if parsed_package.is_none() && !next_files.contains_key("package.json") {
-        package.insert("name".into(), Value::String("worldbase-generated-app".into()));
+        package.insert(
+            "name".into(),
+            Value::String("worldbase-generated-app".into()),
+        );
     }
     if parsed_package.is_some() || !next_files.contains_key("package.json") {
         package.entry("private").or_insert(Value::Bool(true));
@@ -707,7 +721,13 @@ fn apply_next_starter_template(
             "dependencies": { "next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0" },
             "devDependencies": if uses_typescript { json!({ "typescript": "^5.0.0", "@types/node": "^20.0.0", "@types/react": "^19.0.0" }) } else { json!({}) }
         });
-        next_files.insert("package.json".into(), Value::String(format!("{}\n", serde_json::to_string_pretty(&package).unwrap_or_default())));
+        next_files.insert(
+            "package.json".into(),
+            Value::String(format!(
+                "{}\n",
+                serde_json::to_string_pretty(&package).unwrap_or_default()
+            )),
+        );
     }
 
     if let Some(existing) = root_app_file(&next_files, app_root, "layout") {
@@ -717,20 +737,27 @@ fn apply_next_starter_template(
     } else {
         next_files.insert(
             layout_path,
-            Value::String(if uses_typescript { NEXT_TS_LAYOUT_TEMPLATE } else { NEXT_JS_LAYOUT_TEMPLATE }.into()),
+            Value::String(
+                if uses_typescript {
+                    NEXT_TS_LAYOUT_TEMPLATE
+                } else {
+                    NEXT_JS_LAYOUT_TEMPLATE
+                }
+                .into(),
+            ),
         );
     }
     if root_app_file(&next_files, app_root, "page").is_none() {
-        next_files.insert(
-            page_path,
-            Value::String(NEXT_JS_PAGE_TEMPLATE.into()),
-        );
+        next_files.insert(page_path, Value::String(NEXT_JS_PAGE_TEMPLATE.into()));
     }
     next_files
         .entry(globals_path)
         .or_insert_with(|| Value::String(NEXT_GLOBALS_CSS_TEMPLATE.into()));
     if !next_files.keys().any(|path| is_next_config_path(path)) {
-        next_files.insert("next.config.js".into(), Value::String(NEXT_CONFIG_TEMPLATE.into()));
+        next_files.insert(
+            "next.config.js".into(),
+            Value::String(NEXT_CONFIG_TEMPLATE.into()),
+        );
     }
     (next_files, true)
 }
@@ -912,15 +939,8 @@ impl ProjectRuntime {
         meta: Value,
         default_template: bool,
     ) -> Result<ProjectInfo> {
-        self.create_project_internal(
-            None,
-            name,
-            project_type,
-            files,
-            meta,
-            default_template,
-        )
-        .await
+        self.create_project_internal(None, name, project_type, files, meta, default_template)
+            .await
     }
 
     async fn create_project_internal(
@@ -957,11 +977,8 @@ impl ProjectRuntime {
         tokio::fs::create_dir_all(&dir).await?;
 
         let mut full_meta = meta.as_object().cloned().unwrap_or_default();
-        let (prepared_files, files_are_next) = apply_next_starter_template(
-            files,
-            &full_meta,
-            default_template && files.is_empty(),
-        );
+        let (prepared_files, files_are_next) =
+            apply_next_starter_template(files, &full_meta, default_template && files.is_empty());
         for (relative_path, content) in &prepared_files {
             let content = content.as_str().ok_or_else(|| {
                 anyhow::anyhow!("project file {relative_path:?} must be a string")
@@ -1947,10 +1964,7 @@ mod tests {
         let mut files = Map::new();
         files.insert(
             "package.json".into(),
-            Value::String(
-                r#"{"dependencies":{"next":"1","react":"18","react-dom":"18"}}"#
-                    .into(),
-            ),
+            Value::String(r#"{"dependencies":{"next":"1","react":"18","react-dom":"18"}}"#.into()),
         );
         files.insert(
             "app/page.tsx".into(),
@@ -2005,7 +2019,10 @@ mod tests {
         );
         files.insert(
             "app/layout.js".into(),
-            Value::String("'use client';\nexport default function Layout ({ children }) { return children }".into()),
+            Value::String(
+                "'use client';\nexport default function Layout ({ children }) { return children }"
+                    .into(),
+            ),
         );
         let info = rt
             .create_project_with_id_and_files_and_template(

@@ -159,16 +159,25 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
 }
 
 pub(crate) fn is_next_project(root: &Path) -> bool {
-    if ["next.config.js", "next.config.mjs", "next.config.cjs", "next.config.ts"]
-        .iter()
-        .any(|name| root.join(name).is_file())
+    if [
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.cjs",
+        "next.config.ts",
+    ]
+    .iter()
+    .any(|name| root.join(name).is_file())
     {
         return true;
     }
     if fs::read_to_string(root.join(".world-meta.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|meta| meta.get("framework").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|meta| {
+            meta.get("framework")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .is_some_and(|framework| framework.eq_ignore_ascii_case("nextjs"))
     {
         return true;

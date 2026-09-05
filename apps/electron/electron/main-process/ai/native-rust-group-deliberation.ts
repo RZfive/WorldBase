@@ -15,7 +15,13 @@ import type {
   SharedBoardTask,
   SharedBoardUpdate
 } from '../../../src/shared/agent-workspace-types.js'
-import type { RustChatOptions, RustEventFrame, RustHarnessClient } from '../rust-harness-client.js'
+import type {
+  RustChatOptions,
+  RustCustomToolRegistration,
+  RustEventFrame,
+  RustHarnessClient
+} from '../rust-harness-client.js'
+import type { AIExecutionEngine, AIRequestOptions } from '../../../src/main/ai-harness/types.js'
 import { getLastUserMessageText, truncateSectionText } from '../chat-message-utils.js'
 import {
   appendGroupProgressStep,
@@ -42,7 +48,7 @@ import {
 export interface RustNativeGroupDeliberationInput {
   client: RustHarnessClient
   /** The selected Rust engine supplies planner calls too; no TS engine is used. */
-  planner?: import('../../../src/main/ai-harness/types.js').AIExecutionEngine
+  planner?: AIExecutionEngine & Partial<ElectronHostToolProvider>
   group: AgentGroupDefinition
   agents: AgentDefinition[]
   messages: Array<{ role: string; content: MessageContent }>
@@ -56,6 +62,7 @@ export interface RustNativeGroupDeliberationInput {
     | 'workspaceRoot'
     | 'targetProjectId'
     | 'allowedMcpServerIds'
+    | 'enableThinking'
     | 'reasoningEffort'
     | 'temperature'
     | 'planModeActive'
@@ -64,7 +71,16 @@ export interface RustNativeGroupDeliberationInput {
     | 'activeSkillContents'
     | 'memoryScopes'
     | 'memoryQuery'
-  >
+  > & {
+    /** Live Electron authorization mode used by Node-hosted tool handlers. */
+    getAuthMode?: () => 'strict' | 'auto'
+    /** Outer Electron conversation that owns auth/ask-user cards. */
+    hostConversationId?: string
+  }
+}
+
+interface ElectronHostToolProvider {
+  createElectronHostToolRegistrations: (options?: AIRequestOptions) => RustCustomToolRegistration[]
 }
 
 export interface RustNativeGroupDeliberationResult {
@@ -187,7 +203,17 @@ export async function buildNativeRustGroupDeliberation (
   let lastBoard: SharedBoardSnapshot | null = null
   let nativeGroupId = ''
   let registration: NativeGroupRegistration | null = null
-  const commonContext = nativeGroupContext(input)
+  const createHostToolsForStream = (streamId: string): RustCustomToolRegistration[] => {
+    return input.planner?.createElectronHostToolRegistrations?.(
+      nativeGroupHostToolContext(input, streamId)
+    ) || []
+  }
+  const commonContext: RustChatOptions = {
+    ...nativeGroupContext(input),
+    // Descriptors travel with group.message. Handlers are rebuilt lazily for
+    // each child stream below so mutable Electron tool state stays isolated.
+    customTools: createHostToolsForStream(`${input.sessionId}:catalog`)
+  }
   const nativePlanner = input.planner
   const planningAgentId = input.routing.plannerAgentId || coordinator.id
   const planningAgent = agentsById.get(planningAgentId) || coordinator
@@ -263,7 +289,10 @@ export async function buildNativeRustGroupDeliberation (
             abortSignal: input.abortSignal,
             runtimeRequestContext: {
               workspaceRoot: commonContext.workspaceRoot,
-              authMode: commonContext.authMode,
+              authMode: currentNativeGroupAuthMode(input),
+              getAuthMode: input.context?.getAuthMode,
+              hostConversationId: input.context?.hostConversationId,
+              hostSessionId: input.sessionId,
               memoryScopes: commonContext.memoryScopes
             }
           })
@@ -308,8 +337,9 @@ export async function buildNativeRustGroupDeliberation (
         text: roundPlan.request || normalizedRequest,
         round,
         memberIds: roundMemberIds,
-        authMode: input.context?.authMode,
+        authMode: currentNativeGroupAuthMode(input),
         context: commonContext,
+        customToolsForStream: createHostToolsForStream,
         onEvent: frame => {
           const outcome = handleNativeGroupFrame({
             frame,
@@ -416,10 +446,11 @@ function nativeGroupContext (input: RustNativeGroupDeliberationInput): RustChatO
   // Rust's group runner. An outer coordinator policy must not accidentally
   // overwrite every participant's policy.
   return {
-    authMode: input.context?.authMode,
+    authMode: currentNativeGroupAuthMode(input),
     workspaceRoot: input.context?.workspaceRoot,
     targetProjectId: input.context?.targetProjectId,
     allowedMcpServerIds: input.context?.allowedMcpServerIds,
+    enableThinking: input.context?.enableThinking,
     reasoningEffort: input.context?.reasoningEffort,
     temperature: input.context?.temperature,
     planModeActive: input.context?.planModeActive,
@@ -430,6 +461,36 @@ function nativeGroupContext (input: RustNativeGroupDeliberationInput): RustChatO
     activeSkillContents: uniqueStrings(input.context?.activeSkillContents),
     allowedToolNames: [],
     deniedToolNames: []
+  }
+}
+
+function currentNativeGroupAuthMode (
+  input: RustNativeGroupDeliberationInput
+): 'strict' | 'auto' | undefined {
+  return input.context?.getAuthMode?.() ?? input.context?.authMode
+}
+
+function nativeGroupHostToolContext (
+  input: RustNativeGroupDeliberationInput,
+  streamId: string
+): AIRequestOptions {
+  const hostConversationId = input.context?.hostConversationId?.trim() || undefined
+  return {
+    sessionId: streamId,
+    conversationId: hostConversationId,
+    // Permission prompts and progress still belong to the outer Electron
+    // chat, even though each member gets isolated handler state.
+    hostSessionId: input.sessionId,
+    hostConversationId,
+    authMode: currentNativeGroupAuthMode(input),
+    getAuthMode: input.context?.getAuthMode,
+    workspaceRoot: input.context?.workspaceRoot,
+    targetProjectId: input.context?.targetProjectId,
+    allowedMcpServerIds: input.context?.allowedMcpServerIds,
+    activeSkillContents: input.context?.activeSkillContents,
+    systemPromptSections: input.context?.systemPromptSections,
+    memoryScopes: input.context?.memoryScopes,
+    abortSignal: input.abortSignal
   }
 }
 

@@ -16,7 +16,20 @@ export interface ChatContentImagePart {
   image_url: { url: string }
 }
 
-export type ChatContentPart = ChatContentTextPart | ChatContentImagePart
+/** Provider-private Anthropic block retained for tool continuations. */
+export interface ChatContentThinkingPart {
+  type: 'thinking'
+  thinking: string
+  signature: string
+}
+
+/** Opaque Anthropic encrypted/redacted thinking block. */
+export interface ChatContentRedactedThinkingPart {
+  type: 'redacted_thinking'
+  data: string
+}
+
+export type ChatContentPart = ChatContentTextPart | ChatContentImagePart | ChatContentThinkingPart | ChatContentRedactedThinkingPart
 export type MessageContent = string | ChatContentPart[]
 
 export interface ChatMessage {

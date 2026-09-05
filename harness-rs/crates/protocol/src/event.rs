@@ -32,6 +32,9 @@ pub enum EventKind {
     UserMessage { content: String },
     /// 文本增量。
     Delta { text: String },
+    /// Provider reasoning/thinking content. Kept separate from assistant text
+    /// so it is never persisted as the answer or replayed as user-visible text.
+    ThinkingDelta { text: String },
     /// 发起工具调用。
     ToolCall {
         call_id: String,
@@ -51,8 +54,13 @@ pub enum EventKind {
         tool_name: String,
         args_summary: String,
     },
-    /// 本轮完整助手消息（含工具调用记录）。
-    AssistantMessage { content: String },
+    /// 本轮完整助手消息。`content` 是可检索文本视图，`parts` 保留图片输出
+    /// 以及 Anthropic continuation 所需的 provider-private thinking blocks。
+    AssistantMessage {
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<crate::types::ChatContentPart>,
+    },
     /// 群组：成员发言。
     GroupMessage {
         member: String,
@@ -111,6 +119,7 @@ impl EventKind {
             EventKind::Start { .. } => "start",
             EventKind::UserMessage { .. } => "user_message",
             EventKind::Delta { .. } => "delta",
+            EventKind::ThinkingDelta { .. } => "thinking_delta",
             EventKind::ToolCall { .. } => "tool_call",
             EventKind::ToolResult { .. } => "tool_result",
             EventKind::PermissionRequest { .. } => "permission_request",

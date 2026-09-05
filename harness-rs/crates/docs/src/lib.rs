@@ -112,4 +112,23 @@ mod tests {
         assert_eq!(parsed["slides"], 1);
         assert!(parsed["text"].as_str().unwrap().contains("Flutter & Rust"));
     }
+
+    #[test]
+    fn pptx_write_and_parse_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("generated.pptx");
+        edit::write_pptx(
+            &path,
+            &[edit::Slide {
+                title: "迁移进度".into(),
+                content: vec!["Rust harness".into(), "Flutter client".into()],
+            }],
+        )
+        .unwrap();
+        let parsed = parse_file(&path).unwrap();
+        assert_eq!(parsed["kind"], "pptx");
+        assert_eq!(parsed["slides"], 1);
+        assert!(parsed["text"].as_str().unwrap().contains("迁移进度"));
+        assert!(parsed["text"].as_str().unwrap().contains("Flutter client"));
+    }
 }

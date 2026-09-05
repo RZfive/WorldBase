@@ -19,6 +19,10 @@ Pod::Spec.new do |s|
     :script => "RUST_OUT_DIR='#{rust_build_dir}' '#{build_script}'",
     :execution_position => :before_compile,
     :output_files => [rust_lib],
+    # The output path is shared by device/simulator configurations. Force the
+    # incremental Cargo invocation so Xcode never reuses an archive built for
+    # a different target or an older Rust source revision.
+    :always_out_of_date => '1',
   }
   s.libraries = 'z'
   s.frameworks = 'Security', 'SystemConfiguration', 'CoreFoundation', 'CFNetwork'

@@ -355,6 +355,7 @@ impl Store {
                 task TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 last_run_at TEXT,
+                next_run_at TEXT,
                 created_at TEXT NOT NULL
             );
             "#,
@@ -376,6 +377,7 @@ impl Store {
                 "ALTER TABLE agents ADD COLUMN memory_scopes TEXT NOT NULL DEFAULT '[\"user\",\"agent\",\"project\"]'",
                 "ALTER TABLE agents ADD COLUMN memory_write_policy TEXT NOT NULL DEFAULT '{}'",
                 "ALTER TABLE agents ADD COLUMN auto_reply_policy TEXT NOT NULL DEFAULT '{}'",
+                "ALTER TABLE schedules ADD COLUMN next_run_at TEXT",
             ];
             for sql in alters {
                 let _ = conn.execute(sql, []);
@@ -2757,8 +2759,8 @@ impl Store {
     pub fn create_schedule(&self, entry: &ScheduleEntry) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO schedules (id, name, cron, task, enabled, last_run_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO schedules (id, name, cron, task, enabled, last_run_at, next_run_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 entry.id,
                 entry.name,
@@ -2766,6 +2768,7 @@ impl Store {
                 entry.task,
                 entry.enabled,
                 entry.last_run_at,
+                entry.next_run_at,
                 now_ts(),
             ],
         )?;
@@ -2775,7 +2778,7 @@ impl Store {
     pub fn list_schedules(&self) -> Result<Vec<ScheduleEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, cron, task, enabled, last_run_at FROM schedules ORDER BY created_at",
+            "SELECT id, name, cron, task, enabled, last_run_at, next_run_at FROM schedules ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(ScheduleEntry {
@@ -2785,7 +2788,7 @@ impl Store {
                 task: row.get("task")?,
                 enabled: row.get::<_, i64>("enabled")? != 0,
                 last_run_at: row.get("last_run_at")?,
-                next_run_at: None,
+                next_run_at: row.get("next_run_at")?,
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -2802,6 +2805,29 @@ impl Store {
         conn.execute(
             "UPDATE schedules SET last_run_at = ?2 WHERE id = ?1",
             params![id, now_ts()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_schedule_next_run(&self, id: &str, next_run_at: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE schedules SET next_run_at = ?2 WHERE id = ?1",
+            params![id, next_run_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn advance_schedule(
+        &self,
+        id: &str,
+        last_run_at: &str,
+        next_run_at: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE schedules SET last_run_at = ?2, next_run_at = ?3 WHERE id = ?1",
+            params![id, last_run_at, next_run_at],
         )?;
         Ok(())
     }

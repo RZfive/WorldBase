@@ -16,6 +16,7 @@ uuid = { workspace = true }
 sha1 = { workspace = true }
 unicode-normalization = { workspace = true }
 tracing = { workspace = true }
+zip = { workspace = true }
 
 worldbase-protocol = { path = "../protocol" }
 worldbase-memory = { path = "../memory" }

@@ -12,9 +12,18 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:worldbase_mobile/core/harness_ffi.dart';
 
+Uri _loopbackUri(int port, String token, String scheme, String path) => Uri(
+  scheme: scheme,
+  host: '127.0.0.1',
+  port: port,
+  path: path,
+  queryParameters: {'token': token},
+);
+
 void main() {
   late Directory homeDir;
   late int port;
+  late String authToken;
 
   setUpAll(() async {
     homeDir = await Directory.systemTemp.createTemp('worldbase-e2e');
@@ -23,11 +32,12 @@ void main() {
     expect(started, isNotNull);
     port = started!;
     expect(port, greaterThan(0));
+    authToken = HarnessFfi.authToken!;
     final client = HttpClient();
     for (var i = 0; i < 60; i++) {
       try {
         final req = await client.getUrl(
-          Uri.parse('http://127.0.0.1:$port/health'),
+          _loopbackUri(port, authToken, 'http', '/health'),
         );
         final resp = await req.close();
         if (resp.statusCode == 200) break;
@@ -44,12 +54,15 @@ void main() {
   });
 
   test('移动端全功能面端到端', () async {
-    final ws = WebSocketChannel.connect(Uri.parse('ws://127.0.0.1:$port/ws'));
+    final ws = WebSocketChannel.connect(
+      _loopbackUri(port, authToken, 'ws', '/ws'),
+    );
     await ws.ready;
 
     final pending = <String, Completer<dynamic>>{};
     var nextId = 1;
     final eventLog = <Map<String, dynamic>>[];
+    final askUserPayloads = <Map<String, dynamic>>[];
     final doneWaiters = <String, Completer<void>>{};
     final doneStreams = <String>{};
 
@@ -79,6 +92,34 @@ void main() {
               'id': 'perm-\$reqId',
               'method': 'chat.respond',
               'params': {'requestId': reqId, 'allow': true},
+            }),
+          );
+        }
+        if (frame['kind'] == 'host_request' &&
+            frame['requestKind'] == 'ask_user') {
+          final reqId = frame['requestId'] as String;
+          final payload = (frame['payload'] as Map).cast<String, dynamic>();
+          askUserPayloads.add(payload);
+          final questions = (payload['questions'] as List).cast<Map>();
+          ws.sink.add(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': 'host-$reqId',
+              'method': 'host.respond',
+              'params': {
+                'requestId': reqId,
+                'result': {
+                  'answers': [
+                    for (var index = 0; index < questions.length; index++)
+                      {
+                        'question': questions[index]['question'],
+                        'answer': index == 0
+                            ? (questions[index]['options'] as List).first
+                            : '自定义 Markdown',
+                      },
+                  ],
+                },
+              },
             }),
           );
         }
@@ -125,17 +166,59 @@ void main() {
       },
     });
     expect(init['protocolVersion'], '1.0');
-    final toolNames = (init['availableTools'] as List)
-        .map((t) => (t as Map)['name'])
-        .toSet();
+    final availableTools = init['availableTools'] as List;
+    final toolNames = availableTools.map((t) => (t as Map)['name']).toSet();
+    expect(toolNames, hasLength(47), reason: 'mobile 工具面必须是显式、稳定的可执行集合');
     expect(toolNames, contains('read_file'));
     expect(toolNames, contains('ask_user'), reason: 'webview/交互能力应开放 host 域工具');
     expect(toolNames, contains('read_current_page'));
     expect(toolNames, contains('list_agent_workspace_catalog'));
     expect(toolNames, contains('create_agent'));
     expect(toolNames, contains('create_agent_group'));
+    expect(
+      toolNames,
+      isNot(contains('create_scheduled_task')),
+      reason:
+          'mobile must not advertise the partially implemented Node scheduler contract',
+    );
+    expect(toolNames, contains('schedule_create'));
+    expect(toolNames, containsAll(['schedule_list', 'schedule_delete']));
     expect(toolNames, isNot(contains('execute_command')));
     expect(toolNames, isNot(contains('create_project')));
+    for (final unavailable in [
+      'local_read_file',
+      'local_write_file',
+      'local_run_command',
+      'list_workspace_files',
+      'read_workspace_file',
+      'write_workspace_file',
+      'get_workspace_command_status',
+      'list_projects',
+      'read_project_file',
+      'write_project_file',
+      'get_project_command_status',
+      'get_project_status',
+      'get_task_status',
+      'query_project_database',
+      'analyze_project_data',
+    ]) {
+      expect(
+        toolNames,
+        isNot(contains(unavailable)),
+        reason: '$unavailable cannot be completed by the mobile runtime',
+      );
+    }
+    final mobileMcpInstaller = availableTools.cast<Map>().singleWhere(
+      (tool) => tool['name'] == 'install_mcp_server',
+    );
+    final mcpProperties =
+        (mobileMcpInstaller['inputSchema'] as Map)['properties'] as Map;
+    expect((mcpProperties['transport'] as Map)['enum'], [
+      'streamable-http',
+      'sse',
+    ]);
+    expect(mcpProperties.containsKey('command'), isFalse);
+    expect(mcpProperties.containsKey('overwrite_existing'), isFalse);
 
     // 2) 供应商管理：保存/激活/列表
     await call('provider.save', {
@@ -258,6 +341,29 @@ void main() {
     expect(msgs.length, greaterThanOrEqualTo(2));
     expect((msgs.first as Map)['role'], 'user');
 
+    final askResult = await call('tool.call', {
+      'name': 'ask_user',
+      'args': {
+        'questions': [
+          {
+            'question': '执行模式？',
+            'options': ['快速', '完整'],
+          },
+          {
+            'question': '输出格式？',
+            'options': ['JSON', '纯文本'],
+          },
+        ],
+      },
+    });
+    expect(askUserPayloads, hasLength(1), reason: '多个问题必须合并为一次 host_request');
+    expect(askUserPayloads.single['questions'], hasLength(2));
+    expect(askResult['success'], isTrue);
+    expect(askResult['answers'], [
+      {'question': '执行模式？', 'answer': '快速'},
+      {'question': '输出格式？', 'answer': '自定义 Markdown'},
+    ]);
+
     // 6) 分叉 + 编辑重发
     final userMsgId = (msgs.first as Map)['id'] as int;
     final fork =
@@ -337,7 +443,7 @@ void main() {
     final firstImage = imageList.first as Map;
     expect(firstImage['file'] as String, endsWith('.svg'));
     final imgReq = await HttpClient().getUrl(
-      Uri.parse('http://127.0.0.1:$port/studio/${firstImage['id']}'),
+      _loopbackUri(port, authToken, 'http', '/studio/${firstImage['id']}'),
     );
     final imgResp = await imgReq.close();
     expect(imgResp.statusCode, 200);
@@ -399,7 +505,7 @@ void main() {
 
     // 10) 会话列表含分叉会话 + 持久化校验（HTTP /rpc 通道）
     final rpcReq = await HttpClient().postUrl(
-      Uri.parse('http://127.0.0.1:$port/rpc'),
+      _loopbackUri(port, authToken, 'http', '/rpc'),
     );
     rpcReq.headers.contentType = ContentType.json;
     rpcReq.add(
@@ -466,7 +572,7 @@ void main() {
       reason: '对话生成 1 个 + tool.call 创建 1 个',
     );
     final pageReq = await HttpClient().getUrl(
-      Uri.parse('http://127.0.0.1:$port/lightapp/$lightAppId'),
+      _loopbackUri(port, authToken, 'http', '/lightapp/$lightAppId'),
     );
     final pageResp = await pageReq.close();
     expect(pageResp.statusCode, 200);

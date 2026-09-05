@@ -55,6 +55,20 @@ impl Tool for SkillRunTool {
             .skills
             .get(name)?
             .ok_or_else(|| anyhow::anyhow!("skill not found: {name}"))?;
-        Ok(json!({ "skill": skill, "note": "请按 instructions 执行任务" }))
+        let mut instructions = skill.instructions;
+        if let Some(arguments) = input.get("arguments").and_then(Value::as_object) {
+            for (key, value) in arguments {
+                let value = value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| value.to_string());
+                instructions = instructions.replace(&format!("${{{key}}}"), &value);
+            }
+        }
+        Ok(json!({
+            "skill": name,
+            "context": "inline",
+            "instructions": instructions,
+        }))
     }
 }

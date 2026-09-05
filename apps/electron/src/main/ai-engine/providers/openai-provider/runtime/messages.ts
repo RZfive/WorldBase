@@ -129,11 +129,14 @@ function sanitizeOutgoingContent (content: MessageContent): MessageContent {
     return sanitizeOutgoingText(content)
   }
   if (Array.isArray(content)) {
-    return content.map(part =>
-      part.type === 'text' && typeof part.text === 'string'
-        ? { ...part, text: sanitizeOutgoingText(part.text) }
-        : part
-    )
+    return content.flatMap(part => {
+      // Anthropic thinking blocks are provider-private. OpenAI-compatible
+      // endpoints reject them, and reasoning is regenerated on each turn.
+      if (part.type === 'thinking' || part.type === 'redacted_thinking') return []
+      return part.type === 'text' && typeof part.text === 'string'
+        ? [{ ...part, text: sanitizeOutgoingText(part.text) }]
+        : [part]
+    })
   }
   return content
 }

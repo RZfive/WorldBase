@@ -1,10 +1,10 @@
 # WorldBase Rust Harness 架构方案
 
-**版本**: v5（定案）  
-**日期**: 2026-08-28  
-**目标原则**: **Harness 完整迁移当前 TS 全部能力（零删减）· 移动端宿主按平台能力降级 · 桌面/CLI/server 零降级**
+**版本**: v5（定案）
+**日期**: 2026-09-04
+**目标原则**: **Harness 完整迁移当前 TS 全部能力（零删减）· 移动端宿主按平台能力降级 · 桌面/CLI 零降级**
 
-**当前实施状态（2026-08-31）**：Rust 已提供可运行的 core/app-server，并已接入 Electron 的可选 Harness 后端。Electron 默认仍使用 TS；选择 Rust 后，聊天、项目、文件工作区、图片 Studio、MCP、Agent Workspace 群组和 IM 群组路由均通过 Rust 的 JSON-RPC/事件流处理，Electron 宿主工具通过反向 RPC 保留窗口与本地数据语义。TS Harness 保留为显式迁移选项，以及 Rust 可执行文件缺失或初始握手失败时的启动兜底。
+**当前实施状态（2026-09-04）**：Rust 已提供可运行的 core/app-server，并已接入 Electron 的可选 Harness 后端。Electron 默认仍使用 TS；选择 Rust 后，聊天、项目、文件工作区、图片 Studio、MCP、Agent Workspace 群组和 IM 群组路由均通过 Rust 的 JSON-RPC/事件流处理，Electron 宿主工具通过反向 RPC 保留窗口与本地数据语义。TS Harness 保留为显式迁移选项，以及 Rust 可执行文件缺失或初始握手失败时的启动兜底。
 
 ---
 
@@ -17,10 +17,9 @@
 - **v5**: 全 Rust，Harness 完整迁移当前 TS 能力，移动端宿主降级
 
 > **实施状态（2026-08-29）**：P0–P1 主体与移动端已完成并端到端跑通。
-> Rust 48 测试、Flutter 全功能面 E2E 与 GUI 集成测试全过；移动端经 FFI 进程内
-> 运行 harness（`mobile-ffi` 内置 loopback 传输），**serve 独立部署层已删除**
-> （§3 的四种 transport 中 mobile/CLI 走 FFI in-process，serve 模式取消，
-> Electron 仍走 app-server stdio）。详见 HARNESS.md。
+> Rust workspace、Flutter 全功能面 E2E 与 FFI 生命周期测试全过；移动端经 FFI 进程内
+> 启动 harness；Flutter 通过 `mobile-ffi` 内置的 loopback WebSocket JSON-RPC 传输通信，
+> Electron 仍走 app-server stdio。详见 HARNESS.md。
 
 ---
 
@@ -28,10 +27,10 @@
 
 1. [核心原则](#1-核心原则)
 2. [总体架构与 crate 结构](#2-总体架构与-crate-结构)
-3. [通用承载：一个 dispatcher，四种 transport](#3-通用承载一个-dispatcher四种-transport)
+3. [通用承载：一个 dispatcher，多种 transport](#3-通用承载一个-dispatcher多种-transport)
 4. [宿主能力注入](#4-宿主能力注入)
 5. [Electron 集成：渐进迁移、全能力保留](#5-electron-集成渐进迁移全能力保留)
-6. [CLI 与 serve 模式](#6-cli-与-serve-模式)
+6. [CLI 模式](#6-cli-模式)
 7. [对标 Codex](#7-对标-codex)
 8. [移动端降级：宿主层面的能力映射](#8-移动端降级宿主层面的能力映射)
 9. [演进路线](#9-演进路线)
@@ -44,19 +43,18 @@
 ### Harness 是能力的全集，宿主按需裁剪（目标）
 
 - **Rust harness core**: 目标是将 `apps/electron/src/main` 全部业务逻辑 1:1 平移——全栈项目运行时（bundled Node）、全部 60+ 工具、IM webhook 接收、重文档编辑、命令沙箱、群组协作、记忆、技能、MCP、scheduler……**零功能删减**
-- **桌面端/CLI/server**: Rust 已覆盖当前 Electron 的模型/工具循环和已接入业务域；Electron 仍以 TS 作为可选后端，便于迁移期间逐项回归与故障切换
-- **移动端**: 通过 `cfg(feature = "mobile")` 裁剪出可编译子集 + 握手时能力协商过滤工具集（不跑 Node 子进程，用 WebView 轻应用替代全栈项目）
+- **桌面端/CLI**: Rust 已覆盖当前 Electron 的模型/工具循环和已接入业务域；Electron 仍以 TS 作为可选后端，便于迁移期间逐项回归与故障切换
+- **移动端**: 当前与桌面端共享同一依赖图；FFI transport 固定移动端 capability ceiling，握手只能进一步收窄能力，并通过显式移动工具白名单隐藏子进程、端口监听和 Electron-only 工具（不跑 Node 子进程，用 WebView 轻应用替代全栈项目）
 
 **不是「为了移动端简化 harness」，而是「harness 保持完整，移动端选择性接入」。**
 
 ### 架构决策
 
-**Harness 的最终形态是 Rust workspace: 完整迁移当前 TS 版全部能力，唯一 dispatcher + 四种接入方式。迁移期间 Electron 保持 TS/Rust 双后端可选。**
+**Harness 的最终形态是 Rust workspace: 完整迁移当前 TS 版全部能力，唯一 dispatcher + 三种接入方式。迁移期间 Electron 保持 TS/Rust 双后端可选。**
 
 - **CLI/TUI**: 直接链接 core crate（进程内，同 codex），**全能力**
 - **Electron**: spawn harness 二进制，stdio 上跑全双工 JSON-RPC（codex app-server 同款）；设置可选 TS/Rust，Rust 选择时由 Rust 承接已接入的业务域
-- **移动端**: 经 flutter_rust_bridge 把 core 编译为静态库链入 App（FFI 进程内），**按平台能力降级**（见 §8）
-- **server**: 同一二进制加 `serve`（axum，WS/HTTP），**全能力**
+- **移动端**: 通过 `dart:ffi` 加载动态库/静态链接产物并在 App 进程内启动，**按平台能力降级**（见 §8）
 
 ### 为什么选 Rust
 
@@ -74,15 +72,14 @@
 
 | 模块 | 当前 TS | Rust 迁移目标 | 说明 |
 |---|---|---|---|
-| AI 引擎 | providers / agent / 60+ 工具 / 权限引擎 | `core` + `tools` crate | 完整保留，包括 tool-local-command（桌面/server feature）|
+| AI 引擎 | providers / agent / 60+ 工具 / 权限引擎 | `core` + `tools` crate | 完整保留，包括 tool-local-command（桌面域）|
 | 群组协作 | deliberation / session / 黑板 / 5 模式 / HITL | `group` crate | 纯状态机，全端可用 |
-| 项目运行时 | bundled-runtime / project-* 四件套 | `project-runtime` crate | **bundled Node + pnpm**，desktop/server feature only |
+| 项目运行时 | bundled-runtime / project-* 四件套 | `project-runtime` crate | **bundled Node + pnpm**，桌面域 only |
 | 文档引擎 | mammoth / pdf-lib / exceljs / officegen / sharp | `docs` crate | 解析全端（calamine/lopdf）；编辑桌面（printpdf/docx-rs 或保留 TS 注入） |
 | MCP client | stdio / SSE / HTTP transports | `mcp-client` crate | 全端，移动端仅远程（SSE/HTTP）|
-| IM 网关 | 飞书/微信/Slack 等 7 连接器 | `im-gateway` crate | webhook 模式 desktop/server only；socket 模式可选移动端 |
+| IM 网关 | 飞书/微信/Slack 等 7 连接器 | `im-gateway` crate | webhook 模式桌面域 only；socket 模式可选移动端 |
 | scheduler / 长期目标 / 记忆 | cron / FTS5 | `scheduler` + `memory` crate | 全端；移动端定时语义降级（iOS 补跑）|
-| LAN server | Express :19527 | app-server(stdio/WS) + serve(axum) | desktop/server；移动端不监听端口 |
-| 命令执行 / 沙箱 | exec / Seatbelt/Landlock | `exec` crate | desktop/server feature only |
+| 命令执行 / 沙箱 | exec / Seatbelt/Landlock | `exec` crate | 桌面域 only |
 | 浏览器自动化 | webview executeJavaScript | 反向 RPC + platform channel | 全端（桌面 Electron webview，移动 flutter_inappwebview）|
 
 **零删减**：移动端砍的不是 harness 的功能，而是在 FFI 边界通过能力协商拦截（见 §8）。
@@ -97,7 +94,7 @@
 the-world/
 ├── apps/electron/       # Workspace 1: 原始 Electron + Vue/TypeScript
 ├── harness-rs/          # Workspace 2: 唯一 Rust Cargo workspace
-├── apps/mobile/         # Workspace 3: Flutter（P3 创建）
+├── apps/mobile/         # Workspace 3: Flutter（FFI + 全功能面已接入）
 └── docs/                # monorepo 级契约、架构与迁移文档
 ```
 
@@ -106,10 +103,9 @@ Electron 源码已迁移至 `apps/electron/`，Rust workspace 位于 `harness-rs
 ### 总体架构
 
 ```
-                ┌─ Flutter 移动 App ───── FFI(flutter_rust_bridge,进程内,能力过滤)
+                ┌─ Flutter 移动 App ───── FFI 启动 + loopback WebSocket JSON-RPC
 Rust harness ───┼─ CLI(worldbase chat/run/projects)── in-proc(链接 core,全能力)
-(monorepo       ├─ Electron 桌面 ────────── stdio JSON-RPC(spawn 二进制,按迁移域)
- multi-workspace)└─ worldbase serve ─────── WS/HTTP(axum,全能力)
+(monorepo       └─ Electron 桌面 ────────── stdio JSON-RPC(spawn 二进制,按迁移域)
 ```
 
 ### crate 结构（对齐 codex-rs，完整迁移当前 TS）
@@ -119,31 +115,30 @@ harness-rs/                       # 唯一 Cargo workspace
 ├── Cargo.toml
 └── crates/
     ├── core/             # agent 循环 · session/turn · 工具注册 · 权限引擎
-    ├── protocol/         # serde schema 单一来源 → codegen(TS for Electron / Dart for FFI)
+    ├── protocol/         # Rust serde schema；TS/Dart 适配器由跨端契约测试守护
     ├── providers/        # openai / anthropic，SSE 流式(reqwest+rustls)
-    ├── tools/            # 60+ 内置工具(与当前 TS 版 1:1 对齐，cfg 门控平台子集)
+    ├── tools/            # Rust 原生工具 + Electron 契约快照/宿主覆盖 + capability 过滤
     │   ├── local_file.rs / local_command.rs / web_search.rs / web_fetch.rs
     │   ├── ask_user.rs / auth.rs / todo.rs / plan.rs ...
-    │   └── (mobile feature: 裁剪 local_command / exec 类，保留其余)
+    │   └── (mobile runtime allow-list: 隐藏 local_command / exec 与宿主专属工具)
     ├── group/            # 群组 deliberation · session · 黑板(纯状态机，全端)
     ├── memory/           # rusqlite FTS5(全端)
     ├── skills/           # YAML 技能引擎(全端)
     ├── scheduler/        # 定时任务(全端，iOS 语义降级为补跑)
-    ├── mcp-client/       # rmcp(stdio desktop/server, SSE/HTTP 全端)
+    ├── mcp-client/       # stdio 桌面域，SSE/HTTP 全端
     ├── docs/             # 文档引擎
     │   ├── parse/        # calamine · lopdf · docx · image(解析，全端)
-    │   └── edit/         # printpdf · docx-rs(编辑，desktop/server or TS 注入)
+    │   └── edit/         # printpdf · docx-rs(编辑，桌面域 or TS 注入)
     ├── search/           # ignore/grep 系，ripgrep 级检索(全端)
-    ├── app-server/       # JSON-RPC stdio/WS(Electron / 远端客户端)
-    ├── serve/            # axum WS/HTTP server 模式(未来多设备/Web，全能力)
-    ├── cli/              # worldbase chat/run/projects/serve(链接 core，全能力)
-    ├── mobile-ffi/       # flutter_rust_bridge API 面(移动端宿主，能力协商过滤)
-    ├── exec/             # 命令执行 + 沙箱(desktop/server only)
-    ├── project-runtime/  # **Node 项目运行时**(desktop/server feature only)
+    ├── app-server/       # stdio NDJSON JSON-RPC(Electron)
+    ├── cli/              # worldbase chat/run/projects(链接 core，全能力)
+    ├── mobile-ffi/       # C ABI 启停/token + 鉴权 loopback WS/HTTP(移动端能力过滤)
+    ├── exec/             # 命令执行 + 沙箱(桌面域 only)
+    ├── project-runtime/  # **Node 项目运行时**(桌面域 only)
     │   ├── bundled_node.rs   # spawn 内置 Node 二进制
     │   ├── bundled_pnpm.rs   # pnpm install / build
     │   └── dev_server.rs     # 启动 :3100+ / 健康检查 / 日志流
-    └── im-gateway/       # IM 连接器(webhook desktop/server, socket 模式可选移动)
+    └── im-gateway/       # IM 连接器(webhook 桌面域，socket 模式可选移动)
 
 apps/electron/                    # 独立 Node/pnpm workspace
 ├── electron/                      # main/preload/宿主适配
@@ -151,26 +146,26 @@ apps/electron/                    # 独立 Node/pnpm workspace
 ├── public/ · scripts/ · tests/
 └── package.json                   # Electron 依赖与构建
 
-apps/mobile/                      # 独立 Flutter workspace（P3 创建）
+apps/mobile/                      # 独立 Flutter workspace（FFI + loopback WS）
 ├── lib/{app,core,features,l10n}/
 ├── android/ · ios/ · test/
 └── pubspec.yaml
 ```
 
-`core`、`app-server`、`cli`、`serve` 和 `mobile-ffi` 是同一个 Cargo workspace 内的 crate，不是独立仓库。Electron 通过 spawn `app-server` 的 stdio JSON-RPC 接入；Flutter 通过 `mobile-ffi` 接入。
+`core`、`app-server`、`cli` 和 `mobile-ffi` 是同一个 Cargo workspace 内的 crate，不是独立仓库。Electron 通过 spawn `app-server` 的 stdio JSON-RPC 接入；Flutter 通过 FFI 在进程内启动 `mobile-ffi`，再经 loopback WebSocket JSON-RPC 接入。
 
-**关键**：`project-runtime` / `exec` / `im-gateway`(webhook) 等「需要子进程/端口监听」的模块用 `#[cfg(not(feature = "mobile"))]` 门控，编译到移动端静态库时自动排除。Agent 工具集在握手时根据 `capabilities` 动态调整——桌面端全量，移动端自动隐藏 `create_project`(全栈) / `execute_command` 等工具。
+**关键**：当前没有 `cfg(feature = "mobile")` 编译期边界。`mobile-ffi` 的 `desktop-support` 是为兼容既有命令保留的空 feature；Android/iOS 脚本虽传入 `--no-default-features`，目前不会从依赖图裁掉 `project-runtime` / `exec` / `im-gateway`。实际安全与可用性边界由 FFI transport 的移动端 capability ceiling、`initialize` 的能力交集/排除项并集，以及 Agent 的显式移动工具白名单共同提供；移动连接无法把自己升级为 desktop，且不会看到 `create_project`(全栈) / `execute_command` 等工具。后续若引入真实的编译期裁剪，应作为独立优化并配套构建矩阵验证，不能替代 runtime gate。
 
 ---
 
-## 3. 通用承载：一个 dispatcher，四种 transport
+## 3. 通用承载：一个 dispatcher，多种 transport
 
 ### 协议要点
 
 - **JSON-RPC 2.0 全双工**。宿主 → harness: 命令与流式请求；harness → 宿主: 事件通知（带 seq）、反向请求（交互弹层/页面自动化/对话框）
 - **stdio 上用换行分隔 JSON（NDJSON）**，日志走 stderr（codex app-server 同款）
 - **握手即能力协商**。连接建立时交换 `protocolVersion` 与 `capabilities`: 宿主声明「我能提供哪些端口/注入工具」，harness 据此启用或隐藏对应 Agent 工具
-- **四种 transport 共用同一 dispatcher**。CLI/移动端 FFI 走内存 transport，零序列化开销；协议语义完全一致
+- **各接入方式共用同一 dispatcher**。CLI 直接链接 core；Electron 使用 stdio NDJSON JSON-RPC；Flutter 通过 FFI 启动 mobile-ffi 后使用 loopback WebSocket JSON-RPC
 
 ### 流式与断点续传
 
@@ -205,7 +200,7 @@ apps/mobile/                      # 独立 Flutter workspace（P3 创建）
 |---|---|---|
 | 文档解析(docx/xlsx/pdf 读取) | **Rust docs crate(calamine/lopdf/image)**，全端可用 | 核心内置工具 |
 | 重文档编辑(PDF 插图/Office 生成) | 短期保留 TS(pdf-lib/officegen)作注入；长期 Rust(printpdf/docx-rs) | 宿主注册工具，Agent 无感知 |
-| Next.js 全栈项目运行时 | Rust `project-runtime` crate(spawn Node/pnpm) | 桌面/server 独有 |
+| Next.js 全栈项目运行时 | Rust `project-runtime` crate(spawn Node/pnpm) | 桌面域独有 |
 | webview 浏览器自动化 | Electron renderer / flutter_inappwebview | 全端，反向 RPC |
 | 原生通知/对话框/项目窗口 | 宿主平台 API | HostServices 端口实现 |
 
@@ -217,7 +212,7 @@ apps/mobile/                      # 独立 Flutter workspace（P3 创建）
 
 Electron 设置 → 执行中的“对话 Harness”提供 `TypeScript（旧版）`（默认）和 `Rust（app-server）` 两个后端。Rust 分支承接完整的 `ai:chat` / `ai:chatStream` 模型与工具循环，并同步会话历史、权限确认、项目、工作区、群组、页面、多模态附件、图片 Studio 与 MCP 上下文。项目、工作区、图片 Studio、MCP、Agent Workspace 群组和 IM 群组路由均已接入 Rust；Electron 权威域工具通过 `tool.execute` 宿主反向 RPC 注册为 `electron_host_override`。Rust 二进制不可用或启动失败时才自动沿用 TS 路径。已有 Rust 流在切回 TS 后仍可完成、授权和停止。
 
-选择 Rust 不会丢弃 Electron 上下文，也不会根据上下文回退 TS。Rust 已注册 Electron 的公开 Agent 工具名；当操作依赖 Electron 权威数据、运行时或 UI 时，同名的 `electron_host_override` 描述符替换 Rust 内建工具，并由 Rust 循环发起 `tool.execute` 宿主 RPC。Electron 模式仅把 Rust 的计划模式控制作为原生工具暴露给模型，其余域工具均走宿主桥，避免绕过 Electron 的项目、工作区、权限、图库或 MCP 状态。项目目录/运行时日志、文档 artifact store、图片 Studio 队列、subagent、MCP/Skill/Agent Workspace 持久化以及完整 memory/group 行为均已进入 Rust 可测试执行路径；契约测试继续守护 1:1 的输入输出和存储语义。对应的 parity 清单维护在 [HARNESS.md](../HARNESS.md)，完成迁移窗口前保留 TS `AIEngine`、工具和 Electron 服务。
+选择 Rust 不会丢弃 Electron 上下文，也不会根据上下文回退 TS。Electron 的 68 项公开工具定义由注册表自动生成 Rust 契约；除 Rust 原生的 `enter_plan_mode`、`exit_plan_mode` 外，同名 `electron_host_override` 描述符由 Rust 循环发起 `tool.execute` 宿主 RPC，执行现有 Node handler。动态 `mcp__*` 仍由 Rust 发现和执行，通用 `mcp_call` 则复用 Electron MCPService，以便同一轮安装的服务可立即调用。这让 Electron 项目、工作区、权限、图库、文档、调度器、固定 MCP 资源/Prompt 工具与 UI 存储继续复用 Node 实现，同时让 provider、会话、工具循环和计划 guard 留在 Rust。Flutter/FFI 则使用 Rust 原生实现并按 capability 隐藏不可用域。现有测试覆盖 68 项工具的契约生成、注册与 ownership，以及部分关键业务路径；不代表 68 项 handler 均已逐项完成行为 1:1 验证。对应清单维护在 [HARNESS.md](../HARNESS.md)，完成迁移窗口前保留 TS `AIEngine`、工具和 Electron 服务。
 
 ### 打包与进程模型
 
@@ -240,7 +235,7 @@ ipcMain.handle('conversations:list', (e, args) => harness.call('conversations.li
 
 ---
 
-## 6. CLI 与 serve 模式
+## 6. CLI 模式
 
 CLI 是 `cli` crate，直接链接 core，全能力：
 
@@ -248,7 +243,6 @@ CLI 是 `cli` crate，直接链接 core，全能力：
 worldbase chat "..."
 worldbase run --task "每日汇总"
 worldbase projects ls
-worldbase serve --port 19527  # 同一二进制变 server
 ```
 
 ---
@@ -268,10 +262,11 @@ OpenAI Codex([openai/codex](https://github.com/openai/codex))架构同构验证:
 
 ### 接入方式：FFI 进程内
 
-- core 编译为静态库链入 App（无子进程/JIT，AppFlowy 验证）
+- Rust 库由 `dart:ffi` 加载；当前 C ABI 仅导出 `worldbase_start`、`worldbase_get_auth_token` 和 `worldbase_stop`
 - tokio runtime 独立线程组，Dart 全异步
-- 单实例 + 双通道；流式按 ~16ms 帧批量聚合跨 FFI
-- panic 防线: catch_unwind，错误映射协议帧
+- `worldbase_start` 在 App 进程内启动 harness 并返回动态端口；每次启动同时生成随机 64 字符 token，Flutter 读取 token 后通过 loopback WebSocket JSON-RPC 收发请求、事件与反向请求
+- `/health`、`/rpc`、`/ws`、`/studio/{id}` 与 `/lightapp/{id}` 均要求同一 token；服务只绑定 `127.0.0.1`
+- 三个 C ABI 入口均以 `catch_unwind` 阻止 panic 穿过 FFI 边界；启动与 token 读取失败返回 `-1`，停止入口吞下 unwind，同时保留 panic hook/tracing 诊断
 
 ### 能力协商：握手时过滤工具集
 
@@ -301,7 +296,7 @@ Harness 据此**动态过滤 Agent 工具集**：
 
 ### 移动端功能清单（经过滤后）
 
-UI 四 Tab: **对话 · 应用 · 绘图 · 我的**
+UI 以**对话**为主页，历史会话、应用、绘图和设置从抽屉进入。
 
 | 处置 | 功能 |
 |---|---|
@@ -313,11 +308,11 @@ UI 四 Tab: **对话 · 应用 · 绘图 · 我的**
 
 ### 双端兼容工程
 
-- 构建: cargokit，5 target(iOS/Android)
+- 构建: `scripts/build_rust_android.sh` 与 `scripts/build_rust_ios.sh` 直接调用 rustup/cargo；当前未接入 cargokit
 - 依赖: reqwest+rustls、rusqlite bundled FTS5
-- cfg gate: mobile/desktop/server feature
-- 二进制预算: ≤15MB/ABI
-- iOS: checkpoint 断点续跑
+- runtime gate: transport capability ceiling + 移动端工具白名单；移动构建命令关闭默认 features，但空 feature 目前不改变依赖图
+- 已验证: Android `aarch64-linux-android` 与 iOS `aarch64-apple-ios` release 交叉编译
+- 待验证: Android/iOS 真机打包、安装、UI/生命周期、后台恢复与所有 ABI；当前不能把交叉编译通过等同于可上架
 
 ### Flutter 架构
 
@@ -325,14 +320,14 @@ UI 四 Tab: **对话 · 应用 · 绘图 · 我的**
 lib/
 ├── app/            # 路由、主题、i18n
 ├── core/
-│   ├── rust_bridge/  # flutter_rust_bridge 生成
-│   ├── protocol/     # Rust codegen Dart
-│   └── harness.dart  # 单例管理
+│   ├── harness_ffi.dart     # 手写 dart:ffi C ABI 绑定与动态库解析
+│   ├── harness_client.dart  # loopback WS/HTTP JSON-RPC 客户端与协议模型
+│   └── providers.dart       # Riverpod 状态与业务控制器
 ├── features/       # chat / launchpad / studio / settings
 └── l10n/
 ```
 
-状态管理: Riverpod；导航: 底部 Tab
+状态管理: Riverpod；导航: 对话主页 + 抽屉入口
 
 ---
 
@@ -343,9 +338,9 @@ lib/
 | P0 | Rust 骨架: core + providers + protocol + cli | CLI 跑通对话 | 5–6 周 |
 | P1 | 核心移植: tools/skills/memory/群组/scheduler/MCP | 契约测试对齐桌面 | 8–10 周 |
 | P2 | app-server + Electron 接入按域切换（已完成，保留双后端迁移窗口） | 桌面可选择 Rust/TS，Rust 选择下已接入域统一走 Rust | 4–5 周 |
-| P3 | mobile-ffi + Flutter 四 Tab + 轻应用 + cargokit | 移动端双端上架 | 6–8 周 |
+| P3 | mobile-ffi + Flutter 功能面 + 轻应用 + 平台构建接入 | 移动端真机打包与生命周期验证 | 6–8 周 |
 | P4 | docs/search 全端 + exec/project-runtime(Rust 或 TS 注入) | 文档桌面级；全栈项目桌面可用 | 4–6 周 |
-| P5 | 通过行为/E2E parity gate 后再删 TS + 上架打磨 | 一套 Rust 核心四宿主 | 3–4 周 |
+| P5 | 通过行为/E2E parity gate 后再删 TS + 上架打磨 | 一套 Rust 核心三种接入方式 | 3–4 周 |
 
 **总计**: 9–12 个月(1–2 人)
 
@@ -355,7 +350,7 @@ lib/
 
 ### 风险
 
-- **FFI 边界**：单流+帧批量+panic 防线 P3 就位
+- **FFI 边界**：loopback token、生命周期和导出函数 panic containment 自动化测试已就位；Android/iOS 真机生命周期与后台恢复仍需验证
 - **Rust 工期单价**：P1 超 50% 触发 fallback 评估
 - **移植期双运行**：Rust 域通过设置按需启用；未完成 parity 前保留 TS 默认实现和回退路径
 - **构建矩阵**：5 target + 4 平台，P0 就建 CI
@@ -370,9 +365,7 @@ lib/
 
 ### fallback
 
-若 P1 超 50%或 P3 FFI 不可解:
-1. 移动端退 WS 客户端连 server
-2. 核心退 Dart+Rust 插件
+若后续平台限制导致 FFI 无法继续，需另行评审远端 transport 或 Dart/Rust 插件拆分；当前产品不提供独立 `serve` 部署层。
 
 ---
 
@@ -380,9 +373,8 @@ lib/
 
 - [OpenAI Codex](https://github.com/openai/codex)
 - [AppFlowy](https://github.com/AppFlowy-IO/AppFlowy)(Flutter+Rust FFI 验证)
-- [flutter_rust_bridge](https://github.com/fzyzcjy/flutter_rust_bridge)
 
 ---
 
-**文档状态**: 🟢 v5 Rust Harness 已接入 Electron；Electron 保留 TS/Rust 可选后端用于迁移回归，移动端真机构建与少量边缘语义仍按路线持续验证
+**文档状态**: v5 Rust Harness 已接入 Electron；Electron 保留 TS/Rust 可选后端用于迁移回归。移动 FFI 已通过 macOS E2E、panic containment/lifecycle 自动化测试和 Android/iOS arm64 Rust 交叉编译；真机打包、后台行为仍待验证
 **维护**: 随 P0–P5 更新细节

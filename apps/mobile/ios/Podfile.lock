@@ -93,7 +93,7 @@ SPEC CHECKSUMS:
   SwiftyGif: 706c60cf65fa2bc5ee0313beece843c8eb8194d4
   url_launcher_ios: 7a95fa5b60cc718a708b8f2966718e93db0cef1b
   webview_flutter_wkwebview: 8ebf4fded22593026f7dbff1fbff31ea98573c8d
-  WorldBaseRust: 9fce6ce913abaa28c66954c2a60907aa63828376
+  WorldBaseRust: c98aedb9cb35d72f55a542326f14f3c51606414f
 
 PODFILE CHECKSUM: 7550c242e06010193f55c7ebc44e83b02ca06294
 

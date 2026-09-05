@@ -1,0 +1,2465 @@
+{
+  "version": 1,
+  "source": "apps/electron/src/main/ai-engine/agent/tools",
+  "tools": [
+    {
+      "name": "analyze_project_data",
+      "description": "Analyze project data and return statistics. Supported types: summary, trend, distribution, comparison.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "analysis_type": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "trend",
+              "distribution",
+              "comparison"
+            ],
+            "description": "Analysis type"
+          },
+          "options": {
+            "type": "object",
+            "description": "Analysis options. trend needs {table, dateColumn, valueColumn}; distribution needs {table, column}; comparison needs {table, groupColumn, valueColumn}.",
+            "properties": {
+              "table": {
+                "type": "string",
+                "description": "Table name"
+              },
+              "dateColumn": {
+                "type": "string",
+                "description": "Date column (trend)"
+              },
+              "valueColumn": {
+                "type": "string",
+                "description": "Value column"
+              },
+              "column": {
+                "type": "string",
+                "description": "Column to analyze (distribution)"
+              },
+              "groupColumn": {
+                "type": "string",
+                "description": "Group column (comparison)"
+              },
+              "aggregation": {
+                "type": "string",
+                "description": "Aggregation function (comparison): SUM/AVG/COUNT/MIN/MAX"
+              }
+            }
+          }
+        },
+        "required": [
+          "project_id",
+          "analysis_type"
+        ]
+      }
+    },
+    {
+      "name": "ask_user",
+      "description": "Ask the user one or more clarification questions when you are blocked on a decision the user must make (the request is genuinely ambiguous, you cannot pick a sensible default, or proceeding without their answer would force a costly rewrite). BUNDLE every pending question into a single ask_user call — never ask one at a time when more are coming. For each question, propose 2-4 mutually exclusive option strings; the renderer adds an \"其他 (自定义)\" free-text fallback automatically. Do NOT use this tool when a sensible default exists, or when the answer is obvious from context, or merely to confirm something — pick the obvious choice and proceed instead. Returns `{ answers: [{ question, answer }] }` where `answer` is either the option string the user chose or the free text they typed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "questions": {
+            "type": "array",
+            "description": "List of clarification questions to ask the user, all surfaced together in one panel. 1-4 questions; combine related concerns rather than splitting them into multiple calls.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "question": {
+                  "type": "string",
+                  "description": "The complete question to ask the user. Should be specific, end with a question mark, and avoid forward references like \"see option A\"."
+                },
+                "options": {
+                  "type": "array",
+                  "description": "Up to 4 distinct candidate answers. Keep each option short (1-6 words) and mutually exclusive. Do NOT include an \"其他/Other\" option — the renderer always shows a free-text input below the options for that.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "maxItems": 4
+                }
+              },
+              "required": [
+                "question",
+                "options"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 4
+          }
+        },
+        "required": [
+          "questions"
+        ]
+      }
+    },
+    {
+      "name": "call_project_api",
+      "description": "Call a running HTTP API exposed by the specified project.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "DELETE"
+            ],
+            "description": "HTTP method"
+          },
+          "path": {
+            "type": "string",
+            "description": "API path, for example /api/records"
+          },
+          "body": {
+            "type": "object",
+            "description": "Request body for POST or PUT requests"
+          }
+        },
+        "required": [
+          "project_id",
+          "method",
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "clear_project_build_flag",
+      "description": "Force the platform to re-sync its cached build state from disk after a successful manual build. Use this when get_project_status still reports needs_rebuild or missing node_modules even though you have already built the project manually via run_project_command.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      }
+    },
+    {
+      "name": "create_agent",
+      "description": "Create or update a custom agent in the Agent Workspace. Use list_agent_workspace_catalog first to choose valid provider, model, skill IDs, and tool names.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Optional existing agent ID to update. Omit to create a new agent."
+          },
+          "name": {
+            "type": "string",
+            "description": "Agent display name."
+          },
+          "description": {
+            "type": "string",
+            "description": "Short description of the agent role."
+          },
+          "system_prompt": {
+            "type": "string",
+            "description": "System prompt for the agent."
+          },
+          "provider_id": {
+            "type": "string",
+            "description": "Existing provider ID from list_agent_workspace_catalog."
+          },
+          "model_id": {
+            "type": "string",
+            "description": "Existing model ID under the selected provider."
+          },
+          "reasoning_strength": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "max"
+            ]
+          },
+          "skill_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Existing skill IDs to bind."
+          },
+          "allowed_tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Allowed tool names. Leave empty for no allow-list restriction."
+          },
+          "denied_tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Denied tool names."
+          },
+          "memory_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "user",
+                "agent",
+                "project",
+                "group",
+                "channel"
+              ]
+            }
+          },
+          "allow_user_traits": {
+            "type": "boolean"
+          },
+          "allow_agent_skills": {
+            "type": "boolean"
+          },
+          "allow_steps": {
+            "type": "boolean"
+          },
+          "allow_knowledge": {
+            "type": "boolean"
+          },
+          "auto_reply_enabled": {
+            "type": "boolean"
+          },
+          "auto_reply_require_mention": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "system_prompt"
+        ]
+      }
+    },
+    {
+      "name": "create_agent_group",
+      "description": "Create or update an agent group in the Agent Workspace. Use list_agent_workspace_catalog first to pick valid coordinator and member agent IDs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Optional existing group ID to update. Omit to create a new group."
+          },
+          "name": {
+            "type": "string",
+            "description": "Group display name."
+          },
+          "description": {
+            "type": "string",
+            "description": "Short description of the group objective."
+          },
+          "coordinator_agent_id": {
+            "type": "string",
+            "description": "Existing agent ID used as coordinator."
+          },
+          "member_agent_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Existing member agent IDs."
+          },
+          "max_rounds": {
+            "type": "integer"
+          },
+          "max_parallel_workers": {
+            "type": "integer"
+          },
+          "shared_memory_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "group",
+                "project",
+                "channel"
+              ]
+            }
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "summary_only",
+              "expandable_internal_transcript"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "coordinator_agent_id",
+          "member_agent_ids"
+        ]
+      }
+    },
+    {
+      "name": "create_project",
+      "description": "Create a new project shell or a full AI-generated project. For large projects, prefer development_mode=true so you can create the project first, then add or modify files incrementally with write_project_file / patch_project_file instead of sending every file in one tool call.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Project name, for example: expense tracker"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "frontend",
+              "backend",
+              "fullstack"
+            ],
+            "description": "Project type"
+          },
+          "files": {
+            "type": "object",
+            "description": "Optional file content map {relativePath: fileContent}. In development_mode this may be omitted or partial so the AI can continue writing files incrementally afterward."
+          },
+          "meta": {
+            "type": "object",
+            "description": ".world-meta.json content, including runtime config, API definitions, and data schema"
+          },
+          "development_mode": {
+            "type": "boolean",
+            "description": "When true, create the project in incremental development mode. The AI can then call write_project_file / patch_project_file multiple times instead of generating all code in one response."
+          },
+          "install_dependencies": {
+            "type": "boolean",
+            "description": "When true, install dependencies immediately after project creation. Defaults to false in development_mode and true otherwise when package.json exists."
+          },
+          "build_and_start": {
+            "type": "boolean",
+            "description": "When true, build (if needed) and start the project immediately. Defaults to false in development_mode and true otherwise."
+          },
+          "cleanup_dependencies_on_success": {
+            "type": "boolean",
+            "description": "When true, remove node_modules after a successful build/start to save disk space. Leave false during iterative development."
+          },
+          "cleanup_build_cache_on_success": {
+            "type": "boolean",
+            "description": "When true, remove build caches such as .next/cache after a successful build/start to save disk space."
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ]
+      }
+    },
+    {
+      "name": "create_scheduled_task",
+      "description": "Create a persistent scheduled AI task. The task can run once, repeat by minute interval, repeat daily or weekly at a local time, or run on specific dates. It can be limited to selected MCP servers and Skills.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Optional task title shown in the scheduler panel and notifications."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "The user prompt that the scheduled AI task will execute."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the task should start scheduling immediately. Defaults to true."
+          },
+          "schedule_kind": {
+            "type": "string",
+            "enum": [
+              "once",
+              "interval",
+              "daily",
+              "weekly",
+              "dates"
+            ],
+            "description": "Scheduling mode: run once, repeat on minute interval, repeat every day, repeat every week, or run on specific dates."
+          },
+          "run_at": {
+            "type": "string",
+            "description": "Required when schedule_kind=once. ISO datetime for the run."
+          },
+          "every_minutes": {
+            "type": "integer",
+            "description": "Required when schedule_kind=interval. Repeat interval in minutes."
+          },
+          "start_at": {
+            "type": "string",
+            "description": "Optional start time for interval tasks. If omitted, the first run starts immediately."
+          },
+          "time_of_day": {
+            "type": "string",
+            "description": "Required when schedule_kind=daily or weekly. Local time in HH:mm format, for example 09:30."
+          },
+          "weekdays": {
+            "type": "array",
+            "description": "Required when schedule_kind=weekly. ISO weekday numbers, where 1=Monday and 7=Sunday.",
+            "items": {
+              "type": "integer",
+              "enum": [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7
+              ]
+            }
+          },
+          "dates": {
+            "type": "array",
+            "description": "Required when schedule_kind=dates. ISO datetime array for each planned run.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "selected_skill_ids": {
+            "type": "array",
+            "description": "Optional Skill IDs enabled only for this task run.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "selected_mcp_server_ids": {
+            "type": "array",
+            "description": "Optional MCP server IDs allowed only for this task run.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "max_retries": {
+            "type": "integer",
+            "description": "How many automatic retries are allowed after failure. Defaults to 0."
+          },
+          "retry_delay_minutes": {
+            "type": "integer",
+            "description": "Delay in minutes between retries. Defaults to 5."
+          }
+        },
+        "required": [
+          "prompt",
+          "schedule_kind"
+        ]
+      }
+    },
+    {
+      "name": "delete_project_file",
+      "description": "Delete a single file from the specified project.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the project root"
+          }
+        },
+        "required": [
+          "project_id",
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "delete_workspace_file",
+      "description": "Delete a file from the selected folder workspace.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the workspace root"
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "edit_image",
+      "description": "Batch image editing, mirroring the drawing studio (绘制工作台) 图片编辑 form. Tasks are NOT run here — they are added to the studio's shared task queue and execute under the workbench's own concurrency setting, alongside user-initiated jobs. After this returns, the tasks are visible (and retryable/removable) under 绘制工作台 → 📋 任务队列, and finished images land in the 图片库. The tool returns immediately and does NOT wait for images to finish. Each task supplies a prompt plus one or more input images (max 4) from: image-library ids (input_image_ids — e.g. ids previously generated), local file paths (input_image_paths), or raw base64 data URLs (input_images). Controllable parameters match the studio: model, prompt, aspect ratio, resolution tier, size, quality, output format, and count (n). Provider/model auto-select from the first model with the 图片编辑 capability unless `model`/`provider_id` is given. Top-level fields are shared defaults; per-task fields override them.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "description": "One entry per image-edit task (max 20).",
+            "items": {
+              "type": "object",
+              "properties": {
+                "prompt": {
+                  "type": "string",
+                  "description": "Required. How to edit the input image(s)."
+                },
+                "input_image_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Image-library ids to edit (e.g. ids of images generated earlier)."
+                },
+                "input_image_paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Absolute local file paths of source images (png/jpg/jpeg/webp/gif)."
+                },
+                "input_images": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Raw base64 data URLs of source images."
+                },
+                "aspect_ratio": {
+                  "type": "string",
+                  "enum": [
+                    "1:1",
+                    "3:2",
+                    "2:3",
+                    "16:9",
+                    "9:16",
+                    "4:3",
+                    "3:4",
+                    "4:7"
+                  ],
+                  "description": "Optional output aspect ratio preset. Used with resolution when no explicit size is given."
+                },
+                "resolution": {
+                  "type": "string",
+                  "enum": [
+                    "1K",
+                    "2K",
+                    "4K"
+                  ],
+                  "description": "Optional output resolution tier used with aspect_ratio when no explicit size is given."
+                },
+                "size": {
+                  "type": "string",
+                  "description": "Optional output size \"WxH\" (each side 560-3840, dimensions must be multiples of 16)."
+                },
+                "quality": {
+                  "type": "string",
+                  "enum": [
+                    "auto",
+                    "low",
+                    "medium",
+                    "high"
+                  ],
+                  "description": "Optional image quality. Defaults to high."
+                },
+                "output_format": {
+                  "type": "string",
+                  "enum": [
+                    "png",
+                    "jpeg",
+                    "webp"
+                  ],
+                  "description": "Optional output format. Defaults to png."
+                },
+                "n": {
+                  "type": "integer",
+                  "description": "Optional output count, 1-4. Defaults to 1."
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Optional model name override for this task."
+                },
+                "folder": {
+                  "type": "string",
+                  "description": "Optional image-library folder for this task's results."
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Optional tags for this task's results."
+                }
+              },
+              "required": [
+                "prompt"
+              ]
+            }
+          },
+          "provider_id": {
+            "type": "string",
+            "description": "Optional default provider id for all tasks."
+          },
+          "model": {
+            "type": "string",
+            "description": "Optional default model name for all tasks."
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "enum": [
+              "1:1",
+              "3:2",
+              "2:3",
+              "16:9",
+              "9:16",
+              "4:3",
+              "3:4",
+              "4:7"
+            ],
+            "description": "Optional default output aspect ratio."
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "1K",
+              "2K",
+              "4K"
+            ],
+            "description": "Optional default output resolution tier."
+          },
+          "size": {
+            "type": "string",
+            "description": "Optional default output size \"WxH\" for all tasks."
+          },
+          "quality": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "low",
+              "medium",
+              "high"
+            ],
+            "description": "Optional default image quality. Defaults to high."
+          },
+          "output_format": {
+            "type": "string",
+            "enum": [
+              "png",
+              "jpeg",
+              "webp"
+            ],
+            "description": "Optional default output format. Defaults to png."
+          },
+          "n": {
+            "type": "integer",
+            "description": "Optional default output count (1-4) for all tasks."
+          },
+          "folder": {
+            "type": "string",
+            "description": "Optional default image-library folder for all tasks."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional default tags for all tasks."
+          }
+        },
+        "required": [
+          "tasks"
+        ]
+      }
+    },
+    {
+      "name": "edit_project_file",
+      "description": "Performs exact string replacements in a project file. This is the preferred way to edit existing files. You must use read_project_file on the file earlier in the conversation before editing it; editing an unread file is rejected. old_string must match the current file content exactly, character for character (including indentation and whitespace). Do NOT include the line-number + tab prefix that read_project_file adds — match only the real content after it. If old_string is not unique in the file, the edit fails: provide a larger snippet with enough surrounding context to be unique, or set replace_all: true to replace every occurrence (useful for renaming a variable across a file). Use write_project_file only when creating a new file or rewriting most of a file. Do not add unrequested comments or emoji in the replacement.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the project root"
+          },
+          "old_string": {
+            "type": "string",
+            "description": "The exact text to replace. Must match the file content verbatim and be unique unless replace_all is true."
+          },
+          "new_string": {
+            "type": "string",
+            "description": "The text to replace it with. Must differ from old_string."
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "Replace all occurrences of old_string instead of requiring a unique match. Default: false."
+          }
+        },
+        "required": [
+          "project_id",
+          "file_path",
+          "old_string",
+          "new_string"
+        ]
+      }
+    },
+    {
+      "name": "edit_workspace_file",
+      "description": "Perform exact string replacements in a workspace file. This is preferred for targeted edits. You must read the file with read_workspace_file earlier in this session. old_string must match exactly and must not include line-number prefixes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the workspace root"
+          },
+          "old_string": {
+            "type": "string",
+            "description": "Exact text to replace. Must be unique unless replace_all is true."
+          },
+          "new_string": {
+            "type": "string",
+            "description": "Replacement text."
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "Replace all occurrences instead of requiring a unique match."
+          }
+        },
+        "required": [
+          "file_path",
+          "old_string",
+          "new_string"
+        ]
+      }
+    },
+    {
+      "name": "enter_plan_mode",
+      "description": "进入规划模式。在此模式下你只能读取和搜索代码，制定修改计划。计划确认后才能开始执行修改。当任务涉及多个文件或复杂逻辑时应先进入规划模式。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "type": "string",
+            "description": "本次规划的目标描述"
+          }
+        },
+        "required": [
+          "goal"
+        ]
+      }
+    },
+    {
+      "name": "exit_plan_mode",
+      "description": "退出规划模式，开始按计划执行修改。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "plan_summary": {
+            "type": "string",
+            "description": "计划摘要"
+          },
+          "steps": {
+            "type": "array",
+            "description": "计划步骤列表",
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string",
+                  "description": "步骤描述"
+                },
+                "files": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "涉及的文件列表"
+                }
+              },
+              "required": [
+                "description"
+              ]
+            }
+          }
+        },
+        "required": [
+          "plan_summary",
+          "steps"
+        ]
+      }
+    },
+    {
+      "name": "fetch_webpage",
+      "description": "Fetch public http(s) web pages and extract readable text or JSON content. Useful for reading external documentation, release notes, API docs, or blog posts. Blocks localhost and private-network targets.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "urls": {
+            "type": "array",
+            "description": "One or more public http(s) URLs to fetch. Maximum 5 URLs per call.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "query": {
+            "type": "string",
+            "description": "Optional topic or text to focus on when extracting relevant snippets from the fetched page."
+          },
+          "max_chars": {
+            "type": "integer",
+            "description": "Maximum characters to return per page. Default 12000, maximum 40000."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "Per-request timeout in milliseconds. Default 10000, maximum 30000."
+          }
+        },
+        "required": [
+          "urls"
+        ]
+      }
+    },
+    {
+      "name": "fill_current_page_form",
+      "description": "Batch-fill form fields on the currently active in-app browser page. Provide an array of field entries with selectors from read_current_page and the text to enter. This is a convenience wrapper around interact_current_page action=batch_input.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "fields": {
+            "type": "array",
+            "description": "Array of {selector, text, append?} objects. Selectors come from read_current_page formFields or interactiveElements.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "selector": {
+                  "type": "string",
+                  "description": "CSS selector of the input, textarea, or select element."
+                },
+                "text": {
+                  "type": "string",
+                  "description": "Text or option value to set."
+                },
+                "append": {
+                  "type": "boolean",
+                  "description": "If true, append instead of replacing."
+                }
+              },
+              "required": [
+                "selector",
+                "text"
+              ]
+            }
+          }
+        },
+        "required": [
+          "fields"
+        ]
+      }
+    },
+    {
+      "name": "finalize_project",
+      "description": "Finalize a project after development is complete. This performs a rebuild/restart and then reclaims disk space by cleaning dependencies and build caches when safe. Use this only at the end of delivery, not for normal iterative development.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "clean_install": {
+            "type": "boolean",
+            "description": "When true, perform a full clean install before the final rebuild. Leave false unless you specifically need a fresh dependency reinstall."
+          },
+          "cleanup_dependencies": {
+            "type": "boolean",
+            "description": "When true, remove node_modules after the final successful rebuild when the runtime can continue without them. Defaults to true."
+          },
+          "cleanup_build_cache": {
+            "type": "boolean",
+            "description": "When true, remove build caches such as .next/cache after the final successful rebuild. Defaults to true."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      }
+    },
+    {
+      "name": "generate_image",
+      "description": "Batch text-to-image generation, mirroring the drawing studio (绘制工作台) 文生图 form. Tasks are NOT run here — they are added to the studio's shared task queue and execute under the workbench's own concurrency setting, so user- and agent-initiated jobs are managed together. After this returns, the tasks are visible (and retryable/removable) under 绘制工作台 → 📋 任务队列, and finished images land in the 图片库. The tool returns immediately and does NOT wait for images to finish. Controllable parameters match the studio: model, prompt, negative prompt, resolution tier, aspect ratio, size, quality, output format, and count (n). Provider/model are auto-selected from the first configured model with the 图片生成 capability when not specified; pass `model` (or `provider_id`) to pick a specific one. Use top-level fields as shared defaults applied to every task; per-task fields override them.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "description": "One entry per image-generation task (max 20). Each becomes one queue job.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "prompt": {
+                  "type": "string",
+                  "description": "Required. What to draw."
+                },
+                "negative_prompt": {
+                  "type": "string",
+                  "description": "Optional. Content to avoid (only some providers honor it)."
+                },
+                "aspect_ratio": {
+                  "type": "string",
+                  "enum": [
+                    "1:1",
+                    "3:2",
+                    "2:3",
+                    "16:9",
+                    "9:16",
+                    "4:3",
+                    "3:4",
+                    "4:7"
+                  ],
+                  "description": "Optional aspect ratio preset. Used to derive size when no explicit size is given."
+                },
+                "resolution": {
+                  "type": "string",
+                  "enum": [
+                    "1K",
+                    "2K",
+                    "4K"
+                  ],
+                  "description": "Optional resolution tier used with aspect_ratio when no explicit size is given. Defaults to 1K."
+                },
+                "size": {
+                  "type": "string",
+                  "description": "Optional explicit pixel size \"WxH\" (each side 560-3840, dimensions must be multiples of 16). Overrides resolution and aspect_ratio."
+                },
+                "quality": {
+                  "type": "string",
+                  "enum": [
+                    "auto",
+                    "low",
+                    "medium",
+                    "high"
+                  ],
+                  "description": "Optional image quality. Defaults to high for clearer 2K/4K output."
+                },
+                "output_format": {
+                  "type": "string",
+                  "enum": [
+                    "png",
+                    "jpeg",
+                    "webp"
+                  ],
+                  "description": "Optional output format. Defaults to png."
+                },
+                "n": {
+                  "type": "integer",
+                  "description": "Optional image count, 1-4. Defaults to 1."
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Optional model name override for this task."
+                },
+                "folder": {
+                  "type": "string",
+                  "description": "Optional image-library folder to file this task's images under."
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Optional tags applied to this task's images."
+                }
+              },
+              "required": [
+                "prompt"
+              ]
+            }
+          },
+          "provider_id": {
+            "type": "string",
+            "description": "Optional default provider id for all tasks."
+          },
+          "model": {
+            "type": "string",
+            "description": "Optional default model name for all tasks."
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "enum": [
+              "1:1",
+              "3:2",
+              "2:3",
+              "16:9",
+              "9:16",
+              "4:3",
+              "3:4",
+              "4:7"
+            ],
+            "description": "Optional default aspect ratio for all tasks."
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "1K",
+              "2K",
+              "4K"
+            ],
+            "description": "Optional default resolution tier for all tasks. Defaults to 1K."
+          },
+          "size": {
+            "type": "string",
+            "description": "Optional default explicit size \"WxH\" for all tasks."
+          },
+          "quality": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "low",
+              "medium",
+              "high"
+            ],
+            "description": "Optional default image quality. Defaults to high."
+          },
+          "output_format": {
+            "type": "string",
+            "enum": [
+              "png",
+              "jpeg",
+              "webp"
+            ],
+            "description": "Optional default output format. Defaults to png."
+          },
+          "n": {
+            "type": "integer",
+            "description": "Optional default image count (1-4) for all tasks."
+          },
+          "negative_prompt": {
+            "type": "string",
+            "description": "Optional default negative prompt for all tasks."
+          },
+          "folder": {
+            "type": "string",
+            "description": "Optional default image-library folder for all tasks (great for organizing a batch)."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional default tags for all tasks."
+          }
+        },
+        "required": [
+          "tasks"
+        ]
+      }
+    },
+    {
+      "name": "get_project_command_status",
+      "description": "Get the latest status, output, and final result for a command started by run_project_command.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "description": "Command execution ID returned by run_project_command"
+          }
+        },
+        "required": [
+          "command_id"
+        ]
+      }
+    },
+    {
+      "name": "get_project_logs",
+      "description": "Read recent project logs, optionally filtered by stdout, stderr, or all logs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "lines": {
+            "type": "integer",
+            "description": "How many recent log lines to return. Default 50, maximum 200."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "stdout",
+              "stderr",
+              "all"
+            ],
+            "description": "Log type filter. Defaults to all."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      }
+    },
+    {
+      "name": "get_project_status",
+      "description": "Get the current project runtime status, port, PID, start time, dependency/build state, and the most recent structured runtime failure summary.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      }
+    },
+    {
+      "name": "get_task_status",
+      "description": "Get the current status, progress, and final result of an async task.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "Async task ID"
+          }
+        },
+        "required": [
+          "task_id"
+        ]
+      }
+    },
+    {
+      "name": "get_workspace_command_status",
+      "description": "Get the latest status and output for a command started by run_workspace_command.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "description": "Command execution ID returned by run_workspace_command"
+          }
+        },
+        "required": [
+          "command_id"
+        ]
+      }
+    },
+    {
+      "name": "glob_search",
+      "description": "Search for files in a project using glob patterns (e.g. \"**/*.ts\", \"src/**/index.*\", \"*.{js,ts}\"). Returns matching file paths with sizes. Use this to quickly locate files by name or extension pattern.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Glob pattern to match file paths. Supports: * (any chars), ** (any path), ? (single char), {a,b} (alternation), [abc] (char class)."
+          },
+          "dir_path": {
+            "type": "string",
+            "description": "Directory to search within (relative to project root). Defaults to project root."
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Maximum number of results. Default 100, maximum 500."
+          }
+        },
+        "required": [
+          "project_id",
+          "pattern"
+        ]
+      }
+    },
+    {
+      "name": "glob_workspace",
+      "description": "Search for files in the selected folder workspace using glob patterns like \"**/*.ts\".",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Glob pattern to match relative file paths."
+          },
+          "dir_path": {
+            "type": "string",
+            "description": "Directory to search within, relative to workspace root."
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Default 100, max 500."
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    },
+    {
+      "name": "grep_search",
+      "description": "Search for text or a regex pattern in project source code. Use this to find function definitions, variable usages, imports, or any text pattern across the project. Search is case-insensitive by default (set case_sensitive: true to change). output_mode selects the result shape: \"content\" (default) returns matching lines with context, \"files_with_matches\" returns only the list of files that match (cheapest — good for a first pass before reading), and \"count\" returns per-file match counts.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Search text or regex pattern"
+          },
+          "dir_path": {
+            "type": "string",
+            "description": "Directory to search within (relative to project root). Defaults to project root."
+          },
+          "include_pattern": {
+            "type": "string",
+            "description": "Only search files matching this pattern (e.g. \"*.ts\", \"*.{js,jsx}\")."
+          },
+          "is_regexp": {
+            "type": "boolean",
+            "description": "Whether the pattern is a regular expression. Default: false (plain text search)."
+          },
+          "case_sensitive": {
+            "type": "boolean",
+            "description": "Whether the search is case-sensitive. Default: false (case-insensitive)."
+          },
+          "output_mode": {
+            "type": "string",
+            "enum": [
+              "content",
+              "files_with_matches",
+              "count"
+            ],
+            "description": "Result shape. \"content\" (default) = matching lines with context; \"files_with_matches\" = list of matching files only; \"count\" = per-file match counts."
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Maximum items to return. In \"content\" mode this caps matching lines; in \"files_with_matches\"/\"count\" it caps files. Default 50, maximum 200."
+          },
+          "context_lines": {
+            "type": "integer",
+            "description": "Number of context lines before and after each match (content mode only). Default 2, maximum 5."
+          }
+        },
+        "required": [
+          "project_id",
+          "pattern"
+        ]
+      }
+    },
+    {
+      "name": "grep_workspace",
+      "description": "Search text or regex patterns inside the selected folder workspace.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Search text or regex pattern"
+          },
+          "dir_path": {
+            "type": "string",
+            "description": "Directory to search within, relative to workspace root."
+          },
+          "include_pattern": {
+            "type": "string",
+            "description": "Only search files matching this pattern, e.g. \"*.ts\"."
+          },
+          "is_regexp": {
+            "type": "boolean",
+            "description": "Whether pattern is a regular expression."
+          },
+          "case_sensitive": {
+            "type": "boolean",
+            "description": "Whether search is case-sensitive."
+          },
+          "output_mode": {
+            "type": "string",
+            "enum": [
+              "content",
+              "files_with_matches",
+              "count"
+            ]
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Default 50, max 200."
+          },
+          "context_lines": {
+            "type": "integer",
+            "description": "Default 2, max 5."
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    },
+    {
+      "name": "install_mcp_server",
+      "description": "Install or update an MCP server configuration in the app settings. After user approval, the server entry is saved and enabled so the agent can use it without manual settings-page configuration.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "server_id": {
+            "type": "string",
+            "description": "Optional stable server ID. If omitted, one is generated from the server name."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name of the MCP server."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the server should be enabled immediately. Defaults to true."
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "stdio",
+              "streamable-http",
+              "sse"
+            ],
+            "description": "Transport type used by the MCP server."
+          },
+          "command": {
+            "type": "string",
+            "description": "Required for stdio transport. Command to launch the MCP server."
+          },
+          "args": {
+            "type": "array",
+            "description": "Optional command-line arguments for stdio transport.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Optional working directory for stdio transport."
+          },
+          "env": {
+            "type": "object",
+            "description": "Optional environment variables for stdio transport.",
+            "additionalProperties": true
+          },
+          "url": {
+            "type": "string",
+            "description": "Required for streamable-http or sse transports."
+          },
+          "headers": {
+            "type": "object",
+            "description": "Optional request headers for HTTP/SSE transports.",
+            "additionalProperties": true
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "Optional connection timeout in milliseconds. Defaults to 15000."
+          },
+          "overwrite_existing": {
+            "type": "boolean",
+            "description": "Whether an existing server with the same ID or name should be replaced. Defaults to true."
+          }
+        },
+        "required": [
+          "name",
+          "transport"
+        ]
+      }
+    },
+    {
+      "name": "install_skill",
+      "description": "Install a Skill into the app from raw markdown/text content or from a local file path (md, txt, zip, or directory). After user approval, the skill is saved locally and can be activated immediately for the current conversation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Optional display name for the Skill. If omitted, the skill title/frontmatter is used when available."
+          },
+          "content": {
+            "type": "string",
+            "description": "Full skill markdown/text content to install. Either content or file_path must be provided."
+          },
+          "file_path": {
+            "type": "string",
+            "description": "Absolute path to a local skill file (.md, .txt, .zip) or directory to import. Either content or file_path must be provided."
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional short description override."
+          },
+          "activate_now": {
+            "type": "boolean",
+            "description": "Whether to register the installed skill into the current conversation immediately. Defaults to true."
+          }
+        }
+      }
+    },
+    {
+      "name": "interact_current_page",
+      "description": "Interact with the currently active in-app browser page. Supports click, input, select, batch_input, extract, evaluate, hover, focus, press_key, scroll, and wait actions. Use selectors returned by read_current_page.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "click",
+              "input",
+              "select",
+              "batch_input",
+              "extract",
+              "evaluate",
+              "hover",
+              "focus",
+              "press_key",
+              "scroll",
+              "wait"
+            ],
+            "description": "The type of interaction to perform on the active page."
+          },
+          "selector": {
+            "type": "string",
+            "description": "Required for click, input, select, hover, focus. CSS selector of the target element. Optional for extract (defaults to full page) and press_key (defaults to focused element)."
+          },
+          "text": {
+            "type": "string",
+            "description": "Required for input. Text to type into the selected field."
+          },
+          "append": {
+            "type": "boolean",
+            "description": "For input/batch_input: if true, append text instead of replacing the current value."
+          },
+          "top": {
+            "type": "number",
+            "description": "Required for scroll. Vertical scroll offset in pixels."
+          },
+          "left": {
+            "type": "number",
+            "description": "Optional horizontal scroll offset in pixels for scroll."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "Required for wait. Milliseconds to wait before continuing."
+          },
+          "value": {
+            "type": "string",
+            "description": "For select: the option value to select."
+          },
+          "label": {
+            "type": "string",
+            "description": "For select: the visible text label of the option to select."
+          },
+          "index": {
+            "type": "integer",
+            "description": "For select: the zero-based index of the option to select."
+          },
+          "fields": {
+            "type": "array",
+            "description": "Required for batch_input. Array of {selector, text, append?} objects to fill multiple fields at once.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "selector": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "append": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "selector",
+                "text"
+              ]
+            }
+          },
+          "offset": {
+            "type": "integer",
+            "description": "For extract: zero-based character offset to start reading from. Use with max_chars to paginate."
+          },
+          "max_chars": {
+            "type": "integer",
+            "description": "For extract: maximum characters to return per page. Default 60000."
+          },
+          "script": {
+            "type": "string",
+            "description": "For evaluate: a JavaScript expression to run in the page context. Return a JSON-serializable value."
+          },
+          "key": {
+            "type": "string",
+            "description": "Required for press_key. The key to press (e.g. \"Enter\", \"Tab\", \"a\")."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "name": "list_agent_workspace_catalog",
+      "description": "List available providers, models, skills, tool names, existing agents, and existing agent groups before creating or updating agent workspace entities.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_documents",
+      "description": "List all imported documents and their selection summaries.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "list_project_files",
+      "description": "List files and folders in the specified project directory.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "dir_path": {
+            "type": "string",
+            "description": "Directory path relative to the project root. Defaults to the root directory."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      }
+    },
+    {
+      "name": "list_projects",
+      "description": "List all created projects and their runtime status.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "list_scheduled_tasks",
+      "description": "List all saved scheduled AI tasks and their next run state.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_skills",
+      "description": "列出所有可用的 Skills 及其描述和参数信息。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "list_workspace_files",
+      "description": "List files and folders in the selected conversation folder workspace. Paths are relative to the workspace root.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dir_path": {
+            "type": "string",
+            "description": "Directory path relative to the workspace root. Defaults to the root."
+          }
+        }
+      }
+    },
+    {
+      "name": "local_read_file",
+      "description": "Read a file from the user's local computer. User approval is required. Office files are parsed automatically.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Absolute file path, for example /Users/xxx/Documents/file.txt or /Users/xxx/report.xlsx"
+          },
+          "encoding": {
+            "type": "string",
+            "description": "File encoding. Defaults to utf-8; office formats are handled automatically."
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "local_run_command",
+      "description": "Run a shell command on the user's local computer. User approval is required.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Shell command to execute"
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Working directory as an absolute path. Defaults to the user home directory."
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Timeout in seconds. Default 60, maximum 300."
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    },
+    {
+      "name": "local_write_file",
+      "description": "Create or write a file on the user's local computer. User approval is required. Supports office files and plain text files.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Absolute save path, for example /Users/xxx/Documents/report.xlsx"
+          },
+          "content": {
+            "type": "string",
+            "description": "Text file content. For office files, use office_data instead."
+          },
+          "office_data": {
+            "type": "object",
+            "description": "Structured office document data. type selects xlsx/docx/pptx.",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "xlsx",
+                  "docx",
+                  "pptx"
+                ],
+                "description": "Office file type"
+              },
+              "sheets": {
+                "type": "array",
+                "description": "Excel sheet data. Each item includes name, headers, and rows.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "headers": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "description": "Cell value as text. Convert numbers, dates, and other values to strings before writing."
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "paragraphs": {
+                "type": "array",
+                "description": "Word document paragraphs. Each item includes text, heading, and bold.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string"
+                    },
+                    "heading": {
+                      "type": "boolean"
+                    },
+                    "bold": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              },
+              "slides": {
+                "type": "array",
+                "description": "PowerPoint slides. Each item includes title and content.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "manage_todo_list",
+      "description": "Create or update the working todo list for the current task. Provide the complete list each time. Use this for non-trivial multi-step work and keep statuses current as you progress.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "The complete todo list for the current task. Replace the full list on every update. At most one item should be in-progress.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "description": "Stable numeric identifier for the todo item. Keep it consistent across updates."
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Short actionable title, ideally 3-7 words."
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "not-started",
+                    "in-progress",
+                    "completed"
+                  ],
+                  "description": "Current execution state for the item."
+                }
+              },
+              "required": [
+                "id",
+                "title",
+                "status"
+              ]
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      }
+    },
+    {
+      "name": "mcp_call",
+      "description": "Call a tool exposed by a configured MCP server. Prefer a discovered mcp__... tool when one is available because it has the exact server schema.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "string",
+            "description": "Electron MCP server ID."
+          },
+          "tool": {
+            "type": "string",
+            "description": "Remote MCP tool name."
+          },
+          "arguments": {
+            "type": "object",
+            "description": "Arguments accepted by the remote MCP tool.",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "server",
+          "tool"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_get_prompt",
+      "description": "获取 MCP 服务器上的提示模板展开结果。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "server_id": {
+            "type": "string",
+            "description": "MCP 服务器 ID。"
+          },
+          "name": {
+            "type": "string",
+            "description": "提示模板名称。"
+          },
+          "arguments": {
+            "type": "object",
+            "description": "提示模板参数键值对。",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "server_id",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_list_prompts",
+      "description": "列出一个或全部 MCP 服务器提供的提示模板。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "server_id": {
+            "type": "string",
+            "description": "可选。指定要查看的 MCP 服务器 ID。"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_list_resources",
+      "description": "列出一个或全部 MCP 服务器提供的资源。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "server_id": {
+            "type": "string",
+            "description": "可选。指定要查看的 MCP 服务器 ID。"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_list_servers",
+      "description": "列出当前配置的 MCP 服务器及其连接状态、能力和已发现的工具数量。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mcp_read_resource",
+      "description": "读取 MCP 服务器上的资源内容。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "server_id": {
+            "type": "string",
+            "description": "MCP 服务器 ID。"
+          },
+          "uri": {
+            "type": "string",
+            "description": "资源 URI。"
+          }
+        },
+        "required": [
+          "server_id",
+          "uri"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open_project_app",
+      "description": "Ask WorldBase shell to open an existing project in the managed app UI. Prefer this over launching an unmanaged preview server yourself.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "embed",
+              "window"
+            ],
+            "description": "How the shell should open the project. Use embed by default; use window only when the user explicitly wants a standalone window."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      }
+    },
+    {
+      "name": "patch_project_file",
+      "description": "Apply incremental line-range patches to a project file. Much more token-efficient than rewriting the whole file with write_project_file when only a few sections need to change. Patches are applied in reverse line order so that later patches do not shift the line numbers of earlier ones.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the project root"
+          },
+          "patches": {
+            "type": "array",
+            "description": "Array of patches. Each patch replaces lines start_line..end_line (1-based, inclusive) with the given content. For pure insertion before a line without removing anything, set end_line to a value less than start_line (e.g. end_line = 0). Patches must not overlap.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "start_line": {
+                  "type": "integer",
+                  "description": "First line to replace (1-based, inclusive). For insertions, the line before which to insert."
+                },
+                "end_line": {
+                  "type": "integer",
+                  "description": "Last line to replace (1-based, inclusive). Set to a value less than start_line (e.g. 0) for pure insertion before start_line without removing any existing line."
+                },
+                "content": {
+                  "type": "string",
+                  "description": "Replacement content (may be multi-line). An empty string removes the selected lines."
+                }
+              },
+              "required": [
+                "start_line",
+                "end_line",
+                "content"
+              ]
+            }
+          }
+        },
+        "required": [
+          "project_id",
+          "file_path",
+          "patches"
+        ]
+      }
+    },
+    {
+      "name": "patch_workspace_file",
+      "description": "Apply line-range patches to a workspace file. Patches are applied bottom-to-top and must not overlap.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the workspace root"
+          },
+          "patches": {
+            "type": "array",
+            "description": "Array of { start_line, end_line, content } patches. Lines are 1-based inclusive; end_line < start_line inserts before start_line.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "start_line": {
+                  "type": "integer"
+                },
+                "end_line": {
+                  "type": "integer"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "start_line",
+                "end_line",
+                "content"
+              ]
+            }
+          }
+        },
+        "required": [
+          "file_path",
+          "patches"
+        ]
+      }
+    },
+    {
+      "name": "query_project_database",
+      "description": "Run a read-only SQL query against the specified project database. SELECT only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "sql": {
+            "type": "string",
+            "description": "SELECT query"
+          }
+        },
+        "required": [
+          "project_id",
+          "sql"
+        ]
+      }
+    },
+    {
+      "name": "read_current_page",
+      "description": "Inspect the currently active in-app browser page. Returns the live page title, URL, a readable text preview, a list of likely interactive elements, and detected form fields with selectors. Use this before interacting with the page.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "max_chars": {
+            "type": "integer",
+            "description": "Maximum characters from the live page text preview to return. Default 8000, maximum 60000."
+          }
+        }
+      }
+    },
+    {
+      "name": "read_document",
+      "description": "Read imported document content in bounded chunks, or return specific selected regions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "description": "Unique document ID. Use list_documents to discover available documents."
+          },
+          "region_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional list of selection IDs. If provided, only those selections are returned."
+          },
+          "chunk_index": {
+            "type": "number",
+            "description": "Optional zero-based chunk index for traversing large documents. Defaults to 0."
+          },
+          "max_chars": {
+            "type": "number",
+            "description": "Optional maximum characters per chunk. Defaults to 12000 and is clamped for safety."
+          }
+        },
+        "required": [
+          "artifact_id"
+        ]
+      }
+    },
+    {
+      "name": "read_project_file",
+      "description": "Read file content from the specified project. Large files can be read in line-based segments via start_line / max_lines. Results are returned in `cat -n` format: each line is prefixed with a right-aligned line number and a tab, then the original content. Line numbers are 1-based and absolute within the file. When you later edit this file (edit_project_file / patch_project_file), do NOT include the line-number + tab prefix — match or write only the real file content that follows it. Defaults read up to 1000 lines (max 2000); small and medium files are returned in full in one call.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the project root"
+          },
+          "start_line": {
+            "type": "integer",
+            "description": "Start line number (1-based). Use segments for large files."
+          },
+          "max_lines": {
+            "type": "integer",
+            "description": "Maximum lines to read. Default 1000, maximum 2000."
+          }
+        },
+        "required": [
+          "project_id",
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "read_workspace_file",
+      "description": "Read a file from the selected folder workspace. Large files can be read in line-based segments via start_line / max_lines. Results are returned in cat -n format with absolute 1-based line numbers. Do not include line-number prefixes when editing.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the workspace root"
+          },
+          "start_line": {
+            "type": "integer",
+            "description": "Start line number (1-based)."
+          },
+          "max_lines": {
+            "type": "integer",
+            "description": "Maximum lines to read. Default 1000, maximum 2000."
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "rebuild_project",
+      "description": "Rebuild and restart a project. By default this preserves installed dependencies and build caches so iterative development stays fast. Use clean_install only when you need a full reinstall, and use cleanup_*_after_success only when finalizing a project and you explicitly want to reclaim disk space afterwards.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "clean_install": {
+            "type": "boolean",
+            "description": "When true, remove node_modules and build cache before reinstalling dependencies. Leave false for normal hot-update rebuilds."
+          },
+          "cleanup_dependencies_after_success": {
+            "type": "boolean",
+            "description": "When true, remove node_modules after a successful rebuild/restart. Use only when the project is finalized and you no longer need fast iterative rebuilds."
+          },
+          "cleanup_build_cache_after_success": {
+            "type": "boolean",
+            "description": "When true, remove build caches such as .next/cache after a successful rebuild to save disk space."
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      }
+    },
+    {
+      "name": "restart_project_server",
+      "description": "Force-stop any existing project server process, then start a fresh one and return new runtime info plus startup logs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      }
+    },
+    {
+      "name": "run_project_command",
+      "description": "Run a short-lived command inside the project directory for diagnostics: type-check, lint, tests, or quick one-off commands (e.g. \"npx tsc --noEmit\", \"npm test\", \"npx eslint .\"). Do NOT use this tool to run `npm run build`, `npm install`, `npm start`, or `npm run dev` for project install/build/serve — those have dedicated tools: create_project (auto install + build + start on creation), rebuild_project (atomic install + build + restart, preserves caches), and start_project_server / restart_project_server (long-lived servers). Only fall back to a manual `npm install` / `npm run build` here when those dedicated tools are unavailable or have explicitly failed. Allowed commands include npm / npx / pnpm / yarn / bun / node / tsx, the tsc / eslint / prettier / vitest / jest / playwright runners, read-only git (status, diff, log, show, branch), and read-only shell utilities. Prefer dedicated tools (read_project_file, grep_search, list_project_files) over cat / grep / ls. Run ONE command per call; chaining with && | ; or redirects requires developer command mode (THE_WORLD_DEV_COMMANDS=1). If the foreground wait times out the command keeps running in the background and returns a command_id; poll it with get_project_command_status instead of retrying.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "command": {
+            "type": "string",
+            "description": "The command to run, e.g. \"npm test\", \"npx tsc --noEmit\", \"npx eslint .\". A single command unless developer command mode is enabled."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Working subdirectory (defaults to the project root)"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "description": "Foreground wait timeout in seconds. Default 90, maximum 180."
+          }
+        },
+        "required": [
+          "project_id",
+          "command"
+        ]
+      }
+    },
+    {
+      "name": "run_skill",
+      "description": "执行一个预定义的 Skill。Skills 包含领域专家知识和工作流程，能帮助你更好地完成特定类型的任务。调用前先查看可用 Skills 列表。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skill_name": {
+            "type": "string",
+            "description": "Skill 名称"
+          },
+          "arguments": {
+            "type": "object",
+            "description": "Skill 参数键值对",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "skill_name"
+        ]
+      }
+    },
+    {
+      "name": "run_workspace_command",
+      "description": "Run a short-lived install, build, test, lint, type-check, or diagnostic command inside the selected folder workspace. Do not start long-lived dev servers.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The command to run, e.g. \"npm test\", \"pnpm build\", \"npx tsc --noEmit\"."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Working subdirectory relative to the workspace root."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "description": "Foreground wait timeout. Default 90, max 180."
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    },
+    {
+      "name": "save_current_page_as_document",
+      "description": "Save the full text of the currently active in-app browser page as a document artifact. Returns an artifact_id that can be read with read_document in chunks, searched, and revisited later. Useful for long pages or when the model needs to search or repeatedly reference the page content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "selector": {
+            "type": "string",
+            "description": "Optional CSS selector to extract only a portion of the page. Defaults to the full page body."
+          },
+          "file_name": {
+            "type": "string",
+            "description": "Optional display name for the saved document. Defaults to \"current-page\"."
+          }
+        }
+      }
+    },
+    {
+      "name": "spawn_subagents",
+      "description": "Spawn one or more independent subagents that execute their tasks in parallel. All subagents run concurrently; the tool blocks until every subagent has completed or failed. Use this tool to decompose a large task into independent subtasks and accelerate execution through parallelism. Each subagent has access to all standard tools and runs with its own isolated conversation context. Nested spawning is allowed only for one additional layer of clearly independent work; deeper recursive nesting is blocked. After the tool returns, inspect the returned task statuses and results before deciding the next step. Prefer this tool when subtasks are independent and can proceed without each other's intermediate results.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "description": "List of tasks to execute in parallel. Each task runs as an independent subagent.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string",
+                  "description": "Short label (3-5 words) identifying what this subagent does. Used in progress display."
+                },
+                "prompt": {
+                  "type": "string",
+                  "description": "Full detailed instruction for the subagent to execute. Be specific and self-contained — the subagent has no access to the parent conversation history."
+                },
+                "allowed_tools": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Optional: restrict the subagent to only these tool names. Omit to allow all tools."
+                },
+                "denied_tools": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Optional: deny these tool names for the subagent."
+                },
+                "system_prompt": {
+                  "type": "string",
+                  "description": "Optional: additional system prompt section to inject for this subagent only."
+                }
+              },
+              "required": [
+                "description",
+                "prompt"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "tasks"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "start_async_task",
+      "description": "Start a long-running async project task to avoid request timeouts.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "task": {
+            "type": "string",
+            "enum": [
+              "rebuild"
+            ],
+            "description": "Async task type"
+          }
+        },
+        "required": [
+          "project_id",
+          "task"
+        ]
+      }
+    },
+    {
+      "name": "start_project_server",
+      "description": "Start a project server in the background and return its runtime info plus recent startup logs.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          }
+        },
+        "required": [
+          "project_id"
+        ]
+      }
+    },
+    {
+      "name": "web_search",
+      "description": "Search the public web for external documentation, changelogs, registry pages, repositories, or other reference material when you do not yet know the exact URL. Uses multiple search sources, reranks results by query relevance, and supports domain allow/block filters similar to Claude Code web search.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query describing the topic you need to find."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of search results to return. Default 6, maximum 10."
+          },
+          "sources": {
+            "type": "array",
+            "description": "Optional search sources to use. Supported: bing, duckduckgo, github. Defaults to multiple sources automatically chosen by the query.",
+            "items": {
+              "type": "string",
+              "enum": [
+                "bing",
+                "duckduckgo",
+                "github"
+              ]
+            }
+          },
+          "allowed_domains": {
+            "type": "array",
+            "description": "Optional allowlist of result domains. Only results from these domains or their subdomains will be returned.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "blocked_domains": {
+            "type": "array",
+            "description": "Optional blocklist of result domains. Results from these domains or their subdomains will be excluded.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "auto_fetch_top_n": {
+            "type": "integer",
+            "description": "Automatically fetch the top N result pages after searching. Optional. Maximum 5."
+          },
+          "fetch_max_chars": {
+            "type": "integer",
+            "description": "When auto_fetch_top_n is used, maximum characters to return per fetched page. Default 12000, maximum 40000."
+          },
+          "fetch_timeout_ms": {
+            "type": "integer",
+            "description": "When auto_fetch_top_n is used, per-page fetch timeout in milliseconds. Default 10000, maximum 30000."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "write_project_file",
+      "description": "Modify a file in the specified project. A backup is created automatically.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "Project ID"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the project root"
+          },
+          "content": {
+            "type": "string",
+            "description": "Full file content"
+          }
+        },
+        "required": [
+          "project_id",
+          "file_path",
+          "content"
+        ]
+      }
+    },
+    {
+      "name": "write_workspace_file",
+      "description": "Create or rewrite a file in the selected folder workspace. Use targeted edit tools for small changes to existing files.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "File path relative to the workspace root"
+          },
+          "content": {
+            "type": "string",
+            "description": "Full file content"
+          }
+        },
+        "required": [
+          "file_path",
+          "content"
+        ]
+      }
+    }
+  ]
+}

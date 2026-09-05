@@ -92,7 +92,13 @@ export class ElectronToolRegistry {
   }
 
   getToolDefinitions (): ToolDefinition[] {
-    return this.collect({ subagentNestingDepth: 0 }, false)
+    // Definition discovery is a canonical catalog, independent of whether the
+    // current conversation has selected a folder workspace. Handler discovery
+    // below still uses the real run context and therefore remains conditional.
+    return this.collect({
+      subagentNestingDepth: 0,
+      workspaceRoot: '/__worldbase_tool_catalog__'
+    }, false)
       .map(tool => tool.definition)
   }
 
@@ -198,6 +204,15 @@ export class ElectronToolRegistry {
     // The structural shim intentionally has no chat/provider execution path.
     registerAllTools(agent as never, toolServices)
     if (this.services.mcpService) {
+      const getBuiltinToolRegistrations = this.services.mcpService.getBuiltinToolRegistrations
+      if (typeof getBuiltinToolRegistrations === 'function') {
+        for (const tool of getBuiltinToolRegistrations.call(
+          this.services.mcpService,
+          context.allowedMcpServerIds
+        )) {
+          agent.registerTool(tool.definition.name, tool.definition, tool.handler)
+        }
+      }
       agent.registerTool(
         'mcp_call',
         {
@@ -241,7 +256,7 @@ export class ElectronToolRegistry {
     for (const [name, tool] of registered) {
       // These controls stay native so Rust's per-run plan state remains the
       // final authority before any Electron mutation is dispatched.
-      if (INTRINSIC_RUST_TOOL_NAMES.has(name)) continue
+      if (includeHandlers && INTRINSIC_RUST_TOOL_NAMES.has(name)) continue
       result.push({
         definition: tool.definition,
         handler: includeHandlers

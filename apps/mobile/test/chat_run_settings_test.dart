@@ -7,13 +7,16 @@ void main() {
     final container = ProviderContainer();
     addTearDown(container.dispose);
 
+    expect(container.read(chatSwitchesProvider).enableThinking, isFalse);
     expect(container.read(chatSwitchesProvider).reasoningStrength, 'max');
     expect(container.read(chatSwitchesProvider).temperature, isNull);
 
     final notifier = container.read(chatSwitchesProvider.notifier);
+    notifier.setEnableThinking(true);
     notifier.setReasoningStrength('low');
     notifier.setTemperature(3);
 
+    expect(container.read(chatSwitchesProvider).enableThinking, isTrue);
     expect(container.read(chatSwitchesProvider).reasoningStrength, 'low');
     expect(container.read(chatSwitchesProvider).temperature, 2);
 

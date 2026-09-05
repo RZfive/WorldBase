@@ -327,6 +327,7 @@ test('Rust-selected group work keeps planner and member turns on the Rust execut
 test('Rust-native group adapter owns group rounds, board state, and live injection', async () => {
   const { buildNativeRustGroupDeliberation, hasNativeRustGroupSession, injectNativeRustGroup } = await loadNativeGroupModule()
   const calls = []
+  const hostToolContexts = []
   let emitRound = null
   let finishRound = null
   const client = {
@@ -387,9 +388,26 @@ test('Rust-native group adapter owns group rounds, board state, and live injecti
   }
   const coordinator = makeAgent('coordinator', 'Coordinator')
   const worker = makeAgent('member', 'Member')
+  let liveAuthMode = 'strict'
+  const planner = {
+    createElectronHostToolRegistrations (context) {
+      hostToolContexts.push(context)
+      return [{
+        definition: {
+          name: 'read_project_file',
+          description: 'Read a project file through Electron',
+          parameters: { type: 'object', properties: { file_path: { type: 'string' } } }
+        },
+        domain: 'electron_host_override',
+        permission: 'allow',
+        async handler () { return { ok: true } }
+      }]
+    }
+  }
   const progress = []
   const run = buildNativeRustGroupDeliberation({
     client,
+    planner,
     group,
     agents: [coordinator, worker],
     messages: [{ role: 'user', content: 'Review this native group route.' }],
@@ -400,6 +418,11 @@ test('Rust-native group adapter owns group rounds, board state, and live injecti
       normalizedRequest: 'Review this native group route.'
     },
     sessionId: 'native-stream',
+    context: {
+      hostConversationId: 'electron-conversation',
+      authMode: 'strict',
+      getAuthMode: () => liveAuthMode
+    },
     onProgress: event => progress.push(event)
   })
 
@@ -411,6 +434,31 @@ test('Rust-native group adapter owns group rounds, board state, and live injecti
   assert.equal(calls.find(call => call.method === 'group.create').params.maxParallelWorkers, group.maxParallelWorkers)
   assert.equal(calls.find(call => call.method === 'group.message').params.groupId, 'native-group')
   assert.deepEqual(calls.find(call => call.method === 'group.message').params.memberIds, ['member'])
+  const roundParams = calls.find(call => call.method === 'group.message').params
+  assert.equal(roundParams.context.customTools[0].definition.name, 'read_project_file')
+  assert.equal(Object.hasOwn(roundParams.context, 'getAuthMode'), false)
+  assert.equal(typeof roundParams.customToolsForStream, 'function')
+  const memberRegistrations = roundParams.customToolsForStream('native-group:member:member:child')
+  assert.equal(memberRegistrations[0].definition.name, 'read_project_file')
+  assert.equal(hostToolContexts[1].getAuthMode(), 'strict')
+  liveAuthMode = 'auto'
+  assert.equal(hostToolContexts[1].getAuthMode(), 'auto')
+  assert.deepEqual(hostToolContexts.map(context => ({
+    sessionId: context.sessionId,
+    hostSessionId: context.hostSessionId,
+    hostConversationId: context.hostConversationId
+  })), [
+    {
+      sessionId: 'native-stream:catalog',
+      hostSessionId: 'native-stream',
+      hostConversationId: 'electron-conversation'
+    },
+    {
+      sessionId: 'native-group:member:member:child',
+      hostSessionId: 'native-stream',
+      hostConversationId: 'electron-conversation'
+    }
+  ])
 
   emitRound({ kind: 'start', groupMemberStreamId: 'native-group:member:member:child' })
   emitRound({ kind: 'group_message', member: 'Member', round: 1, content: 'Rust member note' })
@@ -488,6 +536,45 @@ test('Rust-native group adapter owns group rounds, board state, and live injecti
   assert.equal(peerMessage.peerMessage.groupId, group.id)
   assert.equal(peerMessage.peerMessage.status, 'completed')
   assert.equal(peerMessage.peerMessage.response, 'Verified.')
+})
+
+test('Rust-native group rounds initialize permissions from the live auth mode', async () => {
+  const { buildNativeRustGroupDeliberation } = await loadNativeGroupModule()
+  let liveAuthMode = 'strict'
+  const roundAuthModes = []
+  const client = {
+    async createNativeGroup () { return { id: 'live-auth-group', board: {} } },
+    async startNativeGroupRound (params) {
+      roundAuthModes.push(params.authMode)
+      params.onEvent({ kind: 'group_message', member: 'Member', round: params.round, content: `Round ${params.round}` })
+      params.onEvent({ kind: 'done', stopReason: 'group_complete' })
+      if (params.round === 1) liveAuthMode = 'auto'
+      return { streamId: 'live-auth-group', round: params.round }
+    },
+    async waitForSessionEnd () {},
+    async getNativeGroup () { return { id: 'live-auth-group', board: {} } },
+    async stopSession () { return true }
+  }
+
+  await buildNativeRustGroupDeliberation({
+    client,
+    group: { ...makeGroup(), maxRounds: 2 },
+    agents: [makeAgent('coordinator', 'Coordinator'), makeAgent('member', 'Member')],
+    messages: [{ role: 'user', content: 'Run two rounds with live authorization.' }],
+    routing: {
+      mode: 'discussion',
+      selectedMemberIds: ['member'],
+      mentionedMemberIds: [],
+      normalizedRequest: 'Run two rounds with live authorization.'
+    },
+    sessionId: 'live-auth-stream',
+    context: {
+      authMode: 'strict',
+      getAuthMode: () => liveAuthMode
+    }
+  })
+
+  assert.deepEqual(roundAuthModes, ['strict', 'auto'])
 })
 
 test('Rust-native planner selects the requested members for coordinator-driven rounds', async () => {

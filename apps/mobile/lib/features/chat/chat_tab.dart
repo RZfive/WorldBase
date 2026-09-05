@@ -101,8 +101,7 @@ class _ChatTabState extends ConsumerState<ChatTab> {
       );
     }
     ref.read(selectedAgentProvider.notifier).set(picked);
-    ref.read(currentConversationProvider.notifier).set(null);
-    ref.read(chatProvider.notifier).clear();
+    ref.read(chatProvider.notifier).startNewConversation();
     if (mounted) {
       setState(() {
         _pendingAttachments.clear();
@@ -230,7 +229,7 @@ class _ChatTabState extends ConsumerState<ChatTab> {
   @override
   Widget build(BuildContext context) {
     final messages = ref.watch(chatProvider);
-    final busy = messages.any((m) => m.streaming);
+    final busy = ref.read(chatProvider.notifier).busy;
     final p = DawnPalette.of(context);
 
     return Scaffold(
@@ -288,7 +287,7 @@ class _ChatTabState extends ConsumerState<ChatTab> {
         0,
         topPad,
         0,
-        (_advancedExpanded ? 244 : 112) + attachmentDockHeight + feedbackHeight,
+        (_advancedExpanded ? 294 : 112) + attachmentDockHeight + feedbackHeight,
       ),
       itemCount: messages.length,
       itemBuilder: (ctx, i) {
@@ -380,19 +379,40 @@ class _ChatTabState extends ConsumerState<ChatTab> {
                 padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
                 child: Column(
                   children: [
-                    _AdvancedSliderRow(
-                      label:
-                          '思考强度 (${_reasoningLabels[switches.reasoningStrength] ?? '中'})',
-                      value: normalizedReasoningIndex.toDouble(),
-                      min: 0,
-                      max: 3,
-                      divisions: 3,
-                      onChanged: (value) => ref
-                          .read(chatSwitchesProvider.notifier)
-                          .setReasoningStrength(
-                            _reasoningLevels[value.round().clamp(0, 3)],
+                    SizedBox(
+                      height: 44,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '深度思考',
+                              style: TextStyle(fontSize: 13, color: p.ink),
+                            ),
                           ),
+                          CupertinoSwitch(
+                            activeTrackColor: p.indigo,
+                            value: switches.enableThinking,
+                            onChanged: ref
+                                .read(chatSwitchesProvider.notifier)
+                                .setEnableThinking,
+                          ),
+                        ],
+                      ),
                     ),
+                    if (switches.enableThinking)
+                      _AdvancedSliderRow(
+                        label:
+                            '思考强度 (${_reasoningLabels[switches.reasoningStrength] ?? '中'})',
+                        value: normalizedReasoningIndex.toDouble(),
+                        min: 0,
+                        max: 3,
+                        divisions: 3,
+                        onChanged: (value) => ref
+                            .read(chatSwitchesProvider.notifier)
+                            .setReasoningStrength(
+                              _reasoningLevels[value.round().clamp(0, 3)],
+                            ),
+                      ),
                     _AdvancedSliderRow(
                       label:
                           '模型温度 (${effectiveTemperature.toStringAsFixed(1)})',
@@ -609,7 +629,7 @@ class _ChatTabState extends ConsumerState<ChatTab> {
     final conversations = await HarnessClient.instance.listConversations();
     final target = conversations.firstWhere((c) => c.id == targetId);
     ref.read(currentConversationProvider.notifier).set(target);
-    await ref.read(chatProvider.notifier).loadHistory(target);
+    await ref.read(chatProvider.notifier).loadHistory(target, force: true);
     ref.read(conversationsProvider.notifier).refresh();
     await ref.read(chatProvider.notifier).send(newText);
   }
@@ -886,6 +906,19 @@ class _ChatAttachmentTile extends StatelessWidget {
             Positioned.fill(
               child: Image.memory(
                 imageBytes,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => Center(
+                  child: Icon(CupertinoIcons.photo, color: foreground),
+                ),
+              ),
+            )
+          else if (attachment.isImage &&
+              attachment.dataUrl != null &&
+              (attachment.dataUrl!.startsWith('https://') ||
+                  attachment.dataUrl!.startsWith('http://')))
+            Positioned.fill(
+              child: Image.network(
+                attachment.dataUrl!,
                 fit: BoxFit.cover,
                 errorBuilder: (_, _, _) => Center(
                   child: Icon(CupertinoIcons.photo, color: foreground),
@@ -1182,7 +1215,11 @@ class _DawnToolCard extends StatelessWidget {
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(9),
                             child: Image.network(
-                              '${HarnessClient.instance.httpBase}/studio/${imageEntries[index].id}',
+                              HarnessClient.instance
+                                  .resourceUri(
+                                    '/studio/${imageEntries[index].id}',
+                                  )
+                                  .toString(),
                               width: 92,
                               height: 92,
                               fit: BoxFit.cover,
@@ -1271,7 +1308,9 @@ class _DawnToolCard extends StatelessWidget {
               boundaryMargin: const EdgeInsets.all(120),
               child: Center(
                 child: Image.network(
-                  '${HarnessClient.instance.httpBase}/studio/${entry.id}',
+                  HarnessClient.instance
+                      .resourceUri('/studio/${entry.id}')
+                      .toString(),
                   fit: BoxFit.contain,
                   errorBuilder: (_, _, _) =>
                       Icon(CupertinoIcons.photo, size: 44, color: p.ink3),
@@ -1338,6 +1377,8 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
   Widget build(BuildContext context) {
     final p = DawnPalette.of(context);
     final conversations = ref.watch(conversationsProvider);
+    ref.watch(chatProvider);
+    ref.watch(groupChatProvider);
     final width = math.min(320.0, MediaQuery.sizeOf(context).width * 0.82);
 
     return Drawer(
@@ -1514,6 +1555,11 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
     final groupId = c.groupId;
     final selected =
         groupId == null && ref.watch(currentConversationProvider)?.id == c.id;
+    final groupController = ref.read(groupChatProvider.notifier);
+    final running = groupId == null
+        ? ref.read(chatProvider.notifier).isConversationRunning(c.id)
+        : groupController.busy &&
+              groupController.session?.conversationId == c.id;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
       child: GestureDetector(
@@ -1560,16 +1606,21 @@ class _ConversationDrawerState extends ConsumerState<_ConversationDrawer> {
                   ),
                 ),
               ),
+              if (running) ...[
+                const SizedBox(width: 6),
+                const CupertinoActivityIndicator(radius: 6),
+                const SizedBox(width: 4),
+                Text('执行中', style: TextStyle(fontSize: 10, color: p.ink2)),
+              ],
               _ConversationMenu(
                 conversation: c,
                 onRenamed: () =>
                     ref.read(conversationsProvider.notifier).refresh(),
-                onDeleted: () {
-                  if (ref.read(currentConversationProvider)?.id == c.id) {
-                    ref.read(currentConversationProvider.notifier).set(null);
-                    ref.read(chatProvider.notifier).clear();
-                  }
-                  ref.read(conversationsProvider.notifier).refresh();
+                onDeleted: () async {
+                  await ref
+                      .read(chatProvider.notifier)
+                      .deleteConversation(c.id);
+                  await ref.read(conversationsProvider.notifier).refresh();
                 },
               ),
             ],
@@ -1711,7 +1762,7 @@ class _ConversationMenu extends StatelessWidget {
 
   final ConversationMeta conversation;
   final VoidCallback onRenamed;
-  final VoidCallback onDeleted;
+  final Future<void> Function() onDeleted;
 
   @override
   Widget build(BuildContext context) {
@@ -1745,8 +1796,7 @@ class _ConversationMenu extends StatelessWidget {
             isDestructiveAction: true,
             onPressed: () async {
               Navigator.pop(ctx);
-              await HarnessClient.instance.deleteConversation(conversation.id);
-              onDeleted();
+              await onDeleted();
             },
             child: const Text('删除'),
           ),

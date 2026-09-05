@@ -330,6 +330,7 @@ export function setupIPC (): void {
               context: {
                 workspaceRoot: resolvedFolderWorkspaceRoot,
                 targetProjectId: runtimeContext.effectiveTargetProjectId,
+                enableThinking: runtimeContext.providerConfig?.enableThinking,
                 reasoningEffort: runtimeContext.providerConfig?.reasoningEffort,
                 temperature: runtimeContext.providerConfig?.temperature,
                 systemPromptSections: [
@@ -637,9 +638,12 @@ export function setupIPC (): void {
                 abortSignal: abortController.signal,
                 onProgress,
                 context: {
+                  hostConversationId: conversationId,
                   authMode: authModeRef.current,
+                  getAuthMode: () => authModeRef.current,
                   workspaceRoot: resolvedFolderWorkspaceRoot,
                   targetProjectId: runtimeContext.effectiveTargetProjectId,
+                  enableThinking: runtimeContext.providerConfig?.enableThinking,
                   reasoningEffort: runtimeContext.providerConfig?.reasoningEffort,
                   temperature: runtimeContext.providerConfig?.temperature,
                   systemPromptSections: [
@@ -790,15 +794,15 @@ export function setupIPC (): void {
     // Session ownership is more reliable than the current global preference:
     // a user can switch back to TS while an existing Rust stream is still
     // running.  Keep authorization updates flowing to that stream.
-    if (mainState.rustHarness?.hasSession(sessionId)) {
-      mainState.rustHarness?.setSessionAuthMode(sessionId, authMode)
-      return { ok: true, updated: true }
-    }
     const sessionState = activeChatSessions.get(sessionId)
-    if (!sessionState) {
+    if (sessionState) sessionState.authMode.current = authMode
+    const rustUpdated = mainState.rustHarness?.hasSession(sessionId) === true
+    if (rustUpdated) {
+      mainState.rustHarness?.setSessionAuthMode(sessionId, authMode)
+    }
+    if (!rustUpdated && !sessionState) {
       return { ok: true, updated: false }
     }
-    sessionState.authMode.current = authMode
     return { ok: true, updated: true }
   })
 
