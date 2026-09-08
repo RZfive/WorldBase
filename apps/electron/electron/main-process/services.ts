@@ -134,8 +134,9 @@ async function parkElectronMcpForRust (): Promise<void> {
 
 /**
  * Apply the durable Electron MCP catalog to the selected harness. Rust mode
- * owns transport connections; Electron's MCPService is kept only for the TS
- * migration fallback and is explicitly disconnected before Rust takes over.
+ * owns configured transport connections; Electron's MCPService remains a
+ * platform adapter for fixed host tools and the frozen TS compatibility path,
+ * and its background connections are parked before Rust takes ownership.
  */
 export async function applyMcpServersToService (): Promise<MCPServerConfig[]> {
   const servers = mainState.settingsStore!.getMcpServers()
@@ -537,9 +538,9 @@ export async function initializeServices (): Promise<void> {
 
   mainState.documentStore = new DocumentStore()
 
-  // The legacy engine consumes this full Electron-domain service surface.
-  // Rust uses it only for UI-bound fallbacks and notifications; project,
-  // folder-workspace, image, and MCP execution live in the Rust app-server.
+  // The frozen engine consumes this full Electron-domain service surface.
+  // The Rust facade reuses it only as a platform adapter for host-owned tools,
+  // UI callbacks, and notifications; it does not run a second Node Agent Loop.
   const aiEngineServices: AIEngineServices = {
     projectFS: mainState.projectFS!,
     runtimeManager: mainState.runtimeManager!,

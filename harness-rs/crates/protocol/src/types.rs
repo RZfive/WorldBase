@@ -100,6 +100,11 @@ pub struct ToolDescriptor {
     /// 默认权限策略：allow / ask / deny。
     #[serde(default = "default_permission")]
     pub permission: String,
+    /// Rust owns execution in Electron when this is true.  This allows a new
+    /// Rust-native tool to enter the Electron catalog without adding a frozen
+    /// TypeScript handler or a placeholder host callback.
+    #[serde(default)]
+    pub electron_native: bool,
 }
 
 fn default_permission() -> String {

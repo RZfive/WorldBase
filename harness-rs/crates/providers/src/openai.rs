@@ -1259,10 +1259,7 @@ mod tests {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let request = read_http_request(&mut socket).await;
                 let request = String::from_utf8_lossy(&request);
-                let body = request
-                    .split_once("\r\n\r\n")
-                    .unwrap()
-                    .1;
+                let body = request.split_once("\r\n\r\n").unwrap().1;
                 let body: Value = serde_json::from_str(body).unwrap();
 
                 if attempt == 0 {

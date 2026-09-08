@@ -53,4 +53,6 @@ export interface ToolDefinition {
   name: string
   description: string
   parameters: Record<string, unknown>
+  /** Set by the Rust catalog for tools whose execution stays in Rust. */
+  electronNative?: boolean
 }

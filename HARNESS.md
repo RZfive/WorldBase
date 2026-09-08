@@ -8,20 +8,20 @@
 the-world/
 ├── apps/
 │   ├── electron/                  # Workspace 1: 现有 Electron/Vue 桌面端
-│   └── mobile/                    # Workspace 3: Flutter 移动端（FFI + 全功能面已接入）
+│   └── mobile/                    # Workspace 3: Flutter 移动端（FFI + Rust Agent Loop 已接入）
 ├── harness-rs/                    # Workspace 2: 唯一 Rust Cargo workspace
 │   ├── Cargo.toml
 │   ├── crates/
 │   │   ├── protocol/              # JSON-RPC schema、capabilities、事件帧（camelCase 冻结）
 │   │   ├── providers/             # Anthropic / OpenAI(兼容端点) / Mock + SSE 解析
-│   │   ├── tools/                 # Rust 工具集、Electron 兼容层和能力协商过滤
+│   │   ├── tools/                 # Agent 工具编排、跨端工具、Electron host 兼容层和能力过滤
 │   │   ├── core/                  # Hub、Agent loop、权限引擎、dispatcher
 │   │   ├── group/                 # 群组协作状态机（5 模式 + 黑板）
 │   │   ├── memory/                # SQLite/FTS5 会话/消息/长期记忆/设置
 │   │   ├── skills/                # YAML Skill 加载与执行
 │   │   ├── scheduler/             # 标准 5 段 cron 定时任务（SQLite 持久化）
 │   │   ├── mcp-client/            # MCP stdio/HTTP 客户端
-│   │   ├── docs/                  # 文档解析（xlsx/pdf/docx/csv/md）与编辑（docx/xlsx/csv）
+│   │   ├── docs/                  # 跨端文档解析与基础编辑（xlsx/pdf/docx/pptx/csv/md）
 │   │   ├── search/                # Glob/Grep（ignore crate，尊重 gitignore）
 │   │   ├── app-server/            # stdio NDJSON JSON-RPC（Electron 接入）
 │   │   ├── cli/                   # worldbase chat/run/projects
@@ -38,7 +38,7 @@ the-world/
 ```text
 apps/mobile    -- dart:ffi 三个 C ABI ----------> harness-rs/mobile-ffi    # ✅ 主路径（进程内）
 apps/mobile    -- WS 127.0.0.1:<动态端口> ------> mobile-ffi 内置 loopback # ✅ 已跑通
-apps/electron  -- spawn stdio NDJSON JSON-RPC --> harness-rs/app-server   # 渐进迁移：TS/Rust 可选
+apps/electron  -- spawn stdio NDJSON JSON-RPC --> harness-rs/app-server   # Rust 默认；TS 仅兼容
 harness-rs/cli -- in-process -------------------> harness-rs/core
 ```
 
@@ -48,40 +48,42 @@ harness-rs/cli -- in-process -------------------> harness-rs/core
 - `harness-rs` 不依赖 Electron 或 Flutter；Electron 不直接链接 Rust crate；Flutter 不复制 Agent 业务逻辑。
 - `protocol` crate 是 Rust 侧协议 schema 来源，JSON 字段统一 camelCase；Electron/Flutter 适配器目前手写，并由跨端契约测试防止漂移。
 - 当前移动构建没有真实的编译期 desktop feature 裁剪；`desktop-support` 是空兼容 feature。FFI transport capability ceiling、握手能力交集/排除项并集与显式移动工具白名单共同过滤 `exec`、`project-runtime`、`im-gateway` 等桌面能力。
-- Electron 设置中的“对话 Harness”可选择 `TypeScript（旧版）` 或 `Rust（app-server）`，默认使用 TS；选择 Rust 时，聊天模型/工具循环，以及项目、文件工作区、图片 Studio、MCP 和群组的已接入业务调用均由 Rust 处理。Electron 仍承担窗口、文件/目录选择和渲染器事件桥接等宿主职责。
+- Electron 设置中的“对话 Harness”默认使用 `Rust（app-server）`。`TypeScript（冻结兼容）` 只为已显式保存的旧配置保留，不再承接新功能。Rust 负责 Agent Loop、provider、会话/事件、权限/Plan、取消/续传和工具编排；Electron 继续承担窗口、renderer 展示、IPC/preload、项目运行时、LAN、页面自动化、图片队列/UI 存储和宿主适配。
 
-## 当前状态（2026-09-04）
+## 当前状态（2026-09-08）
 
-- ✅ **P0–P1 主体完成**：`protocol`、`providers`（SSE 跨 chunk 解析修复、OpenAI 兼容端点、Mock provider、供应商条目 auto 协议解析、OpenAI images 生图）、`tools`（原生工具、Electron 名称兼容层和 host 域工具）、`core`（Hub/Agent loop/权限 ask-allow-deny/事件总线/中止/续传/**宿主反向 RPC**/Studio 生图服务）、`memory`（FTS5 + CJK 兜底 + agents/images/分叉谱系表）、`skills`、`group`（桌面 5 模式 + 六字段黑板 + HITL 注入）、`scheduler`、`mcp-client`、`docs`、`search`、`exec`、`project-runtime`、`im-gateway`、`app-server`、`cli`、`mobile-ffi`。
+- ✅ **Agent Loop 主体完成**：`protocol`、`providers`（SSE 跨 chunk 解析、OpenAI-compatible、Anthropic、Mock、图片生成）、`core`（Hub/Agent loop/权限 ask-allow-deny/Plan/事件总线/中止/续传/宿主反向 RPC/工具结果存储）、`group`、`memory`、`skills`、`mcp-client`、`app-server`、`cli` 和 `mobile-ffi` 均已有可运行实现。
+- ✅ **跨端文档能力已迁移**：`docs` crate 已提供 xlsx/xls、pdf、docx、pptx、csv、md、json、txt 等解析，以及 docx/xlsx/pptx/csv/文本的基础写入；Electron 复杂展示、原文件打开、Office 兼容和桌面 UI 语义仍可由宿主层实现。
+- ✅ **Rust workspace 验证通过**：`cargo test --manifest-path harness-rs/Cargo.toml --workspace` 通过；core 单元/E2E、provider、tools、docs、project-runtime、IM connector 等均有测试覆盖。
 - ✅ **协议新增（对齐桌面端）**：`provider.list/save/delete/setActive`（多供应商）、`agent.list/get/save/delete`（Agent 绑定人设/供应商/模型）、`studio.generate/list/delete`（绘图）、`conversation.fork`（分叉 fork 模式 / 就地编辑 inplace 模式）、`group.inject`（HITL 澄清注入）、`group.board.update`（黑板操作）、`skill.save/delete`、`host.respond`（反向请求应答）、`ask_user`/`read_current_page`/`interact_current_page` 宿主域工具。
-- ✅ **Electron 双后端接入**：`ai:chat`、`ai:chatStream`、`ai:updateSessionAuthMode`、`ai:stopStream` 已支持按设置选择 TS/Rust；Rust 客户端会同步供应商、Agent/Agent Group 配置和会话文本历史，并转发权限、`ask_user`、页面自动化、文档和 `open_project_app` 反向请求。Rust 流在切回 TS 后仍可完成、授权和停止；Rust 二进制不可用或初始握手失败时才回退到 TS。
-- ✅ **Rust 测试**：workspace 单元与集成测试全过（`cargo test --workspace`）。
-- ✅ **移动端按桌面端功能完整实现并跑通**：`apps/mobile` Flutter 工程（四 Tab：对话/应用/绘图/我的，**iOS/Apple 风格 UI**——浅色分组列表、iOS 信息气泡、Cupertino 分段控件/弹窗/动作表、毛玻璃 TabBar，设计系统在 `lib/core/ios_ui.dart`）：
+- ✅ **Electron 默认走 Rust**：`ai:chat`、`ai:chatStream`、`ai:updateSessionAuthMode`、`ai:stopStream` 按设置选择后端；缺失或非法配置归一化为 Rust，只有显式 `ts` 才进入冻结兼容实现。Rust 不可用或握手失败会向调用方报错，不会静默启动 Node Agent Loop。
+- ✅ **Electron 工具 ownership 已明确**：现有 68 个 Node 宿主工具是冻结兼容子集，名称、description 和 JSON Schema 由快照检查保持一致。新 Rust 工具可通过 `electron_native()` 进入 Electron 目录，无需新增 Node placeholder，且不能被同名 host override 覆盖。
+- ✅ **移动端 Agent Loop 主路径已跑通**：`apps/mobile` Flutter 工程（四 Tab：对话/应用/绘图/我的，**iOS/Apple 风格 UI**——浅色分组列表、iOS 信息气泡、Cupertino 分段控件/弹窗/动作表、毛玻璃 TabBar，设计系统在 `lib/core/ios_ui.dart`）；这里的“跑通”指 Rust Agent Loop、FFI/WS 协议和主要功能面，不等同于已完成真机发布验证：
   - **对话**：会话抽屉（搜索/重命名/删除/分叉标记）、消息长按菜单（复制/编辑重发-分叉模式/就地覆盖/从此分叉）、Agent 选择、流式气泡、工具卡片、权限确认弹窗、ask_user 问答弹窗
   - **群组**：桌面 5 模式选择、成员编辑器、成员气泡、六字段黑板查看、HITL 注入
   - **绘图 Studio**：提示词 + 8 种比例 + 数量 → 生成（OpenAI images / mock SVG）→ 图库网格（`/studio/{id}` 取图）→ 删除
   - **应用**：轻应用（Web 快捷方式 + 内置 WebView + 页面自动化桥）、技能管理（新建/删除）、定时任务（创建/删除，移动端降级提示）
   - **我的**：**模型供应商管理**（协议 auto/openai/anthropic、Base URL、API Key、模型列表、生图能力、设默认）、Agent 工作区、长期记忆检索/添加、MCP 服务状态、连接配置收进「高级」
-- ✅ **验证**：Rust workspace、Electron 契约与宿主回调、Flutter 全量测试、真实 dylib + WS E2E 均通过；Android arm64 与 iOS arm64 的 `worldbase-mobile-ffi` release 交叉编译通过。
-- ⏳ **P2**：继续收敛剩余边缘行为与移动端 WebView 轻应用的真机内嵌。TS Harness 保留为显式迁移选项；仅当 Rust 可执行文件缺失或初始握手失败时，Rust 选择才回退至 TS。
-- ✅ **P3 部分**：macOS 已跑通 FFI 进程内模式（启动→握手→对话→持久化→停止），Android/iOS Rust FFI 产物可交叉编译；cargokit 最终打包与 iOS/Android 真机 UI/生命周期验证仍待完成。
+- ✅ **文档 DTO 路径边界已收敛**：artifact 内部持久化保留 canonical source/render 路径，`doc.import/get/list/preview.ensure` 对外只返回 workspace 相对路径；workspace 外部文件只返回 basename。Electron 打开原文件与预览 host callback 仍使用内部路径。
+- ✅ **验证入口已统一**：`pnpm harness:check` 执行 Rust 格式、workspace 测试、Electron 类型检查和 Harness/Electron 回归；`pnpm test:flutter` 全量 88 项通过，作为独立的较慢跨端门禁。
+- ⏳ **后续发布验证**：cargokit/最终打包、Android/iOS 真机 UI 与生命周期、后台恢复和所有 ABI 仍待完成。Node Agent Loop 不再开发；Electron host tools 继续按平台适配器维护。
 
 ## Electron Harness 选择与迁移
 
 在 Electron 的设置 → 执行中选择“对话 Harness”：
 
-- `TypeScript（旧版）`：默认实现，覆盖当前 Electron 全部 Agent 工具和宿主服务。
-- `Rust（app-server）`：启用 Rust stdio NDJSON JSON-RPC。项目、群组/频道、文件夹工作区、页面上下文、多模态附件、Skill、Agent 策略、图片 Studio 与 MCP 均使用 Rust 模型/工具循环；Electron 域工具经宿主反向 RPC 执行以保留现有数据和 UI 语义。
+- `Rust（app-server）`：默认且唯一持续开发的 Harness。provider、Agent Loop、会话/事件、权限/Plan、取消/续传、工具编排和动态 MCP 由 Rust 负责；Electron 域能力通过宿主反向 RPC 保留现有数据与展示语义。
+- `TypeScript（冻结兼容）`：只供显式保存的旧配置临时使用。Node `AIEngine`、AgentCore 和 provider 不再添加新能力。
 
-切换只影响之后创建的聊天流。已有 Rust 流会继续运行并可停止；切回 TS 后新流走 TS。仅在 Rust 二进制不可用或进程启动失败时回退到 TS，不会再根据聊天上下文静默回退。开发环境可运行 `pnpm --dir apps/electron build:harness`，也可通过 `WORLDBASE_RUST_HARNESS` 指定二进制。
+切换只影响之后创建的聊天流。已有 Rust 流会继续运行并可停止；只有用户明确切到 TS 后，新流才走兼容后端。Rust 二进制不可用或进程启动失败时直接报错，不会根据启动状态或聊天上下文静默回退。开发环境可运行 `pnpm --dir apps/electron build:harness`，也可通过 `WORLDBASE_RUST_HARNESS` 指定二进制。
 
 ### 当前 parity 清单
 
-Electron Agent 当前有 68 个公开工具名。名称、description 与 JSON Schema 从 Electron 注册表自动生成到 Rust 契约快照；漂移检查会同时阻止漏生成、重复名称及缺少 Rust 实现。Rust 模式保留 Rust 的模型循环、会话、计划状态和动态 `mcp__*` authority；除 `enter_plan_mode`、`exit_plan_mode` 外，Electron 的公开工具通过反向 `tool.execute` RPC 调用原 Node handler，因此项目备份与生命周期、后台命令轮询、Office/文档、图片队列、调度器、页面自动化、通用 `mcp_call`、固定 MCP 资源/Prompt 工具及 Electron 数据存储保持同一实现。现有 68 工具检查覆盖契约、注册和 ownership，行为测试集中在关键路径，并非逐项 handler 的 1:1 行为证明。
+Electron Agent 的既有 68 个公开工具名构成冻结的 Node 宿主目录。名称、description 与 JSON Schema 从 Electron 注册表生成到 Rust 契约快照；漂移检查防止兼容接口意外变化。Rust 模式下，Rust 负责模型循环、会话、计划状态、权限和动态 `mcp__*`；既有宿主工具通过反向 `tool.execute` RPC 调用 Node handler。新通用工具必须在 Rust 实现；设置 `Tool::electron_native() == true` 后即可随 `initialize.availableTools` 暴露给 Electron，不修改 68 项快照，也不注册 Node placeholder/override。
 
-Flutter/FFI 不依赖 Electron host handler，使用同名 Rust 原生实现，并在握手时按移动端 capability 隐藏子进程、端口和 Electron-only 工具。Provider 请求、对话同步、host callback 与移动端页面桥均有协议/行为测试。TS `AIEngine`、工具和服务仍不能删除，因为它们既是显式可选后端，也是 Rust 模式下 Electron 权威域工具的实现。
+Flutter/FFI 不依赖 Electron host handler，使用 Rust 原生实现，并在握手时按移动端 capability 和显式白名单隐藏子进程、端口和 Electron-only 工具。TS `AIEngine`/provider 只作为冻结兼容代码保留；不能删除仍被 Rust host bridge 调用的 Electron 工具与平台服务。
 
-详细边界见 [docs/rust-harness-architecture.md](docs/rust-harness-architecture.md)。
+详细边界见 [docs/rust-harness-architecture.md](docs/rust-harness-architecture.md)；新增 provider、工具、RPC、事件或文档能力按 [docs/rust-harness-development.md](docs/rust-harness-development.md) 执行。
 
 ## 构建与运行
 
@@ -90,6 +92,9 @@ Flutter/FFI 不依赖 Electron host handler，使用同名 Rust 原生实现，�
 cargo build --manifest-path harness-rs/Cargo.toml
 cargo test --manifest-path harness-rs/Cargo.toml --workspace
 cargo run --manifest-path harness-rs/Cargo.toml -p worldbase-cli -- chat "你好"   # in-process CLI
+
+# 提交前主门禁（Rust fmt/test + Electron typecheck/test）
+pnpm harness:check
 
 # 真实模型（可选；缺省 mock provider）
 export ANTHROPIC_API_KEY=sk-...          # 或 OPENAI_API_KEY / settings.set provider

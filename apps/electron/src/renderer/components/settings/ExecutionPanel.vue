@@ -8,7 +8,7 @@ const { t } = useI18n()
 const executionPreferences = ref<AIExecutionPreferences>({
   notifyOnTaskComplete: true,
   enableAiLogging: false,
-  harnessBackend: 'ts'
+  harnessBackend: 'rust'
 })
 const loading = ref(true)
 const saving = ref(false)
@@ -22,7 +22,7 @@ async function loadPreferences () {
     executionPreferences.value = {
       notifyOnTaskComplete: true,
       enableAiLogging: false,
-      harnessBackend: 'ts'
+      harnessBackend: 'rust'
     }
   } finally {
     loading.value = false

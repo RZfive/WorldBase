@@ -12,7 +12,7 @@
     "electron:build:win": "pnpm --dir apps/electron electron:build:win",
     "electron:build:mac:arm64": "pnpm --dir apps/electron electron:build:mac:arm64",
     "electron:build:linux": "pnpm --dir apps/electron electron:build:linux",
-    "electron:test": "pnpm --dir apps/electron test:group-session && pnpm --dir apps/electron test:group-rust-routing && pnpm --dir apps/electron test:im-rust-group-routing && pnpm --dir apps/electron test:harness-ownership && pnpm --dir apps/electron test:rust-lan-routing && pnpm --dir apps/electron test:rust-project-log-routing && pnpm --dir apps/electron test:anthropic-protocol && pnpm --dir apps/electron test:provider-models && pnpm --dir apps/electron test:message-branching && pnpm --dir apps/electron test:rust-harness-host-callbacks && pnpm --dir apps/electron test:harness-tool-contracts",
+    "electron:test": "pnpm --dir apps/electron test:group-session && pnpm --dir apps/electron test:group-rust-routing && pnpm --dir apps/electron test:im-rust-group-routing && pnpm --dir apps/electron test:harness-ownership && pnpm --dir apps/electron test:harness-settings && pnpm --dir apps/electron test:rust-lan-routing && pnpm --dir apps/electron test:rust-project-log-routing && pnpm --dir apps/electron test:anthropic-protocol && pnpm --dir apps/electron test:provider-models && pnpm --dir apps/electron test:message-branching && pnpm --dir apps/electron test:rust-harness-host-callbacks && pnpm --dir apps/electron test:harness-tool-contracts",
     "electron:test:im-gateway": "pnpm --dir apps/electron test:im-gateway",
     "harness:build": "cargo build --manifest-path harness-rs/Cargo.toml --release",
     "harness:test": "cargo test --manifest-path harness-rs/Cargo.toml",
@@ -22,6 +22,7 @@
     "dev:ios": "bash scripts/dev_ios.sh",
     "harness:test:android-build": "bash scripts/build_rust_android.sh",
     "test:rust": "cargo test --manifest-path harness-rs/Cargo.toml --workspace",
+    "harness:check": "cargo fmt --manifest-path harness-rs/Cargo.toml --all -- --check && cargo test --manifest-path harness-rs/Cargo.toml --workspace && pnpm electron:typecheck && pnpm electron:test",
     "test:flutter": "cargo build --manifest-path harness-rs/Cargo.toml -p worldbase-mobile-ffi --no-default-features && cd apps/mobile && flutter test",
     "test:e2e:macos": "cd apps/mobile && flutter test integration_test/app_e2e.dart -d macos"
   }

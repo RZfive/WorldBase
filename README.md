@@ -4,9 +4,10 @@ AI 驱动的项目生成器与管理平台。通过自然语言对话创建完�
 
 ## 🚀 当前状态
 
-- **Electron App**: 生产版本 (TypeScript) — `apps/electron/` 独立 workspace
-- **Rust Harness**: P0–P1 完成并三端跑通 ✅ — `harness-rs/` 唯一 Cargo workspace（17 个 crate，核心/协议/提供商/移动 FFI 均有 workspace 测试）
-- **Flutter 移动端**: 已建成并接入 harness ✅ — `apps/mobile/`（iOS 风格四 Tab，FFI 进程内连接）
+- **Electron App**: Electron/Vue 产品壳与桌面宿主 — `apps/electron/` 独立 workspace
+- **Rust Agent Loop**: 默认且唯一持续开发的 Harness，已接入 Electron/Flutter — `harness-rs/` 唯一 Cargo workspace
+- **Rust 文档能力**: 文档解析与基础编辑已迁移到 `docs` crate，支持跨端复用；Electron 的窗口、展示、宿主服务和桌面业务工具不要求迁移到 Rust
+- **Flutter 移动端**: 已接入 Rust Agent Loop ✅ — `apps/mobile/`（iOS 风格四 Tab，FFI 进程内连接）；文档 artifact 对外路径已脱敏，Android/iOS 真机打包与生命周期验证待完成
 
 ## 项目结构
 
@@ -23,6 +24,18 @@ harness-rs/            # Workspace 2: 唯一 Rust Cargo workspace
 apps/mobile/           # Workspace 3: Flutter 移动端（已接入 Rust Harness）
 └── lib/{app,core,features}/
 ```
+
+## Rust / Electron 边界
+
+当前目标不是把 Electron 的展示层和所有宿主服务重写成 Rust，而是让 Rust 成为可复用的 Agent Loop 核心：
+
+- Rust 必须稳定负责：Provider 适配、消息/会话上下文、流式事件、tool-call 循环、权限与 Plan、取消与断点续传、子 Agent/群组编排，以及跨端协议。
+- Rust 优先负责：跨平台文档解析和基础文档编辑；这部分能力可以被 CLI、Electron 和 Flutter 复用。
+- Electron 可以继续负责：窗口和 renderer 展示、IPC/preload、项目运行时与 LAN、页面自动化、原生对话框/通知、图片队列/UI 存储、IM webhook 入口，以及需要 Electron 数据和生命周期语义的宿主工具。
+- Electron 中的 Rust 模式因此是“Rust Agent Loop + Electron host tools”，68 个公开工具的契约对齐不代表 68 个 handler 都必须迁移成 Rust。
+- Rust 是新安装默认后端；Node/TS Agent Loop 只保留显式旧配置兼容，不接收新 provider、编排或通用工具功能。Rust 启动失败会明确报错，不会静默回退 TS。
+
+这条边界把 Agent 核心迁移和 Electron 产品层迁移解耦，Rust 的完成标准是 Agent Loop 和跨端能力可靠，而不是删除全部 TypeScript。
 
 ## 快速开始
 
@@ -48,7 +61,7 @@ pnpm --dir apps/electron electron:dev
 
 Electron 主进程使用运行时内置的 `node:sqlite`，不需要额外安装或重建 SQLite 原生 npm 模块。
 
-详细架构见 [docs/rust-harness-architecture.md](docs/rust-harness-architecture.md) 和 [HARNESS.md](HARNESS.md)
+详细架构见 [docs/rust-harness-architecture.md](docs/rust-harness-architecture.md) 和 [HARNESS.md](HARNESS.md)；新增功能流程见 [docs/rust-harness-development.md](docs/rust-harness-development.md)。
 
 ---
 
@@ -120,6 +133,7 @@ pnpm run dev:ios        # iOS 模拟器端
 
 ```bash
 pnpm run test:rust      # Rust workspace 全量测试
+pnpm run harness:check  # Rust + Electron Harness 主门禁
 pnpm run test:flutter   # 重建无桌面 feature 的宿主 dylib，再跑 Flutter 全量测试
 pnpm run harness:test:android-build # 探测 SDK/NDK 后交叉编译 Android arm64 release
 pnpm run test:e2e:macos # GUI 集成测试（真实窗口驱动全流程）
@@ -131,6 +145,8 @@ Android 和 iOS 的 Rust 构建入口分别为 `scripts/build_rust_android.sh` �
 `rustup target add aarch64-apple-ios aarch64-apple-ios-sim` 安装对应 target。
 
 > 移动端细节（架构、能力协商、轻应用、已知遗留）见 [HARNESS.md](HARNESS.md)。
+
+截至 **2026-09-08**，Rust workspace、Electron 回归和 Flutter 全量 88 项测试通过；macOS FFI 启动→握手→对话→持久化→停止主路径通过，Android/iOS arm64 release 交叉编译通过。文档 artifact 内部路径与公开 DTO 已拆分；公开 RPC 返回 workspace 相对路径或外部文件 basename。
 
 ---
 
@@ -158,9 +174,9 @@ Android 和 iOS 的 Rust 构建入口分别为 `scripts/build_rust_android.sh` �
 
 ```
 the-world/
-├── apps/electron/             # Electron workspace（已完成迁移）
-├── harness-rs/                # Rust Harness workspace
-├── apps/mobile/               # Flutter workspace（已接入 Rust Harness）
+├── apps/electron/             # Electron workspace（展示层/宿主能力；Rust Harness 默认）
+├── harness-rs/                # Rust Agent Loop / 公共能力 workspace
+├── apps/mobile/               # Flutter workspace（已接入 Rust Agent Loop）
 ├── docs/                      # 跨 workspace 架构文档
 ├── scripts/                   # 跨 workspace 编排脚本
 └── package.json               # 根编排入口（迁移后不持有 Electron 依赖）

@@ -535,6 +535,65 @@ fn artifact_source_path(workspace: &Path, artifact: &DocumentArtifact) -> PathBu
     }
 }
 
+/// Convert an internal artifact/source path into the path exposed to a
+/// renderer or mobile client.  The artifact store keeps the canonical source
+/// path internally because desktop host callbacks need to open/stat the real
+/// file, but transport DTOs must not leak a machine-specific absolute path.
+fn public_path(workspace: &Path, raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return raw.replace('\\', "/");
+    }
+
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    // macOS commonly exposes the same temporary directory as both `/var`
+    // and `/private/var`. Normalize both sides before containment checks so a
+    // workspace-owned render is not mistaken for an external file.
+    let resolved_path = path
+        .canonicalize()
+        .or_else(|_| canonicalize_existing_ancestor(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    if let Ok(relative) = resolved_path.strip_prefix(&workspace) {
+        return relative.to_string_lossy().replace('\\', "/");
+    }
+
+    // Sources outside the managed workspace are still useful as a display
+    // label, but exposing their parent directories leaks local machine paths.
+    resolved_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "document".to_string())
+}
+
+/// Serialize the public artifact DTO.  Internal artifact JSON remains
+/// path-complete for Rust's own persistence and host callbacks; this helper is
+/// the only shape that should cross doc.* RPC boundaries.
+pub fn artifact_public_value(workspace: &Path, artifact: &DocumentArtifact) -> Value {
+    let mut value = serde_json::to_value(artifact).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "filePath".into(),
+            Value::String(public_path(workspace, &artifact.file_path)),
+        );
+        if let Some(render) = object.get_mut("render").and_then(Value::as_object_mut) {
+            if let Some(asset_path) = render.get("assetPath").and_then(Value::as_str) {
+                render.insert(
+                    "assetPath".into(),
+                    Value::String(public_path(workspace, asset_path)),
+                );
+            }
+        }
+    }
+    value
+}
+
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_string();
@@ -1284,19 +1343,21 @@ pub fn list_documents_result(workspace: &Path) -> Result<Value> {
         );
     }
     Ok(json!({
-        "documents": artifacts.iter().map(|artifact| json!({
-            "id": artifact.id,
-            "filePath": artifact.file_path,
-            "fileName": artifact.file_name,
-            "fileType": artifact.file_type,
-            "fileSize": artifact.file_size,
-            "nodeCount": inferred_node_count(artifact),
-            "selectionCount": selections
-                .iter()
-                .filter(|selection| selection.artifact_id == artifact.id)
-                .count(),
-            "importedAt": artifact.imported_at,
-        })).collect::<Vec<_>>(),
+        "documents": artifacts.iter().map(|artifact| {
+            json!({
+                "id": artifact.id,
+                "filePath": public_path(workspace, &artifact.file_path),
+                "fileName": artifact.file_name,
+                "fileType": artifact.file_type,
+                "fileSize": artifact.file_size,
+                "nodeCount": inferred_node_count(artifact),
+                "selectionCount": selections
+                    .iter()
+                    .filter(|selection| selection.artifact_id == artifact.id)
+                    .count(),
+                "importedAt": artifact.imported_at,
+            })
+        }).collect::<Vec<_>>(),
         "selections": selections.iter().map(|selection| json!({
             "id": selection.id,
             "artifactId": selection.artifact_id,
@@ -1485,6 +1546,64 @@ mod tests {
             Path::new(&artifact.file_path),
             &source.canonicalize().unwrap()
         );
+        let public = artifact_public_value(root.path(), &artifact);
+        assert_eq!(public["filePath"], "nested/notes.txt");
+        assert!(!public
+            .to_string()
+            .contains(&root.path().to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn public_artifact_hides_external_paths_but_internal_storage_remains_resolvable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let source = external.path().join("external-notes.docx");
+        std::fs::write(&source, b"source bytes").unwrap();
+
+        let artifact = import_parsed_document(
+            workspace.path(),
+            &source,
+            &json!({ "kind": "docx", "text": "external notes" }),
+        )
+        .unwrap();
+        persist_host_render_preview(
+            workspace.path(),
+            &artifact.id,
+            json!({
+                "kind": "html",
+                "source": "generated",
+                "status": "ready",
+                "mimeType": "text/html"
+            }),
+            b"<p>preview</p>",
+        )
+        .unwrap();
+
+        let internal = get_document(workspace.path(), &artifact.id)
+            .unwrap()
+            .expect("persisted artifact");
+        assert_eq!(
+            Path::new(&internal.file_path),
+            &source.canonicalize().unwrap()
+        );
+        let internal_asset = internal.render.as_ref().unwrap()["assetPath"]
+            .as_str()
+            .unwrap();
+        assert!(Path::new(internal_asset).is_absolute());
+        assert!(Path::new(internal_asset).is_file());
+
+        let public = artifact_public_value(workspace.path(), &internal);
+        assert_eq!(public["filePath"], "external-notes.docx");
+        assert!(public["render"]["assetPath"]
+            .as_str()
+            .unwrap()
+            .starts_with(".worldbase/document-render-cache/"));
+        assert!(!public
+            .to_string()
+            .contains(&workspace.path().to_string_lossy().to_string()));
+        assert!(!public
+            .to_string()
+            .contains(&external.path().to_string_lossy().to_string()));
     }
 
     #[test]

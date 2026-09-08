@@ -25,6 +25,7 @@
     "test:group-rust-routing": "node --test tests/group-rust-routing.test.mjs",
     "test:im-rust-group-routing": "node --test tests/im-rust-group-routing.test.mjs",
     "test:harness-ownership": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/harness-ownership.test.mjs",
+    "test:harness-settings": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/settings-harness-default.test.mjs",
     "test:image-library-mirror": "node scripts/run-electron-node-test.mjs tests/image-library-mirror.test.mjs",
     "test:rust-harness-host-callbacks": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/rust-harness-host-callbacks.test.mjs",
     "test:harness-tool-contracts": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs scripts/generate-rust-tool-contracts.mjs --check",

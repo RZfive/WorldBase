@@ -3906,6 +3906,10 @@ impl Tool for EnterPlanModeTool {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"goal":{"type":"string"}},"required":["goal"]})
     }
+
+    fn electron_native(&self) -> bool {
+        true
+    }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let goal = require_str(&input, "goal")?;
         if !services.enter_plan_mode(goal) {
@@ -3935,6 +3939,10 @@ impl Tool for ExitPlanModeTool {
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"plan_summary":{"type":"string"},"steps":{"type":"array","items":{"type":"object"}}},"required":["plan_summary","steps"]})
+    }
+
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let summary = require_str(&input, "plan_summary")?;

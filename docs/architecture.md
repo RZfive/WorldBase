@@ -4,6 +4,12 @@
 
 **WorldBase** 是一个基于 Electron + Vue 3 的桌面应用，核心能力是通过 AI 对话生成完整的 Web 应用项目，并对这些生成的子项目进行持续管理、修改和数据分析。
 
+### 当前 Agent Runtime 边界（2026-09-08）
+
+本文档描述 Electron 产品层和项目管理层。Rust 是默认且唯一持续开发的 Agent Harness，提供跨 CLI、Electron 和 Flutter 复用的 provider、会话上下文、流式事件、tool-call 循环、权限/Plan、取消/续传、子 Agent/群组编排和动态 MCP。Node Agent Loop 只保留冻结兼容；Electron 继续负责窗口与 renderer 展示、IPC/preload、项目运行时、LAN、页面自动化、图片队列/UI 存储、IM 入口及其他宿主业务。
+
+文档解析与基础文档编辑属于 Rust 的公共能力迁移范围，由 `harness-rs/crates/docs` 提供跨端实现；Electron 的高级预览、原文件打开、Office/PDF 复杂编辑和工作台展示可以继续使用 TS 宿主服务。Rust/Electron 的详细 ownership 见 [rust-harness-architecture.md](rust-harness-architecture.md) 和 [HARNESS.md](../HARNESS.md)。
+
 ### 核心理念
 
 子项目不是"独立运行的小应用"，而是**主 AI 管理范围内的受控服务**。主 AI 既是它们的创造者，也是持续的管理者和分析者。

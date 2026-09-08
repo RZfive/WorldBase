@@ -52,13 +52,15 @@ test('Rust ask_user host contract retains legacy single payload and response ali
   })
 })
 
-function createNativeToolClient (domainToolNames = []) {
+function createNativeToolClient (domainTools = []) {
   return {
     async start () {},
     getAvailableTools: () => [
       { name: 'enter_plan_mode', description: 'Enter plan mode', inputSchema: { type: 'object' } },
       { name: 'exit_plan_mode', description: 'Exit plan mode', inputSchema: { type: 'object' } },
-      ...domainToolNames.map(name => ({ name, description: `Rust ${name}`, inputSchema: { type: 'object' } }))
+      ...domainTools.map(tool => typeof tool === 'string'
+        ? { name: tool, description: `Rust ${tool}`, inputSchema: { type: 'object' } }
+        : tool)
     ]
   }
 }
@@ -300,6 +302,71 @@ test('canonical discovery includes intrinsic plan schemas without registering No
     assert.equal(definition.parameters.type, 'object')
     assert.equal(registrations.some(tool => tool.definition.name === name), false)
   }
+})
+
+test('electronNative tools keep their Rust schema and cannot be shadowed by host registrations', async () => {
+  const nativeTool = {
+    name: 'write_project_file',
+    description: 'Rust-native write implementation',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        rust_only_value: { type: 'string' }
+      },
+      required: ['rust_only_value']
+    },
+    electronNative: true
+  }
+  const engine = createHarnessEngine(createServices(), [nativeTool])
+  const visible = engine.getAvailableTools().find(tool => tool.name === nativeTool.name)
+
+  assert.ok(visible)
+  assert.equal(visible.description, nativeTool.description)
+  assert.deepEqual(visible.parameters, nativeTool.inputSchema)
+  assert.equal(visible.electronNative, true)
+
+  const registrations = await collectHostTools(engine, {
+    customTools: [{
+      domain: 'electron_host_override',
+      definition: {
+        name: nativeTool.name,
+        description: 'Caller override that must be ignored',
+        parameters: { type: 'object' }
+      },
+      handler: async () => ({ source: 'node' })
+    }]
+  })
+  assert.equal(
+    registrations.some(tool => tool.definition.name === nativeTool.name),
+    false,
+    'an explicit Rust ownership declaration must suppress placeholders, legacy handlers, and custom overrides'
+  )
+})
+
+test('new electronNative tools need no frozen Node registry entry', async () => {
+  const nativeTool = {
+    name: 'new_rust_native_feature',
+    description: 'A feature implemented entirely in Rust',
+    inputSchema: {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query']
+    },
+    electronNative: true
+  }
+  const engine = createHarnessEngine(createServices(), [nativeTool])
+
+  assert.deepEqual(
+    engine.getAvailableTools().find(tool => tool.name === nativeTool.name),
+    {
+      name: nativeTool.name,
+      description: nativeTool.description,
+      parameters: nativeTool.inputSchema,
+      electronNative: true
+    }
+  )
+  const registrations = await collectHostTools(engine)
+  assert.equal(registrations.some(tool => tool.definition.name === nativeTool.name), false)
 })
 
 test('all 68 canonical Electron tools have an explicit execution owner', async () => {
