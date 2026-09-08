@@ -1,7 +1,8 @@
-//! 内置 Agent 工具集（与 TS 版 1:1 能力对齐的平台子集）。
+//! 内置 Agent 工具集。
 //!
-//! 工具分域：`core` 全端可用；`desktop` 域（exec/project 等）在移动端握手时
-//! 被能力协商过滤。
+//! 工具分域：`core` 是跨端公共能力；`desktop` 域（exec/project 等）在移动端
+//! 握手时被能力协商过滤。Electron 既可以使用由旧契约覆盖的宿主工具，也可以
+//! 显式暴露不依赖 TypeScript 的 Rust 原生工具。
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -288,6 +289,14 @@ pub trait Tool: Send + Sync {
     fn permission(&self) -> &str {
         "allow"
     }
+    /// Expose a Rust-native tool to Electron without adding a definition to
+    /// the frozen TypeScript Harness registry. Existing canonical Electron
+    /// contracts remain visible through `electron_contract`; new Rust tools
+    /// opt in explicitly so an accidental internal tool cannot leak into the
+    /// desktop model catalog.
+    fn electron_native(&self) -> bool {
+        false
+    }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value>;
 }
 
@@ -337,6 +346,10 @@ impl Tool for AliasTool {
         self.inner.permission()
     }
 
+    fn electron_native(&self) -> bool {
+        self.inner.electron_native()
+    }
+
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         self.inner.execute(input, services).await
     }
@@ -350,6 +363,7 @@ impl dyn Tool {
             input_schema: self.input_schema(),
             domain: self.domain().to_string(),
             permission: self.permission().to_string(),
+            electron_native: self.electron_native(),
         }
     }
 }
@@ -394,6 +408,10 @@ impl Tool for MobileInstallMcpServerTool {
 
     fn permission(&self) -> &str {
         self.inner.permission()
+    }
+
+    fn electron_native(&self) -> bool {
+        self.inner.electron_native()
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
@@ -490,7 +508,10 @@ pub fn filter_tools<'a>(
     tools
         .iter()
         .filter_map(|tool| {
-            if caps.platform == "electron" && !is_electron_tool_name(tool.name()) {
+            if caps.platform == "electron"
+                && !is_electron_tool_name(tool.name())
+                && !tool.electron_native()
+            {
                 return None;
             }
             if is_mobile && !mobile_tool_supported(tool.name()) {
@@ -784,6 +805,39 @@ impl Tool for GrepTool {
 mod tests {
     use super::*;
 
+    struct ElectronVisibilityTestTool {
+        name: &'static str,
+        electron_native: bool,
+    }
+
+    #[async_trait]
+    impl Tool for ElectronVisibilityTestTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Electron visibility test tool"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                }
+            })
+        }
+
+        fn electron_native(&self) -> bool {
+            self.electron_native
+        }
+
+        async fn execute(&self, input: Value, _services: &ToolServices) -> Result<Value> {
+            Ok(input)
+        }
+    }
+
     #[test]
     fn builtin_tool_names_unique() {
         let tools = builtin_tools();
@@ -873,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn electron_descriptors_exactly_match_every_generated_contract() {
+    fn electron_descriptors_include_every_frozen_generated_contract() {
         let capabilities = worldbase_protocol::types::Capabilities {
             platform: "electron".into(),
             features: worldbase_protocol::types::Capabilities::desktop().features,
@@ -887,12 +941,6 @@ mod tests {
             68,
             "expected the exact Electron tool catalog"
         );
-        assert_eq!(
-            actual.len(),
-            contracts.len(),
-            "Rust must expose exactly the generated Electron catalog"
-        );
-
         let mut actual_by_name = std::collections::HashMap::new();
         for descriptor in actual {
             let name = descriptor.name.clone();
@@ -924,7 +972,15 @@ mod tests {
                 descriptor.name
             );
         }
-        assert_eq!(actual_by_name.len(), contract_names.len());
+        for descriptor in actual_by_name.values() {
+            if !contract_names.contains(&descriptor.name) {
+                assert!(
+                    descriptor.electron_native,
+                    "non-legacy Electron tool must explicitly opt into Rust ownership: {}",
+                    descriptor.name
+                );
+            }
+        }
     }
 
     #[test]
@@ -1109,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    fn electron_only_advertises_the_canonical_generated_catalog() {
+    fn electron_advertises_the_frozen_catalog_and_explicit_rust_native_tools() {
         let tools = builtin_tools();
         let capabilities = worldbase_protocol::types::Capabilities {
             platform: "electron".into(),
@@ -1124,11 +1180,72 @@ mod tests {
             .collect::<Vec<_>>();
         actual.sort();
 
-        assert_eq!(actual, expected);
+        for name in expected {
+            assert!(
+                actual.contains(&name),
+                "missing frozen Electron tool: {name}"
+            );
+        }
+        assert!(filtered
+            .iter()
+            .all(|tool| { is_electron_tool_name(tool.name()) || tool.electron_native() }));
         assert!(!actual.contains(&"web_fetch".to_string()));
         assert!(!actual.contains(&"project_dev_start".to_string()));
         assert!(actual.contains(&"fetch_webpage".to_string()));
         assert!(actual.contains(&"start_project_server".to_string()));
+    }
+
+    #[test]
+    fn electron_filter_requires_an_explicit_rust_native_opt_in() {
+        let mut tools = builtin_tools();
+        tools.push(Arc::new(ElectronVisibilityTestTool {
+            name: "new_rust_feature",
+            electron_native: true,
+        }));
+        tools.push(Arc::new(ElectronVisibilityTestTool {
+            name: "internal_only_feature",
+            electron_native: false,
+        }));
+        let capabilities = worldbase_protocol::types::Capabilities {
+            platform: "electron".into(),
+            features: worldbase_protocol::types::Capabilities::desktop().features,
+            excludes: vec![],
+        };
+        let filtered = filter_tools(&tools, &capabilities);
+
+        let native = filtered
+            .iter()
+            .find(|tool| tool.name() == "new_rust_feature")
+            .expect("explicit Rust-native tool must enter the Electron catalog");
+        assert!(native.descriptor().electron_native);
+        assert!(filtered
+            .iter()
+            .all(|tool| tool.name() != "internal_only_feature"));
+    }
+
+    #[test]
+    fn electron_native_metadata_survives_tool_wrappers() {
+        let inner: Arc<dyn Tool> = Arc::new(ElectronVisibilityTestTool {
+            name: "wrapped_native_feature",
+            electron_native: true,
+        });
+        let alias = AliasTool::new("wrapped_native_alias", inner.clone(), json!({}));
+        let mobile = MobileInstallMcpServerTool {
+            inner: inner.clone(),
+        };
+
+        assert!(alias.electron_native());
+        assert!(mobile.electron_native());
+
+        // `electron_contract::apply` wraps canonical tools. Plan controls are
+        // Rust-owned, so this also proves the contract wrapper forwards the
+        // ownership marker into the initialize descriptor.
+        let plan_control = builtin_tools()
+            .into_iter()
+            .find(|tool| tool.name() == "enter_plan_mode")
+            .expect("enter_plan_mode tool");
+        assert!(plan_control.electron_native());
+        assert!(plan_control.descriptor().electron_native);
     }
 
     #[test]

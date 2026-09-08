@@ -74,7 +74,7 @@ const languagePreference = ref<LanguagePreference>('system')
 const executionPreferences = ref<AIExecutionPreferences>({
   notifyOnTaskComplete: true,
   enableAiLogging: false,
-  harnessBackend: 'ts'
+  harnessBackend: 'rust'
 })
 const savingTheme = ref(false)
 const savingLanguage = ref(false)

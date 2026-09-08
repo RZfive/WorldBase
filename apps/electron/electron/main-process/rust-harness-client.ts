@@ -45,6 +45,8 @@ export interface RustToolDescriptor {
   inputSchema: Record<string, unknown>
   domain?: string
   permission?: string
+  /** Rust owns execution in Electron; no TypeScript host override is needed. */
+  electronNative?: boolean
 }
 
 /** A Rust Studio image record emitted on the `studio.generate` event stream. */

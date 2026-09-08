@@ -262,7 +262,7 @@ export class ElectronToolRegistry {
     if (includeHandlers) {
       for (const definition of this.getNativeToolDefinitions()) {
         const name = definition?.name?.trim()
-        if (!name || INTRINSIC_RUST_TOOL_NAMES.has(name) || name.startsWith('mcp__')) continue
+        if (!name || INTRINSIC_RUST_TOOL_NAMES.has(name) || name.startsWith('mcp__') || definition.electronNative === true) continue
         if (registered.has(name)) continue
         registered.set(name, {
           definition,
@@ -274,10 +274,15 @@ export class ElectronToolRegistry {
     }
 
     const result: RegisteredTool[] = []
+    const rustNativeNames = new Set(
+      this.getNativeToolDefinitions()
+        .filter(definition => definition.electronNative === true)
+        .map(definition => definition.name)
+    )
     for (const [name, tool] of registered) {
       // These controls stay native so Rust's per-run plan state remains the
       // final authority before any Electron mutation is dispatched.
-      if (includeHandlers && INTRINSIC_RUST_TOOL_NAMES.has(name)) continue
+      if (includeHandlers && (INTRINSIC_RUST_TOOL_NAMES.has(name) || rustNativeNames.has(name))) continue
       result.push({
         definition: tool.definition,
         handler: includeHandlers

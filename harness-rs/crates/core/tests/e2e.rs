@@ -160,6 +160,19 @@ impl Provider for BlockingProvider {
 }
 
 async fn test_hub(mock_script: Vec<MockTurn>) -> Arc<Hub> {
+    // The production registry includes the user-level skills directory. Keep
+    // integration tests from reading or writing a developer's real home while
+    // still exercising the same default-directory behavior.
+    static TEST_WORLDBASE_HOME: std::sync::OnceLock<std::path::PathBuf> =
+        std::sync::OnceLock::new();
+    TEST_WORLDBASE_HOME.get_or_init(|| {
+        let path =
+            std::env::temp_dir().join(format!("worldbase-e2e-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        std::env::set_var("WORLDBASE_HOME", &path);
+        path
+    });
+
     let dir = std::env::temp_dir().join(format!("ws-e2e-{}", uuid::Uuid::new_v4()));
     let store = Arc::new(worldbase_memory::Store::open(&dir.join("app.sqlite")).unwrap());
     // 预置一个可读文件
@@ -3592,8 +3605,23 @@ async fn document_preview_ensure_persists_host_render_bytes_for_docx() {
     // A copied workspace or manual cache cleanup can leave a ready descriptor
     // without its bytes. The next ensure must regenerate through the host
     // instead of returning a stale ready artifact.
-    let asset_path = cached["render"]["assetPath"].as_str().unwrap();
-    std::fs::remove_file(asset_path).unwrap();
+    let public_asset_path = cached["render"]["assetPath"].as_str().unwrap();
+    assert!(!std::path::Path::new(public_asset_path).is_absolute());
+    assert!(!cached
+        .to_string()
+        .contains(&hub.workspace.to_string_lossy().to_string()));
+    let internal = worldbase_tools::document_artifacts::get_document(&hub.workspace, &artifact_id)
+        .unwrap()
+        .expect("persisted preview artifact");
+    let internal_asset_path = internal.render.as_ref().unwrap()["assetPath"]
+        .as_str()
+        .unwrap();
+    assert!(std::path::Path::new(internal_asset_path).is_absolute());
+    assert_eq!(
+        hub.workspace.join(public_asset_path),
+        std::path::PathBuf::from(internal_asset_path)
+    );
+    std::fs::remove_file(internal_asset_path).unwrap();
     let mut stale_events = hub.event_tx.subscribe();
     let stale_hub = hub.clone();
     let stale_id = artifact_id.clone();
@@ -3673,6 +3701,44 @@ async fn document_import_enforces_relative_workspace_boundary_and_input_limits()
     assert_eq!(
         imported["artifact"]["fileName"],
         outside.file_name().unwrap().to_string_lossy().to_string()
+    );
+    let artifact_id = imported["artifact"]["id"].as_str().unwrap();
+    let public_file_path = imported["artifact"]["filePath"].as_str().unwrap();
+    assert_eq!(
+        public_file_path,
+        outside.file_name().unwrap().to_string_lossy().to_string()
+    );
+    assert!(!std::path::Path::new(public_file_path).is_absolute());
+    assert!(!imported
+        .to_string()
+        .contains(&workspace.to_string_lossy().to_string()));
+
+    let fetched = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_GET,
+        serde_json::json!({ "artifactId": artifact_id }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fetched["filePath"], public_file_path);
+    let listed = dispatch(&hub, &ctx, method::DOC_LIST, serde_json::json!({}))
+        .await
+        .unwrap();
+    let listed_artifact = listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["id"] == artifact_id)
+        .expect("imported artifact in doc.list");
+    assert_eq!(listed_artifact["filePath"], public_file_path);
+
+    let internal = worldbase_tools::document_artifacts::get_document(&workspace, artifact_id)
+        .unwrap()
+        .expect("persisted external artifact");
+    assert_eq!(
+        std::path::Path::new(&internal.file_path),
+        &outside.canonicalize().unwrap()
     );
 
     let directory = workspace.join("document-directory.md");

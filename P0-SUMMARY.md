@@ -1,4 +1,6 @@
-# P0 骨架完成总结
+# P0 骨架完成总结（历史归档）
+
+> 本文件是 2026-08-28 的阶段快照，保留当时的目录、stub 和待办描述用于追溯，不代表当前实现或开发方向。当前状态以 [HARNESS.md](HARNESS.md)、[Rust Harness 架构](docs/rust-harness-architecture.md) 和 [Rust Harness 开发指南](docs/rust-harness-development.md) 为准；新功能只进入 Rust Harness，Node Agent Loop 已冻结。
 
 **完成时间**: 2026-08-28  
 **状态**: ✅ 可运行

@@ -79,6 +79,10 @@ impl Tool for ElectronContractTool {
         self.inner.permission()
     }
 
+    fn electron_native(&self) -> bool {
+        self.inner.electron_native()
+    }
+
     async fn execute(&self, input: Value, services: &crate::ToolServices) -> Result<Value> {
         self.inner.execute(input, services).await
     }

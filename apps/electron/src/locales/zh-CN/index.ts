@@ -1152,11 +1152,11 @@ const zhCN = {
         notifyOn: '开启任务结束通知',
         notifyOff: '关闭任务结束通知',
         harnessTitle: '对话 Harness',
-        harnessHint: '选择新对话的执行引擎。选择 Rust 后，项目、群组、工作区、图片、MCP 与附件均由 Rust 执行模型和工具循环，并通过 Electron 宿主桥接访问数据与服务。',
-        harnessTs: 'TypeScript（旧版）',
-        harnessTsHint: '旧版实现',
+        harnessHint: 'Rust 是持续维护的 Agent Loop。Electron 继续负责窗口、展示和桌面宿主服务；TypeScript 仅保留为已有配置的兼容后端，新功能不会再添加到 Node Harness。',
+        harnessTs: 'TypeScript（冻结兼容）',
+        harnessTsHint: '仅兼容已有配置，不再开发',
         harnessRust: 'Rust（app-server）',
-        harnessRustHint: '完整聊天上下文由 Rust 执行'
+        harnessRustHint: '默认且唯一的新功能开发入口'
       },
       transfer: {
         navLabel: '配置迁移',

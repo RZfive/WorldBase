@@ -85,6 +85,7 @@ test('Rust-selected IM group replies use the native Rust group adapter', async (
     memberAgentIds: ['member']
   }
   const replyCalls = []
+  const memoryCalls = []
   globalThis[STATE_KEY] = {
     routingInputs: [],
     nativeCalls: [],
@@ -116,7 +117,10 @@ test('Rust-selected IM group replies use the native Rust group adapter', async (
       aiEngine: {
         async chat () { throw new Error('TypeScript AI engine must not run in Rust mode') }
       },
-      rustHarness: { native: true },
+      rustHarness: {
+        native: true,
+        async ingestMemory (input) { memoryCalls.push(input) }
+      },
       agentStore: { get: id => agents.get(id) },
       memoryEngine: null
     }
@@ -148,4 +152,6 @@ test('Rust-selected IM group replies use the native Rust group adapter', async (
   assert.match(globalThis[STATE_KEY].nativeCalls[0].sessionId, /^im-rust-group-binding-1-message-1-/)
   assert.equal(globalThis[STATE_KEY].routingInputs.length, 1)
   assert.match(replyCalls[0].systemPromptSections.at(-1), /native Rust group notes/)
+  assert.equal(memoryCalls.length, 1)
+  assert.equal(memoryCalls[0].finalAssistantText, 'Rust IM reply')
 })

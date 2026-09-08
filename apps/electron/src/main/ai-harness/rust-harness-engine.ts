@@ -53,13 +53,13 @@ const PLAN_MODE_WRITE_TOOLS = new Set([
 // command allowlists and background polling, Office I/O, scheduler/UI stores,
 // page automation, generic MCP calls, and all other host-owned state. Rust
 // still owns dynamic MCP discovery/execution and its per-run allow-list.
-const RUST_NATIVE_EXECUTION_TOOL_NAMES = new Set([
+const RUST_INTRINSIC_EXECUTION_TOOL_NAMES = new Set([
   'enter_plan_mode',
   'exit_plan_mode'
 ])
 
-function shouldExecuteInElectronHost (name: string): boolean {
-  return !RUST_NATIVE_EXECUTION_TOOL_NAMES.has(name)
+function shouldExecuteInElectronHost (name: string, descriptor?: { electronNative?: boolean }): boolean {
+  return !RUST_INTRINSIC_EXECUTION_TOOL_NAMES.has(name) && descriptor?.electronNative !== true
 }
 
 export interface RustHarnessEngineOptions {
@@ -100,7 +100,8 @@ export class RustHarnessEngine implements AIHarness {
         .map(tool => ({
           name: tool.name,
           description: tool.description,
-          parameters: tool.inputSchema
+          parameters: tool.inputSchema,
+          electronNative: tool.electronNative === true
         })),
       runSubagents: async (tasks, parent, onProgress, abortSignal) => {
         return await this.runSubagents(tasks, parent, onProgress, abortSignal)
@@ -327,15 +328,19 @@ export class RustHarnessEngine implements AIHarness {
     // Rust remains the execution authority for the loop. Host-only tools are
     // intentionally replaced with Electron's exact public definitions so the
     // catalog shown to the renderer matches the handler that will run.
-    const tools = this.client.getAvailableTools()
+    const rustDescriptors = this.client.getAvailableTools()
+    const rustByName = new Map(rustDescriptors.map(tool => [tool.name, tool]))
+    const tools = rustDescriptors
       .map(tool => ({
       name: tool.name,
       description: tool.description,
-      parameters: tool.inputSchema
+      parameters: tool.inputSchema,
+      electronNative: tool.electronNative === true
       }))
-    const byName = new Map(tools.map(tool => [tool.name, tool]))
+    const byName = new Map<string, ToolDefinition>(tools.map(tool => [tool.name, tool]))
     for (const tool of this.electronTools.getToolDefinitions()) {
-      if (shouldExecuteInElectronHost(tool.name) || !byName.has(tool.name)) {
+      const rustDescriptor = rustByName.get(tool.name)
+      if (shouldExecuteInElectronHost(tool.name, rustDescriptor) || !byName.has(tool.name)) {
         byName.set(tool.name, tool)
       }
     }
@@ -396,9 +401,13 @@ export class RustHarnessEngine implements AIHarness {
 
   private async collectCustomTools (options?: AIRequestOptions): Promise<RustCustomToolRegistration[]> {
     const nativeNames = this.nativeToolNames()
-    // Electron's public domain tools deliberately override same-name Rust
-    // implementations. Only intrinsic plan controls and dynamically discovered
-    // MCP tools remain on the app-server side for an Electron run.
+    const rustNativeNames = new Set(this.client.getAvailableTools()
+      .filter(tool => tool.electronNative === true)
+      .map(tool => tool.name.trim())
+      .filter(Boolean))
+    // Frozen Electron host tools deliberately override same-name compatibility
+    // implementations. Explicit `electronNative` tools, intrinsic plan
+    // controls, and dynamically discovered MCP tools stay in app-server.
     const hostFallbacks = this.createElectronHostToolRegistrations(options)
     const registered: RustCustomToolRegistration[] = [
       ...hostFallbacks,
@@ -408,7 +417,9 @@ export class RustHarnessEngine implements AIHarness {
     for (const tool of registered) {
       const name = tool.definition?.name?.trim()
       const isHostOverride = tool.domain === 'electron_host_override'
-      if (!name || (!isHostOverride && nativeNames.has(name)) || unique.has(name)) continue
+      // `electronNative` is an ownership declaration, not just discovery
+      // metadata. Even a caller-supplied host override cannot shadow it.
+      if (!name || rustNativeNames.has(name) || (!isHostOverride && nativeNames.has(name)) || unique.has(name)) continue
       unique.set(name, tool)
     }
     return Array.from(unique.values())
@@ -421,8 +432,9 @@ export class RustHarnessEngine implements AIHarness {
    * cannot leak from one member to another.
    */
   createElectronHostToolRegistrations (options: AIRequestOptions = {}): RustCustomToolRegistration[] {
+    const rustByName = new Map(this.client.getAvailableTools().map(tool => [tool.name, tool]))
     return this.electronTools.createRegistrations(options)
-      .filter(tool => shouldExecuteInElectronHost(tool.definition.name) &&
+      .filter(tool => shouldExecuteInElectronHost(tool.definition.name, rustByName.get(tool.definition.name)) &&
         // Dynamic MCP tools are discovered and executed natively after Rust
         // receives the run's MCP allow-list. They are absent from the static
         // initialize catalog, so name-based exclusion alone is insufficient.

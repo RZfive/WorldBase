@@ -1,9 +1,9 @@
 /**
  * Serializes the ownership handoff for project processes and MCP transports.
  *
- * The Electron shell keeps both implementations available during migration,
- * but only one may own project recovery at a time. Keeping this logic outside
- * IPC makes the ordering explicit and independently testable.
+ * The Electron shell keeps the frozen TypeScript compatibility backend
+ * available, but only one may own project recovery at a time. Keeping this
+ * logic outside IPC makes the ordering explicit and independently testable.
  */
 export type HarnessBackend = 'ts' | 'rust'
 

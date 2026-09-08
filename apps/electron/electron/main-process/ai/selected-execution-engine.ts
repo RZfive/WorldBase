@@ -21,10 +21,11 @@ export function isRustHarnessSelected (): boolean {
 
 /**
  * Resolve the configured chat backend before a model/tool loop begins.
- * Context never affects this choice: once Rust is selected, every requested
- * capability is Rust-owned. A missing binary or failed handshake is surfaced
- * to the caller; silently returning the TS engine would invalidate parity
- * testing and can duplicate side effects such as project starts or images.
+ * Context never affects this choice. Rust is the default and the only actively
+ * developed backend; an explicitly persisted `ts` value is supported solely
+ * for compatibility with existing installations. A missing binary or failed
+ * handshake is surfaced to the caller; silently returning TS would hide a
+ * broken Rust deployment and could duplicate side effects.
  */
 export async function startSelectedRustHarness (): Promise<RustHarnessEngine | null> {
   if (!isRustHarnessSelected()) return null

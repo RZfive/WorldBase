@@ -1151,11 +1151,11 @@ const enUS: MessageSchema = {
         notifyOn: 'Turn on task-end notifications',
         notifyOff: 'Turn off task-end notifications',
         harnessTitle: 'Chat harness',
-        harnessHint: 'Choose the engine for new chats. Rust runs the model and tool loop for projects, groups, workspaces, images, MCP, and attachments through the Electron host bridge.',
-        harnessTs: 'TypeScript (legacy)',
-        harnessTsHint: 'Legacy implementation',
+        harnessHint: 'Rust is the actively maintained Agent Loop. Electron continues to own windows, presentation, and desktop host services; TypeScript remains only for existing compatibility settings and receives no new features.',
+        harnessTs: 'TypeScript (frozen compatibility)',
+        harnessTsHint: 'Compatibility only; frozen',
         harnessRust: 'Rust (app-server)',
-        harnessRustHint: 'Full chat context through Rust'
+        harnessRustHint: 'Default and only new-feature target'
       },
       transfer: {
         navLabel: 'Transfer',

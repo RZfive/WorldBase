@@ -2902,7 +2902,12 @@ fn doc_import(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let artifact =
         worldbase_tools::document_artifacts::import_parsed_document(&hub.workspace, &full, &parsed)
             .map_err(internal)?;
-    Ok(json!({ "artifact": artifact }))
+    Ok(json!({
+        "artifact": worldbase_tools::document_artifacts::artifact_public_value(
+            &hub.workspace,
+            &artifact,
+        )
+    }))
 }
 
 fn doc_list(hub: &Arc<Hub>, _params: Value) -> Result<Value, ErrorObject> {
@@ -2913,7 +2918,12 @@ fn doc_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let id = document_id_param(&params)?;
     let artifact =
         worldbase_tools::document_artifacts::get_document(&hub.workspace, id).map_err(internal)?;
-    serde_json::to_value(artifact).map_err(internal)
+    Ok(artifact
+        .as_ref()
+        .map(|artifact| {
+            worldbase_tools::document_artifacts::artifact_public_value(&hub.workspace, artifact)
+        })
+        .unwrap_or(Value::Null))
 }
 
 async fn doc_preview_ensure(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
@@ -2945,7 +2955,10 @@ async fn doc_preview_ensure(hub: &Arc<Hub>, params: Value) -> Result<Value, Erro
             .map_err(internal)?
             .is_some()
         {
-            return serde_json::to_value(current).map_err(internal);
+            return Ok(worldbase_tools::document_artifacts::artifact_public_value(
+                &hub.workspace,
+                &current,
+            ));
         }
     }
 
@@ -3008,7 +3021,12 @@ async fn doc_preview_ensure(hub: &Arc<Hub>, params: Value) -> Result<Value, Erro
         worldbase_tools::document_artifacts::ensure_render_preview(&hub.workspace, id)
             .map_err(internal)?
     };
-    serde_json::to_value(artifact).map_err(internal)
+    Ok(artifact
+        .as_ref()
+        .map(|artifact| {
+            worldbase_tools::document_artifacts::artifact_public_value(&hub.workspace, artifact)
+        })
+        .unwrap_or(Value::Null))
 }
 
 fn host_preview_bytes(value: &Value) -> Option<Vec<u8>> {

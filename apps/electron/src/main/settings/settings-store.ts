@@ -154,7 +154,9 @@ export interface PortableSettingsConfig {
 export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
   notifyOnTaskComplete: true,
   enableAiLogging: false,
-  harnessBackend: 'ts'
+  // Rust is the only actively developed harness.  `ts` remains readable for
+  // existing user settings as a frozen compatibility backend.
+  harnessBackend: 'rust'
 }
 
 export const DEFAULT_CHAT_FONT_PREFERENCES: ChatFontPreferences = {
@@ -336,7 +338,10 @@ function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreference
     enableAiLogging: typeof input.enableAiLogging === 'boolean'
       ? input.enableAiLogging
       : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging,
-    harnessBackend: input.harnessBackend === 'rust' ? 'rust' : 'ts'
+    // Rust is the only actively maintained Harness. Preserve an explicit
+    // legacy `ts` choice for existing installations, but treat missing or
+    // invalid values as the Rust default instead of reviving Node silently.
+    harnessBackend: input.harnessBackend === 'ts' ? 'ts' : 'rust'
   }
 }
 
