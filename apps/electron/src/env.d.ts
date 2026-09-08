@@ -1196,7 +1196,7 @@ interface ElectronAPI {
   getDocument: (artifactId: string) => Promise<DocumentArtifactDTO | null>
   ensureDocumentRenderPreview: (artifactId: string) => Promise<DocumentArtifactDTO | null>
   getDocumentRenderData: (artifactId: string) => Promise<{ mimeType: string; bytes: Uint8Array } | null>
-  openDocumentOriginal: (artifactId: string) => Promise<{ success: boolean; error?: string }>
+  openDocumentOriginal: (artifactId: string) => Promise<{ success: boolean; supported?: boolean; error?: string }>
   removeDocument: (artifactId: string) => Promise<boolean>
   createDocumentSelection: (payload: { artifactId: string; nodeIds: string[]; label: string; color: string; excerpt?: string }) => Promise<DocumentSelectionDTO>
   removeDocumentSelection: (regionId: string) => Promise<boolean>

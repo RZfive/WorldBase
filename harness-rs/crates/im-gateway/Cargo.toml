@@ -4,12 +4,24 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+aes = "0.8"
 anyhow = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
+cbc = { version = "0.1", features = ["alloc"] }
+chrono = { workspace = true }
 futures = { workspace = true }
+hmac = "0.12"
+rand = "0.8"
 reqwest = { workspace = true }
+roxmltree = "0.20"
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_urlencoded = "0.7"
+sha1 = { workspace = true }
+sha2 = "0.10"
+subtle = "2.6"
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 worldbase-protocol = { path = "../protocol" }

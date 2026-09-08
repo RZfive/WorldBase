@@ -356,6 +356,7 @@ impl Store {
                 enabled INTEGER NOT NULL DEFAULT 1,
                 last_run_at TEXT,
                 next_run_at TEXT,
+                metadata TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
             "#,
@@ -378,6 +379,7 @@ impl Store {
                 "ALTER TABLE agents ADD COLUMN memory_write_policy TEXT NOT NULL DEFAULT '{}'",
                 "ALTER TABLE agents ADD COLUMN auto_reply_policy TEXT NOT NULL DEFAULT '{}'",
                 "ALTER TABLE schedules ADD COLUMN next_run_at TEXT",
+                "ALTER TABLE schedules ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
             ];
             for sql in alters {
                 let _ = conn.execute(sql, []);
@@ -2758,9 +2760,15 @@ impl Store {
 
     pub fn create_schedule(&self, entry: &ScheduleEntry) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        let metadata = serde_json::to_string(entry)?;
+        let created_at = if entry.created_at.trim().is_empty() {
+            now_ts()
+        } else {
+            entry.created_at.clone()
+        };
         conn.execute(
-            "INSERT INTO schedules (id, name, cron, task, enabled, last_run_at, next_run_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO schedules (id, name, cron, task, enabled, last_run_at, next_run_at, metadata, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 entry.id,
                 entry.name,
@@ -2769,7 +2777,8 @@ impl Store {
                 entry.enabled,
                 entry.last_run_at,
                 entry.next_run_at,
-                now_ts(),
+                metadata,
+                created_at,
             ],
         )?;
         Ok(())
@@ -2778,20 +2787,78 @@ impl Store {
     pub fn list_schedules(&self) -> Result<Vec<ScheduleEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, cron, task, enabled, last_run_at, next_run_at FROM schedules ORDER BY created_at",
+            "SELECT id, name, cron, task, enabled, last_run_at, next_run_at, metadata, created_at FROM schedules ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok(ScheduleEntry {
-                id: row.get("id")?,
-                name: row.get("name")?,
-                cron: row.get("cron")?,
-                task: row.get("task")?,
-                enabled: row.get::<_, i64>("enabled")? != 0,
-                last_run_at: row.get("last_run_at")?,
-                next_run_at: row.get("next_run_at")?,
-            })
+            let id = row.get("id")?;
+            let name = row.get("name")?;
+            let cron = row.get("cron")?;
+            let task = row.get("task")?;
+            let enabled = row.get::<_, i64>("enabled")? != 0;
+            let last_run_at = row.get("last_run_at")?;
+            let next_run_at = row.get("next_run_at")?;
+            let metadata: String = row.get("metadata")?;
+            let created_at: String = row.get("created_at")?;
+            let mut entry = serde_json::from_str::<ScheduleEntry>(&metadata).unwrap_or_else(|_| {
+                ScheduleEntry {
+                    id: String::new(),
+                    name: String::new(),
+                    cron: String::new(),
+                    task: String::new(),
+                    enabled: false,
+                    last_run_at: None,
+                    next_run_at: None,
+                    schedule: None,
+                    selected_skill_ids: Vec::new(),
+                    selected_mcp_server_ids: Vec::new(),
+                    retry_policy: Default::default(),
+                    retry_scheduled_at: None,
+                    retry_attempt: 0,
+                    created_by: String::new(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                    last_status: String::new(),
+                }
+            });
+            // The indexed columns remain authoritative so legacy update paths
+            // cannot be hidden by stale values in the extensible metadata.
+            entry.id = id;
+            entry.name = name;
+            entry.cron = cron;
+            entry.task = task;
+            entry.enabled = enabled;
+            entry.last_run_at = last_run_at;
+            entry.next_run_at = next_run_at;
+            if entry.created_at.is_empty() {
+                entry.created_at = created_at;
+            }
+            Ok(entry)
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Persist both the legacy indexed fields and structured scheduler
+    /// metadata in one statement.
+    pub fn update_schedule(&self, entry: &ScheduleEntry) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let metadata = serde_json::to_string(entry)?;
+        let updated = conn.execute(
+            "UPDATE schedules
+             SET name = ?2, cron = ?3, task = ?4, enabled = ?5,
+                 last_run_at = ?6, next_run_at = ?7, metadata = ?8
+             WHERE id = ?1",
+            params![
+                entry.id,
+                entry.name,
+                entry.cron,
+                entry.task,
+                entry.enabled,
+                entry.last_run_at,
+                entry.next_run_at,
+                metadata,
+            ],
+        )?;
+        Ok(updated > 0)
     }
 
     pub fn delete_schedule(&self, id: &str) -> Result<bool> {

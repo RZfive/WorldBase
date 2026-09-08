@@ -347,6 +347,45 @@ test('all 68 canonical Electron tools have an explicit execution owner', async (
   assert.deepEqual(canonicalNames.filter(name => !hostNames.includes(name)), nativeNames)
 })
 
+test('missing optional Electron services remain explicit host errors instead of Rust fallbacks', async () => {
+  // This is intentionally the smallest service set.  Rust still advertises
+  // the canonical Electron catalog, but a headless/partially initialized
+  // Electron process must not accidentally execute a different Rust
+  // implementation for a host-owned tool.
+  const services = createServices()
+  const contract = JSON.parse(await fs.readFile(
+    path.resolve(process.cwd(), '../../harness-rs/crates/tools/electron-tool-contracts.json'),
+    'utf8'
+  ))
+  const canonicalNames = contract.tools.map(tool => tool.name)
+  const registrations = await collectHostTools(
+    createHarnessEngine(services, canonicalNames),
+    { authMode: 'auto' }
+  )
+  const hostNames = new Set(
+    registrations
+      .filter(tool => tool.domain === 'electron_host_override')
+      .map(tool => tool.definition.name)
+  )
+
+  for (const name of canonicalNames.filter(name => !['enter_plan_mode', 'exit_plan_mode'].includes(name))) {
+    assert.equal(hostNames.has(name), true, `${name} must retain an explicit Electron owner`)
+  }
+
+  for (const name of [
+    'list_documents',
+    'read_document',
+    'read_current_page',
+    'generate_image',
+    'list_workspace_files'
+  ]) {
+    const { result } = await dispatchToolExecute(registrations, name, {})
+    assert.deepEqual(result, {
+      error: `Electron host service unavailable for ${name}`
+    })
+  }
+})
+
 test('fixed MCP discovery and resource tools execute through the Node MCP service', async () => {
   const mcpService = new MCPService()
   const names = [
@@ -612,6 +651,56 @@ test('Rust Studio client replays image events published before its RPC response 
     entries: [{ id: 'native-image', file: 'native-image.png' }]
   })
   assert.equal(client.hasSession('studio-stream-1'), false)
+})
+
+test('Rust client answers direct document host requests without a session mapping', async () => {
+  const hostRequests = []
+  const responses = []
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-direct-document-host-test'),
+    onEvent: () => {},
+    onHostRequest: async request => {
+      hostRequests.push(request)
+      return { success: true, supported: true }
+    }
+  })
+  client.start = async () => {}
+  client.respondHost = async (requestId, result) => {
+    responses.push({ requestId, result })
+  }
+
+  // Direct document/workbench RPCs do not have the chat session mapping that
+  // tool.execute requests use. They must still be dispatched to the Electron
+  // host callback immediately instead of being parked in the replay backlog.
+  client.handleEvent({
+    streamId: 'document-open-direct',
+    seq: 0,
+    ts: new Date().toISOString(),
+    kind: 'host_request',
+    requestId: 'document-open-direct-request',
+    requestKind: 'document.openOriginal',
+    payload: {
+      artifactId: 'artifact-1',
+      filePath: '/tmp/report.docx'
+    }
+  })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(hostRequests, [{
+    requestId: 'document-open-direct-request',
+    requestKind: 'document.openOriginal',
+    payload: {
+      artifactId: 'artifact-1',
+      filePath: '/tmp/report.docx'
+    },
+    streamId: 'document-open-direct'
+  }])
+  assert.deepEqual(responses, [{
+    requestId: 'document-open-direct-request',
+    result: { success: true, supported: true }
+  }])
+  assert.equal(client.backlog.has('document-open-direct'), false)
 })
 
 test('Rust native group keeps its Electron session through child completion and releases only at group completion', async () => {
@@ -1314,6 +1403,30 @@ test('Rust facade preserves assistant image parts in the completed message', asy
   const done = events.find(event => event.type === 'done')
   assert.ok(done)
   assert.deepEqual(done.message.content, parts)
+})
+
+test('Rust facade forwards reset frames as the Node stream reset event', async () => {
+  const client = {
+    ...createNativeToolClient(),
+    async chatStream (_sessionId, _conversationId, _text, _options, onFrame) {
+      onFrame({ kind: 'assistant_message', content: 'before' })
+      onFrame({ kind: 'delta', text: 'partial' })
+      onFrame({ kind: 'reset' })
+      onFrame({ kind: 'delta', text: 'retry' })
+      onFrame({ kind: 'done', stopReason: 'stop' })
+      return { streamId: 'reset-stream' }
+    },
+    setModelPricing () {}
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  const events = []
+
+  for await (const event of engine.chatStream([{ role: 'user', content: 'retry this' }])) {
+    events.push(event)
+  }
+
+  assert.deepEqual(events.map(event => event.type), ['token', 'reset', 'token', 'done'])
+  assert.equal(events.at(-1).message.content, 'beforeretry')
 })
 
 test('Rust history sync keeps only exactly paired tool calls and does not duplicate result text', async () => {

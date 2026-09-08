@@ -25,6 +25,20 @@ void main() {
     expect(enabled['reasoningEffort'], 'max');
   });
 
+  test('disabled web search denies Node and Rust web tools', () {
+    final params = buildChatSendParams(
+      conversationId: 'conversation',
+      text: 'hello',
+      webSearch: false,
+    );
+
+    expect(params['deniedToolNames'], [
+      'web_search',
+      'fetch_webpage',
+      'web_fetch',
+    ]);
+  });
+
   test('RPC sanitization replaces only orphan UTF-16 surrogates', () {
     final orphanHigh = String.fromCharCode(0xD800);
     final orphanLow = String.fromCharCode(0xDFFF);
@@ -94,6 +108,34 @@ void main() {
     });
 
     expect(descriptor.inputSchema['required'], ['path']);
+  });
+
+  test('document selections accept both key styles and round-trip', () {
+    final selection = DocumentSelection.fromJson({
+      'id': 'region-1',
+      'artifact_id': 'artifact-1',
+      'node_ids': ['node-1', 'node-2'],
+      'label': '重点',
+      'color': '#ef4444',
+      'excerpt': '选中的内容',
+      'created_at': '2026-09-05T00:00:00Z',
+    });
+
+    expect(selection.id, 'region-1');
+    expect(selection.artifactId, 'artifact-1');
+    expect(selection.nodeIds, ['node-1', 'node-2']);
+    expect(selection.label, '重点');
+    expect(selection.excerpt, '选中的内容');
+    expect(selection.createdAt, '2026-09-05T00:00:00Z');
+    expect(selection.toJson(), {
+      'id': 'region-1',
+      'artifactId': 'artifact-1',
+      'nodeIds': ['node-1', 'node-2'],
+      'label': '重点',
+      'color': '#ef4444',
+      'excerpt': '选中的内容',
+      'createdAt': '2026-09-05T00:00:00Z',
+    });
   });
 
   test('uncorrelated protocol errors fail pending RPCs immediately', () async {

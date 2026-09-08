@@ -35,6 +35,12 @@ pub enum EventKind {
     /// Provider reasoning/thinking content. Kept separate from assistant text
     /// so it is never persisted as the answer or replayed as user-visible text.
     ThinkingDelta { text: String },
+    /// Reset the in-progress assistant rendering state.
+    ///
+    /// Node emits this event before retrying an interrupted provider stream so
+    /// hosts can discard partial tokens/thinking from the failed attempt while
+    /// retaining the conversation and tool history checkpoint.
+    Reset,
     /// 发起工具调用。
     ToolCall {
         call_id: String,
@@ -120,6 +126,7 @@ impl EventKind {
             EventKind::UserMessage { .. } => "user_message",
             EventKind::Delta { .. } => "delta",
             EventKind::ThinkingDelta { .. } => "thinking_delta",
+            EventKind::Reset => "reset",
             EventKind::ToolCall { .. } => "tool_call",
             EventKind::ToolResult { .. } => "tool_result",
             EventKind::PermissionRequest { .. } => "permission_request",
@@ -285,5 +292,14 @@ mod tests {
     fn utc_format() {
         assert_eq!(format_utc_secs(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_utc_secs(1_750_000_000), "2025-06-15T15:06:40Z");
+    }
+
+    #[test]
+    fn reset_event_uses_node_wire_shape() {
+        let value = serde_json::to_value(EventKind::Reset).unwrap();
+        assert_eq!(value, serde_json::json!({ "kind": "reset" }));
+        let decoded: EventKind = serde_json::from_value(value).unwrap();
+        assert!(matches!(decoded, EventKind::Reset));
+        assert_eq!(decoded.type_name(), "reset");
     }
 }

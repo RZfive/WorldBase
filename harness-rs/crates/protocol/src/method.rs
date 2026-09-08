@@ -43,6 +43,7 @@ pub const SKILL_RUN: &str = "skill.run";
 
 pub const SCHEDULE_LIST: &str = "schedule.list";
 pub const SCHEDULE_CREATE: &str = "schedule.create";
+pub const SCHEDULE_UPDATE: &str = "schedule.update";
 pub const SCHEDULE_DELETE: &str = "schedule.delete";
 pub const SCHEDULE_RUN: &str = "schedule.run";
 
@@ -63,6 +64,29 @@ pub const MCP_DISCONNECT: &str = "mcp.disconnect";
 
 pub const DOC_PARSE: &str = "doc.parse";
 pub const DOC_WRITE: &str = "doc.write";
+/// Document workbench APIs shared by Electron and Flutter.  `doc.parse` is
+/// retained as the legacy parser endpoint used by chat attachments; these
+/// methods operate on durable imported artifacts and therefore mirror the
+/// Electron preload surface one-for-one.
+pub const DOC_IMPORT: &str = "doc.import";
+pub const DOC_LIST: &str = "doc.list";
+pub const DOC_GET: &str = "doc.get";
+pub const DOC_PREVIEW_ENSURE: &str = "doc.preview.ensure";
+pub const DOC_PREVIEW_READ: &str = "doc.preview.read";
+pub const DOC_OPEN_ORIGINAL: &str = "doc.openOriginal";
+pub const DOC_REMOVE: &str = "doc.remove";
+pub const DOC_EDIT_SOURCE: &str = "doc.editSource";
+/// Durable document-selection APIs shared by Electron's document workbench
+/// and the Flutter client.  The artifact itself is created by `doc.parse` or
+/// the document tools; these methods only manage its user-created regions.
+pub const DOC_SELECTION_LIST: &str = "doc.selection.list";
+pub const DOC_SELECTION_CREATE: &str = "doc.selection.create";
+pub const DOC_SELECTION_UPDATE: &str = "doc.selection.update";
+pub const DOC_SELECTION_REMOVE: &str = "doc.selection.remove";
+/// Build the prompt text used to inject one or more document selections into
+/// an agent request.  The optional region list mirrors Electron's
+/// `buildDocumentSelectionsPrompt` preload API.
+pub const DOC_SELECTION_PROMPT: &str = "doc.selection.prompt";
 
 pub const PROJECT_LIST: &str = "project.list";
 pub const PROJECT_CREATE: &str = "project.create";
@@ -259,6 +283,7 @@ pub const ALL_METHODS: &[&str] = &[
     SKILL_RUN,
     SCHEDULE_LIST,
     SCHEDULE_CREATE,
+    SCHEDULE_UPDATE,
     SCHEDULE_DELETE,
     SCHEDULE_RUN,
     GROUP_CREATE,
@@ -273,6 +298,19 @@ pub const ALL_METHODS: &[&str] = &[
     MCP_DISCONNECT,
     DOC_PARSE,
     DOC_WRITE,
+    DOC_IMPORT,
+    DOC_LIST,
+    DOC_GET,
+    DOC_PREVIEW_ENSURE,
+    DOC_PREVIEW_READ,
+    DOC_OPEN_ORIGINAL,
+    DOC_REMOVE,
+    DOC_EDIT_SOURCE,
+    DOC_SELECTION_LIST,
+    DOC_SELECTION_CREATE,
+    DOC_SELECTION_UPDATE,
+    DOC_SELECTION_REMOVE,
+    DOC_SELECTION_PROMPT,
     PROJECT_LIST,
     PROJECT_CREATE,
     PROJECT_DEV_START,
@@ -357,3 +395,16 @@ pub const ALL_METHODS: &[&str] = &[
     SKILL_DELETE,
     HOST_RESPOND,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::ALL_METHODS;
+    use std::collections::HashSet;
+
+    #[test]
+    fn all_methods_are_unique_and_non_empty() {
+        assert!(ALL_METHODS.iter().all(|method| !method.trim().is_empty()));
+        let unique = ALL_METHODS.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), ALL_METHODS.len(), "duplicate RPC method");
+    }
+}

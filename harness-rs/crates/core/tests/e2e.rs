@@ -2,11 +2,12 @@
 //! 持久化、文档、记忆、定时任务）。
 
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use worldbase_core::dispatcher::ConnectionContext;
 use worldbase_core::Hub;
 use worldbase_protocol::event::EventKind;
 use worldbase_protocol::method;
-use worldbase_protocol::rpc::ErrorObject;
+use worldbase_protocol::rpc::{ErrorObject, INVALID_PARAMS};
 use worldbase_protocol::types::{Capabilities, ChatContentPart, ChatMessage, ImageUrl, Role};
 use worldbase_providers::{
     ChatOptions, ChunkStream, ContentBlock, LlmMessage, LlmTool, MockProvider, MockTurn, Provider,
@@ -168,6 +169,51 @@ async fn test_hub(mock_script: Vec<MockTurn>) -> Arc<Hub> {
         hub.set_custom_provider(Arc::new(MockProvider::new("mock-test", mock_script)));
     }
     hub
+}
+
+async fn read_http_json_request(socket: &mut tokio::net::TcpStream) -> serde_json::Value {
+    let mut buffer = Vec::new();
+    loop {
+        let mut chunk = [0u8; 4096];
+        let count = socket.read(&mut chunk).await.unwrap();
+        assert!(
+            count > 0,
+            "HTTP client closed before sending a full request"
+        );
+        buffer.extend_from_slice(&chunk[..count]);
+
+        let Some(header_end) = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&buffer[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        let body_start = header_end + 4;
+        if buffer.len() >= body_start + content_length {
+            return serde_json::from_slice(&buffer[body_start..body_start + content_length])
+                .unwrap();
+        }
+    }
+}
+
+async fn write_http_json_response(
+    socket: &mut tokio::net::TcpStream,
+    id: serde_json::Value,
+    result: serde_json::Value,
+) {
+    let body = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket.write_all(response.as_bytes()).await.unwrap();
 }
 
 #[tokio::test]
@@ -931,8 +977,15 @@ async fn native_group_tools_emit_rust_owned_board_peer_and_direct_reply_events()
             stream_in_chunks: false,
         },
         MockTurn {
-            text: "Coordinator working note complete.".into(),
-            tool_calls: vec![],
+            text: "".into(),
+            tool_calls: vec![(
+                "finish-coordinator".into(),
+                "finish_task".into(),
+                serde_json::json!({
+                    "task_summary": "Coordinator completed the native board and direct reply checks.",
+                    "status": "completed"
+                }),
+            )],
             stream_in_chunks: false,
         },
         MockTurn {
@@ -958,8 +1011,15 @@ async fn native_group_tools_emit_rust_owned_board_peer_and_direct_reply_events()
             stream_in_chunks: false,
         },
         MockTurn {
-            text: "Engineer working note complete.".into(),
-            tool_calls: vec![],
+            text: "".into(),
+            tool_calls: vec![(
+                "finish-peer".into(),
+                "finish_task".into(),
+                serde_json::json!({
+                    "task_summary": "Engineer completed the peer consultation.",
+                    "status": "completed"
+                }),
+            )],
             stream_in_chunks: false,
         },
     ];
@@ -974,6 +1034,7 @@ async fn native_group_tools_emit_rust_owned_board_peer_and_direct_reply_events()
             "sessionId": "native-group-tools",
             "topic": "Native group tool exercise",
             "mode": "discussion",
+            "maxParallelWorkers": 1,
             "members": [
                 { "name": "Coordinator", "persona": "Coordinate", "agentId": "coordinator" },
                 { "name": "Engineer", "persona": "Implement", "agentId": "engineer" }
@@ -1456,7 +1517,7 @@ async fn persisted_agent_policy_and_skills_reach_the_actual_model_request() {
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].tools, vec!["read_file"]);
+    assert_eq!(requests[0].tools, vec!["read_file", "finish_task"]);
     assert_eq!(
         requests[0].options.reasoning_effort.as_deref(),
         Some("high")
@@ -2704,6 +2765,11 @@ async fn direct_tool_call_accepts_legacy_argument_aliases() {
             "tool": "read_file",
             "arguments": "{\"path\":\"alias-test.txt\"}"
         }),
+        serde_json::json!({
+            "name": "  ",
+            "toolName": " read_file ",
+            "parameters": {"path": "alias-test.txt"}
+        }),
     ] {
         let result = dispatch(&hub, &ctx, method::TOOL_CALL, params)
             .await
@@ -2726,6 +2792,165 @@ async fn direct_tool_call_rejects_non_object_arguments() {
     .await
     .unwrap_err();
     assert!(error.message.contains("tool arguments must be an object"));
+}
+
+#[tokio::test]
+async fn direct_mcp_call_accepts_aliases_trims_names_and_forwards_arguments() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let observed_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let server_calls = observed_calls.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_json_request(&mut socket).await;
+            let method = request["method"].as_str().unwrap();
+            let (result, all_calls_observed) = match method {
+                "initialize" => (
+                    serde_json::json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "serverInfo": { "name": "alias-test", "version": "1" }
+                    }),
+                    false,
+                ),
+                "notifications/initialized" => (serde_json::json!({}), false),
+                "tools/call" => {
+                    let params = request["params"].clone();
+                    let all_calls_observed = {
+                        let mut calls = server_calls.lock().unwrap();
+                        calls.push(params.clone());
+                        calls.len() == 4
+                    };
+                    (
+                        serde_json::json!({ "received": params }),
+                        all_calls_observed,
+                    )
+                }
+                other => panic!("unexpected MCP method: {other}"),
+            };
+            write_http_json_response(
+                &mut socket,
+                request
+                    .get("id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                result,
+            )
+            .await;
+            if all_calls_observed {
+                break;
+            }
+        }
+    });
+
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    dispatch(
+        &hub,
+        &ctx,
+        method::MCP_RELOAD,
+        serde_json::json!({
+            "servers": [{
+                "name": "alias-server",
+                "displayName": "Alias server",
+                "enabled": true,
+                "transport": "http",
+                "target": format!("http://{address}"),
+                "args": [],
+                "env": {},
+                "headers": {}
+            }]
+        }),
+    )
+    .await
+    .unwrap();
+
+    let cases = [
+        (
+            serde_json::json!({
+                "server": "   ",
+                "serverId": " alias-server ",
+                "tool": "\t",
+                "toolName": " camel-tool ",
+                "args": { "source": "args" }
+            }),
+            "camel-tool",
+            serde_json::json!({ "source": "args" }),
+        ),
+        (
+            serde_json::json!({
+                "server_id": " alias-server ",
+                "tool_name": " snake-tool ",
+                "arguments": { "source": "arguments" }
+            }),
+            "snake-tool",
+            serde_json::json!({ "source": "arguments" }),
+        ),
+        (
+            serde_json::json!({
+                "server": " alias-server ",
+                "name": " named-tool ",
+                "input": { "source": "input" }
+            }),
+            "named-tool",
+            serde_json::json!({ "source": "input" }),
+        ),
+        (
+            serde_json::json!({
+                "server": " alias-server ",
+                "tool": " canonical-tool ",
+                "parameters": { "source": "parameters" }
+            }),
+            "canonical-tool",
+            serde_json::json!({ "source": "parameters" }),
+        ),
+    ];
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for (params, expected_tool, expected_arguments) in cases {
+            let result = dispatch(&hub, &ctx, method::MCP_CALL, params)
+                .await
+                .unwrap();
+            assert_eq!(result["received"]["name"], expected_tool);
+            assert_eq!(result["received"]["arguments"], expected_arguments);
+        }
+    })
+    .await
+    .expect("direct MCP alias calls did not finish promptly");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("mock MCP server did not receive every request")
+        .unwrap();
+    assert_eq!(observed_calls.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn direct_mcp_call_rejects_every_non_object_argument_alias() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+
+    for alias in ["args", "arguments", "input", "parameters"] {
+        let mut params = serde_json::json!({
+            "server": "unconfigured",
+            "tool": "remote-tool"
+        });
+        params.as_object_mut().unwrap().insert(
+            alias.to_string(),
+            serde_json::json!(["not", "an", "object"]),
+        );
+
+        let error = dispatch(&hub, &ctx, method::MCP_CALL, params)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, INVALID_PARAMS, "argument alias: {alias}");
+        assert!(
+            error.message.contains("MCP arguments must be an object"),
+            "argument alias: {alias}; error: {}",
+            error.message
+        );
+    }
 }
 
 #[tokio::test]
@@ -2861,6 +3086,62 @@ async fn repeated_direct_ask_user_requests_keep_monotonic_event_sequences() {
 }
 
 #[tokio::test]
+async fn host_respond_accepts_snake_case_request_id_alias() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let mut events = hub.event_tx.subscribe();
+    let host_call = tokio::spawn({
+        let hub = hub.clone();
+        async move {
+            hub.host_request(
+                "tool-call",
+                "ask_user",
+                serde_json::json!({
+                    "questions": [{
+                        "id": "q_1",
+                        "question": "Continue?",
+                        "options": ["Yes", "No"]
+                    }]
+                }),
+                std::time::Duration::from_secs(2),
+            )
+            .await
+        }
+    });
+
+    let request_id = loop {
+        let frame = events.recv().await.unwrap();
+        if let EventKind::HostRequest {
+            request_id,
+            request_kind,
+            ..
+        } = frame.kind
+        {
+            if request_kind == "ask_user" {
+                break request_id;
+            }
+        }
+    };
+
+    let response = dispatch(
+        &hub,
+        &ctx,
+        method::HOST_RESPOND,
+        serde_json::json!({
+            "request_id": request_id,
+            "result": {"answers": [{"id": "q_1", "answer": "Yes"}]}
+        }),
+    )
+    .await
+    .expect("snake_case host response should be accepted");
+    assert_eq!(response["delivered"], true);
+    assert_eq!(
+        host_call.await.unwrap().unwrap()["answers"][0]["answer"],
+        "Yes"
+    );
+}
+
+#[tokio::test]
 async fn desktop_methods_hidden_on_mobile() {
     let hub = test_hub(vec![]).await;
     let mobile = ConnectionContext::new(Capabilities::mobile("mobile-ios"));
@@ -2920,6 +3201,62 @@ async fn memory_settings_and_skills_via_dispatcher() {
         .unwrap();
     assert!(skills["skills"].is_array());
 
+    let saved_skill = dispatch(
+        &hub,
+        &ctx,
+        method::SKILL_SAVE,
+        serde_json::json!({
+            "name": "release / helper",
+            "description": "Prepare releases",
+            "instructions": "Ship ${channel}.",
+            "whenToUse": "When publishing",
+            "arguments": [{
+                "name": "channel",
+                "description": "Release channel",
+                "required": true
+            }],
+            "allowedTools": ["read_file", "read_file"],
+            "context": "fork"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved_skill["name"], "release-helper");
+    assert_eq!(saved_skill["skill"]["whenToUse"], "When publishing");
+    assert_eq!(
+        saved_skill["skill"]["allowedTools"],
+        serde_json::json!(["read_file"])
+    );
+    let listed_skill = dispatch(&hub, &ctx, method::SKILL_LIST, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(listed_skill["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["name"] == "release-helper"));
+    let rendered_skill = dispatch(
+        &hub,
+        &ctx,
+        method::SKILL_RUN,
+        serde_json::json!({
+            "name": "release-helper",
+            "arguments": {"channel": "stable"}
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rendered_skill["context"], "fork");
+    assert_eq!(rendered_skill["instructions"], "Ship stable.");
+    dispatch(
+        &hub,
+        &ctx,
+        method::SKILL_DELETE,
+        serde_json::json!({"name": "release-helper"}),
+    )
+    .await
+    .unwrap();
+
     let sched = dispatch(
         &hub,
         &ctx,
@@ -2930,10 +3267,33 @@ async fn memory_settings_and_skills_via_dispatcher() {
     .unwrap();
     assert!(sched["entry"]["id"].as_str().is_some());
 
+    let structured = dispatch(
+        &hub,
+        &ctx,
+        method::SCHEDULE_CREATE,
+        serde_json::json!({
+            "title": "结构化早报",
+            "prompt": "汇总项目风险",
+            "enabled": false,
+            "schedule": {"kind": "interval", "everyMinutes": 30},
+            "selectedSkillIds": ["research"],
+            "selectedMcpServerIds": ["notion"],
+            "retryPolicy": {"maxRetries": 2, "retryDelayMinutes": 7},
+            "createdBy": "ai"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(structured["entry"]["name"], "结构化早报");
+    assert_eq!(structured["entry"]["schedule"]["kind"], "interval");
+    assert_eq!(structured["entry"]["retryPolicy"]["maxRetries"], 2);
+    assert_eq!(structured["task"]["title"], "结构化早报");
+    assert_eq!(structured["task"]["prompt"], "汇总项目风险");
+
     let list = dispatch(&hub, &ctx, method::SCHEDULE_LIST, serde_json::json!({}))
         .await
         .unwrap();
-    assert_eq!(list["schedules"].as_array().unwrap().len(), 1);
+    assert_eq!(list["schedules"].as_array().unwrap().len(), 2);
     assert!(list["schedules"][0]["nextRunAt"].is_string());
 }
 
@@ -3064,6 +3424,573 @@ async fn doc_roundtrip_via_dispatcher() {
     .unwrap();
     assert_eq!(parsed["kind"], "docx");
     assert!(parsed["text"].as_str().unwrap().contains("Rust harness"));
+}
+
+#[tokio::test]
+async fn document_open_original_delegates_to_host_bridge() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+
+    dispatch(
+        &hub,
+        &ctx,
+        method::DOC_WRITE,
+        serde_json::json!({
+            "path": "open-original.docx",
+            "kind": "docx",
+            "blocks": [{"type": "paragraph", "text": "Open me"}]
+        }),
+    )
+    .await
+    .unwrap();
+    let imported = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_IMPORT,
+        serde_json::json!({"path": "open-original.docx"}),
+    )
+    .await
+    .unwrap();
+    let artifact_id = imported["artifact"]["id"].as_str().unwrap().to_string();
+    let mut events = hub.event_tx.subscribe();
+    let open_hub = hub.clone();
+    let open = tokio::spawn(async move {
+        let open_ctx = ConnectionContext::new(Capabilities::desktop());
+        dispatch(
+            &open_hub,
+            &open_ctx,
+            method::DOC_OPEN_ORIGINAL,
+            serde_json::json!({"artifactId": artifact_id}),
+        )
+        .await
+        .unwrap()
+    });
+
+    let request_id = loop {
+        let frame = events.recv().await.unwrap();
+        if let EventKind::HostRequest {
+            request_id,
+            request_kind,
+            payload,
+        } = frame.kind
+        {
+            assert_eq!(request_kind, "document.openOriginal");
+            assert!(payload["filePath"]
+                .as_str()
+                .unwrap()
+                .ends_with("/open-original.docx"));
+            break request_id;
+        }
+    };
+    assert!(hub.host_respond(
+        &request_id,
+        serde_json::json!({"success": true, "supported": true}),
+    ));
+    assert_eq!(open.await.unwrap()["success"], true);
+    // Direct RPCs use an ephemeral stream only to publish the host callback;
+    // it must not accumulate in the resume registry after the request ends.
+    assert!(hub.streams.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn document_preview_ensure_persists_host_render_bytes_for_docx() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    dispatch(
+        &hub,
+        &ctx,
+        method::DOC_WRITE,
+        serde_json::json!({
+            "path": "host-preview.docx",
+            "kind": "docx",
+            "blocks": [{"type": "paragraph", "text": "Preview me"}]
+        }),
+    )
+    .await
+    .unwrap();
+    let imported = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_IMPORT,
+        serde_json::json!({"path": "host-preview.docx"}),
+    )
+    .await
+    .unwrap();
+    let artifact_id = imported["artifact"]["id"].as_str().unwrap().to_string();
+    let mut events = hub.event_tx.subscribe();
+    let preview_hub = hub.clone();
+    let preview_id = artifact_id.clone();
+    let preview = tokio::spawn(async move {
+        let preview_ctx = ConnectionContext::new(Capabilities::desktop());
+        dispatch(
+            &preview_hub,
+            &preview_ctx,
+            method::DOC_PREVIEW_ENSURE,
+            serde_json::json!({"artifactId": preview_id}),
+        )
+        .await
+        .unwrap()
+    });
+
+    let request_id = loop {
+        let frame = events.recv().await.unwrap();
+        if let EventKind::HostRequest {
+            request_id,
+            request_kind,
+            payload,
+        } = frame.kind
+        {
+            assert_eq!(request_kind, "document.preview.ensure");
+            assert_eq!(payload["fileType"], "docx");
+            break request_id;
+        }
+    };
+    let html = b"<!doctype html><p>host preview</p>";
+    assert!(hub.host_respond(
+        &request_id,
+        serde_json::json!({
+            "render": {
+                "kind": "html",
+                "source": "generated",
+                "status": "ready",
+                "mimeType": "text/html; charset=utf-8"
+            },
+            "bytes": html.to_vec()
+        }),
+    ));
+    let artifact = preview.await.unwrap();
+    assert_eq!(artifact["render"]["kind"], "html");
+    let data = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_PREVIEW_READ,
+        serde_json::json!({"artifactId": artifact_id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(data["mimeType"], "text/html; charset=utf-8");
+    assert_eq!(data["bytes"].as_array().unwrap().len(), html.len());
+
+    // A ready DOCX render is durable. A subsequent workbench refresh should
+    // return the cached artifact without emitting another host request.
+    let mut cached_events = hub.event_tx.subscribe();
+    let cached = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_PREVIEW_ENSURE,
+        serde_json::json!({"artifactId": artifact_id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cached["render"]["kind"], "html");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), cached_events.recv(),)
+            .await
+            .is_err()
+    );
+
+    // A copied workspace or manual cache cleanup can leave a ready descriptor
+    // without its bytes. The next ensure must regenerate through the host
+    // instead of returning a stale ready artifact.
+    let asset_path = cached["render"]["assetPath"].as_str().unwrap();
+    std::fs::remove_file(asset_path).unwrap();
+    let mut stale_events = hub.event_tx.subscribe();
+    let stale_hub = hub.clone();
+    let stale_id = artifact_id.clone();
+    let stale = tokio::spawn(async move {
+        let stale_ctx = ConnectionContext::new(Capabilities::desktop());
+        dispatch(
+            &stale_hub,
+            &stale_ctx,
+            method::DOC_PREVIEW_ENSURE,
+            serde_json::json!({"artifactId": stale_id}),
+        )
+        .await
+        .unwrap()
+    });
+    let request_id = loop {
+        let frame = stale_events.recv().await.unwrap();
+        if let EventKind::HostRequest {
+            request_id,
+            request_kind,
+            ..
+        } = frame.kind
+        {
+            assert_eq!(request_kind, "document.preview.ensure");
+            break request_id;
+        }
+    };
+    assert!(hub.host_respond(
+        &request_id,
+        serde_json::json!({
+            "render": {
+                "kind": "html",
+                "source": "generated",
+                "status": "ready",
+                "mimeType": "text/html; charset=utf-8"
+            },
+            "bytes": html.to_vec()
+        }),
+    ));
+    assert_eq!(stale.await.unwrap()["render"]["status"], "ready");
+    assert!(hub.streams.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn document_import_enforces_relative_workspace_boundary_and_input_limits() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let workspace = hub.workspace.clone();
+    let outside = workspace
+        .parent()
+        .unwrap()
+        .join(format!("outside-{}.md", uuid::Uuid::new_v4()));
+    std::fs::write(&outside, "outside document").unwrap();
+
+    // Relative paths are scoped to the selected workspace, so traversal must
+    // not turn doc.import into an arbitrary local file reader.
+    let traversal = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_IMPORT,
+        serde_json::json!({ "path": format!("../{}", outside.file_name().unwrap().to_string_lossy()) }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(traversal.code, INVALID_PARAMS);
+    assert!(traversal.message.contains("escapes workspace"));
+
+    // An explicit absolute path remains supported, matching Electron's file
+    // picker, which can select documents outside the active workspace.
+    let imported = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_IMPORT,
+        serde_json::json!({ "path": outside }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        imported["artifact"]["fileName"],
+        outside.file_name().unwrap().to_string_lossy().to_string()
+    );
+
+    let directory = workspace.join("document-directory.md");
+    std::fs::create_dir_all(&directory).unwrap();
+    let directory_error = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_IMPORT,
+        serde_json::json!({ "path": "document-directory.md" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(directory_error.code, INVALID_PARAMS);
+    assert!(directory_error.message.contains("not a file"));
+
+    let unsupported = workspace.join("unsupported.bin");
+    std::fs::write(&unsupported, b"binary").unwrap();
+    let unsupported_error = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_IMPORT,
+        serde_json::json!({ "path": "unsupported.bin" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unsupported_error.code, INVALID_PARAMS);
+    assert!(unsupported_error
+        .message
+        .contains("unsupported document extension"));
+
+    let oversized = workspace.join("oversized.txt");
+    let file = std::fs::File::create(&oversized).unwrap();
+    file.set_len(worldbase_tools::document_artifacts::MAX_DOCUMENT_BYTES + 1)
+        .unwrap();
+    let oversized_error = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_IMPORT,
+        serde_json::json!({ "path": "oversized.txt" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(oversized_error.code, INVALID_PARAMS);
+    assert!(oversized_error.message.contains("too large"));
+
+    let _ = std::fs::remove_file(outside);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn document_import_rejects_symlink_parent_escape() {
+    use std::os::unix::fs::symlink;
+
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let outside_dir = std::env::temp_dir().join(format!("doc-escape-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let outside_file = outside_dir.join("escaped.md");
+    std::fs::write(&outside_file, "escaped").unwrap();
+    let link = hub.workspace.join("linked-documents");
+    symlink(&outside_dir, &link).unwrap();
+
+    let error = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_IMPORT,
+        serde_json::json!({ "path": "linked-documents/escaped.md" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, INVALID_PARAMS);
+    assert!(error.message.contains("escapes workspace"));
+    let _ = std::fs::remove_dir_all(outside_dir);
+}
+
+#[tokio::test]
+async fn document_selection_lifecycle_is_reachable_via_dispatcher() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::mobile("mobile-ios"));
+
+    dispatch(
+        &hub,
+        &ctx,
+        method::DOC_WRITE,
+        serde_json::json!({
+            "path": "selection.md",
+            "kind": "markdown",
+            "content": "第一段\n第二段"
+        }),
+    )
+    .await
+    .unwrap();
+    let parsed = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_PARSE,
+        serde_json::json!({"path": "selection.md"}),
+    )
+    .await
+    .unwrap();
+    let artifact_id = parsed["artifact_id"].as_str().unwrap();
+
+    let created = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_CREATE,
+        serde_json::json!({
+            "artifact_id": artifact_id,
+            "node_ids": [],
+            "label": "重点",
+            "color": "#ef4444",
+            "excerpt": "第二段"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(created["artifactId"], artifact_id);
+    assert_eq!(created["label"], "重点");
+    let selection_id = created["id"].as_str().unwrap();
+
+    let listed = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_LIST,
+        serde_json::json!({"artifactId": artifact_id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["id"], selection_id);
+
+    let selected = dispatch(
+        &hub,
+        &ctx,
+        method::TOOL_CALL,
+        serde_json::json!({
+            "name": "read_document",
+            "args": {"artifact_id": artifact_id, "region_ids": [selection_id]}
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected["selections"][0]["regionId"], selection_id);
+    assert_eq!(selected["selections"][0]["text"], "第二段");
+
+    let prompt = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_PROMPT,
+        serde_json::json!({"region_ids": [selection_id]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        prompt,
+        "【文档选区：selection.md — 重点】\n第二段\n【选区结束】"
+    );
+    let default_prompt = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_PROMPT,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(default_prompt, prompt);
+    let empty_prompt = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_PROMPT,
+        serde_json::json!({"regionIds": []}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(empty_prompt, "");
+    let unknown_prompt = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_PROMPT,
+        serde_json::json!({"regionIds": ["missing-region"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unknown_prompt, "");
+    let invalid_prompt = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_PROMPT,
+        serde_json::json!({"regionIds": "not-an-array"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(invalid_prompt.code, -32602);
+
+    let updated = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_UPDATE,
+        serde_json::json!({"region_id": selection_id, "label": "已确认"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated["label"], "已确认");
+
+    let removed = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_REMOVE,
+        serde_json::json!({"id": selection_id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(removed, true);
+    let listed_after_remove = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_SELECTION_LIST,
+        serde_json::json!({"artifact_id": artifact_id}),
+    )
+    .await
+    .unwrap();
+    assert!(listed_after_remove.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn document_selection_rejects_wrong_types_without_alias_fallback() {
+    let hub = test_hub(vec![]).await;
+    let ctx = ConnectionContext::new(Capabilities::mobile("mobile-ios"));
+
+    dispatch(
+        &hub,
+        &ctx,
+        method::DOC_WRITE,
+        serde_json::json!({
+            "path": "selection-contract.md",
+            "kind": "markdown",
+            "content": "选区契约"
+        }),
+    )
+    .await
+    .unwrap();
+    let parsed = dispatch(
+        &hub,
+        &ctx,
+        method::DOC_PARSE,
+        serde_json::json!({"path": "selection-contract.md"}),
+    )
+    .await
+    .unwrap();
+    let artifact_id = parsed["artifactId"].as_str().unwrap().to_string();
+
+    let cases = [
+        (
+            method::DOC_SELECTION_LIST,
+            serde_json::json!({
+                "artifactId": 42,
+                "artifact_id": artifact_id
+            }),
+        ),
+        (
+            method::DOC_SELECTION_CREATE,
+            serde_json::json!({
+                "artifactId": artifact_id,
+                "nodeIds": ["node-1", 42],
+                "excerpt": "选区契约"
+            }),
+        ),
+        (
+            method::DOC_SELECTION_CREATE,
+            serde_json::json!({
+                "artifactId": artifact_id,
+                "nodeIds": [],
+                "label": 42,
+                "excerpt": "选区契约"
+            }),
+        ),
+        (
+            method::DOC_SELECTION_UPDATE,
+            serde_json::json!({
+                "id": 42,
+                "region_id": "valid-fallback-id",
+                "label": "新标签"
+            }),
+        ),
+        (
+            method::DOC_SELECTION_UPDATE,
+            serde_json::json!({
+                "id": "valid-id",
+                "label": 42
+            }),
+        ),
+        (
+            method::DOC_SELECTION_REMOVE,
+            serde_json::json!({
+                "id": 42,
+                "region_id": "valid-fallback-id"
+            }),
+        ),
+        (
+            method::DOC_SELECTION_PROMPT,
+            serde_json::json!({"regionIds": ["valid-id", 42]}),
+        ),
+        (
+            method::DOC_SELECTION_PROMPT,
+            serde_json::json!({
+                "regionIds": "not-an-array",
+                "region_ids": []
+            }),
+        ),
+    ];
+
+    for (method_name, params) in cases {
+        let error = dispatch(&hub, &ctx, method_name, params).await.unwrap_err();
+        assert_eq!(
+            error.code, INVALID_PARAMS,
+            "{method_name} must reject malformed selection parameters"
+        );
+    }
 }
 
 #[tokio::test]

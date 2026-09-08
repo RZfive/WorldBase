@@ -19,6 +19,12 @@ const CODING_TEMPERATURE: f32 = 0.3;
 const IMAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const CONTINUATION_USER_MESSAGE: &str =
     "Continue the current task from the existing context. Do not repeat completed steps.";
+const OPTIONAL_COMPATIBILITY_PARAMETERS: [&str; 4] = [
+    "stream_options",
+    "reasoning_effort",
+    "temperature",
+    "tool_choice",
+];
 
 pub struct OpenAIProvider {
     client: Client,
@@ -283,14 +289,44 @@ fn resolve_reasoning_effort(base_url: &str, model: &str, options: &ChatOptions) 
 
 fn remove_rejected_optional_parameter(body: &mut Value, error_text: &str) -> Option<&'static str> {
     let lower = error_text.to_ascii_lowercase();
-    for key in [
-        "stream_options",
-        "reasoning_effort",
-        "temperature",
-        "tool_choice",
-    ] {
+    for key in OPTIONAL_COMPATIBILITY_PARAMETERS {
         let mentioned = lower.contains(key) || lower.contains(&key.replace('_', " "));
         if mentioned && body.get(key).is_some() {
+            body.as_object_mut()?.remove(key);
+            return Some(key);
+        }
+    }
+    None
+}
+
+fn is_generic_invalid_parameter_error(error_text: &str) -> bool {
+    let Ok(response) = serde_json::from_str::<Value>(error_text) else {
+        return false;
+    };
+    let error = response.get("error").unwrap_or(&response);
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let parameter = error
+        .get("param")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    code.eq_ignore_ascii_case("InvalidParameter")
+        && parameter.is_empty()
+        && message.contains("a parameter specified in the request is not valid")
+}
+
+fn remove_ambiguous_optional_parameter(body: &mut Value) -> Option<&'static str> {
+    for key in OPTIONAL_COMPATIBILITY_PARAMETERS {
+        if body.get(key).is_some() {
             body.as_object_mut()?.remove(key);
             return Some(key);
         }
@@ -539,9 +575,11 @@ impl OpenAIProvider {
 
     async fn send_compatible_request(&self, url: Url, mut body: Value) -> Result<Response> {
         // Compatibility gateways frequently reject one OpenAI extension while
-        // supporting the rest of chat/completions. Retry only when the 400/422
-        // response names a known optional field; semantic/tool errors still
-        // surface immediately.
+        // supporting the rest of chat/completions. Prefer an explicitly named
+        // optional field. Some gateways instead return the generic
+        // InvalidParameter envelope with an empty `param`; for that exact
+        // shape, try each known optional extension once in a fixed order.
+        // Semantic errors and required request fields still surface directly.
         let rejected = self.rejected_optional_parameters.lock().unwrap().clone();
         if let Some(object) = body.as_object_mut() {
             for key in rejected {
@@ -571,6 +609,15 @@ impl OpenAIProvider {
                         .unwrap()
                         .insert(key);
                     continue;
+                }
+                if is_generic_invalid_parameter_error(&text) {
+                    if let Some(key) = remove_ambiguous_optional_parameter(&mut body) {
+                        self.rejected_optional_parameters
+                            .lock()
+                            .unwrap()
+                            .insert(key);
+                        continue;
+                    }
                 }
             }
             bail!("openai api error ({status}): {text}");
@@ -1199,6 +1246,70 @@ mod tests {
         while let Some(chunk) = second_stream.next().await {
             chunk.unwrap();
         }
+        server.await.unwrap();
+        assert_eq!(text, "ok");
+    }
+
+    #[tokio::test]
+    async fn generic_invalid_parameter_falls_back_from_stream_options() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let request = String::from_utf8_lossy(&request);
+                let body = request
+                    .split_once("\r\n\r\n")
+                    .unwrap()
+                    .1;
+                let body: Value = serde_json::from_str(body).unwrap();
+
+                if attempt == 0 {
+                    assert!(body.get("stream_options").is_some());
+                    write_response(
+                        &mut socket,
+                        "400 Bad Request",
+                        "application/json",
+                        r#"{"error":{"code":"InvalidParameter","message":"A parameter specified in the request is not valid Request id: 021788703105809e1e6c18222198123b5b36a942a59f14aa8ab89","param":"","type":"BadRequest"}}"#,
+                    )
+                    .await;
+                } else {
+                    assert!(body.get("stream_options").is_none());
+                    assert_eq!(body["temperature"], json!(CODING_TEMPERATURE));
+                    write_response(
+                        &mut socket,
+                        "200 OK",
+                        "text/event-stream",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+                    )
+                    .await;
+                }
+            }
+        });
+
+        let provider = OpenAIProvider::new(
+            "test-key".into(),
+            "compatible-model".into(),
+            Some(format!("http://{address}/v1/chat/completions")),
+        );
+        let mut stream = provider
+            .chat_stream(
+                None,
+                vec![LlmMessage::text(LlmRole::User, "hello")],
+                vec![],
+                8192,
+                ChatOptions::default(),
+            )
+            .await
+            .unwrap();
+        let mut text = String::new();
+        while let Some(chunk) = stream.next().await {
+            if let StreamChunk::TextDelta(delta) = chunk.unwrap() {
+                text.push_str(&delta);
+            }
+        }
+
         server.await.unwrap();
         assert_eq!(text, "ok");
     }

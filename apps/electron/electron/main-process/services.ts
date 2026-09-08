@@ -1,4 +1,4 @@
-import { app, ipcMain } from 'electron'
+import { app, ipcMain, shell } from 'electron'
 import { AIEngine, type AIEngineServices } from '../../src/main/ai-engine/ai-engine.js'
 import { RustHarnessEngine } from '../../src/main/ai-harness/rust-harness-engine.js'
 import { ProjectFS } from '../../src/main/project-fs/project-fs.js'
@@ -48,6 +48,8 @@ import { normalizeRustAskUserQuestions, normalizeRustAskUserResponse } from './a
 import { broadcastToAppWindows, getActiveAiRequestWindow, getProjectsDir, getSnapshotsDir, requestPageAutomationFromRenderer } from './windows.js'
 import { migrateUserDataForRename } from './user-data-migration.js'
 import { RustHarnessClient, type JsonRpcResult, type RustHostRequest } from './rust-harness-client.js'
+import { buildDocumentRenderPreview, readDocumentRenderAsset } from '../../src/main/document-preview/document-render-service.js'
+import type { DocumentFileType } from '../../src/main/ai-engine/agent/tools/document-types.js'
 
 let electronMcpParkedForRust = false
 
@@ -422,6 +424,28 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
     win.focus()
     win.webContents.send('project:openInShell', { projectId, mode })
     return { success: true, project_id: projectId, mode, opened_via: 'shell_ui' }
+  }
+
+  if (request.requestKind === 'document.openOriginal') {
+    const filePath = optionalString(request.payload, 'filePath') || optionalString(request.payload, 'file_path')
+    if (!filePath) throw new Error('document.openOriginal requires filePath')
+    const error = await shell.openPath(filePath)
+    return error
+      ? { success: false, supported: true, error }
+      : { success: true, supported: true }
+  }
+
+  if (request.requestKind === 'document.preview.ensure') {
+    const filePath = optionalString(request.payload, 'filePath') || optionalString(request.payload, 'file_path')
+    const fileType = optionalString(request.payload, 'fileType') || optionalString(request.payload, 'file_type')
+    if (!filePath || !fileType) throw new Error('document.preview.ensure requires filePath and fileType')
+    const normalizedFileType = fileType.toLowerCase() === 'doc' ? 'docx' : fileType.toLowerCase()
+    const render = await buildDocumentRenderPreview(filePath, normalizedFileType as DocumentFileType)
+    const asset = await readDocumentRenderAsset(render)
+    return {
+      render,
+      ...(asset ? { bytes: Array.from(asset.bytes) } : {})
+    }
   }
 
   throw new Error(`Unsupported Rust host request: ${request.requestKind}`)

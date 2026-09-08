@@ -151,6 +151,7 @@ pub async fn dispatch(
 
         SCHEDULE_LIST => schedule_list(hub),
         SCHEDULE_CREATE => schedule_create(hub, params),
+        SCHEDULE_UPDATE => schedule_update(hub, params),
         SCHEDULE_DELETE => schedule_delete(hub, params),
         SCHEDULE_RUN => schedule_run(hub, ctx, params),
 
@@ -170,6 +171,19 @@ pub async fn dispatch(
 
         DOC_PARSE => doc_parse(hub, params),
         DOC_WRITE => doc_write(hub, params),
+        DOC_IMPORT => doc_import(hub, params),
+        DOC_LIST => doc_list(hub, params),
+        DOC_GET => doc_get(hub, params),
+        DOC_PREVIEW_ENSURE => doc_preview_ensure(hub, params).await,
+        DOC_PREVIEW_READ => doc_preview_read(hub, params),
+        DOC_OPEN_ORIGINAL => doc_open_original(hub, params).await,
+        DOC_REMOVE => doc_remove(hub, params),
+        DOC_EDIT_SOURCE => doc_edit_source(hub, params),
+        DOC_SELECTION_LIST => doc_selection_list(hub, params),
+        DOC_SELECTION_CREATE => doc_selection_create(hub, params),
+        DOC_SELECTION_UPDATE => doc_selection_update(hub, params),
+        DOC_SELECTION_REMOVE => doc_selection_remove(hub, params),
+        DOC_SELECTION_PROMPT => doc_selection_prompt(hub, params),
 
         PROJECT_LIST => Ok(json!({ "projects": hub.projects.project_metas().map_err(internal)? })),
         PROJECT_CREATE => project_create(hub, params).await,
@@ -252,7 +266,8 @@ pub async fn dispatch(
         STUDIO_TASKS_DRAIN => studio_tasks_drain(hub),
 
         USAGE_SUMMARY => {
-            let days = params["days"].as_u64().unwrap_or(30) as u32;
+            let days = u32::try_from(optional_u64_param(&params, &["days"], 30, "days")?)
+                .map_err(|_| params_err("days is too large"))?;
             let summary = hub.store.usage_summary(days).map_err(internal)?;
             Ok(serde_json::to_value(&summary).unwrap())
         }
@@ -262,9 +277,7 @@ pub async fn dispatch(
             Ok(json!({ "apps": apps }))
         }
         LIGHTAPP_DELETE => {
-            let id = params["id"]
-                .as_str()
-                .ok_or_else(|| params_err("missing id"))?;
+            let id = required_string_param(&params, &["id"], "id")?;
             let dir = crate::studio::StudioService::lightapp_dir().join(id);
             if dir.starts_with(crate::studio::StudioService::lightapp_dir()) {
                 let _ = std::fs::remove_dir_all(dir);
@@ -282,9 +295,13 @@ pub async fn dispatch(
         SKILL_DELETE => skill_delete(hub, params),
 
         HOST_RESPOND => {
-            let request_id = params["requestId"]
-                .as_str()
-                .ok_or_else(|| params_err("missing requestId"))?;
+            // Electron sends camelCase, while Flutter and older generic
+            // JSON-RPC callers may retain the protocol's snake_case field
+            // spelling. Keep host responses symmetric with chat.respond and
+            // the other compatibility-aware endpoints so a valid callback is
+            // not reported as a misleading missing-parameter error.
+            let request_id =
+                required_string_param(&params, &["requestId", "request_id"], "requestId")?;
             let result = params.get("result").cloned().unwrap_or(Value::Null);
             Ok(json!({ "delivered": hub.host_respond(request_id, result) }))
         }
@@ -299,6 +316,232 @@ fn internal(e: impl std::fmt::Display) -> ErrorObject {
 
 fn params_err(msg: impl Into<String>) -> ErrorObject {
     ErrorObject::invalid_params(msg)
+}
+
+/// Read one required string from a set of wire-compatible aliases.
+///
+/// The dispatcher deliberately distinguishes a missing field from a field
+/// with the wrong JSON type.  A number of the original handlers used
+/// `and_then(Value::as_str)` and then fell through to a "missing" error (or,
+/// worse, a default), which made malformed Electron/Flutter requests very
+/// difficult to diagnose.  Canonical aliases are checked in order and a
+/// present value always wins, even when it is invalid; callers must not fall
+/// back to another spelling after a type error.
+fn required_string_param<'a>(
+    params: &'a Value,
+    aliases: &[&str],
+    label: &str,
+) -> Result<&'a str, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Err(params_err(format!("missing {label}")));
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| params_err(format!("{key} must be a string")))?;
+    if value.trim().is_empty() {
+        return Err(params_err(format!("{label} must not be empty")));
+    }
+    Ok(value)
+}
+
+/// Read an optional string while retaining the Node convention that explicit
+/// `null` clears an optional value.  Invalid non-null values are rejected.
+fn optional_string_value<'a>(
+    params: &'a Value,
+    aliases: &[&str],
+) -> Result<Option<&'a str>, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .map(Some)
+        .ok_or_else(|| params_err(format!("{key} must be a string")))
+}
+
+fn optional_string_param_strict(
+    params: &Value,
+    aliases: &[&str],
+    _label: &str,
+) -> Result<Option<String>, ErrorObject> {
+    Ok(optional_string_value(params, aliases)?.map(ToOwned::to_owned))
+}
+
+/// Read a string array without silently dropping malformed elements.
+fn string_array_param(
+    params: &Value,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Vec<String>, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let values = value
+        .as_array()
+        .ok_or_else(|| params_err(format!("{key} must be an array of strings")))?;
+    let mut result = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let item = value
+            .as_str()
+            .ok_or_else(|| params_err(format!("{label}[{index}] must be a string")))?;
+        let item = item.trim();
+        if !item.is_empty() && !result.iter().any(|known| known == item) {
+            result.push(item.to_string());
+        }
+    }
+    Ok(result)
+}
+
+fn required_string_array_param(
+    params: &Value,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Vec<String>, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Err(params_err(format!("missing {label}")));
+    };
+    if value.is_null() {
+        return Err(params_err(format!("{key} must be an array of strings")));
+    }
+    string_array_param(params, aliases, label)
+}
+
+fn optional_bool_param(
+    params: &Value,
+    aliases: &[&str],
+    default: bool,
+    _label: &str,
+) -> Result<bool, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Ok(default);
+    };
+    if value.is_null() {
+        return Ok(default);
+    }
+    value
+        .as_bool()
+        .ok_or_else(|| params_err(format!("{key} must be a boolean")))
+}
+
+fn required_bool_param(params: &Value, aliases: &[&str], label: &str) -> Result<bool, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Err(params_err(format!("missing {label}")));
+    };
+    value
+        .as_bool()
+        .ok_or_else(|| params_err(format!("{key} must be a boolean")))
+}
+
+fn optional_u64_param(
+    params: &Value,
+    aliases: &[&str],
+    default: u64,
+    _label: &str,
+) -> Result<u64, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Ok(default);
+    };
+    if value.is_null() {
+        return Ok(default);
+    }
+    value
+        .as_u64()
+        .ok_or_else(|| params_err(format!("{key} must be a non-negative integer")))
+}
+
+fn optional_u64_value(
+    params: &Value,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<u64>, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| params_err(format!("{key} must be a non-negative integer ({label})")))
+}
+
+fn required_u64_param(params: &Value, aliases: &[&str], label: &str) -> Result<u64, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Err(params_err(format!("missing {label}")));
+    };
+    value
+        .as_u64()
+        .ok_or_else(|| params_err(format!("{key} must be a non-negative integer")))
+}
+
+fn optional_object_value(
+    params: &Value,
+    key: &str,
+    label: &str,
+) -> Result<Option<Value>, ErrorObject> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(_)) => Ok(params.get(key).cloned()),
+        Some(_) => Err(params_err(format!("{key} must be an object ({label})"))),
+    }
+}
+
+fn optional_string_array_value(
+    params: &Value,
+    key: &str,
+    label: &str,
+) -> Result<Option<Value>, ErrorObject> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let values = value
+        .as_array()
+        .ok_or_else(|| params_err(format!("{key} must be an array of strings ({label})")))?;
+    for (index, value) in values.iter().enumerate() {
+        if !value.is_string() {
+            return Err(params_err(format!(
+                "{key}[{index}] must be a string ({label})"
+            )));
+        }
+    }
+    Ok(Some(value.clone()))
 }
 
 // ---------- initialize ----------
@@ -343,8 +586,8 @@ fn initialize(
 // ---------- conversations ----------
 
 fn conv_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let title = params["title"].as_str().unwrap_or("新对话");
-    let agent_id = params["agentId"].as_str();
+    let title = optional_string_value(&params, &["title"])?.unwrap_or("新对话");
+    let agent_id = optional_string_value(&params, &["agentId", "agent_id"])?;
     let meta = hub
         .store
         .create_conversation(title, agent_id)
@@ -353,11 +596,9 @@ fn conv_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn conv_ensure(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
-    let title = params["title"].as_str().unwrap_or("新对话");
-    let agent_id = params["agentId"].as_str();
+    let id = required_string_param(&params, &["id"], "id")?;
+    let title = optional_string_value(&params, &["title"])?.unwrap_or("新对话");
+    let agent_id = optional_string_value(&params, &["agentId", "agent_id"])?;
     let meta = hub
         .store
         .ensure_conversation(id, title, agent_id)
@@ -624,7 +865,8 @@ fn same_message_shape(left: &ChatMessage, right: &ChatMessage) -> bool {
 }
 
 fn conv_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let limit = params["limit"].as_u64().unwrap_or(50) as u32;
+    let limit = u32::try_from(optional_u64_param(&params, &["limit"], 50, "limit")?)
+        .map_err(|_| params_err("limit is too large"))?;
     // Native group member runs need isolated histories for correct parallel
     // execution, but those implementation conversations must never appear as
     // separate chats in a client sidebar. The group page owns their shared,
@@ -643,29 +885,22 @@ fn conv_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn conv_messages(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
-    let limit = params["limit"].as_u64().unwrap_or(200) as u32;
+    let id = required_string_param(&params, &["id"], "id")?;
+    let limit = u32::try_from(optional_u64_param(&params, &["limit"], 200, "limit")?)
+        .map_err(|_| params_err("limit is too large"))?;
     let messages = hub.store.list_messages(id, limit).map_err(internal)?;
     Ok(json!({ "messages": messages }))
 }
 
 fn conv_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
     hub.store.delete_conversation(id).map_err(internal)?;
     Ok(json!({ "deleted": true }))
 }
 
 fn conv_rename(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
-    let title = params["title"]
-        .as_str()
-        .ok_or_else(|| params_err("missing title"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
+    let title = required_string_param(&params, &["title"], "title")?;
     hub.store.rename_conversation(id, title).map_err(internal)?;
     Ok(json!({ "renamed": true }))
 }
@@ -733,10 +968,8 @@ fn chat_abort(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn chat_respond(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let request_id = params["requestId"]
-        .as_str()
-        .ok_or_else(|| params_err("missing requestId"))?;
-    let allow = params["allow"].as_bool().unwrap_or(false);
+    let request_id = required_string_param(&params, &["requestId", "request_id"], "requestId")?;
+    let allow = required_bool_param(&params, &["allow"], "allow")?;
     let delivered = crate::permissions::respond(hub, request_id, allow);
     Ok(json!({ "delivered": delivered }))
 }
@@ -753,9 +986,7 @@ async fn tool_call(
     // still `{ name, args }`; aliases only keep existing clients from
     // silently turning their arguments into `{}` and producing misleading
     // "missing parameter" tool errors.
-    let name = ["name", "tool", "toolName", "tool_name"]
-        .into_iter()
-        .find_map(|key| params.get(key).and_then(Value::as_str))
+    let name = non_empty_string_alias(&params, &["name", "tool", "toolName", "tool_name"])?
         .ok_or_else(|| params_err("missing name"))?;
     let raw_args = ["args", "arguments", "input", "parameters"]
         .into_iter()
@@ -810,17 +1041,13 @@ async fn tool_call(
 // ---------- settings ----------
 
 fn settings_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let key = params["key"]
-        .as_str()
-        .ok_or_else(|| params_err("missing key"))?;
+    let key = required_string_param(&params, &["key"], "key")?;
     let value = hub.store.get_setting(key).map_err(internal)?;
     Ok(json!({ "key": key, "value": value }))
 }
 
 fn settings_set(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let key = params["key"]
-        .as_str()
-        .ok_or_else(|| params_err("missing key"))?;
+    let key = required_string_param(&params, &["key"], "key")?;
     let value = params.get("value").cloned().unwrap_or(Value::Null);
     hub.store.set_setting(key, &value).map_err(internal)?;
     Ok(json!({ "ok": true }))
@@ -829,43 +1056,48 @@ fn settings_set(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 // ---------- memory ----------
 
 fn memory_search(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let query = params["query"]
-        .as_str()
-        .ok_or_else(|| params_err("missing query"))?;
-    let limit = params["limit"].as_u64().unwrap_or(10) as u32;
+    let query = required_string_param(&params, &["query"], "query")?;
+    let limit = u32::try_from(optional_u64_param(&params, &["limit"], 10, "limit")?)
+        .map_err(|_| params_err("limit is too large"))?;
     let hits = hub.store.search_memories(query, limit).map_err(internal)?;
     Ok(json!({ "hits": hits }))
 }
 
 fn memory_add(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let content = params["content"]
-        .as_str()
-        .ok_or_else(|| params_err("missing content"))?;
-    let tags: Vec<String> = params["tags"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let content = required_string_param(&params, &["content"], "content")?;
+    let tags = string_array_param(&params, &["tags"], "tags")?;
     let id = hub.store.add_memory(content, &tags).map_err(internal)?;
     Ok(json!({ "id": id }))
 }
 
 fn memory_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    if let Some(id) = params["id"].as_str() {
-        let deleted = hub.store.delete_workspace_memory(id).map_err(internal)?;
-        return Ok(json!({ "deleted": deleted }));
+    let value = params.get("id").ok_or_else(|| params_err("missing id"))?;
+    match value {
+        Value::String(id) => {
+            if id.trim().is_empty() {
+                return Err(params_err("id must not be empty"));
+            }
+            let deleted = hub
+                .store
+                .delete_workspace_memory(id.trim())
+                .map_err(internal)?;
+            Ok(json!({ "deleted": deleted }))
+        }
+        Value::Number(number) => {
+            let id = number
+                .as_i64()
+                .ok_or_else(|| params_err("id must be a string or integer"))?;
+            let deleted = hub.store.delete_memory(id).map_err(internal)?;
+            Ok(json!({ "deleted": deleted }))
+        }
+        _ => Err(params_err("id must be a string or integer")),
     }
-    let id = params["id"]
-        .as_i64()
-        .ok_or_else(|| params_err("missing id"))?;
-    let deleted = hub.store.delete_memory(id).map_err(internal)?;
-    Ok(json!({ "deleted": deleted }))
 }
 
 fn memory_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    if !params.is_object() {
+        return Err(params_err("memory.list params must be an object"));
+    }
     let options: WorkspaceMemorySearchOptions =
         serde_json::from_value(params).map_err(|error| params_err(error.to_string()))?;
     let entries = hub
@@ -876,7 +1108,17 @@ fn memory_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn memory_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let raw = params.get("entry").cloned().unwrap_or(params);
+    if !params.is_object() {
+        return Err(params_err("memory.save params must be an object"));
+    }
+    let raw = if let Some(raw) = params.get("entry") {
+        if !raw.is_object() {
+            return Err(params_err("entry must be an object"));
+        }
+        raw.clone()
+    } else {
+        params
+    };
     let entry: WorkspaceMemoryEntry =
         serde_json::from_value(raw).map_err(|error| params_err(error.to_string()))?;
     if entry.title.trim().is_empty() {
@@ -890,10 +1132,8 @@ fn memory_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn memory_pin(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
-    let pinned = params["pinned"].as_bool().unwrap_or(false);
+    let id = required_string_param(&params, &["id"], "id")?;
+    let pinned = required_bool_param(&params, &["pinned"], "pinned")?;
     let updated = hub
         .store
         .pin_workspace_memory(id, pinned)
@@ -902,7 +1142,17 @@ fn memory_pin(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn memory_compact(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let raw = params.get("plan").cloned().unwrap_or(params);
+    if !params.is_object() {
+        return Err(params_err("memory.compact params must be an object"));
+    }
+    let raw = if let Some(raw) = params.get("plan") {
+        if !raw.is_object() {
+            return Err(params_err("plan must be an object"));
+        }
+        raw.clone()
+    } else {
+        params
+    };
     let plan: MemoryCompactionPlan =
         serde_json::from_value(raw).map_err(|error| params_err(error.to_string()))?;
     let result = hub
@@ -917,11 +1167,72 @@ fn memory_compact_status(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
 }
 
 fn memory_ingest(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    validate_memory_ingest_params(&params)?;
     let entries = hub
         .store
         .ingest_workspace_memories(&params)
         .map_err(internal)?;
     Ok(json!({ "entries": entries }))
+}
+
+fn validate_memory_ingest_params(params: &Value) -> Result<(), ErrorObject> {
+    if !params.is_object() {
+        return Err(params_err("memory.ingest params must be an object"));
+    }
+    let scopes = params
+        .get("scopes")
+        .ok_or_else(|| params_err("missing scopes"))?;
+    let scope_values = scopes
+        .as_array()
+        .ok_or_else(|| params_err("scopes must be an array"))?;
+    for (index, scope) in scope_values.iter().enumerate() {
+        serde_json::from_value::<MemorySearchScopeEntry>(scope.clone())
+            .map_err(|error| params_err(format!("scopes[{index}] is invalid: {error}")))?;
+    }
+    let messages = params
+        .get("userMessages")
+        .ok_or_else(|| params_err("missing userMessages"))?;
+    let messages = messages
+        .as_array()
+        .ok_or_else(|| params_err("userMessages must be an array of strings"))?;
+    for (index, message) in messages.iter().enumerate() {
+        if !message.is_string() {
+            return Err(params_err(format!(
+                "userMessages[{index}] must be a string"
+            )));
+        }
+    }
+    let _ = optional_string_value(params, &["finalAssistantText"])?;
+    let _ = optional_string_value(params, &["sourceConversationId"])?;
+    let _ = optional_string_value(params, &["sourceSessionId"])?;
+    let _ = string_array_param(params, &["toolNames"], "toolNames")?;
+    if let Some(agent) = params.get("agent") {
+        if !agent.is_null() && !agent.is_object() {
+            return Err(params_err("agent must be an object"));
+        }
+        if let Some(agent) = agent.as_object() {
+            if let Some(policy) = agent.get("memoryWritePolicy") {
+                let policy = policy
+                    .as_object()
+                    .ok_or_else(|| params_err("agent.memoryWritePolicy must be an object"))?;
+                for key in [
+                    "allowUserTraits",
+                    "allowAgentSkills",
+                    "allowSteps",
+                    "allowKnowledge",
+                ] {
+                    if let Some(value) = policy.get(key) {
+                        if !value.is_null() && !value.is_boolean() {
+                            return Err(params_err(format!(
+                                "agent.memoryWritePolicy.{key} must be a boolean"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------- skills ----------
@@ -932,42 +1243,402 @@ fn skill_list(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
 }
 
 fn skill_run(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let name = params["name"]
-        .as_str()
-        .ok_or_else(|| params_err("missing name"))?;
+    let name = required_string_param(&params, &["name", "skill_name"], "name or skill_name")?;
+    let arguments = match params.get("arguments") {
+        None | Some(Value::Null) => std::collections::HashMap::new(),
+        Some(value) => {
+            let values = value
+                .as_object()
+                .ok_or_else(|| params_err("arguments must be an object"))?;
+            values
+                .iter()
+                .map(|(key, value)| {
+                    let value = value
+                        .as_str()
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| value.to_string());
+                    (key.clone(), value)
+                })
+                .collect::<std::collections::HashMap<_, _>>()
+        }
+    };
     let skill = hub
         .skills
         .get(name)
         .map_err(internal)?
         .ok_or_else(|| ErrorObject::invalid_params(format!("skill not found: {name}")))?;
-    Ok(json!({ "skill": skill, "note": "请按 instructions 执行任务" }))
+    if let Some(argument) = skill.arguments.iter().find(|argument| {
+        argument.required
+            && arguments
+                .get(&argument.name)
+                .is_none_or(|value| value.is_empty())
+    }) {
+        return Ok(json!({
+            "error": format!(
+                "Missing required argument '{}': {}",
+                argument.name, argument.description
+            )
+        }));
+    }
+    let instructions = substitute_skill_arguments(&skill.instructions, &arguments);
+    Ok(json!({
+        "skill": skill.name,
+        "context": skill.context.as_str(),
+        "instructions": instructions,
+    }))
+}
+
+fn substitute_skill_arguments(
+    template: &str,
+    arguments: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = template[cursor..].find("${") {
+        let start = cursor + relative_start;
+        output.push_str(&template[cursor..start]);
+        let name_start = start + 2;
+        let Some(relative_end) = template[name_start..].find('}') else {
+            output.push_str(&template[start..]);
+            return output;
+        };
+        let end = name_start + relative_end;
+        let name = &template[name_start..end];
+        if !name.is_empty()
+            && name.chars().enumerate().all(|(index, character)| {
+                character.is_ascii_alphanumeric()
+                    || character == '_'
+                    || (index > 0 && character == '-')
+            })
+            && arguments.get(name).is_some()
+        {
+            output.push_str(arguments.get(name).expect("checked above"));
+        } else {
+            output.push_str(&template[start..=end]);
+        }
+        cursor = end + 1;
+    }
+    output.push_str(&template[cursor..]);
+    output
 }
 
 // ---------- schedules ----------
 
 fn schedule_list(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
     let schedules = hub.scheduler.list().map_err(internal)?;
-    Ok(json!({ "schedules": schedules }))
+    let tasks = schedules
+        .iter()
+        .map(worldbase_scheduler::electron_task_value)
+        .collect::<Vec<_>>();
+    Ok(json!({ "schedules": schedules, "tasks": tasks }))
 }
 
 fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let name = params["name"]
-        .as_str()
-        .ok_or_else(|| params_err("missing name"))?;
-    let cron = params["cron"]
-        .as_str()
-        .ok_or_else(|| params_err("missing cron"))?;
-    let task = params["task"]
-        .as_str()
-        .ok_or_else(|| params_err("missing task"))?;
-    let entry = hub.scheduler.create(name, cron, task).map_err(internal)?;
-    Ok(json!({ "entry": entry }))
+    // Keep the original name/cron/task contract, but accept Electron's
+    // structured scheduler payload when callers need skills, MCP allowlists,
+    // or retry policy. The scheduler remains the validation authority.
+    let name = required_string_param(&params, &["name", "title"], "name or title")?;
+    let task = required_string_param(&params, &["task", "prompt"], "task or prompt")?;
+    let enabled = optional_bool_param(&params, &["enabled"], true, "enabled")?;
+    let selected_skill_ids = string_array_alias(
+        &params,
+        &["selectedSkillIds", "selected_skill_ids"],
+        "selectedSkillIds",
+    )?;
+    let selected_mcp_server_ids = string_array_alias(
+        &params,
+        &["selectedMcpServerIds", "selected_mcp_server_ids"],
+        "selectedMcpServerIds",
+    )?;
+    let retry_policy = parse_retry_policy(&params)?;
+    let created_by = optional_string_value(&params, &["createdBy", "created_by"])?
+        .unwrap_or("manual")
+        .trim()
+        .to_string();
+    let structured = schedule_value_from_params(&params)?;
+
+    let entry = if let Some(schedule_value) = structured {
+        validate_schedule_value(&schedule_value)?;
+        let schedule_kind = required_string_param(&schedule_value, &["kind"], "schedule.kind")?;
+        if schedule_kind == "cron" {
+            let cron = if schedule_value.get("expression").is_some()
+                || schedule_value.get("cron").is_some()
+            {
+                required_string_param(&schedule_value, &["expression", "cron"], "cron expression")?
+            } else {
+                required_string_param(&params, &["cron"], "cron expression")?
+            };
+            let mut entry = hub.scheduler.create(name, cron, task).map_err(internal)?;
+            entry.enabled = enabled;
+            entry.selected_skill_ids = selected_skill_ids;
+            entry.selected_mcp_server_ids = selected_mcp_server_ids;
+            entry.retry_policy = retry_policy;
+            entry.created_by = created_by;
+            hub.scheduler.update(entry).map_err(internal)?
+        } else {
+            let schedule: ScheduledTaskSchedule = serde_json::from_value(schedule_value)
+                .map_err(|error| params_err(format!("invalid schedule: {error}")))?;
+            let request = worldbase_scheduler::ScheduledTaskRequest {
+                title: name.to_string(),
+                prompt: task.to_string(),
+                enabled,
+                schedule,
+                selected_skill_ids: selected_skill_ids.clone(),
+                selected_mcp_server_ids: selected_mcp_server_ids.clone(),
+                retry_policy,
+                created_by: created_by.clone(),
+            };
+            hub.scheduler
+                .create_task(request)
+                .map_err(|error| params_err(format!("invalid schedule: {error}")))?
+        }
+    } else {
+        let cron = required_string_param(&params, &["cron"], "cron")?;
+        let mut entry = hub.scheduler.create(name, cron, task).map_err(internal)?;
+        entry.enabled = enabled;
+        entry.selected_skill_ids = selected_skill_ids;
+        entry.selected_mcp_server_ids = selected_mcp_server_ids;
+        entry.retry_policy = retry_policy;
+        entry.created_by = created_by;
+        hub.scheduler.update(entry).map_err(internal)?
+    };
+    let task_view = worldbase_scheduler::electron_task_value(&entry);
+    Ok(json!({ "entry": entry, "task": task_view }))
+}
+
+fn string_array_alias(
+    params: &Value,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Vec<String>, ErrorObject> {
+    string_array_param(params, aliases, label)
+}
+
+fn schedule_value_from_params(params: &Value) -> Result<Option<Value>, ErrorObject> {
+    if let Some(schedule) = params.get("schedule") {
+        return Ok(Some(schedule.clone()));
+    }
+    if params.get("scheduleKind").is_none() && params.get("schedule_kind").is_none() {
+        return Ok(None);
+    }
+    let kind = required_string_param(params, &["scheduleKind", "schedule_kind"], "scheduleKind")?;
+    let mut schedule = serde_json::Map::new();
+    schedule.insert("kind".into(), Value::String(kind.to_string()));
+    for (target, aliases) in [
+        ("runAt", &["runAt", "run_at"][..]),
+        ("everyMinutes", &["everyMinutes", "every_minutes"][..]),
+        ("startAt", &["startAt", "start_at"][..]),
+        ("timeOfDay", &["timeOfDay", "time_of_day"][..]),
+        ("weekdays", &["weekdays"][..]),
+        ("dates", &["dates"][..]),
+        ("expression", &["expression"][..]),
+        ("cron", &["cron"][..]),
+    ] {
+        if let Some(value) = aliases.iter().find_map(|key| params.get(*key)) {
+            schedule.insert(target.to_string(), value.clone());
+        }
+    }
+    Ok(Some(Value::Object(schedule)))
+}
+
+fn validate_schedule_value(value: &Value) -> Result<(), ErrorObject> {
+    if !value.is_object() {
+        return Err(params_err("schedule must be an object"));
+    }
+    let _ = required_string_param(value, &["kind"], "schedule.kind")?;
+    let _ = optional_string_value(value, &["runAt", "run_at"])?;
+    let _ = optional_string_value(value, &["startAt", "start_at"])?;
+    let _ = optional_string_value(value, &["timeOfDay", "time_of_day"])?;
+    let _ = optional_string_value(value, &["expression", "cron"])?;
+    if value.get("everyMinutes").is_some() || value.get("every_minutes").is_some() {
+        let _ = optional_u64_param(value, &["everyMinutes", "every_minutes"], 0, "everyMinutes")?;
+    }
+    if let Some(days) = value.get("weekdays") {
+        if days.is_null() {
+            return Err(params_err("weekdays must be an array of integers"));
+        }
+        let days = days
+            .as_array()
+            .ok_or_else(|| params_err("weekdays must be an array of integers"))?;
+        for (index, day) in days.iter().enumerate() {
+            if day.as_u64().is_none() {
+                return Err(params_err(format!("weekdays[{index}] must be an integer")));
+            }
+        }
+    }
+    if let Some(dates) = value.get("dates") {
+        if dates.is_null() {
+            return Err(params_err("dates must be an array of strings"));
+        }
+        let dates = dates
+            .as_array()
+            .ok_or_else(|| params_err("dates must be an array of strings"))?;
+        for (index, date) in dates.iter().enumerate() {
+            if !date.is_string() {
+                return Err(params_err(format!("dates[{index}] must be a string")));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn schedule_update(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = required_string_param(&params, &["id"], "id")?.trim();
+    let mut entry = hub
+        .scheduler
+        .list()
+        .map_err(internal)?
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| ErrorObject::invalid_params(format!("schedule not found: {id}")))?;
+
+    if let Some(name) = optional_string_value(&params, &["name", "title"])? {
+        if name.trim().is_empty() {
+            return Err(params_err("schedule name must not be empty"));
+        }
+        entry.name = name.trim().to_string();
+    }
+    if let Some(task) = optional_string_value(&params, &["task", "prompt"])? {
+        if task.trim().is_empty() {
+            return Err(params_err("schedule task must not be empty"));
+        }
+        entry.task = task.trim().to_string();
+    }
+    if params.get("enabled").is_some() {
+        let enabled = optional_bool_param(&params, &["enabled"], entry.enabled, "enabled")?;
+        entry.enabled = enabled;
+        // Re-enabling a task with no deadline asks the scheduler to calculate
+        // a fresh next run. Disabling retains the existing deadline so a
+        // later enable does not lose the original occurrence metadata.
+        if enabled && entry.next_run_at.is_none() {
+            entry.retry_scheduled_at = None;
+            entry.retry_attempt = 0;
+        }
+    }
+
+    let has_schedule = params.get("schedule").is_some()
+        || params.get("scheduleKind").is_some()
+        || params.get("schedule_kind").is_some()
+        || params.get("cron").is_some();
+    if has_schedule {
+        let structured = params.get("schedule").cloned().or_else(|| {
+            params
+                .get("scheduleKind")
+                .or_else(|| params.get("schedule_kind"))
+                .map(|kind| {
+                    json!({
+                        "kind": kind,
+                        "runAt": params.get("runAt").or_else(|| params.get("run_at")),
+                        "everyMinutes": params.get("everyMinutes").or_else(|| params.get("every_minutes")),
+                        "startAt": params.get("startAt").or_else(|| params.get("start_at")),
+                        "timeOfDay": params.get("timeOfDay").or_else(|| params.get("time_of_day")),
+                        "weekdays": params.get("weekdays"),
+                        "dates": params.get("dates"),
+                        "expression": params.get("expression")
+                    })
+                })
+        });
+        if let Some(schedule_value) = structured {
+            validate_schedule_value(&schedule_value)?;
+            let kind = required_string_param(&schedule_value, &["kind"], "schedule.kind")?;
+            if kind == "cron" {
+                let cron = if schedule_value.get("expression").is_some()
+                    || schedule_value.get("cron").is_some()
+                {
+                    required_string_param(
+                        &schedule_value,
+                        &["expression", "cron"],
+                        "cron expression",
+                    )?
+                } else {
+                    required_string_param(&params, &["cron"], "cron expression")?
+                };
+                entry.cron = cron.trim().to_string();
+                entry.schedule = None;
+            } else {
+                entry.schedule = Some(
+                    serde_json::from_value(schedule_value)
+                        .map_err(|error| params_err(format!("invalid schedule: {error}")))?,
+                );
+                entry.cron = String::new();
+            }
+            entry.next_run_at = None;
+            entry.retry_scheduled_at = None;
+            entry.retry_attempt = 0;
+        } else if params.get("cron").is_some() {
+            let cron = required_string_param(&params, &["cron"], "cron expression")?;
+            entry.cron = cron.trim().to_string();
+            entry.schedule = None;
+            entry.next_run_at = None;
+            entry.retry_scheduled_at = None;
+            entry.retry_attempt = 0;
+        }
+    }
+
+    if params.get("selectedSkillIds").is_some() || params.get("selected_skill_ids").is_some() {
+        entry.selected_skill_ids = string_array_alias(
+            &params,
+            &["selectedSkillIds", "selected_skill_ids"],
+            "selectedSkillIds",
+        )?;
+    }
+    if params.get("selectedMcpServerIds").is_some()
+        || params.get("selected_mcp_server_ids").is_some()
+    {
+        entry.selected_mcp_server_ids = string_array_alias(
+            &params,
+            &["selectedMcpServerIds", "selected_mcp_server_ids"],
+            "selectedMcpServerIds",
+        )?;
+    }
+    if params.get("retryPolicy").is_some() || params.get("retry_policy").is_some() {
+        entry.retry_policy = parse_retry_policy(&params)?;
+    }
+    if let Some(created_by) = optional_string_value(&params, &["createdBy", "created_by"])? {
+        entry.created_by = created_by.trim().to_string();
+    }
+
+    let entry = hub.scheduler.update(entry).map_err(internal)?;
+    let task = worldbase_scheduler::electron_task_value(&entry);
+    Ok(json!({ "entry": entry, "task": task }))
+}
+
+fn parse_retry_policy(params: &Value) -> Result<ScheduledTaskRetryPolicy, ErrorObject> {
+    let Some((key, value)) = ["retryPolicy", "retry_policy"]
+        .into_iter()
+        .find_map(|key| params.get(key).map(|value| (key, value)))
+    else {
+        return Ok(ScheduledTaskRetryPolicy::default());
+    };
+    if value.is_null() {
+        return Ok(ScheduledTaskRetryPolicy::default());
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| params_err(format!("{key} must be an object")))?;
+    let object_value = Value::Object(object.clone());
+    let max_retries = optional_u64_param(
+        &object_value,
+        &["maxRetries", "max_retries"],
+        0,
+        "maxRetries",
+    )?;
+    let max_retries = u32::try_from(max_retries)
+        .map_err(|_| params_err("maxRetries must be no greater than 4294967295"))?;
+    let retry_delay_minutes = optional_u64_param(
+        &object_value,
+        &["retryDelayMinutes", "retry_delay_minutes"],
+        5,
+        "retryDelayMinutes",
+    )?;
+    Ok(ScheduledTaskRetryPolicy {
+        max_retries,
+        retry_delay_minutes,
+    })
 }
 
 fn schedule_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
     let deleted = hub.scheduler.delete(id).map_err(internal)?;
     Ok(json!({ "deleted": deleted }))
 }
@@ -977,9 +1648,19 @@ fn schedule_run(
     ctx: &ConnectionContext,
     params: Value,
 ) -> Result<Value, ErrorObject> {
-    let task = params["task"]
-        .as_str()
-        .ok_or_else(|| params_err("missing task"))?;
+    let (task, schedule_id) = if let Some(task) = optional_string_value(&params, &["task"])? {
+        (task.to_string(), None)
+    } else {
+        let id = required_string_param(&params, &["id"], "task or id")?;
+        let entry = hub
+            .scheduler
+            .list()
+            .map_err(internal)?
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| ErrorObject::invalid_params(format!("schedule not found: {id}")))?;
+        (entry.task, Some(entry.id))
+    };
     let conv = hub
         .store
         .create_conversation("[手动任务]", None)
@@ -987,7 +1668,7 @@ fn schedule_run(
     let run = crate::agent::start_chat(
         hub.clone(),
         conv.id.clone(),
-        task.to_string(),
+        task,
         vec![],
         ctx.effective_capabilities(),
         ctx.effective_interactive(),
@@ -997,7 +1678,7 @@ fn schedule_run(
         ChatRunContext::default(),
     )
     .map_err(internal)?;
-    Ok(json!({ "streamId": run.stream_id, "conversationId": conv.id }))
+    Ok(json!({ "streamId": run.stream_id, "conversationId": conv.id, "scheduleId": schedule_id }))
 }
 
 // ---------- group ----------
@@ -1047,12 +1728,12 @@ fn persist_group_member_message(
 }
 
 fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let topic = params["topic"]
-        .as_str()
-        .ok_or_else(|| params_err("missing topic"))?;
-    let mode: GroupMode =
-        serde_json::from_value(params.get("mode").cloned().unwrap_or(json!("discussion")))
-            .unwrap_or(GroupMode::Discussion);
+    let topic = required_string_param(&params, &["topic"], "topic")?;
+    let mode: GroupMode = match params.get("mode") {
+        None => GroupMode::Discussion,
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| params_err(format!("invalid mode: {error}")))?,
+    };
     let members: Vec<GroupMember> =
         serde_json::from_value(params.get("members").cloned().unwrap_or_else(|| {
             json!([
@@ -1062,13 +1743,21 @@ fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
             ])
         }))
         .map_err(|e| params_err(e.to_string()))?;
-    let coordinator = params["coordinator"].as_str().map(String::from);
-    let max_parallel_workers = params
-        .get("maxParallelWorkers")
-        .or_else(|| params.get("max_parallel_workers"))
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(worldbase_group::GroupEngine::DEFAULT_MAX_PARALLEL_WORKERS);
+    let coordinator = optional_string_param_strict(
+        &params,
+        &["coordinator", "coordinatorId", "coordinator_id"],
+        "coordinator",
+    )?
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty());
+    let max_parallel_workers = optional_u64_param(
+        &params,
+        &["maxParallelWorkers", "max_parallel_workers"],
+        worldbase_group::GroupEngine::DEFAULT_MAX_PARALLEL_WORKERS as u64,
+        "maxParallelWorkers",
+    )?;
+    let max_parallel_workers = usize::try_from(max_parallel_workers)
+        .map_err(|_| params_err("maxParallelWorkers is outside the supported range"))?;
     let mut session = worldbase_group::GroupEngine::create_with_max_parallel_workers(
         topic,
         mode,
@@ -1076,13 +1765,11 @@ fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         coordinator,
         max_parallel_workers,
     )
-    .map_err(internal)?;
-    if let Some(session_id) = params
-        .get("sessionId")
-        .or_else(|| params.get("session_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
+    .map_err(|error| params_err(error.to_string()))?;
+    if let Some(session_id) =
+        optional_string_param_strict(&params, &["sessionId", "session_id"], "sessionId")?
+            .map(|value| value.trim().to_string())
+            .filter(|id| !id.is_empty())
     {
         session.id = session_id.to_string();
     }
@@ -1108,24 +1795,16 @@ fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn group_inject(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
-    let content = params["content"]
-        .as_str()
-        .ok_or_else(|| params_err("missing content"))?;
-    let mut target_agent_ids: Vec<String> = params["targetAgentIds"]
-        .as_array()
-        .map(|targets| {
-            targets
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|target| !target.is_empty())
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let id = required_string_param(&params, &["id"], "id")?;
+    let content = required_string_param(&params, &["content"], "content")?;
+    let mut target_agent_ids = string_array_param(
+        &params,
+        &["targetAgentIds", "target_agent_ids"],
+        "targetAgentIds",
+    )?;
+    let round = optional_u64_param(&params, &["round"], 0, "round")?;
+    let round =
+        u32::try_from(round).map_err(|_| params_err("round must be no greater than 4294967295"))?;
     let mut sessions = hub.group_sessions.lock().unwrap();
     let session = sessions
         .get_mut(id)
@@ -1166,39 +1845,35 @@ fn group_inject(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     persist_group_user_message(hub, id, format!("[补充说明] {content}")).map_err(internal)?;
     worldbase_group::GroupEngine::inject(session, content, target_agent_ids);
     if let Some(injection) = session.pending_injections.last_mut() {
-        injection.round = params["round"].as_u64().unwrap_or(0) as u32;
+        injection.round = round;
     }
     Ok(json!({ "queued": session.pending_injections.len() }))
 }
 
 async fn group_board_update(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
-    let field = params["field"]
-        .as_str()
-        .ok_or_else(|| params_err("missing field"))?;
-    let op = params["op"]
-        .as_str()
-        .ok_or_else(|| params_err("missing op"))?;
-    let payload = params.get("payload").cloned().unwrap_or_else(|| {
-        legacy_group_board_payload(field, op, params["value"].as_str().unwrap_or(""))
-    });
-    let reason = params
-        .get("reason")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    let agent_id = params
-        .get("agentId")
-        .and_then(Value::as_str)
-        .unwrap_or("user");
-    let agent_name = params
-        .get("agentName")
-        .and_then(Value::as_str)
-        .unwrap_or("User");
+    let id = required_string_param(&params, &["id"], "id")?;
+    let field = required_string_param(&params, &["field"], "field")?;
+    let op = required_string_param(&params, &["op"], "op")?;
+    let payload = if let Some(payload) = params.get("payload") {
+        payload.clone()
+    } else if params.get("value").is_some() {
+        let value = params
+            .get("value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| params_err("value must be a string"))?;
+        legacy_group_board_payload(field, op, value)
+    } else {
+        return Err(params_err("missing payload or value"));
+    };
+    let reason = optional_string_param_strict(&params, &["reason"], "reason")?;
+    let agent_id = optional_string_param_strict(&params, &["agentId", "agent_id"], "agentId")?
+        .unwrap_or_else(|| "user".to_string());
+    let agent_name =
+        optional_string_param_strict(&params, &["agentName", "agent_name"], "agentName")?
+            .unwrap_or_else(|| "User".to_string());
     let (board, update) =
-        apply_group_board_update(hub, id, agent_id, agent_name, field, op, payload, reason)
-            .map_err(internal)?;
+        apply_group_board_update(hub, id, &agent_id, &agent_name, field, op, payload, reason)
+            .map_err(|error| params_err(error.to_string()))?;
     hub.emit(
         id,
         EventKind::BoardUpdate {
@@ -1229,9 +1904,7 @@ fn legacy_group_board_payload(field: &str, op: &str, value: &str) -> Value {
 }
 
 fn group_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
     let session = hub
         .group_sessions
         .lock()
@@ -1726,14 +2399,8 @@ fn group_message(
     ctx: &ConnectionContext,
     params: Value,
 ) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?
-        .to_string();
-    let text = params["text"]
-        .as_str()
-        .ok_or_else(|| params_err("missing text"))?
-        .to_string();
+    let id = required_string_param(&params, &["id"], "id")?.to_string();
+    let text = required_string_param(&params, &["text"], "text")?.to_string();
     let session_snapshot = hub
         .group_sessions
         .lock()
@@ -1741,22 +2408,13 @@ fn group_message(
         .get(&id)
         .cloned()
         .ok_or_else(|| ErrorObject::invalid_params("group session not found"))?;
-    let round = params["round"].as_u64().unwrap_or(
-        (session_snapshot.rounds.len() / session_snapshot.members.len().max(1)) as u64 + 1,
-    ) as u32;
+    let default_round =
+        (session_snapshot.rounds.len() / session_snapshot.members.len().max(1)) as u64 + 1;
+    let round = optional_u64_param(&params, &["round"], default_round, "round")?;
+    let round =
+        u32::try_from(round).map_err(|_| params_err("round must be no greater than 4294967295"))?;
     let max_parallel_workers = session_snapshot.max_parallel_workers;
-    let selected_members: Vec<String> = params["memberIds"]
-        .as_array()
-        .map(|members| {
-            members
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|member| !member.is_empty())
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let selected_members = string_array_param(&params, &["memberIds", "member_ids"], "memberIds")?;
     let mut run_context: ChatRunContext = params
         .get("context")
         .cloned()
@@ -1792,6 +2450,7 @@ fn group_message(
                 model: None,
                 context: run_context.clone(),
                 group_collaboration: None,
+                subagent_nesting_depth: 0,
             },
         );
     }
@@ -1986,12 +2645,8 @@ fn group_message(
 }
 
 fn group_blackboard_add(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
-    let note = params["note"]
-        .as_str()
-        .ok_or_else(|| params_err("missing note"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
+    let note = required_string_param(&params, &["note"], "note")?;
     let mut sessions = hub.group_sessions.lock().unwrap();
     let session = sessions
         .get_mut(id)
@@ -2002,18 +2657,36 @@ fn group_blackboard_add(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObj
 
 // ---------- mcp ----------
 
+fn non_empty_string_alias<'a>(
+    params: &'a Value,
+    aliases: &[&str],
+) -> Result<Option<&'a str>, ErrorObject> {
+    for key in aliases {
+        let Some(value) = params.get(*key) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let value = value
+            .as_str()
+            .ok_or_else(|| params_err(format!("{key} must be a string")))?
+            .trim();
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
 async fn mcp_call(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     // Keep the protocol tolerant of the same camelCase/snake_case spellings
     // accepted by direct `tool.call` requests. Electron's generic MCP tool
     // uses `server`/`tool`/`arguments`, while older mobile callers used the
     // durable `server_id` and `args` names.
-    let server = ["server", "serverId", "server_id"]
-        .into_iter()
-        .find_map(|key| params.get(key).and_then(Value::as_str))
+    let server = non_empty_string_alias(&params, &["server", "serverId", "server_id"])?
         .ok_or_else(|| params_err("missing server"))?;
-    let tool = ["tool", "toolName", "tool_name"]
-        .into_iter()
-        .find_map(|key| params.get(key).and_then(Value::as_str))
+    let tool = non_empty_string_alias(&params, &["tool", "toolName", "tool_name", "name"])?
         .ok_or_else(|| params_err("missing tool"))?;
     let args = ["args", "arguments", "input", "parameters"]
         .into_iter()
@@ -2036,9 +2709,18 @@ async fn mcp_reload(
     ctx: &ConnectionContext,
     params: Value,
 ) -> Result<Value, ErrorObject> {
+    let raw_servers = match params.get("servers") {
+        None => json!([]),
+        Some(value) if value.is_null() => {
+            return Err(params_err("servers must be an array"));
+        }
+        Some(value) if !value.is_array() => {
+            return Err(params_err("servers must be an array"));
+        }
+        Some(value) => value.clone(),
+    };
     let mut configs: Vec<worldbase_mcp_client::McpServerConfig> =
-        serde_json::from_value(params.get("servers").cloned().unwrap_or_else(|| json!([])))
-            .map_err(|e| params_err(e.to_string()))?;
+        serde_json::from_value(raw_servers).map_err(|e| params_err(e.to_string()))?;
     let is_mobile = ctx.effective_capabilities().platform.starts_with("mobile");
     let mut ignored_unsupported = Vec::new();
     if is_mobile {
@@ -2066,12 +2748,7 @@ async fn mcp_reload(
 }
 
 async fn mcp_refresh(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let server_id = params
-        .get("serverId")
-        .or_else(|| params.get("server_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let server_id = non_empty_string_alias(&params, &["serverId", "server_id"])?;
 
     if let Some(server_id) = server_id {
         let snapshot = hub.mcp.refresh_server(server_id).await.map_err(internal)?;
@@ -2082,12 +2759,7 @@ async fn mcp_refresh(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject
 }
 
 async fn mcp_disconnect(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let server_id = params
-        .get("serverId")
-        .or_else(|| params.get("server_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let server_id = non_empty_string_alias(&params, &["serverId", "server_id"])?
         .ok_or_else(|| params_err("missing serverId"))?;
     let snapshot = hub
         .mcp
@@ -2099,75 +2771,440 @@ async fn mcp_disconnect(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObj
 
 // ---------- docs ----------
 
+fn resolve_document_import_path(hub: &Arc<Hub>, raw_path: &str) -> Result<PathBuf, ErrorObject> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(params_err("path must not be empty"));
+    }
+    let candidate = Path::new(raw_path);
+    let is_relative = !candidate.is_absolute();
+    let path = if is_relative {
+        hub.workspace.join(candidate)
+    } else {
+        // Electron's native file picker can select a document outside the
+        // current workspace. Preserve that behavior for explicit absolute
+        // paths; only relative imports are workspace-scoped.
+        candidate.to_path_buf()
+    };
+    let resolved = path
+        .canonicalize()
+        .map_err(|error| params_err(format!("document path is not readable: {error}")))?;
+    if is_relative {
+        let root = hub
+            .workspace
+            .canonicalize()
+            .unwrap_or_else(|_| hub.workspace.clone());
+        if !resolved.starts_with(&root) {
+            return Err(params_err("document path escapes workspace"));
+        }
+    }
+    let metadata = std::fs::metadata(&resolved)
+        .map_err(|error| params_err(format!("document path is not readable: {error}")))?;
+    if !metadata.is_file() {
+        return Err(params_err(format!(
+            "document path is not a file: {}",
+            resolved.display()
+        )));
+    }
+    if metadata.len() > worldbase_tools::document_artifacts::MAX_DOCUMENT_BYTES {
+        return Err(params_err(format!(
+            "document is too large (maximum {} bytes)",
+            worldbase_tools::document_artifacts::MAX_DOCUMENT_BYTES
+        )));
+    }
+    Ok(resolved)
+}
+
+fn resolve_document_write_path(hub: &Arc<Hub>, raw_path: &str) -> Result<PathBuf, ErrorObject> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(params_err("path must not be empty"));
+    }
+    let candidate = Path::new(raw_path);
+    let path = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        hub.workspace.join(candidate)
+    };
+    let root = hub
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|_| hub.workspace.clone());
+    // Resolve the nearest existing ancestor so lexical `..` and symlinked
+    // parents cannot escape the managed workspace before a write creates the
+    // final file.
+    let mut existing = path.clone();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name().map(|name| name.to_os_string()) else {
+            return Err(params_err("invalid document path"));
+        };
+        missing.push(name);
+        let Some(parent) = existing.parent() else {
+            return Err(params_err("invalid document path"));
+        };
+        existing = parent.to_path_buf();
+    }
+    let mut resolved = existing
+        .canonicalize()
+        .map_err(|error| params_err(format!("invalid document path: {error}")))?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    if !resolved.starts_with(&root) {
+        return Err(params_err("document path escapes workspace"));
+    }
+    Ok(resolved)
+}
+
+fn document_id_param(params: &Value) -> Result<&str, ErrorObject> {
+    let id = required_string_param(params, &["artifactId", "artifact_id", "id"], "artifactId")?;
+    if !worldbase_tools::document_artifacts::valid_artifact_id(id) {
+        return Err(params_err("artifactId has invalid format"));
+    }
+    Ok(id)
+}
+
 fn doc_parse(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let path = params["path"]
-        .as_str()
-        .ok_or_else(|| params_err("missing path"))?;
-    let full = hub.workspace.join(path);
-    let parsed = worldbase_docs::parse_file(&full).map_err(internal)?;
+    let path = required_string_param(&params, &["path", "filePath", "file_path"], "path")?;
+    let full = resolve_document_import_path(hub, path)?;
+    if !worldbase_docs::is_supported_path(&full) {
+        return Err(params_err(format!(
+            "unsupported document extension: {}",
+            full.extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown")
+        )));
+    }
+    let mut parsed = worldbase_docs::parse_file(&full).map_err(internal)?;
+    let artifact =
+        worldbase_tools::document_artifacts::import_parsed_document(&hub.workspace, &full, &parsed)
+            .map_err(internal)?;
+    if let Some(result) = parsed.as_object_mut() {
+        result.insert("artifactId".into(), json!(artifact.id));
+        result.insert("artifact_id".into(), json!(artifact.id));
+    }
     Ok(parsed)
 }
 
+fn doc_import(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let path = required_string_param(&params, &["path", "filePath", "file_path"], "path")?;
+    let full = resolve_document_import_path(hub, path)?;
+    if !worldbase_docs::is_supported_path(&full) {
+        return Err(params_err(format!(
+            "unsupported document extension: {}",
+            full.extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown")
+        )));
+    }
+    let parsed = worldbase_docs::parse_file(&full).map_err(internal)?;
+    let artifact =
+        worldbase_tools::document_artifacts::import_parsed_document(&hub.workspace, &full, &parsed)
+            .map_err(internal)?;
+    Ok(json!({ "artifact": artifact }))
+}
+
+fn doc_list(hub: &Arc<Hub>, _params: Value) -> Result<Value, ErrorObject> {
+    worldbase_tools::document_artifacts::list_documents_result(&hub.workspace).map_err(internal)
+}
+
+fn doc_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = document_id_param(&params)?;
+    let artifact =
+        worldbase_tools::document_artifacts::get_document(&hub.workspace, id).map_err(internal)?;
+    serde_json::to_value(artifact).map_err(internal)
+}
+
+async fn doc_preview_ensure(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = document_id_param(&params)?;
+    let Some(current) =
+        worldbase_tools::document_artifacts::get_document(&hub.workspace, id).map_err(internal)?
+    else {
+        return Ok(Value::Null);
+    };
+
+    // Match Electron's document preview service: once a render is already
+    // ready, return the persisted artifact directly instead of asking the
+    // host to regenerate a DOCX preview on every workbench refresh.
+    if matches!(
+        current.file_type.to_ascii_lowercase().as_str(),
+        "docx" | "doc"
+    ) && current
+        .render
+        .as_ref()
+        .and_then(|render| render.get("status"))
+        .and_then(Value::as_str)
+        == Some("ready")
+    {
+        // A legacy artifact can say `ready` while its cache file has been
+        // removed (manual cleanup, workspace copy, or an interrupted write).
+        // Only short-circuit when the durable bytes are actually readable;
+        // otherwise fall through and ask the host to regenerate them.
+        if worldbase_tools::document_artifacts::read_render_asset(&hub.workspace, id)
+            .map_err(internal)?
+            .is_some()
+        {
+            return serde_json::to_value(current).map_err(internal);
+        }
+    }
+
+    let artifact = if matches!(
+        current.file_type.to_ascii_lowercase().as_str(),
+        "docx" | "doc"
+    ) {
+        let requested_stream_id = params
+            .get("streamId")
+            .or_else(|| params.get("stream_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let ephemeral_stream = requested_stream_id.is_none();
+        let stream_id = requested_stream_id
+            .unwrap_or_else(|| format!("document.preview.ensure:{}", uuid::Uuid::new_v4()));
+        let host_result = hub
+            .host_request(
+                &stream_id,
+                "document.preview.ensure",
+                json!({
+                    "artifactId": current.id,
+                    "filePath": current.file_path,
+                    "fileType": current.file_type,
+                }),
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+        if ephemeral_stream {
+            hub.remove_stream(&stream_id);
+        }
+
+        match host_result {
+            Ok(value) => {
+                let render = value.get("render").cloned().unwrap_or(Value::Null);
+                let bytes = value
+                    .get("bytes")
+                    .or_else(|| value.get("data"))
+                    .and_then(host_preview_bytes);
+                if let (Some(render), Some(bytes)) = (render.as_object(), bytes) {
+                    worldbase_tools::document_artifacts::persist_host_render_preview(
+                        &hub.workspace,
+                        id,
+                        Value::Object(render.clone()),
+                        &bytes,
+                    )
+                    .map_err(internal)?
+                } else {
+                    worldbase_tools::document_artifacts::ensure_render_preview(&hub.workspace, id)
+                        .map_err(internal)?
+                }
+            }
+            Err(_) => {
+                worldbase_tools::document_artifacts::ensure_render_preview(&hub.workspace, id)
+                    .map_err(internal)?
+            }
+        }
+    } else {
+        worldbase_tools::document_artifacts::ensure_render_preview(&hub.workspace, id)
+            .map_err(internal)?
+    };
+    serde_json::to_value(artifact).map_err(internal)
+}
+
+fn host_preview_bytes(value: &Value) -> Option<Vec<u8>> {
+    if let Some(bytes) = value.as_array() {
+        return bytes
+            .iter()
+            .map(|byte| byte.as_u64().and_then(|value| u8::try_from(value).ok()))
+            .collect();
+    }
+    value.as_str().and_then(|encoded| {
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()
+    })
+}
+
+fn doc_preview_read(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = document_id_param(&params)?;
+    let asset = worldbase_tools::document_artifacts::read_render_asset(&hub.workspace, id)
+        .map_err(internal)?;
+    Ok(asset.unwrap_or(Value::Null))
+}
+
+async fn doc_open_original(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = document_id_param(&params)?;
+    let Some(artifact) =
+        worldbase_tools::document_artifacts::get_document(&hub.workspace, id).map_err(internal)?
+    else {
+        return Ok(json!({
+            "success": false,
+            "supported": false,
+            "error": format!("文档不存在: {id}"),
+        }));
+    };
+
+    // This is a direct RPC rather than a chat tool call, so there is no
+    // already-mapped session stream on the Electron client. Use a unique
+    // stream by default; the client handles this host request globally while
+    // Flutter receives it through the normal event bridge. Callers that do
+    // have a stream may provide it for observability and event correlation.
+    let requested_stream_id = params
+        .get("streamId")
+        .or_else(|| params.get("stream_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let ephemeral_stream = requested_stream_id.is_none();
+    let stream_id = requested_stream_id
+        .unwrap_or_else(|| format!("document.openOriginal:{}", uuid::Uuid::new_v4()));
+    let payload = json!({
+        "artifactId": artifact.id,
+        "filePath": artifact.file_path,
+    });
+
+    let result = hub
+        .host_request(
+            &stream_id,
+            "document.openOriginal",
+            payload,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+    if ephemeral_stream {
+        hub.remove_stream(&stream_id);
+    }
+
+    match result {
+        Ok(value) if value.is_object() => Ok(value),
+        Ok(value) => Ok(json!({
+            "success": value.as_bool().unwrap_or(false),
+            "supported": true,
+        })),
+        Err(error) => Ok(json!({
+            "success": false,
+            // A Rust-only/CLI transport has no shell host to open the file.
+            // Keep this distinct from Electron's supported-but-failed
+            // `shell.openPath` response so Flutter and other non-desktop
+            // clients can disable the action instead of retrying it.
+            "supported": false,
+            "error": error.to_string(),
+        })),
+    }
+}
+
+fn doc_remove(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = document_id_param(&params)?;
+    worldbase_tools::document_artifacts::remove_document(&hub.workspace, id)
+        .map(Value::Bool)
+        .map_err(internal)
+}
+
+fn doc_edit_source(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = document_id_param(&params)?;
+    worldbase_tools::document_artifacts::edit_source_state(&hub.workspace, id).map_err(internal)
+}
+
+fn doc_selection_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let artifact_id =
+        optional_string_param_strict(&params, &["artifactId", "artifact_id"], "artifactId")?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    let selections = match artifact_id {
+        Some(artifact_id) => worldbase_tools::document_artifacts::get_selections_for_artifact(
+            &hub.workspace,
+            &artifact_id,
+        ),
+        None => worldbase_tools::document_artifacts::list_selections(&hub.workspace),
+    }
+    .map_err(internal)?;
+    serde_json::to_value(selections).map_err(internal)
+}
+
+fn doc_selection_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let artifact_id = required_string_param(&params, &["artifactId", "artifact_id"], "artifactId")?;
+    let node_ids = string_array_param(&params, &["nodeIds", "node_ids"], "nodeIds")?;
+    let label = optional_string_param_strict(&params, &["label"], "label")?;
+    let color = optional_string_param_strict(&params, &["color"], "color")?;
+    let excerpt = optional_string_param_strict(&params, &["excerpt"], "excerpt")?;
+    let selection = worldbase_tools::document_artifacts::create_selection(
+        &hub.workspace,
+        artifact_id,
+        &node_ids,
+        label.as_deref(),
+        color.as_deref(),
+        excerpt.as_deref(),
+    )
+    .map_err(|error| params_err(error.to_string()))?;
+    serde_json::to_value(selection).map_err(internal)
+}
+
+fn doc_selection_update(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = required_string_param(&params, &["id", "regionId", "region_id"], "id")?;
+    let label = required_string_param(&params, &["label"], "label")?;
+    let selection =
+        worldbase_tools::document_artifacts::update_selection_label(&hub.workspace, id, label)
+            .map_err(internal)?;
+    serde_json::to_value(selection).map_err(internal)
+}
+
+fn doc_selection_remove(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = required_string_param(&params, &["id", "regionId", "region_id"], "id")?;
+    let removed = worldbase_tools::document_artifacts::remove_selection(&hub.workspace, id)
+        .map_err(internal)?;
+    Ok(json!(removed))
+}
+
+fn doc_selection_prompt(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let region_ids = match ["regionIds", "region_ids"]
+        .into_iter()
+        .find_map(|key| params.get(key).map(|value| (key, value)))
+    {
+        None => None,
+        Some((_, value)) if value.is_null() => None,
+        Some(_) => Some(string_array_param(
+            &params,
+            &["regionIds", "region_ids"],
+            "regionIds",
+        )?),
+    };
+    worldbase_tools::document_artifacts::build_selections_prompt(
+        &hub.workspace,
+        region_ids.as_deref(),
+    )
+    .map(Value::String)
+    .map_err(internal)
+}
+
 fn doc_write(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let path = params["path"]
-        .as_str()
-        .ok_or_else(|| params_err("missing path"))?;
-    let kind = params["kind"]
-        .as_str()
-        .ok_or_else(|| params_err("missing kind"))?;
-    let full = hub.workspace.join(path);
+    let path = required_string_param(&params, &["path"], "path")?;
+    let kind = required_string_param(&params, &["kind"], "kind")?;
+    let full = resolve_document_write_path(hub, path)?;
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent).map_err(internal)?;
     }
     match kind {
         "markdown" | "text" | "json" => {
-            let content = params["content"]
-                .as_str()
-                .ok_or_else(|| params_err("missing content"))?;
+            let content = required_string_param(&params, &["content"], "content")?;
             worldbase_docs::edit::write_text(&full, content).map_err(internal)?;
         }
         "csv" => {
-            let header: Vec<String> = params["header"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|v| v.as_str().unwrap_or_default().into())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let rows: Vec<Vec<String>> = params["rows"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|r| {
-                            r.as_array()
-                                .map(|c| c.iter().map(cell).collect())
-                                .unwrap_or_default()
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let header = doc_string_array(&params, "header")?;
+            let rows = doc_rows(&params, "rows")?;
             worldbase_docs::edit::write_csv(&full, &header, &rows).map_err(internal)?;
         }
         "docx" => {
-            let blocks = doc_blocks(&params);
+            let blocks = doc_blocks(&params)?;
             worldbase_docs::edit::write_docx(&full, &blocks).map_err(internal)?;
         }
         "xlsx" => {
+            let sheet_name =
+                doc_optional_string_alias(&params, &["sheet_name", "sheetName"], "sheet_name")?
+                    .unwrap_or_else(|| "Sheet1".to_string());
             let sheets = vec![worldbase_docs::edit::Sheet {
-                name: params["sheet_name"].as_str().unwrap_or("Sheet1").into(),
-                rows: params["rows"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .map(|r| {
-                                r.as_array()
-                                    .map(|c| c.iter().map(cell).collect())
-                                    .unwrap_or_default()
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                name: sheet_name,
+                rows: doc_rows(&params, "rows")?,
             }];
             worldbase_docs::edit::write_xlsx(&full, &sheets).map_err(internal)?;
         }
@@ -2184,32 +3221,130 @@ fn cell(v: &Value) -> String {
     }
 }
 
-fn doc_blocks(params: &Value) -> Vec<worldbase_docs::edit::DocBlock> {
+fn doc_optional_string_alias(
+    params: &Value,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Option<String>, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| params_err(format!("{key} must be a string")))?;
+    if value.trim().is_empty() {
+        return Err(params_err(format!("{label} must not be empty")));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn doc_string_array(params: &Value, key: &str) -> Result<Vec<String>, ErrorObject> {
+    let Some(value) = params.get(key) else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| params_err(format!("{key} must be an array of strings")))?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| params_err(format!("{key}[{index}] must be a string")))
+        })
+        .collect()
+}
+
+fn doc_rows(params: &Value, key: &str) -> Result<Vec<Vec<String>>, ErrorObject> {
+    let Some(value) = params.get(key) else {
+        return Ok(Vec::new());
+    };
+    let rows = value
+        .as_array()
+        .ok_or_else(|| params_err(format!("{key} must be a two-dimensional array")))?;
+    rows.iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let cells = row
+                .as_array()
+                .ok_or_else(|| params_err(format!("{key}[{row_index}] must be an array")))?;
+            Ok(cells.iter().map(cell).collect())
+        })
+        .collect()
+}
+
+fn doc_blocks(params: &Value) -> Result<Vec<worldbase_docs::edit::DocBlock>, ErrorObject> {
+    let Some(value) = params.get("blocks") else {
+        return Ok(Vec::new());
+    };
+    let raw_blocks = value
+        .as_array()
+        .ok_or_else(|| params_err("blocks must be an array"))?;
     let mut blocks = Vec::new();
-    for b in params["blocks"].as_array().cloned().unwrap_or_default() {
-        let text = b["text"].as_str().unwrap_or_default().into();
-        match b["type"].as_str().unwrap_or("paragraph") {
-            "heading" => blocks.push(worldbase_docs::edit::DocBlock::Heading(
-                text,
-                b["level"].as_u64().unwrap_or(1) as u32,
-            )),
+    for (index, b) in raw_blocks.iter().enumerate() {
+        let b = b
+            .as_object()
+            .ok_or_else(|| params_err(format!("blocks[{index}] must be an object")))?;
+        let text = b
+            .get("text")
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| params_err(format!("blocks[{index}].text must be a string")))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let block_type = b
+            .get("type")
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| params_err(format!("blocks[{index}].type must be a string")))
+            })
+            .transpose()?
+            .unwrap_or_else(|| "paragraph".to_string());
+        let level = b
+            .get("level")
+            .map(|value| {
+                let level = value.as_u64().ok_or_else(|| {
+                    params_err(format!(
+                        "blocks[{index}].level must be a non-negative integer"
+                    ))
+                })?;
+                u32::try_from(level)
+                    .map_err(|_| params_err(format!("blocks[{index}].level is out of range")))
+            })
+            .transpose()?
+            .unwrap_or(1);
+        match block_type.as_str() {
+            "heading" => blocks.push(worldbase_docs::edit::DocBlock::Heading(text, level)),
+            "paragraph" => blocks.push(worldbase_docs::edit::DocBlock::Paragraph(text)),
             "bullet" => blocks.push(worldbase_docs::edit::DocBlock::Bullet(text)),
-            _ => blocks.push(worldbase_docs::edit::DocBlock::Paragraph(text)),
+            "bold" => blocks.push(worldbase_docs::edit::DocBlock::Bold(text)),
+            other => {
+                return Err(params_err(format!(
+                    "blocks[{index}].type must be heading, paragraph, bullet, or bold (got {other})"
+                )))
+            }
         }
     }
-    blocks
+    Ok(blocks)
 }
 
 // ---------- providers（供应商管理，对齐桌面 settings:providers）----------
 
 async fn provider_fetch_models(params: Value) -> Result<Value, ErrorObject> {
-    let base_url = params["baseUrl"]
-        .as_str()
-        .ok_or_else(|| params_err("missing baseUrl"))?;
-    let api_key = params["apiKey"]
-        .as_str()
-        .ok_or_else(|| params_err("missing apiKey"))?;
-    let api_protocol = params["apiProtocol"].as_str().unwrap_or_default();
+    let base_url = required_string_param(&params, &["baseUrl", "base_url"], "baseUrl")?;
+    let api_key = required_string_param(&params, &["apiKey", "api_key"], "apiKey")?;
+    let api_protocol =
+        optional_string_value(&params, &["apiProtocol", "api_protocol"])?.unwrap_or_default();
     let models = worldbase_providers::fetch_remote_models(base_url, api_key, api_protocol)
         .await
         .map_err(internal)?;
@@ -2237,9 +3372,7 @@ fn provider_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn provider_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
     let mut cfg = hub.providers_config();
     cfg.providers.retain(|p| p.id != id);
     if cfg.active_provider_id.as_deref() == Some(id) {
@@ -2252,9 +3385,7 @@ fn provider_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
 }
 
 fn provider_set_active(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
     let mut cfg = hub.providers_config();
     if !cfg.providers.iter().any(|p| p.id == id) {
         return Err(ErrorObject::invalid_params(format!(
@@ -2271,9 +3402,7 @@ fn provider_set_active(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObje
 // ---------- agents ----------
 
 fn agent_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
     let agent = hub
         .store
         .get_agent(&sanitize_agent_id(id))
@@ -2284,9 +3413,11 @@ fn agent_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 fn agent_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let value = params
         .get("agent")
-        .filter(|agent| agent.is_object())
-        .ok_or_else(|| params_err("missing agent"))?;
-    let requested_id = agent_string(value, "id");
+        .ok_or_else(|| params_err("missing agent"))?
+        .as_object()
+        .ok_or_else(|| params_err("agent must be an object"))?;
+    let value = Value::Object(value.clone());
+    let requested_id = agent_string(&value, "id")?;
     let existing = requested_id
         .as_deref()
         .map(sanitize_agent_id)
@@ -2294,47 +3425,36 @@ fn agent_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         .map(|id| hub.store.get_agent(&id).map_err(internal))
         .transpose()?
         .flatten();
+    let requested_name = agent_string(&value, "name")?;
     let now = worldbase_protocol::event::now_rfc3339();
     let id = requested_id
         .as_deref()
         .map(sanitize_agent_id)
         .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| {
-            create_agent_id(agent_string(value, "name").as_deref().unwrap_or("custom"))
-        });
-    let name = agent_string(value, "name")
+        .unwrap_or_else(|| create_agent_id(requested_name.as_deref().unwrap_or("custom")));
+    let fallback_name = optional_string_value(&params, &["fallbackName"])?;
+    let name = requested_name
         .or_else(|| existing.as_ref().map(|agent| agent.name.clone()))
-        .or_else(|| params["fallbackName"].as_str().map(ToOwned::to_owned))
+        .or_else(|| fallback_name.map(ToOwned::to_owned))
         .unwrap_or_else(|| "Untitled agent".into());
     let icon =
-        agent_string(value, "icon").or_else(|| existing.as_ref().map(|agent| agent.icon.clone()));
-    let description = if value.get("description").and_then(Value::as_str).is_some() {
-        value["description"]
-            .as_str()
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    } else {
-        existing
-            .as_ref()
-            .map(|agent| agent.description.clone())
-            .unwrap_or_default()
-    };
-    let system_prompt = value
-        .get("systemPrompt")
-        .or_else(|| value.get("system_prompt"))
-        .and_then(Value::as_str)
+        agent_string(&value, "icon")?.or_else(|| existing.as_ref().map(|agent| agent.icon.clone()));
+    let description = optional_string_value(&value, &["description"])?
+        .map(|description| description.trim().to_string())
+        .or_else(|| existing.as_ref().map(|agent| agent.description.clone()))
+        .unwrap_or_default();
+    let system_prompt = optional_string_value(&value, &["systemPrompt", "system_prompt"])?
         .map(ToOwned::to_owned)
         .or_else(|| existing.as_ref().map(|agent| agent.system_prompt.clone()))
         .unwrap_or_default();
-    let provider_id = agent_string_alias(value, "providerId", "provider_id").or_else(|| {
+    let provider_id = agent_string_alias(&value, "providerId", "provider_id")?.or_else(|| {
         existing
             .as_ref()
             .and_then(|agent| agent.provider_id.clone())
     });
-    let model_id = agent_string_alias(value, "modelId", "model_id")
+    let model_id = agent_string_alias(&value, "modelId", "model_id")?
         .or_else(|| existing.as_ref().and_then(|agent| agent.model_id.clone()));
-    let reasoning_strength = agent_string_alias(value, "reasoningStrength", "reasoning_strength")
+    let reasoning_strength = agent_string_alias(&value, "reasoningStrength", "reasoning_strength")?
         .filter(|strength| matches!(strength.as_str(), "low" | "medium" | "high" | "max"))
         .or_else(|| {
             existing
@@ -2342,16 +3462,16 @@ fn agent_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
                 .map(|agent| agent.reasoning_strength.clone())
         })
         .unwrap_or_else(|| "medium".into());
-    let skill_ids = agent_string_array_alias(value, "skillIds", "skill_ids")
+    let skill_ids = agent_string_array_alias(&value, "skillIds", "skill_ids")?
         .or_else(|| existing.as_ref().map(|agent| agent.skill_ids.clone()))
         .unwrap_or_default();
-    let allowed_tools = agent_string_array_alias(value, "allowedTools", "allowed_tools")
+    let allowed_tools = agent_string_array_alias(&value, "allowedTools", "allowed_tools")?
         .or_else(|| existing.as_ref().map(|agent| agent.allowed_tools.clone()))
         .unwrap_or_default();
-    let denied_tools = agent_string_array_alias(value, "deniedTools", "denied_tools")
+    let denied_tools = agent_string_array_alias(&value, "deniedTools", "denied_tools")?
         .or_else(|| existing.as_ref().map(|agent| agent.denied_tools.clone()))
         .unwrap_or_default();
-    let memory_scopes = agent_string_array_alias(value, "memoryScopes", "memory_scopes")
+    let memory_scopes = agent_string_array_alias(&value, "memoryScopes", "memory_scopes")?
         .map(|scopes| {
             scopes
                 .into_iter()
@@ -2365,12 +3485,16 @@ fn agent_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         })
         .or_else(|| existing.as_ref().map(|agent| agent.memory_scopes.clone()))
         .unwrap_or_else(|| vec!["user".into(), "agent".into(), "project".into()]);
-    let memory_write_policy = merge_agent_memory_write_policy(value, existing.as_ref());
-    let auto_reply_policy = merge_agent_auto_reply_policy(value, existing.as_ref());
+    let memory_write_policy = merge_agent_memory_write_policy(&value, existing.as_ref())?;
+    let auto_reply_policy = merge_agent_auto_reply_policy(&value, existing.as_ref())?;
+    let requested_created_at = agent_string_alias(&value, "createdAt", "created_at")?;
+    // `updatedAt` is generated by this store, but an explicitly supplied
+    // value still belongs to the input contract and must have a valid type.
+    let _requested_updated_at = agent_string_alias(&value, "updatedAt", "updated_at")?;
     let created_at = existing
         .as_ref()
         .map(|agent| agent.created_at.clone())
-        .or_else(|| agent_string_alias(value, "createdAt", "created_at"))
+        .or(requested_created_at)
         .unwrap_or_else(|| now.clone());
     let agent = AgentDefinition {
         id,
@@ -2395,9 +3519,7 @@ fn agent_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn agent_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
     let sanitized_id = sanitize_agent_id(id);
     if sanitized_id == "agent_default" {
         return Ok(json!({ "deleted": false }));
@@ -2428,87 +3550,147 @@ fn create_agent_id(name: &str) -> String {
     ))
 }
 
-fn agent_string(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(ToOwned::to_owned)
+fn agent_string(value: &Value, key: &str) -> Result<Option<String>, ErrorObject> {
+    let Some(candidate) = value.get(key) else {
+        return Ok(None);
+    };
+    if candidate.is_null() {
+        return Ok(None);
+    }
+    let text = candidate
+        .as_str()
+        .ok_or_else(|| params_err(format!("agent.{key} must be a string")))?
+        .trim();
+    Ok((!text.is_empty()).then(|| text.to_string()))
 }
 
-fn agent_string_alias(value: &Value, camel: &str, snake: &str) -> Option<String> {
-    agent_string(value, camel).or_else(|| agent_string(value, snake))
+fn agent_string_alias(
+    value: &Value,
+    camel: &str,
+    snake: &str,
+) -> Result<Option<String>, ErrorObject> {
+    // A non-null canonical spelling wins even when its type is invalid. This
+    // prevents a malformed camelCase field from being silently replaced by a
+    // legacy snake_case alias.
+    if value.get(camel).is_some() {
+        return agent_string(value, camel);
+    }
+    agent_string(value, snake)
 }
 
-fn agent_string_array_alias(value: &Value, camel: &str, snake: &str) -> Option<Vec<String>> {
-    let source = value
-        .get(camel)
-        .filter(|candidate| !candidate.is_null())
-        .or_else(|| value.get(snake).filter(|candidate| !candidate.is_null()))?;
+fn agent_string_array_alias(
+    value: &Value,
+    camel: &str,
+    snake: &str,
+) -> Result<Option<Vec<String>>, ErrorObject> {
+    let source = if let Some(candidate) = value.get(camel) {
+        if candidate.is_null() {
+            value.get(snake).filter(|candidate| !candidate.is_null())
+        } else {
+            Some(candidate)
+        }
+    } else {
+        value.get(snake).filter(|candidate| !candidate.is_null())
+    };
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let items = source
+        .as_array()
+        .ok_or_else(|| params_err(format!("agent.{camel} must be an array of strings")))?;
     let mut seen = std::collections::HashSet::new();
-    Some(
-        source
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty())
-                    .filter(|text| seen.insert((*text).to_string()))
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default(),
-    )
+    let mut result = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let item = item
+            .as_str()
+            .ok_or_else(|| params_err(format!("agent.{camel}[{index}] must be a string")))?;
+        let item = item.trim();
+        if !item.is_empty() && seen.insert(item.to_string()) {
+            result.push(item.to_string());
+        }
+    }
+    Ok(Some(result))
 }
 
 fn merge_agent_memory_write_policy(
     value: &Value,
     existing: Option<&AgentDefinition>,
-) -> AgentMemoryWritePolicy {
+) -> Result<AgentMemoryWritePolicy, ErrorObject> {
     let defaults = AgentMemoryWritePolicy::default();
     let prior = existing
         .map(|agent| agent.memory_write_policy.clone())
         .unwrap_or(defaults.clone());
-    let source = value
-        .get("memoryWritePolicy")
-        .or_else(|| value.get("memory_write_policy"));
-    let bool_field = |key: &str, fallback: bool| {
-        source
-            .and_then(|policy| policy.get(key))
-            .and_then(Value::as_bool)
-            .unwrap_or(fallback)
+    let source = agent_policy_object(
+        value,
+        "memoryWritePolicy",
+        "memory_write_policy",
+        "memoryWritePolicy",
+    )?;
+    let bool_field = |key: &str, fallback: bool| -> Result<bool, ErrorObject> {
+        match source.and_then(|policy| policy.get(key)) {
+            None | Some(Value::Null) => Ok(fallback),
+            Some(value) => value.as_bool().ok_or_else(|| {
+                params_err(format!("agent.memoryWritePolicy.{key} must be a boolean"))
+            }),
+        }
     };
-    AgentMemoryWritePolicy {
-        allow_user_traits: bool_field("allowUserTraits", prior.allow_user_traits),
-        allow_agent_skills: bool_field("allowAgentSkills", prior.allow_agent_skills),
-        allow_steps: bool_field("allowSteps", prior.allow_steps),
-        allow_knowledge: bool_field("allowKnowledge", prior.allow_knowledge),
-    }
+    Ok(AgentMemoryWritePolicy {
+        allow_user_traits: bool_field("allowUserTraits", prior.allow_user_traits)?,
+        allow_agent_skills: bool_field("allowAgentSkills", prior.allow_agent_skills)?,
+        allow_steps: bool_field("allowSteps", prior.allow_steps)?,
+        allow_knowledge: bool_field("allowKnowledge", prior.allow_knowledge)?,
+    })
 }
 
 fn merge_agent_auto_reply_policy(
     value: &Value,
     existing: Option<&AgentDefinition>,
-) -> AgentAutoReplyPolicy {
+) -> Result<AgentAutoReplyPolicy, ErrorObject> {
     let prior = existing
         .map(|agent| agent.auto_reply_policy.clone())
         .unwrap_or_default();
-    let source = value
-        .get("autoReplyPolicy")
-        .or_else(|| value.get("auto_reply_policy"));
-    AgentAutoReplyPolicy {
-        enabled: source
-            .and_then(|policy| policy.get("enabled"))
-            .and_then(Value::as_bool)
-            .unwrap_or(prior.enabled),
-        require_mention: source
-            .and_then(|policy| policy.get("requireMention"))
-            .and_then(Value::as_bool)
-            .unwrap_or(prior.require_mention),
-    }
+    let source = agent_policy_object(
+        value,
+        "autoReplyPolicy",
+        "auto_reply_policy",
+        "autoReplyPolicy",
+    )?;
+    let bool_field = |key: &str, fallback: bool| -> Result<bool, ErrorObject> {
+        match source.and_then(|policy| policy.get(key)) {
+            None | Some(Value::Null) => Ok(fallback),
+            Some(value) => value.as_bool().ok_or_else(|| {
+                params_err(format!("agent.autoReplyPolicy.{key} must be a boolean"))
+            }),
+        }
+    };
+    Ok(AgentAutoReplyPolicy {
+        enabled: bool_field("enabled", prior.enabled)?,
+        require_mention: bool_field("requireMention", prior.require_mention)?,
+    })
+}
+
+fn agent_policy_object<'a>(
+    value: &'a Value,
+    camel: &str,
+    snake: &str,
+    label: &str,
+) -> Result<Option<&'a serde_json::Map<String, Value>>, ErrorObject> {
+    let source = if let Some(candidate) = value.get(camel) {
+        if candidate.is_null() {
+            value.get(snake).filter(|candidate| !candidate.is_null())
+        } else {
+            Some(candidate)
+        }
+    } else {
+        value.get(snake).filter(|candidate| !candidate.is_null())
+    };
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    source
+        .as_object()
+        .ok_or_else(|| params_err(format!("agent.{label} must be an object")))
+        .map(Some)
 }
 
 // ---------- durable Agent Workspace group catalog ----------
@@ -2773,9 +3955,7 @@ fn agent_group_list(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
 }
 
 fn agent_group_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let requested = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let requested = required_string_param(&params, &["id"], "id")?;
     let id = sanitize_group_id(requested);
     let group = hub
         .store
@@ -2801,7 +3981,8 @@ fn agent_group_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject>
             .position(|group| group_string(group, "id").as_deref() == Some(id))
     });
     let existing = existing_index.and_then(|index| groups.get(index));
-    let fallback_name = params["fallbackName"].as_str().unwrap_or("Untitled group");
+    let fallback_name =
+        optional_string_value(&params, &["fallbackName"])?.unwrap_or("Untitled group");
     let normalized = normalize_agent_group(value, existing, fallback_name);
     if let Some(index) = existing_index {
         groups[index] = normalized.clone();
@@ -2817,9 +3998,7 @@ fn agent_group_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject>
 }
 
 fn agent_group_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let requested = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let requested = required_string_param(&params, &["id"], "id")?;
     let id = sanitize_group_id(requested);
     let mut groups = hub.store.get_agent_groups_setting().map_err(internal)?;
     let original_len = groups.len();
@@ -2844,8 +4023,8 @@ fn studio_generate(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
     let mut p: ImageGenerateParams =
         serde_json::from_value(params.clone()).map_err(|e| params_err(e.to_string()))?;
     // 显式模型：与供应商解析一致（model 覆盖 active_model）
-    if let Some(m) = params["model"].as_str() {
-        p.model = Some(m.to_string());
+    if let Some(model) = optional_string_value(&params, &["model"])? {
+        p.model = Some(model.to_string());
     }
     let stream_id = crate::studio::StudioService::generate(hub.clone(), p).map_err(internal)?;
     Ok(json!({ "streamId": stream_id }))
@@ -2928,14 +4107,14 @@ fn prompt_optimization_provider(
 }
 
 async fn studio_prompt_optimize(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let prompt = params["prompt"]
-        .as_str()
-        .map(str::trim)
-        .filter(|prompt| !prompt.is_empty())
-        .ok_or_else(|| params_err("missing prompt"))?;
-    let is_negative = params["isNegative"].as_bool().unwrap_or(false);
-    let provider_id = params["providerId"].as_str();
-    let requested_model = params["model"].as_str();
+    let prompt = required_string_param(&params, &["prompt"], "prompt")?.trim();
+    if prompt.is_empty() {
+        return Err(params_err("prompt must not be empty"));
+    }
+    let is_negative =
+        optional_bool_param(&params, &["isNegative", "is_negative"], false, "isNegative")?;
+    let provider_id = optional_string_value(&params, &["providerId", "provider_id"])?;
+    let requested_model = optional_string_value(&params, &["model"])?;
     let entry = prompt_optimization_provider(hub, provider_id, requested_model)
         .map_err(|error| params_err(error.to_string()))?;
     let provider = worldbase_providers::create_provider_from_entry(&entry).map_err(internal)?;
@@ -3015,19 +4194,27 @@ fn studio_write_folder_mirror(hub: &Arc<Hub>) -> Result<(), ErrorObject> {
         .map_err(internal)
 }
 
-fn normalized_string_array(params: &Value, key: &str) -> Vec<String> {
-    params[key]
+fn normalized_string_array(params: &Value, key: &str) -> Result<Vec<String>, ErrorObject> {
+    let Some(value) = params.get(key) else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let values = value
         .as_array()
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+        .ok_or_else(|| params_err(format!("{key} must be an array of strings")))?;
+    let mut result = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let item = value
+            .as_str()
+            .ok_or_else(|| params_err(format!("{key}[{index}] must be a string")))?
+            .trim();
+        if !item.is_empty() && !result.iter().any(|known| known == item) {
+            result.push(item.to_string());
+        }
+    }
+    Ok(result)
 }
 
 fn studio_file_path(file_name: &str) -> Option<std::path::PathBuf> {
@@ -3183,12 +4370,10 @@ fn studio_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 
 fn studio_tag(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
-    let tags = normalized_string_array(&params, "tags");
+    let id = required_string_param(&params, &["id"], "id")?;
+    let tags = normalized_string_array(&params, "tags")?;
     let ok = hub.store.set_image_tags(id, &tags).map_err(internal)?;
-    if let Some(folder) = params.get("folder").and_then(Value::as_str) {
+    if let Some(folder) = optional_string_value(&params, &["folder"])? {
         let _ = hub
             .store
             .set_image_folder(&[id.to_string()], Some(folder))
@@ -3201,9 +4386,7 @@ fn studio_tag(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 
 fn studio_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
     if let Some(entry) = hub.store.get_image(id).map_err(internal)? {
         studio_delete_entry_files(&entry);
     }
@@ -3215,7 +4398,7 @@ fn studio_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 fn studio_folder(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let action = params["action"].as_str().unwrap_or("list");
+    let action = optional_string_value(&params, &["action"])?.unwrap_or("list");
     match action {
         "list" => studio_library_list_folders(hub),
         "create" => studio_library_create_folder(hub, params),
@@ -3232,13 +4415,8 @@ fn studio_library_query(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObj
 
 fn studio_library_read(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
-    let variant = params
-        .get("variant")
-        .and_then(Value::as_str)
-        .unwrap_or("full");
+    let id = required_string_param(&params, &["id"], "id")?;
+    let variant = optional_string_value(&params, &["variant"])?.unwrap_or("full");
     if variant != "full" && variant != "thumb" {
         return Err(params_err("variant must be full or thumb"));
     }
@@ -3268,7 +4446,7 @@ fn studio_library_read(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObje
 fn studio_library_delete_many(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
     let mut removed = 0u32;
-    for id in normalized_string_array(&params, "ids") {
+    for id in normalized_string_array(&params, "ids")? {
         if let Some(entry) = hub.store.get_image(&id).map_err(internal)? {
             studio_delete_entry_files(&entry);
             if hub.store.delete_image(&id).map_err(internal)? {
@@ -3284,8 +4462,8 @@ fn studio_library_delete_many(hub: &Arc<Hub>, params: Value) -> Result<Value, Er
 
 fn studio_library_set_folder(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
-    let folder = params.get("folder").and_then(Value::as_str);
-    let ids = normalized_string_array(&params, "ids");
+    let folder = optional_string_value(&params, &["folder"])?;
+    let ids = normalized_string_array(&params, "ids")?;
     let updated = hub.store.set_image_folder(&ids, folder).map_err(internal)?;
     if updated > 0 {
         studio_write_image_mirrors(hub, &ids)?;
@@ -3296,12 +4474,10 @@ fn studio_library_set_folder(hub: &Arc<Hub>, params: Value) -> Result<Value, Err
 
 fn studio_library_set_tags(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
-    let id = params["id"]
-        .as_str()
-        .ok_or_else(|| params_err("missing id"))?;
+    let id = required_string_param(&params, &["id"], "id")?;
     let updated = hub
         .store
-        .set_image_tags(id, &normalized_string_array(&params, "tags"))
+        .set_image_tags(id, &normalized_string_array(&params, "tags")?)
         .map_err(internal)?;
     if updated {
         studio_write_image_mirrors(hub, [id])?;
@@ -3317,9 +4493,7 @@ fn studio_library_list_folders(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
 
 fn studio_library_create_folder(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
-    let name = params["name"]
-        .as_str()
-        .ok_or_else(|| params_err("missing name"))?;
+    let name = required_string_param(&params, &["name"], "name")?;
     hub.store.create_image_folder(name).map_err(internal)?;
     studio_write_folder_mirror(hub)?;
     studio_library_list_folders(hub)
@@ -3327,12 +4501,8 @@ fn studio_library_create_folder(hub: &Arc<Hub>, params: Value) -> Result<Value, 
 
 fn studio_library_rename_folder(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
-    let old_name = params["oldName"]
-        .as_str()
-        .ok_or_else(|| params_err("missing oldName"))?;
-    let new_name = params["newName"]
-        .as_str()
-        .ok_or_else(|| params_err("missing newName"))?;
+    let old_name = required_string_param(&params, &["oldName", "old_name"], "oldName")?;
+    let new_name = required_string_param(&params, &["newName", "new_name"], "newName")?;
     let affected_ids: Vec<String> = hub
         .store
         .image_entries_in_folder(old_name)
@@ -3351,11 +4521,7 @@ fn studio_library_rename_folder(hub: &Arc<Hub>, params: Value) -> Result<Value, 
 
 fn studio_library_delete_folder(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
-    let name = params
-        .get("name")
-        .or_else(|| params.get("folderName"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| params_err("missing name"))?;
+    let name = required_string_param(&params, &["name", "folderName"], "name")?;
     let affected_ids: Vec<String> = hub
         .store
         .image_entries_in_folder(name)
@@ -3376,10 +4542,8 @@ fn studio_library_list_tags(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
 
 fn studio_library_export(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     studio_sync_legacy_mirror(hub)?;
-    let folder = params["folder"].as_str().unwrap_or("");
-    let destination = params["destination"]
-        .as_str()
-        .ok_or_else(|| params_err("missing destination"))?;
+    let folder = optional_string_value(&params, &["folder"])?.unwrap_or("");
+    let destination = required_string_param(&params, &["destination"], "destination")?;
     let destination = Path::new(destination);
     if destination.as_os_str().is_empty() {
         return Err(params_err("missing destination"));
@@ -3430,11 +4594,13 @@ fn studio_tasks_load(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
 }
 
 fn studio_tasks_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let tasks = params
-        .get("tasks")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let tasks = match params.get("tasks") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .cloned()
+            .ok_or_else(|| params_err("tasks must be an array"))?,
+    };
     hub.store.save_studio_tasks(&tasks).map_err(internal)?;
     Ok(json!({ "ok": true, "count": tasks.len() }))
 }
@@ -3520,45 +4686,163 @@ fn conversation_fork(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject
 
 // ---------- skills（内容安装/删除）----------
 
-fn skill_save(_hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let name = params["name"]
+fn skill_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| params_err("missing name"))?
+        .trim();
+    if name.is_empty() {
+        return Err(params_err("name must not be empty"));
+    }
+    let description = optional_string_param(&params, &["description"])?.unwrap_or_default();
+    let instructions = params
+        .get("instructions")
+        .or_else(|| params.get("content"))
+        .or_else(|| params.get("body"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| params_err("missing instructions or content"))?;
+    if instructions.trim().is_empty() {
+        return Err(params_err("instructions must not be empty"));
+    }
+    let when_to_use = optional_string_param(&params, &["whenToUse", "when_to_use"])?;
+    let arguments = parse_skill_arguments(&params)?;
+    let allowed_tools = parse_skill_string_array(
+        &params,
+        &["allowedTools", "allowed_tools", "tools"],
+        "allowedTools",
+    )?;
+    let context = match optional_string_param(&params, &["context"])?
+        .unwrap_or_else(|| "inline".into())
+        .to_ascii_lowercase()
         .as_str()
-        .ok_or_else(|| params_err("missing name"))?;
-    let safe: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
+    {
+        "inline" => SkillContext::Inline,
+        "fork" => SkillContext::Fork,
+        value => {
+            return Err(params_err(format!(
+                "context must be inline or fork, got {value}"
+            )))
+        }
+    };
+    let descriptor = hub
+        .skills
+        .save(worldbase_skills::SkillSaveRequest {
+            name: name.to_string(),
+            description,
+            instructions: instructions.to_string(),
+            when_to_use,
+            arguments,
+            allowed_tools,
+            context,
         })
-        .collect();
-    let description = params["description"].as_str().unwrap_or("");
-    let instructions = params["instructions"]
+        .map_err(internal)?;
+    Ok(json!({
+        "name": descriptor.name,
+        "path": descriptor.path,
+        "skill": descriptor,
+    }))
+}
+
+fn optional_string_param(params: &Value, aliases: &[&str]) -> Result<Option<String>, ErrorObject> {
+    let Some((key, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
         .as_str()
-        .ok_or_else(|| params_err("missing instructions"))?;
-    let dir = worldbase_skills::worldbase_default_skills_dir();
-    std::fs::create_dir_all(&dir).map_err(internal)?;
-    let yaml = format!(
-        "name: {}\ndescription: {}\ninstructions: |\n{}\n",
-        safe,
-        description.replace('\n', "\n  "),
-        instructions
-            .lines()
-            .map(|l| format!("  {l}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    let path = dir.join(format!("{safe}.yaml"));
-    std::fs::write(&path, yaml).map_err(internal)?;
-    Ok(json!({ "name": safe, "path": path.display().to_string() }))
+        .map(|value| Some(value.to_string()))
+        .ok_or_else(|| params_err(format!("{key} must be a string")))
+}
+
+fn parse_skill_string_array(
+    params: &Value,
+    aliases: &[&str],
+    label: &str,
+) -> Result<Vec<String>, ErrorObject> {
+    let Some((_, value)) = aliases
+        .iter()
+        .find_map(|key| params.get(*key).map(|value| (*key, value)))
+    else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let values = value
+        .as_array()
+        .ok_or_else(|| params_err(format!("{label} must be an array of strings")))?;
+    let mut result = Vec::new();
+    for item in values {
+        let item = item
+            .as_str()
+            .ok_or_else(|| params_err(format!("{label} must contain only strings")))?
+            .trim();
+        if !item.is_empty() && !result.iter().any(|known| known == item) {
+            result.push(item.to_string());
+        }
+    }
+    Ok(result)
+}
+
+fn parse_skill_arguments(params: &Value) -> Result<Vec<SkillArgument>, ErrorObject> {
+    let Some(value) = params.get("arguments").or_else(|| params.get("args")) else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let values = value
+        .as_array()
+        .ok_or_else(|| params_err("arguments must be an array"))?;
+    let mut result = Vec::new();
+    for (index, item) in values.iter().enumerate() {
+        let object = item
+            .as_object()
+            .ok_or_else(|| params_err(format!("arguments[{index}] must be an object")))?;
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| params_err(format!("arguments[{index}].name is required")))?
+            .trim();
+        if name.is_empty() {
+            return Err(params_err(format!(
+                "arguments[{index}].name must not be empty"
+            )));
+        }
+        let description = object
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let required = match object.get("required") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(value)) => *value,
+            Some(Value::String(value)) if value.eq_ignore_ascii_case("true") => true,
+            Some(Value::String(value)) if value.eq_ignore_ascii_case("false") => false,
+            Some(_) => {
+                return Err(params_err(format!(
+                    "arguments[{index}].required must be a boolean"
+                )))
+            }
+        };
+        result.push(SkillArgument {
+            name: name.to_string(),
+            description,
+            required,
+        });
+    }
+    Ok(result)
 }
 
 fn skill_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let name = params["name"]
-        .as_str()
-        .ok_or_else(|| params_err("missing name"))?;
+    let name = required_string_param(&params, &["name", "skill_name"], "name")?;
     let skills = hub.skills.list().map_err(internal)?;
     let Some(skill) = skills.iter().find(|s| s.name == name) else {
         return Ok(json!({ "deleted": false }));
@@ -3571,19 +4855,14 @@ fn skill_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 // ---------- projects ----------
 
 async fn project_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let name = params["name"]
-        .as_str()
-        .ok_or_else(|| params_err("missing name"))?;
+    let name = required_string_param(&params, &["name"], "name")?;
     let info = hub.projects.create_project(name).await.map_err(internal)?;
     Ok(serde_json::to_value(&info).unwrap())
 }
 
 async fn project_dev_start(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let project = params["project"]
-        .as_str()
-        .or_else(|| params["projectId"].as_str())
-        .ok_or_else(|| params_err("missing project"))?;
-    if params["install"].as_bool().unwrap_or(false) {
+    let project = required_string_param(&params, &["project", "projectId"], "project")?;
+    if optional_bool_param(&params, &["install"], false, "install")? {
         let projects = hub.projects.list_projects().map_err(internal)?;
         if let Some(p) = projects.iter().find(|p| p.id == project) {
             let log = hub
@@ -3599,29 +4878,19 @@ async fn project_dev_start(hub: &Arc<Hub>, params: Value) -> Result<Value, Error
 }
 
 async fn project_dev_stop(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let project = params["project"]
-        .as_str()
-        .or_else(|| params["projectId"].as_str())
-        .ok_or_else(|| params_err("missing project"))?;
+    let project = required_string_param(&params, &["project", "projectId"], "project")?;
     let stopped = hub.projects.stop_dev(project).await.map_err(internal)?;
     Ok(json!({ "stopped": stopped }))
 }
 
 async fn project_status(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let project = params["project"]
-        .as_str()
-        .or_else(|| params["projectId"].as_str())
-        .ok_or_else(|| params_err("missing project"))?;
+    let project = required_string_param(&params, &["project", "projectId"], "project")?;
     let status = hub.projects.status(project).await.map_err(internal)?;
     Ok(status)
 }
 
 fn project_id<'a>(params: &'a Value) -> Result<&'a str, ErrorObject> {
-    params["projectId"]
-        .as_str()
-        .or_else(|| params["project"].as_str())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| params_err("missing projectId"))
+    required_string_param(params, &["projectId", "project"], "projectId")
 }
 
 fn project_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
@@ -3641,10 +4910,7 @@ fn project_tree(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 
 fn project_file_read(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let project = project_id(&params)?;
-    let file_path = params["filePath"]
-        .as_str()
-        .or_else(|| params["file_path"].as_str())
-        .ok_or_else(|| params_err("missing filePath"))?;
+    let file_path = required_string_param(&params, &["filePath", "file_path"], "filePath")?;
     let content = hub
         .projects
         .read_project_file_for_ui(project, file_path)
@@ -3654,13 +4920,8 @@ fn project_file_read(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject
 
 fn project_file_write(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let project = project_id(&params)?;
-    let file_path = params["filePath"]
-        .as_str()
-        .or_else(|| params["file_path"].as_str())
-        .ok_or_else(|| params_err("missing filePath"))?;
-    let content = params["content"]
-        .as_str()
-        .ok_or_else(|| params_err("missing content"))?;
+    let file_path = required_string_param(&params, &["filePath", "file_path"], "filePath")?;
+    let content = required_string_param(&params, &["content"], "content")?;
     hub.projects
         .write_project_file_for_ui(project, file_path, content)
         .map_err(internal)?;
@@ -3669,7 +4930,11 @@ fn project_file_write(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObjec
 
 fn project_meta_update(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let project = project_id(&params)?;
-    let updates = params.get("updates").cloned().unwrap_or_else(|| json!({}));
+    let updates = match params.get("updates") {
+        None => json!({}),
+        Some(Value::Object(_)) => params.get("updates").cloned().unwrap_or_else(|| json!({})),
+        Some(_) => return Err(params_err("updates must be an object")),
+    };
     hub.projects
         .update_project_meta_for_ui(project, &updates)
         .map_err(internal)
@@ -3692,8 +4957,10 @@ async fn project_build_run(hub: &Arc<Hub>, params: Value) -> Result<Value, Error
 }
 
 async fn project_build_cleanup(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let remove_node_modules = params["removeNodeModules"].as_bool().unwrap_or(true);
-    let remove_build_cache = params["removeBuildCache"].as_bool().unwrap_or(true);
+    let remove_node_modules =
+        optional_bool_param(&params, &["removeNodeModules"], true, "removeNodeModules")?;
+    let remove_build_cache =
+        optional_bool_param(&params, &["removeBuildCache"], true, "removeBuildCache")?;
     hub.projects
         .cleanup_project_for_ui(
             project_id(&params)?,
@@ -3705,16 +4972,25 @@ async fn project_build_cleanup(hub: &Arc<Hub>, params: Value) -> Result<Value, E
 }
 
 async fn project_build_rebuild(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let clean_install = optional_bool_param(&params, &["cleanInstall"], false, "cleanInstall")?;
+    let cleanup_dependencies = optional_bool_param(
+        &params,
+        &["cleanupDependenciesAfterSuccess"],
+        false,
+        "cleanupDependenciesAfterSuccess",
+    )?;
+    let cleanup_build_cache = optional_bool_param(
+        &params,
+        &["cleanupBuildCacheAfterSuccess"],
+        false,
+        "cleanupBuildCacheAfterSuccess",
+    )?;
     hub.projects
         .rebuild_project_for_ui(
             project_id(&params)?,
-            params["cleanInstall"].as_bool().unwrap_or(false),
-            params["cleanupDependenciesAfterSuccess"]
-                .as_bool()
-                .unwrap_or(false),
-            params["cleanupBuildCacheAfterSuccess"]
-                .as_bool()
-                .unwrap_or(false),
+            clean_install,
+            cleanup_dependencies,
+            cleanup_build_cache,
         )
         .await
         .map_err(internal)
@@ -3749,9 +5025,7 @@ async fn project_gateway_stop_all(hub: &Arc<Hub>) -> Result<Value, ErrorObject> 
 }
 
 fn project_gateway_set_restart_policy(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let policy = params["policy"]
-        .as_str()
-        .ok_or_else(|| params_err("missing policy"))?;
+    let policy = required_string_param(&params, &["policy"], "policy")?;
     hub.projects
         .set_restart_policy_for_ui(project_id(&params)?, policy)
         .map_err(internal)?;
@@ -3798,10 +5072,8 @@ async fn project_process_force_kill(hub: &Arc<Hub>, params: Value) -> Result<Val
 }
 
 async fn project_process_kill_orphan(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let pid = params["pid"]
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| params_err("missing pid"))?;
+    let pid = u32::try_from(required_u64_param(&params, &["pid"], "pid")?)
+        .map_err(|_| params_err("pid is out of range"))?;
     match hub.projects.kill_orphan_process_for_ui(pid).await {
         Ok(()) => Ok(json!({ "success": true })),
         Err(error) => Ok(json!({ "success": false, "error": error.to_string() })),
@@ -3816,9 +5088,7 @@ async fn project_process_cleanup_orphans(hub: &Arc<Hub>) -> Result<Value, ErrorO
 }
 
 fn project_data_query(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let sql = params["sql"]
-        .as_str()
-        .ok_or_else(|| params_err("missing sql"))?;
+    let sql = required_string_param(&params, &["sql"], "sql")?;
     hub.projects
         .project_data_query_for_ui(project_id(&params)?, sql)
         .map_err(internal)
@@ -3837,16 +5107,11 @@ fn project_data_list_all(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
 }
 
 fn project_data_query_table(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let table = params["tableName"]
-        .as_str()
-        .ok_or_else(|| params_err("missing tableName"))?;
+    let table = required_string_param(&params, &["tableName"], "tableName")?;
+    let page = optional_u64_param(&params, &["page"], 1, "page")?;
+    let page_size = optional_u64_param(&params, &["pageSize"], 50, "pageSize")?;
     hub.projects
-        .project_data_query_table_for_ui(
-            project_id(&params)?,
-            table,
-            params["page"].as_u64().unwrap_or(1),
-            params["pageSize"].as_u64().unwrap_or(50),
-        )
+        .project_data_query_table_for_ui(project_id(&params)?, table, page, page_size)
         .map_err(internal)
 }
 
@@ -3863,61 +5128,74 @@ fn project_data_tables(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObje
 }
 
 fn project_data_records_query(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let table = params["table"]
-        .as_str()
-        .ok_or_else(|| params_err("missing table"))?;
+    let table = required_string_param(&params, &["table"], "table")?;
+    let filters = optional_object_value(&params, "filters", "record filters")?;
+    let columns = optional_string_array_value(&params, "columns", "record columns")?;
+    let limit = optional_u64_value(&params, &["limit"], "limit")?;
+    let offset = optional_u64_value(&params, &["offset"], "offset")?;
+    let order_by = optional_string_param_strict(&params, &["orderBy"], "orderBy")?;
+    let order_direction =
+        optional_string_param_strict(&params, &["orderDirection"], "orderDirection")?;
+    if let Some(direction) = order_direction.as_deref() {
+        if !direction.eq_ignore_ascii_case("asc") && !direction.eq_ignore_ascii_case("desc") {
+            return Err(params_err("orderDirection must be asc or desc"));
+        }
+    }
     hub.projects
         .project_data_read_records_for_ui(
             project_id(&params)?,
             table,
-            params.get("filters").cloned(),
-            params["limit"].as_u64(),
-            params["offset"].as_u64(),
-            params["orderBy"].as_str(),
-            params["orderDirection"].as_str(),
-            params.get("columns").cloned(),
+            filters,
+            limit,
+            offset,
+            order_by.as_deref(),
+            order_direction.as_deref(),
+            columns,
         )
         .map_err(internal)
 }
 
 fn project_data_records_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let table = params["table"]
-        .as_str()
-        .ok_or_else(|| params_err("missing table"))?;
-    let records = params
-        .get("records")
-        .or_else(|| params.get("record"))
-        .cloned()
-        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let table = required_string_param(&params, &["table"], "table")?;
+    let records = match ["records", "record"]
+        .into_iter()
+        .find_map(|key| params.get(key).map(|value| (key, value)))
+    {
+        None => Value::Array(Vec::new()),
+        Some((_, value @ (Value::Array(_) | Value::Object(_) | Value::Null))) => value.clone(),
+        Some((key, _)) => return Err(params_err(format!("{key} must be an object or array"))),
+    };
+    let mode = optional_string_param_strict(&params, &["mode"], "mode")?;
+    if let Some(mode) = mode.as_deref() {
+        if mode != "insert" && mode != "upsert" {
+            return Err(params_err("mode must be insert or upsert"));
+        }
+    }
     hub.projects
-        .project_data_save_records_for_ui(
-            project_id(&params)?,
-            table,
-            &records,
-            params["mode"].as_str(),
-        )
+        .project_data_save_records_for_ui(project_id(&params)?, table, &records, mode.as_deref())
         .map_err(internal)
 }
 
 async fn project_logs(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let lines = params["lines"].as_u64().unwrap_or(50).clamp(1, 500) as usize;
+    let lines = optional_u64_param(&params, &["lines"], 50, "lines")?.clamp(1, 500) as usize;
     let logs = hub.projects.logs(project_id(&params)?, lines).await;
     Ok(json!({ "logs": logs }))
 }
 
 async fn project_logs_append(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let port = params["port"]
-        .as_u64()
-        .filter(|port| (1..=u16::MAX as u64).contains(port))
-        .ok_or_else(|| params_err("missing or invalid port"))? as u16;
-    let kind = match params["type"].as_str() {
-        Some("stdout") | Some("stderr") => params["type"].as_str().unwrap(),
-        _ => return Err(params_err("type must be stdout or stderr")),
-    };
-    let text = params["text"]
-        .as_str()
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| params_err("missing text"))?;
+    let port = u16::try_from(required_u64_param(&params, &["port"], "port")?)
+        .map_err(|_| params_err("port must be between 1 and 65535"))?;
+    if port == 0 {
+        return Err(params_err("port must be between 1 and 65535"));
+    }
+    let kind = required_string_param(&params, &["type"], "type")?;
+    if kind != "stdout" && kind != "stderr" {
+        return Err(params_err("type must be stdout or stderr"));
+    }
+    let text = required_string_param(&params, &["text"], "text")?;
+    if text.is_empty() {
+        return Err(params_err("text must not be empty"));
+    }
     let project_id = hub
         .projects
         .append_external_log_by_port(port, kind, text)
@@ -3936,12 +5214,10 @@ fn project_analyze(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
 }
 
 fn workspace_root(params: &Value) -> Result<PathBuf, ErrorObject> {
-    let root = params["rootPath"]
-        .as_str()
-        .or_else(|| params["root_path"].as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| params_err("missing rootPath"))?;
+    let root = required_string_param(params, &["rootPath", "root_path"], "rootPath")?.trim();
+    if root.is_empty() {
+        return Err(params_err("rootPath must not be empty"));
+    }
     let root = PathBuf::from(root).canonicalize().map_err(internal)?;
     if !root.is_dir() {
         return Err(params_err("rootPath is not a directory"));
@@ -3958,29 +5234,21 @@ fn workspace_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 
 fn workspace_read(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let root = workspace_root(&params)?;
-    let file_path = params["filePath"]
-        .as_str()
-        .or_else(|| params["file_path"].as_str())
-        .ok_or_else(|| params_err("missing filePath"))?;
+    let file_path = required_string_param(&params, &["filePath", "file_path"], "filePath")?;
     hub.projects
         .folder_workspace_read_for_ui(&root, file_path)
         .map_err(internal)
 }
 
 fn project_package_export(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let output = params["filePath"]
-        .as_str()
-        .or_else(|| params["outputPath"].as_str())
-        .ok_or_else(|| params_err("missing filePath"))?;
+    let output = required_string_param(&params, &["filePath", "outputPath"], "filePath")?;
     hub.projects
         .export_project_package_for_ui(project_id(&params)?, std::path::Path::new(output))
         .map_err(internal)
 }
 
 fn project_package_import(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
-    let file = params["filePath"]
-        .as_str()
-        .ok_or_else(|| params_err("missing filePath"))?;
+    let file = required_string_param(&params, &["filePath"], "filePath")?;
     hub.projects
         .import_project_package_for_ui(std::path::Path::new(file))
         .map_err(internal)
@@ -3993,24 +5261,32 @@ async fn exec_run(
     ctx: &ConnectionContext,
     params: Value,
 ) -> Result<Value, ErrorObject> {
-    let program = params["program"]
-        .as_str()
-        .ok_or_else(|| params_err("missing program"))?;
-    let args: Vec<String> = params["args"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let program = required_string_param(&params, &["program"], "program")?;
+    let args_value = params.get("args");
+    let args = match args_value {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| params_err(format!("args[{index}] must be a string")))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err(params_err("args must be an array of strings")),
+    };
+    let cwd = optional_string_param_strict(&params, &["cwd"], "cwd")?;
+    let timeout_secs = optional_u64_value(&params, &["timeout_secs"], "timeout_secs")?;
+    let sandbox = optional_bool_param(&params, &["sandbox"], true, "sandbox")?;
     let req = worldbase_exec::ExecRequest {
         program: program.into(),
         args,
-        cwd: params["cwd"].as_str().map(String::from),
+        cwd,
         env: Default::default(),
-        timeout_secs: params["timeout_secs"].as_u64(),
-        sandbox: params["sandbox"].as_bool().unwrap_or(true),
+        timeout_secs,
+        sandbox,
     };
     let allowed = crate::permissions::check(
         hub,
@@ -4068,6 +5344,7 @@ mod tests {
                 model: None,
                 context: ChatRunContext::default(),
                 group_collaboration: None,
+                subagent_nesting_depth: 0,
             },
         );
 

@@ -14,6 +14,8 @@ use worldbase_scheduler::Scheduler;
 use worldbase_skills::SkillRegistry;
 use worldbase_tools::{filter_tools, Tool, ToolServices};
 
+static TOOL_RESULT_CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
+
 /// 一次 chat 运行的句柄（用于 abort 与事件续传）。
 pub struct RunHandle {
     pub conversation_id: String,
@@ -34,6 +36,9 @@ pub struct RunHandle {
     /// Present only for a Rust-native group member. The collaboration tool
     /// implementations live in core, while tools only see this trait object.
     pub group_collaboration: Option<Arc<dyn worldbase_tools::GroupCollaborationRuntime>>,
+    /// Internal depth for Rust-native `spawn_subagents` recursion. Root runs
+    /// start at zero and spawned children are capped in core.
+    pub subagent_nesting_depth: u8,
 }
 
 pub struct Hub {
@@ -77,6 +82,18 @@ impl Drop for PendingHostRequestGuard<'_> {
 
 impl Hub {
     pub fn new(workspace: PathBuf, store: Arc<Store>) -> Result<Arc<Self>> {
+        TOOL_RESULT_CLEANUP_ONCE.call_once(|| {
+            let storage_dir = Store::default_dir().join("tool-results");
+            match crate::tool_results::cleanup_expired_tool_results(&storage_dir) {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "cleaned expired persisted tool results");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, path = %storage_dir.display(), "failed to clean persisted tool results");
+                }
+            }
+        });
         let (event_tx, _rx) = tokio::sync::broadcast::channel(4096);
         let skills = Arc::new(SkillRegistry::new(SkillRegistry::default_dirs(&workspace)));
         let scheduler = Arc::new(Scheduler::new(store.clone()));
@@ -342,8 +359,10 @@ impl Hub {
             mcp: self.mcp.clone(),
             projects: self.projects.clone(),
             group_collaboration: None,
+            subagent_runtime: None,
             host: std::sync::Arc::new(host),
             current_stream: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            abort: None,
         }
     }
 
@@ -375,6 +394,13 @@ impl Hub {
             .entry(stream_id.to_string())
             .or_insert_with(|| Arc::new(StreamChannel::new()))
             .clone()
+    }
+
+    /// Remove a stream that was created for a one-shot request (for example a
+    /// direct document host callback).  Chat/group streams intentionally stay
+    /// registered so `chat.resume` can replay their buffered events.
+    pub fn remove_stream(&self, stream_id: &str) -> bool {
+        self.streams.lock().unwrap().remove(stream_id).is_some()
     }
 
     /// 解析当前 provider 配置：settings."provider" > 环境变量 > mock。
@@ -421,15 +447,30 @@ impl Hub {
             let hub_for_due = hub.clone();
             let on_due: worldbase_scheduler::OnDue = Arc::new(move |entry| {
                 let hub = hub_for_due.clone();
-                let entry = entry.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::agent::run_scheduled_task(hub, &entry.id, &entry.name, &entry.task)
-                            .await
-                    {
-                        tracing::warn!(schedule = %entry.name, error = %e, "scheduled task failed");
-                    }
-                });
+                Box::pin(async move {
+                    let active_skill_contents = entry
+                        .selected_skill_ids
+                        .iter()
+                        .filter_map(|skill_id| hub.skills.get(skill_id).ok().flatten())
+                        .map(|skill| skill.instructions)
+                        .filter(|instructions| !instructions.trim().is_empty())
+                        .collect();
+                    let context = worldbase_protocol::types::ChatRunContext {
+                        active_skill_contents,
+                        // Electron treats an empty saved selection as the
+                        // unrestricted default; a non-empty list narrows it.
+                        allowed_mcp_server_ids: Some(entry.selected_mcp_server_ids.clone()),
+                        ..Default::default()
+                    };
+                    crate::agent::run_scheduled_task_with_context(
+                        hub,
+                        &entry.id,
+                        &entry.name,
+                        &entry.task,
+                        context,
+                    )
+                    .await
+                })
             });
             if let Err(e) = hub.scheduler.run_loop(on_due).await {
                 tracing::warn!(error = %e, "scheduler loop exited");
@@ -467,5 +508,54 @@ impl worldbase_tools::host_bridge::HostChannel for Hub {
         timeout: std::time::Duration,
     ) -> anyhow::Result<serde_json::Value> {
         Hub::host_request(self, stream_id, kind, payload, timeout).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_server_selection_matches_node_empty_list_semantics() {
+        let workspace = std::env::temp_dir().join(format!(
+            "worldbase-hub-mcp-policy-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = Arc::new(
+            Store::open(&workspace.join("app.sqlite")).expect("open MCP policy test store"),
+        );
+        let hub = Hub::new(workspace.clone(), store).expect("create MCP policy test hub");
+
+        assert!(hub
+            .services_for_run(None, None, None)
+            .allowed_mcp_server_ids()
+            .is_none());
+        assert!(hub
+            .services_for_run(None, None, Some(vec![]))
+            .allowed_mcp_server_ids()
+            .is_none());
+        assert!(hub
+            .services_for_run(None, None, Some(vec![" ".into(), "\t".into()]))
+            .allowed_mcp_server_ids()
+            .is_none());
+
+        let restricted = hub
+            .services_for_run(
+                None,
+                None,
+                Some(vec![" docs ".into(), "search".into(), "docs".into()]),
+            )
+            .allowed_mcp_server_ids()
+            .expect("non-empty selection must restrict MCP servers");
+        assert_eq!(
+            restricted,
+            ["docs".to_string(), "search".to_string()]
+                .into_iter()
+                .collect()
+        );
+
+        drop(hub);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }

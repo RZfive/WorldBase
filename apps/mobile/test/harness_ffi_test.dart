@@ -161,7 +161,7 @@ void main() {
     final tools = availableTools.map((t) => (t as Map)['name']).toSet();
     expect(
       tools,
-      hasLength(44),
+      hasLength(48),
       reason:
           'without webview automation only the mobile executable surface remains',
     );
@@ -174,9 +174,8 @@ void main() {
     );
     expect(
       tools,
-      isNot(contains('create_scheduled_task')),
-      reason:
-          'FFI must not advertise the partially implemented Node scheduler contract',
+      contains('create_scheduled_task'),
+      reason: 'FFI must advertise the canonical structured scheduler contract',
     );
     expect(tools, contains('schedule_create'));
     expect(tools, containsAll(['schedule_list', 'schedule_delete']));

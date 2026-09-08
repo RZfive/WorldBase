@@ -13,10 +13,9 @@ use rusqlite::{
     Connection,
 };
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::hash_map::DefaultHasher,
     fs,
-    hash::{Hash, Hasher},
     io::{Read, Write},
     path::{Path, PathBuf},
     time::Instant,
@@ -228,12 +227,18 @@ fn update_meta_field(root: &Path, update: impl FnOnce(&mut Map<String, Value>)) 
     Ok(value)
 }
 
-fn collect_source_hash(root: &Path, current: &Path, hasher: &mut DefaultHasher) -> Result<()> {
+fn collect_source_files(root: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {
     let mut entries = fs::read_dir(current)?.collect::<std::result::Result<Vec<_>, _>>()?;
     entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
         let file_type = entry.file_type()?;
+        // Match BuilderService._getSourceFiles: hidden implementation files
+        // are not part of the source hash, except for the metadata file whose
+        // buildHash field is intentionally persisted alongside the sources.
+        if name.starts_with('.') && name != ".world-meta.json" {
+            continue;
+        }
         if file_type.is_dir()
             && (name == "node_modules"
                 || name == ".git"
@@ -248,22 +253,71 @@ fn collect_source_hash(root: &Path, current: &Path, hasher: &mut DefaultHasher) 
         }
         let path = entry.path();
         if file_type.is_dir() {
-            collect_source_hash(root, &path, hasher)?;
+            collect_source_files(root, &path, files)?;
         } else if file_type.is_file() {
-            path.strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .hash(hasher);
-            fs::read(path)?.hash(hasher);
+            if let Ok(relative) = path.strip_prefix(root) {
+                files.push(relative.to_string_lossy().replace('\\', "/"));
+            }
         }
     }
     Ok(())
 }
 
 fn source_hash(root: &Path) -> Result<String> {
-    let mut hasher = DefaultHasher::new();
-    collect_source_hash(root, root, &mut hasher)?;
-    Ok(format!("{:016x}", hasher.finish()))
+    // Electron uses SHA-256 over sorted `relativePath:sourceText` entries and
+    // stores the first 16 hexadecimal characters. Keep the exact algorithm
+    // here so a build produced by either runtime has the same buildHash and
+    // `needs_rebuild` does not oscillate when Electron and Flutter alternate.
+    let mut files = Vec::new();
+    collect_source_files(root, root, &mut files)?;
+    files.sort();
+
+    let mut hasher = Sha256::new();
+    for relative in files {
+        let path = root.join(&relative);
+        let Ok(content) = fs::read_to_string(path) else {
+            // BuilderService skips unreadable/non-UTF8 source files.
+            continue;
+        };
+        hasher.update(relative.as_bytes());
+        hasher.update(b":");
+        hasher.update(content.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let digest = format!("{digest:x}");
+    Ok(digest[..16].to_string())
+}
+
+fn copy_directory_if_missing(source: &Path, destination: &Path) -> Result<()> {
+    if !source.is_dir() || destination.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_directory_if_missing(&source_path, &destination_path)?;
+        } else if entry.file_type()?.is_file() {
+            fs::copy(source_path, destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Next.js standalone output does not include `public/` or `.next/static/` by
+/// default. Electron copies both trees after a build and after a manual-build
+/// reconciliation; Rust must do the same or Flutter launches will render a
+/// server without its assets.
+fn copy_next_static_assets(root: &Path) -> Result<()> {
+    let standalone = root.join(".next/standalone");
+    if !standalone.is_dir() {
+        return Ok(());
+    }
+    copy_directory_if_missing(&root.join("public"), &standalone.join("public"))?;
+    copy_directory_if_missing(&root.join(".next/static"), &standalone.join(".next/static"))?;
+    Ok(())
 }
 
 fn directory_size(path: &Path) -> Result<u64> {
@@ -817,6 +871,9 @@ impl ProjectRuntime {
         let standalone_ok =
             !is_next_project(&root) || root.join(".next/standalone/server.js").is_file();
         let succeeded = success && standalone_ok;
+        if succeeded && is_next_project(&root) {
+            copy_next_static_assets(&root)?;
+        }
         let hash = if succeeded {
             Some(source_hash(&root)?)
         } else {
@@ -845,6 +902,33 @@ impl ProjectRuntime {
             "output": output,
             "error": error
         }))
+    }
+
+    /// Reconcile build metadata after a caller ran `npm run build` itself.
+    /// This is the Rust counterpart of Electron BuilderService's
+    /// `syncManualBuildState`, including the standalone-output guard and the
+    /// static-asset copy required by Next.js standalone servers.
+    pub fn sync_manual_build_state_for_ui(&self, project_id: &str) -> Result<Value> {
+        let root = self.project_root(project_id)?;
+        if is_next_project(&root) {
+            if !root.join(".next/standalone/server.js").is_file() {
+                update_meta_field(&root, |meta| {
+                    meta.insert("buildStatus".into(), Value::String("failed".into()));
+                })?;
+                return Ok(json!({
+                    "synced": false,
+                    "reason": "standaloneOutputMissing"
+                }));
+            }
+            copy_next_static_assets(&root)?;
+        }
+
+        let hash = source_hash(&root)?;
+        update_meta_field(&root, |meta| {
+            meta.insert("buildStatus".into(), Value::String("built".into()));
+            meta.insert("buildHash".into(), Value::String(hash.clone()));
+        })?;
+        Ok(json!({ "synced": true }))
     }
 
     pub async fn cleanup_project_for_ui(

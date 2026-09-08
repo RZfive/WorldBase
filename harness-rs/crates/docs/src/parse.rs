@@ -14,7 +14,6 @@ pub fn xlsx(path: &std::path::Path) -> Result<Value> {
         };
         let rows: Vec<Value> = range
             .rows()
-            .take(1000)
             .map(|row: &[calamine::Data]| {
                 Value::Array(
                     row.iter()
@@ -67,14 +66,32 @@ fn sheets_text(sheets: &[Value]) -> String {
 pub fn pdf(path: &std::path::Path) -> Result<Value> {
     let doc =
         lopdf::Document::load(path).with_context(|| format!("load pdf {}", path.display()))?;
+    let page_count = doc.get_pages().len();
+    let mut page_items = Vec::with_capacity(page_count);
     let mut text = String::new();
-    for page_id in doc.get_pages().keys() {
-        if let Ok(content) = doc.extract_text(&[*page_id]) {
-            text.push_str(&content);
-            text.push('\n');
-        }
+    // Keep `pages` as the historical numeric count.  The richer per-page
+    // payload lives in `items`, matching the existing PPTX parser contract
+    // (`slides` count + `items` array) without breaking old callers.
+    for page_number in doc.get_pages().keys() {
+        let page_number = *page_number;
+        let page_text = doc
+            .extract_text(&[page_number])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        text.push_str(&page_text);
+        text.push('\n');
+        page_items.push(json!({
+            "number": page_number,
+            "text": page_text,
+        }));
     }
-    Ok(json!({ "kind": "pdf", "text": text.trim(), "pages": doc.get_pages().len() }))
+    Ok(json!({
+        "kind": "pdf",
+        "text": text.trim(),
+        "pages": page_count,
+        "items": page_items,
+    }))
 }
 
 pub fn docx(path: &std::path::Path) -> Result<Value> {
@@ -92,34 +109,247 @@ pub fn docx(path: &std::path::Path) -> Result<Value> {
     }
     anyhow::ensure!(!document_xml.is_empty(), "docx missing word/document.xml");
 
-    let paragraphs = extract_docx_paragraphs(&document_xml);
+    let paragraph_details = extract_docx_paragraph_details(&document_xml);
+    let paragraphs: Vec<String> = paragraph_details
+        .iter()
+        .map(|paragraph| paragraph.text.clone())
+        .collect();
+    let paragraph_metadata: Vec<Value> = paragraph_details
+        .iter()
+        .map(|paragraph| {
+            json!({
+                "docxPart": "word/document.xml",
+                "docxParagraphIndex": paragraph.source_index,
+                // Keep the raw parser contract aligned with Electron's
+                // Word parser, which always exposes a string (empty when a
+                // paragraph has no explicit style) rather than JSON null.
+                "paragraphStyle": paragraph.style.as_deref().unwrap_or_default(),
+                "type": paragraph.node_type,
+                "level": paragraph.level,
+            })
+        })
+        .collect();
     let text = paragraphs.join("\n");
-    Ok(json!({ "kind": "docx", "text": text, "paragraphs": paragraphs.len() }))
+    Ok(json!({
+        "kind": "docx",
+        "text": text,
+        "paragraphs": paragraphs,
+        "paragraphMetadata": paragraph_metadata,
+    }))
 }
 
-/// 极简 OOXML 段落提取：按 <w:p> 切分，拼接 <w:t> 文本。
-pub fn extract_docx_paragraphs(xml: &str) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DocxParagraph {
+    text: String,
+    /// Zero-based index in `word/document.xml`, including empty paragraphs.
+    /// This is useful for source-aware editing and matches the Electron node
+    /// parser's `docxParagraphIndex` metadata.
+    source_index: usize,
+    style: Option<String>,
+    node_type: &'static str,
+    level: u8,
+}
+
+/// Extract paragraph text from OOXML while retaining source metadata.
+///
+/// A plain `str::split("<w:p")` is tempting here, but it also matches
+/// `<w:pPr>` and mixes the remainder of the document into the first
+/// paragraph.  This scanner recognizes only real `w:p` elements and finds
+/// each matching closing tag before extracting its text runs.
+fn extract_docx_paragraph_details(xml: &str) -> Vec<DocxParagraph> {
     let mut paragraphs = Vec::new();
-    for para_xml in xml.split("<w:p ").chain(xml.split("<w:p>").skip(1)) {
-        let mut text = String::new();
-        let mut rest = para_xml;
-        while let Some(start) = rest.find("<w:t") {
-            let after = &rest[start..];
-            let Some(tag_end) = after.find('>') else {
-                break;
-            };
-            let body = &after[tag_end + 1..];
-            let Some(end) = body.find("</w:t>") else {
-                break;
-            };
-            text.push_str(&decode_xml_text(&body[..end]));
-            rest = &body[end + 6..];
+    let mut cursor = 0;
+    let mut source_index = 0;
+
+    while let Some(relative_start) = xml[cursor..].find("<w:p") {
+        let start = cursor + relative_start;
+        let after_name = xml.as_bytes().get(start + 4).copied();
+        // Do not treat `<w:pPr>` (or another similarly prefixed element) as
+        // a paragraph.  Attributes and self-closing tags are valid here.
+        if !matches!(
+            after_name,
+            Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            cursor = start + 3;
+            continue;
         }
+
+        let Some(open_end) = find_xml_tag_end(xml, start) else {
+            break;
+        };
+        let opening_tag = &xml[start..=open_end];
+        let content_start = open_end + 1;
+        let self_closing = opening_tag.trim_end().ends_with("/>");
+        let (content_end, next_cursor) = if self_closing {
+            (content_start, content_start)
+        } else {
+            let Some(relative_close) = xml[content_start..].find("</w:p>") else {
+                // Malformed/truncated XML: do not fabricate a paragraph from
+                // the rest of the document.
+                break;
+            };
+            let content_end = content_start + relative_close;
+            (content_end, content_end + "</w:p>".len())
+        };
+        let paragraph_xml = &xml[content_start..content_end];
+        let text = extract_xml_tag_text(paragraph_xml, "w:t");
+        let style = find_xml_tag_fragment(paragraph_xml, "w:pStyle")
+            .and_then(|tag| extract_xml_attribute(tag, &["w:val", "val"]));
+        let level = style.as_deref().and_then(docx_heading_level).unwrap_or(0);
+        let is_list = contains_xml_tag(paragraph_xml, "w:numPr");
+        let node_type = if level > 0 {
+            "heading"
+        } else if is_list {
+            "list_item"
+        } else {
+            "paragraph"
+        };
+
+        // Match the Electron parser: empty paragraphs are not exposed as
+        // selectable nodes, but still advance the source paragraph index.
         if !text.trim().is_empty() {
-            paragraphs.push(text);
+            paragraphs.push(DocxParagraph {
+                text,
+                source_index,
+                style,
+                node_type,
+                level,
+            });
+        }
+        source_index += 1;
+        cursor = next_cursor;
+    }
+
+    paragraphs
+}
+
+/// Extract non-empty OOXML paragraph text.  Kept public for callers that only
+/// need the backward-compatible string representation.
+pub fn extract_docx_paragraphs(xml: &str) -> Vec<String> {
+    extract_docx_paragraph_details(xml)
+        .into_iter()
+        .map(|paragraph| paragraph.text)
+        .collect()
+}
+
+fn find_xml_tag_end(xml: &str, start: usize) -> Option<usize> {
+    let bytes = xml.as_bytes();
+    let mut quote = None;
+    for (offset, byte) in bytes.iter().enumerate().skip(start + 1) {
+        match quote {
+            Some(delimiter) if *byte == delimiter => quote = None,
+            Some(_) => {}
+            None if *byte == b'\'' || *byte == b'"' => quote = Some(*byte),
+            None if *byte == b'>' => return Some(offset),
+            None => {}
         }
     }
-    paragraphs
+    None
+}
+
+fn find_xml_tag_fragment<'a>(xml: &'a str, tag_name: &str) -> Option<&'a str> {
+    let mut cursor = 0;
+    while let Some(relative_start) = xml[cursor..].find(&format!("<{tag_name}")) {
+        let start = cursor + relative_start;
+        let after_name = xml.as_bytes().get(start + tag_name.len() + 1).copied();
+        if !matches!(
+            after_name,
+            Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            cursor = start + tag_name.len() + 1;
+            continue;
+        }
+        let end = find_xml_tag_end(xml, start)?;
+        return Some(&xml[start..=end]);
+    }
+    None
+}
+
+fn contains_xml_tag(xml: &str, tag_name: &str) -> bool {
+    find_xml_tag_fragment(xml, tag_name).is_some()
+}
+
+fn extract_xml_attribute(tag: &str, names: &[&str]) -> Option<String> {
+    for name in names {
+        let mut cursor = 0;
+        while let Some(relative_start) = tag[cursor..].find(name) {
+            let start = cursor + relative_start;
+            let has_boundary = start == 0
+                || tag[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
+            if !has_boundary {
+                cursor = start + name.len();
+                continue;
+            }
+            let after_name = &tag[start + name.len()..];
+            let after_name = after_name.trim_start_matches(char::is_whitespace);
+            let Some(after_equals) = after_name.strip_prefix('=') else {
+                cursor = start + name.len();
+                continue;
+            };
+            let after_equals = after_equals.trim_start_matches(char::is_whitespace);
+            let Some(delimiter) = after_equals.chars().next() else {
+                return None;
+            };
+            if delimiter != '\'' && delimiter != '"' {
+                return None;
+            }
+            let value = &after_equals[delimiter.len_utf8()..];
+            let end = value.find(delimiter)?;
+            return Some(decode_xml_text(&value[..end]));
+        }
+    }
+    None
+}
+
+fn extract_xml_tag_text(xml: &str, tag_name: &str) -> String {
+    let mut text = String::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = xml[cursor..].find(&format!("<{tag_name}")) {
+        let start = cursor + relative_start;
+        let after_name = xml.as_bytes().get(start + tag_name.len() + 1).copied();
+        if !matches!(
+            after_name,
+            Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            cursor = start + tag_name.len() + 1;
+            continue;
+        }
+        let Some(tag_end) = find_xml_tag_end(xml, start) else {
+            break;
+        };
+        let body_start = tag_end + 1;
+        let close_tag = format!("</{tag_name}>");
+        let Some(relative_end) = xml[body_start..].find(&close_tag) else {
+            break;
+        };
+        let body_end = body_start + relative_end;
+        text.push_str(&decode_xml_text(&xml[body_start..body_end]));
+        cursor = body_end + close_tag.len();
+    }
+    text
+}
+
+fn docx_heading_level(style: &str) -> Option<u8> {
+    let lower = style.to_ascii_lowercase();
+    // Match Electron's `/heading\s*([1-6])/i` behavior rather than requiring
+    // the style value to start with "Heading".  Word templates often prefix
+    // built-in styles (for example, "My Heading 2").
+    let mut cursor = 0;
+    while let Some(relative_start) = lower[cursor..].find("heading") {
+        let start = cursor + relative_start;
+        let suffix = lower[start + "heading".len()..].trim_start();
+        if let Some(level) = suffix.chars().next().and_then(|value| value.to_digit(10)) {
+            let level = level as u8;
+            if (1..=6).contains(&level) {
+                return Some(level);
+            }
+        }
+        cursor = start + "heading".len();
+    }
+    None
 }
 
 pub fn pptx(path: &std::path::Path) -> Result<Value> {
@@ -171,36 +401,128 @@ fn slide_number(name: &str) -> Option<u32> {
 
 pub fn extract_pptx_paragraphs(xml: &str) -> Vec<String> {
     let mut paragraphs = Vec::new();
-    for paragraph in xml.split("<a:p").skip(1) {
-        let paragraph = paragraph.split("</a:p>").next().unwrap_or(paragraph);
-        let mut text = String::new();
-        let mut rest = paragraph;
-        while let Some(start) = rest.find("<a:t") {
-            let after = &rest[start..];
-            let Some(tag_end) = after.find('>') else {
-                break;
-            };
-            let body = &after[tag_end + 1..];
-            let Some(end) = body.find("</a:t>") else {
-                break;
-            };
-            text.push_str(&decode_xml_text(&body[..end]));
-            rest = &body[end + 6..];
+    let mut cursor = 0;
+    while let Some(relative_start) = xml[cursor..].find("<a:p") {
+        let start = cursor + relative_start;
+        let after_name = xml.as_bytes().get(start + 4).copied();
+        // `<a:pPr>` and similar tags are not paragraphs.  The previous
+        // split-based implementation treated them as paragraph starts and
+        // consequently duplicated all following text.
+        if !matches!(
+            after_name,
+            Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            cursor = start + 3;
+            continue;
         }
+
+        let Some(open_end) = find_xml_tag_end(xml, start) else {
+            break;
+        };
+        let opening_tag = &xml[start..=open_end];
+        let content_start = open_end + 1;
+        if opening_tag.trim_end().ends_with("/>") {
+            cursor = content_start;
+            continue;
+        }
+        let Some(relative_close) = xml[content_start..].find("</a:p>") else {
+            break;
+        };
+        let content_end = content_start + relative_close;
+        let text = extract_xml_tag_text_trimmed_parts(&xml[content_start..content_end], "a:t");
         if !text.trim().is_empty() {
             paragraphs.push(text.trim().to_string());
         }
+        cursor = content_end + "</a:p>".len();
     }
     paragraphs
 }
 
+/// Extract text from repeated XML tags while applying the same per-run
+/// trimming as Electron's PPTX parser.  Word text runs intentionally use the
+/// raw helper above because `xml:space="preserve"` is meaningful there.
+fn extract_xml_tag_text_trimmed_parts(xml: &str, tag_name: &str) -> String {
+    let mut text = String::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = xml[cursor..].find(&format!("<{tag_name}")) {
+        let start = cursor + relative_start;
+        let after_name = xml.as_bytes().get(start + tag_name.len() + 1).copied();
+        if !matches!(
+            after_name,
+            Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            cursor = start + tag_name.len() + 1;
+            continue;
+        }
+        let Some(tag_end) = find_xml_tag_end(xml, start) else {
+            break;
+        };
+        let body_start = tag_end + 1;
+        let close_tag = format!("</{tag_name}>");
+        let Some(relative_end) = xml[body_start..].find(&close_tag) else {
+            break;
+        };
+        let body_end = body_start + relative_end;
+        text.push_str(decode_xml_text(&xml[body_start..body_end]).trim());
+        cursor = body_end + close_tag.len();
+    }
+    text
+}
+
 fn decode_xml_text(value: &str) -> String {
-    value
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+    // OOXML text commonly contains the five XML named entities, but exported
+    // files also use decimal/hex numeric entities.  Decode one entity at a
+    // time so `&amp;lt;` becomes the literal `&lt;`, just like an XML parser,
+    // rather than being decoded twice by chained string replacements.
+    let mut decoded = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = value[cursor..].find('&') {
+        let start = cursor + relative_start;
+        decoded.push_str(&value[cursor..start]);
+        let Some(relative_end) = value[start..].find(';') else {
+            decoded.push_str(&value[start..]);
+            return decoded;
+        };
+        let end = start + relative_end;
+        let entity = &value[start + 1..end];
+        if let Some(character) = decode_xml_entity(entity) {
+            decoded.push(character);
+        } else {
+            decoded.push_str(&value[start..=end]);
+        }
+        cursor = end + 1;
+    }
+    decoded.push_str(&value[cursor..]);
+    decoded
+}
+
+fn decode_xml_entity(entity: &str) -> Option<char> {
+    match entity {
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "amp" => Some('&'),
+        value
+            if value
+                .strip_prefix("#x")
+                .or_else(|| value.strip_prefix("#X"))
+                .is_some() =>
+        {
+            let digits = value
+                .strip_prefix("#x")
+                .or_else(|| value.strip_prefix("#X"))?;
+            u32::from_str_radix(digits, 16)
+                .ok()
+                .and_then(char::from_u32)
+        }
+        value if value.strip_prefix('#').is_some() => value
+            .strip_prefix('#')?
+            .parse::<u32>()
+            .ok()
+            .and_then(char::from_u32),
+        _ => None,
+    }
 }
 
 pub fn csv(path: &std::path::Path) -> Result<Value> {

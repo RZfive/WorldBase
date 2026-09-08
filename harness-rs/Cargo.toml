@@ -71,6 +71,8 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 
 # SHA-1 is used only for Electron-compatible project identifier suffixes.
 sha1 = "0.10"
+# SHA-256 is used for Electron-compatible source/build hashes.
+sha2 = "0.10"
 unicode-normalization = "0.1"
 
 # Async trait

@@ -203,7 +203,8 @@ export class RuntimeManager {
 
       // If allocated port differs from the configured port and the command is an
       // npm script wrapper, extract the raw script and replace the hardcoded port
-      // with $PORT so the dynamically allocated port is always used.
+      // with the platform's PORT variable so the dynamically allocated port is
+      // always used.  `%PORT%` is required by cmd.exe on Windows.
       if (configuredPort && port !== configuredPort &&
           (command === 'npm start' || command === 'npm run dev')) {
         try {
@@ -632,9 +633,10 @@ export class RuntimeManager {
       return { command: 'node app.js' }
     }
 
-    // Pure static site — serve with http-server
+    // Pure static site — serve with http-server.  Keep the placeholder
+    // compatible with the shell used by the child process on Windows.
     if (existsSync(path.join(projectDir, 'index.html'))) {
-      return { command: 'npx http-server . -p $PORT -c-1 --cors' }
+      return { command: this._portVariableCommand('npx http-server . -p {PORT} -c-1 --cors') }
     }
 
     return null
@@ -832,18 +834,25 @@ export class RuntimeManager {
   }
 
   /**
-   * Replace a hardcoded port number in a command with the `$PORT` shell variable.
+   * Replace a hardcoded port number in a command with the platform's PORT
+   * shell variable (`$PORT` on Unix, `%PORT%` on Windows).
    * Only replaces port values that appear directly after known port flags to avoid
    * accidental substitutions in other parts of the command.
    */
   private _replacePortInCommand (command: string, port: number): string {
     const p = String(port)
+    const variable = process.platform === 'win32' ? '%PORT%' : '$PORT'
     // --port=3000, --port 3000
-    let result = command.replace(new RegExp(`(--port[=\\s])${p}\\b`), '$1$PORT')
+    let result = command.replace(new RegExp(`(--port[=\\s])${p}\\b`), `$1${variable}`)
     // -p 3000
-    result = result.replace(new RegExp(`(-p\\s)${p}\\b`), '$1$PORT')
+    result = result.replace(new RegExp(`(-p\\s)${p}\\b`), `$1${variable}`)
     // -p3000 (no space)
-    result = result.replace(new RegExp(`(-p)${p}\\b`), '$1$PORT')
+    result = result.replace(new RegExp(`(-p)${p}\\b`), `$1${variable}`)
     return result
+  }
+
+  private _portVariableCommand (template: string): string {
+    const variable = process.platform === 'win32' ? '%PORT%' : '$PORT'
+    return template.replaceAll('{PORT}', variable)
   }
 }

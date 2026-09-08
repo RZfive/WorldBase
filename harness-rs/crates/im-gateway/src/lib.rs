@@ -1,157 +1,344 @@
-//! IM 网关：webhook 接收（桌面/server）+ 连接器适配。
-//!
-//! v1 支持通用 JSON webhook、飞书（自建应用事件订阅）、Slack（URL 验证 +
-//! event 回调）。收到消息后交给回调（core 注入 agent 处理），回复走
-//! 各连接器的发送 API。
+//! Transport-independent IM connector parsing plus an optional Axum webhook
+//! server. Electron and other hosts can use the pure request/event APIs without
+//! starting a second HTTP listener.
+
+mod connectors;
+mod model;
+mod outbound;
+
+pub use connectors::{
+    decrypt_feishu_payload, decrypt_wechat_payload, parse_channel_event, process_inbound,
+    verify_connector_request, verify_feishu_signature, verify_slack_signature,
+    verify_wechat_encrypted_signature, verify_wechat_plain_signature,
+};
+pub use model::{
+    ChannelBinding, ChannelEvent, ChannelEventAttachment, ConnectorType, InboundError,
+    InboundOutcome, InboundRequest, InlineResponse, OutboundHttpRequest, OutboundPlan,
+    UnknownConnector,
+};
+pub use outbound::{
+    build_encrypted_wechat_reply, build_encrypted_wechat_reply_with, build_feishu_reply_request,
+    build_feishu_send_text_request, build_feishu_token_request, build_outbound_plan,
+    build_telegram_request, build_wechat_text_reply, build_wechat_text_reply_at,
+    execute_outbound_plan, execute_outbound_request, DeliveryOutcome,
+};
 
 use anyhow::{bail, Context, Result};
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::body::{Body, Bytes};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use axum::{Json, Router};
-use serde_json::{json, Value};
+use chrono::{SecondsFormat, Utc};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use worldbase_protocol::DEFAULT_SERVE_PORT;
 
-/// 收到 IM 消息的回调：(channel, sender, text) → 回复文本。
+/// Received message callback: `(channel, sender, text) -> reply text`.
 pub type OnImMessage =
     Arc<dyn Fn(&str, &str, &str) -> futures::future::BoxFuture<'static, String> + Send + Sync>;
 
 pub struct ImGateway {
-    #[allow(dead_code)]
     channel: String,
-    #[allow(dead_code)]
-    verify_token: String,
+    binding: ChannelBinding,
     on_message: OnImMessage,
     shutdown: tokio::sync::watch::Sender<bool>,
+    local_addr: SocketAddr,
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct GatewayState {
-    channel: String,
-    verify_token: String,
+    route_channel: String,
+    binding: ChannelBinding,
     on_message: OnImMessage,
+    http: reqwest::Client,
 }
 
 impl ImGateway {
-    /// 启动 webhook 监听（绑定 127.0.0.1:port）。
+    /// Start the compatibility single-binding server. Known connector names use
+    /// their native parser; any historical custom channel uses the generic
+    /// connector while preserving its route and callback name.
     pub async fn start(
         channel: &str,
         verify_token: &str,
         port: Option<u16>,
         on_message: OnImMessage,
     ) -> Result<Arc<Self>> {
-        let (tx, _rx) = tokio::sync::watch::channel(false);
+        let connector = ConnectorType::from_str(channel).unwrap_or(ConnectorType::Custom);
+        let binding = ChannelBinding::legacy(connector, verify_token);
+        Self::start_inner(channel, binding, port, on_message).await
+    }
+
+    /// Start a server using a complete Electron-compatible connector binding.
+    pub async fn start_with_binding(
+        binding: ChannelBinding,
+        port: Option<u16>,
+        on_message: OnImMessage,
+    ) -> Result<Arc<Self>> {
+        let route_channel = binding.connector_type.as_str().to_string();
+        Self::start_inner(&route_channel, binding, port, on_message).await
+    }
+
+    async fn start_inner(
+        route_channel: &str,
+        binding: ChannelBinding,
+        port: Option<u16>,
+        on_message: OnImMessage,
+    ) -> Result<Arc<Self>> {
+        let port = port.unwrap_or(DEFAULT_SERVE_PORT + 1);
+        let requested_addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let listener = tokio::net::TcpListener::bind(requested_addr)
+            .await
+            .with_context(|| format!("failed to bind IM gateway at {requested_addr}"))?;
+        let local_addr = listener
+            .local_addr()
+            .context("failed to read IM gateway listener address")?;
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let gateway = Arc::new(Self {
-            channel: channel.into(),
-            verify_token: verify_token.into(),
-            on_message,
-            shutdown: tx,
+            channel: route_channel.to_string(),
+            binding: binding.clone(),
+            on_message: on_message.clone(),
+            shutdown,
+            local_addr,
         });
         let state = GatewayState {
-            channel: channel.into(),
-            verify_token: verify_token.into(),
-            on_message: gateway.on_message.clone(),
+            route_channel: route_channel.to_string(),
+            binding,
+            on_message,
+            http: reqwest::Client::new(),
         };
         let app = Router::new()
-            .route("/health", get(|| async { "ok" }))
-            .route("/webhook/{channel}", post(webhook_handler))
+            .route("/health", get(health_handler))
+            .route(
+                "/webhook/{channel}",
+                get(webhook_handler).post(webhook_handler),
+            )
             .with_state(state);
 
-        let port = port.unwrap_or(DEFAULT_SERVE_PORT + 1);
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let (bind_tx, bind_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    let _ = bind_tx.send(Err(e));
-                    return;
+            let shutdown_signal = async move {
+                loop {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                    if shutdown_rx.changed().await.is_err() {
+                        break;
+                    }
                 }
             };
-            let _ = bind_tx.send(Ok(()));
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!(error = %e, "im gateway serve failed");
+            if let Err(error) = axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal)
+                .await
+            {
+                tracing::error!(%error, "IM gateway server failed");
             }
         });
-        // 等待绑定结果
-        match tokio::time::timeout(std::time::Duration::from_secs(3), bind_rx).await {
-            Ok(Ok(Ok(()))) => tracing::info!(%addr, "im gateway listening"),
-            _ => tracing::warn!(%addr, "im gateway bind pending/failed"),
-        }
+        tracing::info!(address = %local_addr, connector = %gateway.binding.connector_type, "IM gateway listening");
         Ok(gateway)
     }
 
     pub fn stop(&self) {
         let _ = self.shutdown.send(true);
     }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub fn channel(&self) -> &str {
+        &self.channel
+    }
+
+    pub fn binding(&self) -> &ChannelBinding {
+        &self.binding
+    }
+
+    pub fn callback(&self) -> &OnImMessage {
+        &self.on_message
+    }
+}
+
+async fn health_handler() -> Json<Value> {
+    Json(json!({ "ok": true, "service": "im-gateway" }))
 }
 
 async fn webhook_handler(
     State(state): State<GatewayState>,
-    Json(payload): Json<Value>,
-) -> (StatusCode, Json<Value>) {
-    // Slack URL 验证
-    if payload["type"] == "url_verification" {
-        let challenge = payload["challenge"].as_str().unwrap_or_default();
-        return (StatusCode::OK, Json(json!({ "challenge": challenge })));
+    Path(channel): Path<String>,
+    method: Method,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    if channel != state.route_channel {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            json!({ "error": "Unknown IM connector" }),
+        );
     }
+    let raw_body = String::from_utf8_lossy(&body).into_owned();
+    let body = decode_request_body(&headers, &raw_body);
+    let request = InboundRequest {
+        method: method.as_str().to_string(),
+        headers: header_map(&headers),
+        query,
+        body,
+        raw_body,
+        received_at: Some(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
+    };
 
-    let (sender, text) = extract_message(&payload);
-    if text.is_empty() {
-        return (StatusCode::OK, Json(json!({ "ok": true })));
+    match process_inbound(state.binding.connector_type, &request, &state.binding) {
+        Ok(InboundOutcome::Ignored) => {
+            json_response(StatusCode::OK, json!({ "ok": true, "ignored": true }))
+        }
+        Ok(InboundOutcome::JsonChallenge { body }) => json_response(StatusCode::OK, body),
+        Ok(InboundOutcome::TextChallenge { body }) => {
+            text_response(StatusCode::OK, "text/plain; charset=utf-8", body)
+        }
+        Ok(InboundOutcome::Message { event }) => {
+            if !state.binding.auto_reply {
+                return if matches!(
+                    state.binding.connector_type,
+                    ConnectorType::Wechat | ConnectorType::Wecom
+                ) {
+                    text_response(
+                        StatusCode::OK,
+                        "text/plain; charset=utf-8",
+                        "success".into(),
+                    )
+                } else {
+                    json_response(
+                        StatusCode::OK,
+                        json!({ "ok": true, "accepted": true, "autoReply": false }),
+                    )
+                };
+            }
+            let reply =
+                (state.on_message)(&state.route_channel, &event.sender_id, &event.text).await;
+            if reply.is_empty() {
+                return if matches!(
+                    state.binding.connector_type,
+                    ConnectorType::Wechat | ConnectorType::Wecom
+                ) {
+                    text_response(
+                        StatusCode::OK,
+                        "text/plain; charset=utf-8",
+                        "success".into(),
+                    )
+                } else {
+                    json_response(
+                        StatusCode::OK,
+                        json!({ "ok": true, "accepted": true, "reply": Value::Null }),
+                    )
+                };
+            }
+            match build_outbound_plan(state.binding.connector_type, &state.binding, &event, &reply)
+            {
+                Ok(OutboundPlan::Inline { response }) => {
+                    text_response(StatusCode::OK, &response.content_type, response.body)
+                }
+                Ok(plan @ (OutboundPlan::Http { .. } | OutboundPlan::FeishuAppReply { .. })) => {
+                    match execute_outbound_plan(&state.http, &plan).await {
+                        Ok(DeliveryOutcome::Delivered { success, .. }) => {
+                            if state.binding.connector_type == ConnectorType::Wechat {
+                                text_response(
+                                    StatusCode::OK,
+                                    "text/plain; charset=utf-8",
+                                    "success".into(),
+                                )
+                            } else {
+                                json_response(
+                                    StatusCode::OK,
+                                    json!({ "ok": true, "accepted": true, "delivered": success, "reply": reply }),
+                                )
+                            }
+                        }
+                        Ok(_) => json_response(
+                            StatusCode::OK,
+                            json!({ "ok": true, "accepted": true, "delivered": false, "reply": reply }),
+                        ),
+                        Err(error) => json_response(
+                            StatusCode::BAD_GATEWAY,
+                            json!({ "error": error.to_string() }),
+                        ),
+                    }
+                }
+                Ok(OutboundPlan::None) => {
+                    json_response(StatusCode::OK, json!({ "ok": true, "reply": reply }))
+                }
+                Err(error) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({ "error": error.to_string() }),
+                ),
+            }
+        }
+        Err(InboundError::Unauthorized) => json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({ "error": "Invalid IM webhook signature or secret" }),
+        ),
+        Err(InboundError::InvalidPayload(message)) => {
+            json_response(StatusCode::BAD_REQUEST, json!({ "error": message }))
+        }
     }
-
-    let reply = (state.on_message)(&state.channel, &sender, &text).await;
-    (StatusCode::OK, Json(json!({ "ok": true, "reply": reply })))
 }
 
-/// 从各连接器 payload 中提取 (sender, text)。
-fn extract_message(payload: &Value) -> (String, String) {
-    // 飞书事件订阅 v2（header.event_type 判别优先于通用 event 键）
-    if payload["header"]["event_type"] == "im.message.receive_v1" {
-        let sender = payload["event"]["sender"]["sender_id"]["open_id"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string();
-        let text = payload["event"]["message"]["content"]["text"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        return (sender, text);
+fn decode_request_body(headers: &HeaderMap, raw: &str) -> Value {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if content_type.contains("application/x-www-form-urlencoded") {
+        if let Ok(values) = serde_urlencoded::from_str::<BTreeMap<String, String>>(raw) {
+            return Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, Value::String(value)))
+                    .collect::<Map<_, _>>(),
+            );
+        }
     }
-    // Slack event 回调
-    if let Some(event) = payload.get("event") {
-        let sender = event["user"].as_str().unwrap_or("unknown").to_string();
-        let text = event["text"].as_str().unwrap_or("").to_string();
-        return (sender, text);
-    }
-    // 通用 JSON：{sender, text}
-    let sender = payload["sender"].as_str().unwrap_or("unknown").to_string();
-    let text = payload["text"].as_str().unwrap_or("").to_string();
-    (sender, text)
+    serde_json::from_str(raw).unwrap_or(Value::Null)
 }
 
-/// 通过飞书 open API 发送文本消息（需要 tenant_access_token）。
+fn header_map(headers: &HeaderMap) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
+        })
+        .collect()
+}
+
+fn json_response(status: StatusCode, body: Value) -> Response {
+    (status, Json(body)).into_response()
+}
+
+fn text_response(status: StatusCode, content_type: &str, body: String) -> Response {
+    let content_type = HeaderValue::from_str(content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("text/plain; charset=utf-8"));
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body))
+        .expect("valid IM response")
+}
+
+/// Compatibility API for sending a Feishu text message by open ID.
 pub async fn send_feishu_text(domain: &str, token: &str, open_id: &str, text: &str) -> Result<()> {
     let client = reqwest::Client::new();
-    let resp = client
-        .post(format!(
-            "{domain}/open-apis/im/v1/messages?receive_id_type=open_id"
-        ))
-        .bearer_auth(token)
-        .json(&json!({
-            "receive_id": open_id,
-            "msg_type": "text",
-            "content": json!({ "text": text }).to_string(),
-        }))
-        .send()
+    let request = build_feishu_send_text_request(domain, token, open_id, text);
+    let response = execute_outbound_request(&client, &request)
         .await
         .context("feishu send")?;
-    if !resp.status().is_success() {
-        bail!("feishu send failed: {}", resp.status());
+    if !response.status().is_success() {
+        bail!("feishu send failed: {}", response.status());
     }
     Ok(())
 }
@@ -160,46 +347,26 @@ pub async fn send_feishu_text(domain: &str, token: &str, open_id: &str, text: &s
 mod tests {
     use super::*;
 
-    #[test]
-    fn extracts_slack_and_generic() {
-        let slack = json!({ "event": { "user": "U1", "text": "hi" } });
-        assert_eq!(extract_message(&slack), ("U1".into(), "hi".into()));
-
-        let feishu = json!({
-            "header": { "event_type": "im.message.receive_v1" },
-            "event": { "sender": { "sender_id": { "open_id": "ou1" } },
-                        "message": { "content": { "text": "帮我查天气" } } }
-        });
-        assert_eq!(
-            extract_message(&feishu),
-            ("ou1".into(), "帮我查天气".into())
-        );
-
-        let generic = json!({ "sender": "alice", "text": "hello" });
-        assert_eq!(extract_message(&generic), ("alice".into(), "hello".into()));
-    }
-
     #[tokio::test]
-    async fn webhook_end_to_end() {
-        let on_msg: OnImMessage = Arc::new(|_ch: &str, sender: &str, text: &str| {
+    async fn compatibility_webhook_end_to_end() {
+        let on_message: OnImMessage = Arc::new(|channel: &str, sender: &str, text: &str| {
+            let channel = channel.to_string();
             let sender = sender.to_string();
             let text = text.to_string();
-            Box::pin(async move { format!("ack {sender}: {text}") })
+            Box::pin(async move { format!("ack {channel}/{sender}: {text}") })
         });
-        let gw = ImGateway::start("test", "token", Some(19999), on_msg)
+        let gateway = ImGateway::start("test", "", Some(0), on_message)
             .await
             .unwrap();
-        let client = reqwest::Client::new();
-        // 等 listener 起来
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        let resp = client
-            .post("http://127.0.0.1:19999/webhook/test")
-            .json(&json!({ "sender": "alice", "text": "你好" }))
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/webhook/test", gateway.local_addr()))
+            .json(&json!({ "sender": "alice", "text": "hello" }))
             .send()
             .await
             .unwrap();
-        let body: Value = resp.json().await.unwrap();
-        assert_eq!(body["reply"], "ack alice: 你好");
-        gw.stop();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["reply"], "ack test/alice: hello");
+        gateway.stop();
     }
 }

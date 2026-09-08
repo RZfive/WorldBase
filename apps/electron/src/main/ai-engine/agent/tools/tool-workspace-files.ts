@@ -10,6 +10,7 @@ import type { FolderWorkspaceChangeEvent } from '../../../../shared/folder-works
 import { streamFilePreview } from './file-preview-progress.js'
 import { PROJECT_COMMAND_WHITELIST, DANGEROUS_COMMAND_PATTERNS, isDeveloperCommandModeEnabled } from './command-capabilities.js'
 import { createBundledRuntimeEnv } from '../../../project-runtime/bundled-runtime.js'
+import { scanCommandSegments, splitCommandSegments, tokenizeCommand } from './command-parser.js'
 import {
   deleteFolderWorkspaceFile,
   listFolderWorkspaceFiles,
@@ -1039,7 +1040,8 @@ function validateProjectLikeCommand (rawCommand: string): ParsedCommand {
   }
 
   const developerMode = isDeveloperCommandModeEnabled()
-  const hasShellOperators = /[;&|<>]/.test(command)
+  // Only shell syntax outside quoted/escaped text counts as an operator.
+  const { hasOperator: hasShellOperators } = scanCommandSegments(command)
   if (hasShellOperators && !developerMode) {
     throw new Error('Command contains shell operators. Run one command per call or enable THE_WORLD_DEV_COMMANDS=1.')
   }
@@ -1064,26 +1066,6 @@ function validateSingleCommand (segment: string): ParsedCommand {
   if (baseCommand === 'npm') validateNpmCommand(tokens)
   else if (baseCommand === 'git') validateGitCommand(tokens)
   return { baseCommand, tokens }
-}
-
-function splitCommandSegments (command: string): string[] {
-  return stripRedirections(command)
-    .split(/\s*(?:&&|\|\||;|\||&)\s*/)
-    .map(segment => segment.trim())
-    .filter(Boolean)
-}
-
-function stripRedirections (text: string): string {
-  return text
-    .replace(/\d*>>?\s*&\s*\d+/g, ' ')
-    .replace(/\d*>>?\s*\S+/g, ' ')
-    .replace(/<\s*\S+/g, ' ')
-    .trim()
-}
-
-function tokenizeCommand (command: string): string[] {
-  return (command.match(/"[^"]*"|'[^']*'|\S+/g) || [])
-    .map(token => token.replace(/^("|')|("|')$/g, ''))
 }
 
 function normalizeBaseCommand (token: string): string {

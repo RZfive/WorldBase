@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -2217,66 +2218,188 @@ class _SkillsCardState extends ConsumerState<_SkillsCard> {
     final nameCtrl = TextEditingController();
     final descCtrl = TextEditingController();
     final instrCtrl = TextEditingController();
+    final whenCtrl = TextEditingController();
+    final toolsCtrl = TextEditingController();
+    final argsCtrl = TextEditingController();
+    var skillContext = 'inline';
+    var saving = false;
+    String? error;
+
+    List<SkillArgument> parseArguments(String raw) {
+      final value = raw.trim();
+      if (value.isEmpty) return const [];
+      if (value.startsWith('[')) {
+        final decoded = jsonDecode(value);
+        if (decoded is! List) {
+          throw const FormatException('参数 JSON 必须是数组');
+        }
+        return decoded
+            .whereType<Map>()
+            .map((item) => SkillArgument.fromJson(item.cast()))
+            .where((argument) => argument.name.trim().isNotEmpty)
+            .toList();
+      }
+      return value
+          .split(RegExp(r'[,\n]'))
+          .map((item) => item.trim())
+          .where((item) => item.isNotEmpty)
+          .map((name) => SkillArgument(name: name))
+          .toList();
+    }
+
     await showCupertinoDialog<void>(
       context: context,
-      builder: (ctx) => CupertinoAlertDialog(
-        title: const Text('新建技能（YAML）'),
-        content: Padding(
-          padding: const EdgeInsets.only(top: 12),
-          child: Column(
-            children: [
-              CupertinoTextField(
-                controller: nameCtrl,
-                placeholder: '名称（英文标识）',
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialog) => CupertinoAlertDialog(
+          title: const Text('新建技能（YAML）'),
+          content: Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Column(
+              children: [
+                CupertinoTextField(
+                  controller: nameCtrl,
+                  placeholder: '名称（英文标识）',
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 8),
-              CupertinoTextField(
-                controller: descCtrl,
-                placeholder: '描述',
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
+                const SizedBox(height: 8),
+                CupertinoTextField(
+                  controller: descCtrl,
+                  placeholder: '描述',
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 8),
-              CupertinoTextField(
-                controller: instrCtrl,
-                placeholder: '指令内容',
-                maxLines: 3,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
+                const SizedBox(height: 8),
+                CupertinoTextField(
+                  controller: whenCtrl,
+                  placeholder: '何时使用（可选）',
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
                 ),
-              ),
-            ],
+                const SizedBox(height: 8),
+                CupertinoTextField(
+                  controller: toolsCtrl,
+                  placeholder: '允许工具（逗号分隔，可选）',
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                CupertinoTextField(
+                  controller: argsCtrl,
+                  placeholder: '参数名（逗号分隔，或 JSON 数组）',
+                  maxLines: 2,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                CupertinoSlidingSegmentedControl<String>(
+                  groupValue: skillContext,
+                  children: const {
+                    'inline': Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 5,
+                      ),
+                      child: Text('inline'),
+                    ),
+                    'fork': Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 5,
+                      ),
+                      child: Text('fork'),
+                    ),
+                  },
+                  onValueChanged: (value) {
+                    if (saving) return;
+                    setDialog(() => skillContext = value ?? skillContext);
+                  },
+                ),
+                const SizedBox(height: 8),
+                CupertinoTextField(
+                  controller: instrCtrl,
+                  placeholder: '指令内容',
+                  maxLines: 4,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                ),
+                if (error != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    error!,
+                    style: const TextStyle(fontSize: 12, color: iosRed),
+                  ),
+                ],
+              ],
+            ),
           ),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: saving ? null : () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            CupertinoDialogAction(
+              isDefaultAction: true,
+              onPressed: saving
+                  ? null
+                  : () async {
+                      if (nameCtrl.text.trim().isEmpty ||
+                          instrCtrl.text.trim().isEmpty) {
+                        setDialog(() => error = '名称和指令内容不能为空');
+                        return;
+                      }
+                      List<SkillArgument> arguments;
+                      try {
+                        arguments = parseArguments(argsCtrl.text);
+                      } catch (e) {
+                        setDialog(() => error = '$e');
+                        return;
+                      }
+                      setDialog(() {
+                        saving = true;
+                        error = null;
+                      });
+                      try {
+                        await HarnessClient.instance.saveSkill(
+                          nameCtrl.text.trim(),
+                          descCtrl.text.trim(),
+                          instrCtrl.text,
+                          whenToUse: whenCtrl.text,
+                          arguments: arguments,
+                          allowedTools: toolsCtrl.text
+                              .split(RegExp(r'[,\n]'))
+                              .map((tool) => tool.trim())
+                              .where((tool) => tool.isNotEmpty)
+                              .toList(),
+                          context: skillContext,
+                        );
+                        if (ctx.mounted) Navigator.pop(ctx);
+                        _load();
+                      } catch (e) {
+                        if (ctx.mounted) {
+                          setDialog(() {
+                            saving = false;
+                            error = '$e';
+                          });
+                        }
+                      }
+                    },
+              child: const Text('保存'),
+            ),
+          ],
         ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          CupertinoDialogAction(
-            isDefaultAction: true,
-            onPressed: () async {
-              if (nameCtrl.text.trim().isEmpty || instrCtrl.text.isEmpty) {
-                return;
-              }
-              await HarnessClient.instance.saveSkill(
-                nameCtrl.text.trim(),
-                descCtrl.text.trim(),
-                instrCtrl.text,
-              );
-              if (ctx.mounted) Navigator.pop(ctx);
-              _load();
-            },
-            child: const Text('保存'),
-          ),
-        ],
       ),
     );
   }
@@ -2293,6 +2416,8 @@ class _SchedulesCard extends ConsumerStatefulWidget {
 
 class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
   List<ScheduleEntry>? _schedules;
+  List<SkillDescriptor> _skills = const [];
+  List<McpServerSnapshot> _mcpServers = const [];
 
   @override
   void initState() {
@@ -2305,6 +2430,58 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
       final schedules = await HarnessClient.instance.listSchedules();
       if (mounted) setState(() => _schedules = schedules);
     } catch (_) {}
+    try {
+      final skills = await HarnessClient.instance.listSkills();
+      if (mounted) setState(() => _skills = skills);
+    } catch (_) {}
+    try {
+      final state = await HarnessClient.instance.getMcpState();
+      if (mounted) setState(() => _mcpServers = state.servers);
+    } catch (_) {}
+  }
+
+  String _scheduleLabel(ScheduleEntry entry) {
+    final schedule = entry.schedule;
+    if (schedule == null || schedule.kind == 'cron') {
+      return entry.cron.isEmpty ? '未设置' : 'cron ${entry.cron}';
+    }
+    switch (schedule.kind) {
+      case 'once':
+        return '一次性 ${schedule.runAt ?? '-'}';
+      case 'interval':
+        final start = schedule.startAt == null
+            ? ''
+            : ' · 起始 ${schedule.startAt}';
+        return '每 ${schedule.everyMinutes ?? '-'} 分钟$start';
+      case 'daily':
+        return '每天 ${schedule.timeOfDay ?? '-'}';
+      case 'weekly':
+        final days = schedule.weekdays.isEmpty
+            ? '-'
+            : schedule.weekdays.join(',');
+        return '每周 $days · ${schedule.timeOfDay ?? '-'}';
+      case 'dates':
+        return '指定日期 ${schedule.dates.length} 次';
+      default:
+        return schedule.kind;
+    }
+  }
+
+  String _statusLabel(ScheduleEntry entry) {
+    final status = entry.lastStatus.isEmpty ? 'idle' : entry.lastStatus;
+    final enabled = entry.enabled ? '已启用' : '已停用';
+    final next = entry.nextRunAt == null ? '' : ' · 下次 ${entry.nextRunAt}';
+    final retry = entry.retryPolicy.maxRetries > 0
+        ? ' · 重试 ${entry.retryPolicy.maxRetries} 次'
+        : '';
+    return '$enabled · $status$retry$next';
+  }
+
+  String _policyLabel(ScheduleEntry entry) {
+    final skills = entry.selectedSkillIds.length;
+    final mcp = entry.selectedMcpServerIds.length;
+    if (skills == 0 && mcp == 0) return '';
+    return ' · 技能 $skills · MCP $mcp';
   }
 
   @override
@@ -2327,7 +2504,8 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
               icon: CupertinoIcons.alarm_fill,
               iconColor: s.enabled ? iosGreen : p.ink2,
               title: s.name,
-              subtitle: '${s.cron} · 下次 ${s.nextRunAt ?? '-'}',
+              subtitle:
+                  '${_scheduleLabel(s)} · ${_statusLabel(s)}${_policyLabel(s)}',
               onTap: () => _showActions(context, s),
             ),
         IosRow(
@@ -2345,14 +2523,54 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
       context: context,
       builder: (ctx) => CupertinoActionSheet(
         title: Text(s.name),
-        message: Text('${s.cron}\n任务：${s.task}'),
+        message: Text('${_scheduleLabel(s)}\n${_statusLabel(s)}\n任务：${s.task}'),
         actions: [
+          CupertinoActionSheetAction(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              try {
+                await HarnessClient.instance.updateSchedule(
+                  s.id,
+                  enabled: !s.enabled,
+                );
+                await _load();
+              } catch (e) {
+                if (context.mounted) _showError(context, e);
+              }
+            },
+            child: Text(s.enabled ? '停用' : '启用'),
+          ),
+          CupertinoActionSheetAction(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              try {
+                await HarnessClient.instance.runSchedule(s.id);
+                if (context.mounted) {
+                  _showMessage(context, '任务已开始运行');
+                }
+              } catch (e) {
+                if (context.mounted) _showError(context, e);
+              }
+            },
+            child: const Text('立即运行'),
+          ),
+          CupertinoActionSheetAction(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _edit(context, s);
+            },
+            child: const Text('编辑'),
+          ),
           CupertinoActionSheetAction(
             isDestructiveAction: true,
             onPressed: () async {
               Navigator.pop(ctx);
-              await HarnessClient.instance.deleteSchedule(s.id);
-              _load();
+              try {
+                await HarnessClient.instance.deleteSchedule(s.id);
+                await _load();
+              } catch (e) {
+                if (context.mounted) _showError(context, e);
+              }
             },
             child: const Text('删除'),
           ),
@@ -2365,84 +2583,484 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
     );
   }
 
-  Future<void> _create(BuildContext context) async {
-    final nameCtrl = TextEditingController();
-    final cronCtrl = TextEditingController(text: '0 9 * * 1-5');
-    final taskCtrl = TextEditingController();
-    await showCupertinoDialog<void>(
+  void _showMessage(BuildContext context, String message) {
+    showCupertinoDialog<void>(
       context: context,
       builder: (ctx) => CupertinoAlertDialog(
-        title: const Text('新建定时任务'),
-        content: Padding(
-          padding: const EdgeInsets.only(top: 12),
-          child: Column(
-            children: [
-              CupertinoTextField(
-                controller: nameCtrl,
-                placeholder: '名称',
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
-                ),
-              ),
-              const SizedBox(height: 8),
-              CupertinoTextField(
-                controller: cronCtrl,
-                placeholder: 'cron（5 段）',
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
-                ),
-              ),
-              const SizedBox(height: 8),
-              CupertinoTextField(
-                controller: taskCtrl,
-                placeholder: '任务描述',
-                maxLines: 2,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
-                ),
-              ),
-            ],
-          ),
-        ),
+        content: Text(message),
         actions: [
           CupertinoDialogAction(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
+            child: const Text('好'),
           ),
+        ],
+      ),
+    );
+  }
+
+  void _showError(BuildContext context, Object error) {
+    showCupertinoDialog<void>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('操作失败'),
+        content: Text('$error'),
+        actions: [
           CupertinoDialogAction(
-            isDefaultAction: true,
-            onPressed: () async {
-              if (nameCtrl.text.isEmpty || taskCtrl.text.isEmpty) return;
-              try {
-                await HarnessClient.instance.createSchedule(
-                  nameCtrl.text,
-                  cronCtrl.text,
-                  taskCtrl.text,
-                );
-              } catch (e) {
-                if (ctx.mounted) {
-                  showCupertinoDialog<void>(
-                    context: ctx,
-                    builder: (d) => CupertinoAlertDialog(
-                      title: const Text('创建失败'),
-                      content: Text('$e'),
-                      actions: [
-                        CupertinoDialogAction(
-                          onPressed: () => Navigator.pop(d),
-                          child: const Text('好'),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('好'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _create(BuildContext context) => _edit(context, null);
+
+  Future<void> _edit(BuildContext context, ScheduleEntry? existing) async {
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final taskCtrl = TextEditingController(text: existing?.task ?? '');
+    final schedule = existing?.schedule;
+    var kind = schedule?.kind ?? 'cron';
+    final cronCtrl = TextEditingController(
+      text: schedule?.expression ?? existing?.cron ?? '0 9 * * 1-5',
+    );
+    final runAtCtrl = TextEditingController(text: schedule?.runAt ?? '');
+    final everyMinutesCtrl = TextEditingController(
+      text: schedule?.everyMinutes?.toString() ?? '60',
+    );
+    final startAtCtrl = TextEditingController(text: schedule?.startAt ?? '');
+    final timeOfDayCtrl = TextEditingController(
+      text: schedule?.timeOfDay ?? '09:00',
+    );
+    final weekdaysCtrl = TextEditingController(
+      text: schedule?.weekdays.join(',') ?? '1,2,3,4,5',
+    );
+    final datesCtrl = TextEditingController(
+      text: schedule?.dates.join('\n') ?? '',
+    );
+    final skillsCtrl = TextEditingController(
+      text: existing?.selectedSkillIds.join(', ') ?? '',
+    );
+    final mcpCtrl = TextEditingController(
+      text: existing?.selectedMcpServerIds.join(', ') ?? '',
+    );
+    final maxRetriesCtrl = TextEditingController(
+      text: '${existing?.retryPolicy.maxRetries ?? 0}',
+    );
+    final retryDelayCtrl = TextEditingController(
+      text: '${existing?.retryPolicy.retryDelayMinutes ?? 5}',
+    );
+    var enabled = existing?.enabled ?? true;
+    var saving = false;
+    String? error;
+
+    List<String> parseStrings(String value) => value
+        .split(RegExp(r'[,\n]'))
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toSet()
+        .toList();
+    List<int> parseInts(String value) => value
+        .split(RegExp(r'[,\s]+'))
+        .map((item) => int.tryParse(item))
+        .whereType<int>()
+        .toSet()
+        .toList();
+
+    ScheduledTaskSchedule buildSchedule() {
+      switch (kind) {
+        case 'once':
+          return ScheduledTaskSchedule(
+            kind: kind,
+            runAt: runAtCtrl.text.trim(),
+          );
+        case 'interval':
+          return ScheduledTaskSchedule(
+            kind: kind,
+            everyMinutes: int.tryParse(everyMinutesCtrl.text.trim()) ?? 0,
+            startAt: startAtCtrl.text.trim().isEmpty
+                ? null
+                : startAtCtrl.text.trim(),
+          );
+        case 'daily':
+          return ScheduledTaskSchedule(
+            kind: kind,
+            timeOfDay: timeOfDayCtrl.text.trim(),
+          );
+        case 'weekly':
+          return ScheduledTaskSchedule(
+            kind: kind,
+            weekdays: parseInts(weekdaysCtrl.text),
+            timeOfDay: timeOfDayCtrl.text.trim(),
+          );
+        case 'dates':
+          return ScheduledTaskSchedule(
+            kind: kind,
+            dates: parseStrings(datesCtrl.text),
+          );
+        default:
+          return ScheduledTaskSchedule(
+            kind: 'cron',
+            expression: cronCtrl.text.trim(),
+          );
+      }
+    }
+
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) {
+        final p = DawnPalette.of(context);
+        return Container(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.92,
+          ),
+          decoration: BoxDecoration(
+            color: p.groupedBg,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+          ),
+          child: SafeArea(
+            child: StatefulBuilder(
+              builder: (ctx, setSheet) => SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      existing == null ? '新建定时任务' : '编辑定时任务',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    _scheduleField(nameCtrl, '名称', p),
+                    const SizedBox(height: 10),
+                    _scheduleField(taskCtrl, '任务 / Prompt', p, maxLines: 3),
+                    const SizedBox(height: 10),
+                    Text('调度模式', style: TextStyle(fontSize: 13, color: p.ink2)),
+                    const SizedBox(height: 6),
+                    CupertinoSlidingSegmentedControl<String>(
+                      groupValue: kind,
+                      children: const {
+                        'cron': Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 5,
+                          ),
+                          child: Text('cron', style: TextStyle(fontSize: 11)),
+                        ),
+                        'once': Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 5,
+                          ),
+                          child: Text('一次', style: TextStyle(fontSize: 11)),
+                        ),
+                        'interval': Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 5,
+                          ),
+                          child: Text('间隔', style: TextStyle(fontSize: 11)),
+                        ),
+                        'daily': Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 5,
+                          ),
+                          child: Text('每日', style: TextStyle(fontSize: 11)),
+                        ),
+                        'weekly': Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 5,
+                          ),
+                          child: Text('每周', style: TextStyle(fontSize: 11)),
+                        ),
+                        'dates': Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 5,
+                          ),
+                          child: Text('日期', style: TextStyle(fontSize: 11)),
+                        ),
+                      },
+                      onValueChanged: (value) {
+                        if (!saving) setSheet(() => kind = value ?? kind);
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    if (kind == 'cron')
+                      _scheduleField(
+                        cronCtrl,
+                        'Cron 表达式（5 段）',
+                        p,
+                        hint: '0 9 * * 1-5',
+                      )
+                    else if (kind == 'once')
+                      _scheduleField(
+                        runAtCtrl,
+                        '运行时间（ISO 8601）',
+                        p,
+                        hint: '2026-09-05T09:00:00+08:00',
+                      )
+                    else if (kind == 'interval') ...[
+                      _scheduleField(
+                        everyMinutesCtrl,
+                        '间隔分钟数',
+                        p,
+                        keyboardType: TextInputType.number,
+                      ),
+                      const SizedBox(height: 8),
+                      _scheduleField(startAtCtrl, '开始时间（可选，ISO 8601）', p),
+                    ] else if (kind == 'daily')
+                      _scheduleField(
+                        timeOfDayCtrl,
+                        '每日时间（HH:mm）',
+                        p,
+                        hint: '09:00',
+                      )
+                    else if (kind == 'weekly') ...[
+                      _scheduleField(
+                        weekdaysCtrl,
+                        '星期（ISO 1=周一，逗号分隔）',
+                        p,
+                        hint: '1,2,3,4,5',
+                      ),
+                      const SizedBox(height: 8),
+                      _scheduleField(
+                        timeOfDayCtrl,
+                        '每周时间（HH:mm）',
+                        p,
+                        hint: '09:00',
+                      ),
+                    ] else
+                      _scheduleField(
+                        datesCtrl,
+                        '运行日期（每行一个 ISO 8601）',
+                        p,
+                        maxLines: 4,
+                      ),
+                    const SizedBox(height: 10),
+                    _scheduleSwitch(
+                      '启用任务',
+                      enabled,
+                      (value) => setSheet(() => enabled = value),
+                    ),
+                    const SizedBox(height: 8),
+                    _scheduleField(skillsCtrl, '选择技能 ID（逗号分隔，可选）', p),
+                    if (_skills.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          '可用技能：${_skills.map((skill) => skill.name).join(', ')}',
+                          style: TextStyle(fontSize: 11, color: p.ink2),
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    _scheduleField(mcpCtrl, '选择 MCP server ID（逗号分隔，可选）', p),
+                    if (_mcpServers.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          '可用 MCP：${_mcpServers.map((server) => server.id).join(', ')}',
+                          style: TextStyle(fontSize: 11, color: p.ink2),
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _scheduleField(
+                            maxRetriesCtrl,
+                            '最大重试次数',
+                            p,
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _scheduleField(
+                            retryDelayCtrl,
+                            '重试间隔（分钟）',
+                            p,
+                            keyboardType: TextInputType.number,
+                          ),
                         ),
                       ],
                     ),
-                  );
-                }
-              }
-              if (ctx.mounted) Navigator.pop(ctx);
-              _load();
-            },
-            child: const Text('创建'),
+                    if (error != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        error!,
+                        style: const TextStyle(fontSize: 13, color: iosRed),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: CupertinoButton(
+                            onPressed: saving ? null : () => Navigator.pop(ctx),
+                            child: const Text('取消'),
+                          ),
+                        ),
+                        Expanded(
+                          child: CupertinoButton.filled(
+                            onPressed: saving
+                                ? null
+                                : () async {
+                                    final name = nameCtrl.text.trim();
+                                    final task = taskCtrl.text.trim();
+                                    final schedule = buildSchedule();
+                                    if (name.isEmpty || task.isEmpty) {
+                                      setSheet(() => error = '名称和任务内容不能为空');
+                                      return;
+                                    }
+                                    if (kind == 'cron' &&
+                                        cronCtrl.text.trim().isEmpty) {
+                                      setSheet(() => error = '请输入 cron 表达式');
+                                      return;
+                                    }
+                                    setSheet(() {
+                                      saving = true;
+                                      error = null;
+                                    });
+                                    try {
+                                      final retryPolicy =
+                                          ScheduledTaskRetryPolicy(
+                                            maxRetries:
+                                                int.tryParse(
+                                                  maxRetriesCtrl.text.trim(),
+                                                ) ??
+                                                0,
+                                            retryDelayMinutes:
+                                                int.tryParse(
+                                                  retryDelayCtrl.text.trim(),
+                                                ) ??
+                                                5,
+                                          );
+                                      final skillIds = parseStrings(
+                                        skillsCtrl.text,
+                                      );
+                                      final mcpIds = parseStrings(mcpCtrl.text);
+                                      if (existing == null) {
+                                        await HarnessClient.instance
+                                            .createSchedule(
+                                              name,
+                                              kind == 'cron'
+                                                  ? cronCtrl.text.trim()
+                                                  : '',
+                                              task,
+                                              schedule: schedule,
+                                              enabled: enabled,
+                                              selectedSkillIds: skillIds,
+                                              selectedMcpServerIds: mcpIds,
+                                              retryPolicy: retryPolicy,
+                                              createdBy: 'manual',
+                                            );
+                                      } else {
+                                        await HarnessClient.instance
+                                            .updateSchedule(
+                                              existing.id,
+                                              name: name,
+                                              task: task,
+                                              cron: kind == 'cron'
+                                                  ? cronCtrl.text.trim()
+                                                  : '',
+                                              schedule: schedule,
+                                              enabled: enabled,
+                                              selectedSkillIds: skillIds,
+                                              selectedMcpServerIds: mcpIds,
+                                              retryPolicy: retryPolicy,
+                                            );
+                                      }
+                                      if (ctx.mounted) Navigator.pop(ctx);
+                                      await _load();
+                                    } catch (e) {
+                                      if (ctx.mounted) {
+                                        setSheet(() {
+                                          saving = false;
+                                          error = '$e';
+                                        });
+                                      }
+                                    }
+                                  },
+                            child: Text(existing == null ? '创建' : '保存'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    nameCtrl.dispose();
+    taskCtrl.dispose();
+    cronCtrl.dispose();
+    runAtCtrl.dispose();
+    everyMinutesCtrl.dispose();
+    startAtCtrl.dispose();
+    timeOfDayCtrl.dispose();
+    weekdaysCtrl.dispose();
+    datesCtrl.dispose();
+    skillsCtrl.dispose();
+    mcpCtrl.dispose();
+    maxRetriesCtrl.dispose();
+    retryDelayCtrl.dispose();
+  }
+
+  Widget _scheduleField(
+    TextEditingController controller,
+    String label,
+    DawnPalette p, {
+    String? hint,
+    int maxLines = 1,
+    TextInputType? keyboardType,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: TextStyle(fontSize: 13, color: p.ink2)),
+        const SizedBox(height: 5),
+        CupertinoTextField(
+          controller: controller,
+          placeholder: hint,
+          maxLines: maxLines,
+          keyboardType: keyboardType,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: p.cardBg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: p.separator),
+          ),
+          style: TextStyle(fontSize: 14, color: p.ink),
+        ),
+      ],
+    );
+  }
+
+  Widget _scheduleSwitch(
+    String label,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) {
+    final p = DawnPalette.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(label, style: TextStyle(fontSize: 14, color: p.ink)),
+          ),
+          CupertinoSwitch(
+            activeTrackColor: iosGreen,
+            value: value,
+            onChanged: onChanged,
           ),
         ],
       ),

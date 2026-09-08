@@ -6,6 +6,7 @@ import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
 import { PROJECT_COMMAND_WHITELIST, DANGEROUS_COMMAND_PATTERNS, isDeveloperCommandModeEnabled } from './command-capabilities.js'
 import { createBundledRuntimeEnv } from '../../../project-runtime/bundled-runtime.js'
+import { scanCommandSegments, splitCommandSegments, tokenizeCommand } from './command-parser.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -437,7 +438,9 @@ function validateProjectCommand (rawCommand: string): ParsedCommand {
   }
 
   const developerMode = isDeveloperCommandModeEnabled()
-  const hasShellOperators = /[;&|<>]/.test(command)
+  // Scan outside quoted/escaped text so arguments such as `echo "a|b"` and
+  // `echo 'a;b'` remain ordinary single commands, matching the Rust harness.
+  const { hasOperator: hasShellOperators } = scanCommandSegments(command)
 
   if (hasShellOperators && !developerMode) {
     throw new Error('Command contains shell operators (; & | < >). Run a single command per call. To chain commands (e.g. "npm install && npm test"), enable developer command mode by setting THE_WORLD_DEV_COMMANDS=1.')
@@ -486,27 +489,6 @@ function validateSingleCommand (segment: string): ParsedCommand {
   return { baseCommand, tokens }
 }
 
-/**
- * Split a developer-mode command into its individual command segments. Strips
- * redirection clauses first (so "2>&1" / "> file" are not mistaken for new
- * commands), then splits on command separators and pipes.
- */
-function splitCommandSegments (command: string): string[] {
-  return stripRedirections(command)
-    .split(/\s*(?:&&|\|\||;|\||&)\s*/)
-    .map(segment => segment.trim())
-    .filter(Boolean)
-}
-
-/** Remove redirection clauses so only command + args remain for validation. */
-function stripRedirections (text: string): string {
-  return text
-    .replace(/\d*>>?\s*&\s*\d+/g, ' ') // 2>&1, >&2
-    .replace(/\d*>>?\s*\S+/g, ' ') // > file, >> file, 2> file
-    .replace(/<\s*\S+/g, ' ') // < file
-    .trim()
-}
-
 function isSuccessfulManualBuild (parsed: ParsedCommand, payload: { exitCode?: number | null }): boolean {
   return parsed.baseCommand === 'npm' &&
     parsed.tokens[1]?.toLowerCase() === 'run' &&
@@ -517,11 +499,6 @@ function isSuccessfulManualBuild (parsed: ParsedCommand, payload: { exitCode?: n
 function hasReadySignal (stdout: string, stderr: string): boolean {
   const combinedOutput = `${stdout}\n${stderr}`
   return READY_SIGNAL_PATTERNS.some(pattern => pattern.test(combinedOutput))
-}
-
-function tokenizeCommand (command: string): string[] {
-  return (command.match(/"[^"]*"|'[^']*'|\S+/g) || [])
-    .map(token => token.replace(/^("|')|("|')$/g, ''))
 }
 
 function normalizeBaseCommand (token: string): string {
