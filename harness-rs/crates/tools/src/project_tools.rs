@@ -631,6 +631,223 @@ impl Tool for ProjectDevRestartTool {
 /// Return the lifecycle/health state of a managed project server.
 pub struct ProjectStatusTool;
 
+fn read_project_status_metadata(
+    root: Option<&Path>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+    bool,
+    bool,
+    bool,
+) {
+    let Some(root) = root else {
+        return (None, None, None, false, false, false, false);
+    };
+
+    let package_json_path = root.join("package.json");
+    let package_json_exists = package_json_path.is_file();
+    let node_modules_present = root.join("node_modules").is_dir();
+    let standalone_build_present = root.join(".next/standalone/server.js").is_file();
+    let metadata = root
+        .join(".world-meta.json")
+        .is_file()
+        .then(|| std::fs::read_to_string(root.join(".world-meta.json")).ok())
+        .flatten()
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok());
+    let framework = metadata
+        .as_ref()
+        .and_then(|value| value.get("framework"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let build_status = metadata
+        .as_ref()
+        .and_then(|value| value.get("buildStatus"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let last_build_at = metadata
+        .as_ref()
+        .and_then(|value| value.get("lastBuildAt"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let is_next_project = framework
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("nextjs"))
+        || std::fs::read_to_string(&package_json_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+            .is_some_and(|package| {
+                ["dependencies", "devDependencies"].into_iter().any(|key| {
+                    package
+                        .get(key)
+                        .and_then(Value::as_object)
+                        .is_some_and(|dependencies| dependencies.contains_key("next"))
+                })
+            });
+
+    (
+        framework,
+        build_status,
+        last_build_at,
+        package_json_exists,
+        node_modules_present,
+        standalone_build_present,
+        is_next_project,
+    )
+}
+
+fn failure_value(
+    source: &str,
+    phase: &str,
+    status: &str,
+    summary: String,
+    time: Option<Value>,
+    exit_code: Option<Value>,
+    error: Option<String>,
+    stderr_excerpt: Vec<String>,
+) -> Value {
+    let mut failure = serde_json::Map::new();
+    failure.insert("source".into(), json!(source));
+    failure.insert("phase".into(), json!(phase));
+    failure.insert("status".into(), json!(status));
+    failure.insert("summary".into(), json!(summary));
+    if let Some(time) = time {
+        failure.insert("time".into(), time);
+    }
+    if let Some(exit_code) = exit_code {
+        failure.insert("exitCode".into(), exit_code);
+    }
+    if let Some(error) = error {
+        failure.insert("error".into(), json!(error));
+    }
+    failure.insert("stderrExcerpt".into(), json!(stderr_excerpt));
+    Value::Object(failure)
+}
+
+fn latest_project_failure(
+    status: &Value,
+    build_status: Option<&str>,
+    last_build_at: Option<&str>,
+    recent_error_texts: &[String],
+) -> Option<Value> {
+    let runtime_status = status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("not_started");
+    let runtime_failure = match runtime_status {
+        "crashed" => Some(failure_value(
+            "runtime",
+            "crash",
+            runtime_status,
+            status
+                .get("error")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("Project process crashed")
+                .to_string(),
+            status.get("startedAt").cloned(),
+            status
+                .get("exitCode")
+                .or_else(|| status.get("exit_code"))
+                .cloned(),
+            status
+                .get("error")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            recent_error_texts.to_vec(),
+        )),
+        "error" => Some(failure_value(
+            "runtime",
+            "spawn",
+            runtime_status,
+            status
+                .get("error")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("Project runtime failed to start")
+                .to_string(),
+            status.get("startedAt").cloned(),
+            status
+                .get("exitCode")
+                .or_else(|| status.get("exit_code"))
+                .cloned(),
+            status
+                .get("error")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            recent_error_texts.to_vec(),
+        )),
+        _ => None,
+    };
+    let build_failure = if build_status == Some("failed") {
+        Some(failure_value(
+            "build",
+            "build_failed",
+            "failed",
+            "Build failed".into(),
+            last_build_at.map(|value| json!(value)),
+            None,
+            None,
+            recent_error_texts.to_vec(),
+        ))
+    } else {
+        None
+    };
+
+    match (runtime_failure, build_failure) {
+        (Some(runtime), Some(build)) => {
+            let runtime_time = runtime.get("time").and_then(Value::as_str);
+            let build_time = build.get("time").and_then(Value::as_str);
+            if runtime_time.is_some() && build_time.is_none() {
+                Some(runtime)
+            } else if runtime_time.is_none() && build_time.is_some() {
+                Some(build)
+            } else if runtime_time.unwrap_or_default() >= build_time.unwrap_or_default() {
+                Some(runtime)
+            } else {
+                Some(build)
+            }
+        }
+        (Some(runtime), None) => Some(runtime),
+        (None, Some(build)) => Some(build),
+        (None, None) => None,
+    }
+}
+
+fn recommended_next_debug_step(
+    runtime_status: &str,
+    last_failure: Option<&Value>,
+    has_recent_error_logs: bool,
+) -> &'static str {
+    if last_failure
+        .and_then(|failure| failure.get("source"))
+        .and_then(Value::as_str)
+        == Some("build")
+    {
+        return "check_build_output";
+    }
+    if last_failure
+        .and_then(|failure| failure.get("phase"))
+        .and_then(Value::as_str)
+        .is_some_and(|phase| matches!(phase, "terminated_before_ready" | "ready_timeout" | "spawn"))
+    {
+        return "inspect_startup_failure";
+    }
+    if matches!(runtime_status, "crashed" | "error") {
+        let has_failure_excerpt = last_failure
+            .and_then(|failure| failure.get("stderrExcerpt"))
+            .and_then(Value::as_array)
+            .is_some_and(|excerpt| !excerpt.is_empty());
+        return if has_recent_error_logs || has_failure_excerpt {
+            "check_stderr_logs"
+        } else {
+            "restart_project_server"
+        };
+    }
+    "none"
+}
+
 #[async_trait]
 impl Tool for ProjectStatusTool {
     fn name(&self) -> &str {
@@ -638,7 +855,7 @@ impl Tool for ProjectStatusTool {
     }
 
     fn description(&self) -> &str {
-        "获取当前项目开发服务状态"
+        "Get the current project runtime status, port, PID, start time, dependency/build state, and the most recent structured runtime failure summary."
     }
 
     fn input_schema(&self) -> Value {
@@ -655,7 +872,155 @@ impl Tool for ProjectStatusTool {
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let project = require_str(&input, "project_id")?;
-        services.projects.status(project).await
+        let status = services.projects.status(project).await?;
+        let root = services.projects.project_root(project).ok();
+        let (
+            framework,
+            build_status,
+            last_build_at,
+            package_json_exists,
+            node_modules_present,
+            standalone_build_present,
+            is_next_project,
+        ) = read_project_status_metadata(root.as_deref());
+        let needs_rebuild = if is_next_project {
+            Some(
+                services
+                    .projects
+                    .project_needs_rebuild_for_ui(project)
+                    .unwrap_or(true),
+            )
+        } else {
+            None
+        };
+        let dependency_status = if !package_json_exists {
+            "not_applicable"
+        } else if node_modules_present {
+            "installed"
+        } else {
+            "missing"
+        };
+        let recent_logs = services.projects.logs(project, 20).await;
+        let stderr_logs = recent_logs
+            .iter()
+            .filter(|entry| entry.kind == "stderr")
+            .cloned()
+            .collect::<Vec<_>>();
+        let recent_error_logs = stderr_logs
+            .split_at(stderr_logs.len().saturating_sub(10))
+            .1
+            .to_vec();
+        let recent_error_texts = recent_error_logs
+            .iter()
+            .flat_map(|entry| entry.text.split(['\r', '\n']))
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let recent_error_texts = recent_error_texts
+            .split_at(recent_error_texts.len().saturating_sub(12))
+            .1
+            .to_vec();
+        let last_failure = latest_project_failure(
+            &status,
+            build_status.as_deref(),
+            last_build_at.as_deref(),
+            &recent_error_texts,
+        );
+        let runtime_status = status
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("not_started");
+        let recommended_prepare_action = if !package_json_exists {
+            "none"
+        } else if !is_next_project {
+            if node_modules_present {
+                "none"
+            } else {
+                "install_dependencies"
+            }
+        } else if needs_rebuild == Some(true) {
+            "rebuild_project"
+        } else if standalone_build_present {
+            "none"
+        } else if node_modules_present {
+            "rebuild_project"
+        } else {
+            "install_dependencies"
+        };
+        let recommended_debug_step = recommended_next_debug_step(
+            runtime_status,
+            last_failure.as_ref(),
+            !recent_error_logs.is_empty(),
+        );
+
+        let mut result = status.as_object().cloned().unwrap_or_default();
+        if let Some(framework) = framework {
+            result.insert("framework".into(), json!(framework));
+        }
+        if let Some(build_status) = build_status {
+            result.insert("build_status".into(), json!(build_status));
+        }
+        result.insert("package_json_exists".into(), json!(package_json_exists));
+        result.insert("node_modules_present".into(), json!(node_modules_present));
+        result.insert(
+            "standalone_build_present".into(),
+            json!(standalone_build_present),
+        );
+        if let Some(needs_rebuild) = needs_rebuild {
+            result.insert("needs_rebuild".into(), json!(needs_rebuild));
+        }
+        result.insert("dependency_status".into(), json!(dependency_status));
+        result.insert(
+            "recommended_prepare_action".into(),
+            json!(recommended_prepare_action),
+        );
+        if let Some(last_failure) = last_failure {
+            let last_error_source = last_failure.get("source").cloned();
+            let last_error_phase = last_failure.get("phase").cloned();
+            let last_error_time = last_failure.get("time").cloned();
+            let last_error_summary = last_failure.get("summary").cloned().or_else(|| {
+                status
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| json!(value))
+            });
+            let last_error_excerpt = last_failure
+                .get("stderrExcerpt")
+                .cloned()
+                .unwrap_or_else(|| json!(recent_error_texts));
+            result.insert("last_failure".into(), last_failure);
+            if let Some(value) = last_error_source {
+                result.insert("last_error_source".into(), value);
+            }
+            if let Some(value) = last_error_phase {
+                result.insert("last_error_phase".into(), value);
+            }
+            if let Some(value) = last_error_time {
+                result.insert("last_error_time".into(), value);
+            }
+            if let Some(value) = last_error_summary {
+                result.insert("last_error_summary".into(), value);
+            }
+            result.insert("last_error_excerpt".into(), last_error_excerpt);
+        } else if let Some(error) = status
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            result.insert("last_error_summary".into(), json!(error));
+            result.insert("last_error_excerpt".into(), json!(recent_error_texts));
+        }
+        result.insert(
+            "recommended_next_debug_step".into(),
+            json!(recommended_debug_step),
+        );
+        result.insert(
+            "recent_error_logs".into(),
+            serde_json::to_value(recent_error_logs)?,
+        );
+        Ok(Value::Object(result))
     }
 }
 
@@ -673,6 +1038,7 @@ mod tests {
         ToolServices {
             host: Arc::new(super::super::HostBridge::new()),
             current_stream: Arc::new(Mutex::new(String::new())),
+            abort: None,
             workspace,
             folder_workspace: None,
             target_project_id: target_project_id.map(ToOwned::to_owned),
@@ -687,6 +1053,7 @@ mod tests {
             mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
             projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(projects)),
             group_collaboration: None,
+            subagent_runtime: None,
         }
     }
 
@@ -893,6 +1260,67 @@ mod tests {
         assert_eq!(result["stage"], "build");
         assert!(result["projectId"].as_str().is_some());
         assert!(result["output"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn project_status_includes_runtime_build_and_recovery_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path(), None);
+        let project_id = "status-project";
+        let root = temp.path().join("projects").join(project_id);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"next":"15.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".world-meta.json"),
+            r#"{"id":"status-project","framework":"nextjs","buildStatus":"failed"}"#,
+        )
+        .unwrap();
+
+        let result = ProjectStatusTool
+            .execute(json!({ "project_id": project_id }), &services)
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "not_started");
+        assert_eq!(result["framework"], "nextjs");
+        assert_eq!(result["build_status"], "failed");
+        assert_eq!(result["package_json_exists"], true);
+        assert_eq!(result["node_modules_present"], false);
+        assert_eq!(result["standalone_build_present"], false);
+        assert_eq!(result["dependency_status"], "missing");
+        assert_eq!(result["needs_rebuild"], true);
+        assert_eq!(result["recommended_prepare_action"], "rebuild_project");
+        assert_eq!(result["last_failure"]["source"], "build");
+        assert_eq!(result["last_failure"]["phase"], "build_failed");
+        assert_eq!(result["last_error_source"], "build");
+        assert_eq!(result["last_error_phase"], "build_failed");
+        assert_eq!(result["recommended_next_debug_step"], "check_build_output");
+        assert_eq!(result["recent_error_logs"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn project_status_keeps_missing_project_response_compatible() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path(), None);
+
+        let result = ProjectStatusTool
+            .execute(json!({ "project_id": "missing-project" }), &services)
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "not_started");
+        assert_eq!(result["running"], false);
+        assert_eq!(result["package_json_exists"], false);
+        assert_eq!(result["dependency_status"], "not_applicable");
+        assert_eq!(result["recommended_prepare_action"], "none");
+        assert_eq!(result["recommended_next_debug_step"], "none");
+        assert_eq!(result["recent_error_logs"], json!([]));
+        assert!(result.get("framework").is_none());
+        assert!(result.get("needs_rebuild").is_none());
     }
 
     #[test]

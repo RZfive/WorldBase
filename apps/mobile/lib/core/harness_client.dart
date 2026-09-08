@@ -11,6 +11,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -90,7 +91,11 @@ Map<String, dynamic> buildChatSendParams({
       '联网搜索已开启：涉及外部信息时优先调用 web_search；必要时再调用 fetch_webpage。',
     ];
   } else if (webSearch == false) {
-    params['deniedToolNames'] = <String>['web_search', 'fetch_webpage'];
+    params['deniedToolNames'] = <String>[
+      'web_search',
+      'fetch_webpage',
+      'web_fetch',
+    ];
   }
   return params;
 }
@@ -133,6 +138,7 @@ class ToolDescriptor {
   final String name;
   final String description;
   final String domain;
+
   /// JSON Schema advertised by Rust for direct tool callers and UI tooling.
   /// Keep this instead of projecting descriptors down to name/description;
   /// otherwise Flutter cannot construct valid `tool.call` arguments from the
@@ -159,6 +165,406 @@ class ToolDescriptor {
     'domain': domain,
     'inputSchema': inputSchema,
     'permission': permission,
+  };
+}
+
+/// A structured preview descriptor shared by Electron's document workbench
+/// and the Rust JSON-RPC document APIs.
+///
+/// These fields intentionally remain strings instead of Dart enums.  The
+/// renderer currently advertises `pdf`, `html`, and `structured`, but keeping
+/// an unknown future value lossless lets an older Flutter build continue to
+/// display the artifact's text fallback.
+class DocumentRenderPreview {
+  const DocumentRenderPreview({
+    required this.kind,
+    required this.source,
+    required this.status,
+    required this.generatedAt,
+    this.mimeType,
+    this.assetPath,
+    this.error,
+  });
+
+  final String kind;
+  final String source;
+  final String status;
+  final String? mimeType;
+  final String? assetPath;
+  final String? error;
+  final String generatedAt;
+
+  bool get isReady => status == 'ready';
+
+  static DocumentRenderPreview fromJson(
+    Map<String, dynamic> json,
+  ) => DocumentRenderPreview(
+    kind: json['kind'] as String? ?? 'structured',
+    source: json['source'] as String? ?? 'fallback',
+    status: json['status'] as String? ?? 'unavailable',
+    mimeType: json['mimeType'] as String? ?? json['mime_type'] as String?,
+    assetPath: json['assetPath'] as String? ?? json['asset_path'] as String?,
+    error: json['error'] as String?,
+    generatedAt: (json['generatedAt'] ?? json['generated_at']) as String? ?? '',
+  );
+
+  Map<String, dynamic> toJson() => {
+    'kind': kind,
+    'source': source,
+    'status': status,
+    'mimeType': ?mimeType,
+    'assetPath': ?assetPath,
+    'error': ?error,
+    'generatedAt': generatedAt,
+  };
+}
+
+/// One logical unit in a parsed document (paragraph, table row, slide, etc.).
+class DocumentNode {
+  const DocumentNode({
+    required this.id,
+    required this.type,
+    required this.text,
+    required this.level,
+    required this.pageIndex,
+    this.children = const [],
+    this.meta = const <String, dynamic>{},
+  });
+
+  final String id;
+  final String type;
+  final String text;
+  final int level;
+  final int pageIndex;
+  final List<DocumentNode> children;
+  final Map<String, dynamic> meta;
+
+  static DocumentNode fromJson(Map<String, dynamic> json) => DocumentNode(
+    id: json['id'] as String? ?? '',
+    type: json['type'] as String? ?? 'paragraph',
+    text: json['text'] as String? ?? '',
+    level: ((json['level'] ?? 0) as num?)?.toInt() ?? 0,
+    pageIndex:
+        ((json['pageIndex'] ?? json['page_index'] ?? 0) as num?)?.toInt() ?? 0,
+    children:
+        (json['children'] as List?)
+            ?.whereType<Map>()
+            .map((child) => fromJson(child.cast<String, dynamic>()))
+            .toList() ??
+        const [],
+    meta: (json['meta'] as Map?)?.cast<String, dynamic>() ?? const {},
+  );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'type': type,
+    'text': text,
+    'level': level,
+    'pageIndex': pageIndex,
+    if (children.isNotEmpty)
+      'children': children.map((child) => child.toJson()).toList(),
+    if (meta.isNotEmpty) 'meta': meta,
+  };
+}
+
+/// A complete imported document artifact.
+class DocumentArtifact {
+  const DocumentArtifact({
+    required this.id,
+    required this.filePath,
+    required this.fileName,
+    required this.fileSize,
+    required this.fileType,
+    required this.plainText,
+    required this.nodes,
+    required this.importedAt,
+    this.render,
+    this.parsed,
+  });
+
+  final String id;
+  final String filePath;
+  final String fileName;
+  final int fileSize;
+  final String fileType;
+  final String plainText;
+  final List<DocumentNode> nodes;
+  final DocumentRenderPreview? render;
+  final String importedAt;
+
+  /// Rust keeps the parser-native payload here.  Electron's DTO does not
+  /// expose it, so this remains optional for cross-client compatibility.
+  final Object? parsed;
+
+  static DocumentArtifact fromJson(Map<String, dynamic> json) {
+    final parsed = json['parsed'];
+    final rawNodes =
+        json['nodes'] ??
+        (parsed is Map ? parsed['nodes'] ?? parsed['items'] : null);
+    return DocumentArtifact(
+      id:
+          (json['id'] ?? json['artifactId'] ?? json['artifact_id'])
+              as String? ??
+          '',
+      filePath:
+          (json['filePath'] ?? json['file_path'] ?? json['path']) as String? ??
+          '',
+      fileName:
+          (json['fileName'] ?? json['file_name']) as String? ?? 'document',
+      fileSize:
+          ((json['fileSize'] ?? json['file_size'] ?? 0) as num?)?.toInt() ?? 0,
+      fileType:
+          (json['fileType'] ?? json['file_type'] ?? json['kind']) as String? ??
+          'unknown',
+      plainText:
+          (json['plainText'] ?? json['plain_text'] ?? json['text'])
+              as String? ??
+          '',
+      nodes:
+          (rawNodes as List?)
+              ?.whereType<Map>()
+              .map(
+                (node) => DocumentNode.fromJson(node.cast<String, dynamic>()),
+              )
+              .toList() ??
+          const [],
+      render: json['render'] is Map
+          ? DocumentRenderPreview.fromJson(
+              (json['render'] as Map).cast<String, dynamic>(),
+            )
+          : null,
+      importedAt: (json['importedAt'] ?? json['imported_at']) as String? ?? '',
+      parsed: parsed,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'filePath': filePath,
+    'fileName': fileName,
+    'fileSize': fileSize,
+    'fileType': fileType,
+    'plainText': plainText,
+    'nodes': nodes.map((node) => node.toJson()).toList(),
+    'render': ?render?.toJson(),
+    'importedAt': importedAt,
+    'parsed': ?parsed,
+  };
+}
+
+/// Lightweight document entry returned by `doc.list`.
+class DocumentSummary {
+  const DocumentSummary({
+    required this.id,
+    required this.filePath,
+    required this.fileName,
+    required this.fileType,
+    required this.fileSize,
+    required this.nodeCount,
+    required this.selectionCount,
+    required this.importedAt,
+  });
+
+  final String id;
+  final String filePath;
+  final String fileName;
+  final String fileType;
+  final int fileSize;
+  final int nodeCount;
+  final int selectionCount;
+  final String importedAt;
+
+  static DocumentSummary fromJson(Map<String, dynamic> json) => DocumentSummary(
+    id:
+        (json['id'] ?? json['artifactId'] ?? json['artifact_id']) as String? ??
+        '',
+    filePath:
+        (json['filePath'] ?? json['file_path'] ?? json['path']) as String? ??
+        '',
+    fileName: (json['fileName'] ?? json['file_name']) as String? ?? 'document',
+    fileType:
+        (json['fileType'] ?? json['file_type'] ?? json['kind']) as String? ??
+        'unknown',
+    fileSize:
+        ((json['fileSize'] ?? json['file_size'] ?? 0) as num?)?.toInt() ?? 0,
+    nodeCount:
+        ((json['nodeCount'] ?? json['node_count'] ?? 0) as num?)?.toInt() ?? 0,
+    selectionCount:
+        ((json['selectionCount'] ?? json['selection_count'] ?? 0) as num?)
+            ?.toInt() ??
+        0,
+    importedAt: (json['importedAt'] ?? json['imported_at']) as String? ?? '',
+  );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'filePath': filePath,
+    'fileName': fileName,
+    'fileType': fileType,
+    'fileSize': fileSize,
+    'nodeCount': nodeCount,
+    'selectionCount': selectionCount,
+    'importedAt': importedAt,
+  };
+}
+
+/// Binary render asset returned by `doc.preview.read`.
+class DocumentRenderAsset {
+  const DocumentRenderAsset({required this.mimeType, required this.bytes});
+
+  final String mimeType;
+  final Uint8List bytes;
+
+  static DocumentRenderAsset fromJson(Map<String, dynamic> json) {
+    final bytes = _decodeDocumentBytes(json['bytes'] ?? json['data']);
+    if (bytes == null) {
+      throw const FormatException('doc.preview.read returned invalid bytes');
+    }
+    return DocumentRenderAsset(
+      mimeType:
+          (json['mimeType'] ?? json['mime_type']) as String? ??
+          'application/octet-stream',
+      bytes: bytes,
+    );
+  }
+}
+
+/// Source fingerprint used to prevent edits against a changed source file.
+class DocumentEditSourceState {
+  const DocumentEditSourceState({
+    required this.sha256,
+    required this.size,
+    required this.mtimeMs,
+  });
+
+  final String sha256;
+  final int size;
+  final double mtimeMs;
+
+  static DocumentEditSourceState fromJson(Map<String, dynamic> json) =>
+      DocumentEditSourceState(
+        sha256: json['sha256'] as String? ?? '',
+        size: ((json['size'] ?? 0) as num?)?.toInt() ?? 0,
+        mtimeMs:
+            ((json['mtimeMs'] ?? json['mtime_ms'] ?? 0) as num?)?.toDouble() ??
+            0,
+      );
+
+  Map<String, dynamic> toJson() => {
+    'sha256': sha256,
+    'size': size,
+    'mtimeMs': mtimeMs,
+  };
+}
+
+/// Structured result for opening an original file.  Mobile hosts do not have
+/// Electron's `shell.openPath`, so Rust/Flutter may report `supported: false`
+/// while still returning a stable result instead of throwing a platform error.
+class DocumentOpenResult {
+  const DocumentOpenResult({
+    required this.success,
+    this.supported = true,
+    this.error,
+  });
+
+  final bool success;
+  final bool supported;
+  final String? error;
+
+  static DocumentOpenResult fromJson(Object? value) {
+    if (value is bool) return DocumentOpenResult(success: value);
+    if (value is! Map) {
+      throw const FormatException('doc.openOriginal returned invalid data');
+    }
+    final json = value.cast<String, dynamic>();
+    return DocumentOpenResult(
+      success: json['success'] == true || json['ok'] == true,
+      supported: json['supported'] as bool? ?? true,
+      error: json['error'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'success': success,
+    'supported': supported,
+    'error': ?error,
+  };
+}
+
+Uint8List? _decodeDocumentBytes(Object? value) {
+  if (value is Uint8List) return value;
+  if (value is List) {
+    final ints = <int>[];
+    for (final item in value) {
+      if (item is! num || item < 0 || item > 255) return null;
+      ints.add(item.toInt());
+    }
+    return Uint8List.fromList(ints);
+  }
+  if (value is String) {
+    var encoded = value;
+    final comma = encoded.indexOf(',');
+    if (encoded.startsWith('data:') && comma >= 0) {
+      encoded = encoded.substring(comma + 1);
+    }
+    try {
+      return base64Decode(encoded);
+    } on FormatException {
+      return null;
+    }
+  }
+  return null;
+}
+
+/// A document preview selection shared by Electron's document workbench and
+/// the Rust-backed Flutter client.
+///
+/// Rust persists these regions beside the imported artifact so a mobile
+/// reconnect does not lose the labels or excerpts that the user attached to a
+/// document.  Accept both camelCase (current protocol) and snake_case keys so
+/// this model remains usable with an older harness build during an upgrade.
+class DocumentSelection {
+  const DocumentSelection({
+    required this.id,
+    required this.artifactId,
+    required this.nodeIds,
+    required this.label,
+    required this.color,
+    this.excerpt,
+    this.createdAt = '',
+  });
+
+  final String id;
+  final String artifactId;
+  final List<String> nodeIds;
+  final String label;
+  final String color;
+  final String? excerpt;
+  final String createdAt;
+
+  static DocumentSelection fromJson(Map<String, dynamic> json) {
+    final nodeIds = (json['nodeIds'] ?? json['node_ids']) as List?;
+    return DocumentSelection(
+      id:
+          (json['id'] ?? json['regionId'] ?? json['region_id']) as String? ??
+          '',
+      artifactId: (json['artifactId'] ?? json['artifact_id']) as String? ?? '',
+      nodeIds: nodeIds?.whereType<String>().toList() ?? const [],
+      label: json['label'] as String? ?? '',
+      color: json['color'] as String? ?? '',
+      excerpt: json['excerpt'] as String?,
+      createdAt: (json['createdAt'] ?? json['created_at']) as String? ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'artifactId': artifactId,
+    'nodeIds': nodeIds,
+    'label': label,
+    'color': color,
+    'excerpt': ?excerpt,
+    'createdAt': createdAt,
   };
 }
 
@@ -692,6 +1098,11 @@ class GroupSession {
     this.conversationId = '',
     this.board = const {},
     this.rounds = const [],
+    this.createdAt = '',
+    this.maxParallelWorkers = 2,
+    this.boardUpdates = const [],
+    this.pendingInjections = const [],
+    this.activeMemberIds = const [],
   });
   final String id;
   final String topic;
@@ -702,6 +1113,11 @@ class GroupSession {
   final String conversationId;
   final Map<String, dynamic> board;
   final List<dynamic> rounds;
+  final String createdAt;
+  final int maxParallelWorkers;
+  final List<dynamic> boardUpdates;
+  final List<dynamic> pendingInjections;
+  final List<String> activeMemberIds;
 
   List<Map<String, dynamic>> get normalizedMembers => members
       .whereType<Map>()
@@ -740,7 +1156,47 @@ class GroupSession {
         j['conversationId'] as String? ?? 'group-${j['id'] as String}',
     board: (j['board'] as Map?)?.cast<String, dynamic>() ?? {},
     rounds: j['rounds'] as List? ?? [],
+    createdAt: (j['createdAt'] ?? j['created_at']) as String? ?? '',
+    maxParallelWorkers:
+        ((j['maxParallelWorkers'] ?? j['max_parallel_workers']) as num?)
+            ?.toInt() ??
+        2,
+    boardUpdates:
+        j['boardUpdates'] as List? ?? j['board_updates'] as List? ?? [],
+    pendingInjections:
+        j['pendingInjections'] as List? ??
+        j['pending_injections'] as List? ??
+        [],
+    activeMemberIds:
+        (j['activeMemberIds'] as List? ?? j['active_member_ids'] as List?)
+            ?.whereType<String>()
+            .toList() ??
+        const [],
   );
+}
+
+class SkillArgument {
+  const SkillArgument({
+    required this.name,
+    this.description = '',
+    this.required = false,
+  });
+
+  final String name;
+  final String description;
+  final bool required;
+
+  static SkillArgument fromJson(Map<String, dynamic> j) => SkillArgument(
+    name: j['name'] as String? ?? '',
+    description: j['description'] as String? ?? '',
+    required: j['required'] as bool? ?? false,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'description': description,
+    'required': required,
+  };
 }
 
 class SkillDescriptor {
@@ -748,15 +1204,143 @@ class SkillDescriptor {
     required this.name,
     required this.description,
     required this.instructions,
+    this.whenToUse,
+    this.arguments = const [],
+    this.allowedTools = const [],
+    this.context = 'inline',
+    this.path = '',
   });
   final String name;
   final String description;
   final String instructions;
+  final String? whenToUse;
+  final List<SkillArgument> arguments;
+  final List<String> allowedTools;
+  final String context;
+  final String path;
+
   static SkillDescriptor fromJson(Map<String, dynamic> j) => SkillDescriptor(
-    name: j['name'] as String,
+    name: j['name'] as String? ?? '',
     description: j['description'] as String? ?? '',
     instructions: j['instructions'] as String? ?? '',
+    whenToUse: (j['whenToUse'] ?? j['when_to_use']) as String?,
+    arguments:
+        (j['arguments'] as List?)
+            ?.whereType<Map>()
+            .map((argument) => SkillArgument.fromJson(argument.cast()))
+            .toList() ??
+        const [],
+    allowedTools:
+        (j['allowedTools'] as List? ?? j['allowed_tools'] as List?)
+            ?.whereType<String>()
+            .toList() ??
+        const [],
+    context: j['context'] as String? ?? 'inline',
+    path: j['path'] as String? ?? '',
   );
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'description': description,
+    if (whenToUse != null && whenToUse!.isNotEmpty) 'whenToUse': whenToUse,
+    if (arguments.isNotEmpty)
+      'arguments': arguments.map((argument) => argument.toJson()).toList(),
+    if (allowedTools.isNotEmpty) 'allowedTools': allowedTools,
+    'context': context,
+    'instructions': instructions,
+    if (path.isNotEmpty) 'path': path,
+  };
+}
+
+/// Structured cadence used by Electron scheduled tasks. Legacy cron entries
+/// are represented with `kind == 'cron'` and [expression] populated.
+class ScheduledTaskSchedule {
+  const ScheduledTaskSchedule({
+    required this.kind,
+    this.runAt,
+    this.everyMinutes,
+    this.startAt,
+    this.timeOfDay,
+    this.weekdays = const [],
+    this.dates = const [],
+    this.expression,
+  });
+
+  final String kind;
+  final String? runAt;
+  final int? everyMinutes;
+  final String? startAt;
+  final String? timeOfDay;
+  final List<int> weekdays;
+  final List<String> dates;
+  final String? expression;
+
+  bool get isLegacyCron => kind == 'cron';
+
+  static ScheduledTaskSchedule? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final j = value.cast<String, dynamic>();
+    final kind =
+        (j['kind'] ?? j['scheduleKind'] ?? j['schedule_kind']) as String? ?? '';
+    if (kind.isEmpty) return null;
+    final weekdays =
+        (j['weekdays'] as List?)
+            ?.whereType<num>()
+            .map((day) => day.toInt())
+            .toList() ??
+        const <int>[];
+    final dates =
+        (j['dates'] as List?)?.whereType<String>().toList() ?? const <String>[];
+    return ScheduledTaskSchedule(
+      kind: kind,
+      runAt: j['runAt'] as String? ?? j['run_at'] as String?,
+      everyMinutes: ((j['everyMinutes'] ?? j['every_minutes']) as num?)
+          ?.toInt(),
+      startAt: j['startAt'] as String? ?? j['start_at'] as String?,
+      timeOfDay: j['timeOfDay'] as String? ?? j['time_of_day'] as String?,
+      weekdays: weekdays,
+      dates: dates,
+      expression: j['expression'] as String? ?? j['cron'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'kind': kind,
+    if (runAt != null) 'runAt': runAt,
+    if (everyMinutes != null) 'everyMinutes': everyMinutes,
+    if (startAt != null) 'startAt': startAt,
+    if (timeOfDay != null) 'timeOfDay': timeOfDay,
+    if (weekdays.isNotEmpty) 'weekdays': weekdays,
+    if (dates.isNotEmpty) 'dates': dates,
+    if (expression != null) 'expression': expression,
+  };
+}
+
+class ScheduledTaskRetryPolicy {
+  const ScheduledTaskRetryPolicy({
+    this.maxRetries = 0,
+    this.retryDelayMinutes = 5,
+  });
+
+  final int maxRetries;
+  final int retryDelayMinutes;
+
+  static ScheduledTaskRetryPolicy fromJson(Object? value) {
+    if (value is! Map) return const ScheduledTaskRetryPolicy();
+    final j = value.cast<String, dynamic>();
+    return ScheduledTaskRetryPolicy(
+      maxRetries: ((j['maxRetries'] ?? j['max_retries']) as num?)?.toInt() ?? 0,
+      retryDelayMinutes:
+          ((j['retryDelayMinutes'] ?? j['retry_delay_minutes']) as num?)
+              ?.toInt() ??
+          5,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'maxRetries': maxRetries,
+    'retryDelayMinutes': retryDelayMinutes,
+  };
 }
 
 class ScheduleEntry {
@@ -767,6 +1351,17 @@ class ScheduleEntry {
     required this.task,
     required this.enabled,
     this.nextRunAt,
+    this.lastRunAt,
+    this.schedule,
+    this.selectedSkillIds = const [],
+    this.selectedMcpServerIds = const [],
+    this.retryPolicy = const ScheduledTaskRetryPolicy(),
+    this.retryScheduledAt,
+    this.retryAttempt = 0,
+    this.createdBy = 'manual',
+    this.createdAt = '',
+    this.updatedAt = '',
+    this.lastStatus = 'idle',
   });
   final String id;
   final String name;
@@ -774,13 +1369,387 @@ class ScheduleEntry {
   final String task;
   final bool enabled;
   final String? nextRunAt;
+  final String? lastRunAt;
+  final ScheduledTaskSchedule? schedule;
+  final List<String> selectedSkillIds;
+  final List<String> selectedMcpServerIds;
+  final ScheduledTaskRetryPolicy retryPolicy;
+  final String? retryScheduledAt;
+  final int retryAttempt;
+  final String createdBy;
+  final String createdAt;
+  final String updatedAt;
+  final String lastStatus;
+
+  String get title => name;
+  String get prompt => task;
+
   static ScheduleEntry fromJson(Map<String, dynamic> j) => ScheduleEntry(
-    id: j['id'] as String,
-    name: j['name'] as String? ?? '',
+    id: j['id'] as String? ?? '',
+    name: (j['name'] ?? j['title']) as String? ?? '',
     cron: j['cron'] as String? ?? '',
-    task: j['task'] as String? ?? '',
+    task: (j['task'] ?? j['prompt']) as String? ?? '',
     enabled: j['enabled'] as bool? ?? true,
-    nextRunAt: j['nextRunAt'] as String?,
+    nextRunAt: (j['nextRunAt'] ?? j['next_run_at']) as String?,
+    lastRunAt: (j['lastRunAt'] ?? j['last_run_at']) as String?,
+    schedule: ScheduledTaskSchedule.tryParse(j['schedule']),
+    selectedSkillIds:
+        (j['selectedSkillIds'] as List? ?? j['selected_skill_ids'] as List?)
+            ?.whereType<String>()
+            .toList() ??
+        const [],
+    selectedMcpServerIds:
+        (j['selectedMcpServerIds'] as List? ??
+                j['selected_mcp_server_ids'] as List?)
+            ?.whereType<String>()
+            .toList() ??
+        const [],
+    retryPolicy: ScheduledTaskRetryPolicy.fromJson(
+      j['retryPolicy'] ?? j['retry_policy'],
+    ),
+    retryScheduledAt:
+        (j['retryScheduledAt'] ?? j['retry_scheduled_at']) as String?,
+    retryAttempt:
+        ((j['retryAttempt'] ?? j['retry_attempt']) as num?)?.toInt() ?? 0,
+    createdBy: (j['createdBy'] ?? j['created_by']) as String? ?? 'manual',
+    createdAt: (j['createdAt'] ?? j['created_at']) as String? ?? '',
+    updatedAt: (j['updatedAt'] ?? j['updated_at']) as String? ?? '',
+    lastStatus: (j['lastStatus'] ?? j['last_status']) as String? ?? 'idle',
+  );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'cron': cron,
+    'task': task,
+    'enabled': enabled,
+    if (lastRunAt != null) 'lastRunAt': lastRunAt,
+    if (nextRunAt != null) 'nextRunAt': nextRunAt,
+    if (schedule != null) 'schedule': schedule!.toJson(),
+    'selectedSkillIds': selectedSkillIds,
+    'selectedMcpServerIds': selectedMcpServerIds,
+    'retryPolicy': retryPolicy.toJson(),
+    if (retryScheduledAt != null) 'retryScheduledAt': retryScheduledAt,
+    'retryAttempt': retryAttempt,
+    'createdBy': createdBy,
+    if (createdAt.isNotEmpty) 'createdAt': createdAt,
+    if (updatedAt.isNotEmpty) 'updatedAt': updatedAt,
+    'lastStatus': lastStatus,
+  };
+}
+
+/// Durable MCP configuration. Flutter keeps Electron's settings shape
+/// (`id` + `command`/`url`), while Rust also accepts the compact `target`
+/// shape used by direct harness callers.
+class McpServerConfig {
+  const McpServerConfig({
+    required this.id,
+    required this.name,
+    this.enabled = true,
+    this.transport = 'stdio',
+    this.command = '',
+    this.args = const [],
+    this.cwd = '',
+    this.env = const {},
+    this.url = '',
+    this.headers = const {},
+    this.timeoutMs = 15000,
+  });
+
+  final String id;
+  final String name;
+  final bool enabled;
+  final String transport;
+  final String command;
+  final List<String> args;
+  final String cwd;
+  final Map<String, String> env;
+  final String url;
+  final Map<String, String> headers;
+  final int timeoutMs;
+
+  static Map<String, String> _stringMap(Object? value) {
+    if (value is! Map) return const <String, String>{};
+    return value.map<String, String>(
+      (key, value) => MapEntry(key.toString(), value.toString()),
+    );
+  }
+
+  static McpServerConfig fromJson(Map<String, dynamic> j) {
+    final id = (j['id'] ?? j['serverId'] ?? j['name']) as String? ?? '';
+    final transport = j['transport'] as String? ?? 'stdio';
+    final target = j['target'] as String? ?? '';
+    final command =
+        j['command'] as String? ?? (transport == 'stdio' ? target : '');
+    final url = j['url'] as String? ?? (transport != 'stdio' ? target : '');
+    return McpServerConfig(
+      id: id,
+      name:
+          (j['displayName'] ?? j['display_name'] ?? j['name']) as String? ?? id,
+      enabled: j['enabled'] as bool? ?? true,
+      transport: transport,
+      command: command,
+      args: (j['args'] as List?)?.whereType<String>().toList() ?? const [],
+      cwd: j['cwd'] as String? ?? '',
+      env: _stringMap(j['env']),
+      url: url,
+      headers: _stringMap(j['headers']),
+      timeoutMs:
+          ((j['timeoutMs'] ?? j['timeout_ms']) as num?)?.toInt() ?? 15000,
+    );
+  }
+
+  /// Settings shape consumed by `settings.set` and `mcp.reload`.
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'enabled': enabled,
+    'transport': transport,
+    'command': command,
+    'args': args,
+    'cwd': cwd,
+    'env': env,
+    'url': url,
+    'headers': headers,
+    'timeoutMs': timeoutMs,
+  };
+}
+
+class McpTool {
+  const McpTool({
+    required this.server,
+    required this.name,
+    this.serverName = '',
+    this.description = '',
+    this.inputSchema = const {},
+  });
+
+  final String server;
+  final String serverName;
+  final String name;
+  final String description;
+  final Map<String, dynamic> inputSchema;
+
+  static McpTool fromJson(Map<String, dynamic> j) => McpTool(
+    server: (j['server'] ?? j['serverId'] ?? j['server_id']) as String? ?? '',
+    serverName: j['serverName'] as String? ?? '',
+    name: j['name'] as String? ?? '',
+    description: j['description'] as String? ?? '',
+    inputSchema: (j['inputSchema'] ?? j['input_schema']) is Map
+        ? ((j['inputSchema'] ?? j['input_schema']) as Map)
+              .cast<String, dynamic>()
+        : const {},
+  );
+
+  Map<String, dynamic> toJson() => {
+    'server': server,
+    'serverName': serverName,
+    'name': name,
+    'description': description,
+    'inputSchema': inputSchema,
+  };
+}
+
+class McpToolSummary {
+  const McpToolSummary({
+    required this.name,
+    this.localName = '',
+    this.description = '',
+    this.inputSchema = const {},
+  });
+
+  final String name;
+  final String localName;
+  final String description;
+  final Map<String, dynamic> inputSchema;
+
+  static McpToolSummary fromJson(Map<String, dynamic> j) => McpToolSummary(
+    name: j['name'] as String? ?? '',
+    localName: (j['localName'] ?? j['local_name']) as String? ?? '',
+    description: j['description'] as String? ?? '',
+    inputSchema: (j['inputSchema'] ?? j['input_schema']) is Map
+        ? ((j['inputSchema'] ?? j['input_schema']) as Map)
+              .cast<String, dynamic>()
+        : const {},
+  );
+}
+
+class McpResourceSummary {
+  const McpResourceSummary({
+    required this.uri,
+    required this.name,
+    this.description,
+    this.mimeType,
+  });
+
+  final String uri;
+  final String name;
+  final String? description;
+  final String? mimeType;
+
+  static McpResourceSummary fromJson(Map<String, dynamic> j) =>
+      McpResourceSummary(
+        uri: j['uri'] as String? ?? '',
+        name: j['name'] as String? ?? '',
+        description: j['description'] as String?,
+        mimeType: (j['mimeType'] ?? j['mime_type']) as String?,
+      );
+}
+
+class McpPromptArgumentSummary {
+  const McpPromptArgumentSummary({
+    required this.name,
+    this.description,
+    this.required,
+  });
+
+  final String name;
+  final String? description;
+  final bool? required;
+
+  static McpPromptArgumentSummary fromJson(Map<String, dynamic> j) =>
+      McpPromptArgumentSummary(
+        name: j['name'] as String? ?? '',
+        description: j['description'] as String?,
+        required: j['required'] as bool?,
+      );
+}
+
+class McpPromptSummary {
+  const McpPromptSummary({
+    required this.name,
+    this.description = '',
+    this.arguments = const [],
+  });
+
+  final String name;
+  final String description;
+  final List<McpPromptArgumentSummary> arguments;
+
+  static McpPromptSummary fromJson(Map<String, dynamic> j) => McpPromptSummary(
+    name: j['name'] as String? ?? '',
+    description: j['description'] as String? ?? '',
+    arguments:
+        (j['arguments'] as List?)
+            ?.whereType<Map>()
+            .map(
+              (argument) => McpPromptArgumentSummary.fromJson(argument.cast()),
+            )
+            .toList() ??
+        const [],
+  );
+}
+
+class McpCapabilities {
+  const McpCapabilities({
+    this.tools = false,
+    this.resources = false,
+    this.prompts = false,
+  });
+
+  final bool tools;
+  final bool resources;
+  final bool prompts;
+
+  static McpCapabilities fromJson(Object? value) {
+    if (value is! Map) return const McpCapabilities();
+    return McpCapabilities(
+      tools: value['tools'] as bool? ?? false,
+      resources: value['resources'] as bool? ?? false,
+      prompts: value['prompts'] as bool? ?? false,
+    );
+  }
+}
+
+class McpServerSnapshot {
+  const McpServerSnapshot({
+    required this.id,
+    required this.name,
+    required this.enabled,
+    required this.transport,
+    required this.status,
+    this.error,
+    this.updatedAt,
+    this.tools = const [],
+    this.resources = const [],
+    this.prompts = const [],
+    this.capabilities = const McpCapabilities(),
+  });
+
+  final String id;
+  final String name;
+  final bool enabled;
+  final String transport;
+  final String status;
+  final String? error;
+  final String? updatedAt;
+  final List<McpToolSummary> tools;
+  final List<McpResourceSummary> resources;
+  final List<McpPromptSummary> prompts;
+  final McpCapabilities capabilities;
+
+  static McpServerSnapshot fromJson(Map<String, dynamic> j) =>
+      McpServerSnapshot(
+        id: j['id'] as String? ?? '',
+        name: j['name'] as String? ?? '',
+        enabled: j['enabled'] as bool? ?? false,
+        transport: j['transport'] as String? ?? '',
+        status: j['status'] as String? ?? 'disconnected',
+        error: j['error'] as String?,
+        updatedAt: (j['updatedAt'] ?? j['updated_at']) as String?,
+        tools:
+            (j['tools'] as List?)
+                ?.whereType<Map>()
+                .map((tool) => McpToolSummary.fromJson(tool.cast()))
+                .toList() ??
+            const [],
+        resources:
+            (j['resources'] as List?)
+                ?.whereType<Map>()
+                .map((resource) => McpResourceSummary.fromJson(resource.cast()))
+                .toList() ??
+            const [],
+        prompts:
+            (j['prompts'] as List?)
+                ?.whereType<Map>()
+                .map((prompt) => McpPromptSummary.fromJson(prompt.cast()))
+                .toList() ??
+            const [],
+        capabilities: McpCapabilities.fromJson(j['capabilities']),
+      );
+}
+
+class McpStateSnapshot {
+  const McpStateSnapshot({required this.servers, required this.updatedAt});
+
+  final List<McpServerSnapshot> servers;
+  final String updatedAt;
+
+  static McpStateSnapshot fromJson(Map<String, dynamic> j) => McpStateSnapshot(
+    servers:
+        (j['servers'] as List?)
+            ?.whereType<Map>()
+            .map((server) => McpServerSnapshot.fromJson(server.cast()))
+            .toList() ??
+        const [],
+    updatedAt: (j['updatedAt'] ?? j['updated_at']) as String? ?? '',
+  );
+}
+
+class McpListResult {
+  const McpListResult({required this.servers, required this.tools});
+
+  final List<String> servers;
+  final List<McpTool> tools;
+
+  static McpListResult fromJson(Map<String, dynamic> j) => McpListResult(
+    servers: (j['servers'] as List?)?.whereType<String>().toList() ?? const [],
+    tools:
+        (j['tools'] as List?)
+            ?.whereType<Map>()
+            .map((tool) => McpTool.fromJson(tool.cast()))
+            .toList() ??
+        const [],
   );
 }
 
@@ -799,7 +1768,7 @@ class PendingPermission {
   final String argsSummary;
 }
 
-/// 宿主反向请求（ask_user / page_automation）。
+/// 宿主反向请求（ask_user / page_automation / document.openOriginal）。
 class HostRequest {
   HostRequest({
     required this.streamId,
@@ -809,7 +1778,7 @@ class HostRequest {
   });
   final String streamId;
   final String requestId;
-  final String kind; // ask_user / page_automation
+  final String kind; // ask_user / page_automation / document.openOriginal
   final Map<String, dynamic> payload;
 }
 
@@ -1143,7 +2112,7 @@ class HarnessClient {
   /// Rust flattens [ChatRunContext] into `chat.send`, so reasoning controls
   /// are sent as `reasoningEffort` (rather than a nested `context` object).
   /// [webSearch] is translated to the same context contract: enabled runs
-  /// receive an explicit instruction, disabled runs deny the two web tools.
+  /// receive an explicit instruction, disabled runs deny every built-in web tool.
   Future<String> sendChat(
     String conversationId,
     String text, {
@@ -1176,6 +2145,236 @@ class HarnessClient {
   Future<Map<String, dynamic>> parseDocumentFile(String path) async {
     final result = await call('doc.parse', {'path': path});
     return (result as Map).cast<String, dynamic>();
+  }
+
+  /// Import a document through the shared document-workbench contract.
+  ///
+  /// Electron wraps the artifact in `{ artifact }`, while early Rust builds
+  /// returned the artifact object directly.  Accept both forms during the
+  /// migration so an app update does not have to be deployed atomically with
+  /// the bundled harness binary.
+  Future<DocumentArtifact> importDocument(String path) async {
+    final result = await call('doc.import', {'path': path});
+    final artifact = _unwrapDocumentArtifact(result);
+    if (artifact == null) {
+      throw const FormatException('doc.import missing artifact');
+    }
+    return DocumentArtifact.fromJson(artifact);
+  }
+
+  /// List imported document summaries.  Rust tool-compatible builds may
+  /// return `{ documents, selections }`, whereas the Electron preload API
+  /// returns the summary array directly.
+  Future<List<DocumentSummary>> listDocuments() async {
+    final result = await call('doc.list', {});
+    final list = _documentListFromResult(result);
+    return list.map(DocumentSummary.fromJson).toList(growable: false);
+  }
+
+  /// Fetch one imported artifact by id.  A missing artifact is represented by
+  /// `null`, matching Electron's `document:get` IPC handler.
+  Future<DocumentArtifact?> getDocument(String artifactId) async {
+    final result = await call('doc.get', {'artifactId': artifactId});
+    final artifact = _unwrapDocumentArtifact(result);
+    return artifact == null ? null : DocumentArtifact.fromJson(artifact);
+  }
+
+  /// Ensure a preview is available and return the hydrated artifact, if one
+  /// exists.  The Rust response can be either a direct artifact or an
+  /// `{ artifact }` wrapper; a `{ render }` wrapper is also accepted for
+  /// lightweight preview-only implementations.
+  Future<DocumentArtifact?> ensureDocumentRenderPreview(
+    String artifactId,
+  ) async {
+    final result = await call('doc.preview.ensure', {'artifactId': artifactId});
+    final artifact = _unwrapDocumentArtifact(result);
+    if (artifact != null) return DocumentArtifact.fromJson(artifact);
+    if (result is Map && result['render'] is Map) {
+      final current = await getDocument(artifactId);
+      if (current == null) return null;
+      return DocumentArtifact.fromJson({
+        ...current.toJson(),
+        'render': result['render'],
+      });
+    }
+    return null;
+  }
+
+  /// Read the bytes for an ensured preview.  JSON-RPC transports commonly
+  /// encode `Vec<u8>` as an integer list, while a bridge may use base64; both
+  /// representations are accepted here.
+  Future<DocumentRenderAsset?> getDocumentRenderData(String artifactId) async {
+    final result = await call('doc.preview.read', {'artifactId': artifactId});
+    if (result == null) return null;
+    final payload = result is Map && result['asset'] is Map
+        ? (result['asset'] as Map).cast<String, dynamic>()
+        : result;
+    if (payload is! Map) {
+      throw const FormatException('doc.preview.read returned invalid data');
+    }
+    return DocumentRenderAsset.fromJson(payload.cast<String, dynamic>());
+  }
+
+  /// Ask the host to open an original document.  A desktop Rust host may
+  /// delegate to its shell and return `{ success: true }`; mobile hosts are
+  /// expected to return `{ success: false, supported: false }` because they
+  /// do not expose Electron's `shell.openPath` capability.
+  Future<DocumentOpenResult> openDocumentOriginal(String artifactId) async {
+    final result = await call('doc.openOriginal', {'artifactId': artifactId});
+    return DocumentOpenResult.fromJson(result);
+  }
+
+  /// Remove an imported artifact and its associated selections.  Accept both
+  /// Electron's bare boolean and Rust's explicit `{ removed }` response.
+  Future<bool> removeDocument(String artifactId) async {
+    final result = await call('doc.remove', {'artifactId': artifactId});
+    if (result is bool) return result;
+    if (result is Map) {
+      final json = result.cast<String, dynamic>();
+      final removed = json['removed'] ?? json['deleted'] ?? json['success'];
+      if (removed is bool) return removed;
+    }
+    throw const FormatException('doc.remove returned invalid data');
+  }
+
+  /// Read the source fingerprint used by document editors to reject writes
+  /// against a file changed by another process.
+  Future<DocumentEditSourceState> getDocumentEditSourceState(
+    String artifactId,
+  ) async {
+    final result = await call('doc.editSource', {'artifactId': artifactId});
+    if (result is! Map) {
+      throw const FormatException('doc.editSource returned invalid data');
+    }
+    return DocumentEditSourceState.fromJson(result.cast<String, dynamic>());
+  }
+
+  /// Aliases matching the Electron preload names.  Keeping these alongside
+  /// the `get*` names makes callers portable without leaking transport method
+  /// names into widgets.
+  Future<DocumentArtifact?> getDocumentPreview(String artifactId) =>
+      ensureDocumentRenderPreview(artifactId);
+
+  Future<DocumentRenderAsset?> readDocumentPreview(String artifactId) =>
+      getDocumentRenderData(artifactId);
+
+  List<Map<String, dynamic>> _documentListFromResult(Object? result) {
+    final raw = result is List
+        ? result
+        : result is Map
+        ? (result['documents'] ?? result['items'] ?? const [])
+        : const [];
+    if (raw is! List) {
+      throw const FormatException('doc.list returned invalid documents');
+    }
+    return raw
+        .whereType<Map>()
+        .map((entry) => entry.cast<String, dynamic>())
+        .toList(growable: false);
+  }
+
+  Map<String, dynamic>? _unwrapDocumentArtifact(Object? result) {
+    if (result == null) return null;
+    if (result is! Map) return null;
+    final json = result.cast<String, dynamic>();
+    final nested = json['artifact'];
+    if (nested is Map) return nested.cast<String, dynamic>();
+    // `{ document: { ... } }` is used by one older app-server prototype.
+    final document = json['document'];
+    if (document is Map) return document.cast<String, dynamic>();
+    // A render-only / status response is not an artifact.
+    if (json.containsKey('render') &&
+        !json.containsKey('id') &&
+        !json.containsKey('artifactId')) {
+      return null;
+    }
+    return json;
+  }
+
+  /// List Rust-persisted document selections. When [artifactId] is supplied,
+  /// only regions attached to that artifact are returned; omitted and empty
+  /// values have the same unrestricted semantics as Electron's
+  /// `getDocumentSelections` backing store.
+  Future<List<DocumentSelection>> listDocumentSelections({
+    String? artifactId,
+  }) async {
+    final result = await call('doc.selection.list', {
+      'artifactId': ?artifactId,
+    });
+    final list = result is List
+        ? result
+        : result is Map
+        ? result['selections'] as List? ?? const []
+        : const [];
+    return list
+        .whereType<Map>()
+        .map(
+          (entry) => DocumentSelection.fromJson(entry.cast<String, dynamic>()),
+        )
+        .toList();
+  }
+
+  /// Alias matching Electron's preload API for callers that already use the
+  /// document workbench naming.
+  Future<List<DocumentSelection>> getDocumentSelections(String artifactId) =>
+      listDocumentSelections(artifactId: artifactId);
+
+  /// Create a durable selection on an imported document artifact.
+  Future<DocumentSelection> createDocumentSelection({
+    required String artifactId,
+    List<String> nodeIds = const [],
+    String label = '未命名选区',
+    String color = '#3b82f6',
+    String? excerpt,
+  }) async {
+    final result = await call('doc.selection.create', {
+      'artifactId': artifactId,
+      'nodeIds': nodeIds,
+      'label': label,
+      'color': color,
+      'excerpt': ?excerpt,
+    });
+    if (result is! Map) {
+      throw const FormatException('doc.selection.create missing selection');
+    }
+    return DocumentSelection.fromJson(result.cast<String, dynamic>());
+  }
+
+  /// Update the user-visible label of a selection. Unknown IDs return null,
+  /// matching Electron's `DocumentStore.updateSelectionLabel` behavior.
+  Future<DocumentSelection?> updateDocumentSelectionLabel(
+    String regionId,
+    String label,
+  ) async {
+    final result = await call('doc.selection.update', {
+      'id': regionId,
+      'label': label,
+    });
+    if (result == null) return null;
+    if (result is! Map) {
+      throw const FormatException('doc.selection.update returned invalid data');
+    }
+    return DocumentSelection.fromJson(result.cast<String, dynamic>());
+  }
+
+  /// Remove one selection, returning false when the region ID is unknown.
+  Future<bool> removeDocumentSelection(String regionId) async {
+    final result = await call('doc.selection.remove', {'id': regionId});
+    if (result is bool) return result;
+    throw const FormatException('doc.selection.remove returned invalid data');
+  }
+
+  /// Build the prompt envelope used when selected document text is injected
+  /// into an agent request. Omitted [regionIds] includes every persisted
+  /// selection; an explicitly empty list produces an empty prompt.
+  Future<String> buildDocumentSelectionsPrompt([
+    List<String>? regionIds,
+  ]) async {
+    final result = await call('doc.selection.prompt', {
+      'regionIds': ?regionIds,
+    });
+    if (result is String) return result;
+    throw const FormatException('doc.selection.prompt returned invalid data');
   }
 
   String _readStreamId(dynamic result, {required String method}) {
@@ -1578,16 +2777,37 @@ class HarnessClient {
   Future<void> saveSkill(
     String name,
     String description,
-    String instructions,
-  ) => call('skill.save', {
+    String instructions, {
+    String? whenToUse,
+    List<SkillArgument> arguments = const [],
+    List<String> allowedTools = const [],
+    String context = 'inline',
+  }) => call('skill.save', {
     'name': name,
     'description': description,
     'instructions': instructions,
+    if (whenToUse != null && whenToUse.trim().isNotEmpty)
+      'whenToUse': whenToUse.trim(),
+    if (arguments.isNotEmpty)
+      'arguments': arguments.map((argument) => argument.toJson()).toList(),
+    if (allowedTools.isNotEmpty)
+      'allowedTools': allowedTools
+          .map((tool) => tool.trim())
+          .where((tool) => tool.isNotEmpty)
+          .toSet()
+          .toList(),
+    if (context == 'fork') 'context': 'fork',
   });
 
   Future<void> deleteSkill(String name) => call('skill.delete', {'name': name});
 
-  Future<dynamic> runSkill(String name) => call('skill.run', {'name': name});
+  Future<dynamic> runSkill(
+    String name, {
+    Map<String, dynamic> arguments = const {},
+  }) => call('skill.run', {
+    'name': name,
+    if (arguments.isNotEmpty) 'arguments': arguments,
+  });
 
   // ---------- 定时任务 ----------
 
@@ -1599,8 +2819,73 @@ class HarnessClient {
         .toList();
   }
 
-  Future<void> createSchedule(String name, String cron, String task) =>
-      call('schedule.create', {'name': name, 'cron': cron, 'task': task});
+  Future<dynamic> createSchedule(
+    String name,
+    String cron,
+    String task, {
+    ScheduledTaskSchedule? schedule,
+    bool enabled = true,
+    List<String> selectedSkillIds = const [],
+    List<String> selectedMcpServerIds = const [],
+    ScheduledTaskRetryPolicy? retryPolicy,
+    String? createdBy,
+  }) {
+    final params = <String, dynamic>{
+      'name': name,
+      'cron': cron,
+      'task': task,
+      'enabled': enabled,
+      if (schedule != null) 'schedule': schedule.toJson(),
+      if (selectedSkillIds.isNotEmpty) 'selectedSkillIds': selectedSkillIds,
+      if (selectedMcpServerIds.isNotEmpty)
+        'selectedMcpServerIds': selectedMcpServerIds,
+      if (retryPolicy != null) 'retryPolicy': retryPolicy.toJson(),
+      if (createdBy != null && createdBy.trim().isNotEmpty)
+        'createdBy': createdBy.trim(),
+    };
+    return call('schedule.create', params);
+  }
+
+  Future<ScheduleEntry> updateSchedule(
+    String id, {
+    String? name,
+    String? task,
+    String? cron,
+    ScheduledTaskSchedule? schedule,
+    bool? enabled,
+    List<String>? selectedSkillIds,
+    List<String>? selectedMcpServerIds,
+    ScheduledTaskRetryPolicy? retryPolicy,
+    String? createdBy,
+  }) async {
+    final params = <String, dynamic>{
+      'id': id,
+      'name': ?name,
+      'task': ?task,
+      'cron': ?cron,
+      if (schedule != null) 'schedule': schedule.toJson(),
+      'enabled': ?enabled,
+      'selectedSkillIds': ?selectedSkillIds,
+      'selectedMcpServerIds': ?selectedMcpServerIds,
+      if (retryPolicy != null) 'retryPolicy': retryPolicy.toJson(),
+      'createdBy': ?createdBy,
+    };
+    final result = await call('schedule.update', params);
+    final entry = result is Map ? result['entry'] : null;
+    if (entry is! Map) throw FormatException('schedule.update missing entry');
+    return ScheduleEntry.fromJson(entry.cast<String, dynamic>());
+  }
+
+  Future<String> runSchedule(String id) async {
+    final result = await call('schedule.run', {'id': id});
+    if (result is! Map) throw FormatException('schedule.run missing streamId');
+    final streamId = (result['streamId'] ?? result['stream_id']) as String?;
+    if (streamId == null || streamId.isEmpty) {
+      throw FormatException('schedule.run missing streamId');
+    }
+    _lastSeq.putIfAbsent(streamId, () => -1);
+    return streamId;
+  }
 
   Future<void> deleteSchedule(String id) => call('schedule.delete', {'id': id});
 
@@ -1619,6 +2904,51 @@ class HarnessClient {
   Future<dynamic> mcpList() => call('mcp.list', {});
   Future<dynamic> mcpReload(List<dynamic> servers) =>
       call('mcp.reload', {'servers': servers});
+
+  Future<dynamic> reloadMcpServers(Iterable<McpServerConfig> servers) =>
+      mcpReload(servers.map((server) => server.toJson()).toList());
+
+  /// Typed legacy catalog returned by `mcp.list` (server IDs plus discovered
+  /// direct-call tools). Kept alongside [mcpList] for old settings screens.
+  Future<McpListResult> mcpListTyped() async {
+    final result = await mcpList();
+    if (result is! Map) {
+      return const McpListResult(servers: [], tools: []);
+    }
+    return McpListResult.fromJson(result.cast<String, dynamic>());
+  }
+
+  /// Full Rust/Electron-compatible MCP settings snapshot.
+  Future<McpStateSnapshot> getMcpState() async {
+    final result = await call('mcp.status', {});
+    return McpStateSnapshot.fromJson((result as Map).cast<String, dynamic>());
+  }
+
+  /// Rediscover one server, or every enabled server when [serverId] is null.
+  /// A server ID returns [McpServerSnapshot]; an omitted ID returns a state
+  /// snapshot, matching Electron's RustHarnessClient contract.
+  Future<dynamic> refreshMcpServer({String? serverId}) async {
+    final result = await call('mcp.refresh', {'serverId': ?serverId});
+    if (result is! Map) return result;
+    final map = result.cast<String, dynamic>();
+    if (map.containsKey('servers')) return McpStateSnapshot.fromJson(map);
+    return McpServerSnapshot.fromJson(map);
+  }
+
+  Future<McpServerSnapshot> disconnectMcpServer(String serverId) async {
+    final result = await call('mcp.disconnect', {'serverId': serverId});
+    return McpServerSnapshot.fromJson((result as Map).cast<String, dynamic>());
+  }
+
+  Future<dynamic> callMcp(
+    String server,
+    String tool, {
+    Map<String, dynamic> arguments = const {},
+  }) => call('mcp.call', {
+    'server': server,
+    'tool': tool,
+    'arguments': arguments,
+  });
 
   // ---------- 设置 ----------
 

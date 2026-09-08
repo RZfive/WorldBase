@@ -252,6 +252,27 @@ export class ElectronToolRegistry {
       })
     }
 
+    // Rust advertises the canonical Electron catalog even when an optional
+    // Electron service is not present in the current process (for example a
+    // headless test, a worker, or a partially initialized window).  Never let
+    // that absence silently select Rust's compatibility implementation: the
+    // desktop contract is still host-owned, so expose an explicit structured
+    // error callback instead.  The Rust client supplies the negotiated
+    // canonical descriptors; non-canonical Rust-only tools are not added here.
+    if (includeHandlers) {
+      for (const definition of this.getNativeToolDefinitions()) {
+        const name = definition?.name?.trim()
+        if (!name || INTRINSIC_RUST_TOOL_NAMES.has(name) || name.startsWith('mcp__')) continue
+        if (registered.has(name)) continue
+        registered.set(name, {
+          definition,
+          handler: async () => ({
+            error: `Electron host service unavailable for ${name}`
+          })
+        })
+      }
+    }
+
     const result: RegisteredTool[] = []
     for (const [name, tool] of registered) {
       // These controls stay native so Rust's per-run plan state remains the

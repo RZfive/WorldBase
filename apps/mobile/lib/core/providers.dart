@@ -354,6 +354,13 @@ class _ChatImageTarget {
   final String messageId;
 }
 
+class _AssistantCheckpoint {
+  const _AssistantCheckpoint({this.text = '', this.attachments = const []});
+
+  final String text;
+  final List<ChatAttachment> attachments;
+}
+
 /// 聊天控制器：流式接收、工具渲染、分叉/编辑。
 class ChatController extends Notifier<List<UiMessage>> {
   static const _draftConversationId = '__new_conversation__';
@@ -378,6 +385,9 @@ class ChatController extends Notifier<List<UiMessage>> {
 
   StreamSubscription<EventFrame>? _imageSub;
   final Map<String, List<UiMessage>> _conversationMessages = {};
+  // Last completed assistant model turn per conversation. A retry Reset
+  // restores this checkpoint instead of leaking partial failed-attempt text.
+  final Map<String, _AssistantCheckpoint> _assistantCheckpoints = {};
   final Map<String, String> _streamConversationIds = {};
   final Map<String, String> _conversationStreamIds = {};
   final Map<String, StreamSubscription<EventFrame>> _chatSubscriptions = {};
@@ -517,6 +527,7 @@ class ChatController extends Notifier<List<UiMessage>> {
       _streamConversationIds.remove(streamId);
       _chatSubscriptions.remove(streamId)?.cancel();
     }
+    _assistantCheckpoints.remove(conversationId);
     _startingConversationIds.remove(conversationId);
     final imagePrefix = '$conversationId\u0000';
     final imageStreamIds = _messageImageStreams.entries
@@ -755,6 +766,8 @@ class ChatController extends Notifier<List<UiMessage>> {
         unawaited(ref.read(conversationsProvider.notifier).refresh());
       }
 
+      _assistantCheckpoints.remove(conversationId);
+
       if (_deletedConversationIds.contains(conversationId)) {
         _startingConversationIds
           ..remove(initialConversationId)
@@ -878,6 +891,22 @@ class ChatController extends Notifier<List<UiMessage>> {
             ref.read(agentGroupsProvider.notifier).refresh();
           }
         }
+      case 'reset':
+        // A provider retry starts a fresh assistant attempt. Discard partial
+        // deltas from the failed attempt while retaining the stream mapping.
+        final messages = [..._messagesFor(conversationId)];
+        final checkpoint =
+            _assistantCheckpoints[conversationId] ??
+            const _AssistantCheckpoint();
+        for (var i = messages.length - 1; i >= 0; i--) {
+          if (!messages[i].streaming || messages[i].role != 'assistant') {
+            continue;
+          }
+          messages[i].text = checkpoint.text;
+          messages[i].attachments = [...checkpoint.attachments];
+          _publishMessages(conversationId, messages);
+          break;
+        }
       case 'done' || 'error':
         _replacePending(
           conversationId,
@@ -895,6 +924,7 @@ class ChatController extends Notifier<List<UiMessage>> {
     if (_conversationStreamIds[conversationId] == streamId) {
       _conversationStreamIds.remove(conversationId);
     }
+    _assistantCheckpoints.remove(conversationId);
     _chatSubscriptions.remove(streamId)?.cancel();
     _publishRuntimeChange(conversationId);
   }
@@ -931,6 +961,10 @@ class ChatController extends Notifier<List<UiMessage>> {
     final projection = projectChatAttachments(
       data['content'] as String? ?? '',
       parts,
+    );
+    _assistantCheckpoints[conversationId] = _AssistantCheckpoint(
+      text: projection.text,
+      attachments: [...projection.attachments],
     );
     final messages = [...cached];
     for (var i = messages.length - 1; i >= 0; i--) {
@@ -1505,6 +1539,7 @@ class ChatController extends Notifier<List<UiMessage>> {
 
   @visibleForTesting
   void startConversationRunForTesting(String conversationId, String streamId) {
+    _assistantCheckpoints.remove(conversationId);
     _conversationStreamIds[conversationId] = streamId;
     _streamConversationIds[streamId] = conversationId;
     _publishRuntimeChange(conversationId);
@@ -2122,6 +2157,7 @@ class GroupChatController extends Notifier<List<UiMessage>> {
   String? _activeStreamId;
   String? _latestNotice;
   String _assistantBuffer = '';
+  String _assistantCheckpoint = '';
   bool _receivedReply = false;
   bool _terminalReceived = false;
   bool _busy = false;
@@ -2262,6 +2298,7 @@ class GroupChatController extends Notifier<List<UiMessage>> {
     _busy = true;
     _latestNotice = null;
     _assistantBuffer = '';
+    _assistantCheckpoint = '';
     _receivedReply = false;
     _terminalReceived = false;
     final normalized = text.trim();
@@ -2330,6 +2367,7 @@ class GroupChatController extends Notifier<List<UiMessage>> {
         _updatePendingText(_sanitizeGroupReply(_assistantBuffer));
       case 'assistant_message':
         final content = frame.data['content'] as String? ?? _assistantBuffer;
+        _assistantCheckpoint = content;
         _assistantBuffer = '';
         _appendGroupReply(
           id: 'assistant-${frame.seq}',
@@ -2352,6 +2390,11 @@ class GroupChatController extends Notifier<List<UiMessage>> {
         );
       case 'board_update':
         unawaited(refreshSession());
+      case 'reset':
+        // Discard partial text from the failed provider attempt. The next
+        // retry starts from the last completed assistant checkpoint.
+        _assistantBuffer = _assistantCheckpoint;
+        _updatePendingText(_sanitizeGroupReply(_assistantBuffer));
       case 'error':
         _finishWithError(frame.data['message'] as String? ?? '群聊执行失败');
       case 'done':
@@ -2512,6 +2555,7 @@ class GroupChatController extends Notifier<List<UiMessage>> {
     _activeStreamId = null;
     _latestNotice = null;
     _assistantBuffer = '';
+    _assistantCheckpoint = '';
     _receivedReply = false;
     _terminalReceived = false;
     _session = null;

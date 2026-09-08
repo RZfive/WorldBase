@@ -861,9 +861,18 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
 
   Future<void> _handleNonDialogHostRequest(HostRequest req) async {
     if (_disposing || _terminalStreams.contains(req.streamId)) return;
-    final result = req.kind == 'page_automation'
-        ? await runPageAutomation(req.payload)
-        : {'ok': false, 'error': 'unknown host request: ${req.kind}'};
+    final result = switch (req.kind) {
+      'page_automation' => await runPageAutomation(req.payload),
+      // Mobile has no equivalent of Electron's `shell.openPath`. Keep the
+      // host contract explicit so callers can distinguish an unsupported
+      // platform from a malformed request or a missing document.
+      'document.openOriginal' => {
+          'success': false,
+          'supported': false,
+          'error': 'Opening original documents is not supported on mobile hosts',
+        },
+      _ => {'ok': false, 'error': 'unknown host request: ${req.kind}'},
+    };
     if (_disposing || !mounted || _terminalStreams.contains(req.streamId)) {
       return;
     }

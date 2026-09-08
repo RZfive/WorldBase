@@ -57,6 +57,16 @@ void main() {
     expect(container.read(groupChatProvider), isEmpty);
   });
 
+  test('reset does not turn a group stream into a terminal state', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final controller = container.read(groupChatProvider.notifier);
+
+    controller.handleFrameForTesting(_frame(1, 'reset', {}));
+    expect(controller.busy, isFalse);
+    expect(container.read(groupChatProvider), isEmpty);
+  });
+
   test('group_direct_reply unwraps the nested reply payload', () {
     final container = ProviderContainer();
     addTearDown(container.dispose);

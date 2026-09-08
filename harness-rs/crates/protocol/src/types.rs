@@ -287,8 +287,8 @@ pub struct ChatRunContext {
     #[serde(default)]
     pub target_project_id: Option<String>,
     /// Restricts this run to the Electron MCP server IDs explicitly selected
-    /// by the caller. `None` means every enabled configured server; an
-    /// explicit empty list deliberately exposes no MCP server.
+    /// by the caller. Matching Node, `None` and an empty list both mean every
+    /// enabled configured server; only a non-empty list narrows the catalog.
     #[serde(default)]
     pub allowed_mcp_server_ids: Option<Vec<String>>,
     #[serde(default)]
@@ -1072,16 +1072,104 @@ pub struct MemoryCompactionStatus {
     pub error: Option<String>,
 }
 
+/// Skill 调用参数描述。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillArgument {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// Skill 的执行上下文。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillContext {
+    Fork,
+    #[default]
+    Inline,
+}
+
+impl SkillContext {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fork => "fork",
+            Self::Inline => "inline",
+        }
+    }
+}
+
 /// 技能描述。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillDescriptor {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_to_use: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<SkillArgument>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub context: SkillContext,
     #[serde(default)]
     pub instructions: String,
     #[serde(default)]
     pub path: String,
+}
+
+/// Electron-compatible scheduled-task cadence. Legacy callers may continue
+/// using [`ScheduleEntry::cron`] without populating this field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ScheduledTaskSchedule {
+    Once {
+        #[serde(rename = "runAt")]
+        run_at: String,
+    },
+    Interval {
+        #[serde(rename = "everyMinutes")]
+        every_minutes: u64,
+        #[serde(default, rename = "startAt", skip_serializing_if = "Option::is_none")]
+        start_at: Option<String>,
+    },
+    Daily {
+        #[serde(rename = "timeOfDay")]
+        time_of_day: String,
+    },
+    Weekly {
+        weekdays: Vec<u32>,
+        #[serde(rename = "timeOfDay")]
+        time_of_day: String,
+    },
+    Dates {
+        dates: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTaskRetryPolicy {
+    #[serde(default)]
+    pub max_retries: u32,
+    #[serde(default = "default_schedule_retry_delay_minutes")]
+    pub retry_delay_minutes: u64,
+}
+
+fn default_schedule_retry_delay_minutes() -> u64 {
+    5
+}
+
+impl Default for ScheduledTaskRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 0,
+            retry_delay_minutes: default_schedule_retry_delay_minutes(),
+        }
+    }
 }
 
 /// 定时任务。
@@ -1099,6 +1187,29 @@ pub struct ScheduleEntry {
     pub last_run_at: Option<String>,
     #[serde(default)]
     pub next_run_at: Option<String>,
+    /// Structured cadence used by Electron's `create_scheduled_task`. `None`
+    /// identifies a legacy cron entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<ScheduledTaskSchedule>,
+    #[serde(default)]
+    pub selected_skill_ids: Vec<String>,
+    #[serde(default)]
+    pub selected_mcp_server_ids: Vec<String>,
+    #[serde(default)]
+    pub retry_policy: ScheduledTaskRetryPolicy,
+    #[serde(default)]
+    pub retry_scheduled_at: Option<String>,
+    /// Number of retries already scheduled for the current occurrence.
+    #[serde(default)]
+    pub retry_attempt: u32,
+    #[serde(default)]
+    pub created_by: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub last_status: String,
 }
 
 /// 群组协作模式（对齐桌面 AgentGroupCollaborationMode 5 模式）。

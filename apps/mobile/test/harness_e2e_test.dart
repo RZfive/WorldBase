@@ -168,18 +168,26 @@ void main() {
     expect(init['protocolVersion'], '1.0');
     final availableTools = init['availableTools'] as List;
     final toolNames = availableTools.map((t) => (t as Map)['name']).toSet();
-    expect(toolNames, hasLength(47), reason: 'mobile 工具面必须是显式、稳定的可执行集合');
+    expect(toolNames, hasLength(52), reason: 'mobile 工具面必须是显式、稳定的可执行集合');
     expect(toolNames, contains('read_file'));
     expect(toolNames, contains('ask_user'), reason: 'webview/交互能力应开放 host 域工具');
     expect(toolNames, contains('read_current_page'));
+    expect(
+      toolNames,
+      containsAll([
+        'list_documents',
+        'read_document',
+        'save_current_page_as_document',
+      ]),
+    );
     expect(toolNames, contains('list_agent_workspace_catalog'));
     expect(toolNames, contains('create_agent'));
     expect(toolNames, contains('create_agent_group'));
     expect(
       toolNames,
-      isNot(contains('create_scheduled_task')),
+      contains('create_scheduled_task'),
       reason:
-          'mobile must not advertise the partially implemented Node scheduler contract',
+          'mobile must advertise the canonical structured scheduler contract',
     );
     expect(toolNames, contains('schedule_create'));
     expect(toolNames, containsAll(['schedule_list', 'schedule_delete']));
@@ -495,6 +503,55 @@ void main() {
     });
     final schedules = await call('schedule.list', {});
     expect((schedules['schedules'] as List), isNotEmpty);
+
+    // Electron canonical scheduler contract：移动端直接 tool.call 也必须
+    // 支持结构化 cadence、技能/MCP 选择和 retry policy，并返回 camelCase
+    // task 视图供 Flutter/Studio 继续消费。
+    final canonicalSchedule =
+        await call('tool.call', {
+              'name': 'create_scheduled_task',
+              'args': {
+                'title': '移动端结构化早报',
+                'prompt': '汇总昨日并发送摘要',
+                'schedule_kind': 'interval',
+                'every_minutes': 60,
+                'start_at': '2030-01-01T09:00:00Z',
+                'enabled': true,
+                'selected_skill_ids': ['daily-report'],
+                'selected_mcp_server_ids': ['mobile-mcp'],
+                'max_retries': 2,
+                'retry_delay_minutes': 10,
+              },
+            })
+            as Map;
+    expect(canonicalSchedule['success'], isTrue);
+    final canonicalTask = canonicalSchedule['task'] as Map;
+    expect(canonicalTask['title'], '移动端结构化早报');
+    expect(canonicalTask['prompt'], '汇总昨日并发送摘要');
+    expect(canonicalTask['enabled'], isTrue);
+    expect((canonicalTask['schedule'] as Map)['kind'], 'interval');
+    expect((canonicalTask['schedule'] as Map)['everyMinutes'], 60);
+    expect(
+      DateTime.parse(
+        (canonicalTask['schedule'] as Map)['startAt'] as String,
+      ).toUtc(),
+      DateTime.parse('2030-01-01T09:00:00Z').toUtc(),
+    );
+    expect(canonicalTask['selectedSkillIds'], ['daily-report']);
+    expect(canonicalTask['selectedMcpServerIds'], ['mobile-mcp']);
+    expect((canonicalTask['retryPolicy'] as Map)['maxRetries'], 2);
+    expect((canonicalTask['retryPolicy'] as Map)['retryDelayMinutes'], 10);
+
+    final listedCanonical = await call('tool.call', {
+      'name': 'list_scheduled_tasks',
+      'args': {},
+    });
+    final listedTasks = (listedCanonical['tasks'] as List).cast<Map>();
+    expect(
+      listedTasks.any((task) => task['id'] == canonicalTask['id']),
+      isTrue,
+      reason: '创建后的 canonical task 必须可通过 list_scheduled_tasks 读取',
+    );
 
     await call('memory.add', {
       'content': '用户偏好深色主题',

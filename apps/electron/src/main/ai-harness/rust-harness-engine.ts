@@ -188,6 +188,11 @@ export class RustHarnessEngine implements AIHarness {
     let wake: (() => void) | null = null
     let assistantText = ''
     let assistantContent: MessageContent = ''
+    // Keep the last completed model turn as the checkpoint for a retry. Rust
+    // emits `reset` before replaying an interrupted provider stream; any
+    // deltas emitted by the failed attempt must not leak into the next turn.
+    let checkpointAssistantText = ''
+    let checkpointAssistantContent: MessageContent = ''
     let streamError: Error | null = null
     let streamWasAborted = false
     let nativeSideEffects = Promise.resolve()
@@ -215,6 +220,12 @@ export class RustHarnessEngine implements AIHarness {
         assistantText = frame.content
         const parts = normalizeAssistantParts(frame.parts)
         assistantContent = parts.length > 0 ? parts : assistantText
+        checkpointAssistantText = assistantText
+        checkpointAssistantContent = assistantContent
+      }
+      if (frame.kind === 'reset') {
+        assistantText = checkpointAssistantText
+        assistantContent = checkpointAssistantContent
       }
       if (frame.kind === 'usage') this.recordUsage(frame, effectiveConfig)
       if (frame.kind === 'tool_result' && this.isNativeToolResult(frame, customTools)) {
@@ -608,6 +619,10 @@ function frameToStreamEvent (frame: RustEventFrame, assistantContent: MessageCon
       return typeof frame.text === 'string' ? { type: 'token', content: frame.text } : null
     case 'thinking_delta':
       return typeof frame.text === 'string' ? { type: 'thinking', content: frame.text } : null
+    case 'reset':
+      // Rust emits this before a provider-stream retry. Preserve Node's
+      // renderer contract so partial token/thinking buffers are discarded.
+      return { type: 'reset' }
     case 'tool_call':
       return { type: 'tool_start', name: typeof frame.name === 'string' ? frame.name : 'tool' }
     case 'tool_result':

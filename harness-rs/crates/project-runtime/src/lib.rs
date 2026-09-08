@@ -8,6 +8,7 @@ mod control;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     env,
@@ -210,13 +211,37 @@ async fn wait_for_port_or_exit(
     }
 }
 
+#[cfg(windows)]
+fn path_candidates(dir: &Path, prog: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![dir.join(prog)];
+    if Path::new(prog).extension().is_none() {
+        // Windows resolves bare commands through PATHEXT. Keep this lookup in
+        // sync so Flutter and packaged Rust processes can find node.exe or
+        // pnpm.cmd even when PATH contains no Unix-style names.
+        candidates.extend([
+            dir.join(format!("{prog}.exe")),
+            dir.join(format!("{prog}.cmd")),
+            dir.join(format!("{prog}.bat")),
+        ]);
+    }
+    candidates
+}
+
+#[cfg(not(windows))]
+fn path_candidates(dir: &Path, prog: &str) -> Vec<PathBuf> {
+    vec![dir.join(prog)]
+}
+
 fn which(prog: &str) -> Option<PathBuf> {
-    // 简易 PATH 探测（避免依赖 which crate）
-    let path = std::env::var("PATH").ok()?;
-    for dir in path.split(':') {
-        let p = Path::new(dir).join(prog);
-        if p.is_file() {
-            return Some(p);
+    // 简易 PATH 探测（避免依赖 which crate）。`split_paths` 同时兼容
+    // Unix 的 `:` 和 Windows 的 `;`，否则 Flutter/Windows fallback 会把
+    // 整个 PATH 当成一个目录而永远找不到 node/pnpm。
+    let path = std::env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        for candidate in path_candidates(&dir, prog) {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
     None
@@ -234,18 +259,216 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+fn runtime_binary_candidates(root: &Path, name: &str) -> Vec<PathBuf> {
+    let base = root.join(name);
+    #[cfg(windows)]
+    {
+        if Path::new(name).extension().is_some() {
+            vec![base]
+        } else {
+            vec![
+                base,
+                root.join(format!("{name}.exe")),
+                root.join(format!("{name}.cmd")),
+                root.join(format!("{name}.bat")),
+            ]
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        vec![base]
+    }
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn runtime_ancestor_dirs(path: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut current = path;
+    loop {
+        push_unique_path(&mut dirs, current.to_path_buf());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    dirs
+}
+
+fn bundled_node_candidates_from(
+    executable: Option<&Path>,
+    current_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(executable) = executable {
+        if let Some(parent) = executable.parent() {
+            candidates.extend(runtime_binary_candidates(parent, "node-bin/node"));
+            if let Some(grandparent) = parent.parent() {
+                candidates.extend(runtime_binary_candidates(grandparent, "node-bin/node"));
+            }
+        }
+    }
+    if let Some(current_dir) = current_dir {
+        candidates.extend(runtime_binary_candidates(current_dir, "dist/node-bin/node"));
+        candidates.extend(runtime_binary_candidates(
+            current_dir,
+            "resources/node-bin/node",
+        ));
+        candidates.extend(runtime_binary_candidates(current_dir, "node-bin/node"));
+    }
+    // Keep the relative candidate as a final fallback for callers that alter
+    // the process cwd between discovery and execution. Normal application
+    // paths above are absolute, so wrappers never accidentally resolve this
+    // path relative to a project cwd.
+    candidates.extend(runtime_binary_candidates(
+        Path::new("."),
+        "dist/node-bin/node",
+    ));
+    candidates
+}
+
+fn bundled_node_candidates() -> Vec<PathBuf> {
+    bundled_node_candidates_from(
+        std::env::current_exe().ok().as_deref(),
+        env::current_dir().ok().as_deref(),
+    )
+}
+
+fn bundled_pnpm_candidates_from(
+    executable: Option<&Path>,
+    current_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(executable) = executable {
+        if let Some(parent) = executable.parent() {
+            roots.extend(runtime_ancestor_dirs(parent));
+        }
+    }
+    if let Some(current_dir) = current_dir {
+        roots.extend(runtime_ancestor_dirs(current_dir));
+    }
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        // Development layout and the normal packaged app.asar-unpacked
+        // layout. The latter is needed because pnpm is unpacked separately
+        // from the Rust app-server executable by electron-builder.
+        for package_root in [
+            root.join("node_modules/pnpm"),
+            root.join("app.asar.unpacked/node_modules/pnpm"),
+            root.join("resources/app.asar.unpacked/node_modules/pnpm"),
+            root.join("apps/electron/node_modules/pnpm"),
+        ] {
+            push_unique_path(&mut candidates, package_root.join("bin/pnpm.cjs"));
+            push_unique_path(&mut candidates, package_root.join("dist/pnpm.cjs"));
+        }
+    }
+    candidates
+}
+
+fn bundled_pnpm_candidates() -> Vec<PathBuf> {
+    bundled_pnpm_candidates_from(
+        std::env::current_exe().ok().as_deref(),
+        env::current_dir().ok().as_deref(),
+    )
+}
+
+fn bundled_pnpm_cli() -> Option<PathBuf> {
+    if let Some(pnpm) = env::var_os("WORLDBASE_RUNTIME_PNPM")
+        .map(PathBuf::from)
+        .and_then(existing_file)
+    {
+        return Some(pnpm);
+    }
+    bundled_pnpm_candidates()
+        .into_iter()
+        .find_map(existing_file)
+}
+
+fn existing_file(path: PathBuf) -> Option<PathBuf> {
+    if !path.is_file() {
+        return None;
+    }
+    Some(fs::canonicalize(&path).unwrap_or(path))
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn is_auto_bundled_node(node: &Path) -> bool {
+    bundled_node_candidates()
+        .into_iter()
+        .any(|candidate| paths_match(node, &candidate))
+}
+
 fn runtime_wrapper_dir(node: &Path) -> Result<Option<PathBuf>> {
     let force_node_wrapper = env::var("WORLDBASE_RUNTIME_NODE_IS_ELECTRON")
         .map(|value| value == "1")
         .unwrap_or(false);
-    let pnpm_cli = env::var_os("WORLDBASE_RUNTIME_PNPM")
+    let configured_node = env::var_os("WORLDBASE_RUNTIME_NODE")
         .map(PathBuf::from)
-        .filter(|path| path.is_file());
-    if !force_node_wrapper && pnpm_cli.is_none() {
+        .is_some_and(|path| path.is_file());
+    let auto_bundled_node = is_auto_bundled_node(node);
+    let pnpm_cli = bundled_pnpm_cli();
+    // An explicitly configured node path must win over the host's `node`
+    // binary even when the host did not provide a pnpm wrapper. Electron sets
+    // this variable for its packaged runtime; keeping the same behavior for a
+    // pure-Rust process also makes Flutter's command tools deterministic.
+    runtime_wrapper_dir_with_options(
+        node,
+        force_node_wrapper,
+        configured_node,
+        auto_bundled_node,
+        pnpm_cli,
+    )
+}
+
+fn runtime_wrapper_dir_with_options(
+    node: &Path,
+    force_node_wrapper: bool,
+    configured_node: bool,
+    auto_bundled_node: bool,
+    pnpm_cli: Option<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    if !force_node_wrapper && !configured_node && !auto_bundled_node && pnpm_cli.is_none() {
         return Ok(None);
     }
 
-    let dir = env::temp_dir().join(format!("worldbase-runtime-{}", std::process::id()));
+    // Electron keys its wrapper directory by the bundled Node/pnpm paths. A
+    // PID-only directory lets concurrent projects (and concurrent tests)
+    // overwrite one another's wrappers, which can leave a running child
+    // pointing at a deleted temporary Node binary. Include all inputs that
+    // affect the generated scripts so each runtime profile is isolated while
+    // still reusing wrappers across projects in the same process.
+    let mut hasher = Sha256::new();
+    hasher.update(node.to_string_lossy().as_bytes());
+    hasher.update([0]);
+    hasher.update(
+        pnpm_cli
+            .as_deref()
+            .map(Path::to_string_lossy)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hasher.update([0]);
+    hasher.update([u8::from(force_node_wrapper)]);
+    let digest = hasher.finalize();
+    let digest = format!("{digest:x}");
+    let dir = env::temp_dir().join(format!("worldbase-runtime-{}", &digest[..12]));
     fs::create_dir_all(&dir)
         .with_context(|| format!("create runtime wrapper dir {}", dir.display()))?;
 
@@ -370,6 +593,48 @@ fn with_runtime_environment(
     Ok(())
 }
 
+/// Apply the bundled-runtime environment used by short-lived command tools.
+///
+/// This is deliberately narrower than [`with_runtime_environment`]: command
+/// tools should inherit the caller's application variables and only add the
+/// runtime PATH plus the non-interactive package-manager defaults that the
+/// Electron `createBundledRuntimeEnv` helper adds. `project_root` is used to
+/// expose the root `node_modules/.bin` when the command runs from a subdir.
+pub fn apply_command_runtime_environment(
+    command: &mut tokio::process::Command,
+    cwd: &Path,
+    project_root: Option<&Path>,
+) -> Result<()> {
+    let project_root = project_root.unwrap_or(cwd);
+    let mut path_entries = Vec::new();
+    // Command tools also expose read-only utilities such as `git`, `cat`, and
+    // `echo`. A Flutter installation may legitimately have no Node runtime;
+    // keep those commands usable and let a Node-dependent command report the
+    // normal child-process "not found" failure instead of rejecting every
+    // command before spawn.
+    if let Some(node) = bundled_node().or_else(|| which("node")) {
+        if let Some(wrapper_dir) = runtime_wrapper_dir(&node)? {
+            path_entries.push(wrapper_dir.into_os_string());
+        }
+    }
+    path_entries.push(cwd.join("node_modules/.bin").into_os_string());
+    if cwd != project_root {
+        path_entries.push(project_root.join("node_modules/.bin").into_os_string());
+    }
+    path_entries.extend(env::split_paths(&command_env_path()).map(|path| path.into_os_string()));
+    let path = env::join_paths(path_entries).unwrap_or_default();
+
+    command
+        .env("PATH", path)
+        .env("CI", "true")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("NPM_CONFIG_AUDIT", "false")
+        .env("NPM_CONFIG_FUND", "false")
+        .env("npm_config_audit", "false")
+        .env("npm_config_fund", "false");
+    Ok(())
+}
+
 fn extract_runtime_backend(meta: &Value) -> Option<&serde_json::Map<String, Value>> {
     meta.get("runtime")?
         .as_object()?
@@ -395,6 +660,34 @@ fn command_needs_node_modules(command: &str) -> bool {
         || command.starts_with("yarn ")
         || command.contains("next ")
         || command.starts_with("npx ")
+}
+
+fn runtime_port_placeholder_for(windows: bool) -> &'static str {
+    if windows {
+        "%PORT%"
+    } else {
+        "$PORT"
+    }
+}
+
+fn runtime_port_placeholder() -> &'static str {
+    runtime_port_placeholder_for(cfg!(windows))
+}
+
+/// Runtime commands are persisted in project metadata and may have been
+/// authored by the Electron runtime on another platform. Normalize the
+/// shell-specific spelling before handing the command to `sh -c`/`cmd /C` so
+/// a project remains portable between Electron and Flutter.
+fn normalize_runtime_port_placeholder_for(command: &str, windows: bool) -> String {
+    if windows {
+        command.replace("$PORT", "%PORT%")
+    } else {
+        command.replace("%PORT%", "$PORT")
+    }
+}
+
+fn normalize_runtime_port_placeholder(command: &str) -> String {
+    normalize_runtime_port_placeholder_for(command, cfg!(windows))
 }
 
 fn package_dependencies(package: &Value) -> HashMap<String, String> {
@@ -774,11 +1067,18 @@ fn replace_configured_port(
         return command.to_string();
     }
     let configured = configured_port.to_string();
+    let placeholder = runtime_port_placeholder();
     command
-        .replace(&format!("--port={configured}"), "--port=$PORT")
-        .replace(&format!("--port {configured}"), "--port $PORT")
-        .replace(&format!("-p {configured}"), "-p $PORT")
-        .replace(&format!("-p{configured}"), "-p$PORT")
+        .replace(
+            &format!("--port={configured}"),
+            &format!("--port={placeholder}"),
+        )
+        .replace(
+            &format!("--port {configured}"),
+            &format!("--port {placeholder}"),
+        )
+        .replace(&format!("-p {configured}"), &format!("-p {placeholder}"))
+        .replace(&format!("-p{configured}"), &format!("-p{placeholder}"))
 }
 
 impl ProjectRuntime {
@@ -796,7 +1096,9 @@ impl ProjectRuntime {
         let node = bundled_node()
             .or_else(|| which("node"))
             .map(|p| p.display().to_string());
-        let pnpm = which("pnpm").map(|p| p.display().to_string());
+        let pnpm = bundled_pnpm_cli()
+            .or_else(|| which("pnpm"))
+            .map(|p| p.display().to_string());
         Ok(json!({
             "node": node,
             "pnpm": pnpm,
@@ -1124,6 +1426,7 @@ impl ProjectRuntime {
 
         if let Some(command) = configured_command {
             let command = replace_configured_port(command, configured_port, port);
+            let command = normalize_runtime_port_placeholder(&command);
             let node_env = if command_looks_like_development(&command) {
                 "development"
             } else {
@@ -1202,7 +1505,10 @@ impl ProjectRuntime {
         if project_path.join("index.html").is_file() {
             return Ok(RuntimeLaunch {
                 command: RuntimeCommand::Shell {
-                    command: "npx http-server . -p $PORT -c-1 --cors".into(),
+                    command: format!(
+                        "npx http-server . -p {} -c-1 --cors",
+                        runtime_port_placeholder()
+                    ),
                 },
                 cwd: project_path.to_path_buf(),
                 port,
@@ -1642,20 +1948,17 @@ fn normalize_project_id(project_id: &str) -> Result<&str> {
 fn bundled_node() -> Option<PathBuf> {
     if let Some(node) = env::var_os("WORLDBASE_RUNTIME_NODE")
         .map(PathBuf::from)
-        .filter(|path| path.is_file())
+        .and_then(existing_file)
     {
         return Some(node);
     }
-    // 与 Electron 打包约定：extraResources/node-bin/node
-    let candidates = [
-        std::env::current_exe()
-            .ok()?
-            .parent()?
-            .parent()?
-            .join("node-bin/node"),
-        PathBuf::from("dist/node-bin/node"),
-    ];
-    candidates.into_iter().find(|p| p.is_file())
+    // 与 Electron 打包约定：extraResources/node-bin/node。逐个构造候选
+    // 路径，避免 current_exe()/parent() 任一失败时提前返回而跳过 dist
+    // fallback；同时把相对路径规范化成绝对路径，供 cwd 已切换的子进程
+    // 和 runtime wrapper 稳定使用。
+    bundled_node_candidates()
+        .into_iter()
+        .find_map(existing_file)
 }
 
 fn pick_free_port(preferred: Option<u16>) -> Result<u16> {
@@ -2090,12 +2393,152 @@ mod tests {
     fn configured_port_is_rewritten_only_after_fallback() {
         assert_eq!(
             replace_configured_port("npm run dev -- --port 3000", Some(3000), 4173),
-            "npm run dev -- --port $PORT"
+            format!("npm run dev -- --port {}", runtime_port_placeholder())
         );
         assert_eq!(
             replace_configured_port("npm run dev -- --port 3000", Some(3000), 3000),
             "npm run dev -- --port 3000"
         );
+    }
+
+    #[test]
+    fn runtime_port_placeholder_supports_both_shells() {
+        assert_eq!(runtime_port_placeholder_for(false), "$PORT");
+        assert_eq!(runtime_port_placeholder_for(true), "%PORT%");
+        assert_eq!(
+            normalize_runtime_port_placeholder_for("npm run dev -- --port $PORT", true),
+            "npm run dev -- --port %PORT%"
+        );
+        assert_eq!(
+            normalize_runtime_port_placeholder_for("npm run dev -- --port %PORT%", false),
+            "npm run dev -- --port $PORT"
+        );
+    }
+
+    #[test]
+    fn static_site_launch_uses_platform_port_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ProjectRuntime::new(dir.path().to_path_buf());
+        let project = dir.path().join("static");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("index.html"), "<h1>static</h1>").unwrap();
+
+        let launch = rt.resolve_runtime_launch("static", &project).unwrap();
+        match launch.command {
+            RuntimeCommand::Shell { command } => assert_eq!(
+                command,
+                format!(
+                    "npx http-server . -p {} -c-1 --cors",
+                    runtime_port_placeholder()
+                )
+            ),
+            RuntimeCommand::NextDev { .. } => panic!("expected static runtime command"),
+        }
+    }
+
+    #[test]
+    fn configured_commands_are_normalized_for_the_current_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ProjectRuntime::new(dir.path().to_path_buf());
+        let project = dir.path().join("portable");
+        std::fs::create_dir_all(project.join("node_modules")).unwrap();
+        std::fs::write(
+            project.join(".world-meta.json"),
+            r#"{"runtime":{"backend":{"command":"node server.js --port %PORT%","port":32123}}}"#,
+        )
+        .unwrap();
+
+        let launch = rt.resolve_runtime_launch("portable", &project).unwrap();
+        match launch.command {
+            RuntimeCommand::Shell { command } => assert_eq!(
+                command,
+                normalize_runtime_port_placeholder_for(
+                    "node server.js --port %PORT%",
+                    cfg!(windows)
+                )
+            ),
+            RuntimeCommand::NextDev { .. } => panic!("expected configured runtime command"),
+        }
+    }
+
+    #[test]
+    fn bundled_node_fallback_checks_dist_and_uses_an_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("dist/node-bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(&node, b"bundled node").unwrap();
+
+        let candidates = bundled_node_candidates_from(None, Some(dir.path()));
+        assert!(candidates.iter().any(|candidate| candidate == &node));
+        assert_eq!(
+            candidates.into_iter().find_map(existing_file),
+            Some(node.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn bundled_pnpm_fallback_checks_development_and_unpacked_layouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let development = dir.path().join("node_modules/pnpm/bin/pnpm.cjs");
+        std::fs::create_dir_all(development.parent().unwrap()).unwrap();
+        std::fs::write(&development, b"bundled pnpm").unwrap();
+
+        let candidates = bundled_pnpm_candidates_from(None, Some(dir.path()));
+        assert!(candidates.iter().any(|candidate| candidate == &development));
+        assert_eq!(
+            candidates.into_iter().find_map(existing_file),
+            Some(development.canonicalize().unwrap())
+        );
+
+        let unpacked_root = dir.path().join("app.asar.unpacked/node_modules/pnpm");
+        let unpacked = unpacked_root.join("dist/pnpm.cjs");
+        std::fs::create_dir_all(unpacked.parent().unwrap()).unwrap();
+        std::fs::write(&unpacked, b"unpacked pnpm").unwrap();
+        let candidates = bundled_pnpm_candidates_from(None, Some(dir.path()));
+        assert!(candidates.iter().any(|candidate| candidate == &unpacked));
+    }
+
+    #[test]
+    fn automatically_discovered_bundled_node_gets_a_high_priority_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node-bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(&node, b"bundled node").unwrap();
+
+        let wrapper_dir = runtime_wrapper_dir_with_options(&node, false, false, true, None)
+            .unwrap()
+            .expect("bundled node should get a wrapper");
+        let wrapper = wrapper_dir.join(if cfg!(windows) { "node.cmd" } else { "node" });
+        let script = std::fs::read_to_string(wrapper).unwrap();
+        assert!(script.contains(&node.display().to_string()));
+    }
+
+    #[test]
+    fn runtime_wrapper_creates_npm_and_npx_aliases_for_bundled_pnpm() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node-bin/node");
+        let pnpm = dir.path().join("node_modules/pnpm/bin/pnpm.cjs");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(pnpm.parent().unwrap()).unwrap();
+        std::fs::write(&node, b"bundled node").unwrap();
+        std::fs::write(&pnpm, b"bundled pnpm").unwrap();
+
+        let wrapper_dir =
+            runtime_wrapper_dir_with_options(&node, true, true, true, Some(pnpm.clone()))
+                .unwrap()
+                .expect("bundled runtime should get wrappers");
+        for name in ["node", "pnpm", "npm", "npx"] {
+            let path = wrapper_dir.join(if cfg!(windows) {
+                format!("{name}.cmd")
+            } else {
+                name.to_string()
+            });
+            let script = std::fs::read_to_string(path).unwrap();
+            assert!(script.contains(&node.display().to_string()));
+            if name != "node" {
+                assert!(script.contains(&pnpm.display().to_string()));
+            }
+        }
     }
 
     #[tokio::test]

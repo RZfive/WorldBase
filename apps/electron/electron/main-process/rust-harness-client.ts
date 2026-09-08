@@ -1315,6 +1315,14 @@ export class RustHarnessClient {
     const nativeGroupSession = directSessionId ? null : this.nativeGroupSessionForMemberStream(frame.streamId)
     const sessionId = directSessionId || nativeGroupSession
     if (!sessionId) {
+      // Direct document/workbench RPCs can ask the host to perform a shell
+      // operation without first creating a chat session. They still arrive as
+      // regular `host_request` events, so dispatch them before the session
+      // backlog gate; otherwise the request would never be answered.
+      if (frame.kind === 'host_request') {
+        void this.handleHostRequest(frame, frame.streamId)
+        return
+      }
       const queue = this.backlog.get(frame.streamId) || []
       queue.push(frame)
       this.backlog.set(frame.streamId, queue)

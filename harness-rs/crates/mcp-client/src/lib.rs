@@ -17,7 +17,15 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, watch, Mutex, Notify};
 
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+// Keep the default identical to Electron's settings normalization.  A server
+// loaded through `mcp.reload` may omit timeoutMs entirely, so this value is
+// part of the public compatibility contract rather than only a transport
+// implementation detail.
+const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+
+fn default_enabled() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,20 +110,24 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             #[serde(default)]
             #[serde(alias = "timeout_ms")]
             timeout_ms: Option<u64>,
-            #[serde(default)]
+            #[serde(default = "default_enabled")]
             enabled: bool,
         }
 
         let raw = RawMcpServerConfig::deserialize(deserializer)?;
-        let durable_name = raw
+        let name = raw
             .id
-            .clone()
-            .or_else(|| raw.name.clone())
-            .unwrap_or_default();
-        let name = durable_name.trim().to_string();
-        if name.is_empty() {
-            return Err(de::Error::custom("MCP server requires id or name"));
-        }
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                raw.name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .ok_or_else(|| de::Error::custom("MCP server requires id or name"))?
+            .to_string();
 
         let display_name = raw
             .display_name
@@ -128,15 +140,36 @@ impl<'de> Deserialize<'de> for McpServerConfig {
                     .then(|| raw.name.clone().unwrap_or_default())
             })
             .unwrap_or_default();
-        let target = raw
-            .target
-            .or_else(|| raw.command.clone())
-            .or_else(|| raw.url.clone())
-            .unwrap_or_default();
         let transport = raw.transport.trim().to_string();
         if transport.is_empty() {
             return Err(de::Error::custom("MCP server requires transport"));
         }
+        let explicit_target = raw
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let command = raw
+            .command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let url = raw
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let transport_target = match transport.as_str() {
+            "stdio" => command.or(url),
+            "http" | "streamable-http" | "sse" => url.or(command),
+            // Preserve the historical fallback for unknown values, which are
+            // rejected later when a connection starts.
+            _ => command.or(url),
+        };
+        let target = explicit_target
+            .or(transport_target)
+            .unwrap_or_default()
+            .to_string();
         Ok(Self {
             name,
             display_name,
@@ -1609,6 +1642,89 @@ mod tests {
         assert_eq!(config.name, "remote");
         assert_eq!(config.display_name, "Remote MCP");
         assert_eq!(config.target, "https://example.test/mcp");
+    }
+
+    #[test]
+    fn blank_id_falls_back_to_trimmed_name() {
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "id": "  \t ",
+            "name": "  server-id  ",
+            "enabled": true,
+            "transport": "stdio",
+            "command": "node",
+        }))
+        .unwrap();
+
+        assert_eq!(config.name, "server-id");
+    }
+
+    #[test]
+    fn omitted_enabled_and_timeout_match_electron_defaults() {
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "id": "server-id",
+            "name": "Server",
+            "transport": "streamable-http",
+            "url": "https://example.test/mcp"
+        }))
+        .unwrap();
+
+        assert!(config.enabled);
+        assert_eq!(config.timeout(), Duration::from_millis(15_000));
+
+        let disabled: McpServerConfig = serde_json::from_value(json!({
+            "id": "disabled",
+            "name": "Disabled",
+            "enabled": false,
+            "transport": "streamable-http",
+            "url": "https://example.test/mcp"
+        }))
+        .unwrap();
+        assert!(!disabled.enabled);
+    }
+
+    #[test]
+    fn stdio_prefers_trimmed_command_when_command_and_url_are_populated() {
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "id": "server-id",
+            "enabled": true,
+            "transport": "stdio",
+            "target": "  ",
+            "command": "  node  ",
+            "url": "https://example.test/mcp",
+        }))
+        .unwrap();
+
+        assert_eq!(config.target, "node");
+    }
+
+    #[test]
+    fn remote_transport_prefers_trimmed_url_when_command_and_url_are_populated() {
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "id": "server-id",
+            "enabled": true,
+            "transport": "streamable-http",
+            "target": "  ",
+            "command": "node",
+            "url": "  https://example.test/mcp  ",
+        }))
+        .unwrap();
+
+        assert_eq!(config.target, "https://example.test/mcp");
+    }
+
+    #[test]
+    fn explicit_target_precedes_transport_specific_fields() {
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "id": "server-id",
+            "enabled": true,
+            "transport": "streamable-http",
+            "target": "  https://explicit.example.test/mcp  ",
+            "command": "node",
+            "url": "https://fallback.example.test/mcp",
+        }))
+        .unwrap();
+
+        assert_eq!(config.target, "https://explicit.example.test/mcp");
     }
 
     #[tokio::test]

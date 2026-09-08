@@ -76,27 +76,43 @@ impl Tool for AskUserTool {
     }
 }
 
-fn normalized_strings(value: Option<&Value>, limit: usize) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .take(limit)
-                .map(ToOwned::to_owned)
-                .collect()
+fn normalized_strings(value: Option<&Value>, key: &str, limit: usize) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("{key} must be an array of strings"))?;
+    anyhow::ensure!(
+        values.len() <= limit,
+        "{key} must contain at most {limit} items"
+    );
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let text = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}[{index}] must be a string"))?
+                .trim();
+            anyhow::ensure!(!text.is_empty(), "{key}[{index}] must not be empty");
+            Ok(text.to_owned())
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn normalize_questions(input: &Value) -> Result<Vec<(String, Vec<String>)>> {
     let mut questions = Vec::new();
-    if let Some(values) = input.get("questions").and_then(Value::as_array) {
+    if let Some(raw_questions) = input.get("questions") {
+        let values = raw_questions
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("questions must be an array"))?;
         anyhow::ensure!(!values.is_empty(), "questions must be a non-empty array");
-        for (index, value) in values.iter().take(4).enumerate() {
+        anyhow::ensure!(values.len() <= 4, "questions must contain at most 4 items");
+        for (index, value) in values.iter().enumerate() {
+            let value = value
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("question[{index}] must be an object"))?;
             let question = value
                 .get("question")
                 .and_then(Value::as_str)
@@ -105,24 +121,28 @@ fn normalize_questions(input: &Value) -> Result<Vec<(String, Vec<String>)>> {
                 .ok_or_else(|| {
                     anyhow::anyhow!("question[{index}] must include a non-empty question")
                 })?;
-            let options = normalized_strings(value.get("options"), 4);
+            let options = normalized_strings(
+                value.get("options"),
+                &format!("question[{index}].options"),
+                4,
+            )?;
             anyhow::ensure!(
                 !options.is_empty(),
                 "question[{index}] must include at least one option"
             );
             questions.push((question.to_string(), options));
         }
-    } else if let Some(question) = input
-        .get("question")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    } else if let Some(raw_question) = input.get("question") {
+        let question = raw_question
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("question must be a string"))?
+            .trim();
+        anyhow::ensure!(!question.is_empty(), "question must not be empty");
         // Compatibility for native calls persisted before the Electron schema
         // became canonical across clients.
         questions.push((
             question.to_string(),
-            normalized_strings(input.get("choices"), 4),
+            normalized_strings(input.get("choices"), "choices", 4)?,
         ));
     }
     anyhow::ensure!(!questions.is_empty(), "questions must be a non-empty array");
@@ -268,45 +288,105 @@ impl Tool for InteractCurrentPageTool {
     }
 }
 
-fn optional_trimmed(input: &Value, key: &str) -> Option<String> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+fn optional_trimmed(input: &Value, key: &str) -> Result<Option<String>> {
+    match input.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) => {
+            Ok((!value.trim().is_empty()).then(|| value.trim().to_owned()))
+        }
+        Some(_) => anyhow::bail!("{key} must be a string"),
+    }
+}
+
+fn optional_bool(input: &Value, key: &str) -> Result<Option<bool>> {
+    match input.get(key) {
+        None => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => anyhow::bail!("{key} must be a boolean"),
+    }
+}
+
+fn optional_u64(input: &Value, key: &str) -> Result<Option<u64>> {
+    match input.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("{key} must be a non-negative integer")),
+    }
+}
+
+fn optional_i64(input: &Value, key: &str) -> Result<Option<i64>> {
+    match input.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("{key} must be an integer")),
+    }
+}
+
+fn optional_f64(input: &Value, key: &str) -> Result<Option<f64>> {
+    match input.get(key) {
+        None => Ok(None),
+        Some(value) => {
+            let number = value
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("{key} must be a number"))?;
+            anyhow::ensure!(number.is_finite(), "{key} must be a finite number");
+            Ok(Some(number))
+        }
+    }
+}
+
+fn required_string_alias<'a>(input: &'a Value, keys: &[&str], label: &str) -> Result<&'a str> {
+    for key in keys {
+        if let Some(value) = input.get(*key) {
+            return value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key} must be a string"));
+        }
+    }
+    anyhow::bail!("{label} is required")
 }
 
 fn normalize_field(value: &Value, index: usize) -> Result<Value> {
+    let value = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("fields[{index}] must be an object"))?;
     let selector = value
         .get("selector")
-        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("fields[{index}].selector is required"))?
+        .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("fields[{index}].selector is required"))?;
-    let text = value
-        .get("text")
-        .or_else(|| value.get("value"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("fields[{index}].text is required"))?;
+    let text = ["text", "value"]
+        .iter()
+        .find_map(|key| value.get(*key))
+        .ok_or_else(|| anyhow::anyhow!("fields[{index}].text is required"))?
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("fields[{index}].text must be a string"))?;
+    let append = match value.get("append") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => anyhow::bail!("fields[{index}].append must be a boolean"),
+    };
     Ok(json!({
         "selector": selector,
         "text": text,
         "value": text,
-        "append": value.get("append").and_then(Value::as_bool).unwrap_or(false),
+        "append": append,
     }))
 }
 
 fn canonical_page_action(input: &Value) -> Result<Vec<Value>> {
-    let action = input
-        .get("action")
-        .or_else(|| input.get("type"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("action is required"))?;
-    let selector = optional_trimmed(input, "selector");
-    match action {
+    let action = required_string_alias(input, &["action", "type"], "action")?
+        .trim()
+        .to_owned();
+    anyhow::ensure!(!action.is_empty(), "action is required");
+    let selector = optional_trimmed(input, "selector")?;
+    match action.as_str() {
         "click" | "hover" | "focus" => {
             let selector =
                 selector.ok_or_else(|| anyhow::anyhow!("selector is required for {action}"))?;
@@ -315,40 +395,38 @@ fn canonical_page_action(input: &Value) -> Result<Vec<Value>> {
         "input" | "fill" => {
             let selector =
                 selector.ok_or_else(|| anyhow::anyhow!("selector is required for input"))?;
-            let text = input
-                .get("text")
-                .or_else(|| input.get("value"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("text is required for input"))?;
+            let text = required_string_alias(input, &["text", "value"], "text")?;
             Ok(vec![json!({
                 "type": "input",
                 "selector": selector,
                 "text": text,
                 "value": text,
-                "append": input.get("append").and_then(Value::as_bool).unwrap_or(false),
+                "append": optional_bool(input, "append")?.unwrap_or(false),
             })])
         }
         "select" => {
             let selector =
                 selector.ok_or_else(|| anyhow::anyhow!("selector is required for select"))?;
+            let value = optional_trimmed(input, "value")?;
+            let label = optional_trimmed(input, "label")?;
+            let index = optional_i64(input, "index")?;
             anyhow::ensure!(
-                input.get("value").and_then(Value::as_str).is_some()
-                    || input.get("label").and_then(Value::as_str).is_some()
-                    || input.get("index").and_then(Value::as_i64).is_some(),
+                value.is_some() || label.is_some() || index.is_some(),
                 "select requires value, label, or index"
             );
             Ok(vec![json!({
                 "type": "select",
                 "selector": selector,
-                "value": input.get("value"),
-                "label": input.get("label"),
-                "index": input.get("index"),
+                "value": value,
+                "label": label,
+                "index": index,
             })])
         }
         "batch_input" => {
             let fields = input
                 .get("fields")
-                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow::anyhow!("fields must be an array for batch_input"))?
+                .as_array()
                 .ok_or_else(|| anyhow::anyhow!("fields must be an array for batch_input"))?;
             anyhow::ensure!(!fields.is_empty(), "at least one field is required");
             let fields = fields
@@ -361,15 +439,11 @@ fn canonical_page_action(input: &Value) -> Result<Vec<Value>> {
         "extract" => Ok(vec![json!({
             "type": "extract",
             "selector": selector,
-            "offset": input.get("offset").and_then(Value::as_u64).unwrap_or(0),
-            "maxChars": input.get("max_chars").and_then(Value::as_u64).unwrap_or(60_000),
+            "offset": optional_u64(input, "offset")?.unwrap_or(0),
+            "maxChars": optional_u64(input, "max_chars")?.unwrap_or(60_000),
         })]),
         "evaluate" => {
-            let script = input
-                .get("script")
-                .or_else(|| input.get("js"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("script is required for evaluate"))?;
+            let script = required_string_alias(input, &["script", "js"], "script")?;
             Ok(vec![
                 json!({ "type": "evaluate", "script": script, "js": script }),
             ])
@@ -377,25 +451,24 @@ fn canonical_page_action(input: &Value) -> Result<Vec<Value>> {
         "press_key" => {
             let key = input
                 .get("key")
-                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("key is required for press_key"))?
+                .as_str()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("key is required for press_key"))?;
+                .ok_or_else(|| anyhow::anyhow!("key must be a non-empty string"))?;
             Ok(vec![
                 json!({ "type": "press_key", "selector": selector, "key": key }),
             ])
         }
         "scroll" => {
-            let top = input.get("top").and_then(Value::as_f64).unwrap_or(0.0);
-            let left = input.get("left").and_then(Value::as_f64).unwrap_or(0.0);
+            let top = optional_f64(input, "top")?.unwrap_or(0.0);
+            let left = optional_f64(input, "left")?.unwrap_or(0.0);
             Ok(vec![
                 json!({ "type": "scroll", "top": top, "left": left, "dy": top }),
             ])
         }
         "wait" => {
-            let timeout = input
-                .get("timeout_ms")
-                .or_else(|| input.get("timeoutMs"))
-                .and_then(Value::as_u64)
+            let timeout = optional_u64(input, "timeout_ms")?
+                .or(optional_u64(input, "timeoutMs")?)
                 .unwrap_or(0);
             Ok(vec![json!({ "type": "wait", "timeoutMs": timeout })])
         }
@@ -404,7 +477,10 @@ fn canonical_page_action(input: &Value) -> Result<Vec<Value>> {
 }
 
 pub(crate) fn normalize_page_actions(input: &Value) -> Result<Vec<Value>> {
-    if let Some(actions) = input.get("actions").and_then(Value::as_array) {
+    if let Some(raw_actions) = input.get("actions") {
+        let actions = raw_actions
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("actions must be an array"))?;
         anyhow::ensure!(!actions.is_empty(), "actions must be a non-empty array");
         let mut normalized = Vec::new();
         for action in actions {
@@ -545,6 +621,71 @@ mod tests {
     }
 
     #[test]
+    fn malformed_questions_are_rejected_without_dropping_items() {
+        let cases = [
+            (json!({ "questions": {} }), "questions must be an array"),
+            (
+                json!({ "questions": [] }),
+                "questions must be a non-empty array",
+            ),
+            (
+                json!({ "questions": [42] }),
+                "question[0] must be an object",
+            ),
+            (
+                json!({ "questions": [{ "question": "Mode?", "options": "Fast" }] }),
+                "question[0].options must be an array of strings",
+            ),
+            (
+                json!({ "questions": [{ "question": "Mode?", "options": ["Fast", 42] }] }),
+                "question[0].options[1] must be a string",
+            ),
+            (
+                json!({ "questions": [{ "question": "Mode?", "options": ["  "] }] }),
+                "question[0].options[0] must not be empty",
+            ),
+            (
+                json!({ "questions": [{ "question": "Mode?", "options": [] }] }),
+                "question[0] must include at least one option",
+            ),
+            (
+                json!({ "questions": [{ "question": "Mode?", "options": ["A", "B", "C", "D", "E"] }] }),
+                "question[0].options must contain at most 4 items",
+            ),
+            (
+                json!({ "question": "Mode?", "choices": ["Fast", null] }),
+                "choices[1] must be a string",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                normalize_questions(&input).unwrap_err().to_string(),
+                expected,
+                "input: {input}"
+            );
+        }
+        let question = json!({ "question": "Mode?", "options": ["Fast"] });
+        assert_eq!(
+            normalize_questions(&json!({ "questions": vec![question; 5] }))
+                .unwrap_err()
+                .to_string(),
+            "questions must contain at most 4 items"
+        );
+    }
+
+    #[test]
+    fn legacy_question_aliases_keep_optional_choices() {
+        assert_eq!(
+            normalize_questions(&json!({ "question": " Mode? " })).unwrap(),
+            vec![("Mode?".to_owned(), Vec::<String>::new())]
+        );
+        assert_eq!(
+            normalize_questions(&json!({ "question": "Mode?", "choices": [" Fast "] })).unwrap(),
+            vec![("Mode?".to_owned(), vec!["Fast".to_owned()])]
+        );
+    }
+
+    #[test]
     fn batch_and_legacy_host_answers_share_one_result_shape() {
         let questions = vec![
             ("Mode?".to_string(), vec!["Fast".to_string()]),
@@ -592,6 +733,145 @@ mod tests {
             normalize_page_actions(&json!({ "action": "evaluate", "script": "document.title" }))
                 .unwrap();
         assert_eq!(evaluate[0]["js"], "document.title");
+    }
+
+    #[test]
+    fn malformed_page_actions_are_rejected_without_defaulting() {
+        let cases = [
+            (json!({ "actions": {} }), "actions must be an array"),
+            (json!({ "actions": null }), "actions must be an array"),
+            (
+                json!({ "actions": [] }),
+                "actions must be a non-empty array",
+            ),
+            (
+                json!({ "action": "scroll", "top": "100" }),
+                "top must be a number",
+            ),
+            (
+                json!({ "action": "scroll", "left": false }),
+                "left must be a number",
+            ),
+            (
+                json!({ "action": "wait", "timeout_ms": "100" }),
+                "timeout_ms must be a non-negative integer",
+            ),
+            (
+                json!({ "action": "wait", "timeout_ms": -1 }),
+                "timeout_ms must be a non-negative integer",
+            ),
+            (
+                json!({ "action": "wait", "timeoutMs": "100" }),
+                "timeoutMs must be a non-negative integer",
+            ),
+            (
+                json!({ "action": "select", "selector": "#mode", "index": "1" }),
+                "index must be an integer",
+            ),
+            (
+                json!({ "action": "select", "selector": "#mode", "index": 1.5 }),
+                "index must be an integer",
+            ),
+            (
+                json!({ "action": "input", "selector": "#name", "text": "Ada", "append": "true" }),
+                "append must be a boolean",
+            ),
+            (
+                json!({ "action": "extract", "offset": "100" }),
+                "offset must be a non-negative integer",
+            ),
+            (
+                json!({ "action": "extract", "max_chars": null }),
+                "max_chars must be a non-negative integer",
+            ),
+            (
+                json!({ "action": "evaluate", "script": 42 }),
+                "script must be a string",
+            ),
+            (
+                json!({ "action": "press_key", "key": false }),
+                "key must be a non-empty string",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                normalize_page_actions(&input).unwrap_err().to_string(),
+                expected,
+                "input: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_batch_fields_report_the_invalid_item() {
+        let cases = [
+            (
+                json!({ "action": "batch_input", "fields": {} }),
+                "fields must be an array for batch_input",
+            ),
+            (
+                json!({ "action": "batch_input", "fields": [] }),
+                "at least one field is required",
+            ),
+            (
+                json!({ "action": "batch_input", "fields": [
+                    { "selector": "#name", "text": "Ada" }, 42
+                ] }),
+                "fields[1] must be an object",
+            ),
+            (
+                json!({ "action": "batch_input", "fields": [
+                    { "selector": "#name", "text": "Ada", "append": "true" }
+                ] }),
+                "fields[0].append must be a boolean",
+            ),
+            (
+                json!({ "action": "batch_input", "fields": [
+                    { "selector": "#name", "text": 42 }
+                ] }),
+                "fields[0].text must be a string",
+            ),
+            (
+                json!({ "action": "batch_input", "fields": [
+                    { "selector": "#name", "value": null }
+                ] }),
+                "fields[0].text must be a string",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                normalize_page_actions(&input).unwrap_err().to_string(),
+                expected,
+                "input: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_and_mobile_action_aliases_keep_valid_defaults() {
+        let actions = normalize_page_actions(&json!({ "actions": [
+            { "type": "fill", "selector": "#name", "value": "" },
+            { "type": "scroll", "top": -12.5 },
+            { "type": "wait", "timeoutMs": 100 },
+            { "type": "select", "selector": "#mode", "index": 0 },
+            { "type": "extract" },
+            { "type": "evaluate", "js": "document.title" }
+        ] }))
+        .unwrap();
+        assert_eq!(actions.len(), 6);
+        assert_eq!(actions[0]["type"], "input");
+        assert_eq!(actions[0]["text"], "");
+        assert_eq!(actions[0]["value"], "");
+        assert_eq!(actions[0]["append"], false);
+        assert_eq!(actions[1]["top"], -12.5);
+        assert_eq!(actions[1]["dy"], -12.5);
+        assert_eq!(actions[1]["left"], 0.0);
+        assert_eq!(actions[2]["timeoutMs"], 100);
+        assert_eq!(actions[3]["index"], 0);
+        assert_eq!(actions[4]["offset"], 0);
+        assert_eq!(actions[4]["maxChars"], 60_000);
+        assert_eq!(actions[5]["script"], "document.title");
+        assert_eq!(actions[5]["js"], "document.title");
     }
 
     #[test]

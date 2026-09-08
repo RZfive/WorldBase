@@ -448,5 +448,78 @@ void main() {
         );
       },
     );
+
+    testWidgets(
+      'mobile host rejects direct document.openOriginal requests explicitly',
+      (tester) async {
+        late _FakeHarnessServer fake;
+        final client = HarnessClient.instance;
+        await tester.pumpWidget(
+          const ProviderScope(
+            child: CupertinoApp(
+              home: GlobalDialogHost(child: SizedBox.expand()),
+            ),
+          ),
+        );
+        final httpOverrides = _RealHttpOverrides();
+        await tester.runAsync(() async {
+          fake = await _FakeHarnessServer.start();
+          client.configure(
+            host: '127.0.0.1',
+            port: fake.server.port,
+            authToken: 'document-open-widget-test-token',
+          );
+          await HttpOverrides.runZoned(
+            client.connect,
+            createHttpClient: httpOverrides.createRealClient,
+          );
+        });
+        addTearDown(() async {
+          client.dispose();
+          await fake.close();
+        });
+
+        Future<void> settleSocketEvents() async {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 20)),
+          );
+          await tester.pumpAndSettle();
+        }
+
+        // This stream deliberately has no chat session mapping. The mobile
+        // host bridge must still answer the request instead of treating it as
+        // a dialog or leaving Rust waiting for the timeout.
+        fake.emitEvent(
+          streamId: 'document-open-direct',
+          seq: 0,
+          kind: 'host_request',
+          data: {
+            'requestId': 'document-open-direct-request',
+            'requestKind': 'document.openOriginal',
+            'payload': {
+              'artifactId': 'artifact-1',
+              'filePath': '/tmp/report.docx',
+            },
+          },
+        );
+        await settleSocketEvents();
+
+        final responses = fake.requests.where(
+          (request) => request['method'] == 'host.respond',
+        );
+        expect(responses, hasLength(1));
+        final params = (responses.single['params'] as Map)
+            .cast<String, dynamic>();
+        expect(params['requestId'], 'document-open-direct-request');
+        expect(
+          params['result'],
+          containsPair('success', false),
+        );
+        expect(
+          params['result'],
+          containsPair('supported', false),
+        );
+      },
+    );
   });
 }

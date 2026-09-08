@@ -798,6 +798,7 @@ mod tests {
         ToolServices {
             host: Arc::new(super::super::HostBridge::new()),
             current_stream: Arc::new(std::sync::Mutex::new(String::new())),
+            abort: None,
             workspace,
             folder_workspace: None,
             target_project_id: None,
@@ -812,6 +813,7 @@ mod tests {
             mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
             projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(projects)),
             group_collaboration: None,
+            subagent_runtime: None,
         }
     }
 

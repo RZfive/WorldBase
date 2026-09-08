@@ -85,6 +85,63 @@ void main() {
     expect(reply.attachments.single.dataUrl, 'data:image/png;base64,aGVsbG8=');
   });
 
+  test('reset clears failed partial text before the next retry delta', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final controller = container.read(chatProvider.notifier);
+
+    controller.restoreConversationForTesting('conversation-a', [
+      UiMessage(id: 'pending', role: 'assistant', streaming: true),
+    ], select: true);
+    controller.startConversationRunForTesting('conversation-a', 'stream-a');
+
+    controller.handleFrameForTesting(
+      _frame('stream-a', 1, 'delta', {'text': 'partial'}),
+    );
+    controller.handleFrameForTesting(_frame('stream-a', 2, 'reset', {}));
+    expect(controller.isConversationRunning('conversation-a'), isTrue);
+    expect(container.read(chatProvider).single.text, isEmpty);
+
+    controller.handleFrameForTesting(
+      _frame('stream-a', 3, 'delta', {'text': ' retry'}),
+    );
+    expect(container.read(chatProvider).single.text, ' retry');
+
+    controller.handleFrameForTesting(_frame('stream-a', 4, 'done', {}));
+    expect(controller.isConversationRunning('conversation-a'), isFalse);
+    expect(container.read(chatProvider).single.streaming, isFalse);
+  });
+
+  test('reset restores the latest assistant checkpoint after a tool turn', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final controller = container.read(chatProvider.notifier);
+
+    controller.restoreConversationForTesting('conversation-a', [
+      UiMessage(id: 'pending', role: 'assistant', streaming: true),
+    ], select: true);
+    controller.startConversationRunForTesting('conversation-a', 'stream-a');
+    controller.handleFrameForTesting(
+      _frame('stream-a', 1, 'assistant_message', {'content': '先读取文件'}),
+    );
+    controller.handleFrameForTesting(
+      _frame('stream-a', 2, 'tool_call', {
+        'name': 'read_file',
+        'args': {'path': 'notes.txt'},
+      }),
+    );
+    controller.handleFrameForTesting(_frame('stream-a', 3, 'reset', {}));
+    controller.handleFrameForTesting(
+      _frame('stream-a', 4, 'delta', {'text': '，然后总结'}),
+    );
+
+    final messages = container.read(chatProvider);
+    expect(
+      messages.where((message) => message.streaming).single.text,
+      '先读取文件，然后总结',
+    );
+  });
+
   test('new conversation does not clear cached conversations', () {
     final container = ProviderContainer();
     addTearDown(container.dispose);

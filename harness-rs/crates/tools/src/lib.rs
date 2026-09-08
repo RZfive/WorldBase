@@ -9,11 +9,13 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use worldbase_protocol::types::ToolDescriptor;
 
 pub mod command;
 pub mod compat_tools;
 pub mod document;
+pub mod document_artifacts;
 mod electron_contract;
 pub mod fs_tools;
 pub mod group_tools;
@@ -25,6 +27,7 @@ pub mod memory_tools;
 pub mod project_tools;
 pub mod schedule_tools;
 pub mod skill_tools;
+pub mod subagent;
 pub mod todo;
 pub mod web;
 
@@ -66,6 +69,10 @@ pub use project_tools::{
 };
 pub use schedule_tools::{ScheduleCreateTool, ScheduleDeleteTool, ScheduleListTool};
 pub use skill_tools::{SkillListTool, SkillRunTool};
+pub use subagent::{
+    SubagentRunRequest, SubagentRunResponse, SubagentRuntime, SubagentTaskRequest,
+    SubagentTaskResult, SubagentTaskStatus, SubagentTokenUsage,
+};
 pub use todo::{TodoReadTool, TodoWriteTool};
 pub use web::{FetchWebpageTool, WebFetchTool, WebSearchTool};
 pub use worldbase_search::{glob as search_glob, grep as search_grep, GrepHit};
@@ -77,6 +84,9 @@ pub struct ToolServices {
     pub host: Arc<HostBridge>,
     /// 当前工具调用所属流（反向请求路由用）。
     pub current_stream: Arc<std::sync::Mutex<String>>,
+    /// Cancellation for the owning chat run. Direct `tool.call` requests do
+    /// not have a parent run and leave this unset.
+    pub abort: Option<CancellationToken>,
     /// Agent 工作区根目录。
     pub workspace: PathBuf,
     /// Electron conversation's explicitly selected local folder. This is
@@ -109,6 +119,9 @@ pub struct ToolServices {
     /// Present only for a Rust-native group member run. Keeping it optional
     /// makes group collaboration impossible to invoke from a normal chat.
     pub group_collaboration: Option<Arc<dyn GroupCollaborationRuntime>>,
+    /// Per-run subagent executor supplied by core. It captures the parent
+    /// cancellation/progress context and enforces the nesting limit.
+    pub subagent_runtime: Option<Arc<dyn SubagentRuntime>>,
 }
 
 impl ToolServices {
@@ -427,6 +440,7 @@ fn mobile_tool_supported(name: &str) -> bool {
                 | "skill_run"
                 | "list_skills"
                 | "run_skill"
+                | "create_scheduled_task"
                 | "schedule_create"
                 | "schedule_list"
                 | "schedule_delete"
@@ -443,6 +457,7 @@ fn mobile_tool_supported(name: &str) -> bool {
                 | "read_current_page"
                 | "interact_current_page"
                 | "fill_current_page_form"
+                | "save_current_page_as_document"
                 | "enter_plan_mode"
                 | "exit_plan_mode"
                 | "manage_todo_list"
@@ -452,6 +467,9 @@ fn mobile_tool_supported(name: &str) -> bool {
                 | "create_agent_group"
                 | "generate_image"
                 | "edit_image"
+                | "list_documents"
+                | "read_document"
+                | "spawn_subagents"
         )
 }
 
@@ -961,14 +979,7 @@ mod tests {
         let no_interactive = filter_tools(&tools, &mobile);
         assert!(no_interactive.iter().all(|t| t.name() != "ask_user"));
 
-        for unavailable in [
-            "create_scheduled_task",
-            "spawn_subagents",
-            "save_current_page_as_document",
-            "list_documents",
-            "read_document",
-            "open_project_app",
-        ] {
+        for unavailable in ["open_project_app"] {
             assert!(
                 filtered.iter().all(|tool| tool.name() != unavailable),
                 "mobile must not advertise Electron-only host tool {unavailable}"
@@ -996,6 +1007,7 @@ mod tests {
             "create_agent",
             "create_agent_group",
             "create_lightweight_app",
+            "create_scheduled_task",
             "delete_file",
             "doc_parse",
             "doc_write",
@@ -1013,6 +1025,7 @@ mod tests {
             "interact_current_page",
             "list_agent_workspace_catalog",
             "list_dir",
+            "list_documents",
             "list_scheduled_tasks",
             "list_skills",
             "manage_todo_list",
@@ -1027,13 +1040,16 @@ mod tests {
             "memory_search",
             "patch_file",
             "read_current_page",
+            "read_document",
             "read_file",
             "run_skill",
             "schedule_create",
             "schedule_delete",
             "schedule_list",
+            "save_current_page_as_document",
             "skill_list",
             "skill_run",
+            "spawn_subagents",
             "todo_read",
             "todo_write",
             "web_fetch",
@@ -1125,6 +1141,7 @@ mod tests {
         let services = ToolServices {
             host: std::sync::Arc::new(HostBridge::new()),
             current_stream: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            abort: None,
             workspace: root.clone(),
             folder_workspace: None,
             target_project_id: None,
@@ -1147,6 +1164,7 @@ mod tests {
                 root.join("projects"),
             )),
             group_collaboration: None,
+            subagent_runtime: None,
         };
         assert!(services
             .ensure_workspace_path(&services.workspace_path("../outside.txt"))
@@ -1166,6 +1184,7 @@ mod tests {
         let services = ToolServices {
             host: std::sync::Arc::new(HostBridge::new()),
             current_stream: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            abort: None,
             workspace: root.clone(),
             folder_workspace: None,
             target_project_id: None,
@@ -1188,6 +1207,7 @@ mod tests {
                 root.join("projects"),
             )),
             group_collaboration: None,
+            subagent_runtime: None,
         };
 
         assert!(services.enter_plan_mode("inspect before editing"));
