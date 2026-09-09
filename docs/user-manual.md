@@ -41,14 +41,16 @@ WorldBase 主要由以下几部分组成：
 如果你从源码运行本项目，可使用：
 
 ```bash
-pnpm install
-pnpm electron:dev
+pnpm --dir apps/electron install
+pnpm --dir apps/electron electron:dev
 ```
+
+Electron 主进程使用运行时内置的 `node:sqlite`，无需重建 SQLite 原生依赖。
 
 如果需要构建安装包，可使用：
 
 ```bash
-pnpm electron:build
+pnpm --dir apps/electron electron:build
 ```
 
 ## 2.2 首次使用建议顺序

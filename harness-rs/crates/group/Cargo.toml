@@ -1,0 +1,17 @@
+[package]
+name = "worldbase-group"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+worldbase-protocol = { path = "../protocol" }
+worldbase-providers = { path = "../providers" }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -19,11 +19,11 @@
 
 | 维度 | 当前基础 | 缺口 |
 |------|----------|------|
-| 会话 UI | `src/renderer/components/chat/ChatPanel.vue` 已支持会话、项目上下文、技能选择、流式执行 | 没有 Agent 配置、群协作、记忆查看入口 |
-| 会话存档 | `src/main/settings/ai-log-store.ts` 已保存 conversation/session/provider/tool 日志 | 没有“长期记忆蒸馏”和结构化召回 |
-| Agent 内核 | `src/main/ai-engine/agent/agent-core.ts` 已支持上下文压缩、计划模式、技能注入、成本追踪 | 没有 Agent Profile、多 Agent 编排、共享任务板 |
-| Skills | `src/main/ai-engine/agent/skill-engine.ts` 已支持技能解析、注册、执行 | 技能还没有成为 Agent 的长期能力画像 |
-| 权限 | `src/main/ai-engine/agent/permissions/permission-engine.ts` 已有多层权限链 | 没有针对 IM 来源和群组代理身份的额外策略 |
+| 会话 UI | `apps/electron/src/renderer/components/chat/ChatPanel.vue` 已支持会话、项目上下文、技能选择、流式执行 | 没有 Agent 配置、群协作、记忆查看入口 |
+| 会话存档 | `apps/electron/src/main/settings/ai-log-store.ts` 已保存 conversation/session/provider/tool 日志 | 没有“长期记忆蒸馏”和结构化召回 |
+| Agent 内核 | `apps/electron/src/main/ai-engine/agent/agent-core.ts` 已支持上下文压缩、计划模式、技能注入、成本追踪 | 没有 Agent Profile、多 Agent 编排、共享任务板 |
+| Skills | `apps/electron/src/main/ai-engine/agent/skill-engine.ts` 已支持技能解析、注册、执行 | 技能还没有成为 Agent 的长期能力画像 |
+| 权限 | `apps/electron/src/main/ai-engine/agent/permissions/permission-engine.ts` 已有多层权限链 | 没有针对 IM 来源和群组代理身份的额外策略 |
 
 结论很明确：
 
@@ -78,7 +78,7 @@ Agent 应该是稳定对象，至少包含这些内容：
 
 ### 3.5 先做 SQLite FTS，后做向量检索
 
-当前应用本地存储已经依赖 SQLite，MVP 阶段优先用 `better-sqlite3 + FTS5` 做记忆索引，先把写回、去重、筛选、召回链路跑通。向量检索可以作为第二阶段增强，而不是前置阻塞项。
+当前应用本地存储已经依赖 SQLite，MVP 阶段优先用 Electron 内置 `node:sqlite` 或 Rust bundled `rusqlite` 搭配 FTS5 做记忆索引，先把写回、去重、筛选、召回链路跑通。向量检索可以作为第二阶段增强，而不是前置阻塞项。
 
 ---
 
@@ -423,8 +423,8 @@ MVP 阶段直接使用：
 
 新增：
 
-- `src/main/settings/agent-store.ts`
-- `src/main/ai-engine/agent-registry/`
+- `apps/electron/src/main/settings/agent-store.ts`
+- `apps/electron/src/main/ai-engine/agent-registry/`
 
 职责：
 
@@ -636,7 +636,7 @@ IM 线程会引入新的上下文范围：`channel scope`。
 建议新增目录：
 
 ```text
-src/main/
+apps/electron/src/main/
   ai-engine/
     agent-registry/
       agent-registry.ts
@@ -671,7 +671,7 @@ src/main/
 建议新增目录：
 
 ```text
-src/renderer/components/chat/
+apps/electron/src/renderer/components/chat/
   agent-studio/
   group-workspace/
   memory-inspector/
@@ -682,11 +682,11 @@ src/renderer/components/chat/
 
 下面这些现有模块应直接复用，而不是重写：
 
-- `src/main/settings/ai-log-store.ts` 作为原始会话层
-- `src/main/ai-engine/agent/agent-core.ts` 作为单 Agent 执行核心
-- `src/main/ai-engine/agent/skill-engine.ts` 作为技能能力内核
-- `src/main/ai-engine/agent/permissions/permission-engine.ts` 作为权限基线
-- `src/renderer/components/chat/ChatPanel.vue` 作为总容器
+- `apps/electron/src/main/settings/ai-log-store.ts` 作为原始会话层
+- `apps/electron/src/main/ai-engine/agent/agent-core.ts` 作为单 Agent 执行核心
+- `apps/electron/src/main/ai-engine/agent/skill-engine.ts` 作为技能能力内核
+- `apps/electron/src/main/ai-engine/agent/permissions/permission-engine.ts` 作为权限基线
+- `apps/electron/src/renderer/components/chat/ChatPanel.vue` 作为总容器
 
 ---
 

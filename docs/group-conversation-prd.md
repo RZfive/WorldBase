@@ -1,6 +1,6 @@
 # 多 Agent 群组对话：从「协调者传话」到「Agent 互相对话」
 
-> **状态** Draft v0.1 · **日期** 2026-08-11 · **范围** `electron/main-process/ai/group-deliberation.ts` 及相关工具/UI
+> **状态** Draft v0.1 · **日期** 2026-08-11 · **范围** `apps/electron/electron/main-process/ai/group-deliberation.ts` 及相关工具/UI
 
 ## 摘要
 
@@ -14,10 +14,10 @@
 
 ### 运行时链路（已验证）
 
-- **配置层**：`agent-group-store.ts` 持久化群组定义——协调者 agent、成员列表、`maxRounds`(1–5)、`maxParallelWorkers`(1–5)、`sharedMemoryScopes`、`visibility`。设置 UI 在 `AgentWorkspacePanel.vue`。
-- **选择**：侧栏 `openGroup` → `selectedGroupId` → 作为第 10 个参数传给 `chatStream` → `ipc.ts` 的 `ai:chatStream` 处理器 → `buildGroupDeliberationSection()`。
-- **运行时**：`group-deliberation.ts`（1232 行）的 `runGroupDeliberation()`。`parseGroupRouting()` 按 `@提及` 选模式：`coordinator_only` / `targeted` / `discussion` / `coordinator_decides` / `mentioned_agent_decides`。
-- **子 agent 工具**：`spawn_subagents` → `SubagentService.runParallel()`，各自独立 AgentCore、互不可见、阻塞到全部完成。
+- **配置层**：`apps/electron/src/main/settings/agent-group-store.ts` 持久化群组定义——协调者 agent、成员列表、`maxRounds`(1–5)、`maxParallelWorkers`(1–5)、`sharedMemoryScopes`、`visibility`。设置 UI 在 `apps/electron/src/renderer/components/settings/AgentWorkspacePanel.vue`。
+- **选择**：侧栏 `openGroup` → `selectedGroupId` → 作为第 10 个参数传给 `chatStream` → `apps/electron/electron/main-process/ipc.ts` 的 `ai:chatStream` 处理器 → `buildGroupDeliberationSection()`。
+- **运行时**：`apps/electron/electron/main-process/ai/group-deliberation.ts`（1232 行）的 `runGroupDeliberation()`。`parseGroupRouting()` 按 `@提及` 选模式：`coordinator_only` / `targeted` / `discussion` / `coordinator_decides` / `mentioned_agent_decides`。
+- **子 agent 工具**：`spawn_subagents` → `apps/electron/src/main/ai-engine/agent/subagent-service.ts` 的 `SubagentService.runParallel()`，各自独立 AgentCore、互不可见、阻塞到全部完成。
 
 ### discussion 模式的执行结构
 
@@ -196,4 +196,4 @@ P0 三项合起来才让「边做边商量」成立——任意一项单独上�
 
 ---
 
-*本 PRD 基于对 `electron/main-process/ai/group-deliberation.ts`、`src/main/ai-engine/agent/subagent-service.ts`、`tool-spawn-subagent.ts`、`agent-workspace-types.ts` 及相关 UI block 的代码审阅。所有文件 / 行号引用截至 2026-08-11。*
+*本 PRD 基于对 `apps/electron/electron/main-process/ai/group-deliberation.ts`、`apps/electron/src/main/ai-engine/agent/subagent-service.ts`、`apps/electron/src/main/ai-engine/agent/tools/tool-spawn-subagent.ts`、`apps/electron/src/shared/agent-workspace-types.ts` 及相关 UI block 的代码审阅。所有文件 / 行号引用截至 2026-08-11。*

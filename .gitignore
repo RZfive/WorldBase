@@ -1,3 +1,10 @@
+# Rust
+/target
+**/target/
+Cargo.lock
+!harness-rs/Cargo.lock
+**/*.rs.bk
+*.pdb
 # Logs
 logs
 *.log
@@ -26,6 +33,22 @@ dist-ssr
 # Electron build output
 release/
 dist-electron/
+apps/electron/dist/
+apps/electron/dist-electron/
+apps/electron/release/
+apps/electron/resources/harness/
+
+# Flutter build output
+apps/mobile/.dart_tool/
+apps/mobile/build/
+
+# Mobile Rust FFI build artifacts (regenerate with scripts/dev_ios.sh / scripts/dev_android.sh)
+apps/mobile/ios/rust-build/
+apps/mobile/android/app/src/main/jniLibs/
+
+# Temp inspection dirs
+.tmp-vite-plugin-bytecode-inspect/
+.tmp/
 
 # Runtime data (user projects)
 projects/

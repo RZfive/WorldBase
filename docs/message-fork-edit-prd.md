@@ -1,6 +1,6 @@
 # 消息级分支与编辑重发：让每条用户输入都可以「改主意」
 
-> **状态** Draft v0.3 · **日期** 2026-08-15 · **范围** `src/renderer/components/chat/**`、`src/main/settings/chat-history.ts`、`electron/main-process/ipc.ts`（conversations:* IPC）
+> **状态** Draft v0.3 · **日期** 2026-08-15 · **范围** `apps/electron/src/renderer/components/chat/**`、`apps/electron/src/main/settings/chat-history.ts`、`apps/electron/electron/main-process/ipc.ts`（conversations:* IPC）
 
 ## 摘要
 
@@ -12,9 +12,9 @@
 
 ### 数据与链路（已验证）
 
-- **消息没有身份**：`ChatMessage`（`chat/types.ts:79` / `chat-history.ts:78`）只有 `role/content/blocks` 等字段，**没有稳定 id**。渲染层全部用数组下标引用消息--`MessageRow` 接收 `index`，`latestAssistantMessageIndex`、`getLatestVisibleTodoItems(messages, ...)`、lightbox 的 `messageIndex/blockIndex/partIndex` 全是下标寻址。
-- **会话整包持久化**：`conversations:save` IPC 把整个 `Conversation`（含全部 messages）序列化写盘（`chat-history.ts`）。没有消息级增量更新，也没有任何分支概念。
-- **每轮全量重发**：`message-sender.ts` 发送时把当前 `messages` 数组整体构建为 outgoing messages 传给 `ai:chatStream`。**这实际上意味着「编辑重发」在协议层是天然可行的**--截断 + 替换 + 重发即可，不需要任何服务端配合。
+- **消息没有身份**：`ChatMessage`（`apps/electron/src/renderer/components/chat/types.ts:79` / `apps/electron/src/main/settings/chat-history.ts:78`）只有 `role/content/blocks` 等字段，**没有稳定 id**。渲染层全部用数组下标引用消息--`MessageRow` 接收 `index`，`latestAssistantMessageIndex`、`getLatestVisibleTodoItems(messages, ...)`、lightbox 的 `messageIndex/blockIndex/partIndex` 全是下标寻址。
+- **会话整包持久化**：`conversations:save` IPC 把整个 `Conversation`（含全部 messages）序列化写盘（`apps/electron/src/main/settings/chat-history.ts`）。没有消息级增量更新，也没有任何分支概念。
+- **每轮全量重发**：`apps/electron/src/renderer/components/chat/panel/message-sender.ts` 发送时把当前 `messages` 数组整体构建为 outgoing messages 传给 `ai:chatStream`。**这实际上意味着「编辑重发」在协议层是天然可行的**--截断 + 替换 + 重发即可，不需要任何服务端配合。
 - **用户消息可能带附件**：`pendingImages/pendingFiles` 在发送时注入消息（`attachment` block / `image_url` parts），重发时需要能从历史消息还原这些附件。
 - **会话元数据已有继承先例**：`Conversation` 已携带 `providerId/selectedModel/reasoningStrength/temperature/targetProjectId/agentId/groupId` 等上下文，`newConversation` 时逐字段复制--Fork 复用同一套机制。
 
@@ -202,7 +202,7 @@ Fork / 截断复制时对 block 逐类处理：
 
 ## § 06 技术方案要点
 
-1. **新增 `message-branching.ts`**（`src/renderer/components/chat/panel/`）：`forkConversationFromMessage(messageId, edit?)`、`truncateFromMessage(messageId)`、`resolveMessageIndexById(id)`、block 过滤器（R6 表）。纯函数 + 调用现有 `saveConversation`/`newConversation`，不新增 IPC。
+1. **新增 `message-branching.ts`**（`apps/electron/src/renderer/components/chat/panel/`）：`forkConversationFromMessage(messageId, edit?)`、`truncateFromMessage(messageId)`、`resolveMessageIndexById(id)`、block 过滤器（R6 表）。纯函数 + 调用现有 `saveConversation`/`newConversation`，不新增 IPC。
 2. **无新 IPC**：Fork = `conversations:save`（新 id 整包写）+ 本地 `conversations` 列表刷新；原地编辑 = 一次覆盖 save。主进程零改动（仅 `ChatMessage/Conversation` 类型放宽字段）。
 3. **UI 落点**：`MessageRow.vue` 增加用户消息 hover 工具条（仅 `msg.role === 'user'`），emit 到 `MessageList` → `ChatPanelContainer` → `useChatPanel` 暴露 `editUserMessage/forkFromMessage`；编辑态组件放 `blocks/` 或独立 `MessageEditBox.vue`。
 4. **不迁移旧数据**：旧消息无 id → 功能按钮仅对有 id 消息渲染，避免一次性数据迁移风险。

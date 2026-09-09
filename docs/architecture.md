@@ -4,6 +4,12 @@
 
 **WorldBase** 是一个基于 Electron + Vue 3 的桌面应用，核心能力是通过 AI 对话生成完整的 Web 应用项目，并对这些生成的子项目进行持续管理、修改和数据分析。
 
+### 当前 Agent Runtime 边界（2026-09-08）
+
+本文档描述 Electron 产品层和项目管理层。Rust 是默认且唯一持续开发的 Agent Harness，提供跨 CLI、Electron 和 Flutter 复用的 provider、会话上下文、流式事件、tool-call 循环、权限/Plan、取消/续传、子 Agent/群组编排和动态 MCP。Node Agent Loop 只保留冻结兼容；Electron 继续负责窗口与 renderer 展示、IPC/preload、项目运行时、LAN、页面自动化、图片队列/UI 存储、IM 入口及其他宿主业务。
+
+文档解析与基础文档编辑属于 Rust 的公共能力迁移范围，由 `harness-rs/crates/docs` 提供跨端实现；Electron 的高级预览、原文件打开、Office/PDF 复杂编辑和工作台展示可以继续使用 TS 宿主服务。Rust/Electron 的详细 ownership 见 [rust-harness-architecture.md](rust-harness-architecture.md) 和 [HARNESS.md](../HARNESS.md)。
+
 ### 核心理念
 
 子项目不是"独立运行的小应用"，而是**主 AI 管理范围内的受控服务**。主 AI 既是它们的创造者，也是持续的管理者和分析者。
@@ -59,7 +65,7 @@
 | 前端 | Vue 3 + Vite |
 | 主进程后端 | Node.js (Electron main process) |
 | LAN 服务 | Express.js + http-proxy-middleware |
-| 数据库 | better-sqlite3 (主应用 + 子项目) |
+| 数据库 | SQLite（Electron `node:sqlite` + Rust bundled `rusqlite`） |
 | AI | OpenAI-compatible API (function calling) |
 | 进程管理 | Node.js child_process |
 
@@ -69,7 +75,7 @@
 
 ### 1. ProjectFS — 项目文件系统访问层
 
-**路径**: `src/main/project-fs/`
+**路径**: `apps/electron/src/main/project-fs/`
 
 主 AI 通过此层读写子项目的任何文件，是实现"直接修改后端"的基础。
 
@@ -98,7 +104,7 @@ class ProjectFS {
 
 ### 2. ProjectApiClient — 子项目 API 桥接
 
-**路径**: `src/main/project-api-bridge/`
+**路径**: `apps/electron/src/main/project-api-bridge/`
 
 主 AI 调用运行中子项目的 HTTP API，用于测试、调试、获取运行时数据。
 
@@ -124,7 +130,7 @@ class ProjectApiClient {
 
 ### 3. ProjectDataAccess — 统一数据访问层
 
-**路径**: `src/main/project-data-access/`
+**路径**: `apps/electron/src/main/project-data-access/`
 
 主应用通过此层统一访问子项目的数据，支持多种存储格式。
 
@@ -161,7 +167,7 @@ class ProjectApiClient {
 
 ### 4. ProjectRuntime — 项目运行时管理
 
-**路径**: `src/main/project-runtime/`
+**路径**: `apps/electron/src/main/project-runtime/`
 
 | 文件 | 职责 |
 |------|------|
@@ -173,7 +179,7 @@ class ProjectApiClient {
 
 ### 5. AI Engine — AI 引擎与 Agent 系统
 
-**路径**: `src/main/ai-engine/`
+**路径**: `apps/electron/src/main/ai-engine/`
 
 主 AI 从"代码生成器"升级为"项目感知的全栈 Agent"。
 
@@ -219,7 +225,7 @@ class ProjectApiClient {
 
 ### 6. LAN Server — 局域网服务
 
-**路径**: `src/main/lan-server/`
+**路径**: `apps/electron/src/main/lan-server/`
 
 | 文件 | 职责 |
 |------|------|
