@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
@@ -522,7 +523,8 @@ export interface ElectronAPI {
   // Conversations
   listConversations: () => Promise<ConversationSummary[]>
   getConversation: (id: string) => Promise<Conversation | null>
-  saveConversation: (conversation: Conversation) => Promise<{ success: boolean }>
+  saveConversation: (conversation: Conversation) => Promise<{ success: boolean; summary?: ConversationSummary }>
+  updateConversationMetadata: (id: string, patch: ConversationMetadataPatch) => Promise<{ success: boolean; summary: ConversationSummary | null }>
   renameConversation: (id: string, title: string) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
   listAgents: () => Promise<AgentDefinition[]>
@@ -600,6 +602,8 @@ export interface ElectronAPI {
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
   onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
+  getComputerUsePermissions: () => Promise<{ platform: string; screen: string; accessibility: boolean; granted: boolean }>
+  requestComputerUsePermissions: () => Promise<{ granted: boolean }>
 
   // Process management
   getProcessSnapshot: () => Promise<ProcessManagerSnapshot>
@@ -749,7 +753,7 @@ export interface ElectronAPI {
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext, folderWorkspaceRoot),
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot),
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot, computerUseEnabled),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => ipcRenderer.invoke('ai:groupInject', sessionId, groupId, content, targetAgentIds),
@@ -786,6 +790,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listConversations: () => ipcRenderer.invoke('conversations:list'),
   getConversation: (id: string) => ipcRenderer.invoke('conversations:get', id),
   saveConversation: (conversation: Conversation) => ipcRenderer.invoke('conversations:save', conversation),
+  updateConversationMetadata: (id: string, patch: ConversationMetadataPatch) => ipcRenderer.invoke('conversations:updateMetadata', id, patch),
   renameConversation: (id: string, title: string): Promise<{ success: boolean }> => ipcRenderer.invoke('conversations:rename', id, title),
   deleteConversation: (id: string) => ipcRenderer.invoke('conversations:delete', id),
   listAgents: () => ipcRenderer.invoke('agents:list'),
@@ -895,6 +900,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => { ipcRenderer.removeListener('browser:openUrlInDock', handler) }
   },
   getSystemStatus: () => ipcRenderer.invoke('system:getStatus'),
+  getComputerUsePermissions: () => ipcRenderer.invoke('permissions:getComputerUse'),
+  requestComputerUsePermissions: () => ipcRenderer.invoke('permissions:requestComputerUse'),
 
   // Process management
   getProcessSnapshot: () => ipcRenderer.invoke('process:getSnapshot'),

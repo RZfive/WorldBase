@@ -35,6 +35,7 @@ const collapsedThinking = reactive<Record<string, boolean>>({})
 const activeMermaidPreview = ref<{ code: string } | null>(null)
 const scrollTop = ref(0)
 const viewportHeight = ref(0)
+const viewportVisible = ref(false)
 const autoStickEnabled = ref(true)
 const nearBottom = ref(true)
 const measuredMessageHeights = reactive<Record<string, number>>({})
@@ -207,7 +208,13 @@ function markProgrammaticScroll (): void {
   })
 }
 
+function hasVisibleViewport (): boolean {
+  const element = messagesContainer.value
+  return Boolean(element && element.clientHeight > 0 && element.clientWidth > 0 && document.visibilityState !== 'hidden')
+}
+
 function setContainerScrollTop (element: HTMLElement, top: number): void {
+  if (!hasVisibleViewport()) return
   markProgrammaticScroll()
   element.scrollTop = top
   scrollTop.value = element.scrollTop
@@ -217,7 +224,7 @@ function setContainerScrollTop (element: HTMLElement, top: number): void {
 function flushScrollToBottom (): void {
   bottomScrollScheduled = false
   bottomScrollFrameId = null
-  if (!messagesContainer.value) return
+  if (!messagesContainer.value || !hasVisibleViewport()) return
 
   setContainerScrollTop(messagesContainer.value, messagesContainer.value.scrollHeight)
   nearBottom.value = true
@@ -225,7 +232,7 @@ function flushScrollToBottom (): void {
 }
 
 function scrollToBottom () {
-  if (bottomScrollScheduled) return
+  if (!hasVisibleViewport() || bottomScrollScheduled) return
   bottomScrollScheduled = true
   nextTick(() => {
     if (!bottomScrollScheduled) return
@@ -242,12 +249,25 @@ function isAtBottom (element: HTMLElement): boolean {
 }
 
 function syncViewportMetrics (): void {
-  if (!messagesContainer.value) return
-  scrollTop.value = messagesContainer.value.scrollTop
-  viewportHeight.value = messagesContainer.value.clientHeight
+  const element = messagesContainer.value
+  if (!element || !hasVisibleViewport()) {
+    viewportVisible.value = false
+    cancelMinimapIdleMounts()
+    // App.vue keeps chat mounted with v-show. Zero-sized hidden measurements
+    // must not overwrite the scroll/width/height cache or reflow every row.
+    return
+  }
+  const wasVisible = viewportVisible.value
+  viewportVisible.value = true
+  if (!wasVisible && viewportHeight.value > 0) {
+    setContainerScrollTop(element, autoStickEnabled.value ? element.scrollHeight : scrollTop.value)
+  }
+  scrollTop.value = element.scrollTop
+  viewportHeight.value = element.clientHeight
   readContainerPaddings()
   readMinimapTrackWidth()
-  nearBottom.value = isNearBottom(messagesContainer.value)
+  nearBottom.value = isNearBottom(element)
+  if (!wasVisible) ensureMinimapViewportMounted()
 }
 
 /** Resolved container paddings, so minimap ratios map onto the real scroll extent. */
@@ -268,7 +288,11 @@ function readContainerPaddings (): void {
 
 function handleScroll (): void {
   hideSelectionCopyMenu()
-  if (!messagesContainer.value) return
+  if (!messagesContainer.value || !hasVisibleViewport()) return
+  if (!viewportVisible.value) {
+    syncViewportMetrics()
+    return
+  }
   if (isProgrammaticScrolling) {
     syncViewportMetrics()
     return
@@ -463,6 +487,7 @@ const minimapRows = computed<MinimapRow[]>(() => {
 const MINIMAP_MAX_MOUNTED_ROWS = 300
 const minimapMountedIndexes = ref<Set<number>>(new Set())
 let minimapMountIdleId: number | null = null
+let minimapMountTimeoutId: number | null = null
 let minimapMountQueue: number[] = []
 
 function rebuildMinimapMountQueue (): void {
@@ -486,7 +511,7 @@ function mountMinimapRows (indexes: number[]): void {
 
 /** Mount the viewport neighborhood right away, schedule the rest for idle. */
 function ensureMinimapViewportMounted (): void {
-  if (!minimapVisible.value) return
+  if (!minimapVisible.value || !hasVisibleViewport()) return
   const range = visibleRange.value
   const from = Math.max(0, range.start - 6)
   const to = Math.min(props.messages.length - 1, range.end + 6)
@@ -502,20 +527,31 @@ function ensureMinimapViewportMounted (): void {
   scheduleMinimapIdleMounts()
 }
 
+function cancelMinimapIdleMounts (): void {
+  if (minimapMountIdleId != null) window.cancelIdleCallback?.(minimapMountIdleId)
+  if (minimapMountTimeoutId != null) window.clearTimeout(minimapMountTimeoutId)
+  minimapMountIdleId = null
+  minimapMountTimeoutId = null
+}
+
 function scheduleMinimapIdleMounts (): void {
+  if (!hasVisibleViewport() || !minimapVisible.value) return
   rebuildMinimapMountQueue()
-  if (minimapMountQueue.length === 0) return
-  if (typeof window.requestIdleCallback !== 'function') {
-    mountMinimapRows(minimapMountQueue.splice(0, minimapMountQueue.length))
-    return
-  }
-  if (minimapMountIdleId != null) return
-  minimapMountIdleId = window.requestIdleCallback(() => {
+  if (minimapMountQueue.length === 0 || minimapMountIdleId != null || minimapMountTimeoutId != null) return
+  const mountBatch = () => {
     minimapMountIdleId = null
+    minimapMountTimeoutId = null
+    if (!hasVisibleViewport() || !minimapVisible.value) return
     // Small batches per idle slot; Vue mounts + markdown/KaTeX renders cost.
     mountMinimapRows(minimapMountQueue.splice(0, 3))
     if (minimapMountQueue.length > 0) scheduleMinimapIdleMounts()
-  }, { timeout: 2000 })
+  }
+  if (typeof window.requestIdleCallback === 'function') {
+    minimapMountIdleId = window.requestIdleCallback(mountBatch, { timeout: 2000 })
+  } else {
+    // Never synchronously mount all 300 rows on the non-idle fallback path.
+    minimapMountTimeoutId = window.setTimeout(mountBatch, 32)
+  }
 }
 
 // Mount on appends and viewport moves - AND on visibility: a streaming reply
@@ -594,6 +630,7 @@ function scheduleAnchorFlush (): void {
 }
 
 function updateMeasuredHeight (rowKey: string, index: number, height: number): void {
+  if (!Number.isFinite(height) || height <= 0) return
   const nextHeight = Math.max(Math.ceil(height), 1)
   const prevHeight = measuredMessageHeights[rowKey]
   if (prevHeight === nextHeight) return
@@ -781,9 +818,19 @@ watch(
 
 watch(
   () => props.messages,
-  () => {
+  (messages, previous) => {
     trimVirtualMeasurements()
-    nextTick(syncViewportMetrics)
+    if (messages[0] !== previous?.[0]) {
+      // Mounted indexes belong to one history. Reusing a full set from the
+      // previous chat synchronously renders up to 300 new Markdown rows.
+      cancelMinimapIdleMounts()
+      minimapMountQueue = []
+      minimapMountedIndexes.value = new Set()
+    }
+    nextTick(() => {
+      syncViewportMetrics()
+      ensureMinimapViewportMounted()
+    })
   }
 )
 
@@ -832,6 +879,7 @@ watch(
 onMounted(() => {
   document.addEventListener('click', hideSelectionCopyMenu)
   document.addEventListener('selectionchange', handleDocumentSelectionChange)
+  document.addEventListener('visibilitychange', syncViewportMetrics)
   window.addEventListener('blur', hideSelectionCopyMenu)
   syncViewportMetrics()
   ensureMinimapViewportMounted()
@@ -848,6 +896,7 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('click', hideSelectionCopyMenu)
   document.removeEventListener('selectionchange', handleDocumentSelectionChange)
+  document.removeEventListener('visibilitychange', syncViewportMetrics)
   window.removeEventListener('blur', hideSelectionCopyMenu)
   if (selectionCopyResetTimer != null) {
     window.clearTimeout(selectionCopyResetTimer)
@@ -855,10 +904,8 @@ onUnmounted(() => {
   }
   containerObserver?.disconnect()
   containerObserver = null
-  if (minimapMountIdleId != null && typeof window.cancelIdleCallback === 'function') {
-    window.cancelIdleCallback(minimapMountIdleId)
-    minimapMountIdleId = null
-  }
+  viewportVisible.value = false
+  cancelMinimapIdleMounts()
   if (jumpHighlightTimer != null) {
     window.clearTimeout(jumpHighlightTimer)
     jumpHighlightTimer = null

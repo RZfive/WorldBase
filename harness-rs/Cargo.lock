@@ -2740,7 +2740,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "worldbase-app-server"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2758,7 +2758,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-cli"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2774,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-core"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2807,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-docs"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "calamine",
@@ -2820,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-exec"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2833,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-group"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-im-gateway"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -2875,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-mcp-client"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -2889,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-memory"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "image",
@@ -2903,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-mobile-ffi"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2920,7 +2920,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-project-runtime"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-protocol"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2948,7 +2948,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-providers"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2965,7 +2965,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-scheduler"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2981,7 +2981,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-search"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ignore",
@@ -2993,7 +2993,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-skills"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3007,13 +3007,14 @@ dependencies = [
 
 [[package]]
 name = "worldbase-tools"
-version = "0.1.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64",
  "chrono",
  "futures",
+ "image",
  "regex",
  "reqwest",
  "rusqlite",

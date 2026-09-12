@@ -190,6 +190,8 @@ app.on('before-quit', (event) => {
         mainState.memoryStore.close()
       }
     } finally {
+      // Drain accepted history writes even if another service failed cleanup.
+      await mainState.chatHistory?.dispose().catch(error => console.warn('[main] History shutdown failed:', error))
       mainState.hasFinishedQuitCleanup = true
       mainState.isQuitCleanupRunning = false
       app.quit()

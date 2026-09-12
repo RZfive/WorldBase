@@ -68,6 +68,9 @@ const props = defineProps<{
   providerDefaultTemperature?: number
   authMode: AIExecutionAuthMode
   planModeActive: boolean
+  computerUseEnabled?: boolean
+  /** null until the first macOS permission query lands; false gates the toggle. */
+  computerUsePermissionGranted?: boolean | null
   availableAgents?: AgentOption[]
   selectedAgentId?: string
   selectedGroupId?: string
@@ -90,6 +93,7 @@ const emit = defineEmits<{
   (e: 'toggleFolderWorkspace'): void
   (e: 'update:auth-mode', value: AIExecutionAuthMode): void
   (e: 'togglePlanMode'): void
+  (e: 'toggleComputerUse'): void
   (e: 'update:selected-agent-id', id: string): void
 }>()
 
@@ -1070,6 +1074,21 @@ onUnmounted(() => {
             <span class="tooltip-text">{{ $t('chatUi.codeWorkspace') }}</span>
           </div>
           <div class="tooltip-container">
+            <button
+              class="action-btn computer-use-btn"
+              :class="{ active: props.computerUseEnabled, 'permission-locked': props.computerUsePermissionGranted === false }"
+              type="button"
+              :aria-pressed="props.computerUseEnabled === true"
+              :aria-label="props.computerUsePermissionGranted === false ? $t('chatUi.computerUsePermissionNeeded') : (props.computerUseEnabled ? $t('chatUi.disableComputerUse') : $t('chatUi.enableComputerUse'))"
+              @click="emit('toggleComputerUse')"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><path d="m9 10 2 2 4-4"/></svg>
+            </button>
+            <span class="tooltip-text">{{ props.computerUsePermissionGranted === false
+              ? $t('chatUi.computerUsePermissionNeeded')
+              : (props.computerUseEnabled ? $t('chatUi.disableComputerUse') : $t('chatUi.enableComputerUse')) }}</span>
+          </div>
+          <div class="tooltip-container">
             <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
               <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
@@ -1990,6 +2009,10 @@ onUnmounted(() => {
 .action-btn.doc-btn.active,
 .action-btn.folder-btn.active { color: var(--app-accent); background: var(--app-accent-soft); }
 .action-btn.upload-btn { cursor: pointer; }
+.computer-use-btn.active { color: var(--app-accent, #2563eb); background: color-mix(in srgb, var(--app-accent, #2563eb) 14%, transparent); }
+/* macOS permission gate: grayed out until Screen Recording + Accessibility are granted. */
+.computer-use-btn.permission-locked { opacity: 0.38; cursor: not-allowed; }
+.computer-use-btn.permission-locked:hover { background: transparent; color: var(--app-text-muted, #888); }
 .action-btn.disabled {
   opacity: 0.5;
   cursor: not-allowed;

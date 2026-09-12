@@ -119,6 +119,8 @@ export interface RustChatOptions {
   memoryScopes?: MemorySearchScope[]
   /** Current user message used for Rust-side memory retrieval. */
   memoryQuery?: string
+  /** Explicit per-run opt-in for OS-level Computer Use tools. */
+  computerUseEnabled?: boolean
 }
 
 /** Durable member identity supplied when Electron opens a Rust group session. */
@@ -817,7 +819,8 @@ export class RustHarnessClient {
         planModeActive: options?.planModeActive === true,
         budgetLimit: normalizeBudgetLimit(options?.budgetLimit),
         memoryScopes: Array.isArray(options?.memoryScopes) ? options.memoryScopes : [],
-        memoryQuery: normalizeOptionalString(options?.memoryQuery || text)
+        memoryQuery: normalizeOptionalString(options?.memoryQuery || text),
+        computerUseEnabled: options?.computerUseEnabled === true
       })
       const streamId = result.streamId || result.stream_id
       if (!streamId) throw new Error('Rust harness did not return a stream id')
@@ -1118,7 +1121,7 @@ export class RustHarnessClient {
         protocolVersion: '1.0',
         capabilities: {
           platform: 'electron',
-          features: ['subprocess', 'port_binding', 'webhook_receiver', 'webview_automation', 'interactive'],
+          features: ['subprocess', 'port_binding', 'webhook_receiver', 'webview_automation', 'interactive', 'computer_screen_capture', 'computer_input_injection'],
           excludes: []
         }
       })
@@ -1702,7 +1705,8 @@ function nativeGroupContext (options?: RustChatOptions): Record<string, unknown>
     planModeActive: options?.planModeActive === true,
     budgetLimit: normalizeBudgetLimit(options?.budgetLimit),
     memoryScopes: Array.isArray(options?.memoryScopes) ? options.memoryScopes : [],
-    memoryQuery: normalizeOptionalString(options?.memoryQuery)
+    memoryQuery: normalizeOptionalString(options?.memoryQuery),
+    computerUseEnabled: options?.computerUseEnabled === true
   }
 }
 

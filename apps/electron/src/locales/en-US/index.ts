@@ -417,6 +417,9 @@ const enUS: MessageSchema = {
     documentCenter: 'Document Center',
     codeWorkspace: 'Code Workspace',
     addAttachment: 'Add attachment',
+    enableComputerUse: 'Enable Computer Use',
+    computerUsePermissionNeeded: 'Permission required — enable Screen Recording & Accessibility in System Settings, then restart WorldBase',
+    disableComputerUse: 'Disable Computer Use',
     processingFiles: 'Processing files...',
     stopGenerating: 'Stop generating',
     send: 'Send',
@@ -1155,7 +1158,13 @@ const enUS: MessageSchema = {
         harnessTs: 'TypeScript (frozen compatibility)',
         harnessTsHint: 'Compatibility only; frozen',
         harnessRust: 'Rust (app-server)',
-        harnessRustHint: 'Default and only new-feature target'
+        harnessRustHint: 'Default and only new-feature target',
+        computerUseTitle: 'Computer use permissions',
+        computerUseHint: 'Screen Recording and Accessibility permissions are checked only at startup. Enable them in System Settings, then restart WorldBase.',
+        computerUseScreen: 'Screen Recording',
+        computerUseAccessibility: 'Accessibility',
+        computerUseGrant: 'Grant access',
+        computerUseGranted: 'Granted'
       },
       transfer: {
         navLabel: 'Transfer',

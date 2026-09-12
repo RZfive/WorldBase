@@ -212,6 +212,7 @@ function buildAttachmentPrompt (): string {
           @toggle-folder-workspace="noop"
           @update:auth-mode="noop"
           @toggle-plan-mode="noop"
+          @toggle-computer-use="noop"
         />
       </section>
     </div>

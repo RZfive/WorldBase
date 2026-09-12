@@ -71,6 +71,7 @@ export interface RustNativeGroupDeliberationInput {
     | 'activeSkillContents'
     | 'memoryScopes'
     | 'memoryQuery'
+    | 'computerUseEnabled'
   > & {
     /** Live Electron authorization mode used by Node-hosted tool handlers. */
     getAuthMode?: () => 'strict' | 'auto'
@@ -457,6 +458,7 @@ function nativeGroupContext (input: RustNativeGroupDeliberationInput): RustChatO
     budgetLimit: input.context?.budgetLimit,
     memoryScopes: input.context?.memoryScopes,
     memoryQuery: input.context?.memoryQuery,
+    computerUseEnabled: input.context?.computerUseEnabled === true,
     systemPromptSections: uniqueStrings(input.context?.systemPromptSections),
     activeSkillContents: uniqueStrings(input.context?.activeSkillContents),
     allowedToolNames: [],

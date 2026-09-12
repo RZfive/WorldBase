@@ -1,5 +1,6 @@
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { computerUsePermissions } from '../../../utils/computer-use-permissions'
 import { createChatAttachmentState } from './attachment-state'
 import { createChatAuthorizationState } from './authorization-state'
 import { createChatConversationNavigation } from './conversation-navigation'
@@ -58,6 +59,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     selectedChannelBindingId,
     showSkillPicker,
     planModeActive,
+    computerUseEnabled,
+    computerUsePermissionGranted,
     syncingProviderOptions,
     documentDockVisible,
     documentWorkspaceDocuments,
@@ -212,6 +215,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const {
     loadConversations,
     renameConversation,
+    rememberConversationContext,
+    saveConversationMetadata,
     saveConversation: doSaveConversation,
     setConversationTarget
   } = createChatConversationStorage({
@@ -219,6 +224,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     formatAttachmentConversationTitle,
     conversations,
     conversationsLoaded,
+    currentConversationId,
     currentAuthMode,
     activeProviderId,
     selectedModel,
@@ -246,13 +252,12 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     handleTemperatureChange,
     loadProviders,
     providerDefaultTemperature,
+    selectConversationProvider,
     syncProviderSelectionForAgent,
     togglePlanMode
   } = createChatProviderState({
     conversations,
     currentConversationId,
-    messages,
-    targetProjectId,
     providers,
     providersConfig,
     activeProviderId,
@@ -269,7 +274,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     agentsById,
     providersById,
     getDefaultAgentId,
-    saveConversation: (conversationId, chatMessages, options) => doSaveConversation(conversationId, chatMessages, options)
+    saveConversationMetadata
   })
 
   const {
@@ -355,7 +360,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     getDefaultAgentId,
     clearConversationUnread,
     syncProviderSelectionForAgent,
-    loadProviders,
+    selectConversationProvider,
+    rememberConversationContext,
     loadConversations,
     saveConversation: doSaveConversation,
     setConversationTarget,
@@ -421,6 +427,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     conversationTemperature,
     pendingImages,
     pendingFiles,
+    computerUseEnabled,
     isUploadingFiles,
     uploadFeedback,
     filePreview,
@@ -473,11 +480,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   }, { immediate: true })
 
   onMounted(async () => {
-    await loadConversations()
-    await loadLongTermGoals()
-    await loadProviders()
-    await loadSkills()
-    await loadAgentWorkspaceOptions()
+    // Bind configuration updates before startup reads can complete out of order.
     ensureSharedChatPanelLifecycleBindings({
       activeProviderId,
       selectedModel,
@@ -496,7 +499,38 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       loadLongTermGoalSnapshot,
       mergeGoalTitleState
     })
+    await loadConversations()
+    await loadLongTermGoals()
+    await loadProviders()
+    await loadSkills()
+    await loadAgentWorkspaceOptions()
   })
+
+  let disposed = false
+  let togglingComputerUse = false
+  onUnmounted(() => { disposed = true })
+
+  async function toggleComputerUse (): Promise<void> {
+    if (computerUseEnabled.value) {
+      computerUseEnabled.value = false
+      if (isLoading.value) await stopCurrentStream()
+      return
+    }
+    if (togglingComputerUse) return
+    togglingComputerUse = true
+    try {
+      // Await the already-loaded startup snapshot, never a fresh native probe.
+      const status = await computerUsePermissions.initialize()
+      if (!status || disposed) return
+      if (!status.granted) {
+        await computerUsePermissions.request()
+        return
+      }
+      if (!disposed) computerUseEnabled.value = true
+    } finally {
+      togglingComputerUse = false
+    }
+  }
 
   return {
     activeGroupSessionId,
@@ -572,6 +606,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     pendingFiles,
     pendingImages,
     planModeActive,
+    computerUseEnabled,
+    computerUsePermissionGranted,
     providers,
     providerDefaultTemperature,
     conversationTemperature,
@@ -608,6 +644,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     startEditUserMessage: startEditMessage,
     stopCurrentStream,
     togglePlanMode,
+    toggleComputerUse,
     toggleSkill,
     clearSkills,
     updateDocumentWorkspaceState,

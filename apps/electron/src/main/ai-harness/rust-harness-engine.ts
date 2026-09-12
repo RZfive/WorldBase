@@ -44,7 +44,9 @@ const PLAN_MODE_WRITE_TOOLS = new Set([
   'rebuild_project',
   'start_project_server',
   'restart_project_server',
-  'clear_project_build_flag'
+  'clear_project_build_flag',
+  'computer_observe',
+  'computer_action'
 ])
 
 // Rust owns the model/tool loop and the two intrinsic plan-mode controls.
@@ -282,7 +284,8 @@ export class RustHarnessEngine implements AIHarness {
         reasoningEffort: effectiveConfig.reasoningEffort,
         temperature: effectiveConfig.temperature,
         planModeActive: this.planModeDefault,
-        budgetLimit: this.budgetLimit
+        budgetLimit: this.budgetLimit,
+        computerUseEnabled: options?.computerUseEnabled === true
       }
       // MCP/tool discovery above can await for a while. Re-check immediately
       // before handing the prompt to Rust so a stop during preparation never

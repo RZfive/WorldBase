@@ -2,7 +2,6 @@ import { computed, nextTick, type ComputedRef, type Ref } from 'vue'
 import { getEnabledProviders } from './provider-utils'
 import type {
   AIExecutionAuthMode,
-  ChatMessage,
   ConversationSummary,
   ProviderOption,
   ProvidersConfig,
@@ -12,8 +11,6 @@ import type {
 interface ChatProviderStateOptions {
   conversations: Ref<ConversationSummary[]>
   currentConversationId: Ref<string | null>
-  messages: Ref<ChatMessage[]>
-  targetProjectId: Ref<string | null>
   providers: Ref<ProviderOption[]>
   providersConfig: Ref<ProvidersConfig>
   activeProviderId: Ref<string>
@@ -30,15 +27,13 @@ interface ChatProviderStateOptions {
   agentsById: ComputedRef<Map<string, AgentDefinition>>
   providersById: ComputedRef<Map<string, ProviderOption>>
   getDefaultAgentId: () => string
-  saveConversation: (conversationId: string, messages: ChatMessage[], options?: { targetProjectId?: string | null; allowEmpty?: boolean }) => Promise<void>
+  saveConversationMetadata: (conversationId: string) => Promise<void>
 }
 
 export function createChatProviderState (options: ChatProviderStateOptions) {
   const {
     conversations,
     currentConversationId,
-    messages,
-    targetProjectId,
     providers,
     providersConfig,
     activeProviderId,
@@ -55,15 +50,14 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
     agentsById,
     providersById,
     getDefaultAgentId,
-    saveConversation
+    saveConversationMetadata
   } = options
+
+  let catalogVersion = 0
 
   async function saveActiveConversationMeta (): Promise<void> {
     if (!currentConversationId.value) return
-    await saveConversation(currentConversationId.value, messages.value, {
-      targetProjectId: targetProjectId.value,
-      allowEmpty: true
-    })
+    await saveConversationMetadata(currentConversationId.value)
   }
 
   async function applyProvidersConfig (
@@ -71,6 +65,7 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
     preferredProviderId?: string | null,
     preferredModelId?: string | null
   ): Promise<void> {
+    catalogVersion++
     syncingProviderOptions.value = true
     providersConfig.value = {
       providers: config.providers.map(provider => ({ ...provider })),
@@ -79,11 +74,18 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
     }
     providers.value = getEnabledProviders(providersConfig.value)
 
+    selectConversationProvider(preferredProviderId, preferredModelId)
+
+    await nextTick()
+    syncingProviderOptions.value = false
+  }
+
+  function selectConversationProvider (preferredProviderId?: string | null, preferredModelId?: string | null): void {
     const candidateIds = [
       preferredProviderId,
       currentConversationId.value ? conversations.value.find(item => item.id === currentConversationId.value)?.providerId : null,
       activeProviderId.value,
-      config.activeProviderId
+      providersConfig.value.activeProviderId
     ]
     const nextProviderId = candidateIds.find(id => id && providers.value.some(provider => provider.id === id))
       || providers.value[0]?.id
@@ -94,15 +96,14 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
     selectedModel.value = preferredModelId && active?.models.includes(preferredModelId)
       ? preferredModelId
       : active?.activeModel || active?.models[0] || ''
-
-    await nextTick()
-    syncingProviderOptions.value = false
   }
 
   async function loadProviders (preferredProviderId?: string | null, preferredModelId?: string | null): Promise<void> {
     if (!window.electronAPI) return
+    const version = catalogVersion
     try {
       const config = await window.electronAPI.getProviders()
+      if (version !== catalogVersion) return
       const currentConversation = currentConversationId.value
         ? conversations.value.find(item => item.id === currentConversationId.value)
         : null
@@ -164,16 +165,15 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
 
   async function handleAuthModeChange (authMode: AIExecutionAuthMode): Promise<void> {
     currentAuthMode.value = authMode
+    const savingMetadata = saveActiveConversationMeta()
     const activeConversationId = currentConversationId.value
     const activeSessionId = activeConversationId ? activeStreamSessionIds.get(activeConversationId) : null
-    if (activeSessionId && window.electronAPI?.updateChatSessionAuthMode) {
-      try {
-        await window.electronAPI.updateChatSessionAuthMode(activeSessionId, authMode)
-      } catch {
-        /* ignore */
-      }
-    }
-    await saveActiveConversationMeta()
+    const updatingSession = activeSessionId && window.electronAPI?.updateChatSessionAuthMode
+      ? window.electronAPI.updateChatSessionAuthMode(activeSessionId, authMode).catch(() => {})
+      : Promise.resolve()
+    // Attach both rejection handlers immediately; persistence must retain the
+    // captured conversation even if navigation happens during the session RPC.
+    await Promise.all([savingMetadata, updatingSession])
   }
 
   async function handleAgentSelectionChange (agentId: string): Promise<void> {
@@ -214,6 +214,7 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
     handleTemperatureChange,
     loadProviders,
     providerDefaultTemperature,
+    selectConversationProvider,
     syncProviderSelectionForAgent,
     togglePlanMode
   }

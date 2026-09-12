@@ -93,6 +93,8 @@ const {
   pendingFiles,
   pendingImages,
   planModeActive,
+  computerUseEnabled,
+  computerUsePermissionGranted,
   providers,
   providerDefaultTemperature,
   conversationTemperature,
@@ -139,6 +141,7 @@ const {
   showSkillPicker,
   stopCurrentStream,
   togglePlanMode,
+  toggleComputerUse,
   toggleSkill,
   clearSkills,
   updateDocumentWorkspaceState,
@@ -794,6 +797,8 @@ watch(
             :provider-default-temperature="providerDefaultTemperature"
             :auth-mode="currentAuthMode"
             :plan-mode-active="planModeActive"
+            :computer-use-enabled="computerUseEnabled"
+            :computer-use-permission-granted="computerUsePermissionGranted"
             :available-agents="nonDefaultAgents"
             :selected-agent-id="agentSelectorValue"
             :selected-group-id="selectedGroupId"
@@ -812,6 +817,7 @@ watch(
             @toggle-folder-workspace="toggleFolderWorkspace"
             @update:auth-mode="handleAuthModeChange"
             @toggle-plan-mode="togglePlanMode"
+            @toggle-computer-use="toggleComputerUse"
             @update:selected-agent-id="handleAgentSelectionChange"
           />
         </template>

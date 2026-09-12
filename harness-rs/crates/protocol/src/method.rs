@@ -26,6 +26,8 @@ pub const TOOL_CALL: &str = "tool.call";
 
 pub const SETTINGS_GET: &str = "settings.get";
 pub const SETTINGS_SET: &str = "settings.set";
+/// Query OS permissions from the process that owns native Computer Use.
+pub const PERMISSIONS_COMPUTER_USE: &str = "permissions.computerUse";
 
 pub const MEMORY_SEARCH: &str = "memory.search";
 pub const MEMORY_ADD: &str = "memory.add";
@@ -270,6 +272,7 @@ pub const ALL_METHODS: &[&str] = &[
     TOOL_CALL,
     SETTINGS_GET,
     SETTINGS_SET,
+    PERMISSIONS_COMPUTER_USE,
     MEMORY_SEARCH,
     MEMORY_ADD,
     MEMORY_DELETE,

@@ -73,6 +73,9 @@ export interface ConversationSummary {
 export interface ChatPanelProps {
   projectContext?: Record<string, unknown> | null
   activePageContext?: ActivePageAutomationContext | null
+  computerUseEnabled?: boolean
+  /** null until the first macOS permission query lands; false gates the toggle. */
+  computerUsePermissionGranted?: boolean | null
 }
 
 export interface ChatSurfaceStatusSummary {

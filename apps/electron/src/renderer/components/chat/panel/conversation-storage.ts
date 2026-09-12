@@ -1,4 +1,5 @@
 import type { ComputedRef, Ref } from 'vue'
+import type { ConversationMetadataPatch } from '../../../../shared/conversation-metadata'
 import type { ComposerTranslation } from 'vue-i18n'
 import { getConversationTitleText } from './message-runtime'
 import type {
@@ -19,6 +20,7 @@ interface ChatConversationStorageOptions {
   formatAttachmentConversationTitle: (attachmentNames: string[]) => string
   conversations: Ref<ConversationSummary[]>
   conversationsLoaded: Ref<boolean>
+  currentConversationId: Ref<string | null>
   currentAuthMode: Ref<AIExecutionAuthMode>
   activeProviderId: Ref<string>
   selectedModel: Ref<string>
@@ -40,6 +42,7 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     formatAttachmentConversationTitle,
     conversations,
     conversationsLoaded,
+    currentConversationId,
     currentAuthMode,
     activeProviderId,
     selectedModel,
@@ -54,6 +57,48 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     buildCurrentDocumentWorkspaceState,
     buildCurrentFolderWorkspaceState
   } = options
+
+  function currentMetadata (): ConversationMetadataPatch {
+    return {
+      authMode: currentAuthMode.value,
+      providerId: shouldUseConversationProviderOverride.value ? (activeProviderId.value || null) : null,
+      selectedModel: shouldUseConversationProviderOverride.value ? (selectedModel.value || null) : null,
+      reasoningStrength: reasoningStrength.value,
+      temperature: conversationTemperature.value,
+      targetProjectId: currentConversationId.value ? getConversationTarget(currentConversationId.value) : null,
+      agentId: selectedAgentId.value || null,
+      groupId: selectedGroupId.value || null,
+      channelBindingId: selectedChannelBindingId.value || null
+    }
+  }
+
+  function captureContext () {
+    return {
+      ...currentMetadata(),
+      documentWorkspace: buildCurrentDocumentWorkspaceState(),
+      folderWorkspace: buildCurrentFolderWorkspaceState(),
+      pinnedTitle: getPinnedContextTitle()
+    }
+  }
+  const backgroundContexts = new Map<string, ReturnType<typeof captureContext>>()
+  function rememberConversationContext (id: string): void {
+    backgroundContexts.set(id, captureContext())
+  }
+
+  function applySummary (summary: ConversationSummary): void {
+    const next = conversations.value.filter(item => item.id !== summary.id)
+    next.push(summary)
+    next.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    conversations.value = next
+  }
+
+  async function saveConversationMetadata (id: string): Promise<void> {
+    const api = window.electronAPI
+    if (!api?.updateConversationMetadata) return
+    // This payload never traverses messages, screenshots or document contents.
+    const result = await api.updateConversationMetadata(id, currentMetadata())
+    if (result.summary) applySummary(result.summary)
+  }
 
   function setConversationTarget (conversationId: string, projectId: string | null | undefined): void {
     if (!projectId) {
@@ -97,12 +142,15 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     const existingConversation = conversations.value.find(conversation => conversation.id === conversationId)
     if (messages.length === 0 && !saveOptions?.titleOverride && !saveOptions?.allowEmpty && !existingConversation) return
 
+    const context = currentConversationId.value === conversationId
+      ? captureContext()
+      : backgroundContexts.get(conversationId)
     const firstUserMessage = messages.find(message => message.role === 'user')
     const titleText = getConversationTitleText(firstUserMessage, { attachmentTitle: formatAttachmentConversationTitle })
     const shouldKeepManualTitle = Boolean(existingConversation?.manualTitle && !saveOptions?.titleOverride)
     const resolvedTitle = saveOptions?.titleOverride
       || (shouldKeepManualTitle ? existingConversation?.title : '')
-      || getPinnedContextTitle()
+      || context?.pinnedTitle
       || (titleText
         ? (titleText.length > 40 ? titleText.substring(0, 40) + '...' : titleText)
         : (existingConversation?.title || t('chatUi.newConversation')))
@@ -112,27 +160,29 @@ export function createChatConversationStorage (options: ChatConversationStorageO
 
     setConversationTarget(conversationId, resolvedTargetProjectId)
 
-    await window.electronAPI.saveConversation(JSON.parse(JSON.stringify({
+    const metadata: ConversationMetadataPatch = context || existingConversation || {}
+    const result = await window.electronAPI.saveConversation(JSON.parse(JSON.stringify({
       id: conversationId,
       title: resolvedTitle,
       messages,
       createdAt: getConversationCreatedAt(conversationId),
       updatedAt: new Date().toISOString(),
       manualTitle: shouldKeepManualTitle || undefined,
-      authMode: currentAuthMode.value,
-      providerId: shouldUseConversationProviderOverride.value ? (activeProviderId.value || undefined) : undefined,
-      selectedModel: shouldUseConversationProviderOverride.value ? (selectedModel.value || undefined) : undefined,
-      reasoningStrength: reasoningStrength.value,
-      temperature: conversationTemperature.value ?? undefined,
+      authMode: metadata.authMode ?? undefined,
+      providerId: metadata.providerId ?? undefined,
+      selectedModel: metadata.selectedModel ?? undefined,
+      reasoningStrength: metadata.reasoningStrength ?? undefined,
+      temperature: metadata.temperature ?? undefined,
       targetProjectId: resolvedTargetProjectId || undefined,
-      agentId: selectedAgentId.value || undefined,
-      groupId: selectedGroupId.value || undefined,
-      channelBindingId: selectedChannelBindingId.value || undefined,
-      documentWorkspace: buildCurrentDocumentWorkspaceState(),
-      folderWorkspace: buildCurrentFolderWorkspaceState()
+      agentId: metadata.agentId ?? undefined,
+      groupId: metadata.groupId ?? undefined,
+      channelBindingId: metadata.channelBindingId ?? undefined,
+      documentWorkspace: context?.documentWorkspace,
+      folderWorkspace: context?.folderWorkspace
     })))
 
-    await loadConversations()
+    if (result.summary) applySummary(result.summary)
+    else await loadConversations() // Older preload compatibility only.
   }
 
   async function renameConversation (conversationId: string, title: string): Promise<boolean> {
@@ -153,6 +203,8 @@ export function createChatConversationStorage (options: ChatConversationStorageO
   return {
     loadConversations,
     renameConversation,
+    rememberConversationContext,
+    saveConversationMetadata,
     saveConversation,
     setConversationTarget
   }

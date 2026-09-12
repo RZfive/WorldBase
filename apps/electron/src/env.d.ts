@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 
+type ConversationMetadataPatch = import('./shared/conversation-metadata.js').ConversationMetadataPatch
+
 type ActivePageAutomationContext = import('./shared/page-automation-types.js').ActivePageAutomationContext
 type AppAboutInfo = import('./shared/app-update-types.js').AppAboutInfo
 type AppUpdateChannel = import('./shared/app-update-types.js').AppUpdateChannel
@@ -974,7 +976,7 @@ interface DocumentSummaryDTO {
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -995,7 +997,8 @@ interface ElectronAPI {
   // Conversations
   listConversations: () => Promise<ConversationSummary[]>
   getConversation: (id: string) => Promise<ConversationData | null>
-  saveConversation: (conversation: ConversationData) => Promise<{ success: boolean }>
+  saveConversation: (conversation: ConversationData) => Promise<{ success: boolean; summary?: ConversationSummary }>
+  updateConversationMetadata: (id: string, patch: ConversationMetadataPatch) => Promise<{ success: boolean; summary: ConversationSummary | null }>
   renameConversation: (id: string, title: string) => Promise<{ success: boolean }>
   deleteConversation: (id: string) => Promise<boolean>
   listAgents: () => Promise<AgentDefinition[]>
@@ -1073,6 +1076,8 @@ interface ElectronAPI {
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
   onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
+  getComputerUsePermissions: () => Promise<{ platform: string; screen: string; accessibility: boolean; granted: boolean }>
+  requestComputerUsePermissions: () => Promise<{ granted: boolean }>
 
   // Process management
   getProcessSnapshot: () => Promise<ProcessManagerSnapshot>

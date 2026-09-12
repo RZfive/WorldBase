@@ -27,6 +27,8 @@ impl Capabilities {
                 "webhook_receiver".into(),
                 "webview_automation".into(),
                 "interactive".into(),
+                "computer_screen_capture".into(),
+                "computer_input_injection".into(),
             ],
             excludes: vec![],
         }
@@ -320,6 +322,10 @@ pub struct ChatRunContext {
     /// The current user message used for scoped memory retrieval.
     #[serde(default)]
     pub memory_query: Option<String>,
+    /// Enables OS-level Computer Use tools for this run. The UI toggle is
+    /// intentionally ephemeral and does not alter the persisted conversation.
+    #[serde(default)]
+    pub computer_use_enabled: bool,
 }
 
 /// A concrete memory scope selected for one agent run.

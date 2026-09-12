@@ -2,6 +2,7 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import QRCode from 'qrcode'
+import { computerUsePermissions } from './renderer/utils/computer-use-permissions'
 import ChatPanel from './renderer/components/chat/ChatPanel.vue'
 import Launchpad from './renderer/components/launchpad/Launchpad.vue'
 import AISettings from './renderer/components/settings/AISettings.vue'
@@ -1136,6 +1137,7 @@ function closeWindow () { window.electronAPI?.closeWindow() }
 function onDocClickGlobal () { hideDockCtx() }
 
 onMounted(async () => {
+  void computerUsePermissions.initialize()
   // Keep the global titlebar-height token in sync with the platform-specific TitleBar height
   // (38px on macOS, 34px on Windows). Overlays anchored below the titlebar read this token.
   const platform = (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform || navigator.platform || navigator.userAgent

@@ -135,6 +135,7 @@ pub async fn dispatch(
 
         SETTINGS_GET => settings_get(hub, params),
         SETTINGS_SET => settings_set(hub, params),
+        PERMISSIONS_COMPUTER_USE => Ok(worldbase_tools::computer_use::permission_status()),
 
         MEMORY_SEARCH => memory_search(hub, params),
         MEMORY_ADD => memory_add(hub, params),

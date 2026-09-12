@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { computerUsePermissions as permissionState } from '../../utils/computer-use-permissions'
 import { loadAIExecutionPreferences, persistAIExecutionPreferences } from '../../utils/ai-execution-preferences'
 import type { ThemePreference } from '../../utils/theme'
 import { applyThemePreference, resolveThemePreference, watchSystemThemeChange } from '../../utils/theme'
@@ -515,8 +516,8 @@ async function importConfig () {
   }
 }
 
-onMounted(async () => {
-  await loadSettings()
+onMounted(() => {
+  void loadSettings()
   stopThemeWatcher = watchSystemThemeChange(() => {
     if (themePreference.value === 'system') {
       applyThemePreference('system')
@@ -531,6 +532,14 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleFontReposition)
   window.removeEventListener('scroll', handleFontReposition, true)
 })
+
+// Opening General/Appearance must not run synchronous macOS TCC probes.
+const computerUsePermissions = permissionState.status
+const requestingComputerUse = permissionState.requesting
+
+async function requestComputerUsePermissions () {
+  await permissionState.request()
+}
 
 function handleFontReposition () {
   if (fontDropdownOpen.value) updateFontPanelPosition()
@@ -738,6 +747,30 @@ function handleFontReposition () {
                 <small>{{ $t('settings.general.execution.harnessRustHint') }}</small>
               </button>
             </div>
+          </section>
+
+          <section class="gs-control-card">
+            <div class="gs-control-copy">
+              <span class="gs-control-title">{{ $t('settings.general.execution.computerUseTitle') }}</span>
+              <p class="gs-control-hint">{{ $t('settings.general.execution.computerUseHint') }}</p>
+              <p v-if="computerUsePermissions && !computerUsePermissions.granted" class="gs-control-hint computer-use-perm-hint">
+                <span class="perm-dot" :class="{ ok: computerUsePermissions.screen === 'granted' }" />
+                {{ $t('settings.general.execution.computerUseScreen') }}
+                <span class="perm-dot" :class="{ ok: computerUsePermissions.accessibility }" />
+                {{ $t('settings.general.execution.computerUseAccessibility') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="gs-permission-btn"
+              :class="{ granted: computerUsePermissions?.granted }"
+              :disabled="requestingComputerUse || computerUsePermissions?.granted"
+              @click="requestComputerUsePermissions"
+            >
+              {{ computerUsePermissions?.granted
+                ? $t('settings.general.execution.computerUseGranted')
+                : $t('settings.general.execution.computerUseGrant') }}
+            </button>
           </section>
 
         </template>
@@ -1458,6 +1491,49 @@ function handleFontReposition () {
 .gs-harness-option:disabled {
   cursor: default;
   opacity: 0.7;
+}
+
+.computer-use-perm-hint {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.perm-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 159, 10, 0.85);
+  flex: none;
+}
+
+.perm-dot.ok {
+  background: rgba(48, 209, 88, 0.9);
+}
+
+.gs-permission-btn {
+  flex: none;
+  align-self: center;
+  padding: 7px 14px;
+  border: 1px solid rgba(94, 123, 255, 0.4);
+  border-radius: 6px;
+  background: rgba(94, 123, 255, 0.16);
+  color: var(--app-text);
+  font-size: 0.8em;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gs-permission-btn:hover:not(:disabled) {
+  background: rgba(94, 123, 255, 0.28);
+}
+
+.gs-permission-btn.granted {
+  border-color: rgba(48, 209, 88, 0.4);
+  background: rgba(48, 209, 88, 0.14);
+  color: var(--app-text);
+  cursor: default;
 }
 
 .gs-harness-option span {

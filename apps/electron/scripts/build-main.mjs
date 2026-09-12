@@ -53,6 +53,19 @@ await build({
   sourcemap: false
 })
 
+// The history worker has no Electron imports and must ship alongside both
+// main.js and the bytecode loader; never fall back to synchronous main-thread IO.
+await build({
+  entryPoints: [path.join(workspaceRoot, 'src/main/settings/chat-history-worker.ts')],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  outfile: path.join(outputDir, 'chat-history-worker.cjs'),
+  target: ['node22'],
+  minify: true,
+  legalComments: 'none'
+})
+
 if (isBytecodeBuild) {
   await bytenode.compileFile({
     filename: mainBytecodeSourcePath,

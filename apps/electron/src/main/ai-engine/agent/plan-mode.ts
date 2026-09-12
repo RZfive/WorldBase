@@ -40,7 +40,9 @@ export class PlanEngine {
     'rebuild_project',
     'start_project_server',
     'restart_project_server',
-    'clear_project_build_flag'
+    'clear_project_build_flag',
+    'computer_observe',
+    'computer_action'
   ])
 
   get active (): boolean {

@@ -55,7 +55,11 @@
         "arch": ["arm64"]
       }
     ],
-    "icon": "public/icon-mac.png"
+    "icon": "public/icon-mac.png",
+    "extendInfo": {
+      "NSScreenCaptureUsageDescription": "WorldBase needs Screen Recording permission to let Computer Use observe the desktop.",
+      "NSAccessibilityUsageDescription": "WorldBase needs Accessibility permission to let Computer Use control the desktop."
+    }
   },
   "win": {
     "target": "nsis",

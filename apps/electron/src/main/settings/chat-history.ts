@@ -1,5 +1,5 @@
-import fs from 'node:fs'
-import path from 'node:path'
+import { Worker } from 'node:worker_threads'
+import type { ConversationMetadataPatch } from '../../shared/conversation-metadata.js'
 import { t } from '../i18n/main-i18n.js'
 import type { AIExecutionAuthMode } from './settings-store.js'
 import type { AgentGroupDirectReply, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentSidechatSession, SharedBoardSnapshot } from '../../shared/agent-workspace-types.js'
@@ -140,175 +140,82 @@ export interface Conversation {
   forkedAt?: string
 }
 
-interface ConversationListEntry extends Omit<Conversation, 'messages'> {
+export interface ConversationListEntry extends Omit<Conversation, 'messages'> {
   previewText?: string
   searchText?: string
 }
 
-function getMessageContentText (message: ChatMessage): string {
-  const contentText = typeof message.content === 'string'
-    ? message.content.trim()
-    : message.content
-      .filter(part => part.type === 'text')
-      .map(part => part.text || '')
-      .join(' ')
-      .trim()
+/** All history JSON/IO/index work runs in one serialized worker, never the UI thread. */
+export class ChatHistoryStore {
+  private readonly worker: Worker
+  private nextId = 0
+  private readonly timeoutMs: number
+  private stopped: Error | null = null
+  private closing: Promise<void> | null = null
+  private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>()
 
-  const blockText = (message.blocks || [])
-    .flatMap((block) => {
-      switch (block.kind) {
-        case 'content':
-          return typeof block.content === 'string'
-            ? [block.content]
-            : block.content.filter(part => part.type === 'text').map(part => part.text || '')
-        case 'attachment':
-          return [block.fileName, block.previewText]
-        case 'error':
-          return [block.message]
-        case 'auth_request':
-          return [block.title, block.detail]
-        default:
-          return []
+  constructor (userDataPath: string, workerUrl = new URL('./chat-history-worker.cjs', import.meta.url), timeoutMs = 30_000) {
+    this.timeoutMs = timeoutMs
+    this.worker = new Worker(workerUrl, { workerData: { userDataPath }, execArgv: [] })
+    this.worker.on('message', ({ id, result, error }) => {
+      const request = this.pending.get(id)
+      if (!request) return
+      this.pending.delete(id)
+      clearTimeout(request.timer)
+      if (error) request.reject(new Error(error))
+      else request.resolve(result)
+      if (this.pending.size === 0) this.worker.unref()
+    })
+    this.worker.on('error', error => this.fail(error instanceof Error ? error : new Error(String(error))))
+    this.worker.on('exit', code => this.fail(new Error(`Chat history worker exited (${code})`)))
+    this.worker.unref()
+  }
+
+  private fail (error: Error): void {
+    this.stopped = error
+    for (const request of this.pending.values()) {
+      clearTimeout(request.timer)
+      request.reject(error)
+    }
+    this.pending.clear()
+  }
+
+  private call<T> (method: string, ...args: unknown[]): Promise<T> {
+    if (this.stopped) return Promise.reject(this.stopped)
+    if (this.closing && method !== 'close') return Promise.reject(new Error('Chat history is closing'))
+    const id = ++this.nextId
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        if (this.pending.size === 0) this.worker.unref()
+        reject(new Error(`Chat history ${method} timed out; write outcome may be unknown`))
+      }, this.timeoutMs)
+      this.pending.set(id, { resolve, reject, timer })
+      this.worker.ref()
+      try { this.worker.postMessage({ id, method, args }) } catch (error) {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        if (this.pending.size === 0) this.worker.unref()
+        reject(error)
       }
     })
-    .join(' ')
-    .trim()
-
-  return [message.speakerName, contentText, blockText]
-    .filter(Boolean)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function buildConversationIndex (messages: ChatMessage[]): Pick<ConversationListEntry, 'previewText' | 'searchText'> {
-  const searchSegments = messages
-    .map(getMessageContentText)
-    .filter(Boolean)
-
-  const latestPreview = [...searchSegments].reverse().find(Boolean) || ''
-
-  return {
-    previewText: latestPreview ? (latestPreview.length > 96 ? `${latestPreview.slice(0, 96)}...` : latestPreview) : undefined,
-    searchText: searchSegments.join('\n').slice(0, 6000) || undefined
   }
-}
 
-/**
- * ChatHistoryStore — 对话历史持久化
- * 将每个对话保存为 userData/conversations/ 下的独立 JSON 文件
- */
-export class ChatHistoryStore {
-  private dir: string
+  list (): Promise<ConversationListEntry[]> { return this.call('list') }
+  get (id: string): Promise<Conversation | null> { return this.call('get', id) }
+  save (conversation: Conversation): Promise<ConversationListEntry> { return this.call('save', conversation) }
+  updateMetadata (id: string, patch: ConversationMetadataPatch): Promise<ConversationListEntry | null> {
+    return this.call('updateMetadata', id, patch)
+  }
+  rename (id: string, title: string): Promise<boolean> { return this.call('rename', id, title) }
+  delete (id: string): Promise<boolean> { return this.call('delete', id) }
 
-  constructor (userDataPath: string) {
-    this.dir = path.join(userDataPath, 'conversations')
-    if (!fs.existsSync(this.dir)) {
-      fs.mkdirSync(this.dir, { recursive: true })
+  dispose (): Promise<void> {
+    if (!this.closing) {
+      // The close message follows all accepted writes in the worker's FIFO.
+      this.closing = this.call<void>('close').finally(async () => { await this.worker.terminate() })
     }
-  }
-
-  private filePath (id: string): string {
-    // Prevent directory traversal
-    const safe = id.replace(/[^a-zA-Z0-9_-]/g, '')
-    return path.join(this.dir, `${safe}.json`)
-  }
-
-  /**
-   * List all conversations (sorted by updatedAt desc).
-   */
-  list (): ConversationListEntry[] {
-    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
-    const convos: ConversationListEntry[] = []
-
-    for (const file of files) {
-      try {
-        const raw = fs.readFileSync(path.join(this.dir, file), 'utf-8')
-        const data = JSON.parse(raw) as Conversation
-        const conversationIndex = buildConversationIndex(data.messages || [])
-        convos.push({
-          id: data.id,
-          title: data.title,
-          createdAt: data.createdAt,
-          updatedAt: data.updatedAt,
-          previewText: conversationIndex.previewText,
-          searchText: conversationIndex.searchText,
-          manualTitle: data.manualTitle,
-          authMode: data.authMode,
-          providerId: data.providerId,
-          selectedModel: data.selectedModel,
-          reasoningStrength: data.reasoningStrength,
-          temperature: data.temperature,
-          targetProjectId: data.targetProjectId,
-          agentId: data.agentId,
-          groupId: data.groupId,
-          channelBindingId: data.channelBindingId,
-          forkedFromConversationId: data.forkedFromConversationId,
-          forkedFromMessageId: data.forkedFromMessageId,
-          rootConversationId: data.rootConversationId,
-          forkDepth: data.forkDepth,
-          forkedAt: data.forkedAt
-        })
-      } catch {
-        // skip corrupted files
-      }
-    }
-
-    return convos.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-  }
-
-  /**
-   * Get a single conversation by ID.
-   */
-  get (id: string): Conversation | null {
-    const fp = this.filePath(id)
-    if (!fs.existsSync(fp)) return null
-    try {
-      return JSON.parse(fs.readFileSync(fp, 'utf-8')) as Conversation
-    } catch {
-      return null
-    }
-  }
-
-  /**
-   * Create or update a conversation.
-   */
-  save (conversation: Conversation): void {
-    conversation.updatedAt = new Date().toISOString()
-    fs.writeFileSync(this.filePath(conversation.id), JSON.stringify(conversation, null, 2), 'utf-8')
-  }
-
-  /**
-   * Rename a conversation without changing its updatedAt ordering.
-   */
-  rename (id: string, title: string): boolean {
-    const fp = this.filePath(id)
-    if (!fs.existsSync(fp)) return false
-
-    const nextTitle = title.trim()
-    if (!nextTitle) return false
-
-    try {
-      const conversation = JSON.parse(fs.readFileSync(fp, 'utf-8')) as Conversation
-      conversation.title = nextTitle
-      conversation.manualTitle = true
-      fs.writeFileSync(fp, JSON.stringify(conversation, null, 2), 'utf-8')
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  /**
-   * Delete a conversation.
-   */
-  delete (id: string): boolean {
-    const fp = this.filePath(id)
-    if (fs.existsSync(fp)) {
-      fs.unlinkSync(fp)
-      return true
-    }
-    return false
+    return this.closing
   }
 
   /**

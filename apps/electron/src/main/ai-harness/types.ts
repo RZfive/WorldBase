@@ -84,6 +84,8 @@ export interface AIRequestOptions {
   customTools?: CustomToolRegistration[]
   /** Internal nesting depth for Electron-hosted subagent runs. */
   subagentNestingDepth?: number
+  /** Explicit per-run opt-in for OS-level Computer Use tools. */
+  computerUseEnabled?: boolean
 }
 
 /** Minimal model/tool-loop surface shared by the legacy and Rust harnesses. */

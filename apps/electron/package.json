@@ -1,7 +1,7 @@
 {
   "name": "the-world",
   "productName": "WorldBase",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "AI-powered project generator and manager",
   "author": "RZfive",
   "type": "module",
@@ -33,6 +33,7 @@
     "test:rust-project-log-routing": "node --experimental-strip-types --test tests/rust-project-log-routing.test.mjs",
     "test:anthropic-protocol": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/anthropic-protocol.test.mjs",
     "test:provider-models": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/provider-model-service.test.mjs",
+    "test:renderer-navigation": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/renderer-navigation-performance.test.mjs tests/chat-history-performance.test.mjs",
     "test:message-branching": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-branching.test.mjs",
     "test:im-gateway": "node scripts/im-gateway-smoke.mjs",
     "electron:dev": "pnpm rebuild:native && pnpm build:harness && pnpm build && pnpm build:electron && pnpm exec electron .",

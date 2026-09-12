@@ -15,6 +15,7 @@ use worldbase_protocol::types::ToolDescriptor;
 
 pub mod command;
 pub mod compat_tools;
+pub mod computer_use;
 pub mod document;
 pub mod document_artifacts;
 mod electron_contract;
@@ -46,6 +47,7 @@ pub use compat_tools::{
     WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool, WorkspaceGrepTool,
     WorkspaceListFilesTool, WorkspacePatchFileTool, WorkspaceReadFileTool, WorkspaceWriteFileTool,
 };
+pub use computer_use::{ComputerActionTool, ComputerObserveTool};
 pub use document::{DocParseTool, DocWriteTool};
 pub use fs_tools::{
     DeleteFileTool, EditFileTool, ListDirTool, PatchFileTool, ProjectDeleteFileTool,
@@ -212,6 +214,8 @@ impl ToolServices {
                 | "project_dev_start"
                 | "project_dev_stop"
                 | "project_dev_restart"
+                | "computer_observe"
+                | "computer_action"
         )
     }
 
@@ -521,6 +525,9 @@ pub fn filter_tools<'a>(
                 "desktop" => !hide_desktop,
                 "host" if tool.name() == "ask_user" => caps.has("interactive"),
                 "host" => has_webview,
+                "computer" => {
+                    caps.has("computer_screen_capture") && caps.has("computer_input_injection")
+                }
                 "electron_host" => caps.platform == "electron",
                 _ => true,
             };
@@ -605,6 +612,8 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(AskUserTool),
         Arc::new(ReadCurrentPageTool),
         Arc::new(InteractCurrentPageTool),
+        Arc::new(ComputerObserveTool),
+        Arc::new(ComputerActionTool),
         Arc::new(ProjectListTool),
         Arc::new(ProjectCreateTool),
         Arc::new(ProjectDevStartTool),
@@ -1193,6 +1202,14 @@ mod tests {
         assert!(!actual.contains(&"project_dev_start".to_string()));
         assert!(actual.contains(&"fetch_webpage".to_string()));
         assert!(actual.contains(&"start_project_server".to_string()));
+        assert!(actual.contains(&"computer_observe".to_string()));
+        assert!(actual.contains(&"computer_action".to_string()));
+        let observe = filtered
+            .iter()
+            .find(|tool| tool.name() == "computer_observe")
+            .expect("computer_observe");
+        assert!(observe.electron_native());
+        assert_eq!(observe.permission(), "ask");
     }
 
     #[test]
@@ -1332,6 +1349,8 @@ mod tests {
         assert!(services.is_tool_allowed_in_plan_mode("read_project_file"));
         assert!(!services.is_tool_allowed_in_plan_mode("write_project_file"));
         assert!(!services.is_tool_allowed_in_plan_mode("write_file"));
+        assert!(!services.is_tool_allowed_in_plan_mode("computer_observe"));
+        assert!(!services.is_tool_allowed_in_plan_mode("computer_action"));
         assert!(!services.is_tool_allowed_in_plan_mode("mcp_call"));
         assert!(!services.is_tool_allowed_in_plan_mode("mcp__server__mutate"));
 

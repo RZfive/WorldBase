@@ -46,7 +46,8 @@ interface ChatConversationNavigationOptions {
   getDefaultAgentId: () => string
   clearConversationUnread: (conversationId: string | null | undefined) => void
   syncProviderSelectionForAgent: (agentId: string) => void
-  loadProviders: (preferredProviderId?: string | null, preferredModelId?: string | null) => Promise<void>
+  selectConversationProvider: (preferredProviderId?: string | null, preferredModelId?: string | null) => void
+  rememberConversationContext: (conversationId: string) => void
   loadConversations: () => Promise<void>
   saveConversation: (conversationId: string, messages: ChatMessage[], options?: SaveConversationOptions) => Promise<void>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
@@ -89,7 +90,8 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     getDefaultAgentId,
     clearConversationUnread,
     syncProviderSelectionForAgent,
-    loadProviders,
+    selectConversationProvider,
+    rememberConversationContext,
     loadConversations,
     saveConversation,
     setConversationTarget,
@@ -101,6 +103,8 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     resetFolderWorkspaceState,
     resetTransientStreamState
   } = options
+
+  let navigationVersion = 0
 
   function resetConversationComposerState (): void {
     messages.value = []
@@ -145,7 +149,9 @@ export function createChatConversationNavigation (options: ChatConversationNavig
       documentWorkspace: buildCurrentDocumentWorkspaceState(),
       folderWorkspace: buildCurrentFolderWorkspaceState()
     })
-    void saveConversation(conversationId, messages.value, { targetProjectId: targetProjectId.value })
+    // The running stream owns persistence. Navigation only keeps references;
+    // serializing a multi-MB history here used to freeze every chat switch.
+    rememberConversationContext(conversationId)
   }
 
   async function createWorkspaceConversation (context: {
@@ -155,6 +161,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     title: string
   }): Promise<void> {
     const conversationId = generateId()
+    navigationVersion++
 
     stashCurrentConversationForNavigation()
     selectedLongTermGoalId.value = null
@@ -202,6 +209,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     const name = String(context.name || context.id || t('chatUi.unknownProject'))
     const projectRef = projectId ? `[[project:${projectId}|${name}]]` : ''
     const conversationId = generateId()
+    navigationVersion++
 
     stashCurrentConversationForNavigation()
     currentConversationId.value = conversationId
@@ -231,6 +239,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
   }
 
   function newConversation (): void {
+    navigationVersion++
     stashCurrentConversationForNavigation()
     selectedLongTermGoalId.value = null
     currentConversationId.value = null
@@ -242,7 +251,8 @@ export function createChatConversationNavigation (options: ChatConversationNavig
   }
 
   async function loadConversation (conversationId: string): Promise<void> {
-    if (!window.electronAPI) return
+    const version = ++navigationVersion
+    if (!window.electronAPI || currentConversationId.value === conversationId) return
 
     if (currentConversationId.value && currentConversationId.value !== conversationId) {
       stashCurrentConversationForNavigation()
@@ -270,12 +280,12 @@ export function createChatConversationNavigation (options: ChatConversationNavig
       pendingFiles.value = []
       pendingImages.value = []
       uploadFeedback.value = ''
-      await loadProviders(backgroundState.providerId || null, backgroundState.selectedModel || null)
+      selectConversationProvider(backgroundState.providerId || null, backgroundState.selectedModel || null)
       return
     }
 
     const conversation = await window.electronAPI.getConversation(conversationId)
-    if (!conversation) return
+    if (!conversation || version !== navigationVersion) return
 
     currentConversationId.value = conversation.id
     messages.value = ensureMessageIds(conversation.messages)
@@ -293,10 +303,11 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     pendingFiles.value = []
     pendingImages.value = []
     uploadFeedback.value = ''
-    await loadProviders(conversation.providerId || null, conversation.selectedModel || null)
+    selectConversationProvider(conversation.providerId || null, conversation.selectedModel || null)
   }
 
   function prepareLongTermGoalWorkspace (): void {
+    navigationVersion++
     stashCurrentConversationForNavigation()
     currentConversationId.value = null
     messages.value = []

@@ -1,4 +1,5 @@
 import { reactive, ref } from 'vue'
+import { computerUsePermissions } from '../../../utils/computer-use-permissions'
 import type {
   AgentDefinition,
   AgentGroupDefinition,
@@ -67,6 +68,9 @@ export const sharedChatPanelState = {
   selectedChannelBindingId: ref(''),
   showSkillPicker: ref(false),
   planModeActive: ref(false),
+  computerUseEnabled: ref(false),
+  // Shared macOS TCC startup snapshot. Changes take effect on app restart.
+  computerUsePermissionGranted: computerUsePermissions.granted,
   syncingProviderOptions: ref(false),
   documentDockVisible: ref(false),
   documentWorkspaceDocuments: ref<ConversationDocumentReference[]>([]),

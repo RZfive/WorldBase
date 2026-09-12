@@ -22,6 +22,8 @@ sha2 = { workspace = true }
 unicode-normalization = { workspace = true }
 tracing = { workspace = true }
 zip = { workspace = true }
+image = { workspace = true }
+tempfile = { workspace = true }
 
 worldbase-protocol = { path = "../protocol" }
 worldbase-memory = { path = "../memory" }

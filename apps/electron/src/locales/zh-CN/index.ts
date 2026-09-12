@@ -418,6 +418,9 @@ const zhCN = {
     documentCenter: '文档中心',
     codeWorkspace: '代码工作区',
     addAttachment: '添加附件',
+    enableComputerUse: '开启电脑使用',
+    computerUsePermissionNeeded: '需要授权 — 在系统设置中开启屏幕录制与辅助功能后，请重启应用',
+    disableComputerUse: '关闭电脑使用',
     processingFiles: '文件处理中...',
     stopGenerating: '停止生成',
     send: '发送',
@@ -1156,7 +1159,13 @@ const zhCN = {
         harnessTs: 'TypeScript（冻结兼容）',
         harnessTsHint: '仅兼容已有配置，不再开发',
         harnessRust: 'Rust（app-server）',
-        harnessRustHint: '默认且唯一的新功能开发入口'
+        harnessRustHint: '默认且唯一的新功能开发入口',
+        computerUseTitle: '电脑使用权限',
+        computerUseHint: 'Agent 观察和控制桌面需要「屏幕录制」与「辅助功能」两项系统授权。权限仅在应用启动时检查。请在系统设置中开启后重启应用，电脑使用开关才会解锁。',
+        computerUseScreen: '屏幕录制',
+        computerUseAccessibility: '辅助功能',
+        computerUseGrant: '去授权',
+        computerUseGranted: '已授权'
       },
       transfer: {
         navLabel: '配置迁移',

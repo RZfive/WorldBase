@@ -69,6 +69,7 @@ interface ChatMessageSenderOptions {
   conversationTemperature: Ref<number | null>
   pendingImages: Ref<PendingImage[]>
   pendingFiles: Ref<PendingAttachment[]>
+  computerUseEnabled: Ref<boolean>
   isUploadingFiles: Ref<boolean>
   uploadFeedback: Ref<string>
   filePreview: Ref<FilePreviewState>
@@ -128,6 +129,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     conversationTemperature,
     pendingImages,
     pendingFiles,
+    computerUseEnabled,
     isUploadingFiles,
     uploadFeedback,
     filePreview,
@@ -594,7 +596,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           selectedChannelBindingId.value || undefined,
           getActivePageContext() ?? undefined,
           conversationTemperature.value ?? undefined,
-          buildCurrentFolderWorkspaceState()?.rootPath
+          buildCurrentFolderWorkspaceState()?.rootPath,
+          computerUseEnabled.value
         )
 
         if (streamingConvIds.has(convId)) {
