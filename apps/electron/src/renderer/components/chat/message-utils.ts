@@ -18,6 +18,18 @@ export function getContentText (content: MessageContent): string {
   return ''
 }
 
+export function getContentExcerpt (content: MessageContent, limit = 80): string {
+  if (typeof content === 'string') return content.slice(0, limit)
+  if (!Array.isArray(content)) return ''
+  let result = ''
+  for (const part of content) {
+    if (part.type !== 'text') continue
+    result += (part.text || '').slice(0, Math.max(0, limit - result.length))
+    if (result.length >= limit) break
+  }
+  return result
+}
+
 export function hasRenderableContent (content: MessageContent): boolean {
   return getContentParts(content).some(part => {
     if (part.type === 'text') return Boolean(part.text?.length)

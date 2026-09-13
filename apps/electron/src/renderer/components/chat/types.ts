@@ -88,23 +88,11 @@ export interface ChatMessage {
   blocks?: ChatMessageBlock[]
 }
 
-/** One message band in the minimap's scaled conversation preview. */
-export interface MinimapRow {
+/** Lightweight navigation entry for one user question. */
+export interface QuestionNavigationEntry {
   key: string
-  /** Message index to jump to. */
   messageIndex: number
-  role: 'user' | 'assistant'
-  /** Top offset from the scroll-content start, px (paddings included). */
-  offsetPx: number
-  /** Rendered message height incl. gap, px. */
-  extentPx: number
-  /** User-message text preview for the stripe placeholder / tooltip. */
-  excerpt?: string
-  /** 1-based ordinal among user messages (user rows only). */
-  ordinal?: number
-  isEditing?: boolean
-  /** True once the real MessageRow is mounted in the offscreen layer. */
-  mounted?: boolean
+  excerpt: string
 }
 
 export interface GalleryImage {

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { buildMessageBlocks, getContentParts } from '../message-utils'
+import { buildMessageBlocks, getContentExcerpt, getContentParts } from '../message-utils'
 import { copyTextToClipboard } from '../export-utils'
-import type { ChatMessage, GalleryImage, FilePreviewState } from '../types'
+import type { ChatMessage, GalleryImage, FilePreviewState, QuestionNavigationEntry } from '../types'
 import MessageRow from './MessageRow.vue'
 import ImageLightbox from '../media/ImageLightbox.vue'
 import MermaidPreviewDialog from '../media/MermaidPreviewDialog.vue'
+import QuestionOutline from './QuestionOutline.vue'
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -42,6 +43,8 @@ let programmaticScrollFrameId: number | null = null
 let selectionCopyResetTimer: number | null = null
 let bottomScrollScheduled = false
 let bottomScrollFrameId: number | null = null
+let jumpHighlightTimer: number | null = null
+const highlightedMessageKey = ref<string | null>(null)
 
 const AUTO_SCROLL_THRESHOLD = 96
 const RESTORE_AUTO_SCROLL_THRESHOLD = 4
@@ -53,6 +56,17 @@ const latestAssistantMessageIndex = computed(() => {
     if (props.messages[i].role === 'assistant') return i
   }
   return -1
+})
+
+const questionEntries = computed<QuestionNavigationEntry[]>(() => {
+  return props.messages
+    .map((message, messageIndex) => ({ message, messageIndex }))
+    .filter(({ message }) => message.role === 'user')
+    .map(({ message, messageIndex }) => ({
+      key: message.id || `question-${messageIndex}`,
+      messageIndex,
+      excerpt: getContentExcerpt(message.content, 120)
+    }))
 })
 
 const lastMessageGrowthKey = computed(() => {
@@ -260,6 +274,22 @@ function handleWheel (event: WheelEvent): void {
   if (event.deltaY < 0) autoStickEnabled.value = false
 }
 
+function jumpToMessageIndex (index: number): void {
+  const element = messagesContainer.value
+  const message = props.messages[index]
+  if (!element || !message) return
+  const target = element.querySelector<HTMLElement>(`[data-message-index="${index}"]`)
+  if (!target) return
+  autoStickEnabled.value = false
+  setContainerScrollTop(element, Math.max(0, target.offsetTop - 24))
+  highlightedMessageKey.value = getMessageKey(message, index)
+  if (jumpHighlightTimer != null) window.clearTimeout(jumpHighlightTimer)
+  jumpHighlightTimer = window.setTimeout(() => {
+    highlightedMessageKey.value = null
+    jumpHighlightTimer = null
+  }, 1500)
+}
+
 watch(
   () => props.isLoading,
   (loading, wasLoading) => {
@@ -313,7 +343,9 @@ onMounted(() => {
   syncViewportState()
   if (props.messages.length > 0) nextTick(scrollToBottom)
   if (typeof ResizeObserver !== 'undefined' && messagesContainer.value) {
-    containerObserver = new ResizeObserver(syncViewportState)
+    containerObserver = new ResizeObserver(() => {
+      syncViewportState()
+    })
     containerObserver.observe(messagesContainer.value)
   }
 })
@@ -326,6 +358,7 @@ onUnmounted(() => {
   if (selectionCopyResetTimer != null) window.clearTimeout(selectionCopyResetTimer)
   if (programmaticScrollFrameId != null) window.cancelAnimationFrame(programmaticScrollFrameId)
   if (bottomScrollFrameId != null) window.cancelAnimationFrame(bottomScrollFrameId)
+  if (jumpHighlightTimer != null) window.clearTimeout(jumpHighlightTimer)
   containerObserver?.disconnect()
   containerObserver = null
 })
@@ -333,6 +366,11 @@ onUnmounted(() => {
 
 <template>
   <div class="message-list-shell">
+    <QuestionOutline
+      v-if="questionEntries.length > 0"
+      :questions="questionEntries"
+      @jump="jumpToMessageIndex"
+    />
     <div
       ref="messagesContainer"
       class="chat-messages"
@@ -359,7 +397,8 @@ onUnmounted(() => {
           v-for="(msg, index) in props.messages"
           :key="getMessageKey(msg, index)"
           class="message-item"
-          :class="{ 'with-leading-gap': index > 0 }"
+          :data-message-index="index"
+          :class="{ 'with-leading-gap': index > 0, 'jump-highlight': getMessageKey(msg, index) === highlightedMessageKey }"
         >
           <MessageRow
             :msg="msg"
