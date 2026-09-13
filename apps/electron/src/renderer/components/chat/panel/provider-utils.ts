@@ -62,14 +62,21 @@ export function resolveConversationIcon (
   return '💬'
 }
 
+const subtitleFormatters = new Map<string, Intl.DateTimeFormat>()
+
 export function formatConversationSubtitle (updatedAt: string, locale: string): string {
   try {
-    return new Date(updatedAt).toLocaleString(locale, {
-      month: 'numeric',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    })
+    let formatter = subtitleFormatters.get(locale)
+    if (!formatter) {
+      formatter = new Intl.DateTimeFormat(locale, {
+        month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'
+      })
+      // Reuse ICU formatters instead of constructing two per sidebar row.
+      if (subtitleFormatters.size >= 8) subtitleFormatters.clear()
+      subtitleFormatters.set(locale, formatter)
+    }
+    const date = new Date(updatedAt)
+    return Number.isNaN(date.getTime()) ? date.toString() : formatter.format(date)
   } catch {
     return updatedAt
   }

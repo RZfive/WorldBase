@@ -87,8 +87,16 @@ export function createChatConversationStorage (options: ChatConversationStorageO
 
   function applySummary (summary: ConversationSummary): void {
     const next = conversations.value.filter(item => item.id !== summary.id)
-    next.push(summary)
-    next.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    // listConversations returns descending timestamps. Insert the changed
+    // summary without sorting (and reformatting) the entire catalog again.
+    let low = 0
+    let high = next.length
+    while (low < high) {
+      const middle = (low + high) >>> 1
+      if (next[middle].updatedAt >= summary.updatedAt) low = middle + 1
+      else high = middle
+    }
+    next.splice(low, 0, summary)
     conversations.value = next
   }
 

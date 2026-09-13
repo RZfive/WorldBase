@@ -437,6 +437,8 @@ const zhCN = {
     newEmptyFolder: '新建空文件夹',
     noMatchingConversations: '没有找到匹配的对话内容',
     noConversationRecords: '暂无对话记录',
+    loadingConversation: '正在加载对话…',
+    conversationLoadFailed: '对话加载失败',
     waitingAuthCount: '等待授权 {count} 项',
     pendingAuthShort: '待授权',
     generating: '生成中',

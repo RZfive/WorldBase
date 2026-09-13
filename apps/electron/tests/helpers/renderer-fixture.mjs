@@ -71,8 +71,9 @@ export function rendererFixture (t, { idle = true } = {}) {
   })
   return {
     window, document, idleCallbacks, frames,
-    mount (component, props) {
+    mount (component, props, plugins = []) {
       const app = renderer.createApp(component, props)
+      for (const plugin of plugins) app.use(plugin)
       const vm = app.mount({})
       apps.add(app)
       const unmount = app.unmount.bind(app)

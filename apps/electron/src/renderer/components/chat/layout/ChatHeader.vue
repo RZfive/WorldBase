@@ -35,8 +35,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:selected-channel-binding-id', channelBindingId: string): void
-  (e: 'update:active-provider-id', id: string): void
-  (e: 'update:selected-model', model: string): void
+  (e: 'selectProviderModel', selection: { providerId: string; model: string }): void
   (e: 'toggleSkillPicker'): void
   (e: 'selectAllSkills'): void
   (e: 'clearSkills'): void
@@ -70,8 +69,7 @@ const hasHeaderDetail = computed(() => {
           :active-provider-id="activeProviderId"
           :selected-model="selectedModel"
           :title="$t('chatUi.providerModelTitle')"
-          @update:active-provider-id="emit('update:active-provider-id', $event)"
-          @update:selected-model="emit('update:selected-model', $event)"
+          @select="emit('selectProviderModel', $event)"
         />
       </div>
       <p v-else-if="contextDetail" :title="contextDetail">{{ contextDetail }}</p>

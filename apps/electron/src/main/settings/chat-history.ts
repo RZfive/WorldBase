@@ -141,8 +141,8 @@ export interface Conversation {
 }
 
 export interface ConversationListEntry extends Omit<Conversation, 'messages'> {
+  /** Short preview used by the conversation directory. Never contains messages. */
   previewText?: string
-  searchText?: string
 }
 
 /** All history JSON/IO/index work runs in one serialized worker, never the UI thread. */

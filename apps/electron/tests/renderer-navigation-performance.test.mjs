@@ -74,106 +74,47 @@ test('explicit grant opens settings once but never re-probes or mutates the star
 })
 
 const MessageList = await loadSetupComponent(new URL('../src/renderer/components/chat/messages/MessageList.vue', import.meta.url))
-const history = (prefix = 'chat', count = 400) => Array.from({ length: count }, (_, i) => ({ id: `${prefix}-${i}`, role: 'assistant', content: `Message ${i}` }))
-const props = () => ({ messages: history(), isLoading: false, filePreview: { active: false } })
-const viewport = () => ({ clientHeight: 600, clientWidth: 1000, scrollTop: 800, scrollHeight: 100_000 })
+const history = (prefix = 'chat', count = 40) => Array.from({ length: count }, (_, i) => ({ id: `${prefix}-${i}`, role: i % 2 ? 'assistant' : 'user', content: `Message ${i}` }))
+const props = (messages = history()) => ({ messages, isLoading: false, filePreview: { active: false } })
+const viewport = () => ({ clientHeight: 600, clientWidth: 1000, scrollTop: 0, scrollHeight: 100_000 })
 
-test('hidden chat preserves viewport/row sizes, scroll position and stops minimap work', async t => {
+test('message list renders the complete selected conversation without virtual row ranges', async t => {
   const fixture = rendererFixture(t)
-  const { state } = fixture.mount(MessageList, props())
-  const element = viewport()
-  state.messagesContainer = element
-  state.autoStickEnabled = false
-  state.syncViewportMetrics()
-  const rowKey = state.getMessageKey(0)
-  state.updateMeasuredHeight(rowKey, 0, 360)
-  await flush()
-  const previousRange = { ...state.visibleRange }
-  assert.ok(fixture.idleCallbacks.size > 0)
-  element.clientHeight = 0
-  element.clientWidth = 0
-  element.scrollTop = 0
-  state.syncViewportMetrics()
-  state.updateMeasuredHeight(rowKey, 0, 0)
-  state.handleScroll()
-  state.flushScrollToBottom()
-  await flush()
-  assert.equal(state.viewportHeight, 600)
-  assert.equal(state.minimapTrackWidth, 1000)
-  assert.equal(state.scrollTop, 800)
-  assert.equal(state.autoStickEnabled, false)
-  assert.equal(state.measuredMessageHeights[rowKey], 360)
-  assert.deepEqual(state.visibleRange, previousRange)
-  assert.equal(fixture.idleCallbacks.size, 0)
-  element.clientHeight = 600
-  element.clientWidth = 1000
-  state.syncViewportMetrics()
-  assert.equal(element.scrollTop, 800)
-  assert.ok(fixture.idleCallbacks.size > 0)
-})
-
-test('conversation changes reset minimap indexes instead of rendering 300 replacement rows', async t => {
-  const fixture = rendererFixture(t)
-  const mounted = fixture.mount(MessageList, props())
+  const messages = history('complete', 1200)
+  const mounted = fixture.mount(MessageList, props(messages))
+  assert.equal(mounted.props.messages.length, 1200)
+  assert.equal(mounted.state.virtualRows, undefined)
+  assert.equal(mounted.state.messageOffsets, undefined)
+  assert.equal(mounted.state.minimapRows, undefined)
   mounted.state.messagesContainer = viewport()
-  mounted.state.syncViewportMetrics()
-  // Simulate the previous history having finished its idle rendering.
-  mounted.state.minimapMountedIndexes = new Set(Array.from({ length: 300 }, (_, i) => i))
-  mounted.props.messages = history('different')
+  mounted.state.syncViewportState()
+  mounted.state.messagesContainer.scrollTop = 5000
+  mounted.state.handleScroll()
+  assert.equal(mounted.state.scrollTop, 5000)
   await flush()
-  assert.ok(mounted.state.minimapMountedIndexes.size < 40)
-  assert.ok(fixture.idleCallbacks.size <= 1)
 })
 
-test('without requestIdleCallback minimap still mounts bounded deferred batches', async t => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  const fixture = rendererFixture(t, { idle: false })
-  const { state } = fixture.mount(MessageList, props())
-  const element = viewport()
-  state.messagesContainer = element
-  state.syncViewportMetrics()
-  const immediateCount = state.minimapMountedIndexes.size
-  assert.ok(immediateCount < 40)
-  t.mock.timers.tick(32)
-  assert.equal(state.minimapMountedIndexes.size, immediateCount + 3)
-  element.clientHeight = 0
-  state.syncViewportMetrics()
-  const hiddenCount = state.minimapMountedIndexes.size
-  t.mock.timers.tick(1000)
-  await flush()
-  assert.equal(state.minimapMountedIndexes.size, hiddenCount)
-})
-
-test('an idle callback racing a settings navigation cannot mount hidden rows', async t => {
+test('switching the selected history clears gallery state and keeps the new full message array', async t => {
   const fixture = rendererFixture(t)
-  const { state } = fixture.mount(MessageList, props())
-  const element = viewport()
-  state.messagesContainer = element
-  state.syncViewportMetrics()
-  const callback = [...fixture.idleCallbacks.values()][0]
-  const before = state.minimapMountedIndexes.size
-  // Simulate display:none before the container ResizeObserver delivers it.
-  element.clientWidth = 0
-  callback()
+  const mounted = fixture.mount(MessageList, props(history('first', 20)))
+  mounted.state.galleryActive = true
+  mounted.props.messages = history('second', 90)
   await flush()
-  assert.equal(state.minimapMountedIndexes.size, before)
+  assert.equal(mounted.state.galleryActive, false)
+  assert.equal(mounted.props.messages.length, 90)
+  assert.equal(mounted.state.virtualRows, undefined)
 })
 
-test('a sticky chat resumes at the tail after messages arrive while hidden', async t => {
+test('sticky scrolling follows appended messages without height estimation or anchor compensation', async t => {
   const fixture = rendererFixture(t)
-  const { state } = fixture.mount(MessageList, props())
+  const mounted = fixture.mount(MessageList, props(history('stream', 3)))
   const element = viewport()
-  state.messagesContainer = element
-  state.syncViewportMetrics()
-  element.clientHeight = 0
-  state.syncViewportMetrics()
-  element.scrollHeight += 5000
-  element.scrollTop = 0
-  state.scrollToBottom()
+  mounted.state.messagesContainer = element
+  mounted.state.syncViewportState()
+  mounted.state.autoStickEnabled = true
+  mounted.props.messages = history('stream', 6)
   await flush()
-  assert.equal(element.scrollTop, 0, 'no scrolling work while hidden')
-  element.clientHeight = 600
-  state.syncViewportMetrics()
-  assert.equal(element.scrollTop, element.scrollHeight)
+  assert.equal(mounted.state.autoStickEnabled, true)
+  assert.equal(mounted.state.measuredMessageHeights, undefined)
+  assert.equal(mounted.state.pendingAnchorDelta, undefined)
 })
-

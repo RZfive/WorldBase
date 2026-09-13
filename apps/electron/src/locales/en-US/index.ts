@@ -436,6 +436,8 @@ const enUS: MessageSchema = {
     newEmptyFolder: 'New empty folder',
     noMatchingConversations: 'No matching conversations found',
     noConversationRecords: 'No conversation history yet',
+    loadingConversation: 'Loading conversation…',
+    conversationLoadFailed: 'Failed to load conversation',
     waitingAuthCount: 'Waiting for {count} authorizations',
     pendingAuthShort: 'Pending auth',
     generating: 'Generating',

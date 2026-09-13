@@ -34,6 +34,13 @@ const { t } = useI18n()
 const triggerRef = ref<HTMLButtonElement | null>(null)
 const open = ref(false)
 const expandedProviderId = ref('')
+const panelRef = ref<HTMLElement | null>(null)
+const modelListRef = ref<HTMLElement | null>(null)
+const modelScrollTop = ref(0)
+const focusedModelIndex = ref(0)
+// Fixed row extent and a window covering the maximum 320px picker + overscan.
+const MODEL_ROW_HEIGHT = 36
+const MODEL_WINDOW_SIZE = 16
 
 const resolvedSelectedProvider = computed(() => {
   if (props.activeProviderId) {
@@ -56,6 +63,56 @@ const currentExpandedProvider = computed(() => {
     || props.providers[0]
     || null
 })
+
+const modelRangeStart = computed(() => {
+  const count = currentExpandedProvider.value?.models.length || 0
+  return Math.min(Math.max(0, count - MODEL_WINDOW_SIZE), Math.max(0, Math.floor(modelScrollTop.value / MODEL_ROW_HEIGHT) - 3))
+})
+const visibleModels = computed(() => {
+  const start = modelRangeStart.value
+  return (currentExpandedProvider.value?.models || []).slice(start, start + MODEL_WINDOW_SIZE)
+    .map((model, offset) => ({ model, index: start + offset }))
+})
+
+function setModelScrollTop (top: number): void {
+  modelScrollTop.value = Math.max(0, top)
+  if (modelListRef.value) modelListRef.value.scrollTop = modelScrollTop.value
+}
+
+function handleModelScroll (event: Event): void {
+  modelScrollTop.value = (event.currentTarget as HTMLElement).scrollTop
+}
+
+watch([open, () => currentExpandedProvider.value?.id, () => currentExpandedProvider.value?.models, () => currentExpandedProvider.value?.models.length], () => {
+  if (!open.value) return
+  const provider = currentExpandedProvider.value
+  const selectedIndex = provider && provider.id === props.activeProviderId ? provider.models.indexOf(props.selectedModel || '') : -1
+  focusedModelIndex.value = Math.max(0, selectedIndex)
+  modelScrollTop.value = focusedModelIndex.value * MODEL_ROW_HEIGHT
+  nextTick(() => { if (open.value) setModelScrollTop(modelScrollTop.value) })
+})
+
+function handleModelKeydown (event: KeyboardEvent): void {
+  const provider = currentExpandedProvider.value
+  if (!provider || provider.models.length === 0) return
+  const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End', 'Enter', ' ']
+  if (!keys.includes(event.key)) return
+  event.preventDefault()
+  if (event.key === 'Enter' || event.key === ' ') {
+    const model = provider.models[focusedModelIndex.value]
+    if (model) selectModel(provider.id, model)
+    return
+  }
+  const last = provider.models.length - 1
+  const index = event.key === 'Home' ? 0 : event.key === 'End' ? last
+    : Math.min(last, Math.max(0, focusedModelIndex.value + (event.key === 'ArrowDown' ? 1 : -1)))
+  focusedModelIndex.value = index
+  const height = modelListRef.value?.clientHeight || 240
+  const top = index * MODEL_ROW_HEIGHT
+  if (top < modelScrollTop.value) setModelScrollTop(top)
+  else if (top + MODEL_ROW_HEIGHT > modelScrollTop.value + height) setModelScrollTop(top + MODEL_ROW_HEIGHT - height)
+  nextTick(() => modelListRef.value?.querySelector<HTMLButtonElement>(`[data-model-index="${index}"]`)?.focus())
+}
 
 const combinedLabel = computed(() => {
   if (props.selectedModel && resolvedSelectedProvider.value?.name) {
@@ -117,7 +174,7 @@ watch([
   if (!open.value) {
     expandedProviderId.value = resolvedSelectedProvider.value?.id || props.providers[0]?.id || ''
   }
-}, { deep: true, immediate: true })
+}, { immediate: true })
 
 function toggleOpen () {
   if (props.disabled || props.providers.length === 0) {
@@ -164,10 +221,8 @@ function handlePanelKeydown (e: KeyboardEvent) {
 }
 
 function scrollCurrentIntoView () {
-  const selectedProvider = document.querySelector('.provider-model-provider.selected') as HTMLElement | null
-  const selectedModel = document.querySelector('.provider-model-item.selected') as HTMLElement | null
+  const selectedProvider = panelRef.value?.querySelector<HTMLElement>('.provider-model-provider.selected')
   selectedProvider?.scrollIntoView({ block: 'nearest' })
-  selectedModel?.scrollIntoView({ block: 'nearest' })
 }
 
 function onDocumentClick (e: MouseEvent) {
@@ -214,6 +269,7 @@ onBeforeUnmount(() => {
   <Teleport to="body">
     <div
       v-if="open"
+      ref="panelRef"
       class="provider-model-panel"
       :style="panelStyle"
       @click.stop
@@ -243,21 +299,38 @@ onBeforeUnmount(() => {
           {{ currentExpandedProvider?.name || props.title }}
         </div>
 
-        <div v-if="currentExpandedProvider && currentExpandedProvider.models.length > 0" class="provider-model-list">
-          <button
-            v-for="model in currentExpandedProvider.models"
-            :key="model"
-            class="provider-model-item"
-            :class="{ selected: currentExpandedProvider.id === activeProviderId && model === selectedModel }"
-            type="button"
-            :title="`${model} · ${currentExpandedProvider.name}`"
-            @click="selectModel(currentExpandedProvider.id, model)"
-          >
-            <span class="provider-model-item-label">{{ model }}</span>
-            <svg v-if="currentExpandedProvider.id === activeProviderId && model === selectedModel" class="provider-model-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-          </button>
+        <div
+          v-if="currentExpandedProvider && currentExpandedProvider.models.length > 0"
+          ref="modelListRef"
+          class="provider-model-list"
+          role="listbox"
+          :aria-label="currentExpandedProvider.name"
+          tabindex="0"
+          @scroll.passive="handleModelScroll"
+          @keydown="handleModelKeydown"
+        >
+          <div class="provider-model-list-content" :style="{ height: `${currentExpandedProvider.models.length * MODEL_ROW_HEIGHT}px` }">
+            <button
+              v-for="{ model, index } in visibleModels"
+              :key="model"
+              class="provider-model-item"
+              :style="{ top: `${index * MODEL_ROW_HEIGHT}px`, height: `${MODEL_ROW_HEIGHT}px` }"
+              :data-model-index="index"
+              role="option"
+              :aria-selected="currentExpandedProvider.id === activeProviderId && model === selectedModel"
+              tabindex="-1"
+              :class="{ selected: currentExpandedProvider.id === activeProviderId && model === selectedModel }"
+              @focus="focusedModelIndex = index"
+              type="button"
+              :title="`${model} · ${currentExpandedProvider.name}`"
+              @click="selectModel(currentExpandedProvider.id, model)"
+            >
+              <span class="provider-model-item-label">{{ model }}</span>
+              <svg v-if="currentExpandedProvider.id === activeProviderId && model === selectedModel" class="provider-model-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div v-else class="provider-model-empty">{{ $t('chatUi.noAvailableModels') }}</div>
@@ -431,9 +504,6 @@ onBeforeUnmount(() => {
 }
 
 .provider-model-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -442,7 +512,14 @@ onBeforeUnmount(() => {
   scrollbar-color: var(--app-scrollbar) transparent;
 }
 
+.provider-model-list-content {
+  position: relative;
+}
+
 .provider-model-item {
+  position: absolute;
+  left: 0;
+  box-sizing: border-box;
   padding: 8px 10px;
 }
 

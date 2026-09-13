@@ -142,6 +142,28 @@ test('leaving a streaming chat keeps references without serializing, and backgro
   assert.equal(fixture.activeProviderId.value, 'b')
 })
 
+
+test('catalog rows never include message payloads and restart reads catalog instead of histories', t => {
+  const dir = temporary(t)
+  const first = new ChatHistoryStorage(dir)
+  first.save({ ...record('alpha'), messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'last' }] })
+  first.save({ ...record('beta'), messages: [{ role: 'user', content: 'beta' }] })
+  const catalogPath = path.join(dir, 'conversations', 'catalog.json')
+  assert.ok(fs.existsSync(catalogPath))
+  const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8'))
+  assert.ok(catalog.every(item => !('messages' in item) && !('searchText' in item)))
+
+  const restarted = new ChatHistoryStorage(dir)
+  const originalRead = fs.readFileSync
+  const reads = []
+  t.mock.method(fs, 'readFileSync', (...args) => { reads.push(String(args[0])); return originalRead(...args) })
+  const rows = restarted.list()
+  assert.deepEqual(rows.map(row => row.id), ['beta', 'alpha'])
+  assert.ok(reads.some(file => file.endsWith('catalog.json')))
+  assert.ok(reads.every(file => !file.endsWith('alpha.json') && !file.endsWith('beta.json')))
+  assert.equal(restarted.get('alpha').messages.length, 2)
+})
+
 test('metadata validation rejects message payloads, unexpected keys and invalid values', () => {
   for (const patch of [null, [], { messages: [] }, { __proto__: null, title: 'no' }, { temperature: Infinity }, { authMode: 'allow-all' }]) {
     assert.throws(() => validateConversationMetadata(patch))
@@ -158,19 +180,38 @@ test('summary cache avoids rereading unrelated histories and stays correct after
   const reads = []
   t.mock.method(fs, 'readFileSync', (...args) => { reads.push(args[0]); return originalRead(...args) })
   assert.equal(store.list().length, 2)
-  assert.equal(reads.length, 2)
+  assert.equal(reads.length, 0)
   for (let i = 0; i < 20; i++) store.list()
-  assert.equal(reads.length, 2)
+  assert.equal(reads.length, 0)
   const summary = store.updateMetadata('alpha', { providerId: 'b', temperature: null })
   assert.equal(summary.providerId, 'b')
-  assert.equal(reads.length, 2, 'metadata-only changes never read a large history')
+  assert.equal(reads.length, 0, 'metadata-only changes never read a large history')
   assert.equal(store.list().find(item => item.id === 'alpha').providerId, 'b')
-  assert.equal(reads.length, 2)
+  assert.equal(reads.length, 0)
   assert.ok(store.rename('alpha', 'Manual title'))
   assert.equal(store.list().find(item => item.id === 'alpha').title, 'Manual title')
   store.delete('beta')
   assert.equal(store.list().length, 1)
   assert.throws(() => store.get('../alpha'))
+})
+
+
+test('conversation details load independently after list selection and stale loads never replace the active chat', async t => {
+  const pending = new Map()
+  const fixture = chatFixture(t, {
+    getConversation: id => new Promise(resolve => pending.set(id, resolve))
+  })
+  const loading = fixture.navigation.loadConversation('beta')
+  assert.equal(fixture.navigation.conversationDetailState.value, 'loading')
+  assert.equal(fixture.currentConversationId.value, 'beta')
+  assert.deepEqual(fixture.messages.value, [])
+  const other = fixture.navigation.loadConversation('gamma')
+  pending.get('beta')({ ...record('beta'), messages: [{ id: 'beta-message', role: 'assistant', content: 'stale' }] })
+  pending.get('gamma')({ ...record('gamma'), messages: [{ id: 'gamma-message', role: 'assistant', content: 'current' }] })
+  await Promise.all([loading, other])
+  assert.equal(fixture.currentConversationId.value, 'gamma')
+  assert.equal(fixture.navigation.conversationDetailState.value, 'ready')
+  assert.equal(fixture.messages.value[0].id, 'gamma-message')
 })
 
 async function workerFixture (t) {
@@ -244,7 +285,7 @@ test('large legacy history indexing runs while the calling event loop remains re
     const summaries = await store.list()
     assert.equal(summaries.length, 40)
     assert.ok(ticks > 0, 'event loop must be able to service UI/IPC during indexing')
-    assert.ok(summaries.every(summary => !('messages' in summary) && summary.searchText.length <= 6000))
+    assert.ok(summaries.every(summary => !('messages' in summary) && !('searchText' in summary) && (summary.previewText?.length || 0) <= 99))
   } finally {
     clearInterval(timer)
     await store.dispose()
@@ -317,4 +358,40 @@ test('auth changes retain the original conversation when the user navigates duri
   assert.equal(saved.length, 1)
   assert.equal(saved[0].id, 'alpha')
   assert.equal(saved[0].patch.authMode, 'auto')
+})
+
+test('combined picker selection persists the final provider/model pair once, with no intermediate default model', async t => {
+  const patches = []
+  const failHeavyWork = () => { throw new Error('unexpected history/catalog work') }
+  const fixture = chatFixture(t, {
+    getProviders: failHeavyWork, listConversations: failHeavyWork, saveConversation: failHeavyWork,
+    updateConversationMetadata: async (id, patch) => {
+      patches.push({ id, patch })
+      const { messages, ...summary } = record(id)
+      return { success: true, summary: { ...summary, ...patch } }
+    }
+  })
+  Object.defineProperty(fixture.messages, 'value', { get: failHeavyWork })
+  await fixture.providersState.handleProviderModelSelectionChange({ providerId: 'b', model: 'b2' })
+  assert.equal(fixture.activeProviderId.value, 'b')
+  assert.equal(fixture.selectedModel.value, 'b2')
+  assert.equal(patches.length, 1)
+  assert.equal(patches[0].patch.providerId, 'b')
+  assert.equal(patches[0].patch.selectedModel, 'b2')
+  assert.equal(patches[0].id, 'alpha')
+  await fixture.providersState.handleProviderModelSelectionChange({ providerId: 'b', model: 'b2' })
+  assert.equal(patches.length, 1, 'reselecting the same model does not write or reorder anything')
+})
+
+test('one-summary updates retain descending timestamp order without refreshing the catalog', async t => {
+  const fixture = chatFixture(t, { updateConversationMetadata: async (id, patch) => ({ success: true, summary: { ...record(id), ...patch, messages: undefined, updatedAt: '2026-09-12T01:30:00.000Z' } }) })
+  fixture.conversations.value = [
+    { ...record('gamma'), updatedAt: '2026-09-12T02:00:00.000Z' },
+    { ...record('beta'), updatedAt: '2026-09-12T01:00:00.000Z' },
+    { ...record('alpha'), updatedAt: date }
+  ]
+  const unrelated = fixture.conversations.value[0]
+  await fixture.storage.saveConversationMetadata('alpha')
+  assert.deepEqual(fixture.conversations.value.map(item => item.id), ['gamma', 'alpha', 'beta'])
+  assert.equal(fixture.conversations.value[0], unrelated)
 })

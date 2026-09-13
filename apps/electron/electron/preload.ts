@@ -67,7 +67,6 @@ interface ConversationSummary {
   updatedAt: string
   manualTitle?: boolean
   previewText?: string
-  searchText?: string
   authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string

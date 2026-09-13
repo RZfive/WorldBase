@@ -1,4 +1,4 @@
-import { computed, type Ref } from 'vue'
+import { computed, type ComputedRef, type Ref } from 'vue'
 import type { ComposerTranslation } from 'vue-i18n'
 import type { LongTermGoalDefinition } from '../../../../shared/long-term-goal-types.js'
 import {
@@ -170,7 +170,6 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
             selection.modelId,
             conversation?.title,
             conversation?.previewText,
-            conversation?.searchText
           ]),
           icon: getAgentIcon(agent),
           modelId: selection.modelId,
@@ -201,7 +200,6 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
           coordinatorName,
           conversation?.title,
           conversation?.previewText,
-          conversation?.searchText
         ]),
         icon: getGroupIcon(group),
         isStreaming: conversation ? streamingConversationIds.has(conversation.id) : false,
@@ -261,39 +259,62 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
     })
   })
 
-  const conversationSidebarItems = computed<SidebarConversationItem[]>(() => {
-    const defaultAgentId = getDefaultAgentId()
-    const pinnedConversationIds = new Set<string>([
-      ...agentSidebarItems.value.map(item => item.conversationId).filter((value): value is string => Boolean(value)),
-      ...groupSidebarItems.value.map(item => item.conversationId).filter((value): value is string => Boolean(value))
-    ])
+  type ConversationPresentation = Pick<SidebarConversationItem, 'id' | 'title' | 'subtitle' | 'searchText' | 'icon' | 'isFork'>
+  const presentations = new WeakMap<ConversationSummary, ComputedRef<ConversationPresentation>>()
 
-    return conversations.value
-      .filter((conversation) => {
-        if (pinnedConversationIds.has(conversation.id)) return false
-        if (conversation.groupId && groupsById.value.has(conversation.groupId)) return false
-        if (conversation.agentId && conversation.agentId !== defaultAgentId && agentsById.value.has(conversation.agentId)) return false
-        return true
+  function getConversationPresentation (conversation: ConversationSummary): ConversationPresentation {
+    let presentation = presentations.get(conversation)
+    if (!presentation) {
+      presentation = computed(() => {
+        const timestamp = formatConversationSubtitle(conversation.updatedAt, locale.value)
+        return {
+          id: conversation.id,
+          title: conversation.title,
+          subtitle: conversation.previewText ? `${timestamp} · ${conversation.previewText}` : timestamp,
+          searchText: buildSidebarSearchText([conversation.title, conversation.previewText, timestamp]),
+          icon: resolveConversationIcon(conversation, groupsById.value, agentsById.value),
+          isFork: Boolean(conversation.forkedFromConversationId)
+        }
       })
-      .map((conversation) => ({
-        id: conversation.id,
-        title: conversation.title,
-        subtitle: conversation.previewText
-          ? `${formatConversationSubtitle(conversation.updatedAt, locale.value)} · ${conversation.previewText}`
-          : formatConversationSubtitle(conversation.updatedAt, locale.value),
-        searchText: buildSidebarSearchText([
-          conversation.title,
-          conversation.previewText,
-          conversation.searchText,
-          formatConversationSubtitle(conversation.updatedAt, locale.value)
-        ]),
-        icon: resolveConversationIcon(conversation, groupsById.value, agentsById.value),
-        isStreaming: streamingConversationIds.has(conversation.id),
-        pendingAuthCount: getPendingAuthCount(conversation.id),
-        unreadCount: getUnreadCount(conversation.id),
-        isActive: currentConversationId.value === conversation.id,
-        isFork: Boolean(conversation.forkedFromConversationId)
-      }))
+      presentations.set(conversation, presentation)
+    }
+    return presentation.value
+  }
+
+  // Membership does not depend on the selected chat/provider or unread badges.
+  // In particular, don't derive it from agentSidebarItems (which does).
+  const regularConversations = computed(() => {
+    const defaultAgentId = getDefaultAgentId()
+    return conversations.value.filter(conversation => {
+      if (conversation.groupId && groupsById.value.has(conversation.groupId)) return false
+      if (conversation.agentId && conversation.agentId !== defaultAgentId && agentsById.value.has(conversation.agentId)) return false
+      return true
+    })
+  })
+
+  let previousConversationRows = new Map<string, { presentation: ConversationPresentation; item: SidebarConversationItem }>()
+  const conversationSidebarItems = computed<SidebarConversationItem[]>(() => {
+    const activeId = currentConversationId.value
+    const nextRows = new Map<string, { presentation: ConversationPresentation; item: SidebarConversationItem }>()
+    const items = regularConversations.value.map(conversation => {
+      const presentation = getConversationPresentation(conversation)
+      const isActive = activeId === conversation.id
+      const isStreaming = streamingConversationIds.has(conversation.id)
+      const pendingAuthCount = getPendingAuthCount(conversation.id)
+      const unreadCount = getUnreadCount(conversation.id)
+      const previous = previousConversationRows.get(conversation.id)
+      // Stable props let Vue skip every unaffected card. Switching chats only
+      // changes two rows, not thousands of date labels and 6 KB search strings.
+      const entry = previous && previous.presentation === presentation
+        && previous.item.isActive === isActive && previous.item.isStreaming === isStreaming
+        && previous.item.pendingAuthCount === pendingAuthCount && previous.item.unreadCount === unreadCount
+        ? previous
+        : { presentation, item: { ...presentation, isActive, isStreaming, pendingAuthCount, unreadCount } }
+      nextRows.set(conversation.id, entry)
+      return entry.item
+    })
+    previousConversationRows = nextRows
+    return items
   })
 
   const currentContextLabel = computed(() => {

@@ -182,10 +182,12 @@ export function useConversationSidebarFolders (
 
     const nextTopLevelOrder = conversationTopLevelOrder.value.filter(entry => validTopLevelKeys.has(entry))
 
+    const nextTopLevelKeys = new Set(nextTopLevelOrder)
     normalizedFolders.forEach((folder) => {
       const key = folderKey(folder.id)
-      if (!nextTopLevelOrder.includes(key)) {
+      if (!nextTopLevelKeys.has(key)) {
         nextTopLevelOrder.push(key)
+        nextTopLevelKeys.add(key)
       }
     })
 
@@ -194,8 +196,9 @@ export function useConversationSidebarFolders (
     conversationItems.value.forEach((item) => {
       if (seenConversationIds.has(item.id)) return
       const key = conversationKey(item.id)
-      if (!nextTopLevelOrder.includes(key)) {
+      if (!nextTopLevelKeys.has(key)) {
         newConversationKeys.push(key)
+        nextTopLevelKeys.add(key)
       }
     })
 
@@ -238,13 +241,22 @@ export function useConversationSidebarFolders (
     }
   }
 
+  // Folder membership only changes when ids are added/removed/reordered.
+  // Never deep-watch full sidebar rows: selection, provider metadata and
+  // streaming badges used to trigger layout normalization + JSON on each click.
+  const conversationIds = computed<string[]>((previous) => {
+    const ids = conversationItems.value.map(item => item.id)
+    return previous && ids.length === previous.length && ids.every((id, index) => id === previous[index])
+      ? previous
+      : ids
+  })
   watch(
-    [conversationItems, conversationListLoaded],
+    [conversationIds, conversationListLoaded],
     () => {
       if (!conversationListLoaded.value) return
       applyNormalizedConversationLayout()
     },
-    { immediate: true, deep: true }
+    { immediate: true }
   )
 
   const isSearching = computed(() => normalizeSearchValue(searchQuery.value).length > 0)

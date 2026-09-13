@@ -248,6 +248,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     handleGroupSelectionChange,
     handleModelSelectionChange,
     handleProviderSelectionChange,
+    handleProviderModelSelectionChange,
     handleReasoningStrengthChange,
     handleTemperatureChange,
     loadProviders,
@@ -322,6 +323,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   }
 
   const {
+    conversationDetailError,
+    conversationDetailState,
     deleteConversation,
     loadConversation,
     newConversation,
@@ -544,6 +547,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     availableSkills,
     conversationsLoaded,
     conversationSidebarItems,
+    conversationDetailError,
+    conversationDetailState,
     createLongTermGoal,
     currentAuthMode,
     currentAssistantIcon,
@@ -588,6 +593,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     handleChannelBindingSelectionChange,
     handleModelSelectionChange,
     handleProviderSelectionChange,
+    handleProviderModelSelectionChange,
     handleReasoningStrengthChange,
     handleTemperatureChange,
     inputText,

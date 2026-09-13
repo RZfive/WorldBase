@@ -6,6 +6,8 @@ const props = defineProps<{
   images: GalleryImage[]
 }>()
 
+const emit = defineEmits<{ (e: 'close'): void }>()
+
 const lightboxBodyRef = ref<HTMLElement | null>(null)
 const lightboxIndex = ref<number | null>(null)
 const lightboxZoom = ref(1)
@@ -134,6 +136,7 @@ function selectLightboxImage (index: number) {
 }
 
 function closeLightbox () {
+  emit('close')
   lightboxIndex.value = null
   resetLightboxZoom()
   lightboxNaturalSize.value = { width: 0, height: 0 }
@@ -203,7 +206,7 @@ function handleWindowKeydown (event: KeyboardEvent) {
 
 // Sync lightbox state when image gallery changes
 watch(
-  () => props.images.map(img => `${img.messageIndex}:${img.blockIndex}:${img.partIndex}:${img.url}`).join('|'),
+  () => props.images,
   () => {
     if (lightboxIndex.value == null) return
     if (props.images.length === 0) { closeLightbox(); return }

@@ -3,6 +3,8 @@ import path from 'node:path'
 import type { ChatMessage, Conversation, ConversationListEntry } from './chat-history.js'
 import { validateConversationMetadata, type ConversationMetadataPatch } from '../../shared/conversation-metadata.js'
 
+const CATALOG_FILE = 'catalog.json'
+
 function getMessageContentText (message: ChatMessage): string {
   const contentText = typeof message.content === 'string'
     ? message.content.trim()
@@ -39,39 +41,35 @@ function getMessageContentText (message: ChatMessage): string {
     .trim()
 }
 
-function buildConversationIndex (messages: ChatMessage[]): Pick<ConversationListEntry, 'previewText' | 'searchText'> {
-  const searchSegments = messages
-    .map(getMessageContentText)
-    .filter(Boolean)
-
+function buildConversationIndex (messages: ChatMessage[]): Pick<ConversationListEntry, 'previewText'> {
+  const searchSegments = messages.map(getMessageContentText).filter(Boolean)
   const latestPreview = [...searchSegments].reverse().find(Boolean) || ''
-
-  return {
-    previewText: latestPreview ? (latestPreview.length > 96 ? `${latestPreview.slice(0, 96)}...` : latestPreview) : undefined,
-    searchText: searchSegments.join('\n').slice(0, 6000) || undefined
-  }
+  const previewText = latestPreview ? (latestPreview.length > 96 ? `${latestPreview.slice(0, 96)}...` : latestPreview) : undefined
+  // Only used to create/update the catalog entry. It is intentionally bounded
+  // and never includes screenshots or the full conversation payload.
+  return { previewText }
 }
 
 /**
- * ChatHistoryStorage — worker-owned history persistence
- * 将每个对话保存为 userData/conversations/ 下的独立 JSON 文件
+ * Worker-owned history storage. The conversation directory has two layers:
+ * - catalog.json: lightweight list rows for the sidebar
+ * - <id>.json: full messages, read only after a conversation is opened
  */
 export class ChatHistoryStorage {
   private dir: string
   private summaries: Map<string, ConversationListEntry> | null = null
   private readonly metadataDir: string
+  private readonly catalogPath: string
 
   constructor (userDataPath: string) {
     this.dir = path.join(userDataPath, 'conversations')
+    this.catalogPath = path.join(this.dir, CATALOG_FILE)
     this.metadataDir = path.join(this.dir, 'metadata')
-    if (!fs.existsSync(this.dir)) {
-      fs.mkdirSync(this.dir, { recursive: true })
-    }
+    if (!fs.existsSync(this.dir)) fs.mkdirSync(this.dir, { recursive: true })
     fs.mkdirSync(this.metadataDir, { recursive: true })
   }
 
   private filePath (id: string): string {
-    // Prevent directory traversal
     if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('Invalid conversation id')
     return path.join(this.dir, `${id}.json`)
   }
@@ -108,71 +106,27 @@ export class ChatHistoryStorage {
     } finally { fs.rmSync(temporary, { force: true }) }
   }
 
-  /**
-   * List all conversations (sorted by updatedAt desc).
-   */
-  list (): ConversationListEntry[] {
-    if (this.summaries) return [...this.summaries.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    const files = fs.readdirSync(this.dir).filter(f => f.endsWith('.json'))
-    const convos: ConversationListEntry[] = []
-
-    for (const file of files) {
-      try {
-        const raw = fs.readFileSync(path.join(this.dir, file), 'utf-8')
-        const rawConversation = JSON.parse(raw) as Conversation
-        if (!rawConversation || typeof rawConversation.id !== 'string' || typeof rawConversation.updatedAt !== 'string') continue
-        const data = this.applyMetadata(rawConversation, this.readMetadata(rawConversation.id))
-        const conversationIndex = buildConversationIndex(data.messages || [])
-        convos.push({
-          id: data.id,
-          title: data.title,
-          createdAt: data.createdAt,
-          updatedAt: data.updatedAt,
-          previewText: conversationIndex.previewText,
-          searchText: conversationIndex.searchText,
-          manualTitle: data.manualTitle,
-          authMode: data.authMode,
-          providerId: data.providerId,
-          selectedModel: data.selectedModel,
-          reasoningStrength: data.reasoningStrength,
-          temperature: data.temperature,
-          targetProjectId: data.targetProjectId,
-          agentId: data.agentId,
-          groupId: data.groupId,
-          channelBindingId: data.channelBindingId,
-          forkedFromConversationId: data.forkedFromConversationId,
-          forkedFromMessageId: data.forkedFromMessageId,
-          rootConversationId: data.rootConversationId,
-          forkDepth: data.forkDepth,
-          forkedAt: data.forkedAt
-        })
-      } catch {
-        // skip corrupted files
-      }
-    }
-
-    this.summaries = new Map(convos.map(conversation => [conversation.id, conversation]))
-    return convos.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-  }
-
-  /**
-   * Get a single conversation by ID.
-   */
-  get (id: string): Conversation | null {
-    const fp = this.filePath(id)
-    if (!fs.existsSync(fp)) return null
+  private readCatalog (): ConversationListEntry[] | null {
+    if (!fs.existsSync(this.catalogPath)) return null
     try {
-      return this.applyMetadata(JSON.parse(fs.readFileSync(fp, 'utf-8')) as Conversation, this.readMetadata(id))
-    } catch {
-      return null
-    }
+      const value = JSON.parse(fs.readFileSync(this.catalogPath, 'utf-8'))
+      if (!Array.isArray(value)) return null
+      return value
+        .filter(item => item && typeof item.id === 'string' && typeof item.updatedAt === 'string')
+        .map(item => {
+          const { searchText: _searchText, messages: _messages, documentWorkspace: _documents, folderWorkspace: _folder, ...catalogItem } = item
+          return this.applyMetadata({ ...catalogItem }, this.readMetadata(item.id))
+        })
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    } catch { return null }
   }
 
-  /**
-   * Create or update a conversation.
-   */
-  private write (conversation: Conversation): void {
-    this.writeAtomic(this.filePath(conversation.id), conversation)
+  private writeCatalog (): void {
+    if (!this.summaries) return
+    const rows = [...this.summaries.values()]
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .map(({ folderWorkspace: _folder, ...row }) => row)
+    this.writeAtomic(this.catalogPath, rows)
   }
 
   private summary (conversation: Conversation, index = buildConversationIndex(conversation.messages || [])): ConversationListEntry {
@@ -180,48 +134,85 @@ export class ChatHistoryStorage {
     return { ...metadata, ...index }
   }
 
+  /** One-time migration for installations created before catalog.json. */
+  private rebuildCatalogFromConversationFiles (): ConversationListEntry[] {
+    const convos: ConversationListEntry[] = []
+    const files = fs.readdirSync(this.dir).filter(file => file.endsWith('.json') && file !== CATALOG_FILE)
+    for (const file of files) {
+      try {
+        const rawConversation = JSON.parse(fs.readFileSync(path.join(this.dir, file), 'utf-8')) as Conversation
+        if (!rawConversation || typeof rawConversation.id !== 'string' || typeof rawConversation.updatedAt !== 'string') continue
+        convos.push(this.summary(this.applyMetadata(rawConversation, this.readMetadata(rawConversation.id))))
+      } catch {
+        // Ignore corrupted or temporary files.
+      }
+    }
+    this.summaries = new Map(convos.map(conversation => [conversation.id, conversation]))
+    this.writeCatalog()
+    return convos.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  }
+
+  /** List only lightweight catalog rows. Full conversation files are not read. */
+  list (): ConversationListEntry[] {
+    if (!this.summaries) {
+      const catalog = this.readCatalog()
+      if (catalog) this.summaries = new Map(catalog.map(conversation => [conversation.id, conversation]))
+      else return this.rebuildCatalogFromConversationFiles()
+    }
+    return [...this.summaries.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  }
+
+  /** Read one full conversation after the user opens it. */
+  get (id: string): Conversation | null {
+    const fp = this.filePath(id)
+    if (!fs.existsSync(fp)) return null
+    try {
+      return this.applyMetadata(JSON.parse(fs.readFileSync(fp, 'utf-8')) as Conversation, this.readMetadata(id))
+    } catch { return null }
+  }
+
+  private write (conversation: Conversation): void {
+    this.writeAtomic(this.filePath(conversation.id), conversation)
+  }
+
+  private upsertSummary (summary: ConversationListEntry): void {
+    if (!this.summaries) this.list()
+    this.summaries!.set(summary.id, summary)
+    this.writeCatalog()
+  }
+
   save (conversation: Conversation): ConversationListEntry {
-    // A provider change is newer than an in-flight stream's old metadata.
-    // Fold its tiny sidecar into the next content write, then remove it.
     this.applyMetadata(conversation, this.readMetadata(conversation.id))
     conversation.updatedAt = new Date().toISOString()
     this.write(conversation)
     fs.rmSync(this.metadataPath(conversation.id), { force: true })
     const summary = this.summary(conversation)
-    this.summaries?.set(conversation.id, summary)
+    this.upsertSummary(summary)
     return summary
   }
 
   updateMetadata (id: string, input: ConversationMetadataPatch): ConversationListEntry | null {
     const patch = validateConversationMetadata(input)
     if (!fs.existsSync(this.filePath(id))) return null
-    let summary = this.summaries?.get(id)
-    if (!summary) {
-      const conversation = this.get(id)
-      if (!conversation) return null
-      summary = this.summary(conversation)
-    }
+    if (!this.summaries) this.list()
+    const summary = this.summaries?.get(id)
+    if (!summary) return null
     const record = {
       patch: { ...this.readMetadata(id)?.patch, ...patch },
       updatedAt: new Date().toISOString()
     }
-    // O(metadata size), not O(history size): no screenshot/text reserialization.
     this.writeAtomic(this.metadataPath(id), record)
     const updated = this.applyMetadata({ ...summary }, record)
-    this.summaries?.set(id, updated)
+    this.summaries!.set(id, updated)
+    this.writeCatalog()
     return updated
   }
 
-  /**
-   * Rename a conversation without changing its updatedAt ordering.
-   */
   rename (id: string, title: string): boolean {
     const fp = this.filePath(id)
     if (!fs.existsSync(fp)) return false
-
     const nextTitle = title.trim()
     if (!nextTitle) return false
-
     try {
       const conversation = this.get(id)
       if (!conversation) return false
@@ -229,25 +220,24 @@ export class ChatHistoryStorage {
       conversation.manualTitle = true
       this.write(conversation)
       fs.rmSync(this.metadataPath(id), { force: true })
+      if (!this.summaries) this.list()
       const cached = this.summaries?.get(id)
-      if (cached) this.summaries!.set(id, { ...cached, title: nextTitle, manualTitle: true })
+      if (cached) {
+        this.summaries!.set(id, { ...cached, title: nextTitle, manualTitle: true })
+        this.writeCatalog()
+      }
       return true
-    } catch {
-      return false
-    }
+    } catch { return false }
   }
 
-  /**
-   * Delete a conversation.
-   */
   delete (id: string): boolean {
     const fp = this.filePath(id)
-    if (fs.existsSync(fp)) {
-      fs.unlinkSync(fp)
-      fs.rmSync(this.metadataPath(id), { force: true })
-      this.summaries?.delete(id)
-      return true
-    }
-    return false
+    if (!fs.existsSync(fp)) return false
+    fs.unlinkSync(fp)
+    fs.rmSync(this.metadataPath(id), { force: true })
+    if (!this.summaries) this.list()
+    this.summaries?.delete(id)
+    this.writeCatalog()
+    return true
   }
 }

@@ -1,4 +1,4 @@
-import type { ComputedRef, Ref } from 'vue'
+import { ref, type ComputedRef, type Ref } from 'vue'
 import type { ComposerTranslation } from 'vue-i18n'
 import { generateId } from './message-blocks'
 import { ensureMessageIds } from './message-branching'
@@ -105,8 +105,12 @@ export function createChatConversationNavigation (options: ChatConversationNavig
   } = options
 
   let navigationVersion = 0
+  const conversationDetailState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const conversationDetailError = ref<string | null>(null)
 
   function resetConversationComposerState (): void {
+    conversationDetailState.value = 'idle'
+    conversationDetailError.value = null
     messages.value = []
     targetProjectId.value = null
     currentAuthMode.value = 'strict'
@@ -176,6 +180,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
       targetProjectId: null,
       allowEmpty: true
     })
+    conversationDetailState.value = 'ready'
   }
 
   async function openAgentWorkspaceConversation (agentId: string): Promise<void> {
@@ -236,6 +241,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
       titleOverride: t('chatUi.optimizationConversationTitle', { name }),
       targetProjectId: projectId
     })
+    conversationDetailState.value = 'ready'
   }
 
   function newConversation (): void {
@@ -260,6 +266,12 @@ export function createChatConversationNavigation (options: ChatConversationNavig
 
     selectedLongTermGoalId.value = null
     clearConversationUnread(conversationId)
+    conversationDetailState.value = 'loading'
+    conversationDetailError.value = null
+    // Switch the active id immediately so the message surface is keyed to the
+    // requested conversation and cannot retain the previous DOM subtree.
+    currentConversationId.value = conversationId
+    messages.value = []
 
     const backgroundState = backgroundStreamMessages.get(conversationId)
     if (backgroundState) {
@@ -281,29 +293,42 @@ export function createChatConversationNavigation (options: ChatConversationNavig
       pendingImages.value = []
       uploadFeedback.value = ''
       selectConversationProvider(backgroundState.providerId || null, backgroundState.selectedModel || null)
+      conversationDetailState.value = 'ready'
       return
     }
 
-    const conversation = await window.electronAPI.getConversation(conversationId)
-    if (!conversation || version !== navigationVersion) return
+    try {
+      const conversation = await window.electronAPI.getConversation(conversationId)
+      if (version !== navigationVersion || currentConversationId.value !== conversationId) return
+      if (!conversation) {
+        conversationDetailState.value = 'error'
+        conversationDetailError.value = t('chatUi.conversationLoadFailed')
+        return
+      }
 
-    currentConversationId.value = conversation.id
-    messages.value = ensureMessageIds(conversation.messages)
-    targetProjectId.value = conversation.targetProjectId || null
-    currentAuthMode.value = conversation.authMode === 'auto' ? 'auto' : 'strict'
-    reasoningStrength.value = conversation.reasoningStrength || DEFAULT_REASONING_STRENGTH
-    conversationTemperature.value = typeof conversation.temperature === 'number' ? conversation.temperature : null
-    selectedAgentId.value = resolveConversationAgentSelection(conversation)
-    selectedGroupId.value = conversation.groupId || ''
-    selectedChannelBindingId.value = conversation.channelBindingId || ''
-    applyDocumentWorkspaceState(conversation.documentWorkspace)
-    applyFolderWorkspaceState(conversation.folderWorkspace)
-    setConversationTarget(conversation.id, conversation.targetProjectId || null)
-    resetTransientStreamState()
-    pendingFiles.value = []
-    pendingImages.value = []
-    uploadFeedback.value = ''
-    selectConversationProvider(conversation.providerId || null, conversation.selectedModel || null)
+      messages.value = ensureMessageIds(conversation.messages)
+      targetProjectId.value = conversation.targetProjectId || null
+      currentAuthMode.value = conversation.authMode === 'auto' ? 'auto' : 'strict'
+      reasoningStrength.value = conversation.reasoningStrength || DEFAULT_REASONING_STRENGTH
+      conversationTemperature.value = typeof conversation.temperature === 'number' ? conversation.temperature : null
+      selectedAgentId.value = resolveConversationAgentSelection(conversation)
+      selectedGroupId.value = conversation.groupId || ''
+      selectedChannelBindingId.value = conversation.channelBindingId || ''
+      applyDocumentWorkspaceState(conversation.documentWorkspace)
+      applyFolderWorkspaceState(conversation.folderWorkspace)
+      setConversationTarget(conversation.id, conversation.targetProjectId || null)
+      resetTransientStreamState()
+      pendingFiles.value = []
+      pendingImages.value = []
+      uploadFeedback.value = ''
+      selectConversationProvider(conversation.providerId || null, conversation.selectedModel || null)
+      conversationDetailState.value = 'ready'
+
+    } catch (error) {
+      if (version !== navigationVersion || currentConversationId.value !== conversationId) return
+      conversationDetailState.value = 'error'
+      conversationDetailError.value = error instanceof Error ? error.message : t('chatUi.conversationLoadFailed')
+    }
   }
 
   function prepareLongTermGoalWorkspace (): void {
@@ -350,6 +375,8 @@ export function createChatConversationNavigation (options: ChatConversationNavig
   }
 
   return {
+    conversationDetailError,
+    conversationDetailState,
     deleteConversation,
     loadConversation,
     newConversation,

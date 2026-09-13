@@ -41,6 +41,8 @@ const {
   availableSkills,
   conversationsLoaded,
   conversationSidebarItems,
+  conversationDetailError,
+  conversationDetailState,
   createLongTermGoal,
   currentAuthMode,
   currentAskUserRequest,
@@ -73,8 +75,7 @@ const {
   handleAgentSelectionChange,
   handleAuthModeChange,
   handleChannelBindingSelectionChange,
-  handleModelSelectionChange,
-  handleProviderSelectionChange,
+  handleProviderModelSelectionChange,
   handleReasoningStrengthChange,
   handleTemperatureChange,
   inputText,
@@ -729,15 +730,23 @@ watch(
             :selected-model="selectedModel"
             :show-provider-selector="shouldUseConversationProviderOverride"
             @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
-            @update:active-provider-id="handleProviderSelectionChange"
-            @update:selected-model="handleModelSelectionChange"
+            @select-provider-model="handleProviderModelSelectionChange"
             @toggle-skill-picker="showSkillPicker = !showSkillPicker"
             @select-all-skills="selectAllSkills"
             @clear-skills="clearSkills"
             @toggle-skill="toggleSkill"
           />
 
+          <div v-if="conversationDetailState === 'loading'" class="conversation-detail-state">
+            <div class="conversation-detail-spinner" aria-hidden="true" />
+            <span>{{ $t('chatUi.loadingConversation') }}</span>
+          </div>
+          <div v-else-if="conversationDetailState === 'error'" class="conversation-detail-state error">
+            <strong>{{ $t('chatUi.conversationLoadFailed') }}</strong>
+            <span>{{ conversationDetailError }}</span>
+          </div>
           <MessageList
+            v-else
             :key="currentConversationId || 'draft'"
             :messages="messages"
             :is-loading="isLoading"
@@ -1112,6 +1121,37 @@ watch(
   overflow: hidden;
 }
 
+.conversation-detail-state {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--app-text-muted);
+  font-size: 0.84rem;
+  padding: 24px;
+  text-align: center;
+}
+
+.conversation-detail-state.error {
+  color: var(--app-danger);
+}
+
+.conversation-detail-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid color-mix(in srgb, var(--app-accent) 24%, transparent);
+  border-top-color: var(--app-accent);
+  border-radius: 50%;
+  animation: conversation-detail-spin 0.8s linear infinite;
+}
+
+@keyframes conversation-detail-spin {
+  to { transform: rotate(360deg); }
+}
+
 .chat-main {
   display: flex;
   flex: 1;
@@ -1121,7 +1161,7 @@ watch(
   position: relative;
 }
 
-.chat-panel-with-workspace .chat-main {
+.chat-main {
   min-width: var(--chat-main-protected-min-width, 640px);
   flex-shrink: 0;
 }

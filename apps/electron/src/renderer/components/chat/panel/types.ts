@@ -47,7 +47,6 @@ export interface ConversationSummary {
   updatedAt: string
   manualTitle?: boolean
   previewText?: string
-  searchText?: string
   authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string
@@ -132,6 +131,7 @@ export interface SidebarConversationItem {
   pendingAuthCount: number
   unreadCount: number
   isActive: boolean
+  isFork?: boolean
 }
 
 export interface SidebarLongTermGoalItem {

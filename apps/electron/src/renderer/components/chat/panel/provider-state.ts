@@ -139,6 +139,15 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
     if (!syncingProviderOptions.value) await saveActiveConversationMeta()
   }
 
+  async function handleProviderModelSelectionChange (selection: { providerId: string; model: string }): Promise<void> {
+    if (activeProviderId.value === selection.providerId && selectedModel.value === selection.model) return
+    // The picker already supplies both values. One atomic update avoids saving
+    // the provider's default model first, then saving/reordering the sidebar again.
+    activeProviderId.value = selection.providerId
+    selectedModel.value = selection.model
+    if (!syncingProviderOptions.value) await saveActiveConversationMeta()
+  }
+
   async function handleModelSelectionChange (model: string): Promise<void> {
     selectedModel.value = model
     if (!syncingProviderOptions.value) await saveActiveConversationMeta()
@@ -210,6 +219,7 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
     handleGroupSelectionChange,
     handleModelSelectionChange,
     handleProviderSelectionChange,
+    handleProviderModelSelectionChange,
     handleReasoningStrengthChange,
     handleTemperatureChange,
     loadProviders,
