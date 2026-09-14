@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560" viewBox="0 0 900 560">
+  <rect width="900" height="560" rx="24" fill="#f7f8fc"/>
+  <text x="450" y="92" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif" font-size="30" font-weight="700" fill="#1f2937">WorldBase 安装说明</text>
+  <text x="450" y="138" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif" font-size="20" fill="#4b5563">将 WorldBase 拖入 Applications 文件夹</text>
+  <text x="450" y="414" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif" font-size="18" fill="#374151">首次打开受阻时，在终端复制执行：</text>
+  <text x="450" y="458" text-anchor="middle" font-family="Menlo,Monaco,monospace" font-size="16" fill="#111827">xattr -dr com.apple.quarantine "/Applications/WorldBase.app"</text>
+  <text x="450" y="500" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif" font-size="15" fill="#6b7280">应用路径不同，请将命令中的路径替换为实际位置</text>
+</svg>

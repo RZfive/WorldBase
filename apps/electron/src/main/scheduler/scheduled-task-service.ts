@@ -221,10 +221,6 @@ export class ScheduledTaskService {
 
   saveTask (input: ScheduledTaskDefinition): ScheduledTaskDefinition {
     const existing = this.tasks.find(task => task.id === input.id)
-    if (existing && this.runningTaskIds.has(existing.id)) {
-      throw new Error(t('mainDialog.scheduledTaskRunningEditBlocked'))
-    }
-
     const { id, candidate, scheduleChanged, enabledChanged } = this.buildTaskSaveCandidate(input, existing)
     const nextTasks = existing
       ? this.tasks.map(task => task.id === existing.id ? candidate : task)
@@ -290,10 +286,10 @@ export class ScheduledTaskService {
   deleteTask (taskId: string): boolean {
     const task = this.tasks.find(item => item.id === taskId)
     if (!task) return false
-    if (this.runningTaskIds.has(taskId)) {
-      throw new Error(t('mainDialog.scheduledTaskRunningDeleteBlocked'))
-    }
-
+    // A running task is allowed to be removed. The in-flight execution keeps
+    // its captured prompt/context, while its task record and future scheduling
+    // are removed immediately. Its completion handlers no longer assume that
+    // the task still exists.
     this.clearTaskTimer(taskId)
     this.tasks = this.tasks.filter(item => item.id !== taskId)
     this.reports = this.reports.filter(report => report.taskId !== taskId)
@@ -707,7 +703,8 @@ export class ScheduledTaskService {
       this.scheduleTask(updatedTask)
     } catch (error) {
       const errorMessage = (error as Error).message || t('mainDialog.scheduledTaskFailedSummary')
-      const taskForRetry = this.getTaskOrThrow(taskId)
+      const taskForRetry = this.tasks.find(item => item.id === taskId)
+      if (!taskForRetry) return
       const shouldRetry = context.attempt <= taskForRetry.retryPolicy.maxRetries
       const finishedAt = new Date().toISOString()
 
@@ -768,7 +765,11 @@ export class ScheduledTaskService {
     } finally {
       this.runningTaskIds.delete(taskId)
       const latestTask = this.tasks.find(item => item.id === taskId)
-      if (latestTask?.retryScheduledAt) {
+      if (!latestTask) {
+        this.deferredTaskSaves.delete(taskId)
+        return
+      }
+      if (latestTask.retryScheduledAt) {
         this.deferredTaskSaves.delete(taskId)
         return
       }

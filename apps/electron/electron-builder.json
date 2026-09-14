@@ -18,7 +18,9 @@
     {
       "from": "resources/harness",
       "to": "harness",
-      "filter": ["**/*"]
+      "filter": [
+        "**/*"
+      ]
     }
   ],
   "files": [
@@ -52,7 +54,9 @@
     "target": [
       {
         "target": "dmg",
-        "arch": ["arm64"]
+        "arch": [
+          "arm64"
+        ]
       }
     ],
     "icon": "public/icon-mac.png",
@@ -79,5 +83,13 @@
   "linux": {
     "target": "AppImage",
     "icon": "public/icon.png"
+  },
+  "dmg": {
+    "background": "build/dmg-background.svg",
+    "backgroundColor": "#f7f8fc",
+    "window": {
+      "width": 900,
+      "height": 560
+    }
   }
 }

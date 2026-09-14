@@ -188,6 +188,18 @@ the-world/
 
 - [`docs/custom-agent-memory-im-architecture.md`](./docs/custom-agent-memory-im-architecture.md) — 自定义 Agent、长期记忆、群协作与未来 IM 接入的整体升级方案
 
+## macOS 安装说明
+
+如果 macOS 提示“无法打开 WorldBase”或应用来自身份不明的开发者，可以先将应用拖入“应用程序”文件夹，然后在终端执行以下命令移除下载隔离标记：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/WorldBase.app"
+```
+
+如果应用不在默认位置，请将命令中的 `/Applications/WorldBase.app` 替换为实际的 `.app` 路径。也可以先在终端输入 `xattr -dr com.apple.quarantine `（末尾保留空格），再把应用从 Finder 拖入终端，按回车执行。
+
+执行完成后重新打开应用。如果仍然无法启动，请在 Finder 中右键点击应用，选择“打开”，并在系统设置的“隐私与安全性”中允许打开该应用。
+
 ## 开发
 
 ```bash

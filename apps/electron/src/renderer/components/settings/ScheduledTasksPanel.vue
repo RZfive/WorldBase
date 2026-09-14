@@ -554,11 +554,15 @@ async function saveDraft () {
 }
 
 async function deleteSelectedTask () {
-  if (!selectedTask.value || !window.electronAPI?.deleteScheduledTask) return
-  if (!window.confirm(t('settings.scheduledTasks.deleteConfirm', { title: selectedTask.value.title }))) return
+  const taskToDelete = selectedTask.value
+  if (!taskToDelete || !window.electronAPI?.deleteScheduledTask) return
+  if (!window.confirm(t('settings.scheduledTasks.deleteConfirm', { title: taskToDelete.title }))) return
 
   try {
-    await window.electronAPI.deleteScheduledTask(selectedTask.value.id)
+    // Capture the primitive ID before the reactive selection can change. Passing a
+    // Vue proxy through Electron's structured-clone IPC boundary throws
+    // `An object could not be cloned.`
+    await window.electronAPI.deleteScheduledTask(String(taskToDelete.id))
     activeReportId.value = null
     selectedTaskId.value = ''
     await loadData()
@@ -569,14 +573,39 @@ async function deleteSelectedTask () {
 }
 
 async function toggleSelectedTaskEnabled () {
-  if (!selectedTask.value || !window.electronAPI?.saveScheduledTask) return
+  const taskToToggle = selectedTask.value
+  if (!taskToToggle || !window.electronAPI?.saveScheduledTask) return
 
   try {
-    const savedTask = await window.electronAPI.saveScheduledTask({
-      ...selectedTask.value,
-      enabled: !selectedTask.value.enabled,
-      updatedAt: new Date().toISOString()
-    })
+    // `selectedTask` is derived from a Vue reactive array. Spreading it only
+    // removes the top-level proxy; nested schedule/retry/array values can still
+    // cross the Electron IPC boundary as reactive proxies. Build a plain task
+    // payload explicitly before invoking IPC.
+    const taskPayload: ScheduledTaskDefinition = {
+      id: String(taskToToggle.id),
+      title: String(taskToToggle.title),
+      enabled: !Boolean(taskToToggle.enabled),
+      hidden: taskToToggle.hidden === true,
+      createdBy: taskToToggle.createdBy === 'ai' ? 'ai' : 'manual',
+      prompt: String(taskToToggle.prompt),
+      schedule: JSON.parse(JSON.stringify(taskToToggle.schedule)) as ScheduledTaskDefinition['schedule'],
+      providerId: taskToToggle.providerId == null ? null : String(taskToToggle.providerId),
+      modelId: taskToToggle.modelId == null ? null : String(taskToToggle.modelId),
+      selectedSkillIds: Array.from(taskToToggle.selectedSkillIds, String),
+      selectedMcpServerIds: Array.from(taskToToggle.selectedMcpServerIds, String),
+      retryPolicy: {
+        maxRetries: Number(taskToToggle.retryPolicy.maxRetries),
+        retryDelayMinutes: Number(taskToToggle.retryPolicy.retryDelayMinutes)
+      },
+      createdAt: String(taskToToggle.createdAt),
+      updatedAt: new Date().toISOString(),
+      nextRunAt: taskToToggle.nextRunAt == null ? null : String(taskToToggle.nextRunAt),
+      retryScheduledAt: taskToToggle.retryScheduledAt == null ? null : String(taskToToggle.retryScheduledAt),
+      lastRunAt: taskToToggle.lastRunAt == null ? null : String(taskToToggle.lastRunAt),
+      lastStatus: taskToToggle.lastStatus,
+      lastReportId: taskToToggle.lastReportId == null ? null : String(taskToToggle.lastReportId)
+    }
+    const savedTask = await window.electronAPI.saveScheduledTask(taskPayload)
     selectedTaskId.value = savedTask.id
     await loadData()
     setStatus(savedTask.enabled ? t('settings.scheduledTasks.taskEnabled') : t('settings.scheduledTasks.taskDisabled'))

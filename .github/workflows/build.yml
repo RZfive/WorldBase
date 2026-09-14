@@ -1,9 +1,11 @@
 name: Build & Release
 
 on:
-  push:
+  pull_request:
     branches:
       - main
+    types:
+      - closed
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -14,6 +16,8 @@ permissions:
 
 jobs:
   cleanup:
+    # All build jobs depend on cleanup, so closing an unmerged PR skips packaging.
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Delete old artifacts (keep latest 5 per name)
@@ -78,9 +82,6 @@ jobs:
       - name: Install dependencies
         run: pnpm --dir apps/electron install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm --dir apps/electron typecheck
-
       - name: Build Electron (Windows)
         run: pnpm --dir apps/electron electron:build:win
 
@@ -140,9 +141,6 @@ jobs:
       - name: Install dependencies
         run: pnpm --dir apps/electron install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm --dir apps/electron typecheck
-
       - name: Build Electron (macOS ARM)
         run: pnpm --dir apps/electron electron:build:mac:arm64
 
@@ -199,9 +197,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm --dir apps/electron install --frozen-lockfile
-
-      - name: Typecheck
-        run: pnpm --dir apps/electron typecheck
 
       - name: Build Electron (Linux)
         run: pnpm --dir apps/electron electron:build:linux

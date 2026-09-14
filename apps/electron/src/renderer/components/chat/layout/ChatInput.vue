@@ -1184,7 +1184,7 @@ onUnmounted(() => {
 }
 
 .input-container {
-  --chat-input-surface: #0a1018;
+  --chat-input-surface: var(--app-main-surface);
   --chat-input-border: var(--app-input-border);
   --chat-input-control-surface: color-mix(in srgb, var(--app-panel-muted) 84%, transparent);
   --chat-input-control-border: var(--app-border-strong);
@@ -1208,11 +1208,9 @@ onUnmounted(() => {
 }
 
 :global(:root[data-theme='light'] .chat-input .input-container) {
-  --chat-input-surface: #ffffff;
-  --chat-input-border: rgba(15, 23, 42, 0.12);
+  --chat-input-border: var(--app-border);
   --chat-input-control-surface: rgba(15, 23, 42, 0.035);
   --chat-input-control-border: rgba(15, 23, 42, 0.11);
-  --chat-input-floating-surface: #ffffff;
   --chat-input-hover-surface: rgba(15, 23, 42, 0.055);
   --chat-input-disabled-surface: rgba(15, 23, 42, 0.05);
   --chat-input-chip-remove-hover: rgba(15, 23, 42, 0.08);
@@ -1323,7 +1321,7 @@ onUnmounted(() => {
   height: 18px;
   border-radius: 50%;
   background: var(--app-danger);
-  color: #ffffff;
+  color: var(--app-on-accent);
   border: none;
   font-size: 0.7em;
   cursor: pointer;
@@ -1346,7 +1344,7 @@ onUnmounted(() => {
   height: 18px;
   border-radius: 50%;
   background: var(--app-danger);
-  color: #ffffff;
+  color: var(--app-on-accent);
   border: none;
   font-size: 0.7em;
   cursor: pointer;
@@ -1529,14 +1527,14 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, #22c55e 38%, transparent);
-  background: color-mix(in srgb, #22c55e 13%, transparent);
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--app-success) 38%, transparent);
+  background: var(--app-success-soft);
   color: var(--app-text-soft);
 }
 
 .code-tag-chip-prefix {
-  color: #22c55e;
+  color: var(--app-success);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.72em;
   font-weight: 900;
@@ -1641,8 +1639,8 @@ onUnmounted(() => {
 }
 
 .runtime-status-bar.waitingAuth {
-  background: rgba(245, 158, 11, 0.14);
-  color: #b45309;
+  background: var(--app-warning-soft);
+  color: var(--app-warning-strong);
 }
 
 .runtime-status-indicator {
@@ -1762,15 +1760,15 @@ onUnmounted(() => {
   font-size: 0.74em;
   margin-right: auto;
 }
-.group-inject-feedback.sent { color: #2f7a4a; }
-.group-inject-feedback.failed { color: #b25a1e; }
+.group-inject-feedback.sent { color: var(--app-success); }
+.group-inject-feedback.failed { color: var(--app-danger); }
 
 .group-inject-submit {
   border: none;
   border-radius: 6px;
   padding: 5px 14px;
   background: var(--app-accent);
-  color: #fff;
+  color: var(--app-on-accent);
   font-size: 0.78em;
   font-weight: 600;
   cursor: pointer;
@@ -1929,23 +1927,23 @@ onUnmounted(() => {
 }
 
 .plan-mode-btn.active {
-  color: #f59e0b;
-  background: rgba(245, 158, 11, 0.12);
+  color: var(--app-warning);
+  background: var(--app-warning-soft);
 }
 
 .plan-mode-btn.active:hover {
-  background: rgba(245, 158, 11, 0.18);
-  color: #d97706;
+  background: color-mix(in srgb, var(--app-warning) 18%, transparent);
+  color: var(--app-warning-strong);
 }
 
 .auth-mode-btn.auto {
-  color: #22c55e;
-  background: rgba(34, 197, 94, 0.1);
+  color: var(--app-success);
+  background: var(--app-success-soft);
 }
 
 .auth-mode-btn.auto:hover {
-  background: rgba(34, 197, 94, 0.16);
-  color: #16a34a;
+  background: color-mix(in srgb, var(--app-success) 16%, transparent);
+  color: var(--app-success);
 }
 
 .action-btn {
@@ -2009,10 +2007,10 @@ onUnmounted(() => {
 .action-btn.doc-btn.active,
 .action-btn.folder-btn.active { color: var(--app-accent); background: var(--app-accent-soft); }
 .action-btn.upload-btn { cursor: pointer; }
-.computer-use-btn.active { color: var(--app-accent, #2563eb); background: color-mix(in srgb, var(--app-accent, #2563eb) 14%, transparent); }
+.computer-use-btn.active { color: var(--app-accent); background: var(--app-accent-soft); }
 /* macOS permission gate: grayed out until Screen Recording + Accessibility are granted. */
 .computer-use-btn.permission-locked { opacity: 0.38; cursor: not-allowed; }
-.computer-use-btn.permission-locked:hover { background: transparent; color: var(--app-text-muted, #888); }
+.computer-use-btn.permission-locked:hover { background: transparent; color: var(--app-text-muted); }
 .action-btn.disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -2029,27 +2027,27 @@ onUnmounted(() => {
 
 .action-btn.send-btn {
   background: var(--app-accent);
-  color: #ffffff;
+  color: var(--app-on-accent);
 }
 
 .action-btn.send-btn:hover:not(:disabled) { background: var(--app-accent-strong); }
 
 .action-btn.send-btn.stopping {
   background: var(--app-danger);
-  box-shadow: 0 10px 24px rgba(220, 38, 38, 0.24);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--app-danger-strong) 24%, transparent);
 }
 
 .action-btn.send-btn.stopping:hover:not(:disabled) {
-  background: #dc2626;
+  background: var(--app-danger-strong);
 }
 
 .action-btn.send-btn.stopping.waitingAuth {
-  background: #f59e0b;
-  box-shadow: 0 10px 24px rgba(245, 158, 11, 0.28);
+  background: var(--app-warning);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--app-warning) 28%, transparent);
 }
 
 .action-btn.send-btn.stopping.waitingAuth:hover:not(:disabled) {
-  background: #d97706;
+  background: var(--app-warning-strong);
 }
 
 .action-btn.send-btn:disabled {

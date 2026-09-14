@@ -311,7 +311,7 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
   display: flex;
   gap: 6px;
   opacity: 0;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--duration-fast) ease;
 }
 
 .message-row:hover .message-user-actions,
@@ -328,12 +328,13 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
 
 .message-user-action-btn {
   padding: 2px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--app-border);
   background: transparent;
   color: var(--app-text-muted);
   font-size: 0.72rem;
   cursor: pointer;
+  transition: border-color var(--duration-fast) ease, color var(--duration-fast) ease;
 }
 
 .message-user-action-btn:hover:not(:disabled) {
@@ -363,31 +364,31 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
   align-items: center;
   min-width: 0;
   color: var(--app-accent-strong);
-  font-size: 0.72rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
 .message-role-label.user {
-  color: var(--app-text-muted);
+  color: var(--app-text-faint);
 }
 
 .message-author {
-  font-size: 0.88rem;
-  font-weight: 700;
+  font-size: 0.84rem;
+  font-weight: 600;
   color: var(--app-text-strong);
 }
 
 .message-model-chip {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--app-border);
-  background: transparent;
-  color: var(--app-text-muted);
-  font-size: 0.72rem;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  border: none;
+  background: var(--app-panel-muted);
+  color: var(--app-text-faint);
+  font-size: 0.7rem;
 }
 
 .message-agent-avatar,
@@ -411,8 +412,8 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
 }
 
 .message-user-avatar {
-  background: color-mix(in srgb, #10b981 86%, var(--app-accent));
-  color: #ffffff;
+  background: var(--chat-avatar-user-bg);
+  color: var(--app-on-accent);
   font-size: 0.76rem;
 }
 

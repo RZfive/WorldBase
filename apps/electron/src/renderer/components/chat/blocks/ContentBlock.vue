@@ -286,11 +286,11 @@ onBeforeUnmount(() => {
   max-width: min(100%, var(--chat-user-bubble-max, 640px));
   margin-left: auto;
   padding: 12px 16px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
+  border: 1px solid var(--chat-bubble-user-border);
   border-radius: 18px 18px 8px 18px;
-  background: color-mix(in srgb, var(--app-panel-strong) 96%, black 4%);
+  background: var(--chat-bubble-user-bg);
   color: var(--app-text-strong);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.045);
+  box-shadow: var(--shadow-1);
 }
 
 .message-output.streaming {
@@ -304,9 +304,10 @@ onBeforeUnmount(() => {
   top: 2px;
   bottom: 2px;
   width: 2px;
-  border-radius: 999px;
-  background: var(--app-accent);
-  opacity: 0.72;
+  border-radius: var(--radius-pill);
+  background: var(--chat-stream-bar);
+  box-shadow: var(--chat-stream-glow);
+  opacity: 0.85;
 }
 
 .message-placeholder {

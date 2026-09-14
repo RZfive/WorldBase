@@ -47,6 +47,38 @@
   --app-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
   --app-scrollbar: rgba(148, 163, 184, 0.26);
   --app-scrollbar-hover: rgba(148, 163, 184, 0.42);
+
+  /* ---- Semantic status colors (soft variants are tinted surfaces) ---- */
+  --app-success-soft: rgba(34, 197, 94, 0.14);
+  --app-warning: #f59e0b;
+  --app-warning-strong: #d97706;
+  --app-warning-soft: rgba(245, 158, 11, 0.14);
+  --app-danger-strong: #dc2626;
+  --app-danger-soft: rgba(248, 113, 113, 0.14);
+  --app-on-accent: #ffffff;
+
+  /* ---- Radius scale ---- */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  /* ---- Elevation scale (1: card, 2: popover/floating, 3: modal) ---- */
+  --shadow-1: 0 2px 10px rgba(0, 0, 0, 0.22);
+  --shadow-2: 0 10px 28px rgba(0, 0, 0, 0.3);
+  --shadow-3: 0 18px 48px rgba(0, 0, 0, 0.32);
+
+  /* ---- Motion ---- */
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ---- Chat-specific ---- */
+  --chat-bubble-user-bg: color-mix(in srgb, var(--app-accent) 16%, var(--app-panel-strong));
+  --chat-bubble-user-border: color-mix(in srgb, var(--app-accent) 32%, transparent);
+  --chat-avatar-user-bg: color-mix(in srgb, var(--app-accent) 82%, var(--app-accent-strong));
+  --chat-stream-bar: linear-gradient(180deg, var(--app-accent), color-mix(in srgb, var(--app-accent) 40%, transparent));
+  --chat-stream-glow: 0 0 10px var(--app-accent-glow);
 }
 
 :root[data-theme='light'] {
@@ -82,6 +114,21 @@
   --app-shadow: 0 18px 48px rgba(15, 23, 42, 0.12);
   --app-scrollbar: rgba(15, 23, 42, 0.18);
   --app-scrollbar-hover: rgba(15, 23, 42, 0.28);
+
+  --app-success-soft: rgba(22, 163, 74, 0.1);
+  --app-warning: #d97706;
+  --app-warning-strong: #b45309;
+  --app-warning-soft: rgba(217, 119, 6, 0.1);
+  --app-danger-strong: #b91c1c;
+  --app-danger-soft: rgba(220, 38, 38, 0.08);
+
+  --shadow-1: 0 2px 10px rgba(15, 23, 42, 0.07);
+  --shadow-2: 0 10px 28px rgba(15, 23, 42, 0.1);
+  --shadow-3: 0 18px 48px rgba(15, 23, 42, 0.14);
+
+  --chat-bubble-user-bg: var(--app-accent-soft);
+  --chat-bubble-user-border: color-mix(in srgb, var(--app-accent) 30%, transparent);
+  --chat-avatar-user-bg: var(--app-accent);
 }
 
 :root[data-theme='dark'] {
@@ -379,3 +426,33 @@ html, body, #app {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--app-scrollbar-hover);
 }
+
+/* Shared container for chat block cards (tool runs, thinking, errors, auth, …).
+   Block components apply this to their outermost element instead of each
+   re-declaring radius/border/background. */
+.chat-card {
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-md);
+  background: var(--app-panel-muted);
+  padding: 12px 14px;
+}
+
+/* Left status stripe used by stateful blocks (error/warning/success/info). */
+.chat-card-status {
+  position: relative;
+}
+
+.chat-card-status::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--app-accent);
+}
+
+.chat-card-status.danger::before { background: var(--app-danger); }
+.chat-card-status.warning::before { background: var(--app-warning); }
+.chat-card-status.success::before { background: var(--app-success); }

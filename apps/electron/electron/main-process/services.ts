@@ -663,16 +663,16 @@ export async function initializeServices (): Promise<void> {
     resolveTaskOptions: (task) => mainState.longTermGoalService?.resolveScheduledTaskOptions(task),
     shouldNotifyReport: (report) => mainState.longTermGoalService?.shouldNotifyScheduledReport(report),
     onTasksChanged: (tasks: ScheduledTaskDefinition[]) => {
-      broadcastToAppWindows('scheduler:tasksChanged', tasks)
+      broadcastToAppWindows('scheduler:tasksChanged', JSON.parse(JSON.stringify(tasks)))
     },
     onReportsChanged: (reports: ScheduledTaskRunReport[]) => {
-      broadcastToAppWindows('scheduler:reportsChanged', reports)
+      broadcastToAppWindows('scheduler:reportsChanged', JSON.parse(JSON.stringify(reports)))
       setTimeout(() => {
         mainState.longTermGoalService?.reconcileScheduledReports(mainState.scheduledTaskService?.listAllReports() || [])
       }, 0)
     },
     onReportNotificationClick: (report: ScheduledTaskRunReport) => {
-      broadcastToAppWindows('scheduler:reportRequested', report)
+      broadcastToAppWindows('scheduler:reportRequested', JSON.parse(JSON.stringify(report)))
     }
   })
   mainState.aiEngine.setScheduledTaskService(mainState.scheduledTaskService)
