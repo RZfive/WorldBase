@@ -140,6 +140,20 @@ function getSoftwareEngineeringSection (ctx: ToolPromptContext): string {
 }
 
 /**
+ * Communication cadence — keeps the message stream quiet while work is in
+ * flight. The UI already surfaces live tool summaries and a thinking pill,
+ * so interleaved progress narration is pure noise. The model should think,
+ * chain tool calls, and deliver ONE final report when done.
+ */
+function getCommunicationCadenceSection (): string {
+  return `## 沟通节奏（降低噪声，重要）
+- 先想透，再连续执行：复杂任务先用思考把步骤规划清楚，然后不间断地连续调用工具，让每一步直接消化上一步的结果，直到任务完备；不要每调用一两个工具就停下来对用户说一句进度。
+- 过程性叙述（"接下来我要…""现在我来试试…"）不要写给用户——执行过程已由界面的工具汇总行与思考摘要实时展示，重复 narrate 只会制造噪声。
+- 你写给用户的可见文字只有两类：① 任务全部完成后的最终汇报，一条消息说清做了什么、关键结果、如何验证、还有什么没做；② 真正需要用户决策或补充信息时的提问。
+- 只有在授权被拒、缺少关键信息、或同一错误反复失败无法自行解决时才中途停下询问用户；否则始终优先继续思考和调用工具推进，完备后再输出最终回复。`
+}
+
+/**
  * Careful execution of side-effecting / hard-to-reverse actions.
  * Mirrors Claude Code's "Executing actions with care".
  */
@@ -599,6 +613,7 @@ export function getSystemPrompt (options?: SystemPromptOptions): string {
     getRoleAndCoreRulesSection(toolContext),
     getAvailableToolsSection(toolContext),
     getSoftwareEngineeringSection(toolContext),
+    getCommunicationCadenceSection(),
     getExecutionSafetySection(),
     getContextAndPromptSafetySection(),
     getLocalApprovalSection(toolContext),

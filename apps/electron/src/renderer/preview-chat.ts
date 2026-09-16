@@ -22,14 +22,20 @@ const conversationItems: ConversationSidebarItem[] = [
 const messages: ChatMessage[] = [
   { id:'m1', role:'user', content:'把 settings 页的表格换成虚拟滚动。' },
   { id:'m2', role:'assistant', speakerName:'前端工程师', modelLabel:'Opus 4.8', content:'', blocks:[
-    { id:'t1', kind:'thinking', text:'正在定位表格渲染瓶颈，并核对排序状态的存储位置。' },
-    { id:'tool1', kind:'tool', toolRun:{ id:'r1', name:'read_current_page', status:'completed', progress:[{stage:'读取当前页面',detail:'定位到 settings/Table.vue'}] } },
+    { id:'t1', kind:'thinking', text:'正在定位表格渲染瓶颈，并核对排序状态的存储位置。', startedAt: Date.now() - 14000, endedAt: Date.now() - 12000 },
+    { id:'tool1', kind:'tool', toolRun:{ id:'r1', name:'read_current_page', status:'completed', startedAt: Date.now() - 12000, endedAt: Date.now() - 9000, progress:[{stage:'读取当前页面',detail:'定位到 settings/Table.vue'}] } },
+    { id:'tool1b', kind:'tool', toolRun:{ id:'r1b', name:'grep_search', status:'completed', startedAt: Date.now() - 9000, endedAt: Date.now() - 6000, progress:[{stage:'检索列表项',detail:'匹配 3 处可优化点'}] } },
     { id:'c21', kind:'content', content:'已定位瓶颈：1 万行全量 DOM。方案：只渲染可视区 ±10 行。' }
   ] },
   { id:'m3', role:'user', content:'排序状态切视图后会丢吗？' },
-  { id:'m4', role:'assistant', speakerName:'前端工程师', modelLabel:'Opus 4.8', content:'排序与筛选写入 URL query，切回默认视图可恢复。\n\n```ts\nconst visibleRows = rows.slice(start, end)\n```' },
+  { id:'m4', role:'assistant', speakerName:'前端工程师', modelLabel:'Opus 4.8', blocks:[
+    { id:'t4', kind:'thinking', text:'排序状态需要持久化到 URL，同时保留默认视图恢复路径。' },
+    { id:'tool4', kind:'tool', toolRun:{ id:'r4', name:'edit_project_file', status:'completed', progress:[{stage:'编辑 settings/Table.vue',detail:'排序参数写入 query'}] } }
+  ], content:'排序与筛选写入 URL query，切回默认视图可恢复。\n\n```ts\nconst visibleRows = rows.slice(start, end)\n```' },
   { id:'m5', role:'user', content:'什么时候能看到性能数据？' },
-  { id:'m6', role:'assistant', speakerName:'前端工程师', modelLabel:'Opus 4.8', content:'回归脚本跑完就发给你，预计 10 分钟内。' }
+  { id:'m6', role:'assistant', speakerName:'前端工程师', modelLabel:'Opus 4.8', content:'回归脚本跑完就发给你，预计 10 分钟内。', blocks:[
+    { id:'tool2', kind:'tool', toolRun:{ id:'r2', name:'run_project_command', status:'running', startedAt: Date.now() - 21000, progress:[{stage:'运行性能回归',detail:'npx vitest run bench'}] } }
+  ] }
 ]
 
 const App = defineComponent({

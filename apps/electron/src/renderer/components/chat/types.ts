@@ -26,6 +26,10 @@ export interface ToolRun {
   name: string
   status: 'running' | 'completed' | 'failed'
   progress: ToolProgressEntry[]
+  /** Epoch ms when the run started — feeds the work-elapsed summary row. */
+  startedAt?: number
+  /** Epoch ms when the run reached a terminal status. */
+  endedAt?: number
 }
 
 export interface WebSearchResultItem {
@@ -58,7 +62,7 @@ export interface WebFetchResultEntry {
 export type ChatMessageBlock =
   | { id: string; kind: 'content'; content: MessageContent }
   | { id: string; kind: 'error'; message: string }
-  | { id: string; kind: 'thinking'; text: string }
+  | { id: string; kind: 'thinking'; text: string; startedAt?: number; endedAt?: number }
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; lineCount: number; added: number; removed: number; active: boolean }

@@ -40,7 +40,8 @@ export function createToolRun (name: string): ToolRun {
     id: generateId(),
     name,
     status: 'running',
-    progress: []
+    progress: [],
+    startedAt: Date.now()
   }
 }
 
@@ -71,7 +72,22 @@ export function createThinkingBlock (text = ''): ChatMessageBlock {
   return {
     id: createBlockId('thinking'),
     kind: 'thinking',
-    text
+    text,
+    startedAt: Date.now()
+  }
+}
+
+/**
+ * Stamp endedAt on any thinking blocks still open, so their "已思考 · N 秒"
+ * duration freezes once visible output (content / tool calls / done) follows.
+ */
+export function closeOpenThinkingBlocks (message: ChatMessage): void {
+  const blocks = ensureBlocks(message)
+  const now = Date.now()
+  for (const block of blocks) {
+    if (block.kind === 'thinking' && block.endedAt == null) {
+      block.endedAt = now
+    }
   }
 }
 
@@ -375,6 +391,9 @@ export function ensureStreamingContentBlock (message: ChatMessage): Extract<Chat
     return lastBlock
   }
 
+  // Visible text starts here — close any open thinking block so its
+  // elapsed-time pill freezes at this moment.
+  closeOpenThinkingBlocks(message)
   const created = createContentBlock('') as Extract<ChatMessageBlock, { kind: 'content' }>
   blocks.push(created)
   return created

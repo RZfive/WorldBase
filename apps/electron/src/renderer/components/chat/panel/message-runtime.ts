@@ -161,6 +161,7 @@ export function finalizePendingAuthBlocks (message: ChatMessage): void {
 
 export function markToolRunStopped (toolRun: ToolRun, copy: AssistantStopCopy = DEFAULT_STOP_COPY): void {
   toolRun.status = 'completed'
+  if (toolRun.endedAt == null) toolRun.endedAt = Date.now()
   const alreadyMarked = toolRun.progress.some(step => isStoppedStage(step.stage, copy.stage))
   if (!alreadyMarked) {
     toolRun.progress.push({ stage: copy.stage, detail: copy.detail })

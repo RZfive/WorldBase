@@ -14,6 +14,7 @@ import {
   createToolRun,
   createWebFetchBlock,
   createWebSearchBlock,
+  closeOpenThinkingBlocks,
   ensureBlocks,
   ensureStreamingContentBlock,
   ensureThinkingBlock,
@@ -402,6 +403,7 @@ export function createLongTermGoalState (options: LongTermGoalStateOptions) {
           const toolRun = findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
           if (toolRun) {
             toolRun.status = 'completed'
+            toolRun.endedAt = Date.now()
             syncToolRuns()
           }
         } else if (event.type === 'progress' && event.stage) {
@@ -417,8 +419,12 @@ export function createLongTermGoalState (options: LongTermGoalStateOptions) {
           ensureBlocks(message).push(createWebFetchBlock(event.result as unknown as WebFetchResultEntry, event.query))
         } else if (event.type === 'done') {
           flush()
+          closeOpenThinkingBlocks(message)
           for (const toolRun of toolRuns) {
-            if (toolRun.status === 'running') toolRun.status = 'completed'
+            if (toolRun.status === 'running') {
+              toolRun.status = 'completed'
+              toolRun.endedAt = Date.now()
+            }
           }
           syncToolRuns()
           // service 在 done 里转发了剥离 JSON 元数据后的最终正文，直接覆盖流式累积的原始文本。
@@ -429,9 +435,11 @@ export function createLongTermGoalState (options: LongTermGoalStateOptions) {
           }
         } else if (event.type === 'error') {
           flush()
+          closeOpenThinkingBlocks(message)
           const toolRun = findLastRunningToolRun(toolRuns)
           if (toolRun) {
             toolRun.status = 'failed'
+            toolRun.endedAt = Date.now()
             toolRun.progress.push({ stage: t('chatUi.toolStageError'), detail: event.error })
             syncToolRuns()
           }

@@ -16,6 +16,7 @@ import {
   createToolRun,
   createWebFetchBlock,
   createWebSearchBlock,
+  closeOpenThinkingBlocks,
   ensureBlocks,
   ensureStreamingContentBlock,
   ensureThinkingBlock,
@@ -483,6 +484,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             } else if (event.type === 'tool_start' && event.name) {
               flushPendingStreamText()
               hadToolSinceLastThinking = true
+              closeOpenThinkingBlocks(assistantMessage)
               const toolRun = createToolRun(event.name)
               toolRuns.push(toolRun)
               ensureBlocks(assistantMessage).push(createToolBlock(toolRun))
@@ -500,14 +502,17 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
               const activeToolRun = findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
               if (activeToolRun) {
                 activeToolRun.status = 'completed'
+                activeToolRun.endedAt = Date.now()
                 syncAssistantToolRuns()
               }
             } else if (event.type === 'done') {
               try {
                 flushPendingStreamText()
+                closeOpenThinkingBlocks(assistantMessage)
                 for (const toolRun of toolRuns) {
                   if (toolRun.status === 'running') {
                     toolRun.status = 'completed'
+                    toolRun.endedAt = Date.now()
                   }
                 }
                 finalizePendingAuthBlocks(assistantMessage)
@@ -536,9 +541,11 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             } else if (event.type === 'error') {
               try {
                 flushPendingStreamText()
+                closeOpenThinkingBlocks(assistantMessage)
                 const activeToolRun = findLastRunningToolRun(toolRuns)
                 if (activeToolRun) {
                   activeToolRun.status = 'failed'
+                  activeToolRun.endedAt = Date.now()
                   activeToolRun.progress.push({ stage: t('chatUi.toolStageError'), detail: event.error })
                   syncAssistantToolRuns()
                 }
@@ -550,6 +557,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             } else if (event.type === 'stopped') {
               try {
                 flushPendingStreamText()
+                closeOpenThinkingBlocks(assistantMessage)
                 markAssistantMessageStopped(assistantMessage, getAssistantStopCopy())
                 syncAssistantToolRuns()
               } finally {
@@ -558,11 +566,13 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             }
           } catch (err) {
             flushPendingStreamText()
+            closeOpenThinkingBlocks(assistantMessage)
             console.error('[chat] Failed to handle stream event:', event, err)
 
             const activeToolRun = findLastRunningToolRun(toolRuns)
             if (activeToolRun) {
               activeToolRun.status = 'failed'
+              activeToolRun.endedAt = Date.now()
               activeToolRun.progress.push({ stage: t('chatUi.toolStageRenderError'), detail: (err as Error).message })
               syncAssistantToolRuns()
             }

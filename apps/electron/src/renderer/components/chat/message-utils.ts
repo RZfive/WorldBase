@@ -7,6 +7,21 @@ export function getContentParts (content: MessageContent): ChatContentPart[] {
   return content
 }
 
+/**
+ * Human elapsed-time label for work/thinking summaries ("45 秒" / "3 分 20 秒").
+ * Takes the i18n translate function so components stay locale-reactive.
+ */
+export function formatElapsedDuration (
+  seconds: number,
+  translate: (key: string, values?: Record<string, unknown>) => string
+): string {
+  const total = Math.max(0, Math.floor(seconds))
+  if (total < 60) return translate('chatUi.durationSeconds', { count: total })
+  const minutes = Math.floor(total / 60)
+  const rest = total % 60
+  return translate('chatUi.durationMinSec', { minutes, seconds: rest })
+}
+
 export function getContentText (content: MessageContent): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {

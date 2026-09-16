@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../markdown'
+import { formatElapsedDuration } from '../message-utils'
 import type { ChatMessageBlock } from '../types'
 
 const props = defineProps<{
@@ -37,6 +38,46 @@ let viewportObserver: ResizeObserver | null = null
 
 const thinkingCharacterCount = computed(() => {
   return t('chatUi.characterCount', { count: props.block.text.length.toLocaleString(locale.value) })
+})
+
+// design v1.7: thinking is a timed pill — pulsing dot + live seconds while
+// streaming, frozen green dot + "已思考 · N 秒" once closed.
+const localStartedAt = Date.now()
+const nowTick = ref(Date.now())
+let tickTimer: number | null = null
+
+watch(() => props.isStreaming, (streaming) => {
+  if (streaming && tickTimer == null) {
+    nowTick.value = Date.now()
+    tickTimer = window.setInterval(() => {
+      nowTick.value = Date.now()
+    }, 1000)
+  } else if (!streaming && tickTimer != null) {
+    window.clearInterval(tickTimer)
+    tickTimer = null
+  }
+}, { immediate: true })
+
+onBeforeUnmount(() => {
+  if (tickTimer != null) {
+    window.clearInterval(tickTimer)
+    tickTimer = null
+  }
+})
+
+const liveElapsedLabel = computed(() => {
+  if (!props.isStreaming) return ''
+  const startedAt = typeof props.block.startedAt === 'number' ? props.block.startedAt : localStartedAt
+  return formatElapsedDuration((nowTick.value - startedAt) / 1000, t)
+})
+
+const doneElapsedLabel = computed(() => {
+  const { startedAt, endedAt } = props.block
+  if (typeof startedAt !== 'number' || typeof endedAt !== 'number' || endedAt < startedAt) return ''
+  // Sub-second thinking (reasoning arrived in a single chunk right before the
+  // next block) would read as "已思考 · 0 秒" — show the char count instead.
+  if (endedAt - startedAt < 1000) return ''
+  return formatElapsedDuration((endedAt - startedAt) / 1000, t)
 })
 
 interface ThinkingSegment {
@@ -338,20 +379,16 @@ onBeforeUnmount(() => {
 <template>
   <div class="thinking-inline">
     <button class="thinking-header" type="button" @click="emit('toggle')">
-      <span class="thinking-header-left">
-        <span v-if="props.isStreaming" class="thinking-dot-icon" aria-hidden="true">
-          <span class="thinking-dot"></span>
-          <span class="thinking-dot"></span>
-          <span class="thinking-dot"></span>
-        </span>
-        <span v-else class="thinking-status-dot" aria-hidden="true" />
-        <span class="thinking-header-label">{{ props.isStreaming ? $t('chatUi.thinkingStreaming') : $t('chatUi.thinkingProcess') }}</span>
-        <span v-if="!props.isStreaming" class="thinking-char-count">{{ thinkingCharacterCount }}</span>
-        <span class="thinking-chevron" :class="{ expanded: !props.isCollapsed }" aria-hidden="true">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="6 9 12 15 18 9"/>
-          </svg>
-        </span>
+      <span v-if="props.isStreaming" class="thinking-dot" aria-hidden="true" />
+      <span v-else class="thinking-status-dot" aria-hidden="true" />
+      <span class="thinking-header-label">{{ props.isStreaming ? $t('chatUi.thinkingStreaming') : $t('chatUi.thoughtDoneLabel') }}</span>
+      <span v-if="liveElapsedLabel" class="thinking-char-count">{{ liveElapsedLabel }}</span>
+      <span v-else-if="doneElapsedLabel" class="thinking-char-count">{{ doneElapsedLabel }}</span>
+      <span v-else-if="!props.isStreaming" class="thinking-char-count">{{ thinkingCharacterCount }}</span>
+      <span class="thinking-chevron" :class="{ expanded: !props.isCollapsed }" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
       </span>
     </button>
     <div class="thinking-body-wrapper" :class="{ collapsed: props.isCollapsed }">
@@ -397,25 +434,33 @@ onBeforeUnmount(() => {
   color: var(--app-text-muted);
 }
 
+/* design v1.7: thinking is a timed pill — rounded capsule, 6px pulsing dot
+   while streaming, frozen green dot + "已思考 · N 秒" once closed. */
 .thinking-header {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 3px 0;
-  border: none;
-  background: transparent;
+  gap: 7px;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 4px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-panel);
+  color: var(--app-text-muted);
   cursor: pointer;
   text-align: left;
-  gap: 8px;
-  color: inherit;
   font: inherit;
-  font-size: 0.78em;
+  font-size: 0.72em;
   line-height: 1.45;
+  box-shadow: var(--shadow-1);
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
 }
 
-.thinking-header:hover .thinking-header-label {
+.thinking-header:hover,
+.thinking-header:focus-visible {
+  border-color: var(--app-border-strong);
   color: var(--app-text);
+  outline: none;
 }
 
 .thinking-header:hover .thinking-chevron,
@@ -424,18 +469,23 @@ onBeforeUnmount(() => {
   opacity: 1;
 }
 
-.thinking-header-left {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
+/* 6px pulsing dot while thinking (1.2s, design motion spec). */
+.thinking-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--app-accent);
+  box-shadow: 0 0 0 3px var(--app-accent-soft);
+  flex-shrink: 0;
+  animation: thinking-pulse 1.2s ease-in-out infinite;
 }
 
+/* A finished thought settles into a green dot. */
 .thinking-status-dot {
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--app-text-muted) 60%, transparent);
+  background: var(--app-success);
   flex-shrink: 0;
 }
 
@@ -519,28 +569,15 @@ onBeforeUnmount(() => {
   line-height: 1.68;
 }
 
-/* Animated dots for streaming */
-.thinking-dot-icon {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
+/* Animated streaming dot (design v1.7: 6px pulse, 1.2s) */
+@keyframes thinking-pulse {
+  0%, 100% { transform: scale(0.85); opacity: 0.7; }
+  50% { transform: scale(1.15); opacity: 1; }
 }
 
-.thinking-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--app-accent);
-  animation: thinking-bounce 1.2s ease-in-out infinite;
-}
-
-.thinking-dot:nth-child(1) { animation-delay: 0s; }
-.thinking-dot:nth-child(2) { animation-delay: 0.2s; }
-.thinking-dot:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes thinking-bounce {
-  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-  40% { transform: scale(1); opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .thinking-dot {
+    animation: none;
+  }
 }
 </style>

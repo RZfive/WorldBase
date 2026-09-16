@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ChatMessageBlock, ToolRun } from '../types'
+import { formatElapsedDuration } from '../message-utils'
 import { translateProgressEntry } from '../progress-i18n'
 import ExecutionDisclosure from './ExecutionDisclosure.vue'
 
@@ -10,15 +12,61 @@ const props = defineProps<{
 
 const { t } = useI18n()
 
+// Codex-style work row: live seconds while the run is active, frozen total
+// once it reaches a terminal status (design v1.7 P1).
+const nowTick = ref(Date.now())
+let tickTimer: number | null = null
+
+watch(() => props.block.toolRun.status, (status) => {
+  if (status === 'running' && tickTimer == null) {
+    nowTick.value = Date.now()
+    tickTimer = window.setInterval(() => {
+      nowTick.value = Date.now()
+    }, 1000)
+  } else if (status !== 'running' && tickTimer != null) {
+    window.clearInterval(tickTimer)
+    tickTimer = null
+  }
+}, { immediate: true })
+
+onBeforeUnmount(() => {
+  if (tickTimer != null) {
+    window.clearInterval(tickTimer)
+    tickTimer = null
+  }
+})
+
+const elapsedLabel = computed(() => {
+  const { startedAt, endedAt, status } = props.block.toolRun
+  if (status === 'running') {
+    if (typeof startedAt !== 'number') return ''
+    const liveSeconds = (nowTick.value - startedAt) / 1000
+    return liveSeconds >= 1 ? formatElapsedDuration(liveSeconds, t) : ''
+  }
+  if (typeof startedAt !== 'number' || typeof endedAt !== 'number' || endedAt < startedAt) return ''
+  const seconds = (endedAt - startedAt) / 1000
+  // Sub-second runs would read as "完成 · 0 秒" — just show the status.
+  return seconds >= 1 ? formatElapsedDuration(seconds, t) : ''
+})
+
+function getToolRunSummaryStatusLabel (status: ToolRun['status']): string {
+  if (status === 'completed') {
+    return elapsedLabel.value ? t('chatUi.toolDoneElapsed', { time: elapsedLabel.value }) : ''
+  }
+  if (status === 'failed') {
+    return elapsedLabel.value
+      ? t('chatUi.toolFailedElapsed', { time: elapsedLabel.value })
+      : t('chatUi.toolStatusFailed')
+  }
+  return elapsedLabel.value
+    ? t('chatUi.workingElapsed', { time: elapsedLabel.value })
+    : t('chatUi.toolStatusRunning')
+}
+
 function getToolRunStatusLabel (status: ToolRun['status']): string {
   if (status === 'completed') return t('chatUi.toolStatusCompleted')
   if (status === 'failed') return t('chatUi.toolStatusFailed')
   return t('chatUi.toolStatusRunning')
-}
-
-function getToolRunSummaryStatusLabel (status: ToolRun['status']): string {
-  if (status === 'completed') return ''
-  return getToolRunStatusLabel(status)
 }
 
 function getProgressStage (step: ToolRun['progress'][number]): string {

@@ -99,9 +99,23 @@ watch(
   flex: 0 0 auto;
   background: var(--app-border-strong);
 }
-.execution-disclosure.running .execution-dot { background: var(--app-accent); }
+.execution-disclosure.running .execution-dot {
+  background: var(--app-accent);
+  animation: execution-dot-pulse 1.15s ease-in-out infinite;
+}
 .execution-disclosure.completed .execution-dot { background: var(--app-success); }
 .execution-disclosure.failed .execution-dot { background: var(--app-danger); }
+
+@keyframes execution-dot-pulse {
+  0%, 100% { transform: scale(0.85); opacity: 0.7; }
+  50% { transform: scale(1.2); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .execution-disclosure.running .execution-dot {
+    animation: none;
+  }
+}
 .execution-title {
   flex: 0 0 auto;
   max-width: 42%;

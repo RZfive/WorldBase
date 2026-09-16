@@ -6,6 +6,7 @@ import { buildMessageBlocks, getContentText, hasRenderableContent } from '../mes
 import type { ChatMessage, ChatMessageBlock, FilePreviewState } from '../types'
 import ThinkingBlock from '../blocks/ThinkingBlock.vue'
 import ToolRunBlock from '../blocks/ToolRunBlock.vue'
+import ToolGroupBlock from '../blocks/ToolGroupBlock.vue'
 import FilePreviewBlock from '../blocks/FilePreviewBlock.vue'
 import GroupCollaborationPlanBlock from '../blocks/GroupCollaborationPlanBlock.vue'
 import AgentSidechatBlock from '../blocks/AgentSidechatBlock.vue'
@@ -102,6 +103,70 @@ const isStreamingAssistantMessage = computed(() => isStreamingAssistant())
 const lastContentBlockIndex = computed(() => getLastContentBlockIndex(blocks.value))
 const messageText = computed(() => getMessageText())
 
+/**
+ * Codex-style work summary: consecutive thinking + tool runs collapse into
+ * ONE row (live seconds while working, frozen total once settled), expanding
+ * to the full trace — thinking pills and per-tool rows. A run needs ≥2
+ * renderable items and at least one tool to group; lone thinking stays a
+ * standalone pill. Purely a render-level transform, so stored/legacy
+ * conversations group the same way as live ones.
+ */
+type ThinkingOrToolBlock = Extract<ChatMessageBlock, { kind: 'thinking' | 'tool' }>
+
+interface MessageRenderSegment {
+  type: 'single' | 'group'
+  key: string
+  block: ChatMessageBlock
+  blockIndex: number
+  groupBlocks: ThinkingOrToolBlock[]
+}
+
+const renderSegments = computed<MessageRenderSegment[]>(() => {
+  const all = blocks.value
+  const segments: MessageRenderSegment[] = []
+  let run: Array<{ block: ChatMessageBlock; blockIndex: number }> = []
+
+  const flushRun = () => {
+    if (run.length === 0) return
+    const renderable = run.filter(entry => entry.block.kind !== 'thinking' || hasRenderableBlock(entry.block))
+    const toolCount = renderable.filter(entry => entry.block.kind === 'tool').length
+    if (toolCount > 0 && renderable.length >= 2) {
+      segments.push({
+        type: 'group',
+        key: `group-${renderable[0].block.id}`,
+        block: renderable[0].block,
+        blockIndex: renderable[0].blockIndex,
+        groupBlocks: renderable.map(entry => entry.block) as ThinkingOrToolBlock[]
+      })
+    } else {
+      for (const entry of renderable) {
+        segments.push({ type: 'single', key: entry.block.id, block: entry.block, blockIndex: entry.blockIndex, groupBlocks: [] })
+      }
+    }
+    run = []
+  }
+
+  all.forEach((block, blockIndex) => {
+    if (block.kind === 'thinking' || block.kind === 'tool') {
+      run.push({ block, blockIndex })
+      return
+    }
+    flushRun()
+    segments.push({ type: 'single', key: block.id, block, blockIndex, groupBlocks: [] })
+  })
+  flushRun()
+  return segments
+})
+
+// A thinking block is only "live" while it is the newest block and still open —
+// message-level streaming alone made every historical thinking block tick.
+function isStreamingThinkingBlock (block: ChatMessageBlock, blockIndex: number): boolean {
+  return isStreamingAssistant() &&
+    block.kind === 'thinking' &&
+    block.endedAt == null &&
+    blockIndex === blocks.value.length - 1
+}
+
 const isUserMessage = computed(() => props.msg.role === 'user')
 const isMessageEditable = computed(() => isUserMessage.value && Boolean(props.msg.id) && !props.isLoading)
 const isEditing = computed(() => Boolean(props.msg.id) && props.editingMessageId === props.msg.id)
@@ -133,108 +198,116 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
 
       <template v-else>
         <div class="message-flow" :class="props.msg.role">
-          <template v-for="(block, blockIndex) in blocks" :key="block.id">
-            <ThinkingBlock
-              v-if="block.kind === 'thinking' && hasRenderableBlock(block)"
-              :block="block"
-              :is-streaming="isStreamingAssistantMessage"
-              :is-collapsed="props.collapsedThinking[block.id] !== false"
-              @toggle="emit('toggleThinking', block.id)"
+          <template v-for="segment in renderSegments" :key="segment.key">
+            <!-- design v1.7: consecutive thinking + tool runs as one work summary row -->
+            <ToolGroupBlock
+              v-if="segment.type === 'group'"
+              :blocks="segment.groupBlocks"
+              :message-streaming="isStreamingAssistantMessage"
+            />
+            <template v-else>
+              <ThinkingBlock
+                v-if="segment.block.kind === 'thinking' && hasRenderableBlock(segment.block)"
+                :block="segment.block"
+                :is-streaming="isStreamingThinkingBlock(segment.block, segment.blockIndex)"
+                :is-collapsed="props.collapsedThinking[segment.block.id] !== false"
+                @toggle="emit('toggleThinking', segment.block.id)"
+              />
+
+              <ToolRunBlock
+                v-else-if="segment.block.kind === 'tool'"
+                :block="segment.block"
+              />
+            </template>
+
+            <FilePreviewBlock
+              v-if="segment.block.kind === 'file_preview'"
+              :block="segment.block"
             />
 
-          <ToolRunBlock
-            v-else-if="block.kind === 'tool'"
-            :block="block"
-          />
+            <GroupCollaborationPlanBlock
+              v-else-if="segment.block.kind === 'group_collaboration_plan'"
+              :block="segment.block"
+            />
 
-          <FilePreviewBlock
-            v-else-if="block.kind === 'file_preview'"
-            :block="block"
-          />
+            <AgentSidechatBlock
+              v-else-if="segment.block.kind === 'agent_sidechat'"
+              :block="segment.block"
+            />
 
-          <GroupCollaborationPlanBlock
-            v-else-if="block.kind === 'group_collaboration_plan'"
-            :block="block"
-          />
+            <GroupProgressBlock
+              v-else-if="segment.block.kind === 'group_progress'"
+              :block="segment.block"
+            />
 
-          <AgentSidechatBlock
-            v-else-if="block.kind === 'agent_sidechat'"
-            :block="block"
-          />
+            <GroupTranscriptBlock
+              v-else-if="segment.block.kind === 'group_transcript'"
+              :block="segment.block"
+            />
 
-          <GroupProgressBlock
-            v-else-if="block.kind === 'group_progress'"
-            :block="block"
-          />
+            <SharedBoardBlock
+              v-else-if="segment.block.kind === 'group_board'"
+              :block="segment.block"
+            />
 
-          <GroupTranscriptBlock
-            v-else-if="block.kind === 'group_transcript'"
-            :block="block"
-          />
+            <GroupDirectReplyBlock
+              v-else-if="segment.block.kind === 'group_direct_reply'"
+              :block="segment.block"
+            />
 
-          <SharedBoardBlock
-            v-else-if="block.kind === 'group_board'"
-            :block="block"
-          />
+            <GroupUserInjectionBlock
+              v-else-if="segment.block.kind === 'group_user_injection'"
+              :block="segment.block"
+            />
 
-          <GroupDirectReplyBlock
-            v-else-if="block.kind === 'group_direct_reply'"
-            :block="block"
-          />
+            <GroupPeerMessageBlock
+              v-else-if="segment.block.kind === 'group_peer_message'"
+              :block="segment.block"
+            />
 
-          <GroupUserInjectionBlock
-            v-else-if="block.kind === 'group_user_injection'"
-            :block="block"
-          />
+            <WebSearchBlock
+              v-else-if="segment.block.kind === 'web_search'"
+              :block="segment.block"
+            />
 
-          <GroupPeerMessageBlock
-            v-else-if="block.kind === 'group_peer_message'"
-            :block="block"
-          />
+            <WebFetchBlock
+              v-else-if="segment.block.kind === 'web_fetch'"
+              :block="segment.block"
+            />
 
-          <WebSearchBlock
-            v-else-if="block.kind === 'web_search'"
-            :block="block"
-          />
+            <AttachmentBlock
+              v-else-if="segment.block.kind === 'attachment'"
+              :block="segment.block"
+            />
 
-          <WebFetchBlock
-            v-else-if="block.kind === 'web_fetch'"
-            :block="block"
-          />
+            <AuthRequestBlock
+              v-else-if="segment.block.kind === 'auth_request'"
+              :block="segment.block"
+              @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
+            />
 
-          <AttachmentBlock
-            v-else-if="block.kind === 'attachment'"
-            :block="block"
-          />
+            <SudoPasswordBlock
+              v-else-if="segment.block.kind === 'sudo_password_request'"
+              :block="segment.block"
+              @respond-sudo-password="(requestId, password) => emit('respondSudoPassword', requestId, password)"
+            />
 
-          <AuthRequestBlock
-            v-else-if="block.kind === 'auth_request'"
-            :block="block"
-            @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
-          />
+            <ErrorBlock
+              v-else-if="segment.block.kind === 'error'"
+              :block="segment.block"
+            />
 
-          <SudoPasswordBlock
-            v-else-if="block.kind === 'sudo_password_request'"
-            :block="block"
-            @respond-sudo-password="(requestId, password) => emit('respondSudoPassword', requestId, password)"
-          />
-
-          <ErrorBlock
-            v-else-if="block.kind === 'error'"
-            :block="block"
-          />
-
-          <ContentBlock
-            v-else-if="block.kind === 'content' && (hasRenderableBlock(block) || (isStreamingAssistantMessage && blockIndex === lastContentBlockIndex))"
-            :block="block"
-            :role="props.msg.role"
-            :message-index="props.index"
-            :block-index="blockIndex"
-            :is-streaming-block="isStreamingAssistantMessage && blockIndex === lastContentBlockIndex"
-            :message-text="messageText"
-            @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
-            @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
-          />
+            <ContentBlock
+              v-else-if="segment.block.kind === 'content' && (hasRenderableBlock(segment.block) || (isStreamingAssistantMessage && segment.blockIndex === lastContentBlockIndex))"
+              :block="segment.block"
+              :role="props.msg.role"
+              :message-index="props.index"
+              :block-index="segment.blockIndex"
+              :is-streaming-block="isStreamingAssistantMessage && segment.blockIndex === lastContentBlockIndex"
+              :message-text="messageText"
+              @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
+              @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
+            />
           </template>
 
           <div v-if="isUserMessage && props.msg.id" class="message-user-actions">
