@@ -198,34 +198,32 @@ function toggleCollapsed () {
 <style scoped>
 .ask-shell {
   --ask-panel-max-width: 560px;
-  position: relative;
-  z-index: 10;
-  height: 0;
+  position: static;
+  z-index: 0;
+  height: auto;
   width: 100%;
-  max-width: var(--chat-message-track-max, 980px);
-  margin: 0 auto;
-  padding: 0 var(--chat-message-gutter, 28px);
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
   box-sizing: border-box;
   pointer-events: none;
 }
 
 .ask-float {
-  position: absolute;
-  left: 50%;
-  bottom: max(0px, calc(var(--chat-input-overlap, 56px) - 10px));
+  position: static;
   width: min(
     var(--ask-panel-max-width),
     var(--chat-message-track-max, 980px),
     calc(100% - var(--chat-message-gutter, 28px) - var(--chat-message-gutter, 28px))
   );
-  max-width: calc(100% - 16px);
+  max-width: 100%;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 6px;
   align-items: stretch;
   box-sizing: border-box;
   pointer-events: auto;
-  transform: translateX(-50%);
 }
 
 .ask-strip {
@@ -237,21 +235,18 @@ function toggleCollapsed () {
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
-  border: 1px solid color-mix(in srgb, #f59e0b 32%, var(--app-border-strong));
-  border-bottom: 0;
-  border-radius: 10px 10px 0 0;
-  background: color-mix(in srgb, var(--app-panel) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 32%, var(--app-border-strong));
+  border-radius: 13px;
+  background: var(--app-panel);
   box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.16);
   color: var(--app-text);
   cursor: pointer;
   text-align: left;
-  backdrop-filter: blur(14px) saturate(130%);
-  -webkit-backdrop-filter: blur(14px) saturate(130%);
 }
 
 .ask-strip:hover {
-  border-color: color-mix(in srgb, #f59e0b 48%, var(--app-border-strong));
-  background: color-mix(in srgb, rgba(245, 158, 11, 0.16) 60%, var(--app-panel));
+  border-color: color-mix(in srgb, var(--app-accent) 48%, var(--app-border-strong));
+  background: color-mix(in srgb, var(--app-accent-soft) 60%, var(--app-panel));
 }
 
 .ask-strip-status {
@@ -260,8 +255,8 @@ function toggleCollapsed () {
   height: 22px;
   padding: 0 7px;
   border-radius: 7px;
-  border: 1px solid color-mix(in srgb, #f59e0b 36%, var(--app-border-strong));
-  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 36%, var(--app-border-strong));
+  background: var(--app-accent-soft);
   color: #b45309;
   font-size: 0.68rem;
   font-weight: 800;
@@ -318,13 +313,11 @@ function toggleCollapsed () {
 
 .ask-detail {
   padding: 12px;
-  border: 1px solid color-mix(in srgb, #f59e0b 28%, var(--app-border-strong));
+  border: 1px solid color-mix(in srgb, var(--app-accent) 28%, var(--app-border-strong));
   border-radius: 12px;
-  background: color-mix(in srgb, var(--app-panel) 97%, transparent);
+  background: var(--app-panel);
   box-shadow: var(--app-shadow);
   overflow: hidden;
-  backdrop-filter: blur(14px) saturate(130%);
-  -webkit-backdrop-filter: blur(14px) saturate(130%);
 }
 
 .ask-detail-head {
@@ -378,8 +371,8 @@ function toggleCollapsed () {
   font-size: 0.7rem;
   font-weight: 800;
   color: #b45309;
-  background: rgba(245, 158, 11, 0.16);
-  border: 1px solid color-mix(in srgb, #f59e0b 28%, var(--app-border-strong));
+  background: var(--app-accent-soft);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 28%, var(--app-border-strong));
 }
 
 :global(:root[data-theme='dark'] .ask-question-index) {

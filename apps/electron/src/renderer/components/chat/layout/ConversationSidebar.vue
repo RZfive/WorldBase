@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, reactive, ref, toRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ConversationSidebarFolder from './ConversationSidebarFolder.vue'
 import ConversationSidebarItemCard from './ConversationSidebarItemCard.vue'
+import SidebarIcon from './SidebarIcon.vue'
 import {
   type AgentSidebarItem,
   type ConversationSidebarSectionKey,
@@ -36,9 +37,31 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const searchQuery = ref('')
+const searchInputEl = ref<HTMLInputElement | null>(null)
 const renamingConversationId = ref<string | null>(null)
 const conversationRenameInput = ref('')
 const defaultFolderName = computed(() => t('launchpad.newFolder'))
+
+// ⌘K / Ctrl+K focuses the list search — the hint is rendered in the search
+// shell, so the shortcut must exist wherever the hint shows.
+function onSearchShortcut (event: KeyboardEvent): void {
+  if ((event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')) {
+    event.preventDefault()
+    void nextTick(() => searchInputEl.value?.focus())
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onSearchShortcut)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onSearchShortcut)
+})
+
+function focusSearch (): void {
+  searchInputEl.value?.focus()
+}
 
 const SECTION_COLLAPSE_STORAGE_KEY = 'conversation-sidebar-sections'
 
@@ -189,35 +212,45 @@ function cancelRenameConversation () {
   <div class="conv-sidebar">
     <div class="conv-toolbar">
       <div class="conv-toolbar-row">
-        <button class="new-conv-btn" type="button" @click="emit('newConversation')">+ {{ $t('chatUi.newConversation') }}</button>
         <button
-          class="conv-collapse-btn"
+          class="conv-tool-btn"
           type="button"
           :title="$t('chatUi.collapseConversationList')"
           :aria-label="$t('chatUi.collapseConversationList')"
           @click="emit('toggleCollapse')"
         >
-          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <path d="M12.5 5L7.5 10L12.5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
+          <SidebarIcon name="panel" :size="15" />
+        </button>
+        <label class="conv-search-shell" @click="focusSearch">
+          <SidebarIcon class="conv-search-icon" name="search" :size="12" />
+          <input
+            ref="searchInputEl"
+            v-model="searchQuery"
+            class="conv-search-input"
+            type="search"
+            :placeholder="$t('chatUi.searchConversationsPlaceholder')"
+          >
+          <button
+            v-if="searchQuery"
+            class="conv-search-clear"
+            type="button"
+            :title="$t('chatUi.clearSearch')"
+            @click.prevent.stop="searchQuery = ''"
+          >
+            <SidebarIcon name="close" :size="10" />
+          </button>
+          <kbd v-else class="conv-search-kbd">⌘K</kbd>
+        </label>
+        <button
+          class="conv-new-btn"
+          type="button"
+          :title="$t('chatUi.newConversation')"
+          :aria-label="$t('chatUi.newConversation')"
+          @click="emit('newConversation')"
+        >
+          <SidebarIcon name="plus" :size="14" />
         </button>
       </div>
-      <label class="conv-search-shell">
-        <span class="conv-search-icon">⌕</span>
-        <input
-          v-model="searchQuery"
-          class="conv-search-input"
-          type="search"
-          :placeholder="$t('chatUi.searchConversationsPlaceholder')"
-        >
-        <button
-          v-if="searchQuery"
-          class="conv-search-clear"
-          type="button"
-          :title="$t('chatUi.clearSearch')"
-          @click="searchQuery = ''"
-        >×</button>
-      </label>
     </div>
     <div class="conv-list">
       <section v-if="props.agentItems.length > 0" class="conv-section">
@@ -476,6 +509,8 @@ function cancelRenameConversation () {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background: var(--app-chat-list-surface);
   border-right: 1px solid var(--app-border);
   display: flex;
@@ -484,44 +519,26 @@ function cancelRenameConversation () {
 }
 
 .conv-toolbar {
-  padding: 10px 10px 9px;
+  padding: 10px 8px 8px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
 }
 
+/* Single-row toolbar (design v1.7): collapse / search ⌘K / new conversation. */
 .conv-toolbar-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.new-conv-btn {
-  flex: 1;
+  gap: 6px;
   min-width: 0;
-  padding: 9px 0;
-  background: var(--app-accent);
-  color: #ffffff;
-  border: none;
-  border-radius: 10px;
-  font-size: 0.8rem;
-  font-weight: 700;
-  cursor: pointer;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-  transition: background 0.18s ease, border-color 0.18s ease;
 }
 
-.new-conv-btn:hover {
-  background: var(--app-accent-strong);
-}
-
-.conv-collapse-btn {
+.conv-tool-btn {
   flex: 0 0 auto;
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
   background: var(--app-chat-list-raised);
   color: var(--app-text-muted);
   display: inline-flex;
@@ -531,37 +548,58 @@ function cancelRenameConversation () {
   transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
 }
 
-.conv-collapse-btn svg {
-  width: 18px;
-  height: 18px;
-}
-
-.conv-collapse-btn:hover {
+.conv-tool-btn:hover {
   border-color: color-mix(in srgb, var(--app-accent) 28%, var(--app-border));
   background: color-mix(in srgb, var(--app-accent-soft) 36%, var(--app-chat-list-raised));
   color: var(--app-text);
 }
 
+.conv-new-btn {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: none;
+  background: var(--app-accent);
+  color: var(--app-on-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.18s ease, transform 0.18s ease;
+}
+
+.conv-new-btn:hover {
+  background: var(--app-accent-strong);
+}
+
+.conv-new-btn:active {
+  transform: scale(0.96);
+}
+
 .conv-search-shell {
+  flex: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  min-height: 38px;
-  border-radius: 10px;
+  gap: 6px;
+  padding: 0 8px;
+  min-height: 30px;
+  min-width: 0;
+  cursor: text;
+  border-radius: 8px;
   border: 1px solid var(--app-border);
   background: var(--app-input-bg);
 }
 
 .conv-search-shell:focus-within {
-  border-color: var(--app-accent);
+  border-color: color-mix(in srgb, var(--app-accent) 55%, var(--app-border));
   box-shadow: 0 0 0 1px var(--app-accent-soft);
 }
 
 .conv-search-icon {
   color: var(--app-text-faint);
-  font-size: 0.84rem;
   flex-shrink: 0;
+  display: inline-flex;
 }
 
 .conv-search-input {
@@ -570,7 +608,7 @@ function cancelRenameConversation () {
   border: none;
   background: transparent;
   color: var(--app-text);
-  font-size: 0.8rem;
+  font-size: 0.76rem;
   outline: none;
 }
 
@@ -578,29 +616,55 @@ function cancelRenameConversation () {
   color: var(--app-text-faint);
 }
 
+.conv-search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.conv-search-kbd {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 0.58rem;
+  color: var(--app-text-faint);
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  line-height: 1.3;
+}
+
 .conv-search-clear {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   border: none;
+  border-radius: 999px;
   background: transparent;
   color: var(--app-text-faint);
   cursor: pointer;
-  font-size: 1rem;
-  line-height: 1;
   padding: 0;
 }
 
 .conv-search-clear:hover {
   color: var(--app-danger);
+  background: var(--app-danger-soft);
 }
 
 .conv-list {
-  flex: 1;
+  flex: 1 1 0;
+  width: 100%;
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 7px 9px 10px 8px;
+  padding: 8px 0;
   scrollbar-gutter: stable;
 }
 
+/* Horizontal inset lives on the section (not the list) so the active row's
+   signature-gradient indicator at -8px stays inside .conv-section-body's
+   padding box and survives its overflow:hidden collapse clip. */
 .conv-section {
   display: flex;
   flex-direction: column;
@@ -608,6 +672,7 @@ function cancelRenameConversation () {
   margin-bottom: 8px;
   min-width: 0;
   max-width: 100%;
+  padding: 0 8px;
 }
 
 .conv-section-toggle {
@@ -717,10 +782,10 @@ function cancelRenameConversation () {
 }
 
 .conv-section-title {
-  color: var(--app-text-soft);
-  font-size: 0.72rem;
+  color: var(--app-text-faint);
+  font-size: 0.68rem;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.09em;
   text-transform: uppercase;
 }
 
@@ -759,16 +824,16 @@ function cancelRenameConversation () {
 }
 
 .conv-section-body {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows 0.28s cubic-bezier(0.22, 1, 0.36, 1);
-  overflow: hidden;
+  display: block;
   min-width: 0;
-  max-width: 100%;
+  /* margin -8px re-extends the body over the section padding so rows line up
+     with the toolbar; max-width must stay off or it cancels the margins. */
+  margin: 0 -8px;
+  padding: 0 8px;
 }
 
 .conv-section-body.collapsed {
-  grid-template-rows: 0fr;
+  display: none;
 }
 
 .conv-section-body-inner {
@@ -808,15 +873,12 @@ function cancelRenameConversation () {
   background: var(--app-accent-strong);
 }
 
-.conv-section-body.collapsed .conv-section-body-inner {
-  opacity: 0;
-}
-
 .conv-empty {
   text-align: center;
   color: var(--app-text-faint);
   font-size: 0.8em;
   padding: 20px 12px;
+  margin: 0 8px;
   border: 1px dashed color-mix(in srgb, var(--app-border) 68%, transparent);
   border-radius: 10px;
   background: color-mix(in srgb, var(--app-panel-muted) 42%, transparent);

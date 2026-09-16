@@ -232,6 +232,7 @@ pub async fn dispatch(
 
         PROVIDER_LIST => Ok(json!({ "providers": hub.providers_config() })),
         PROVIDER_FETCH_MODELS => provider_fetch_models(params).await,
+        PROVIDER_DETECT_PROTOCOL => provider_detect_protocol(params).await,
         PROVIDER_SAVE => provider_save(hub, params),
         PROVIDER_DELETE => provider_delete(hub, params),
         PROVIDER_SET_ACTIVE => provider_set_active(hub, params),
@@ -3368,6 +3369,29 @@ async fn provider_fetch_models(params: Value) -> Result<Value, ErrorObject> {
         .await
         .map_err(internal)?;
     Ok(json!({ "models": models }))
+}
+
+/// 自动探测：以最简消息 "hi" 逐个尝试 Responses → Chat → Anthropic，首个
+/// 成功协议作为结果；全部失败时返回逐项错误供设置页展示。
+async fn provider_detect_protocol(params: Value) -> Result<Value, ErrorObject> {
+    let base_url = required_string_param(&params, &["baseUrl", "base_url"], "baseUrl")?;
+    let api_key = required_string_param(&params, &["apiKey", "api_key"], "apiKey")?;
+    let model = required_string_param(&params, &["model", "modelId", "model_id"], "model")?;
+    let result = worldbase_providers::detect_protocol(base_url, api_key, model).await;
+    Ok(json!({
+        "protocol": result.detected.map(|protocol| protocol.as_str()),
+        "probes": result
+            .probes
+            .iter()
+            .map(|probe| {
+                json!({
+                    "protocol": probe.protocol.as_str(),
+                    "ok": probe.error.is_none(),
+                    "error": probe.error,
+                })
+            })
+            .collect::<Vec<_>>(),
+    }))
 }
 
 fn provider_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {

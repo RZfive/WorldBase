@@ -118,7 +118,8 @@ interface AIProvider {
   name: string
   baseUrl: string
   apiKey: string
-  apiProtocol?: 'openai' | 'anthropic'
+  apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic'
+  detectedApiProtocol?: 'openai-chat' | 'openai-responses' | 'anthropic'
   models: string[]
   modelContextWindows?: Record<string, number>
   modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
@@ -633,7 +634,8 @@ export interface ElectronAPI {
   getAISettings: () => Promise<AISettings>
   saveAISettings: (config: AISettings) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
-  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: 'openai' | 'anthropic' }) => Promise<{ models: string[] }>
+  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => Promise<{ models: string[] }>
+  detectProviderProtocol: (input: { baseUrl: string; apiKey: string; model: string }) => Promise<{ protocol: 'openai-chat' | 'openai-responses' | 'anthropic' | null; probes: Array<{ protocol: string; ok: boolean; error?: string }> }>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
@@ -924,7 +926,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAISettings: () => ipcRenderer.invoke('settings:getAI'),
   saveAISettings: (config: AISettings) => ipcRenderer.invoke('settings:saveAI', config),
   getProviders: () => ipcRenderer.invoke('settings:getProviders'),
-  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: 'openai' | 'anthropic' }) => ipcRenderer.invoke('settings:fetchProviderModels', input),
+  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => ipcRenderer.invoke('settings:fetchProviderModels', input),
+  detectProviderProtocol: (input: { baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke('settings:detectProviderProtocol', input),
   saveProviders: (config: AIProvidersConfig) => ipcRenderer.invoke('settings:saveProviders', config),
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, config: AIProvidersConfig) => callback(config)

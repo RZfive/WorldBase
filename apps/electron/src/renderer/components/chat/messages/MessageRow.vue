@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import SidebarIcon from '../layout/SidebarIcon.vue'
 import { useI18n } from 'vue-i18n'
 import { buildMessageBlocks, getContentText, hasRenderableContent } from '../message-utils'
 import type { ChatMessage, ChatMessageBlock, FilePreviewState } from '../types'
@@ -82,6 +83,12 @@ function getAssistantIcon (): string {
   return props.assistantIcon?.trim() || '🤖'
 }
 
+// Chrome avatars are SVG (design v1.7); a customized assistant emoji keeps its identity.
+const customAssistantEmoji = computed(() => {
+  const raw = props.assistantIcon?.trim() || ''
+  return raw && raw !== '🤖' ? raw : ''
+})
+
 function getModelLabel (): string {
   return props.msg.modelLabel || 'WorldBase AI'
 }
@@ -105,17 +112,13 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
 <template>
   <article class="message-row" :class="props.msg.role">
     <div class="message-column" :class="props.msg.role">
-      <div class="message-meta" :class="props.msg.role">
-        <template v-if="props.msg.role === 'assistant'">
-          <span class="message-agent-avatar" aria-hidden="true">{{ getAssistantIcon() }}</span>
-          <span class="message-author">{{ getMessageAuthor() }}</span>
-          <span class="message-model-chip">{{ getModelLabel() }}</span>
-        </template>
-        <template v-else>
-          <span class="message-role-label user">{{ $t('chatUi.user') }}</span>
-          <span class="message-author">{{ $t('chatUi.you') }}</span>
-          <span class="message-user-avatar" aria-hidden="true">{{ $t('chatUi.you') }}</span>
-        </template>
+      <div v-if="props.msg.role === 'assistant'" class="message-meta">
+        <span class="message-agent-avatar" aria-hidden="true">
+          <span v-if="customAssistantEmoji" class="message-agent-emoji">{{ customAssistantEmoji }}</span>
+          <SidebarIcon v-else name="robot" :size="13" />
+        </span>
+        <span class="message-author">{{ getMessageAuthor() }}</span>
+        <span class="message-model-chip">{{ getModelLabel() }}</span>
       </div>
 
       <template v-if="isEditing">
@@ -265,7 +268,7 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
   box-sizing: border-box;
   width: min(100%, var(--chat-message-track-max, 1180px));
   margin: 0 auto;
-  padding: 0 0 24px;
+  padding: 0 0 20px;
 }
 
 .message-row.user {
@@ -294,7 +297,7 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 12px;
+  gap: 15px;
   overflow-wrap: anywhere;
   /* Base typography for chat content blocks. Block components use em so their
      text and row heights scale with the user preference. The message meta
@@ -355,66 +358,38 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
   color: var(--app-text-muted);
 }
 
-.message-meta.user {
-  justify-content: flex-end;
-}
-
-.message-role-label {
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-  color: var(--app-accent-strong);
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.message-role-label.user {
-  color: var(--app-text-faint);
-}
-
 .message-author {
-  font-size: 0.84rem;
-  font-weight: 600;
+  font-size: 0.82rem;
+  font-weight: 700;
   color: var(--app-text-strong);
 }
 
 .message-model-chip {
   display: inline-flex;
   align-items: center;
-  padding: 1px 8px;
+  padding: 2px 7px;
   border-radius: var(--radius-pill);
-  border: none;
+  border: 1px solid var(--app-border);
   background: var(--app-panel-muted);
   color: var(--app-text-faint);
   font-size: 0.7rem;
 }
 
-.message-agent-avatar,
-.message-user-avatar {
+.message-agent-avatar {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 10px;
-  font-weight: 800;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  border: none;
+  background: var(--app-accent-soft);
+  color: var(--app-accent-strong);
   line-height: 1;
 }
 
-.message-agent-avatar {
-  border: 1px solid color-mix(in srgb, var(--app-accent) 22%, transparent);
-  background: color-mix(in srgb, var(--app-accent-soft) 72%, var(--app-panel));
-  color: var(--app-text-strong);
-  font-size: 0.9rem;
-  box-shadow: 0 6px 18px color-mix(in srgb, var(--app-accent) 10%, transparent);
-}
-
-.message-user-avatar {
-  background: var(--chat-avatar-user-bg);
-  color: var(--app-on-accent);
-  font-size: 0.76rem;
+.message-agent-emoji {
+  font-size: 0.78rem;
 }
 
 @media (max-width: 860px) {

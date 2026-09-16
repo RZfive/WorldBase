@@ -23,14 +23,15 @@ export function isAnthropicProvider (baseUrl: string, model: string): boolean {
 }
 
 /**
- * Resolve which wire protocol to use. An explicit provider setting always
- * wins; otherwise a native Anthropic base URL implies the Messages API while
- * everything else (including Claude models served through OpenAI-compatible
- * gateways like OpenRouter) stays on chat/completions.
+ * Resolve which wire protocol to use. Explicit values win; legacy `'openai'`,
+ * `'openai-chat'` and the auto sentinel all resolve to chat/completions.
+ * Auto detection is probe-based and pinned by the settings page before values
+ * reach the engine, so there is no base-URL sniffing here.
  */
 export function resolveApiProtocol (baseUrl: string, explicit?: ProviderApiProtocol): ProviderApiProtocol {
-  if (explicit === 'anthropic' || explicit === 'openai') return explicit
-  return baseUrl.toLowerCase().includes('anthropic.com') ? 'anthropic' : 'openai'
+  if (explicit === 'anthropic') return 'anthropic'
+  if (explicit === 'openai-responses') return 'openai-responses'
+  return 'openai'
 }
 
 export function resolveReasoningEffort (

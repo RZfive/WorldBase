@@ -16,7 +16,7 @@ const props = defineProps<{
 <style scoped>
 .message-event-card {
   width: min(100%, var(--chat-event-card-max, 1080px));
-  border-radius: 18px;
+  border-radius: 9px;
   overflow: hidden;
 }
 

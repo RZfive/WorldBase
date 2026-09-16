@@ -104,34 +104,32 @@ function toggleCollapsed (): void {
 <style scoped>
 .auth-shell {
   --auth-panel-max-width: 560px;
-  position: relative;
-  z-index: 11;
-  height: 0;
+  position: static;
+  z-index: 0;
+  height: auto;
   width: 100%;
-  max-width: var(--chat-message-track-max, 980px);
-  margin: 0 auto;
-  padding: 0 var(--chat-message-gutter, 28px);
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
   box-sizing: border-box;
   pointer-events: none;
 }
 
 .auth-float {
-  position: absolute;
-  left: 50%;
-  bottom: max(0px, calc(var(--chat-input-overlap, 56px) - 10px));
+  position: static;
   width: min(
     var(--auth-panel-max-width),
     var(--chat-message-track-max, 980px),
     calc(100% - var(--chat-message-gutter, 28px) - var(--chat-message-gutter, 28px))
   );
-  max-width: calc(100% - 16px);
+  max-width: 100%;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 6px;
   align-items: stretch;
   box-sizing: border-box;
   pointer-events: auto;
-  transform: translateX(-50%);
 }
 
 .auth-strip {
@@ -143,17 +141,13 @@ function toggleCollapsed (): void {
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
-  border: 1px solid color-mix(in srgb, #f59e0b 38%, var(--app-border-strong));
-  border-bottom: 0;
-  border-radius: 10px 10px 0 0;
-  background: color-mix(in srgb, var(--app-panel) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-warning) 38%, var(--app-border-strong));
+  border-radius: 13px;
+  background: var(--app-panel);
   box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.16);
   color: var(--app-text);
   cursor: pointer;
   text-align: left;
-  backdrop-filter: blur(14px) saturate(130%);
-  -webkit-backdrop-filter: blur(14px) saturate(130%);
-  animation: auth-strip-pulse 2s ease-in-out infinite;
 }
 
 .auth-strip:hover {
@@ -232,11 +226,9 @@ function toggleCollapsed (): void {
   padding: 12px;
   border: 1px solid color-mix(in srgb, #f59e0b 32%, var(--app-border-strong));
   border-radius: 12px;
-  background: color-mix(in srgb, var(--app-panel) 97%, transparent);
+  background: var(--app-panel);
   box-shadow: var(--app-shadow);
   overflow: hidden;
-  backdrop-filter: blur(14px) saturate(130%);
-  -webkit-backdrop-filter: blur(14px) saturate(130%);
 }
 
 .auth-detail-head {

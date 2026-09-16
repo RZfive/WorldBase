@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import SidebarIcon from './SidebarIcon.vue'
 import type {
   AgentSidebarItem,
   ConversationSidebarItem,
@@ -94,9 +95,6 @@ watch(
     @dragend="emit('dragend')"
   >
     <div class="conv-main">
-      <span v-if="!isCompactConversation" :class="['conv-avatar-shell', variant]">
-        <span :class="['conv-icon', variant]">{{ item.icon }}</span>
-      </span>
       <div class="conv-copy">
         <div :class="['conv-title-row', { 'conv-title-row-compact': isCompactConversation }]">
           <div class="conv-title-stack">
@@ -120,7 +118,7 @@ watch(
               v-if="showForkBadge"
               class="conv-fork-badge"
               :title="$t('chatUi.forkedConversationBadge')"
-            >⑂</span>
+            ><SidebarIcon name="fork" :size="11" /></span>
           </div>
           <span
             v-if="item.pendingAuthCount > 0"
@@ -163,16 +161,18 @@ watch(
         :aria-label="itemIsPinned ? $t('chatUi.unpin') : $t('chatUi.pin')"
         @click.stop="emit('pin')"
       >
-        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <path d="M9.5 2.5L13.5 6.5L10.5 7.5L8.5 11.5L7 10L4.5 12.5L6 8.5L4.5 7L8.5 5L9.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
-        </svg>
+        <SidebarIcon name="pin" :size="12" />
       </button>
-      <button v-if="showDelete" class="conv-delete" type="button" :title="deleteTitle || $t('common.delete')" @click.stop="emit('delete')">×</button>
+      <button v-if="showDelete" class="conv-delete" type="button" :title="deleteTitle || $t('common.delete')" @click.stop="emit('delete')">
+        <SidebarIcon name="close" :size="11" />
+      </button>
     </div>
   </div>
 </template>
 
 <style scoped>
+/* Flat, uniform list rows (design v1.7): one container language — no bordered
+   cards, active state = accent wash + 2.5px signature-gradient indicator. */
 .conv-item {
   position: relative;
   box-sizing: border-box;
@@ -180,16 +180,17 @@ watch(
   max-width: 100%;
   min-width: 0;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 8px 9px;
-  border-radius: 10px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: 8px;
   cursor: pointer;
   color: var(--app-text-soft);
-  font-size: 0.8em;
-  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
-  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
+  border: none;
+  background: transparent;
+  transition: background 0.16s ease, color 0.16s ease;
   overflow: visible;
 }
 
@@ -201,39 +202,38 @@ watch(
 }
 
 .conv-item::before {
-  inset: 0 auto 0 0;
-  width: 2px;
-  border-radius: 999px;
+  inset: 6px auto 6px -8px;
+  width: 2.5px;
+  border-radius: 3px;
   background: transparent;
   transition: background 0.18s ease;
 }
 
 .conv-item:hover {
   background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
-  border-color: color-mix(in srgb, var(--app-accent) 12%, var(--app-border));
   color: var(--app-text);
 }
 
 .conv-item.active {
-  background: color-mix(in srgb, var(--app-accent-soft) 42%, transparent);
-  border-color: color-mix(in srgb, var(--app-accent-glow) 60%, transparent);
+  background: var(--app-accent-wash, color-mix(in srgb, var(--app-accent) 16%, transparent));
   color: var(--app-text-strong);
 }
 
 .conv-item.active::before {
-  background: var(--app-accent-strong);
-}
-
-.conv-item.streaming {
-  border-color: color-mix(in srgb, var(--app-accent-glow) 60%, transparent);
-}
-
-.conv-item.waitingAuth {
-  border-color: rgba(245, 158, 11, 0.38);
+  background: var(--app-sig);
+  box-shadow: 0 0 8px var(--app-accent-glow);
 }
 
 .conv-item.dragging {
   opacity: 0.62;
+}
+
+.conv-item.waitingAuth {
+  background: var(--app-warning-soft);
+}
+
+.conv-item.waitingAuth.active {
+  background: color-mix(in srgb, var(--app-warning-soft) 55%, var(--app-accent-wash, color-mix(in srgb, var(--app-accent) 16%, transparent)));
 }
 
 .conv-item.drop-before::after,
@@ -247,78 +247,20 @@ watch(
 }
 
 .conv-item.drop-before::after {
-  top: -3px;
+  top: 0;
 }
 
 .conv-item.drop-after::after {
-  bottom: -3px;
+  bottom: 0;
 }
 
 .conv-item.drop-merge::after {
   left: 10px;
   right: 10px;
-  bottom: -3px;
-}
-
-.conv-item.drop-merge {
-  border-color: color-mix(in srgb, var(--app-accent-glow) 66%, transparent);
-  background: color-mix(in srgb, var(--app-accent-soft) 30%, transparent);
-}
-
-.conversation-item-compact.drop-before::after {
-  top: 0;
-}
-
-.conversation-item-compact.drop-after::after,
-.conversation-item-compact.drop-merge::after {
   bottom: 0;
 }
 
-.agent-item {
-  background: color-mix(in srgb, var(--app-chat-list-raised) 94%, var(--app-accent-soft) 6%);
-}
-
-.group-item {
-  background: color-mix(in srgb, var(--app-chat-list-raised) 94%, #14b8a6 5%);
-}
-
-.conversation-item {
-  background: var(--app-chat-list-raised);
-}
-
-.conversation-item-compact {
-  align-items: center;
-  width: 100%;
-  max-width: 100%;
-  min-height: 30px;
-  padding: 3px 5px 3px 10px;
-  border-color: transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--app-text-soft);
-  overflow: hidden;
-}
-
-.conversation-item-compact:hover {
-  background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
-  border-color: transparent;
-}
-
-.conversation-item-compact.active {
-  background: color-mix(in srgb, var(--app-accent-soft) 34%, transparent);
-  border-color: transparent;
-}
-
-.conversation-item-compact.waitingAuth {
-  border-color: transparent;
-  background: rgba(245, 158, 11, 0.08);
-}
-
-.conversation-item-compact.streaming {
-  border-color: transparent;
-}
-
-.conversation-item-compact.drop-merge {
+.conv-item.drop-merge {
   background: color-mix(in srgb, var(--app-accent-soft) 34%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent-glow) 58%, transparent);
 }
@@ -333,40 +275,10 @@ watch(
 
 .conv-main {
   display: flex;
-  gap: 9px;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
   flex: 1;
-}
-
-.conversation-item-compact .conv-main {
-  align-items: center;
-  gap: 0;
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-}
-
-.conv-avatar-shell {
-  position: relative;
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-  display: inline-flex;
-  flex-shrink: 0;
-  border: 1px solid color-mix(in srgb, var(--app-border) 80%, transparent);
-  background: color-mix(in srgb, var(--app-panel-muted) 70%, transparent);
-}
-
-.conv-avatar-shell.agent {
-  background: color-mix(in srgb, var(--app-accent-soft) 32%, var(--app-chat-list-raised));
-}
-
-.conv-avatar-shell.group {
-  background: rgba(20, 184, 166, 0.12);
-}
-
-.conv-avatar-shell.conversation {
-  background: color-mix(in srgb, var(--app-panel-muted) 78%, var(--app-chat-list-raised));
 }
 
 .conv-copy {
@@ -374,15 +286,7 @@ watch(
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
-}
-
-.conversation-item-compact .conv-copy {
-  flex: 1;
-  min-width: 0;
-  max-width: 100%;
-  gap: 0;
-  overflow: hidden;
+  gap: 1px;
 }
 
 .conv-title-row {
@@ -402,8 +306,9 @@ watch(
   min-width: 0;
   max-width: 100%;
   display: flex;
-  flex-direction: column;
-  gap: 0;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
   overflow: hidden;
 }
 
@@ -414,22 +319,10 @@ watch(
 
 .conv-fork-badge {
   flex-shrink: 0;
-  font-size: 0.8em;
-  font-weight: 800;
-  color: var(--app-accent-strong, var(--app-accent));
-  opacity: 0.85;
-}
-
-.conv-icon {
-  width: 100%;
-  height: 100%;
-  border-radius: 8px;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  background: transparent;
-  flex-shrink: 0;
-  font-size: 0.92rem;
+  color: var(--app-accent-strong);
+  opacity: 0.85;
 }
 
 .conv-title {
@@ -440,17 +333,12 @@ watch(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.8rem;
-  font-weight: 700;
-  color: var(--app-text-strong);
-}
-
-.conversation-item-compact .conv-title {
-  font-size: 0.76rem;
+  font-size: 0.78rem;
   font-weight: 500;
   color: var(--app-text-soft);
 }
 
+.conv-item.active .conv-title,
 .conversation-item-compact.active .conv-title {
   font-weight: 650;
   color: var(--app-text-strong);
@@ -460,27 +348,24 @@ watch(
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  height: 24px;
+  height: 22px;
   padding: 2px 7px;
   border: 1px solid color-mix(in srgb, var(--app-accent) 36%, var(--app-border));
   border-radius: 6px;
   background: var(--app-input-bg);
   color: var(--app-text);
   font: inherit;
-  font-size: 0.76rem;
+  font-size: 0.74rem;
   outline: none;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--app-accent-soft) 34%, transparent);
 }
 
 .conv-subtitle {
   color: var(--app-text-muted);
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   overflow: hidden;
   text-overflow: ellipsis;
-  display: -webkit-box;
-  line-clamp: 2;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   line-height: 1.3;
 }
 
@@ -499,12 +384,12 @@ watch(
   cursor: pointer;
   padding: 0;
   flex-shrink: 0;
-  opacity: 0;
-  transform: translateY(2px) scale(0.94);
-  transition: opacity 0.18s ease, transform 0.18s ease, color 0.18s ease, background 0.18s ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  opacity: 0;
+  transform: translateY(2px) scale(0.94);
+  transition: none;
 }
 
 .conversation-item-compact .conv-pin {
@@ -515,27 +400,13 @@ watch(
   opacity: 0;
   pointer-events: none;
   transform: translateX(7px);
-  transition: opacity 0.2s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), color 0.16s ease, background 0.16s ease;
-}
-
-.conv-pin svg {
-  width: 13px;
-  height: 13px;
-}
-
-.conversation-item-compact .conv-pin svg {
-  width: 12px;
-  height: 12px;
+  transition: none;
 }
 
 .conv-pin.active {
   opacity: 1;
   transform: translateY(0) scale(1);
   color: var(--app-accent);
-}
-
-.conv-pin.active svg path {
-  fill: var(--app-accent);
 }
 
 .conv-item:hover .conv-pin {
@@ -548,8 +419,16 @@ watch(
   color: var(--app-accent);
 }
 
-.conv-item.pinned {
-  border-color: color-mix(in srgb, var(--app-accent) 18%, var(--app-border));
+.conv-item.pinned .conv-title {
+  color: var(--app-text);
+}
+
+.conversation-item-compact .conv-pin.active {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+  color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-chat-list-raised) 34%, transparent);
 }
 
 .conv-delete {
@@ -559,14 +438,15 @@ watch(
   border: none;
   background: transparent;
   color: var(--app-text-faint);
-  font-size: 0.92rem;
   cursor: pointer;
   padding: 0;
-  line-height: 1;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   opacity: 0;
   transform: translateY(2px) scale(0.94);
-  transition: opacity 0.18s ease, transform 0.18s ease, color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+  transition: none;
 }
 
 .conversation-item-compact .conv-delete {
@@ -584,13 +464,13 @@ watch(
 }
 
 .conv-item:hover .conv-delete,
-.conv-item.active:not(.conversation-item-compact) .conv-delete {
+.conv-item.active .conv-delete {
   opacity: 1;
   transform: translateY(0) scale(1);
 }
 
 .conv-delete:hover {
-  background: rgba(239, 68, 68, 0.08);
+  background: var(--app-danger-soft);
   color: var(--app-danger);
 }
 
@@ -610,23 +490,16 @@ watch(
   transform: translateY(-50%);
 }
 
-.conversation-item-compact.has-dual-actions .conv-actions {
-  width: auto;
-  min-width: 0;
-}
-
 .conversation-item-compact .conv-actions::before {
   content: '';
   position: absolute;
   inset: -3px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--app-chat-list-raised) 38%, transparent);
-  -webkit-backdrop-filter: blur(8px) saturate(118%);
-  backdrop-filter: blur(8px) saturate(118%);
+  background: var(--app-chat-list-raised);
   opacity: 0;
   transform: scale(0.9);
   transform-origin: right center;
-  transition: opacity 0.22s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: none;
   pointer-events: none;
 }
 
@@ -655,17 +528,6 @@ watch(
   transition-delay: 0.04s;
 }
 
-/* Pinned rows keep the pin visible as a standalone frosted chip when idle. */
-.conversation-item-compact .conv-pin.active {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateX(0);
-  color: var(--app-accent);
-  background: color-mix(in srgb, var(--app-chat-list-raised) 34%, transparent);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-}
-
 .conv-status {
   display: inline-flex;
   align-items: center;
@@ -691,13 +553,13 @@ watch(
 }
 
 .conv-status.auth {
-  color: #b45309;
-  background: rgba(245, 158, 11, 0.16);
+  color: var(--app-warning-strong);
+  background: var(--app-warning-soft);
 }
 
 .conv-status.unread {
   color: var(--app-danger);
-  background: color-mix(in srgb, var(--app-danger) 14%, transparent);
+  background: var(--app-danger-soft);
 }
 
 .conv-status-dot {
@@ -735,13 +597,21 @@ watch(
   50% { transform: scale(1.15); opacity: 1; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .conv-status-dot {
+    animation: none;
+  }
+}
+
 @media (max-width: 880px) {
   .conv-item {
     flex-direction: column;
+    align-items: stretch;
   }
 
   .conv-item.conversation-item-compact {
     flex-direction: row;
+    align-items: center;
   }
 
   .conv-delete {

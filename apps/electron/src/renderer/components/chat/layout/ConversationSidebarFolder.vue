@@ -69,7 +69,9 @@ const emit = defineEmits<{
       <button class="conv-folder-toggle" type="button" @click="emit('toggle')">
         <div class="conv-main conv-folder-main">
           <span class="conv-avatar-shell conversation conv-folder-avatar-shell">
-            <span class="conv-icon conversation">📁</span>
+            <svg class="conv-icon conversation" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2.25 5A1.5 1.5 0 0 1 3.75 3.5H6.2a1 1 0 0 1 .77.36l.57.7a1 1 0 0 0 .77.36h3.94a1.5 1.5 0 0 1 1.5 1.5v4.33a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5z" />
+            </svg>
           </span>
           <div class="conv-copy conv-folder-copy">
             <div class="conv-title-row conv-folder-title-row">

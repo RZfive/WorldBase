@@ -141,6 +141,7 @@ pub const EXEC_RUN: &str = "exec.run";
 // 供应商 / Agent / Studio / 分叉 / 宿主应答（对齐桌面端能力）
 pub const PROVIDER_LIST: &str = "provider.list";
 pub const PROVIDER_FETCH_MODELS: &str = "provider.fetchModels";
+pub const PROVIDER_DETECT_PROTOCOL: &str = "provider.detectProtocol";
 pub const PROVIDER_SAVE: &str = "provider.save";
 pub const PROVIDER_DELETE: &str = "provider.delete";
 pub const PROVIDER_SET_ACTIVE: &str = "provider.setActive";

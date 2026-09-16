@@ -42,9 +42,63 @@ test('fetchProviderModels uses OpenAI bearer authentication', async () => {
     const models = await fetchProviderModels({
       baseUrl: `${baseUrl}/v1`,
       apiKey: 'test-secret',
-      apiProtocol: 'openai'
+      apiProtocol: 'openai-chat'
     })
     assert.deepEqual(models, ['model-a', 'model-b'])
+  })
+})
+
+test('fetchProviderModels treats both OpenAI wire protocols as Bearer catalog style', async () => {
+  await withServer((request, response) => {
+    assert.equal(request.url, '/v1/models')
+    assert.equal(request.headers.authorization, 'Bearer test-secret')
+    response.setHeader('content-type', 'application/json')
+    response.end(JSON.stringify({ data: [{ id: 'gpt-5.1' }] }))
+  }, async baseUrl => {
+    const models = await fetchProviderModels({
+      baseUrl: `${baseUrl}/v1`,
+      apiKey: 'test-secret',
+      apiProtocol: 'openai-responses'
+    })
+    assert.deepEqual(models, ['gpt-5.1'])
+  })
+})
+
+test('fetchProviderModels auto entries retry with Anthropic headers on auth failures', async () => {
+  const seen = []
+  await withServer((request, response) => {
+    seen.push({ url: request.url, auth: request.headers.authorization, apiKey: request.headers['x-api-key'] })
+    if (request.url === '/models') {
+      // First OpenAI-style attempt fails with an auth error.
+      response.statusCode = 401
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ error: { message: 'no bearer' } }))
+      return
+    }
+    assert.equal(request.url, '/v1/models')
+    assert.equal(request.headers['x-api-key'], 'anthropic-secret')
+    assert.equal(request.headers['anthropic-version'], '2023-06-01')
+    response.setHeader('content-type', 'application/json')
+    response.end(JSON.stringify({ data: [{ id: 'claude-sonnet' }] }))
+  }, async baseUrl => {
+    const models = await fetchProviderModels({ baseUrl, apiKey: 'anthropic-secret' })
+    assert.deepEqual(models, ['claude-sonnet'])
+    assert.equal(seen.length, 2)
+  })
+})
+
+test('fetchProviderModels auto entries do not retry on non-auth failures', async () => {
+  let calls = 0
+  await withServer((request, response) => {
+    calls += 1
+    response.statusCode = 500
+    response.end(JSON.stringify({ error: { message: 'upstream down' } }))
+  }, async baseUrl => {
+    await assert.rejects(
+      fetchProviderModels({ baseUrl, apiKey: 'secret' }),
+      /\(500\)/
+    )
+    assert.equal(calls, 1)
   })
 })
 

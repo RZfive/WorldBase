@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, type CSSProperties } from 'vue'
 import { useI18n } from 'vue-i18n'
-import ProviderDropdown from './ProviderDropdown.vue'
 import { copyTextToClipboard } from '../export-utils'
 
 interface PendingAttachment {
@@ -29,14 +28,7 @@ interface CodeTagChip {
   raw: string
 }
 
-type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
 type AIExecutionAuthMode = 'strict' | 'auto'
-
-interface AgentOption {
-  id: string
-  name: string
-  icon?: string
-}
 
 interface GroupMentionHint {
   token: string
@@ -63,21 +55,18 @@ const props = defineProps<{
   uploadFeedback: string
   documentDockVisible: boolean
   folderWorkspaceVisible: boolean
-  reasoningStrength: ReasoningStrength
-  temperature?: number | null
-  providerDefaultTemperature?: number
   authMode: AIExecutionAuthMode
   planModeActive: boolean
   computerUseEnabled?: boolean
   /** null until the first macOS permission query lands; false gates the toggle. */
   computerUsePermissionGranted?: boolean | null
-  availableAgents?: AgentOption[]
-  selectedAgentId?: string
+  availableSkills?: Array<{ id: string; name: string }>
+  activeSkillIds?: Set<string>
+  showSkillPicker?: boolean
   selectedGroupId?: string
   activeGroupSessionId?: string
   groupMentionHints?: GroupMentionHint[]
   isGroupConversation?: boolean
-  isNewConversation?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -87,14 +76,15 @@ const emit = defineEmits<{
   (e: 'addAttachments', files: File[]): void
   (e: 'removeImage', index: number): void
   (e: 'removeFile', id: string): void
-  (e: 'update:reasoning-strength', value: ReasoningStrength): void
-  (e: 'update:temperature', value: number | null): void
   (e: 'toggleDocumentDock'): void
   (e: 'toggleFolderWorkspace'): void
   (e: 'update:auth-mode', value: AIExecutionAuthMode): void
   (e: 'togglePlanMode'): void
   (e: 'toggleComputerUse'): void
-  (e: 'update:selected-agent-id', id: string): void
+  (e: 'toggleSkillPicker'): void
+  (e: 'selectAllSkills'): void
+  (e: 'clearSkills'): void
+  (e: 'toggleSkill', skillId: string): void
 }>()
 
 const { t } = useI18n()
@@ -126,66 +116,20 @@ const inputContextMenu = reactive({
 let inputContextMenuResetTimer: number | null = null
 const MAX_MENTION_DROPDOWN_HEIGHT = 320
 const MIN_MENTION_DROPDOWN_HEIGHT = 120
-const reasoningLevels: Array<{ value: ReasoningStrength; labelKey: string }> = [
-  { value: 'low', labelKey: 'chatUi.reasoningLow' },
-  { value: 'medium', labelKey: 'chatUi.reasoningMedium' },
-  { value: 'high', labelKey: 'chatUi.reasoningHigh' },
-  { value: 'max', labelKey: 'chatUi.reasoningMax' }
-]
-const ADVANCED_SLIDER_THUMB_SIZE = 12
-function sliderFillToThumbCenter (ratio: number): string {
-  const clamped = Math.min(Math.max(ratio, 0), 1)
-  const percent = clamped * 100
-  const offset = (0.5 - clamped) * ADVANCED_SLIDER_THUMB_SIZE
-  const operator = offset >= 0 ? '+' : '-'
-  return `calc(${percent.toFixed(3)}% ${operator} ${Math.abs(offset).toFixed(2)}px)`
-}
-const currentReasoningIndex = computed(() => {
-  const index = reasoningLevels.findIndex(level => level.value === props.reasoningStrength)
-  return index >= 0 ? index : reasoningLevels.length - 1
+// design v1.7: the auth pill reads its state without hover —
+// auto = green breathing dot, strict = amber; while an auth request is
+// pending in strict mode it says 等待授权 (waiting for authorization).
+const authModeLabel = computed(() => {
+  if (props.authMode === 'strict') {
+    return (props.pendingAuthCount || 0) > 0
+      ? t('chatUi.waitingAuth')
+      : t('chatUi.authModeStrict')
+  }
+  return t('chatUi.authModeAuto')
 })
-const currentReasoningLabel = computed(() => {
-  const level = reasoningLevels[currentReasoningIndex.value]
-  return level ? t(level.labelKey) : t('chatUi.reasoningMax')
-})
-const reasoningSliderFill = computed(() => {
-  return sliderFillToThumbCenter(currentReasoningIndex.value / Math.max(reasoningLevels.length - 1, 1))
-})
-const groupReasoningTitle = computed(() => {
-  return t('chatUi.groupReasoningTitle', { value: currentReasoningLabel.value })
-})
-const TEMPERATURE_MIN = 0
-const TEMPERATURE_MAX = 2
 const LARGE_PASTE_TEXT_ATTACHMENT_THRESHOLD = 2000
 const INPUT_CONTEXT_MENU_WIDTH = 128
 const INPUT_CONTEXT_MENU_HEIGHT = 112
-const showAdvancedPanel = ref(false)
-const fallbackTemperature = computed(() => {
-  const value = props.providerDefaultTemperature
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0.3
-})
-const effectiveTemperature = computed(() => {
-  return typeof props.temperature === 'number' && Number.isFinite(props.temperature) ? props.temperature : fallbackTemperature.value
-})
-const temperatureSliderFill = computed(() => {
-  const span = Math.max(TEMPERATURE_MAX - TEMPERATURE_MIN, 1)
-  const value = Math.min(Math.max(effectiveTemperature.value, TEMPERATURE_MIN), TEMPERATURE_MAX)
-  return sliderFillToThumbCenter((value - TEMPERATURE_MIN) / span)
-})
-function toggleAdvancedPanel () {
-  showAdvancedPanel.value = !showAdvancedPanel.value
-}
-function onTemperatureInput (e: Event) {
-  const value = Number.parseFloat((e.target as HTMLInputElement).value)
-  if (!Number.isFinite(value)) return
-  emit('update:temperature', Math.min(Math.max(value, TEMPERATURE_MIN), TEMPERATURE_MAX))
-}
-function onReasoningInput (e: Event) {
-  const value = Number.parseInt((e.target as HTMLInputElement).value, 10)
-  const level = reasoningLevels[Math.min(Math.max(value, 0), reasoningLevels.length - 1)]
-  if (!level || props.isGroupConversation) return
-  emit('update:reasoning-strength', level.value)
-}
 const projectTags = computed<ProjectTagChip[]>(() => {
   const seenIds = new Set<string>()
   const tags: ProjectTagChip[] = []
@@ -962,138 +906,107 @@ onUnmounted(() => {
         <span class="runtime-status-copy">{{ runtimeStatusLabel }}</span>
       </div>
       <div class="input-actions">
-        <div class="input-actions-left">
-          <!-- Advanced settings expand inline inside the input toolbar. -->
-          <div class="advanced-settings-anchor">
-            <div class="tooltip-container">
-              <button
-                class="action-btn advanced-btn"
-                :class="{ active: showAdvancedPanel }"
-                type="button"
-                :aria-label="$t('chatUi.advancedSettings')"
-                @click="toggleAdvancedPanel"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="12" cy="12" r="3"/>
-                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                </svg>
-              </button>
-              <span v-if="!showAdvancedPanel" class="tooltip-text">{{ $t('chatUi.advancedSettings') }}</span>
-            </div>
-            <Transition name="advanced-drawer">
-              <div v-if="showAdvancedPanel" class="advanced-panel">
-                <div class="advanced-setting advanced-reasoning-setting">
-                  <span class="advanced-setting-name" :title="props.isGroupConversation ? groupReasoningTitle : ''">
-                    {{ $t('chatUi.reasoningStrength') }} <span class="advanced-setting-value">({{ currentReasoningLabel }})</span>
-                  </span>
-                  <input
-                    class="advanced-slider advanced-reasoning-slider"
-                    type="range"
-                    min="0"
-                    max="3"
-                    step="1"
-                    :value="currentReasoningIndex"
-                    :style="{ '--advanced-slider-fill': reasoningSliderFill }"
-                    :disabled="props.isGroupConversation"
-                    @input="onReasoningInput"
-                  />
-                </div>
-                <div class="advanced-setting advanced-temperature-setting">
-                  <span class="advanced-setting-name">
-                    {{ $t('chatUi.modelTemperature') }} <span class="advanced-setting-value">({{ effectiveTemperature.toFixed(1) }})</span>
-                  </span>
-                  <input
-                    class="advanced-slider"
-                    type="range"
-                    :min="TEMPERATURE_MIN"
-                    :max="TEMPERATURE_MAX"
-                    step="0.1"
-                    :value="effectiveTemperature"
-                    :style="{ '--advanced-slider-fill': temperatureSliderFill }"
-                    @input="onTemperatureInput"
-                  />
-                </div>
-              </div>
-            </Transition>
-          </div>
-          <ProviderDropdown
-            v-if="props.isNewConversation && props.availableAgents && props.availableAgents.length > 0"
-            :model-value="props.selectedAgentId || ''"
-            :options="[{ value: '', label: $t('chatUi.defaultAgent') }, ...props.availableAgents.map(a => ({ value: a.id, label: (a.icon ? a.icon + ' ' : '') + a.name }))]"
-            :title="$t('chatUi.selectAgent')"
-            @update:model-value="emit('update:selected-agent-id', $event)"
-          />
+        <!-- design v1.7: high-frequency actions stay icons and lead the row —
+             attachment / code workspace / document center. The agent switcher
+             lives in the header next to the agent name. -->
+        <div class="tooltip-container">
+          <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
+            <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
+          </label>
+          <span class="tooltip-text">{{ $t('chatUi.addAttachment') }}</span>
         </div>
-        <div class="input-actions-right">
-          <!-- Auth mode: icon toggle (lock = strict, unlock = auto) -->
-          <div class="tooltip-container">
-            <button
-            class="action-btn auth-mode-btn"
-            :class="{ auto: props.authMode === 'auto' }"
-            type="button"
-            @click="emit('update:auth-mode', props.authMode === 'strict' ? 'auto' : 'strict')"
-          >
-            <svg v-if="props.authMode === 'strict'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-            </svg>
-            <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>
+        <div class="tooltip-container">
+          <button class="action-btn folder-btn" :class="{ active: props.folderWorkspaceVisible }" type="button" @click="emit('toggleFolderWorkspace')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3.5 6.5A2.5 2.5 0 0 1 6 4h4l2 2h6A2.5 2.5 0 0 1 20.5 8.5v8A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5v-10Z"/>
+              <path d="m10 12-2 2 2 2"/>
+              <path d="m14 12 2 2-2 2"/>
             </svg>
           </button>
-          <span class="tooltip-text">{{ props.authMode === 'strict' ? $t('chatUi.strictAuthTooltip') : $t('chatUi.autoAuthTooltip') }}</span>
+          <span class="tooltip-text">{{ $t('chatUi.codeWorkspace') }}</span>
+        </div>
+        <div class="tooltip-container">
+          <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" type="button" @click="emit('toggleDocumentDock')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          </button>
+          <span class="tooltip-text">{{ $t('chatUi.documentCenter') }}</span>
+        </div>
+        <!-- Readable state pills follow (design v1.7): 技能 / 计划 / 电脑使用 / 授权模式. -->
+        <div v-if="props.availableSkills && props.availableSkills.length > 0" class="composer-skill-selector">
+            <button
+              class="action-btn state-pill skills-pill"
+              :class="{ active: (props.activeSkillIds?.size || 0) > 0 }"
+              type="button"
+              @click="emit('toggleSkillPicker')"
+            >
+              <span class="skills-pill-spark" aria-hidden="true">✦</span>
+              {{ $t('chatUi.skillsLabel') }}{{ (props.activeSkillIds?.size || 0) > 0 ? ` (${props.activeSkillIds?.size})` : '' }}
+            </button>
+            <div v-if="props.showSkillPicker" class="composer-skill-dropdown">
+              <div class="composer-skill-actions">
+                <button type="button" :disabled="props.activeSkillIds?.size === props.availableSkills.length" @click="emit('selectAllSkills')">{{ $t('common.selectAll') }}</button>
+                <button type="button" :disabled="(props.activeSkillIds?.size || 0) === 0" @click="emit('clearSkills')">{{ $t('common.clear') }}</button>
+              </div>
+              <button
+                v-for="skill in props.availableSkills"
+                :key="skill.id"
+                type="button"
+                class="composer-skill-option"
+                :class="{ selected: props.activeSkillIds?.has(skill.id) }"
+                @click="emit('toggleSkill', skill.id)"
+              >
+                <span class="composer-skill-check" aria-hidden="true">{{ props.activeSkillIds?.has(skill.id) ? '✓' : '' }}</span>
+                <span>{{ skill.name }}</span>
+              </button>
+            </div>
           </div>
-          <!-- Plan mode: icon toggle -->
+          <!-- Plan mode: readable text pill (design v1.7) -->
           <div class="tooltip-container">
             <button
-              class="action-btn plan-mode-btn"
+              class="action-btn state-pill plan-mode-btn"
               :class="{ active: props.planModeActive }"
               type="button"
               @click="emit('togglePlanMode')"
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
                 <polyline points="3 6 4 7 6 5"/><polyline points="3 12 4 13 6 11"/><polyline points="3 18 4 19 6 17"/>
               </svg>
+              {{ $t('chatUi.planModeLabel') }}
             </button>
             <span class="tooltip-text">{{ props.planModeActive ? $t('chatUi.exitPlanMode') : $t('chatUi.enterPlanMode') }}</span>
           </div>
           <div class="tooltip-container">
-            <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" type="button" @click="emit('toggleDocumentDock')">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-            </button>
-            <span class="tooltip-text">{{ $t('chatUi.documentCenter') }}</span>
-          </div>
-          <div class="tooltip-container">
-            <button class="action-btn folder-btn" :class="{ active: props.folderWorkspaceVisible }" type="button" @click="emit('toggleFolderWorkspace')">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3.5 6.5A2.5 2.5 0 0 1 6 4h4l2 2h6A2.5 2.5 0 0 1 20.5 8.5v8A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5v-10Z"/>
-                <path d="m10 12-2 2 2 2"/>
-                <path d="m14 12 2 2-2 2"/>
-              </svg>
-            </button>
-            <span class="tooltip-text">{{ $t('chatUi.codeWorkspace') }}</span>
-          </div>
-          <div class="tooltip-container">
             <button
-              class="action-btn computer-use-btn"
+              class="action-btn state-pill computer-use-btn"
               :class="{ active: props.computerUseEnabled, 'permission-locked': props.computerUsePermissionGranted === false }"
               type="button"
               :aria-pressed="props.computerUseEnabled === true"
               :aria-label="props.computerUsePermissionGranted === false ? $t('chatUi.computerUsePermissionNeeded') : (props.computerUseEnabled ? $t('chatUi.disableComputerUse') : $t('chatUi.enableComputerUse'))"
               @click="emit('toggleComputerUse')"
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><path d="m9 10 2 2 4-4"/></svg>
+              <span v-if="props.computerUseEnabled" class="pill-dot live" aria-hidden="true"></span>
+              <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><path d="m9 10 2 2 4-4"/></svg>
+              {{ props.computerUseEnabled ? $t('chatUi.computerUseActiveLabel') : $t('chatUi.computerUseLabel') }}
             </button>
             <span class="tooltip-text">{{ props.computerUsePermissionGranted === false
               ? $t('chatUi.computerUsePermissionNeeded')
               : (props.computerUseEnabled ? $t('chatUi.disableComputerUse') : $t('chatUi.enableComputerUse')) }}</span>
           </div>
+          <!-- Auth mode: breathing-dot pill (design v1.7 — auto green / strict amber,
+               等待授权 while a request is pending in strict mode). -->
           <div class="tooltip-container">
-            <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
-              <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
-            </label>
-            <span class="tooltip-text">{{ $t('chatUi.addAttachment') }}</span>
+            <button
+              class="action-btn state-pill auth-mode-btn"
+              :class="{ auto: props.authMode === 'auto', strict: props.authMode === 'strict' }"
+              type="button"
+              @click="emit('update:auth-mode', props.authMode === 'strict' ? 'auto' : 'strict')"
+            >
+              <span class="pill-dot" aria-hidden="true"></span>
+              {{ authModeLabel }}
+            </button>
+            <span class="tooltip-text">{{ props.authMode === 'strict' ? $t('chatUi.strictAuthTooltip') : $t('chatUi.autoAuthTooltip') }}</span>
           </div>
           <div v-if="canInject" class="tooltip-container group-inject-wrapper">
             <button
@@ -1139,7 +1052,6 @@ onUnmounted(() => {
             <svg v-if="!props.isLoading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           </button>
-        </div>
       </div>
     </div>
     <Teleport to="body">
@@ -1171,7 +1083,7 @@ onUnmounted(() => {
   position: relative;
   z-index: 6;
   margin-top: calc(-1 * var(--chat-input-overlap, 0px));
-  padding: 10px var(--chat-message-gutter, 24px) 18px;
+  padding: 10px var(--chat-input-gutter, 16px) 18px;
   background: transparent;
 }
 
@@ -1184,7 +1096,7 @@ onUnmounted(() => {
 }
 
 .input-container {
-  --chat-input-surface: var(--app-main-surface);
+  --chat-input-surface: var(--app-panel);
   --chat-input-border: var(--app-input-border);
   --chat-input-control-surface: color-mix(in srgb, var(--app-panel-muted) 84%, transparent);
   --chat-input-control-border: var(--app-border-strong);
@@ -1192,7 +1104,7 @@ onUnmounted(() => {
   --chat-input-hover-surface: var(--app-panel-muted);
   --chat-input-disabled-surface: var(--app-panel-muted);
   --chat-input-chip-remove-hover: rgba(255, 255, 255, 0.08);
-  --chat-input-shadow: 0 18px 42px rgba(0, 0, 0, 0.12);
+  --chat-input-shadow: 0 12px 32px rgba(28, 32, 60, 0.12);
   --chat-input-focus-shadow: 0 0 0 2px var(--app-accent-soft);
   --chat-input-busy-shadow: 0 0 0 1px rgba(91, 140, 255, 0.08), 0 18px 36px rgba(91, 140, 255, 0.08);
   --chat-input-waiting-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12), 0 18px 36px rgba(245, 158, 11, 0.12);
@@ -1201,7 +1113,7 @@ onUnmounted(() => {
   box-sizing: border-box;
   background: var(--chat-input-surface);
   border: 1px solid var(--chat-input-border);
-  border-radius: 24px;
+  border-radius: 15px;
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
   overflow: visible;
   box-shadow: var(--chat-input-shadow);
@@ -1573,7 +1485,9 @@ onUnmounted(() => {
   background: transparent;
   border: none;
   color: var(--app-text);
-  padding: 12px 14px 4px;
+  min-height: 66px;
+  max-height: 176px;
+  padding: 13px 12px 6px;
   font-size: 0.92em;
   line-height: 1.5;
   resize: none;
@@ -1656,52 +1570,14 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
+/* design v1.7: one left-flowing toolbar — high-frequency icons lead,
+   state pills follow, the send key is pushed to the far edge. */
 .input-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 4px;
-  padding: 4px 8px 8px;
-}
-
-.input-actions-left {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-}
-
-.advanced-settings-anchor {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-}
-
-.action-btn.advanced-btn {
-  width: 28px;
-  height: 28px;
-}
-
-.action-btn.advanced-btn.active {
-  color: var(--app-accent);
-  background: var(--app-accent-soft);
-}
-
-.advanced-panel {
-  width: 296px;
-  max-width: 100%;
-  height: 28px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  overflow: visible;
-  transform-origin: left center;
-  will-change: max-width, opacity, transform;
+  padding: 6px 8px 7px;
+  border-top: 1px solid var(--app-border);
 }
 
 .group-inject-btn.active {
@@ -1805,127 +1681,6 @@ onUnmounted(() => {
   transform: translateX(0) scaleX(1);
 }
 
-.advanced-setting {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 28px;
-  min-width: 0;
-  flex-shrink: 0;
-}
-
-.advanced-reasoning-setting {
-  min-width: 136px;
-}
-
-.advanced-temperature-setting {
-  min-width: 136px;
-}
-
-.advanced-setting-name {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  font-size: 0.74em;
-  font-weight: 600;
-  color: var(--app-text-soft);
-  white-space: nowrap;
-}
-
-.advanced-reasoning-setting .advanced-setting-name {
-  flex: 0 0 84px;
-}
-
-.advanced-temperature-setting .advanced-setting-name {
-  flex: 0 0 84px;
-}
-
-.advanced-setting-value {
-  display: inline-block;
-  min-width: 2.7em;
-  font-size: 1em;
-  font-weight: 700;
-  color: var(--app-accent);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.advanced-slider {
-  --advanced-slider-fill: 0%;
-  width: 48px;
-  height: 16px;
-  min-width: 0;
-  padding: 0;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  appearance: none;
-  -webkit-appearance: none;
-  cursor: pointer;
-  overflow: visible;
-}
-
-.advanced-reasoning-slider {
-  width: 46px;
-}
-
-.advanced-slider:disabled {
-  opacity: 0.48;
-  cursor: not-allowed;
-}
-
-.advanced-slider::-webkit-slider-runnable-track {
-  height: 14px;
-  border-radius: 999px;
-  background: linear-gradient(
-    to right,
-    var(--app-accent) 0%,
-    var(--app-accent) var(--advanced-slider-fill),
-    color-mix(in srgb, var(--app-text-muted) 24%, transparent) var(--advanced-slider-fill),
-    color-mix(in srgb, var(--app-text-muted) 24%, transparent) 100%
-  );
-}
-
-.advanced-slider::-webkit-slider-thumb {
-  width: 12px;
-  height: 12px;
-  margin-top: 1px;
-  border-radius: 999px;
-  border: 2px solid color-mix(in srgb, var(--app-accent) 70%, white);
-  background: var(--app-panel-strong);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.24);
-  -webkit-appearance: none;
-  appearance: none;
-}
-
-.advanced-slider::-moz-range-track {
-  height: 14px;
-  border-radius: 999px;
-  background: linear-gradient(
-    to right,
-    var(--app-accent) 0%,
-    var(--app-accent) var(--advanced-slider-fill),
-    color-mix(in srgb, var(--app-text-muted) 24%, transparent) var(--advanced-slider-fill),
-    color-mix(in srgb, var(--app-text-muted) 24%, transparent) 100%
-  );
-}
-
-.advanced-slider::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
-  border-radius: 999px;
-  border: 2px solid color-mix(in srgb, var(--app-accent) 70%, white);
-  background: var(--app-panel-strong);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.24);
-}
-
-.input-actions-right {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
 .plan-mode-btn.active {
   color: var(--app-warning);
   background: var(--app-warning-soft);
@@ -1946,18 +1701,125 @@ onUnmounted(() => {
   color: var(--app-success);
 }
 
+/* design v1.7: auth pill = breathing dot, auto green / strict amber. */
+.auth-mode-btn .pill-dot {
+  animation: runtime-pulse 2s ease-in-out infinite;
+}
+
+.auth-mode-btn.strict {
+  color: var(--app-warning-strong);
+  background: var(--app-warning-soft);
+  border-color: color-mix(in srgb, var(--app-warning) 32%, var(--app-border));
+}
+
+.auth-mode-btn.strict .pill-dot {
+  background: var(--app-warning);
+}
+
+.auth-mode-btn.strict:hover {
+  background: color-mix(in srgb, var(--app-warning) 16%, transparent);
+  color: var(--app-warning-strong);
+}
+
+
+.composer-skill-selector {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.skills-pill {
+  width: auto;
+  min-width: 62px;
+}
+
+.skills-pill-spark {
+  color: var(--app-accent-strong);
+  font-size: 0.78rem;
+}
+
+.skills-pill.active {
+  color: var(--app-accent-strong);
+  border-color: color-mix(in srgb, var(--app-accent) 30%, var(--app-border));
+  background: var(--app-accent-soft);
+}
+
+.composer-skill-dropdown {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  width: 220px;
+  max-height: min(320px, 42vh);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-panel-strong);
+  box-shadow: var(--shadow-2);
+}
+
+.composer-skill-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  padding: 2px 2px 6px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.composer-skill-actions button,
+.composer-skill-option {
+  border: 0;
+  background: transparent;
+  color: var(--app-text-soft);
+  cursor: pointer;
+}
+
+.composer-skill-actions button {
+  padding: 4px 6px;
+  font-size: 0.68rem;
+}
+
+.composer-skill-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-skill-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 6px;
+  border-radius: 7px;
+  text-align: left;
+  font-size: 0.74rem;
+}
+
+.composer-skill-option:hover,
+.composer-skill-option.selected {
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
+}
+
+.composer-skill-check {
+  width: 15px;
+  color: var(--app-accent);
+  font-weight: 700;
+  text-align: center;
+}
+
 .action-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 24px;
   border-radius: 8px;
   border: none;
   background: transparent;
   color: var(--app-text-muted);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: none;
   flex-shrink: 0;
 }
 
@@ -2007,7 +1869,51 @@ onUnmounted(() => {
 .action-btn.doc-btn.active,
 .action-btn.folder-btn.active { color: var(--app-accent); background: var(--app-accent-soft); }
 .action-btn.upload-btn { cursor: pointer; }
-.computer-use-btn.active { color: var(--app-accent); background: var(--app-accent-soft); }
+
+/* Labeled state pills (design v1.7): plan / auth / computer-use read their
+   state without hover. */
+.action-btn.state-pill {
+  width: auto;
+  height: 24px;
+  padding: 0 9px;
+  gap: 5px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-panel-strong) 60%, transparent);
+  color: var(--app-text-muted);
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+
+.action-btn.state-pill svg {
+  width: 13px;
+  height: 13px;
+}
+
+.pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--app-success);
+  flex-shrink: 0;
+}
+
+.pill-dot.live {
+  background: #ffffff;
+  animation: runtime-pulse 1.2s ease-in-out infinite;
+}
+
+.plan-mode-btn.active {
+  color: var(--app-accent-strong);
+  border-color: color-mix(in srgb, var(--app-accent) 38%, var(--app-border));
+  background: var(--app-accent-soft);
+}
+
+.computer-use-btn.active {
+  color: var(--app-on-accent);
+  border-color: transparent;
+  background: var(--app-accent);
+}
 /* macOS permission gate: grayed out until Screen Recording + Accessibility are granted. */
 .computer-use-btn.permission-locked { opacity: 0.38; cursor: not-allowed; }
 .computer-use-btn.permission-locked:hover { background: transparent; color: var(--app-text-muted); }
@@ -2026,21 +1932,32 @@ onUnmounted(() => {
 }
 
 .action-btn.send-btn {
-  background: var(--app-accent);
-  color: var(--app-on-accent);
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  border-radius: 999px;
+  background: var(--app-sig);
+  color: #ffffff;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--app-accent) 32%, transparent);
 }
 
-.action-btn.send-btn:hover:not(:disabled) { background: var(--app-accent-strong); }
+.action-btn.send-btn:hover:not(:disabled) {
+  background: var(--app-sig);
+  filter: none;
+}
 
+/* Running: the icon becomes a stop square, the gradient stays (design v1.7). */
 .action-btn.send-btn.stopping {
-  background: var(--app-danger);
-  box-shadow: 0 10px 24px color-mix(in srgb, var(--app-danger-strong) 24%, transparent);
+  background: var(--app-sig);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--app-accent) 32%, transparent), 0 0 0 2px var(--app-accent-soft);
 }
 
 .action-btn.send-btn.stopping:hover:not(:disabled) {
-  background: var(--app-danger-strong);
+  background: var(--app-sig);
+  filter: none;
 }
 
+/* Waiting for authorization tints the key amber. */
 .action-btn.send-btn.stopping.waitingAuth {
   background: var(--app-warning);
   box-shadow: 0 10px 24px color-mix(in srgb, var(--app-warning) 28%, transparent);
@@ -2048,6 +1965,7 @@ onUnmounted(() => {
 
 .action-btn.send-btn.stopping.waitingAuth:hover:not(:disabled) {
   background: var(--app-warning-strong);
+  filter: none;
 }
 
 .action-btn.send-btn:disabled {
@@ -2062,21 +1980,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 860px) {
-  .advanced-panel {
-    width: min(300px, calc(100vw - 210px));
-    gap: 8px;
-  }
-
-  .advanced-reasoning-setting,
-  .advanced-temperature-setting {
-    min-width: 0;
-  }
-
-  .advanced-slider,
-  .advanced-reasoning-slider {
-    width: 48px;
-  }
-
   .advanced-drawer-enter-to,
   .advanced-drawer-leave-from {
     max-width: 300px;

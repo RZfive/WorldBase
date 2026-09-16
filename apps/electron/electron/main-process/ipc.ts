@@ -1439,7 +1439,8 @@ export function setupIPC (): void {
               apiKey: provider.apiKey,
               baseUrl: provider.baseUrl,
               model,
-              apiProtocol: provider.apiProtocol,
+              // Auto entries carry their probe result; never guess from the URL.
+              apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined,
               providerId: provider.id,
               providerName: provider.name
             },
@@ -1452,7 +1453,7 @@ export function setupIPC (): void {
       } else {
         const aiProvider = createProvider({
           baseUrl: provider.baseUrl,
-          apiProtocol: provider.apiProtocol
+          apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined
         })
         aiProvider.setApiKey(provider.apiKey)
         aiProvider.setBaseUrl(provider.baseUrl)
@@ -2191,8 +2192,23 @@ export function setupIPC (): void {
     return settingsStore!.getProviders()
   })
 
-  ipcMain.handle('settings:fetchProviderModels', async (_event: IpcMainInvokeEvent, input: { baseUrl: string; apiKey: string; apiProtocol?: 'openai' | 'anthropic' }) => {
+  ipcMain.handle('settings:fetchProviderModels', async (_event: IpcMainInvokeEvent, input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => {
     return { models: await fetchProviderModels(input) }
+  })
+
+  // Probe-based wire-protocol detection: the Rust harness sends the minimal
+  // message "hi" through Responses → Chat Completions → Anthropic and returns
+  // the first protocol whose response shape matches.
+  ipcMain.handle('settings:detectProviderProtocol', async (_event: IpcMainInvokeEvent, input: { baseUrl: string; apiKey: string; model: string }) => {
+    const engine = mainState.rustHarnessEngine
+    const client = mainState.rustHarness
+    if (!engine || !client) {
+      throw new Error('Protocol detection requires the Rust harness, which is not initialized.')
+    }
+    if (!client.isAvailable()) {
+      await engine.start()
+    }
+    return await client.detectProviderProtocol(input)
   })
 
   ipcMain.handle('settings:saveProviders', async (_event: IpcMainInvokeEvent, config: AIProvidersConfig) => {

@@ -1383,19 +1383,44 @@ test('Electron provider sync preserves saved temperature and thinking defaults',
     workspace: process.cwd(),
     dataDir: path.join(os.tmpdir(), 'worldbase-rust-provider-sync-test'),
     getProviders: () => ({
-      providers: [{
-        id: 'provider-1',
-        name: 'Compatible provider',
-        baseUrl: 'https://gateway.example/v1',
-        apiKey: 'secret',
-        apiProtocol: 'openai',
-        models: ['model-1'],
-        activeModel: 'model-1',
-        temperature: 0.65,
-        enableThinking: true,
-        modelCapabilities: {},
-        modelContextWindows: {}
-      }],
+      providers: [
+        {
+          id: 'provider-1',
+          name: 'Compatible provider',
+          baseUrl: 'https://gateway.example/v1',
+          apiKey: 'secret',
+          apiProtocol: 'openai-chat',
+          models: ['model-1'],
+          activeModel: 'model-1',
+          temperature: 0.65,
+          enableThinking: true,
+          modelCapabilities: {},
+          modelContextWindows: {}
+        },
+        {
+          id: 'provider-auto-detected',
+          name: 'Auto with probe result',
+          baseUrl: 'https://api.anthropic.com',
+          apiKey: 'secret',
+          apiProtocol: '',
+          detectedApiProtocol: 'anthropic',
+          models: ['claude'],
+          activeModel: 'claude',
+          modelCapabilities: {},
+          modelContextWindows: {}
+        },
+        {
+          id: 'provider-auto-unpinned',
+          name: 'Auto without probe result',
+          baseUrl: 'https://gateway.example/v1',
+          apiKey: 'secret',
+          apiProtocol: '',
+          models: ['model-1'],
+          activeModel: 'model-1',
+          modelCapabilities: {},
+          modelContextWindows: {}
+        }
+      ],
       activeProviderId: 'provider-1'
     }),
     onEvent: () => {}
@@ -1412,6 +1437,16 @@ test('Electron provider sync preserves saved temperature and thinking defaults',
   assert.ok(saved)
   assert.equal(saved.params.provider.temperature, 0.65)
   assert.equal(saved.params.provider.enableThinking, true)
+
+  // The harness always receives a concrete wire protocol: explicit values
+  // pass through, auto entries carry their probe result, and unpinned auto
+  // entries fall back to chat/completions.
+  const savedById = new Map(calls
+    .filter(call => call.method === 'provider.save')
+    .map(call => [call.params.provider.id, call.params.provider.apiProtocol]))
+  assert.equal(savedById.get('provider-1'), 'openai-chat')
+  assert.equal(savedById.get('provider-auto-detected'), 'anthropic')
+  assert.equal(savedById.get('provider-auto-unpinned'), 'openai-chat')
 })
 
 test('Rust facade promotes historical system and developer messages into run-scoped system sections', async () => {

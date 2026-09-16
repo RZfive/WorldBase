@@ -56,10 +56,17 @@ function canCloseApp (app: RunningApp): boolean {
 function closeTitle (app: RunningApp): string {
   return app.kind === 'project' ? t('appShell.dockStop') : t('appShell.dockCloseWebPage')
 }
+
+/** design v1.7 dock: running apps render as character badges (first grapheme). */
+function appInitial (app: RunningApp): string {
+  const match = /[\p{L}\p{N}]/u.exec(app.name || '')
+  return (match?.[0] || '·').toUpperCase()
+}
 </script>
 
 <template>
   <aside class="dock-bar">
+    <!-- design v1.7: core three = chat bubble / studio hexahedron SVGs -->
     <div class="dock-top">
       <div
         :class="['dock-item', { 'dock-active': props.currentView === 'chat' && !props.showLaunchpad }]"
@@ -68,7 +75,9 @@ function closeTitle (app: RunningApp): string {
         @click="emit('openChat')"
       >
         <span class="dock-item-surface">
-          <span class="dock-item-icon">💬</span>
+          <svg class="dock-item-svg" width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M2.5 3.5h11v7h-6L4 13.5v-3H2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+          </svg>
         </span>
         <span class="dock-tooltip">{{ $t('appShell.chat') }}</span>
       </div>
@@ -80,7 +89,12 @@ function closeTitle (app: RunningApp): string {
         @click="emit('openStudio')"
       >
         <span class="dock-item-surface">
-          <span class="dock-item-icon">🎨</span>
+          <svg class="dock-item-svg" width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M8 1.9c-3.4 0-6.1 2.6-6.1 5.8 0 3.1 2.5 5.7 5.6 5.7.9 0 1.5-.7 1.3-1.5-.2-.8.4-1.6 1.3-1.6h1.5c1.3 0 2.4-1.1 2.4-2.4 0-3.3-2.7-6-6-6z" stroke="currentColor" stroke-width="1.2" />
+            <circle cx="5.3" cy="6.3" r="0.95" fill="currentColor" />
+            <circle cx="8" cy="4.6" r="0.95" fill="currentColor" />
+            <circle cx="10.7" cy="6.3" r="0.95" fill="currentColor" />
+          </svg>
         </span>
         <span class="dock-tooltip">{{ $t('appShell.studio') }}</span>
       </div>
@@ -102,7 +116,7 @@ function closeTitle (app: RunningApp): string {
           <span class="dock-item-surface">
             <span class="dock-item-icon-wrap">
               <img v-if="resolveIcon(app).kind === 'image'" :src="resolveIcon(app).value" alt="" class="dock-item-icon dock-item-icon-image" />
-              <span v-else class="dock-item-icon">{{ resolveIcon(app).value }}</span>
+              <span v-else class="dock-item-badge">{{ appInitial(app) }}</span>
             </span>
             <span class="dock-pin-badge" :title="$t('appShell.pinnedToDock')">📌</span>
             <span v-if="app.isWindow" class="dock-window-badge">↗</span>
@@ -136,7 +150,7 @@ function closeTitle (app: RunningApp): string {
         <span class="dock-item-surface">
           <span class="dock-item-icon-wrap">
             <img v-if="resolveIcon(app).kind === 'image'" :src="resolveIcon(app).value" alt="" class="dock-item-icon dock-item-icon-image" />
-            <span v-else class="dock-item-icon">{{ resolveIcon(app).value }}</span>
+            <span v-else class="dock-item-badge">{{ appInitial(app) }}</span>
           </span>
           <span v-if="app.isWindow" class="dock-window-badge">↗</span>
           <button
@@ -155,9 +169,10 @@ function closeTitle (app: RunningApp): string {
       </div>
     </div>
 
-    <div class="dock-divider" aria-hidden="true"></div>
-
     <div class="dock-bottom">
+      <div class="dock-divider" aria-hidden="true"></div>
+
+      <!-- 应用中心：app grid (launchpad) -->
       <div
         :class="['dock-item', { 'dock-active': props.showLaunchpad }]"
         :title="$t('appShell.launchpad')"
@@ -165,11 +180,17 @@ function closeTitle (app: RunningApp): string {
         @click="emit('toggleLaunchpad')"
       >
         <span class="dock-item-surface">
-          <span class="dock-item-icon">🚀</span>
+          <svg class="dock-item-svg" width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <rect x="2.75" y="2.75" width="4.5" height="4.5" rx="1.3" stroke="currentColor" stroke-width="1.3" />
+            <rect x="8.75" y="2.75" width="4.5" height="4.5" rx="1.3" stroke="currentColor" stroke-width="1.3" />
+            <rect x="2.75" y="8.75" width="4.5" height="4.5" rx="1.3" stroke="currentColor" stroke-width="1.3" />
+            <rect x="8.75" y="8.75" width="4.5" height="4.5" rx="1.3" stroke="currentColor" stroke-width="1.3" />
+          </svg>
         </span>
         <span class="dock-tooltip">{{ $t('appShell.launchpad') }}</span>
       </div>
 
+      <!-- 主题切换已移除：深浅主题在 设置 → 外观 中调整 -->
       <div
         :class="['dock-item', { 'dock-active': props.currentView === 'settings' && !props.showLaunchpad }]"
         :title="$t('appShell.settings')"
@@ -177,7 +198,10 @@ function closeTitle (app: RunningApp): string {
         @click="emit('openSettings')"
       >
         <span class="dock-item-surface">
-          <span class="dock-item-icon">⚙️</span>
+          <svg class="dock-item-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
         </span>
         <span class="dock-tooltip">{{ $t('appShell.settings') }}</span>
       </div>
@@ -187,9 +211,10 @@ function closeTitle (app: RunningApp): string {
 
 <style scoped>
 .dock-bar {
-  --dock-slot-size: 46px;
-  --dock-surface-size: 42px;
-  --dock-icon-size: 22px;
+  /* design v1.7 dock: 56px rail, 42px slots, 38px surfaces, 12px radius */
+  --dock-slot-size: 42px;
+  --dock-surface-size: 38px;
+  --dock-icon-size: 18px;
   --dock-accent: var(--app-accent);
   --dock-accent-soft: var(--app-accent-soft);
   --dock-accent-glow: var(--app-accent-glow);
@@ -200,7 +225,7 @@ function closeTitle (app: RunningApp): string {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding: 6px calc((var(--dock-width) - var(--dock-slot-size)) / 2) 6px;
+  padding: 7px calc((var(--dock-width) - var(--dock-slot-size)) / 2) 7px;
   background: linear-gradient(180deg, var(--app-panel), var(--app-panel-strong) 55%, var(--app-panel));
 }
 
@@ -242,13 +267,13 @@ function closeTitle (app: RunningApp): string {
 .dock-item::before {
   content: '';
   position: absolute;
-  left: 0;
+  left: -5px;
   top: 50%;
-  width: 4px;
-  height: 24px;
-  border-radius: 999px;
+  width: 3px;
+  height: 23px;
+  border-radius: 3px;
   background: linear-gradient(180deg, var(--dock-accent), var(--app-accent-strong));
-  box-shadow: 0 0 14px var(--dock-accent-glow);
+  box-shadow: 0 0 10px var(--dock-accent-glow);
   transform: translateY(-50%) scaleY(0.4);
   transform-origin: center;
   opacity: 0;
@@ -262,12 +287,13 @@ function closeTitle (app: RunningApp): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 14px;
+  border-radius: 12px;
   border: 1px solid transparent;
   background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   overflow: hidden;
-  transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, color 0.18s ease;
+  color: var(--app-text-muted);
 }
 
 .dock-item-surface::before {
@@ -298,24 +324,11 @@ function closeTitle (app: RunningApp): string {
   transform: translateY(-50%) scaleY(1);
 }
 
+/* design v1.7: active slot = accent wash + accent glyph */
 .dock-item.dock-active .dock-item-surface {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent),
-    linear-gradient(180deg, var(--dock-accent-soft), rgba(255, 255, 255, 0.02));
-  border-color: var(--dock-accent-glow);
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
-    inset 0 -18px 28px rgba(255, 255, 255, 0.03);
-}
-
-.dock-item.dock-active .dock-item-surface::after {
-  content: '';
-  position: absolute;
-  inset: 5px;
-  border-radius: 11px;
-  background: radial-gradient(circle at 50% 12%, var(--dock-accent-glow), transparent 68%);
-  opacity: 0.9;
-  pointer-events: none;
+  background: var(--dock-accent-soft);
+  border-color: color-mix(in srgb, var(--dock-accent) 26%, var(--app-border-strong));
+  color: var(--app-accent-strong);
 }
 
 .dock-tooltip {
@@ -353,6 +366,26 @@ function closeTitle (app: RunningApp): string {
   justify-content: center;
 }
 
+/* design v1.7: semantic SVG glyphs for the fixed dock icons */
+.dock-item-svg {
+  position: relative;
+  z-index: 1;
+  transition: transform 0.18s ease, filter 0.18s ease;
+  filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.22));
+}
+
+/* running/pinned apps render as character badges (first grapheme of the name) */
+.dock-item-badge {
+  position: relative;
+  z-index: 1;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.86em;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  transition: transform 0.18s ease, filter 0.18s ease;
+}
+
 .dock-item-icon {
   position: relative;
   z-index: 1;
@@ -369,11 +402,14 @@ function closeTitle (app: RunningApp): string {
   border-radius: 6px;
 }
 
+.dock-item:hover .dock-item-svg,
+.dock-item:hover .dock-item-badge,
 .dock-item:hover .dock-item-icon {
   transform: scale(1.08);
-  filter: drop-shadow(0 12px 16px rgba(0, 0, 0, 0.22));
 }
 
+.dock-item.dock-active .dock-item-svg,
+.dock-item.dock-active .dock-item-badge,
 .dock-item.dock-active .dock-item-icon {
   transform: scale(1.08);
   filter: drop-shadow(0 0 10px var(--dock-accent-glow));
@@ -422,7 +458,8 @@ function closeTitle (app: RunningApp): string {
   z-index: 2;
 }
 
-.dock-item.dock-running .dock-close-btn {
+/* design v1.7: hover 关闭 — the close affordance appears on hover/active only */
+.dock-item.dock-running:hover .dock-close-btn {
   opacity: 0.86;
 }
 

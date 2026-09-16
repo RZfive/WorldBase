@@ -572,6 +572,29 @@ function handleChatSurfaceStatusChange (status: ChatSurfaceStatusSummary) {
   chatSurfaceStatus.value = status
 }
 
+// design v1.7 titlebar: `WorldBase · {视图} · {会话标题}`. The context title
+// only applies to the chat surface; strip any leading emoji from the label
+// ('💬 新对话' → '新对话') so the line stays plain text.
+function stripLeadingSymbols (value: string): string {
+  return value.replace(/^[^\p{L}\p{N}]+/u, '').trim()
+}
+
+const titleViewLabel = computed(() => {
+  switch (currentView.value) {
+    case 'chat': return t('appShell.chat')
+    case 'studio': return t('appShell.studio')
+    case 'settings': return t('appShell.settings')
+    case 'app': return t('appShell.titleViewApp')
+    case 'source': return t('appShell.titleViewSource')
+    default: return ''
+  }
+})
+
+const titleContextTitle = computed(() => {
+  if (currentView.value !== 'chat') return ''
+  return stripLeadingSymbols(chatSurfaceStatus.value.contextLabel || '')
+})
+
 function toggleLaunchpad () {
   showLaunchpad.value = !showLaunchpad.value
   hideDockCtx()
@@ -1242,6 +1265,8 @@ onUnmounted(() => {
 
     <template v-else>
       <TitleBar
+        :view-label="titleViewLabel"
+        :context-title="titleContextTitle"
         @minimize="minimizeWindow"
         @maximize="maximizeWindow"
         @close="closeWindow"

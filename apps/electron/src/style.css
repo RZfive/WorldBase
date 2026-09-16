@@ -12,15 +12,21 @@
   --chat-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
     Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
   --chat-font-size: 16px;
-  --app-accent: #0ea5e9;
-  --app-accent-strong: #0284c7;
-  --app-accent-soft: rgba(14, 165, 233, 0.14);
-  --app-accent-glow: rgba(14, 165, 233, 0.28);
+  /* 晨昏 accent (docs/design/desktop-chat-ui-directions.html): indigo fill,
+     lighter indigo for text-accent/hover on dark. */
+  --app-accent: #5b6be0;
+  --app-accent-strong: #7d89ff;
+  --app-accent-soft: rgba(125, 137, 255, 0.13);
+  --app-accent-glow: rgba(125, 137, 255, 0.24);
+  --app-accent-wash: rgba(125, 137, 255, 0.2);
+  /* Signature gradient (115° indigo → violet → dawn orange) — identity moments
+     only: active list indicator, send key, stream caret. */
+  --app-sig: linear-gradient(115deg, #5b6be0 8%, #9a6bd0 50%, #e8826b 92%);
   /* Translucent shell lets the transparent Electron window show through with
      a frosted-glass blur applied by the app frame. */
   --app-shell-bg: rgba(9, 11, 15, 0.72);
-  --app-shell-tint-1: rgba(56, 189, 248, 0.08);
-  --app-shell-tint-2: rgba(245, 158, 11, 0.06);
+  --app-shell-tint-1: rgba(91, 107, 224, 0.1);
+  --app-shell-tint-2: rgba(232, 130, 107, 0.06);
   --app-main-surface: #0b1018;
   /* Opaque flatten of --app-main-surface over --app-shell-bg — the solid color
      the semi-transparent chat canvas actually reads as. Used by surfaces that
@@ -83,44 +89,45 @@
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --app-accent: #0284c7;
-  --app-accent-strong: #0369a1;
-  --app-accent-soft: rgba(2, 132, 199, 0.12);
-  --app-accent-glow: rgba(2, 132, 199, 0.2);
+  --app-accent: #4353d6;
+  --app-accent-strong: #3242c4;
+  --app-accent-soft: rgba(67, 83, 214, 0.1);
+  --app-accent-glow: rgba(67, 83, 214, 0.2);
+  --app-accent-wash: rgba(67, 83, 214, 0.16);
+  --app-sig: linear-gradient(115deg, #4353d6 8%, #8a5ccf 50%, #d0654a 92%);
   /* Frosted white frame around an opaque white work surface. */
-  --app-shell-bg: rgba(255, 255, 255, 0.62);
-  --app-shell-tint-1: rgba(14, 165, 233, 0.08);
-  --app-shell-tint-2: rgba(245, 158, 11, 0.06);
-  --app-main-surface: #ffffff;
-  /* Opaque flatten of --app-main-surface over --app-shell-bg — near-white, so
-     the floating chat header matches the message-list canvas instead of the
-     bluer raw shell-bg (#eef3f9). */
-  --app-chat-canvas: #ffffff;
-  --app-panel: rgba(255, 255, 255, 0.9);
+  --app-shell-bg: #f4f5f9;
+  --app-shell-tint-1: rgba(67, 83, 214, 0.07);
+  --app-shell-tint-2: rgba(208, 101, 74, 0.05);
+  --app-main-surface: #fbfbfd;
+  --app-chat-canvas: #fbfbfd;
+  --app-panel: #ffffff;
   --app-panel-strong: #ffffff;
-  --app-panel-muted: rgba(15, 23, 42, 0.04);
-  --app-panel-subtle: rgba(15, 23, 42, 0.03);
-  --app-input-bg: rgba(255, 255, 255, 0.9);
-  --app-input-border: rgba(15, 23, 42, 0.1);
-  --app-border: rgba(15, 23, 42, 0.12);
-  --app-border-strong: rgba(15, 23, 42, 0.2);
-  --app-text: #0f172a;
-  --app-text-strong: #020617;
-  --app-text-soft: #334155;
-  --app-text-muted: #64748b;
-  --app-text-faint: #94a3b8;
-  --app-success: #16a34a;
-  --app-danger: #dc2626;
+  --app-chat-list-surface: #eef0f7;
+  --app-chat-list-raised: #ffffff;
+  --app-panel-muted: rgba(52, 58, 94, 0.055);
+  --app-panel-subtle: rgba(52, 58, 94, 0.035);
+  --app-input-bg: #ffffff;
+  --app-input-border: rgba(52, 58, 94, 0.14);
+  --app-border: rgba(52, 58, 94, 0.12);
+  --app-border-strong: rgba(52, 58, 94, 0.22);
+  --app-text: #1d2133;
+  --app-text-strong: #0f1220;
+  --app-text-soft: #474d66;
+  --app-text-muted: #686e86;
+  --app-text-faint: #8f95ab;
+  --app-success: #177e4e;
+  --app-danger: #c23a3a;
   --app-shadow: 0 18px 48px rgba(15, 23, 42, 0.12);
   --app-scrollbar: rgba(15, 23, 42, 0.18);
   --app-scrollbar-hover: rgba(15, 23, 42, 0.28);
 
-  --app-success-soft: rgba(22, 163, 74, 0.1);
-  --app-warning: #d97706;
-  --app-warning-strong: #b45309;
-  --app-warning-soft: rgba(217, 119, 6, 0.1);
-  --app-danger-strong: #b91c1c;
-  --app-danger-soft: rgba(220, 38, 38, 0.08);
+  --app-success-soft: rgba(31, 164, 104, 0.11);
+  --app-warning: #9a6410;
+  --app-warning-strong: #9a6410;
+  --app-warning-soft: rgba(221, 154, 46, 0.13);
+  --app-danger-strong: #c23a3a;
+  --app-danger-soft: rgba(210, 75, 75, 0.10);
 
   --shadow-1: 0 2px 10px rgba(15, 23, 42, 0.07);
   --shadow-2: 0 10px 28px rgba(15, 23, 42, 0.1);

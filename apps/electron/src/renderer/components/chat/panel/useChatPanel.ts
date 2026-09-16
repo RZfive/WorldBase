@@ -502,11 +502,16 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       loadLongTermGoalSnapshot,
       mergeGoalTitleState
     })
-    await loadConversations()
-    await loadLongTermGoals()
-    await loadProviders()
-    await loadSkills()
-    await loadAgentWorkspaceOptions()
+    // These startup snapshots are independent. Loading them in parallel avoids
+    // making the renderer appear blank while each store waits for the previous
+    // native read to finish.
+    await Promise.all([
+      loadConversations(),
+      loadLongTermGoals(),
+      loadProviders(),
+      loadSkills(),
+      loadAgentWorkspaceOptions()
+    ])
   })
 
   let disposed = false

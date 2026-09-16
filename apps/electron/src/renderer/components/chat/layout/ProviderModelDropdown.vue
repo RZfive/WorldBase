@@ -8,15 +8,25 @@ interface ProviderItem {
   models: string[]
 }
 
+type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+
 const props = withDefaults(defineProps<{
   providers: ProviderItem[]
   activeProviderId?: string
   selectedModel?: string
   title?: string
   disabled?: boolean
+  /** Show the model tuning section (reasoning strength / temperature). */
+  showTuning?: boolean
+  reasoningStrength?: ReasoningStrength
+  temperature?: number | null
+  providerDefaultTemperature?: number
+  isGroupConversation?: boolean
 }>(), {
   title: '',
-  disabled: false
+  disabled: false,
+  showTuning: false,
+  isGroupConversation: false
 })
 
 const emit = defineEmits<{
@@ -27,6 +37,8 @@ const emit = defineEmits<{
    * `update:active-provider-id` 与 `update:selected-model` 两个事件时的竞态。
    */
   (e: 'select', payload: { providerId: string; model: string }): void
+  (e: 'update:reasoning-strength', value: ReasoningStrength): void
+  (e: 'update:temperature', value: number | null): void
 }>()
 
 const { t } = useI18n()
@@ -220,6 +232,66 @@ function handlePanelKeydown (e: KeyboardEvent) {
   }
 }
 
+// ---- model tuning (design v1.7: reasoning strength / temperature live with
+// the provider + model selection instead of a header menu) ----
+const TUNING_TEMPERATURE_MIN = 0
+const TUNING_TEMPERATURE_MAX = 2
+const TUNING_SLIDER_THUMB_SIZE = 12
+const reasoningLevels: Array<{ value: ReasoningStrength; labelKey: string }> = [
+  { value: 'low', labelKey: 'chatUi.reasoningLow' },
+  { value: 'medium', labelKey: 'chatUi.reasoningMedium' },
+  { value: 'high', labelKey: 'chatUi.reasoningHigh' },
+  { value: 'max', labelKey: 'chatUi.reasoningMax' }
+]
+
+function tuningSliderFill (ratio: number): string {
+  const clamped = Math.min(Math.max(ratio, 0), 1)
+  const percent = clamped * 100
+  const offset = (0.5 - clamped) * TUNING_SLIDER_THUMB_SIZE
+  const operator = offset >= 0 ? '+' : '-'
+  return `calc(${percent.toFixed(3)}% ${operator} ${Math.abs(offset).toFixed(2)}px)`
+}
+
+const fallbackTuningTemperature = computed(() => {
+  const value = props.providerDefaultTemperature
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0.3
+})
+const effectiveTuningTemperature = computed(() => {
+  return typeof props.temperature === 'number' && Number.isFinite(props.temperature) ? props.temperature : fallbackTuningTemperature.value
+})
+const currentReasoningIndex = computed(() => {
+  const index = reasoningLevels.findIndex(level => level.value === (props.reasoningStrength || 'max'))
+  return index >= 0 ? index : reasoningLevels.length - 1
+})
+const currentReasoningLabel = computed(() => {
+  const level = reasoningLevels[currentReasoningIndex.value]
+  return level ? t(level.labelKey) : t('chatUi.reasoningMax')
+})
+const groupReasoningTitle = computed(() => {
+  return t('chatUi.groupReasoningTitle', { value: currentReasoningLabel.value })
+})
+const reasoningSliderFill = computed(() => {
+  return tuningSliderFill(currentReasoningIndex.value / Math.max(reasoningLevels.length - 1, 1))
+})
+const temperatureSliderFill = computed(() => {
+  const span = Math.max(TUNING_TEMPERATURE_MAX - TUNING_TEMPERATURE_MIN, 1)
+  const value = Math.min(Math.max(effectiveTuningTemperature.value, TUNING_TEMPERATURE_MIN), TUNING_TEMPERATURE_MAX)
+  return tuningSliderFill((value - TUNING_TEMPERATURE_MIN) / span)
+})
+
+function onTuningTemperatureInput (e: Event) {
+  const value = Number.parseFloat((e.target as HTMLInputElement).value)
+  if (!Number.isFinite(value)) return
+  emit('update:temperature', Math.min(Math.max(value, TUNING_TEMPERATURE_MIN), TUNING_TEMPERATURE_MAX))
+}
+
+function onTuningReasoningInput (e: Event) {
+  const value = Number.parseInt((e.target as HTMLInputElement).value, 10)
+  const level = reasoningLevels[Math.min(Math.max(value, 0), reasoningLevels.length - 1)]
+  if (!level || props.isGroupConversation) return
+  emit('update:reasoning-strength', level.value)
+}
+
 function scrollCurrentIntoView () {
   const selectedProvider = panelRef.value?.querySelector<HTMLElement>('.provider-model-provider.selected')
   selectedProvider?.scrollIntoView({ block: 'nearest' })
@@ -275,65 +347,101 @@ onBeforeUnmount(() => {
       @click.stop
       @keydown="handlePanelKeydown"
     >
-      <div class="provider-model-providers-column">
-        <button
-          v-for="provider in providers"
-          :key="provider.id"
-          class="provider-model-provider"
-          :class="{ selected: provider.id === resolvedSelectedProvider?.id, active: provider.id === currentExpandedProvider?.id }"
-          type="button"
-          :title="provider.name"
-          @click="handleProviderClick(provider)"
-          @mouseenter="expandProvider(provider.id)"
-          @focus="expandProvider(provider.id)"
-        >
-          <span class="provider-model-provider-name">{{ provider.name }}</span>
-          <svg class="provider-model-provider-caret" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M6 4L10 8L6 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </button>
+      <div class="provider-model-main">
+        <div class="provider-model-providers-column">
+          <button
+            v-for="provider in providers"
+            :key="provider.id"
+            class="provider-model-provider"
+            :class="{ selected: provider.id === resolvedSelectedProvider?.id, active: provider.id === currentExpandedProvider?.id }"
+            type="button"
+            :title="provider.name"
+            @click="handleProviderClick(provider)"
+            @mouseenter="expandProvider(provider.id)"
+            @focus="expandProvider(provider.id)"
+          >
+            <span class="provider-model-provider-name">{{ provider.name }}</span>
+            <svg class="provider-model-provider-caret" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M6 4L10 8L6 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="provider-model-models-column">
+          <div class="provider-model-models-heading" :title="currentExpandedProvider?.name || props.title">
+            {{ currentExpandedProvider?.name || props.title }}
+          </div>
+
+          <div
+            v-if="currentExpandedProvider && currentExpandedProvider.models.length > 0"
+            ref="modelListRef"
+            class="provider-model-list"
+            role="listbox"
+            :aria-label="currentExpandedProvider.name"
+            tabindex="0"
+            @scroll.passive="handleModelScroll"
+            @keydown="handleModelKeydown"
+          >
+            <div class="provider-model-list-content" :style="{ height: `${currentExpandedProvider.models.length * MODEL_ROW_HEIGHT}px` }">
+              <button
+                v-for="{ model, index } in visibleModels"
+                :key="model"
+                class="provider-model-item"
+                :style="{ top: `${index * MODEL_ROW_HEIGHT}px`, height: `${MODEL_ROW_HEIGHT}px` }"
+                :data-model-index="index"
+                role="option"
+                :aria-selected="currentExpandedProvider.id === activeProviderId && model === selectedModel"
+                tabindex="-1"
+                :class="{ selected: currentExpandedProvider.id === activeProviderId && model === selectedModel }"
+                @focus="focusedModelIndex = index"
+                type="button"
+                :title="`${model} · ${currentExpandedProvider.name}`"
+                @click="selectModel(currentExpandedProvider.id, model)"
+              >
+                <span class="provider-model-item-label">{{ model }}</span>
+                <svg v-if="currentExpandedProvider.id === activeProviderId && model === selectedModel" class="provider-model-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div v-else class="provider-model-empty">{{ $t('chatUi.noAvailableModels') }}</div>
+        </div>
       </div>
 
-      <div class="provider-model-models-column">
-        <div class="provider-model-models-heading" :title="currentExpandedProvider?.name || props.title">
-          {{ currentExpandedProvider?.name || props.title }}
-        </div>
-
-        <div
-          v-if="currentExpandedProvider && currentExpandedProvider.models.length > 0"
-          ref="modelListRef"
-          class="provider-model-list"
-          role="listbox"
-          :aria-label="currentExpandedProvider.name"
-          tabindex="0"
-          @scroll.passive="handleModelScroll"
-          @keydown="handleModelKeydown"
-        >
-          <div class="provider-model-list-content" :style="{ height: `${currentExpandedProvider.models.length * MODEL_ROW_HEIGHT}px` }">
-            <button
-              v-for="{ model, index } in visibleModels"
-              :key="model"
-              class="provider-model-item"
-              :style="{ top: `${index * MODEL_ROW_HEIGHT}px`, height: `${MODEL_ROW_HEIGHT}px` }"
-              :data-model-index="index"
-              role="option"
-              :aria-selected="currentExpandedProvider.id === activeProviderId && model === selectedModel"
-              tabindex="-1"
-              :class="{ selected: currentExpandedProvider.id === activeProviderId && model === selectedModel }"
-              @focus="focusedModelIndex = index"
-              type="button"
-              :title="`${model} · ${currentExpandedProvider.name}`"
-              @click="selectModel(currentExpandedProvider.id, model)"
-            >
-              <span class="provider-model-item-label">{{ model }}</span>
-              <svg v-if="currentExpandedProvider.id === activeProviderId && model === selectedModel" class="provider-model-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        <div v-else class="provider-model-empty">{{ $t('chatUi.noAvailableModels') }}</div>
+      <!-- Reasoning + temperature share one compact row. -->
+      <div v-if="props.showTuning" class="provider-model-tuning">
+        <span class="provider-model-tuning-name" :title="props.isGroupConversation ? groupReasoningTitle : ''">
+          {{ $t('chatUi.reasoningStrength') }}
+          <span class="provider-model-tuning-value">{{ currentReasoningLabel }}</span>
+        </span>
+        <input
+          class="provider-model-slider"
+          type="range"
+          min="0"
+          max="3"
+          step="1"
+          :value="currentReasoningIndex"
+          :style="{ '--tuning-slider-fill': reasoningSliderFill }"
+          :disabled="props.isGroupConversation"
+          @input="onTuningReasoningInput"
+        />
+        <span class="provider-model-tuning-divider" aria-hidden="true"></span>
+        <span class="provider-model-tuning-name">
+          {{ $t('chatUi.modelTemperature') }}
+          <span class="provider-model-tuning-value">{{ effectiveTuningTemperature.toFixed(1) }}</span>
+        </span>
+        <input
+          class="provider-model-slider"
+          type="range"
+          :min="TUNING_TEMPERATURE_MIN"
+          :max="TUNING_TEMPERATURE_MAX"
+          step="0.1"
+          :value="effectiveTuningTemperature"
+          :style="{ '--tuning-slider-fill': temperatureSliderFill }"
+          @input="onTuningTemperatureInput"
+        />
       </div>
     </div>
   </Teleport>
@@ -395,9 +503,8 @@ onBeforeUnmount(() => {
 
 .provider-model-panel {
   z-index: 10000;
-  display: grid;
-  grid-template-columns: minmax(150px, 170px) minmax(210px, 1fr);
-  gap: 0;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   overflow: hidden;
   border: 1px solid var(--app-border-strong);
@@ -405,6 +512,113 @@ onBeforeUnmount(() => {
   background: var(--app-panel-strong);
   box-shadow: var(--app-shadow);
   backdrop-filter: blur(20px);
+}
+
+.provider-model-main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(150px, 170px) minmax(210px, 1fr);
+}
+
+/* ---- model tuning section (reasoning strength / temperature, one row) ---- */
+.provider-model-tuning {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-panel-muted) 55%, transparent);
+}
+
+.provider-model-tuning-name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  flex: 0 0 auto;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--app-text-soft);
+  white-space: nowrap;
+}
+
+.provider-model-tuning-value {
+  color: var(--app-accent);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.provider-model-tuning-divider {
+  width: 1px;
+  height: 16px;
+  flex-shrink: 0;
+  background: var(--app-border-strong);
+}
+
+.provider-model-slider {
+  --tuning-slider-fill: 0%;
+  flex: 1 1 0;
+  min-width: 56px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+.provider-model-slider:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.provider-model-slider::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--app-accent) 0%,
+    var(--app-accent) var(--tuning-slider-fill),
+    color-mix(in srgb, var(--app-text-muted) 24%, transparent) var(--tuning-slider-fill),
+    color-mix(in srgb, var(--app-text-muted) 24%, transparent) 100%
+  );
+}
+
+.provider-model-slider::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -2px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--app-accent) 70%, white);
+  background: var(--app-panel-strong);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.24);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.provider-model-slider::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--app-accent) 0%,
+    var(--app-accent) var(--tuning-slider-fill),
+    color-mix(in srgb, var(--app-text-muted) 24%, transparent) var(--tuning-slider-fill),
+    color-mix(in srgb, var(--app-text-muted) 24%, transparent) 100%
+  );
+}
+
+.provider-model-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--app-accent) 70%, white);
+  background: var(--app-panel-strong);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.24);
 }
 
 .provider-model-providers-column,

@@ -65,8 +65,8 @@ export interface AIConfigInput {
   apiKey?: string
   baseUrl?: string
   model?: string
-  /** Wire protocol: OpenAI-compatible chat/completions or native Anthropic Messages API. */
-  apiProtocol?: 'openai' | 'anthropic'
+  /** Wire protocol: OpenAI-compatible chat/completions, OpenAI Responses (Rust harness only), or native Anthropic Messages API. */
+  apiProtocol?: 'openai' | 'openai-chat' | 'openai-responses' | 'anthropic'
   /** 供应商 id（用于用量统计分组；不影响 provider 行为）。 */
   providerId?: string
   /** 供应商名称快照（用量统计展示用）。 */

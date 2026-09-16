@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const CODING_TEMPERATURE: f32 = 0.3;
+pub(crate) const CODING_TEMPERATURE: f32 = 0.3;
 const IMAGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const CONTINUATION_USER_MESSAGE: &str =
     "Continue the current task from the existing context. Do not repeat completed steps.";
@@ -254,7 +254,7 @@ fn is_o_series(model: &str) -> bool {
     bytes.len() >= 2 && bytes[0] == b'o' && matches!(bytes[1], b'1'..=b'9')
 }
 
-fn model_rejects_custom_temperature(base_url: &str, model: &str) -> bool {
+pub(crate) fn model_rejects_custom_temperature(base_url: &str, model: &str) -> bool {
     if !is_openai_provider(base_url, model) {
         return false;
     }
@@ -262,7 +262,11 @@ fn model_rejects_custom_temperature(base_url: &str, model: &str) -> bool {
     model.starts_with("gpt-5") || is_o_series(&model)
 }
 
-fn resolve_reasoning_effort(base_url: &str, model: &str, options: &ChatOptions) -> Option<String> {
+pub(crate) fn resolve_reasoning_effort(
+    base_url: &str,
+    model: &str,
+    options: &ChatOptions,
+) -> Option<String> {
     if !options.enable_thinking {
         return None;
     }

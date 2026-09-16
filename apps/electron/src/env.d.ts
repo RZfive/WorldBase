@@ -502,7 +502,8 @@ interface AIProviderConfig {
   name: string
   baseUrl: string
   apiKey: string
-  apiProtocol?: 'openai' | 'anthropic'
+  apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic'
+  detectedApiProtocol?: 'openai-chat' | 'openai-responses' | 'anthropic'
   models: string[]
   modelContextWindows?: Record<string, number>
   modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
@@ -1101,7 +1102,8 @@ interface ElectronAPI {
   getAISettings: () => Promise<{ apiKey: string; baseUrl: string; model: string }>
   saveAISettings: (config: { apiKey: string; baseUrl: string; model: string }) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
-  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: 'openai' | 'anthropic' }) => Promise<{ models: string[] }>
+  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => Promise<{ models: string[] }>
+  detectProviderProtocol: (input: { baseUrl: string; apiKey: string; model: string }) => Promise<{ protocol: 'openai-chat' | 'openai-responses' | 'anthropic' | null; probes: Array<{ protocol: string; ok: boolean; error?: string }> }>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>

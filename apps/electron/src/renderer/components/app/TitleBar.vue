@@ -7,11 +7,16 @@ const props = withDefaults(defineProps<{
   icon?: string
   subtitle?: string
   isMaximized?: boolean
+  /** design v1.7 titlebar: when set, the center shows `WorldBase · {viewLabel} · {contextTitle}`. */
+  viewLabel?: string
+  contextTitle?: string
 }>(), {
   title: 'WorldBase',
   icon: '🌍',
   subtitle: '',
-  isMaximized: false
+  isMaximized: false,
+  viewLabel: '',
+  contextTitle: ''
 })
 
 const emit = defineEmits<{
@@ -52,7 +57,17 @@ const maximizeLabel = computed(() => props.isMaximized ? t('appShell.restore') :
     </div>
 
     <div class="titlebar-drag">
-      <div class="titlebar-brand">
+      <!-- design v1.7: `WorldBase · 对话 · {会话标题}` mono context line -->
+      <div v-if="props.viewLabel" class="titlebar-context">
+        <strong>{{ props.title }}</strong>
+        <span class="titlebar-context-sep">·</span>
+        <span>{{ props.viewLabel }}</span>
+        <template v-if="props.contextTitle">
+          <span class="titlebar-context-sep">·</span>
+          <span class="titlebar-context-title">{{ props.contextTitle }}</span>
+        </template>
+      </div>
+      <div v-else class="titlebar-brand">
         <span class="titlebar-icon">{{ props.icon }}</span>
         <div class="titlebar-copy">
           <span class="titlebar-title">{{ props.title }}</span>
@@ -61,7 +76,9 @@ const maximizeLabel = computed(() => props.isMaximized ? t('appShell.restore') :
       </div>
     </div>
 
-    <div v-if="!isWindows" class="titlebar-balance"></div>
+    <div v-if="!isWindows" class="titlebar-right">
+      <span v-if="props.viewLabel" class="titlebar-platform" aria-hidden="true">DESKTOP</span>
+    </div>
 
     <div v-else class="titlebar-controls windows-controls">
       <button class="titlebar-win-button" @click="emit('minimize')" :title="$t('appShell.minimize')" :aria-label="$t('appShell.minimize')">
@@ -164,9 +181,55 @@ const maximizeLabel = computed(() => props.isMaximized ? t('appShell.restore') :
   margin-left: 12px;
 }
 
-.titlebar-balance {
+/* design v1.7: right rail shows the platform badge on the context line */
+.titlebar-right {
   width: 74px;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.titlebar-platform {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.6em;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--app-text-faint);
+}
+
+/* design v1.7: `WorldBase · 对话 · {会话标题}` — mono line, brand in UI sans */
+.titlebar-context {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 100%;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.72em;
+  letter-spacing: 0.04em;
+  color: var(--app-text-muted);
+}
+
+.titlebar-context strong {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--app-text-strong);
+  white-space: nowrap;
+}
+
+.titlebar-context-sep {
+  flex-shrink: 0;
+  color: var(--app-text-faint);
+}
+
+.titlebar-context-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .titlebar-traffic {

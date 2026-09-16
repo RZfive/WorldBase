@@ -75,14 +75,14 @@ const statusText = computed(() => {
 .message-event-card {
   width: min(100%, var(--chat-event-card-max, 1080px));
   border: 1px solid var(--app-border-strong);
-  border-radius: 18px;
+  border-radius: 13px;
   background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
   overflow: hidden;
 }
 
 .auth-request-card {
-  padding: 18px 20px;
+  padding: 10px 12px;
   border-color: rgba(245, 158, 11, 0.35);
   background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
   transition: border-color 0.3s ease;
@@ -117,7 +117,7 @@ const statusText = computed(() => {
 .auth-request-icon {
   width: 42px;
   height: 42px;
-  border-radius: 12px;
+  border-radius: 9px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -131,7 +131,7 @@ const statusText = computed(() => {
 
 .auth-request-icon.approved {
   background: rgba(34, 197, 94, 0.12);
-  color: #22c55e;
+  color: var(--app-success);
 }
 
 .auth-request-icon.denied {
@@ -158,7 +158,7 @@ const statusText = computed(() => {
 }
 
 .auth-request-status.pending { color: #f59e0b; font-weight: 600; }
-.auth-request-status.approved { color: #22c55e; }
+.auth-request-status.approved { color: var(--app-success); }
 .auth-request-status.denied { color: #ef4444; }
 
 .auth-request-title {
@@ -170,7 +170,7 @@ const statusText = computed(() => {
   margin: 10px 0 0;
   padding: 12px 14px;
   border: 1px solid var(--app-border);
-  border-radius: 12px;
+  border-radius: 9px;
   background: var(--app-panel-subtle);
   color: var(--app-text-soft);
   font-size: 0.82em;
@@ -198,7 +198,7 @@ const statusText = computed(() => {
   height: 40px;
   padding: 0 18px;
   border: none;
-  border-radius: 12px;
+  border-radius: 9px;
   font-size: 0.86em;
   font-weight: 600;
   cursor: pointer;

@@ -62,3 +62,39 @@ test('renderer fallback applies the same Rust-default migration rule', async () 
     else globalThis.window = previousWindow
   }
 })
+
+test('provider protocol values normalize with legacy migration', async () => {
+  await withSettings({
+    aiProviders: {
+      providers: [
+        { id: 'legacy-openai', name: 'Old', baseUrl: 'https://api.deepseek.com/v1', apiKey: 'k', apiProtocol: 'openai', models: ['m'], activeModel: 'm' },
+        { id: 'legacy-auto-anthropic', name: 'Sniffed', baseUrl: 'https://api.anthropic.com', apiKey: 'k', models: ['claude'], activeModel: 'claude' },
+        { id: 'legacy-auto-other', name: 'Plain', baseUrl: 'https://gateway.example/v1', apiKey: 'k', models: ['m'], activeModel: 'm' },
+        { id: 'new-responses', name: 'New', baseUrl: 'https://api.openai.com/v1', apiKey: 'k', apiProtocol: 'openai-responses', models: ['gpt-5.1'], activeModel: 'gpt-5.1' },
+        { id: 'explicit-anthropic', name: 'Native', baseUrl: 'https://gw.example/v3', apiKey: 'k', apiProtocol: 'anthropic', models: ['claude'], activeModel: 'claude' }
+      ],
+      activeProviderId: 'legacy-openai',
+      enabledProviderIds: ['legacy-openai']
+    }
+  }, async store => {
+    const providers = store.getProviders().providers
+    const byId = Object.fromEntries(providers.map(provider => [provider.id, provider]))
+
+    // Legacy 'openai' migrates to the explicit chat/completions value.
+    assert.equal(byId['legacy-openai'].apiProtocol, 'openai-chat')
+    assert.equal(byId['legacy-openai'].detectedApiProtocol, undefined)
+
+    // Auto + anthropic.com keeps working: the sniffed result is pinned once as
+    // the detection outcome instead of being re-guessed at runtime.
+    assert.equal(byId['legacy-auto-anthropic'].apiProtocol, '')
+    assert.equal(byId['legacy-auto-anthropic'].detectedApiProtocol, 'anthropic')
+
+    // Plain auto entries stay unpinned.
+    assert.equal(byId['legacy-auto-other'].apiProtocol, '')
+    assert.equal(byId['legacy-auto-other'].detectedApiProtocol, undefined)
+
+    // New protocol values round-trip untouched.
+    assert.equal(byId['new-responses'].apiProtocol, 'openai-responses')
+    assert.equal(byId['explicit-anthropic'].apiProtocol, 'anthropic')
+  })
+})

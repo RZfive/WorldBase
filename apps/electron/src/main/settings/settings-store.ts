@@ -16,14 +16,27 @@ export interface AISettingsInput {
   model?: string
 }
 
+/**
+ * User-selected chat wire protocol for a provider.
+ * - `''` — auto-detect (probe-based; the result is cached in `detectedApiProtocol`)
+ * - `'openai-chat'` — OpenAI Chat Completions, the de-facto gateway standard
+ * - `'openai-responses'` — OpenAI's newer native Responses API
+ * - `'anthropic'` — native Anthropic Messages API
+ */
+export type ProviderApiProtocol = '' | 'openai-chat' | 'openai-responses' | 'anthropic'
+/** A concrete (non-auto) wire protocol. */
+export type ConcreteApiProtocol = 'openai-chat' | 'openai-responses' | 'anthropic'
+
 /** A saved AI provider configuration */
 export interface AIProvider {
   id: string
   name: string
   baseUrl: string
   apiKey: string
-  /** Wire protocol: 'anthropic' uses the native Messages API; default auto-detects from baseUrl. */
-  apiProtocol?: 'openai' | 'anthropic'
+  /** Wire protocol selection; see {@link ProviderApiProtocol}. */
+  apiProtocol?: ProviderApiProtocol
+  /** Last successful auto-detection result (only meaningful while `apiProtocol` is `''`). */
+  detectedApiProtocol?: ConcreteApiProtocol
   models: string[]
   /** Context window per model name */
   modelContextWindows?: Record<string, number>
@@ -215,6 +228,22 @@ function normalizeModelCapabilities (
   return normalized
 }
 
+/**
+ * Normalize a stored protocol selection. Legacy `'openai'` migrates to
+ * `'openai-chat'`; anything unknown becomes the auto sentinel `''`.
+ */
+function normalizeApiProtocol (value: unknown): ProviderApiProtocol {
+  if (value === 'anthropic' || value === 'openai-chat' || value === 'openai-responses' || value === '') return value
+  if (value === 'openai') return 'openai-chat'
+  return ''
+}
+
+function normalizeDetectedApiProtocol (value: unknown): ConcreteApiProtocol | undefined {
+  if (value === 'anthropic' || value === 'openai-chat' || value === 'openai-responses') return value
+  if (value === 'openai') return 'openai-chat'
+  return undefined
+}
+
 function normalizeProvider (input: AIProvider): AIProvider {
   const rawModels = Array.isArray(input.models) ? input.models : []
   const models: string[] = []
@@ -245,12 +274,23 @@ function normalizeProvider (input: AIProvider): AIProvider {
 
   const activeModel = models.includes(input.activeModel) ? input.activeModel : (models[0] || '')
 
+  const apiProtocol = normalizeApiProtocol(input.apiProtocol)
+  let detectedApiProtocol = normalizeDetectedApiProtocol(input.detectedApiProtocol)
+  // One-time migration: entries that previously relied on base-URL sniffing
+  // (auto + anthropic.com) keep working by pinning the sniffed result as the
+  // detection outcome. Runtime resolution itself never guesses from the URL.
+  if (apiProtocol === '' && detectedApiProtocol === undefined
+    && input.baseUrl.toLowerCase().includes('anthropic.com')) {
+    detectedApiProtocol = 'anthropic'
+  }
+
   return {
     id: input.id,
     name: input.name,
     baseUrl: normalizeBaseUrl(input.baseUrl),
     apiKey: input.apiKey,
-    apiProtocol: input.apiProtocol === 'anthropic' || input.apiProtocol === 'openai' ? input.apiProtocol : undefined,
+    apiProtocol,
+    detectedApiProtocol,
     models,
     modelContextWindows,
     modelCapabilities,

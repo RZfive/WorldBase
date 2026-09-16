@@ -41,7 +41,7 @@ export interface AIConfigInput {
   apiKey?: string
   baseUrl?: string
   model?: string
-  apiProtocol?: 'openai' | 'anthropic'
+  apiProtocol?: 'openai' | 'openai-chat' | 'openai-responses' | 'anthropic'
   providerId?: string
   providerName?: string
   imageGeneration?: boolean

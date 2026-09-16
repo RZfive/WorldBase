@@ -277,7 +277,9 @@ onBeforeUnmount(() => {
   min-width: 0;
   max-width: 100%;
   padding: 0;
-  color: var(--app-text);
+  color: var(--app-text-soft);
+  font-size: 1em;
+  line-height: 1.68;
   overflow-wrap: anywhere;
 }
 
@@ -285,12 +287,12 @@ onBeforeUnmount(() => {
   width: fit-content;
   max-width: min(100%, var(--chat-user-bubble-max, 640px));
   margin-left: auto;
-  padding: 12px 16px;
+  padding: 7px 11px;
   border: 1px solid var(--chat-bubble-user-border);
-  border-radius: 18px 18px 8px 18px;
+  border-radius: 13px 13px 4px 13px;
   background: var(--chat-bubble-user-bg);
   color: var(--app-text-strong);
-  box-shadow: var(--shadow-1);
+  box-shadow: none;
 }
 
 .message-output.streaming {
@@ -458,12 +460,12 @@ onBeforeUnmount(() => {
 .message-output :deep(pre) {
   background: var(--app-panel-strong);
   border: 1px solid var(--app-border-strong);
-  border-radius: 12px;
-  padding: 12px 14px;
+  border-radius: 9px;
+  padding: 9px 10px;
   overflow-x: auto;
   font-size: 0.85em;
   line-height: 1.55;
-  margin: 10px 0;
+  margin: 8px 0;
 }
 
 .message-output :deep(code) {
@@ -494,13 +496,13 @@ onBeforeUnmount(() => {
   line-height: 1.35;
 }
 
-.message-output :deep(h1) { font-size: 1.22em; }
-.message-output :deep(h2) { font-size: 1.12em; }
-.message-output :deep(h3) { font-size: 1.02em; }
+.message-output :deep(h1) { font-size: 1.34em; }
+.message-output :deep(h2) { font-size: 1.18em; }
+.message-output :deep(h3) { font-size: 1em; }
 
 .message-output :deep(blockquote) {
-  border-left: 3px solid var(--app-accent);
-  padding-left: 12px;
+  border-left: 2px solid var(--app-accent);
+  padding-left: 11px;
   color: var(--app-text-muted);
   font-family: inherit;
   margin: 0.55em 0;

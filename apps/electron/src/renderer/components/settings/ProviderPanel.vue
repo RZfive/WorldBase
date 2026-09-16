@@ -16,7 +16,10 @@ interface AIProvider {
   name: string
   baseUrl: string
   apiKey: string
-  apiProtocol?: 'openai' | 'anthropic'
+  /** '' = auto-detect (probe-based, cached in detectedApiProtocol). */
+  apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic'
+  /** Last successful probe-based detection result while apiProtocol is ''. */
+  detectedApiProtocol?: 'openai-chat' | 'openai-responses' | 'anthropic'
   models: string[]
   modelContextWindows?: Record<string, number>
   modelPricing?: Record<string, ModelPricingEntry>
@@ -62,6 +65,10 @@ const remoteModelsLoading = ref(false)
 const remoteModelsError = ref('')
 let remoteModelsTimer: number | undefined
 let remoteModelsRequestId = 0
+const detectionBusy = ref(false)
+const detectionFailed = ref(false)
+const detectionStatusMessage = ref('')
+let lastDetectionKey = ''
 
 const filteredProviders = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
@@ -92,19 +99,29 @@ const remoteModelOptions = computed(() => {
     .map(model => ({ value: model, label: model }))
 })
 
-/** Select proxy with '' meaning "auto-detect from base URL". */
-const editApiProtocol = computed<'openai' | 'anthropic' | ''>({
+/** Select proxy with '' meaning "auto-detect via protocol probing". */
+const editApiProtocol = computed<'' | 'openai-chat' | 'openai-responses' | 'anthropic'>({
   get: () => editDraft.value?.apiProtocol ?? '',
   set: (value) => {
     if (editDraft.value) {
-      editDraft.value.apiProtocol = value === 'openai' || value === 'anthropic' ? value : undefined
+      editDraft.value.apiProtocol = value
     }
   }
 })
 
+function protocolDisplayName (protocol: 'openai-chat' | 'openai-responses' | 'anthropic'): string {
+  if (protocol === 'anthropic') return t('settings.provider.apiProtocolAnthropic')
+  if (protocol === 'openai-responses') return t('settings.provider.apiProtocolOpenAIResponses')
+  return t('settings.provider.apiProtocolOpenAIChat')
+}
+
 function providerProtocolLabel (provider: AIProvider): string {
   if (provider.apiProtocol === 'anthropic') return t('settings.provider.apiProtocolAnthropic')
-  if (provider.apiProtocol === 'openai') return t('settings.provider.apiProtocolOpenAI')
+  if (provider.apiProtocol === 'openai-responses') return t('settings.provider.apiProtocolOpenAIResponses')
+  if (provider.apiProtocol === 'openai-chat') return t('settings.provider.apiProtocolOpenAIChat')
+  if (provider.detectedApiProtocol) {
+    return `${t('settings.provider.apiProtocolAuto')} · ${protocolDisplayName(provider.detectedApiProtocol)}`
+  }
   return t('settings.provider.apiProtocolAuto')
 }
 
@@ -131,6 +148,22 @@ watch(
   }
 )
 
+// A cached detection result is only valid for the exact endpoint + key it
+// probed; clear it as soon as either changes. The opening transition (empty
+// sentinel → loaded values) must not clear a pinned result.
+watch(
+  () => [editDraft.value?.baseUrl.trim() ?? '', editDraft.value?.apiKey.trim() ?? ''],
+  ([baseUrl, apiKey], [prevBaseUrl, prevApiKey]) => {
+    if (!prevBaseUrl && !prevApiKey) return
+    if (baseUrl === prevBaseUrl && apiKey === prevApiKey) return
+    if (editDraft.value) editDraft.value.detectedApiProtocol = undefined
+    detectionBusy.value = false
+    detectionFailed.value = false
+    detectionStatusMessage.value = ''
+    lastDetectionKey = ''
+  }
+)
+
 async function fetchRemoteModels () {
   const draft = editDraft.value
   if (!draft?.baseUrl.trim() || !draft.apiKey.trim() || !window.electronAPI?.fetchProviderModels) return
@@ -146,11 +179,13 @@ async function fetchRemoteModels () {
     const result = await window.electronAPI.fetchProviderModels({
       baseUrl: draft.baseUrl.trim(),
       apiKey: draft.apiKey.trim(),
-      apiProtocol: draft.apiProtocol
+      apiProtocol: draft.apiProtocol || draft.detectedApiProtocol || ''
     })
     if (requestId !== remoteModelsRequestId) return
     remoteModels.value = result.models
     selectedRemoteModels.value = []
+    // With models available the auto protocol can be probed and pinned.
+    void runDetection('auto')
   } catch (err) {
     if (requestId !== remoteModelsRequestId) return
     remoteModels.value = []
@@ -159,6 +194,69 @@ async function fetchRemoteModels () {
   } finally {
     if (requestId === remoteModelsRequestId) remoteModelsLoading.value = false
   }
+}
+
+/**
+ * Probe-based protocol detection: the Rust harness sends the minimal message
+ * "hi" through Responses → Chat Completions → Anthropic and pins the first
+ * protocol that answers correctly.
+ */
+async function runDetection (trigger: 'auto' | 'manual') {
+  const draft = editDraft.value
+  if (!draft || detectionBusy.value) return
+  // Detection only applies to the auto mode; an explicit protocol wins.
+  if (draft.apiProtocol) return
+  if (!window.electronAPI?.detectProviderProtocol) {
+    if (trigger === 'manual') {
+      detectionFailed.value = true
+      detectionStatusMessage.value = t('settings.provider.detectUnavailable')
+    }
+    return
+  }
+  const baseUrl = draft.baseUrl.trim()
+  const apiKey = draft.apiKey.trim()
+  const model = draft.activeModel || draft.models[0] || remoteModels.value[0] || ''
+  if (trigger === 'manual' && (!baseUrl || !apiKey || !model)) {
+    detectionFailed.value = true
+    detectionStatusMessage.value = t('settings.provider.detectNeedsInput')
+    return
+  }
+  if (!baseUrl || !apiKey || !model) return
+  const key = `${baseUrl}|${apiKey}|${model}`
+  if (trigger === 'auto' && key === lastDetectionKey) return
+  lastDetectionKey = key
+
+  detectionBusy.value = true
+  detectionFailed.value = false
+  detectionStatusMessage.value = ''
+  try {
+    const result = await window.electronAPI.detectProviderProtocol({ baseUrl, apiKey, model })
+    if (result.protocol) {
+      draft.detectedApiProtocol = result.protocol
+      detectionStatusMessage.value = t('settings.provider.detectedAs', { protocol: protocolDisplayName(result.protocol) })
+    } else {
+      draft.detectedApiProtocol = undefined
+      detectionFailed.value = true
+      const failures = result.probes
+        .filter(probe => !probe.ok && probe.error)
+        .map(probe => `${protocolLabelShort(probe.protocol)}: ${probe.error}`)
+        .join(' · ')
+      detectionStatusMessage.value = t('settings.provider.detectFailed', { detail: failures || t('settings.provider.detectFailedNoDetail') })
+    }
+  } catch (err) {
+    draft.detectedApiProtocol = undefined
+    detectionFailed.value = true
+    detectionStatusMessage.value = (err as Error).message
+  } finally {
+    detectionBusy.value = false
+  }
+}
+
+function protocolLabelShort (protocol: string): string {
+  if (protocol === 'anthropic') return 'Anthropic'
+  if (protocol === 'openai-responses') return 'Responses'
+  if (protocol === 'openai-chat') return 'Chat Completions'
+  return protocol || '?'
 }
 
 function clonePricing (pricing?: Partial<ModelPricing> | Partial<ModelPricingEntry>): ModelPricingEntry {
@@ -730,10 +828,31 @@ function formatContextWindow (value: number): string {
             <label>{{ $t('settings.provider.apiProtocol') }}</label>
             <select v-model="editApiProtocol" class="pp-select">
               <option value="">{{ $t('settings.provider.apiProtocolAuto') }}</option>
-              <option value="openai">{{ $t('settings.provider.apiProtocolOpenAI') }}</option>
+              <option value="openai-chat">{{ $t('settings.provider.apiProtocolOpenAIChat') }}</option>
+              <option value="openai-responses">{{ $t('settings.provider.apiProtocolOpenAIResponses') }}</option>
               <option value="anthropic">{{ $t('settings.provider.apiProtocolAnthropic') }}</option>
             </select>
             <span class="pp-hint">{{ $t('settings.provider.apiProtocolHint') }}</span>
+            <div v-if="editApiProtocol === ''" class="pp-protocol-detect">
+              <button
+                class="pp-btn-ghost pp-btn-small"
+                type="button"
+                :disabled="detectionBusy"
+                @click="runDetection('manual')"
+              >
+                {{ detectionBusy
+                  ? $t('settings.provider.detecting')
+                  : (editDraft?.detectedApiProtocol
+                      ? $t('settings.provider.redetect')
+                      : $t('settings.provider.detectNow')) }}
+              </button>
+              <span
+                v-if="detectionStatusMessage"
+                class="pp-detect-status"
+                :class="{ 'pp-detect-status-failed': detectionFailed }"
+              >{{ detectionStatusMessage }}</span>
+              <span v-else-if="!detectionBusy" class="pp-hint">{{ $t('settings.provider.detectHint') }}</span>
+            </div>
           </div>
 
           <div class="pp-separator" />
@@ -1077,6 +1196,25 @@ function formatContextWindow (value: number): string {
   font-size: 0.8em;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.pp-protocol-detect {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.pp-detect-status {
+  font-size: 0.8em;
+  line-height: 1.5;
+  color: var(--app-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.pp-detect-status-failed {
+  color: #ef4444;
 }
 
 .pp-remote-model-buttons button:disabled {

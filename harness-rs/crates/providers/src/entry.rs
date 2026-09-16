@@ -1,7 +1,8 @@
-//! 供应商条目解析（对齐桌面端 apiProtocol auto 规则）与图像生成。
+//! 供应商条目解析与图像生成。
 
 use super::Provider;
-use crate::{AnthropicProvider, MockProvider, OpenAIProvider};
+use crate::api_protocol::ApiProtocol;
+use crate::{AnthropicProvider, MockProvider, OpenAIProvider, OpenAIResponsesProvider};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use worldbase_protocol::types::ProviderEntry;
@@ -61,25 +62,13 @@ fn is_gpt_image_model(model: &str) -> bool {
     model.to_ascii_lowercase().contains("gpt-image")
 }
 
-/// Auto protocol selection matches Electron exactly: only the official
-/// anthropic.com base URL implies the native Messages API. Third-party paths
-/// containing "anthropic" remain OpenAI-compatible unless explicitly set.
-pub fn resolve_protocol(entry: &ProviderEntry) -> &'static str {
-    match entry.api_protocol.as_str() {
-        "anthropic" => "anthropic",
-        "openai" => "openai",
-        _ => {
-            if entry
-                .base_url
-                .to_ascii_lowercase()
-                .contains("anthropic.com")
-            {
-                "anthropic"
-            } else {
-                "openai"
-            }
-        }
-    }
+/// Resolve the chat wire protocol from the stored `apiProtocol` value. There
+/// is deliberately no base-URL guessing: the desktop settings page pins auto
+/// entries through probe-based detection before syncing them here, so an
+/// unpinned entry (legacy stores, env fallbacks, mobile) uses the safest
+/// default — Chat Completions.
+pub fn resolve_protocol(entry: &ProviderEntry) -> ApiProtocol {
+    ApiProtocol::from_stored(&entry.api_protocol)
 }
 
 /// 由供应商条目构建 chat provider；无 api_key 时回退 mock（保持全链路可演示）。
@@ -90,12 +79,17 @@ pub fn create_provider_from_entry(entry: &ProviderEntry) -> Result<std::sync::Ar
         )));
     }
     match resolve_protocol(entry) {
-        "anthropic" => Ok(std::sync::Arc::new(AnthropicProvider::new(
+        ApiProtocol::Anthropic => Ok(std::sync::Arc::new(AnthropicProvider::new(
             entry.api_key.clone(),
             entry.active_model.clone(),
             non_empty(Some(entry.base_url.clone())),
         )?)),
-        _ => {
+        ApiProtocol::OpenAiResponses => Ok(std::sync::Arc::new(OpenAIResponsesProvider::new(
+            entry.api_key.clone(),
+            entry.active_model.clone(),
+            non_empty(Some(entry.base_url.clone())),
+        ))),
+        ApiProtocol::OpenAiChat => {
             let (image_generation, image_editing) = entry
                 .models
                 .iter()
@@ -765,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_auto_rules() {
+    fn protocol_resolution_normalizes_stored_values() {
         let mut e = ProviderEntry {
             id: "p1".into(),
             name: "官方".into(),
@@ -786,21 +780,39 @@ mod tests {
             enable_thinking: false,
             image_generation: false,
         };
-        assert_eq!(resolve_protocol(&e), "anthropic");
-        e.base_url = "https://api.deepseek.com/v1".into();
-        assert_eq!(resolve_protocol(&e), "openai");
+        // Auto never guesses from the base URL — even the official Anthropic
+        // domain stays on Chat Completions until detection pins a protocol.
+        assert_eq!(resolve_protocol(&e), ApiProtocol::OpenAiChat);
+        e.api_protocol = "openai".into();
+        assert_eq!(resolve_protocol(&e), ApiProtocol::OpenAiChat);
+        e.api_protocol = "openai-chat".into();
+        assert_eq!(resolve_protocol(&e), ApiProtocol::OpenAiChat);
+        e.api_protocol = "openai-responses".into();
+        assert_eq!(resolve_protocol(&e), ApiProtocol::OpenAiResponses);
         e.api_protocol = "anthropic".into();
-        assert_eq!(resolve_protocol(&e), "anthropic");
+        assert_eq!(resolve_protocol(&e), ApiProtocol::Anthropic);
 
         e.api_protocol.clear();
         e.base_url = "https://gateway.example/api/anthropic".into();
-        assert_eq!(
-            resolve_protocol(&e),
-            "openai",
-            "third-party Anthropic-compatible paths require an explicit protocol"
-        );
-        e.base_url = "HTTPS://API.ANTHROPIC.COM/V1".into();
-        assert_eq!(resolve_protocol(&e), "anthropic");
+        assert_eq!(resolve_protocol(&e), ApiProtocol::OpenAiChat);
+    }
+
+    #[test]
+    fn creates_responses_provider_for_openai_responses_protocol() {
+        let e = ProviderEntry {
+            id: "p".into(),
+            name: "官方".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: "k".into(),
+            api_protocol: "openai-responses".into(),
+            models: vec![],
+            active_model: "gpt-5.1".into(),
+            temperature: None,
+            enable_thinking: false,
+            image_generation: false,
+        };
+        let provider = create_provider_from_entry(&e).unwrap();
+        assert_eq!(provider.name(), "openai-responses");
     }
 
     #[tokio::test]

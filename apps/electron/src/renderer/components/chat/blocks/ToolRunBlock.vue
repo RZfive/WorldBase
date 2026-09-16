@@ -122,7 +122,7 @@ function getToolRunDisplayName (name: string): string {
 }
 
 .tool-run-steps {
-  margin-top: 10px;
+  margin-top: 8px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -130,7 +130,7 @@ function getToolRunDisplayName (name: string): string {
 
 .tool-run-step {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   align-items: flex-start;
 }
 

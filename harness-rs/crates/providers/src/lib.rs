@@ -3,7 +3,11 @@
 //! - `AnthropicProvider`: Messages API SSE 流式（含 tool_use 块）
 //! - `OpenAIProvider`: Chat Completions SSE 流式（含 tool_calls，支持 base_url
 //!   覆盖以兼容 OpenAI 兼容端点）
+//! - `OpenAIResponsesProvider`: Responses API SSE 流式（OpenAI 官方新协议）
 //! - `MockProvider`: 脚本化回复，供测试与无 key 演示
+//!
+//! 协议在运行时由条目的 `apiProtocol` 归一化（`api_protocol::ApiProtocol`），
+//! 自动探测见 `detect`。
 //!
 //! SSE 解析使用跨网络 chunk 的缓冲行解析器，修复 P0 版本按 chunk 边界
 //! 截断事件的问题。
@@ -15,22 +19,28 @@ use serde_json::Value;
 use worldbase_protocol::types::ProviderConfig;
 
 pub mod anthropic;
+pub mod api_protocol;
+pub mod detect;
 pub mod entry;
 mod http;
 pub mod mock;
 pub mod openai;
+pub mod openai_responses;
 mod remote_models;
 pub mod sse;
 mod tool_input;
 mod urls;
 
 pub use anthropic::AnthropicProvider;
+pub use api_protocol::ApiProtocol;
+pub use detect::{detect_protocol, DetectProtocolResult, ProtocolProbe};
 pub use entry::{
     create_provider_from_entry, generate_images, pixel_size, resolve_protocol, size_for,
     GeneratedImage, ImageParams,
 };
 pub use mock::{MockProvider, MockTurn};
 pub use openai::OpenAIProvider;
+pub use openai_responses::OpenAIResponsesProvider;
 pub use remote_models::fetch_remote_models;
 
 /// 消息内容块（对齐 Anthropic content blocks / OpenAI tool 消息）。

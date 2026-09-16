@@ -14,27 +14,33 @@ import { resolveApiProtocol } from '../src/main/ai-engine/providers/openai-provi
 import { getAnthropicMessagesUrl } from '../src/main/ai-engine/providers/openai-provider/runtime/urls.ts'
 
 function createAnthropicProvider () {
-  return createProvider({ baseUrl: 'https://api.anthropic.com/v1' })
+  return createProvider({ baseUrl: 'https://api.anthropic.com/v1', apiProtocol: 'anthropic' })
 }
 
-test('resolveApiProtocol auto-detects native Anthropic only from the base URL', () => {
-  assert.equal(resolveApiProtocol('https://api.anthropic.com/v1'), 'anthropic')
-  assert.equal(resolveApiProtocol('https://openrouter.ai/api/v1'), 'openai')
-  // Claude models behind an OpenAI-compatible gateway stay on chat/completions.
+test('resolveApiProtocol maps explicit values without URL sniffing', () => {
+  // Auto never guesses from the base URL; probe-based detection is pinned
+  // upstream by the settings page before values reach the engine.
+  assert.equal(resolveApiProtocol('https://api.anthropic.com/v1'), 'openai')
   assert.equal(resolveApiProtocol('https://openrouter.ai/api/v1'), 'openai')
   // Explicit settings always win.
-  assert.equal(resolveApiProtocol('https://api.anthropic.com/v1', 'openai'), 'openai')
+  assert.equal(resolveApiProtocol('https://api.anthropic.com/v1', 'anthropic'), 'anthropic')
   assert.equal(resolveApiProtocol('https://gateway.example.com/v1', 'anthropic'), 'anthropic')
+  // Legacy 'openai' and 'openai-chat' are the same wire protocol.
+  assert.equal(resolveApiProtocol('https://api.anthropic.com/v1', 'openai'), 'openai')
+  assert.equal(resolveApiProtocol('https://api.anthropic.com/v1', 'openai-chat'), 'openai')
+  assert.equal(resolveApiProtocol('https://api.openai.com/v1', 'openai-responses'), 'openai-responses')
 })
 
 test('createProvider dispatches by protocol', () => {
-  assert.ok(createProvider({ baseUrl: 'https://api.anthropic.com/v1' }) instanceof AnthropicProvider)
+  // No URL sniffing: auto defaults to the OpenAI chat provider everywhere.
   assert.ok(createProvider({ baseUrl: 'https://api.openai.com/v1' }) instanceof OpenAIProvider)
-  // Claude models behind an OpenAI-compatible gateway stay OpenAI-shaped.
+  assert.ok(createProvider({ baseUrl: 'https://api.anthropic.com/v1' }) instanceof OpenAIProvider)
   assert.ok(createProvider({ baseUrl: 'https://openrouter.ai/api/v1' }) instanceof OpenAIProvider)
-  // Explicit protocol overrides the base URL.
+  // Explicit protocol overrides.
   assert.ok(createProvider({ baseUrl: 'https://gateway.example.com/v3', apiProtocol: 'anthropic' }) instanceof AnthropicProvider)
-  assert.ok(createProvider({ baseUrl: 'https://api.anthropic.com/v1', apiProtocol: 'openai' }) instanceof OpenAIProvider)
+  assert.ok(createProvider({ baseUrl: 'https://api.anthropic.com/v1', apiProtocol: 'anthropic' }) instanceof AnthropicProvider)
+  // The Responses wire protocol is Rust-harness-only and must fail loudly.
+  assert.throws(() => createProvider({ apiProtocol: 'openai-responses' }), /Rust harness/)
 })
 
 function anthropicRuntime () {

@@ -174,8 +174,8 @@ export function applyActiveProviderToAiEngine (): AIProvidersConfig {
     apiKey: active?.apiKey ?? '',
     baseUrl: active?.baseUrl ?? '',
     model: active?.activeModel ?? '',
-    apiProtocol: active?.apiProtocol
-      ?? ((active?.baseUrl ?? '').toLowerCase().includes('anthropic.com') ? 'anthropic' : undefined),
+    // Auto entries carry their probe result; never guess from the base URL.
+    apiProtocol: active?.apiProtocol || active?.detectedApiProtocol || undefined,
     imageGeneration: active?.activeModel ? active.modelCapabilities?.[active.activeModel]?.imageGeneration === true : false,
     imageEditing: active?.activeModel ? active.modelCapabilities?.[active.activeModel]?.imageEditing === true : false,
     enableThinking: active?.enableThinking ?? false,
@@ -212,8 +212,8 @@ export function resolveProviderConfig (requestedProviderId?: string, requestedMo
     apiKey: provider.apiKey,
     baseUrl: provider.baseUrl,
     model: resolvedModel,
-    apiProtocol: provider.apiProtocol
-      ?? (provider.baseUrl.toLowerCase().includes('anthropic.com') ? 'anthropic' : undefined),
+    // Auto entries carry their probe result; never guess from the base URL.
+    apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined,
     providerId: provider.id,
     providerName: provider.name,
     imageGeneration: provider.modelCapabilities?.[resolvedModel]?.imageGeneration === true,

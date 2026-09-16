@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ConversationSidebar from '../layout/ConversationSidebar.vue'
+import SidebarIcon from '../layout/SidebarIcon.vue'
 import MessageList from '../messages/MessageList.vue'
 import ChatInput from '../layout/ChatInput.vue'
 import ChatHeader from '../layout/ChatHeader.vue'
@@ -20,8 +21,8 @@ const emit = defineEmits<ChatPanelEmit>()
 const { t } = useI18n()
 
 const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
-const CONVERSATION_SIDEBAR_WIDTH = 252
-const CONVERSATION_SIDEBAR_COLLAPSED_WIDTH = 64
+const CONVERSATION_SIDEBAR_WIDTH = 224
+const CONVERSATION_SIDEBAR_COLLAPSED_WIDTH = 0
 const MIN_CHAT_MAIN_WIDTH = 640
 const DOCUMENT_WORKSPACE_LIST_WIDTH = 260
 const DOCUMENT_WORKSPACE_PREVIEW_MIN_WIDTH = DOCUMENT_WORKSPACE_LIST_WIDTH * 2
@@ -182,6 +183,26 @@ function measureChatHeader (): void {
   chatHeaderHeight.value = el.offsetHeight
 }
 
+// The attention zone (design v1.7: auth / ask / todo) floats 6px above the
+// input card. The card's height follows the textarea, the runtime bar and
+// attachment previews, so measure it and expose it as a CSS token — same
+// approach as the floating header above.
+const chatInputRef = ref<{ $el?: HTMLElement } | null>(null)
+const chatInputCardHeight = ref(0)
+let inputCardResizeObserver: ResizeObserver | null = null
+let observedInputCard: HTMLElement | null = null
+
+function measureChatInputCard (): void {
+  const card = chatInputRef.value?.$el?.querySelector<HTMLElement>('.input-container')
+  if (!card) return
+  if (inputCardResizeObserver && card !== observedInputCard) {
+    inputCardResizeObserver.disconnect()
+    observedInputCard = card
+    inputCardResizeObserver.observe(card)
+  }
+  chatInputCardHeight.value = card.offsetHeight
+}
+
 onMounted(() => {
   measureChatHeader()
   const el = chatHeaderRef.value?.$el
@@ -189,11 +210,26 @@ onMounted(() => {
     headerResizeObserver = new ResizeObserver(() => measureChatHeader())
     headerResizeObserver.observe(el)
   }
+  if (typeof ResizeObserver !== 'undefined') {
+    inputCardResizeObserver = new ResizeObserver(() => {
+      if (observedInputCard) chatInputCardHeight.value = observedInputCard.offsetHeight
+    })
+  }
+  measureChatInputCard()
+  window.addEventListener('keydown', onSidebarShortcut)
 })
+
+watch(chatInputRef, () => {
+  measureChatInputCard()
+}, { flush: 'post' })
 
 onBeforeUnmount(() => {
   headerResizeObserver?.disconnect()
   headerResizeObserver = null
+  inputCardResizeObserver?.disconnect()
+  inputCardResizeObserver = null
+  observedInputCard = null
+  window.removeEventListener('keydown', onSidebarShortcut)
 })
 
 function loadConversationSidebarCollapsed (): boolean {
@@ -210,49 +246,34 @@ const conversationSidebarWidth = computed(() => conversationSidebarCollapsed.val
   ? CONVERSATION_SIDEBAR_COLLAPSED_WIDTH
   : CONVERSATION_SIDEBAR_WIDTH
 )
-const collapsedAgentActive = computed(() => agentSidebarItems.value.some(item => item.isActive))
-const collapsedGroupActive = computed(() => groupSidebarItems.value.some(item => item.isActive))
-const collapsedLongTermGoalActive = computed(() => longTermGoalSidebarItems.value.some(item => item.isActive))
-const collapsedConversationActive = computed(() => conversationSidebarItems.value.some(item => item.isActive))
+const sidebarTotalCount = computed(() => (
+  agentSidebarItems.value.length +
+  groupSidebarItems.value.length +
+  longTermGoalSidebarItems.value.length +
+  conversationSidebarItems.value.length
+))
+
+// The collapsed capsule shows which list owns the active conversation
+// (design v1.7: the capsule is a context marker, not a quick-switch rail —
+// expanding the list is the switching surface).
+const collapsedCapsuleIcon = computed(() => {
+  if (agentSidebarItems.value.some(item => item.isActive)) return 'robot'
+  if (groupSidebarItems.value.some(item => item.isActive)) return 'people'
+  if (longTermGoalSidebarItems.value.some(item => item.isActive)) return 'target'
+  return 'bubble'
+})
 
 function toggleConversationSidebar (): void {
   conversationSidebarCollapsed.value = !conversationSidebarCollapsed.value
 }
 
-function openFirstCollapsedAgent (): void {
-  const item = agentSidebarItems.value.find(entry => entry.isActive) || agentSidebarItems.value[0]
-  if (item) openAgentWorkspaceConversation(item.id)
-}
-
-function openFirstCollapsedGroup (): void {
-  const item = groupSidebarItems.value.find(entry => entry.isActive) || groupSidebarItems.value[0]
-  if (item) openGroupWorkspaceConversation(item.id)
-}
-
-function openFirstCollapsedLongTermGoal (): void {
-  const item = longTermGoalSidebarItems.value.find(entry => entry.isActive) || longTermGoalSidebarItems.value[0]
-  if (item) {
-    void openLongTermGoal(item.id)
-    return
+// ⌘\ / Ctrl+\ toggles the conversation list, matching the hint on the
+// capsule tooltip (design P3).
+function onSidebarShortcut (event: KeyboardEvent): void {
+  if ((event.metaKey || event.ctrlKey) && event.key === '\\') {
+    event.preventDefault()
+    toggleConversationSidebar()
   }
-  void createLongTermGoal()
-}
-
-function openFirstCollapsedConversation (): void {
-  const item = conversationSidebarItems.value.find(entry => entry.isActive) || conversationSidebarItems.value[0]
-  if (item) loadConversation(item.id)
-}
-
-function openCollapsedSidebarAgent (item: typeof agentSidebarItems.value[number]): void {
-  openAgentWorkspaceConversation(item.id)
-}
-
-function openCollapsedSidebarGroup (item: typeof groupSidebarItems.value[number]): void {
-  openGroupWorkspaceConversation(item.id)
-}
-
-function openCollapsedSidebarLongTermGoal (item: typeof longTermGoalSidebarItems.value[number]): void {
-  void openLongTermGoal(item.id)
 }
 
 function deleteLongTermGoalById (goalId: string): void {
@@ -263,10 +284,6 @@ function deleteLongTermGoalById (goalId: string): void {
   const ok = window.confirm(t('chatUi.deleteLongTermGoalConfirm', { title }))
   if (!ok) return
   void deleteLongTermGoal(goal || goalId)
-}
-
-function openCollapsedSidebarConversation (item: typeof conversationSidebarItems.value[number]): void {
-  loadConversation(item.id)
 }
 
 function getPreferredWorkspaceWidth (kind: 'document' | 'folder' = 'document'): number {
@@ -500,176 +517,24 @@ watch(
         />
       </template>
 
-      <div v-else class="conversation-sidebar-rail">
-        <button
-          class="conversation-sidebar-toggle collapsed"
-          type="button"
-          :title="$t('chatUi.expandConversationList')"
-          :aria-label="$t('chatUi.expandConversationList')"
-          @click="toggleConversationSidebar"
-        >
-          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <path d="M7.5 5L12.5 10L7.5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </button>
-        <button
-          class="conversation-sidebar-rail-action"
-          type="button"
-          :title="$t('chatUi.newConversation')"
-          :aria-label="$t('chatUi.newConversation')"
-          @click="newConversation"
-        >
-          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <path d="M10 4.5V15.5M4.5 10H15.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-          </svg>
-        </button>
-        <div class="conversation-sidebar-rail-sections" :aria-label="$t('chatUi.quickSwitch')">
-          <div class="conversation-sidebar-rail-group">
-            <button
-              class="conversation-sidebar-rail-section"
-              :class="{ active: collapsedAgentActive }"
-              type="button"
-              :title="$t('chatUi.agentSectionHint')"
-              :aria-label="$t('chatUi.agentSectionHint')"
-              @click="openFirstCollapsedAgent"
-            >
-              <span class="conversation-sidebar-rail-icon">🤖</span>
-              <span class="conversation-sidebar-rail-count">{{ agentSidebarItems.length }}</span>
-            </button>
-            <div class="conversation-sidebar-popover">
-              <div class="conversation-sidebar-popover-head">
-                <span>{{ $t('chatUi.agentSectionHint') }}</span>
-                <span>{{ agentSidebarItems.length }}</span>
-              </div>
-              <button
-                v-for="item in agentSidebarItems"
-                :key="`rail-agent-${item.id}`"
-                class="conversation-sidebar-popover-item"
-                :class="{ active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }"
-                type="button"
-                @click="openCollapsedSidebarAgent(item)"
-              >
-                <span class="conversation-sidebar-popover-icon">{{ item.icon }}</span>
-                <span class="conversation-sidebar-popover-copy">
-                  <span class="conversation-sidebar-popover-title">{{ item.title }}</span>
-                  <span class="conversation-sidebar-popover-subtitle">{{ item.subtitle }}</span>
-                </span>
-              </button>
-              <div v-if="agentSidebarItems.length === 0" class="conversation-sidebar-popover-empty">{{ $t('chatUi.noAgentConversations') }}</div>
-            </div>
-          </div>
-
-          <div class="conversation-sidebar-rail-group">
-            <button
-              class="conversation-sidebar-rail-section"
-              :class="{ active: collapsedGroupActive }"
-              type="button"
-              :title="$t('chatUi.groups')"
-              :aria-label="$t('chatUi.groups')"
-              @click="openFirstCollapsedGroup"
-            >
-              <span class="conversation-sidebar-rail-icon">👥</span>
-              <span class="conversation-sidebar-rail-count">{{ groupSidebarItems.length }}</span>
-            </button>
-            <div class="conversation-sidebar-popover">
-              <div class="conversation-sidebar-popover-head">
-                <span>{{ $t('chatUi.groups') }}</span>
-                <span>{{ groupSidebarItems.length }}</span>
-              </div>
-              <button
-                v-for="item in groupSidebarItems"
-                :key="`rail-group-${item.id}`"
-                class="conversation-sidebar-popover-item"
-                :class="{ active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }"
-                type="button"
-                @click="openCollapsedSidebarGroup(item)"
-              >
-                <span class="conversation-sidebar-popover-icon">{{ item.icon }}</span>
-                <span class="conversation-sidebar-popover-copy">
-                  <span class="conversation-sidebar-popover-title">{{ item.title }}</span>
-                  <span class="conversation-sidebar-popover-subtitle">{{ item.subtitle }}</span>
-                </span>
-              </button>
-              <div v-if="groupSidebarItems.length === 0" class="conversation-sidebar-popover-empty">{{ $t('chatUi.noGroupConversations') }}</div>
-            </div>
-          </div>
-
-          <div class="conversation-sidebar-rail-group">
-            <button
-              class="conversation-sidebar-rail-section"
-              :class="{ active: collapsedLongTermGoalActive }"
-              type="button"
-              :title="$t('chatUi.longTermGoals')"
-              :aria-label="$t('chatUi.longTermGoals')"
-              @click="openFirstCollapsedLongTermGoal"
-            >
-              <span class="conversation-sidebar-rail-icon">◎</span>
-              <span class="conversation-sidebar-rail-count">{{ longTermGoalSidebarItems.length }}</span>
-            </button>
-            <div class="conversation-sidebar-popover">
-              <div class="conversation-sidebar-popover-head">
-                <span>{{ $t('chatUi.longTermGoals') }}</span>
-                <span>{{ longTermGoalSidebarItems.length }}</span>
-              </div>
-              <button
-                v-for="item in longTermGoalSidebarItems"
-                :key="`rail-goal-${item.id}`"
-                class="conversation-sidebar-popover-item"
-                :class="{ active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }"
-                type="button"
-                @click="openCollapsedSidebarLongTermGoal(item)"
-              >
-                <span class="conversation-sidebar-popover-icon">{{ item.icon }}</span>
-                <span class="conversation-sidebar-popover-copy">
-                  <span class="conversation-sidebar-popover-title">{{ item.title }}</span>
-                  <span class="conversation-sidebar-popover-subtitle">{{ item.subtitle }}</span>
-                </span>
-              </button>
-              <button v-if="longTermGoalSidebarItems.length === 0" class="conversation-sidebar-popover-item" type="button" @click="() => createLongTermGoal()">
-                <span class="conversation-sidebar-popover-icon">＋</span>
-                <span class="conversation-sidebar-popover-copy">
-                  <span class="conversation-sidebar-popover-title">{{ $t('chatUi.newLongTermGoal') }}</span>
-                  <span class="conversation-sidebar-popover-subtitle">{{ $t('chatUi.longTermGoalSectionHint') }}</span>
-                </span>
-              </button>
-            </div>
-          </div>
-
-          <div class="conversation-sidebar-rail-group">
-            <button
-              class="conversation-sidebar-rail-section"
-              :class="{ active: collapsedConversationActive }"
-              type="button"
-              :title="$t('chatUi.conversations')"
-              :aria-label="$t('chatUi.conversations')"
-              @click="openFirstCollapsedConversation"
-            >
-              <span class="conversation-sidebar-rail-icon">💬</span>
-              <span class="conversation-sidebar-rail-count">{{ conversationSidebarItems.length }}</span>
-            </button>
-            <div class="conversation-sidebar-popover">
-              <div class="conversation-sidebar-popover-head">
-                <span>{{ $t('chatUi.conversations') }}</span>
-                <span>{{ conversationSidebarItems.length }}</span>
-              </div>
-              <button
-                v-for="item in conversationSidebarItems"
-                :key="`rail-conversation-${item.id}`"
-                class="conversation-sidebar-popover-item"
-                :class="{ active: item.isActive, streaming: item.isStreaming, waitingAuth: item.pendingAuthCount > 0 }"
-                type="button"
-                @click="openCollapsedSidebarConversation(item)"
-              >
-                <span class="conversation-sidebar-popover-icon">{{ item.icon }}</span>
-                <span class="conversation-sidebar-popover-copy">
-                  <span class="conversation-sidebar-popover-title">{{ item.title }}</span>
-                  <span class="conversation-sidebar-popover-subtitle">{{ item.subtitle }}</span>
-                </span>
-              </button>
-              <div v-if="conversationSidebarItems.length === 0" class="conversation-sidebar-popover-empty">{{ $t('chatUi.noRegularConversations') }}</div>
-            </div>
-          </div>
-        </div>
+      <div
+        v-else
+        class="conversation-sidebar-capsule"
+        role="button"
+        :tabindex="0"
+        :aria-label="$t('chatUi.expandConversationList')"
+        @click="toggleConversationSidebar"
+        @keydown.enter.prevent="toggleConversationSidebar"
+        @keydown.space.prevent="toggleConversationSidebar"
+      >
+        <span class="conversation-capsule-btn" aria-hidden="true">
+          <SidebarIcon name="panel" :size="14" />
+        </span>
+        <span class="conversation-capsule-av" aria-hidden="true">
+          <SidebarIcon :name="collapsedCapsuleIcon" :size="12" />
+        </span>
+        <span class="conversation-capsule-n" aria-hidden="true">{{ sidebarTotalCount }}</span>
+        <span class="conversation-capsule-tip" aria-hidden="true">{{ $t('chatUi.expandConversationList') }} · ⌘\</span>
       </div>
     </aside>
 
@@ -677,7 +542,13 @@ watch(
       :class="['chat-panel', { 'chat-panel-with-workspace': documentDockVisible || folderWorkspaceVisible }]"
       :style="{ '--chat-main-protected-min-width': `${MIN_CHAT_MAIN_WIDTH}px` }"
     >
-      <div class="chat-main" :style="{ '--chat-header-height': `${chatHeaderHeight}px` }">
+      <div
+        class="chat-main"
+        :style="{
+          '--chat-header-height': `${chatHeaderHeight}px`,
+          '--chat-input-card-height': chatInputCardHeight > 0 ? `${chatInputCardHeight}px` : undefined
+        }"
+      >
         <LongTermGoalPanel
           v-if="currentLongTermGoal"
           :goal="currentLongTermGoal"
@@ -722,19 +593,22 @@ watch(
             :context-detail="currentContextDetail"
             :available-channel-bindings="availableChannelBindings"
             :selected-channel-binding-id="selectedChannelBindingId"
-            :available-skills="availableSkills"
-            :active-skill-ids="activeSkillIds"
-            :show-skill-picker="showSkillPicker"
             :providers="providers"
             :active-provider-id="activeProviderId"
             :selected-model="selectedModel"
             :show-provider-selector="shouldUseConversationProviderOverride"
+            :reasoning-strength="reasoningStrength"
+            :temperature="conversationTemperature"
+            :provider-default-temperature="providerDefaultTemperature"
+            :is-group-conversation="isGroupConversation"
+            :show-agent-selector="!currentConversationId"
+            :available-agents="nonDefaultAgents"
+            :selected-agent-id="agentSelectorValue"
             @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
             @select-provider-model="handleProviderModelSelectionChange"
-            @toggle-skill-picker="showSkillPicker = !showSkillPicker"
-            @select-all-skills="selectAllSkills"
-            @clear-skills="clearSkills"
-            @toggle-skill="toggleSkill"
+            @update:reasoning-strength="handleReasoningStrengthChange"
+            @update:temperature="handleTemperatureChange"
+            @update:selected-agent-id="handleAgentSelectionChange"
           />
 
           <div v-if="conversationDetailState === 'loading'" class="conversation-detail-state">
@@ -764,34 +638,38 @@ watch(
             @cancel-edit="cancelEditMessage"
           />
 
-          <PinnedTodoPanel
-            v-if="activeTodoItems.length > 0"
-            :items="activeTodoItems"
-            :is-loading="isLoading"
-          />
+          <div class="chat-attention-zone" aria-live="polite">
+            <!-- design v1.7 stacking priority: auth > ask > todo (auth on top). -->
+            <AuthPermissionPanel
+              v-if="currentPendingAuthRequest"
+              :request="currentPendingAuthRequest"
+              :pending-count="currentPendingAuthCount"
+              @respond="respondToAuthRequest"
+            />
 
-          <AskUserPanel
-            v-if="currentAskUserRequest"
-            :request="currentAskUserRequest"
-            @submit="(requestId, answers) => respondToAskUserRequest(requestId, answers)"
-            @cancel="(requestId) => respondToAskUserRequest(requestId, null)"
-          />
+            <SudoPasswordPanel
+              v-if="currentSudoPasswordRequest"
+              :request="currentSudoPasswordRequest"
+              :pending-count="currentPendingSudoPasswordCount"
+              @respond="respondToSudoPasswordRequest"
+            />
 
-          <AuthPermissionPanel
-            v-if="currentPendingAuthRequest"
-            :request="currentPendingAuthRequest"
-            :pending-count="currentPendingAuthCount"
-            @respond="respondToAuthRequest"
-          />
+            <AskUserPanel
+              v-if="currentAskUserRequest"
+              :request="currentAskUserRequest"
+              @submit="(requestId, answers) => respondToAskUserRequest(requestId, answers)"
+              @cancel="(requestId) => respondToAskUserRequest(requestId, null)"
+            />
 
-          <SudoPasswordPanel
-            v-if="currentSudoPasswordRequest"
-            :request="currentSudoPasswordRequest"
-            :pending-count="currentPendingSudoPasswordCount"
-            @respond="respondToSudoPasswordRequest"
-          />
+            <PinnedTodoPanel
+              v-if="activeTodoItems.length > 0"
+              :items="activeTodoItems"
+              :is-loading="isLoading"
+            />
+          </div>
 
           <ChatInput
+            ref="chatInputRef"
             v-model="inputText"
             :is-loading="isLoading"
             :pending-auth-count="currentPendingAuthCount"
@@ -801,33 +679,31 @@ watch(
             :upload-feedback="uploadFeedback"
             :document-dock-visible="documentDockVisible"
             :folder-workspace-visible="folderWorkspaceVisible"
-            :reasoning-strength="reasoningStrength"
-            :temperature="conversationTemperature"
-            :provider-default-temperature="providerDefaultTemperature"
             :auth-mode="currentAuthMode"
             :plan-mode-active="planModeActive"
             :computer-use-enabled="computerUseEnabled"
             :computer-use-permission-granted="computerUsePermissionGranted"
-            :available-agents="nonDefaultAgents"
-            :selected-agent-id="agentSelectorValue"
+            :available-skills="availableSkills"
+            :active-skill-ids="activeSkillIds"
+            :show-skill-picker="showSkillPicker"
             :selected-group-id="selectedGroupId"
             :active-group-session-id="activeGroupSessionId"
             :group-mention-hints="groupMentionHints"
             :is-group-conversation="isGroupConversation"
-            :is-new-conversation="!currentConversationId"
             @send="sendMessage"
             @stop="stopCurrentStream"
             @add-attachments="addAttachments"
             @remove-image="removeImage"
             @remove-file="removeFile"
-            @update:reasoning-strength="handleReasoningStrengthChange"
-            @update:temperature="handleTemperatureChange"
             @toggle-document-dock="toggleDocumentWorkspace"
             @toggle-folder-workspace="toggleFolderWorkspace"
             @update:auth-mode="handleAuthModeChange"
             @toggle-plan-mode="togglePlanMode"
             @toggle-computer-use="toggleComputerUse"
-            @update:selected-agent-id="handleAgentSelectionChange"
+            @toggle-skill-picker="showSkillPicker = !showSkillPicker"
+            @select-all-skills="selectAllSkills"
+            @clear-skills="clearSkills"
+            @toggle-skill="toggleSkill"
           />
         </template>
       </div>
@@ -865,253 +741,136 @@ watch(
 .conversation-sidebar-shell {
   position: relative;
   z-index: 20;
-  width: 252px;
-  flex: 0 0 252px;
+  width: 224px;
+  flex: 0 0 224px;
   min-width: 0;
   display: flex;
   transition: width 0.22s ease, flex-basis 0.22s ease;
 }
 
 .conversation-sidebar-shell.collapsed {
-  width: 64px;
-  flex-basis: 64px;
-}
-
-.conversation-sidebar-toggle,
-.conversation-sidebar-rail-action,
-.conversation-sidebar-rail-section {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
-  background: var(--app-chat-list-raised);
-  color: var(--app-text-muted);
-  cursor: pointer;
-  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
-}
-
-.conversation-sidebar-toggle:hover,
-.conversation-sidebar-rail-action:hover,
-.conversation-sidebar-rail-section:hover {
-  border-color: color-mix(in srgb, var(--app-accent) 32%, var(--app-border));
-  background: color-mix(in srgb, var(--app-accent-soft) 42%, var(--app-chat-list-raised));
-  color: var(--app-text);
-}
-
-.conversation-sidebar-toggle svg,
-.conversation-sidebar-rail-action svg {
-  width: 18px;
-  height: 18px;
-}
-
-.conversation-sidebar-rail {
-  width: 100%;
-  border-right: 1px solid var(--app-border);
-  background: var(--app-chat-list-surface);
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
+  width: 0;
+  flex-basis: 0;
   overflow: visible;
 }
 
-.conversation-sidebar-rail-action {
-  color: #ffffff;
-  border-color: transparent;
-  background: var(--app-accent);
-}
-
-.conversation-sidebar-rail-action:hover {
-  color: #ffffff;
-  background: var(--app-accent-strong);
-}
-
-.conversation-sidebar-rail-sections {
-  width: 100%;
-  margin-top: 6px;
-  padding-top: 10px;
-  border-top: 1px solid color-mix(in srgb, var(--app-border) 72%, transparent);
+/* ---- Collapsed state: floating glass capsule (design v1.7) ----
+   The collapsed list occupies no column. A translucent vertical capsule
+   hovers over the chat's left edge; hover turns the border solid accent,
+   click restores the list. */
+.conversation-sidebar-capsule {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 22;
+  width: 36px;
+  padding: 8px 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-}
-
-.conversation-sidebar-rail-group {
-  position: relative;
-  width: 100%;
-  display: flex;
-  justify-content: center;
-}
-
-.conversation-sidebar-rail-group::after {
-  content: '';
-  position: absolute;
-  left: 100%;
-  top: -12px;
-  bottom: -12px;
-  width: 22px;
-}
-
-.conversation-sidebar-rail-section {
-  position: relative;
-  background: transparent;
-}
-
-.conversation-sidebar-rail-section.active {
-  border-color: color-mix(in srgb, var(--app-accent) 42%, var(--app-border));
-  background: color-mix(in srgb, var(--app-accent-soft) 58%, transparent);
-  color: var(--app-text-strong);
-}
-
-.conversation-sidebar-rail-icon {
-  width: 1.2em;
-  min-width: 0;
-  overflow: hidden;
-  text-align: center;
-  line-height: 1;
-}
-
-.conversation-sidebar-rail-count {
-  position: absolute;
-  right: -3px;
-  top: -5px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
+  gap: 9px;
   border-radius: 999px;
-  background: var(--app-chat-list-raised);
   border: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-chat-list-raised) 58%, transparent);
+  box-shadow: var(--shadow-2);
   color: var(--app-text-muted);
-  font-size: 0.6rem;
-  font-weight: 800;
-  line-height: 14px;
-  box-sizing: border-box;
-}
-
-.conversation-sidebar-popover {
-  position: absolute;
-  left: calc(100% + 10px);
-  top: -8px;
-  z-index: 30;
-  width: 288px;
-  max-height: min(460px, calc(100vh - 90px));
-  padding: 10px;
-  border-radius: 16px;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-chat-list-raised) 96%, transparent);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.14);
-  -webkit-backdrop-filter: blur(14px) saturate(120%);
-  backdrop-filter: blur(14px) saturate(120%);
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transform: translateX(-4px);
-  transition: opacity 0.16s ease, visibility 0.16s ease, transform 0.16s ease;
-  overflow-y: auto;
-}
-
-.conversation-sidebar-rail-group:hover .conversation-sidebar-popover,
-.conversation-sidebar-rail-group:focus-within .conversation-sidebar-popover {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
-  transform: translateX(0);
-}
-
-.conversation-sidebar-popover-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 2px 4px 8px;
-  color: var(--app-text-muted);
-  font-size: 0.72rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.conversation-sidebar-popover-item {
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px;
-  border: none;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--app-text);
   cursor: pointer;
-  text-align: left;
+  user-select: none;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+  animation: conversation-capsule-in 0.22s var(--ease-out);
 }
 
-.conversation-sidebar-popover-item:hover {
-  background: color-mix(in srgb, var(--app-panel-muted) 62%, transparent);
+@keyframes conversation-capsule-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(-6px);
+  }
 }
 
-.conversation-sidebar-popover-item.active {
-  background: color-mix(in srgb, var(--app-accent-soft) 52%, transparent);
+.conversation-sidebar-capsule:hover,
+.conversation-sidebar-capsule:focus-visible {
+  border: 1.5px solid var(--app-accent);
+  background: color-mix(in srgb, var(--app-chat-list-raised) 90%, transparent);
+  box-shadow: var(--shadow-3), 0 0 0 3px var(--app-accent-soft);
+  color: var(--app-accent-strong);
+  outline: none;
 }
 
-.conversation-sidebar-popover-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
+.conversation-capsule-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 auto;
-  border: 1px solid color-mix(in srgb, var(--app-border) 76%, transparent);
-  background: color-mix(in srgb, var(--app-panel-muted) 66%, transparent);
+  color: var(--app-text-soft);
 }
 
-.conversation-sidebar-popover-copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.conversation-sidebar-capsule:hover .conversation-capsule-btn,
+.conversation-sidebar-capsule:focus-visible .conversation-capsule-btn {
+  color: var(--app-accent-strong);
 }
 
-.conversation-sidebar-popover-title,
-.conversation-sidebar-popover-subtitle {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.conversation-capsule-av {
+  width: 22px;
+  height: 22px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--app-accent-soft);
+  color: var(--app-accent-strong);
 }
 
-.conversation-sidebar-popover-title {
-  color: var(--app-text-strong);
-  font-size: 0.82rem;
-  font-weight: 700;
-}
-
-.conversation-sidebar-popover-subtitle {
-  color: var(--app-text-muted);
-  font-size: 0.72rem;
-}
-
-.conversation-sidebar-popover-empty {
-  padding: 12px 8px;
+.conversation-capsule-n {
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   color: var(--app-text-faint);
-  font-size: 0.76rem;
-  text-align: center;
+}
+
+.conversation-capsule-tip {
+  position: absolute;
+  left: calc(100% + 9px);
+  top: 50%;
+  z-index: 23;
+  white-space: nowrap;
+  font-size: 0.68rem;
+  color: var(--app-text-strong);
+  background: color-mix(in srgb, var(--app-panel-strong) 96%, transparent);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 4px 9px;
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-50%) translateX(-4px);
+  transition: opacity 0.16s ease, transform 0.16s var(--ease-out), visibility 0.16s ease;
+}
+
+.conversation-sidebar-capsule:hover .conversation-capsule-tip,
+.conversation-sidebar-capsule:focus-visible .conversation-capsule-tip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(-50%) translateX(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-sidebar-capsule {
+    animation: none;
+  }
 }
 
 .chat-panel {
-  --chat-message-gutter: clamp(32px, 7vw, 128px);
+  --chat-message-gutter: clamp(24px, 4vw, 64px);
   --chat-message-track-max: 980px;
   --chat-user-message-max: 680px;
   --chat-user-bubble-max: 540px;
   --chat-event-card-max: 100%;
-  --chat-input-overlap: clamp(44px, 7vh, 72px);
+  --chat-input-overlap: clamp(52px, 7vh, 88px);
+  --chat-input-gutter: 16px;
   display: flex;
   flex-direction: row;
   flex: 1;
@@ -1119,6 +878,33 @@ watch(
   min-height: 0;
   position: relative;
   overflow: hidden;
+}
+
+
+.chat-attention-zone {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  /*
+   * design v1.7: the capsules sit 6px above the input card. The card is
+   * wrapped by .chat-input's 18px bottom padding, so the offset from the
+   * panel bottom is measured-card-height + 24px — tracked via the
+   * ResizeObserver-fed token instead of the old overlap guess that let the
+   * capsules float inside the input box.
+   */
+  bottom: calc(var(--chat-input-card-height, 176px) + 24px);
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-height: min(52vh, 460px);
+  pointer-events: none;
+}
+
+.chat-attention-zone > * {
+  flex: 0 0 auto;
+  width: 100%;
 }
 
 .conversation-detail-state {

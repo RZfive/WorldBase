@@ -365,6 +365,9 @@ export class RustHarnessClient {
         || method === 'mcp.refresh'
         || method === 'studio.library.export'
         ? 300_000
+        // Protocol detection probes up to three wire protocols sequentially.
+        : method === 'provider.detectProtocol'
+        ? 90_000
         : 15_000)
       this.pending.set(id, {
         resolve: value => resolve(value as T),
@@ -1141,6 +1144,33 @@ export class RustHarnessClient {
     }
   }
 
+  /**
+   * Probe-based wire-protocol auto-detection. The Rust harness sends the
+   * minimal message "hi" through Responses → Chat Completions → Anthropic and
+   * reports the first protocol that answers with a matching response shape.
+   */
+  async detectProviderProtocol (input: { baseUrl: string; apiKey: string; model: string }): Promise<{
+    protocol: 'openai-chat' | 'openai-responses' | 'anthropic' | null
+    probes: Array<{ protocol: string; ok: boolean; error?: string }>
+  }> {
+    const result = await this.request<{
+      protocol?: 'openai-chat' | 'openai-responses' | 'anthropic' | null
+      probes?: Array<{ protocol?: unknown; ok?: unknown; error?: unknown }>
+    }>('provider.detectProtocol', {
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+      model: input.model
+    })
+    return {
+      protocol: result.protocol ?? null,
+      probes: (result.probes || []).map(probe => ({
+        protocol: typeof probe.protocol === 'string' ? probe.protocol : '',
+        ok: probe.ok === true,
+        error: typeof probe.error === 'string' ? probe.error : undefined
+      }))
+    }
+  }
+
   private async syncProviderSettings (): Promise<void> {
     const getProviders = this.options.getProviders
     if (!getProviders) return
@@ -1180,7 +1210,9 @@ export class RustHarnessClient {
           name: provider.name,
           baseUrl: provider.baseUrl,
           apiKey: provider.apiKey,
-          apiProtocol: provider.apiProtocol || '',
+          // Always send the concrete wire protocol: auto entries carry their
+          // last probe result so the harness never guesses at runtime.
+          apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || 'openai-chat',
           models,
           activeModel: provider.activeModel,
           temperature: normalizeTemperature(provider.temperature),

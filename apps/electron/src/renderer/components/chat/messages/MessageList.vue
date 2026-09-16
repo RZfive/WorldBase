@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { buildMessageBlocks, getContentExcerpt, getContentParts } from '../message-utils'
 import { copyTextToClipboard } from '../export-utils'
 import type { ChatMessage, GalleryImage, FilePreviewState, QuestionNavigationEntry } from '../types'
@@ -7,6 +8,8 @@ import MessageRow from './MessageRow.vue'
 import ImageLightbox from '../media/ImageLightbox.vue'
 import MermaidPreviewDialog from '../media/MermaidPreviewDialog.vue'
 import QuestionOutline from './QuestionOutline.vue'
+
+const { locale } = useI18n()
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -50,6 +53,15 @@ const AUTO_SCROLL_THRESHOLD = 96
 const RESTORE_AUTO_SCROLL_THRESHOLD = 4
 const SELECTION_COPY_MENU_WIDTH = 112
 const SELECTION_COPY_MENU_HEIGHT = 40
+
+const dateAnchorLabel = computed(() => {
+  const date = new Date()
+  const dateText = new Intl.DateTimeFormat(locale.value, {
+    month: 'numeric',
+    day: 'numeric'
+  }).format(date)
+  return `${locale.value.startsWith('zh') ? '今天' : 'Today'} · ${dateText}`
+})
 
 const latestAssistantMessageIndex = computed(() => {
   for (let i = props.messages.length - 1; i >= 0; i--) {
@@ -393,6 +405,9 @@ onUnmounted(() => {
         </div>
       </div>
       <template v-else>
+        <div v-if="props.messages.length > 0" class="message-date-divider" aria-hidden="true">
+          <span>{{ dateAnchorLabel }}</span>
+        </div>
         <div
           v-for="(msg, index) in props.messages"
           :key="getMessageKey(msg, index)"
@@ -457,15 +472,35 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: calc(24px + var(--chat-header-height, 0px)) var(--chat-message-gutter, 28px) calc(8px + var(--chat-input-overlap, 0px));
+  padding: calc(17px + var(--chat-header-height, 0px)) var(--chat-message-gutter, 27px) calc(8px + var(--chat-input-overlap, 0px));
   scrollbar-gutter: stable;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
   position: relative;
 }
 
+.message-date-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 4px;
+  color: var(--app-text-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.message-date-divider::before,
+.message-date-divider::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: var(--app-border);
+}
+
 .message-item.with-leading-gap {
-  margin-top: 20px;
+  margin-top: 15px;
 }
 
 .message-item.jump-highlight {

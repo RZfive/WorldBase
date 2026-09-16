@@ -203,8 +203,12 @@ export type StreamReadResult = Awaited<ReturnType<ReadableStreamDefaultReader<Ui
 
 export type ProviderReasoningEffort = 'low' | 'medium' | 'high' | 'max'
 
-/** Wire protocol the provider speaks: OpenAI-compatible or native Anthropic Messages. */
-export type ProviderApiProtocol = 'openai' | 'anthropic'
+/**
+ * Wire protocol the provider speaks. Legacy `'openai'` and `'openai-chat'`
+ * both mean Chat Completions; `'openai-responses'` is OpenAI's newer native
+ * Responses API (Rust harness only).
+ */
+export type ProviderApiProtocol = 'openai' | 'openai-chat' | 'openai-responses' | 'anthropic'
 
 export interface OpenAIProviderRuntime {
   apiKey: string

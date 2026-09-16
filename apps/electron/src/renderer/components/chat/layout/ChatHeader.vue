@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ProviderModelDropdown from './ProviderModelDropdown.vue'
-
-interface SkillItem {
-  id: string
-  name: string
-}
+import ProviderDropdown from './ProviderDropdown.vue'
 
 interface ChannelBindingOption {
   id: string
@@ -19,42 +16,60 @@ interface ProviderItem {
   models: string[]
 }
 
+interface AgentOption {
+  id: string
+  name: string
+  icon?: string
+}
+
+type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+
 const props = defineProps<{
   contextLabel: string
   contextDetail: string
   availableChannelBindings: ChannelBindingOption[]
   selectedChannelBindingId: string
-  availableSkills: SkillItem[]
-  activeSkillIds: Set<string>
-  showSkillPicker: boolean
   providers?: ProviderItem[]
   activeProviderId?: string
   selectedModel?: string
   showProviderSelector?: boolean
+  reasoningStrength?: ReasoningStrength
+  temperature?: number | null
+  providerDefaultTemperature?: number
+  isGroupConversation?: boolean
+  /** New-conversation agent switcher, pinned next to the agent name (design v1.7). */
+  showAgentSelector?: boolean
+  availableAgents?: AgentOption[]
+  selectedAgentId?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'update:selected-channel-binding-id', channelBindingId: string): void
   (e: 'selectProviderModel', selection: { providerId: string; model: string }): void
-  (e: 'toggleSkillPicker'): void
-  (e: 'selectAllSkills'): void
-  (e: 'clearSkills'): void
-  (e: 'toggleSkill', skillId: string): void
+  (e: 'update:reasoning-strength', value: ReasoningStrength): void
+  (e: 'update:temperature', value: number | null): void
+  (e: 'update:selected-agent-id', id: string): void
 }>()
 
 function onChannelBindingChange (event: Event) {
   emit('update:selected-channel-binding-id', (event.target as HTMLSelectElement).value)
 }
 
-const allSkillsSelected = computed(() => {
-  return props.availableSkills.length > 0 && props.activeSkillIds.size === props.availableSkills.length
-})
+const showAgentPicker = computed(() => Boolean(
+  props.showAgentSelector &&
+  props.availableAgents &&
+  props.availableAgents.length > 0
+))
 
-const hasHeaderDetail = computed(() => {
-  return Boolean(
-    (props.showProviderSelector && props.providers && props.providers.length > 0) ||
-    props.contextDetail
-  )
+// The trigger reads the selected agent (falling back to the default agent
+// label) instead of a static prompt, so the header states who will answer.
+const { t } = useI18n()
+const agentPickerLabel = computed(() => {
+  if (props.selectedAgentId) {
+    const found = (props.availableAgents || []).find(agent => agent.id === props.selectedAgentId)
+    if (found) return (found.icon ? found.icon + ' ' : '') + found.name
+  }
+  return t('chatUi.defaultAgent')
 })
 </script>
 
@@ -62,18 +77,23 @@ const hasHeaderDetail = computed(() => {
   <div class="chat-header">
     <div class="chat-header-copy">
       <h2 :title="contextLabel">{{ contextLabel }}</h2>
-      <span v-if="hasHeaderDetail" class="header-meta-separator" aria-hidden="true">·</span>
-      <div v-if="showProviderSelector && providers && providers.length > 0" class="header-model-picker">
-        <ProviderModelDropdown
-          :providers="providers"
-          :active-provider-id="activeProviderId"
-          :selected-model="selectedModel"
-          :title="$t('chatUi.providerModelTitle')"
-          @select="emit('selectProviderModel', $event)"
-        />
-      </div>
-      <p v-else-if="contextDetail" :title="contextDetail">{{ contextDetail }}</p>
+      <template v-if="showAgentPicker">
+        <span class="header-meta-separator" aria-hidden="true">·</span>
+        <div class="header-agent-picker">
+          <ProviderDropdown
+            :model-value="selectedAgentId || ''"
+            :options="[{ value: '', label: $t('chatUi.defaultAgent') }, ...(availableAgents || []).map(a => ({ value: a.id, label: (a.icon ? a.icon + ' ' : '') + a.name }))]"
+            :title="agentPickerLabel"
+            @update:model-value="emit('update:selected-agent-id', $event)"
+          />
+        </div>
+      </template>
+      <template v-else-if="contextDetail">
+        <span class="header-meta-separator" aria-hidden="true">·</span>
+        <p :title="contextDetail">{{ contextDetail }}</p>
+      </template>
     </div>
+
     <div class="header-controls">
       <div v-if="availableChannelBindings.length > 0" class="channel-binding-selector">
         <select :value="selectedChannelBindingId" class="select-input" @change="onChannelBindingChange">
@@ -84,29 +104,22 @@ const hasHeaderDetail = computed(() => {
         </select>
       </div>
 
-      <div v-if="availableSkills.length > 0" class="skill-selector">
-        <button
-          class="skill-toggle-btn"
-          :class="{ 'has-active': activeSkillIds.size > 0 }"
-          @click="emit('toggleSkillPicker')"
-        >
-          🧠 {{ $t('chatUi.skillsLabel') }}{{ activeSkillIds.size > 0 ? ` (${activeSkillIds.size})` : '' }}
-        </button>
-        <div v-if="showSkillPicker" class="skill-dropdown">
-          <div class="skill-dropdown-actions">
-            <button type="button" class="skill-dropdown-action" :disabled="allSkillsSelected" @click="emit('selectAllSkills')">{{ $t('common.selectAll') }}</button>
-            <button type="button" class="skill-dropdown-action" :disabled="activeSkillIds.size === 0" @click="emit('clearSkills')">{{ $t('common.clear') }}</button>
-          </div>
-          <div
-            v-for="skill in availableSkills"
-            :key="skill.id"
-            :class="['skill-option', { selected: activeSkillIds.has(skill.id) }]"
-            @click="emit('toggleSkill', skill.id)"
-          >
-            <span class="skill-check">{{ activeSkillIds.has(skill.id) ? '✅' : '⬜' }}</span>
-            <span class="skill-option-name">{{ skill.name }}</span>
-          </div>
-        </div>
+      <!-- Provider switch capsule on the far side of the header (design v1.7). -->
+      <div v-if="showProviderSelector && providers && providers.length > 0" class="header-model-picker">
+        <ProviderModelDropdown
+          :providers="providers"
+          :active-provider-id="activeProviderId"
+          :selected-model="selectedModel"
+          :title="$t('chatUi.providerModelTitle')"
+          :show-tuning="true"
+          :reasoning-strength="reasoningStrength"
+          :temperature="temperature"
+          :provider-default-temperature="providerDefaultTemperature"
+          :is-group-conversation="isGroupConversation"
+          @select="emit('selectProviderModel', $event)"
+          @update:reasoning-strength="emit('update:reasoning-strength', $event)"
+          @update:temperature="emit('update:temperature', $event)"
+        />
       </div>
     </div>
   </div>
@@ -128,32 +141,39 @@ const hasHeaderDetail = computed(() => {
   left: 0;
   right: 0;
   z-index: 12;
-  padding: 12px 24px;
+  height: 49px;
+  min-height: 49px;
+  padding: 0 15px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   min-width: 0;
   /*
-   * No backdrop blur and no divider line. The header is a solid panel surface
-   * across the top (where the controls live, so they stay readable) that fades
-   * to transparent toward the bottom edge. Scrolling messages rise through that
-   * transparent tail and bleed in via a pure color wash — a gradient fade
-   * instead of a frosted slab, consistent with the solid panel surfaces used
-   * elsewhere (sidebar / dock).
+   * No backdrop blur. The header is a solid panel surface across the top
+   * (where the controls live, so they stay readable) that fades to transparent
+   * toward the bottom edge, with a hairline seam (design v1.7 chat head).
    */
-  background: linear-gradient(180deg,
-    var(--chat-header-solid) 0%,
-    var(--chat-header-solid) 72%,
-    color-mix(in srgb, var(--chat-header-solid) 38%, transparent) 88%,
-    transparent 100%);
+  background: var(--chat-header-solid);
+}
+
+.chat-header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: color-mix(in srgb, var(--app-border) 55%, transparent);
+  pointer-events: none;
 }
 
 .chat-header h2 {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0;
-  font-size: 1.1em;
+  font-size: 0.82rem;
+  font-weight: 600;
   color: var(--app-text-strong);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -197,21 +217,41 @@ const hasHeaderDetail = computed(() => {
 .header-model-picker :deep(.provider-model-trigger) {
   height: 24px;
   max-width: 100%;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--app-text-soft);
-  font-size: 0.82rem;
+  padding: 0 10px 0 20px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-panel-strong) 72%, transparent);
+  color: var(--app-text-muted);
+  font-size: 0.68rem;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  letter-spacing: 0.02em;
   box-shadow: none;
+}
+
+/* Signature dot in front of the model pill (design v1.7 chat head). */
+.header-model-picker :deep(.provider-model-trigger)::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--app-sig);
 }
 
 .header-model-picker :deep(.provider-model-trigger:hover:not(:disabled)),
 .header-model-picker :deep(.provider-model-trigger.open),
 .header-model-picker :deep(.provider-model-trigger:focus) {
-  border: none;
-  background: transparent;
+  border-color: color-mix(in srgb, var(--app-accent) 40%, var(--app-border));
+  background: var(--app-panel-strong);
   color: var(--app-text-strong);
   box-shadow: none;
+}
+
+.header-model-picker :deep(.provider-model-trigger) {
+  position: relative;
 }
 
 .header-model-picker :deep(.provider-model-value) {
@@ -225,6 +265,46 @@ const hasHeaderDetail = computed(() => {
   gap: 8px;
   min-width: 0;
 }
+
+/* New-conversation agent switcher, sitting next to the agent name (design v1.7). */
+.header-agent-picker {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: min(240px, 28vw);
+}
+
+.header-agent-picker :deep(.provider-dropdown-trigger) {
+  height: 24px;
+  max-width: 100%;
+  padding: 0 9px;
+  gap: 5px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-panel-strong) 72%, transparent);
+  color: var(--app-text-muted);
+  font-size: 0.68rem;
+  box-shadow: none;
+}
+
+.header-agent-picker :deep(.provider-dropdown-trigger:hover:not(:disabled)),
+.header-agent-picker :deep(.provider-dropdown-trigger.open),
+.header-agent-picker :deep(.provider-dropdown-trigger:focus) {
+  border-color: color-mix(in srgb, var(--app-accent) 40%, var(--app-border));
+  background: var(--app-panel-strong);
+  color: var(--app-text-strong);
+}
+
+.header-agent-picker :deep(.provider-dropdown-title) {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- header「更多」settings menu (design v1.7 P2) ---- */
+/* (moved into ProviderModelDropdown's tuning section) */
 
 .channel-binding-selector,
 .auth-mode-selector {
@@ -265,24 +345,33 @@ const hasHeaderDetail = computed(() => {
 }
 
 .skill-toggle-btn {
-  padding: 4px 12px;
-  background: var(--app-input-bg);
-  border: 1px solid var(--app-input-border);
-  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--app-panel-strong) 72%, transparent);
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
   color: var(--app-text-muted);
-  font-size: 0.8em;
+  font-size: 0.68rem;
   cursor: pointer;
   transition: all 0.12s;
   white-space: nowrap;
 }
 
+.skill-spark {
+  color: var(--app-accent-strong);
+  font-size: 0.7rem;
+}
+
 .skill-toggle-btn:hover {
-  border-color: var(--app-accent);
+  border-color: color-mix(in srgb, var(--app-accent) 40%, var(--app-border));
   color: var(--app-text);
 }
 
 .skill-toggle-btn.has-active {
-  border-color: var(--app-accent);
+  border-color: color-mix(in srgb, var(--app-accent) 40%, var(--app-border));
   color: var(--app-text-strong);
   background: var(--app-accent-soft);
 }
@@ -356,7 +445,25 @@ const hasHeaderDetail = computed(() => {
 }
 
 .skill-check {
-  font-size: 0.9em;
+  width: 13px;
+  height: 13px;
+  border-radius: 4px;
+  border: 1px solid var(--app-border-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--app-on-accent);
+}
+
+.skill-check.on {
+  border-color: transparent;
+  background: var(--app-accent);
+}
+
+.skill-check svg {
+  width: 10px;
+  height: 10px;
 }
 
 .skill-option-name {

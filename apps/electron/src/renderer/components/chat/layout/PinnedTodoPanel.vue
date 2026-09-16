@@ -138,34 +138,32 @@ function toggleCollapsed(): void {
 <style scoped>
 .todo-shell {
   --todo-panel-max-width: 480px;
-  position: relative;
-  z-index: 9;
-  height: 0;
+  position: static;
+  z-index: 0;
+  height: auto;
   width: 100%;
-  max-width: calc(var(--chat-message-track-max, 980px) - 32px);
-  margin: 0 auto;
-  padding: 0 calc(var(--chat-message-gutter, 28px) + 10px);
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
   box-sizing: border-box;
   pointer-events: none;
 }
 
 .todo-float {
-  position: absolute;
-  left: 50%;
-  bottom: max(0px, calc(var(--chat-input-overlap, 56px) - 10px));
+  position: static;
   width: min(
     var(--todo-panel-max-width),
     var(--chat-message-track-max, 980px),
     calc(100% - var(--chat-message-gutter, 28px) - var(--chat-message-gutter, 28px) - 24px)
   );
-  max-width: calc(100% - 32px);
+  max-width: 100%;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 6px;
   align-items: stretch;
   box-sizing: border-box;
   pointer-events: auto;
-  transform: translateX(-50%);
 }
 
 .todo-strip {
@@ -179,20 +177,16 @@ function toggleCollapsed(): void {
   align-items: center;
   border: 1px solid
     color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
-  border-bottom: 0;
-  border-radius: 8px 8px 0 0;
-  background: color-mix(in srgb, var(--app-panel) 96%, transparent);
-  box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.16);
+  border-radius: 13px;
+  background: var(--app-panel);
+  box-shadow: var(--shadow-2);
   color: var(--app-text);
   cursor: pointer;
   text-align: left;
-  backdrop-filter: blur(14px) saturate(130%);
-  -webkit-backdrop-filter: blur(14px) saturate(130%);
 }
 
 .todo-strip:hover {
   border-color: color-mix(in srgb, var(--app-accent) 30%, var(--app-border-strong));
-  border-bottom: 0;
   background: color-mix(in srgb, var(--app-accent-soft) 34%, var(--app-panel));
 }
 
@@ -281,11 +275,9 @@ function toggleCollapsed(): void {
   border: 1px solid
     color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
   border-radius: 8px;
-  background: color-mix(in srgb, var(--app-panel) 96%, transparent);
+  background: var(--app-panel);
   box-shadow: var(--app-shadow);
   overflow: hidden;
-  backdrop-filter: blur(14px) saturate(130%);
-  -webkit-backdrop-filter: blur(14px) saturate(130%);
 }
 
 .todo-detail-head {

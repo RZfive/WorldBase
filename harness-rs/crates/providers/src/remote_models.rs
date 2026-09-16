@@ -1,5 +1,6 @@
 //! Remote model catalog discovery for OpenAI-compatible and Anthropic APIs.
 
+use crate::api_protocol::ApiProtocol;
 use anyhow::{bail, Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::Value;
@@ -23,10 +24,10 @@ pub async fn fetch_remote_models(
         bail!("API key is required");
     }
 
-    let protocol = resolve_remote_protocol(base_url, api_protocol);
+    let protocol = resolve_remote_protocol(api_protocol);
     let endpoint = remote_models_url(base_url, protocol)?;
     let mut headers = HeaderMap::new();
-    if protocol == "anthropic" {
+    if protocol == ApiProtocol::Anthropic {
         headers.insert(
             "x-api-key",
             HeaderValue::from_str(api_key).context("invalid API key")?,
@@ -73,23 +74,20 @@ pub async fn fetch_remote_models(
     Ok(models)
 }
 
-fn resolve_remote_protocol<'a>(base_url: &str, explicit: &'a str) -> &'a str {
-    match explicit {
-        "anthropic" => "anthropic",
-        "openai" => "openai",
-        _ if base_url.to_ascii_lowercase().contains("anthropic.com") => "anthropic",
-        _ => "openai",
-    }
+/// 归一化存储的 apiProtocol：两个 OpenAI 协议共用 Bearer 鉴权的 /models，
+/// 不做 base URL 猜测（自动探测在 detect.rs 完成后才落库）。
+fn resolve_remote_protocol(explicit: &str) -> ApiProtocol {
+    ApiProtocol::from_stored(explicit)
 }
 
-fn remote_models_url(base_url: &str, protocol: &str) -> Result<String> {
+fn remote_models_url(base_url: &str, protocol: ApiProtocol) -> Result<String> {
     let mut url = reqwest::Url::parse(base_url).context("invalid base URL")?;
     if url.scheme() != "http" && url.scheme() != "https" {
         bail!("base URL must use http or https");
     }
 
     let path = url.path().trim_end_matches('/');
-    let models_path = if protocol == "anthropic" && !path.ends_with("/v1") {
+    let models_path = if protocol == ApiProtocol::Anthropic && !path.ends_with("/v1") {
         format!("{path}/v1/models")
     } else {
         format!("{path}/models")
@@ -119,7 +117,7 @@ fn parse_remote_models(payload: &Value) -> Vec<String> {
     models.into_iter().collect()
 }
 
-fn response_error_message(body: &str) -> String {
+pub(crate) fn response_error_message(body: &str) -> String {
     let parsed = serde_json::from_str::<Value>(body).ok();
     let message = parsed
         .as_ref()
@@ -196,6 +194,21 @@ mod tests {
         assert!(request.contains("x-api-key: anthropic-secret"));
         assert!(request.contains("anthropic-version: 2023-06-01"));
         assert_eq!(models, vec!["claude-sonnet"]);
+    }
+
+    #[tokio::test]
+    async fn openai_responses_protocol_uses_bearer_model_catalog() {
+        let (base_url, server) = serve_once(r#"{"data":[{"id":"gpt-5.1"}]}"#, "200 OK").await;
+        let models = fetch_remote_models(&format!("{base_url}/v1"), "secret", "openai-responses")
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+
+        assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer secret"));
+        assert_eq!(models, vec!["gpt-5.1"]);
     }
 
     #[tokio::test]
