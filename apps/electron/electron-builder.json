@@ -1,6 +1,7 @@
 {
   "appId": "com.theworld.app",
   "productName": "WorldBase",
+  "afterSign": "scripts/check-macos-permission-signing.cjs",
   "compression": "maximum",
   "electronLanguages": [
     "en-US",
@@ -85,11 +86,23 @@
     "icon": "public/icon.png"
   },
   "dmg": {
-    "background": "build/dmg-background.svg",
-    "backgroundColor": "#f7f8fc",
+    "background": "build/dmg-background.png",
     "window": {
-      "width": 900,
-      "height": 560
-    }
+      "width": 660,
+      "height": 400
+    },
+    "contents": [
+      {
+        "x": 200,
+        "y": 268,
+        "type": "file"
+      },
+      {
+        "x": 460,
+        "y": 268,
+        "type": "link",
+        "path": "/Applications"
+      }
+    ]
   }
 }

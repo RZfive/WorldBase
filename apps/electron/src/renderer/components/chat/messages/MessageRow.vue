@@ -104,21 +104,24 @@ const lastContentBlockIndex = computed(() => getLastContentBlockIndex(blocks.val
 const messageText = computed(() => getMessageText())
 
 /**
- * Codex-style work summary: consecutive thinking + tool runs collapse into
- * ONE row (live seconds while working, frozen total once settled), expanding
- * to the full trace — thinking pills and per-tool rows. A run needs ≥2
- * renderable items and at least one tool to group; lone thinking stays a
- * standalone pill. Purely a render-level transform, so stored/legacy
- * conversations group the same way as live ones.
+ * Codex-style work summary: consecutive thinking + tool + web result runs
+ * collapse into ONE row (live seconds while working, frozen total once
+ * settled), expanding to the full trace — thinking pills, per-tool rows and
+ * web result cards. A run needs ≥2 renderable items and at least one
+ * non-thinking item to group; lone thinking stays a standalone pill. Purely a
+ * render-level transform, so stored/legacy conversations group the same way
+ * as live ones.
  */
-type ThinkingOrToolBlock = Extract<ChatMessageBlock, { kind: 'thinking' | 'tool' }>
+type WorkBurstBlock = Extract<ChatMessageBlock, { kind: 'thinking' | 'tool' | 'web_search' | 'web_fetch' }>
+
+const GROUPABLE_KINDS = new Set<ChatMessageBlock['kind']>(['thinking', 'tool', 'web_search', 'web_fetch'])
 
 interface MessageRenderSegment {
   type: 'single' | 'group'
   key: string
   block: ChatMessageBlock
   blockIndex: number
-  groupBlocks: ThinkingOrToolBlock[]
+  groupBlocks: WorkBurstBlock[]
 }
 
 const renderSegments = computed<MessageRenderSegment[]>(() => {
@@ -129,14 +132,14 @@ const renderSegments = computed<MessageRenderSegment[]>(() => {
   const flushRun = () => {
     if (run.length === 0) return
     const renderable = run.filter(entry => entry.block.kind !== 'thinking' || hasRenderableBlock(entry.block))
-    const toolCount = renderable.filter(entry => entry.block.kind === 'tool').length
-    if (toolCount > 0 && renderable.length >= 2) {
+    const hasWork = renderable.some(entry => entry.block.kind !== 'thinking')
+    if (hasWork && renderable.length >= 2) {
       segments.push({
         type: 'group',
         key: `group-${renderable[0].block.id}`,
         block: renderable[0].block,
         blockIndex: renderable[0].blockIndex,
-        groupBlocks: renderable.map(entry => entry.block) as ThinkingOrToolBlock[]
+        groupBlocks: renderable.map(entry => entry.block) as WorkBurstBlock[]
       })
     } else {
       for (const entry of renderable) {
@@ -147,7 +150,7 @@ const renderSegments = computed<MessageRenderSegment[]>(() => {
   }
 
   all.forEach((block, blockIndex) => {
-    if (block.kind === 'thinking' || block.kind === 'tool') {
+    if (GROUPABLE_KINDS.has(block.kind)) {
       run.push({ block, blockIndex })
       return
     }

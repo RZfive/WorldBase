@@ -71,24 +71,36 @@ const agentPickerLabel = computed(() => {
   }
   return t('chatUi.defaultAgent')
 })
+
+// The right-side provider pill already shows the model identity — only keep
+// the detail line when it carries unique info (goal status, group size).
+const showContextDetail = computed(() => Boolean(
+  props.contextDetail &&
+  !showAgentPicker.value &&
+  !(props.showProviderSelector && props.providers && props.providers.length > 0)
+))
 </script>
 
 <template>
   <div class="chat-header">
     <div class="chat-header-copy">
-      <h2 :title="contextLabel">{{ contextLabel }}</h2>
-      <template v-if="showAgentPicker">
-        <span class="header-meta-separator" aria-hidden="true">·</span>
-        <div class="header-agent-picker">
-          <ProviderDropdown
-            :model-value="selectedAgentId || ''"
-            :options="[{ value: '', label: $t('chatUi.defaultAgent') }, ...(availableAgents || []).map(a => ({ value: a.id, label: (a.icon ? a.icon + ' ' : '') + a.name }))]"
-            :title="agentPickerLabel"
-            @update:model-value="emit('update:selected-agent-id', $event)"
-          />
-        </div>
-      </template>
-      <template v-else-if="contextDetail">
+      <!-- Agent capsule: a picker for new conversations, a subdued badge once
+           the conversation is bound (design v1.7). -->
+      <div v-if="showAgentPicker" class="header-agent-picker">
+        <ProviderDropdown
+          :model-value="selectedAgentId || ''"
+          :options="[{ value: '', label: $t('chatUi.defaultAgent') }, ...(availableAgents || []).map(a => ({ value: a.id, label: (a.icon ? a.icon + ' ' : '') + a.name }))]"
+          :title="agentPickerLabel"
+          @update:model-value="emit('update:selected-agent-id', $event)"
+        />
+      </div>
+      <div v-else class="header-agent-badge">
+        <span class="header-agent-badge-label">{{ contextLabel }}</span>
+      </div>
+
+      <!-- The model identity lives in the right-side provider pill; only show
+           the detail line when it carries unique info (goal/group status). -->
+      <template v-if="showContextDetail">
         <span class="header-meta-separator" aria-hidden="true">·</span>
         <p :title="contextDetail">{{ contextDetail }}</p>
       </template>
@@ -168,16 +180,28 @@ const agentPickerLabel = computed(() => {
   pointer-events: none;
 }
 
-.chat-header h2 {
+/* Subdued agent badge for bound conversations — identity without shouting. */
+.header-agent-badge {
   flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
   min-width: 0;
-  margin: 0;
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--app-text-strong);
+  max-width: min(260px, 30vw);
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-panel-strong) 55%, transparent);
+  color: var(--app-text-muted);
+}
+
+.header-agent-badge-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.72rem;
+  font-weight: 500;
 }
 
 .chat-header-copy {

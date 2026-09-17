@@ -1,7 +1,8 @@
-import { BrowserWindow, dialog, ipcMain, shell, systemPreferences, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell, systemPreferences, type IpcMainInvokeEvent } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { validateConversationMetadata, type ConversationMetadataPatch } from '../../src/shared/conversation-metadata.js'
-import { createStartupPermissionSnapshot } from './permissions/startup-snapshot.js'
+import { createComputerUsePermissionService } from './permissions/computer-use.js'
+import type { ComputerUsePermissionTarget } from '../../src/shared/computer-use-permissions.js'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { USER_ABORT_MESSAGE } from '../../src/main/ai-engine/abort-utils.js'
@@ -223,26 +224,28 @@ function rustStudioError (request: ImageStudioGenerateRequest, error: unknown): 
   })
 }
 
-export interface ComputerUsePermissionStatus {
-  platform: NodeJS.Platform
-  /** macOS TCC media status; always 'granted' off macOS. */
-  screen: 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'
-  accessibility: boolean
-  granted: boolean
-}
-
-const computerUseStartupSnapshot = createStartupPermissionSnapshot<ComputerUsePermissionStatus>(() => {
-  if (process.platform !== 'darwin') {
-    return { platform: process.platform, screen: 'granted', accessibility: true, granted: true }
-  }
-  const screen = systemPreferences.getMediaAccessStatus('screen')
-  const accessibility = systemPreferences.isTrustedAccessibilityClient(false)
-  return { platform: process.platform, screen, accessibility, granted: screen === 'granted' && accessibility }
-}, { platform: process.platform, screen: 'unknown', accessibility: false, granted: false })
+const computerUsePermissions = createComputerUsePermissionService({
+  platform: process.platform,
+  isPackaged: app.isPackaged,
+  executablePath: process.execPath,
+  getScreenStatus: () => systemPreferences.getMediaAccessStatus('screen'),
+  isAccessibilityTrusted: prompt => systemPreferences.isTrustedAccessibilityClient(prompt),
+  requestScreenAccess: async () => {
+    // Electron prompts for Screen Recording before enumerating sources. Do not
+    // capture thumbnails, icons or retain desktop contents just to request access.
+    await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 0, height: 0 },
+      fetchWindowIcons: false
+    })
+  },
+  openExternal: url => shell.openExternal(url),
+  warn: (message, error) => console.warn(message, error)
+})
 
 export function setupIPC (): void {
   // setupIPC runs once after app.whenReady, before any renderer is opened.
-  computerUseStartupSnapshot.initialize()
+  console.info('[permissions] Computer Use startup snapshot:', computerUsePermissions.initialize())
   const getMainWindow = () => mainState.mainWindow
   const aiEngine = mainState.aiEngine!
   const projectFS = mainState.projectFS!
@@ -2008,27 +2011,13 @@ export function setupIPC (): void {
 
   // All windows read the same startup snapshot; this IPC never probes TCC.
   ipcMain.handle('permissions:getComputerUse', async () => {
-    return computerUseStartupSnapshot.get()
+    return computerUsePermissions.get()
   })
 
-  // For denied/not-determined states, take the user to the matching pane. The
-  // Electron app is the permission client shown in System Settings, so do not
-  // ask a separately spawned Rust helper for the UI state.
-  ipcMain.handle('permissions:requestComputerUse', async () => {
-    if (process.platform !== 'darwin') return { granted: true }
-    const status = computerUseStartupSnapshot.get()
-    if (status.granted) return { granted: true }
-
-    if (!status.accessibility) {
-      // `true` asks macOS to show the Accessibility consent UI when possible;
-      // the explicit URL is a fallback for versions that ignore the prompt.
-      try { systemPreferences.isTrustedAccessibilityClient(true) } catch { /* best effort */ }
-    }
-    const pane = status.screen !== 'granted'
-      ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
-      : 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
-    await shell.openExternal(pane)
-    return { granted: status.granted }
+  // Only explicit user actions prompt/register this Electron app with TCC.
+  // Separate targets let users open Accessibility even if screen status is stale.
+  ipcMain.handle('permissions:requestComputerUse', async (_event: IpcMainInvokeEvent, target?: ComputerUsePermissionTarget) => {
+    return computerUsePermissions.request(target)
   })
 
   // Build management

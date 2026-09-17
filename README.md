@@ -216,6 +216,8 @@ pnpm --dir apps/electron electron:dev
 pnpm --dir apps/electron electron:build
 ```
 
+macOS 本地打包仍可使用临时（ad-hoc）签名，但覆盖安装后系统的屏幕录制 / 辅助功能授权可能需要重新添加。开发版 Electron 的授权不等于安装版 WorldBase 的授权。正式发布请配置 Developer ID Application 证书后执行 `pnpm electron:build:mac:arm64:signed`，此入口不允许退回临时签名。安装版权限排查与复测步骤见 [macOS 电脑使用权限](docs/macos-computer-use-permissions.md)。
+
 当前打包流程会将 Electron 主进程编译为 V8 字节码 (`.jsc`) 并通过 loader 启动；preload 产物保留为压缩后的普通 JS，以避免安装包中的 `contextBridge`/IPC 桥接在字节码模式下失效。开发态 `pnpm --dir apps/electron electron:dev` 仍使用普通 JS 产物，便于调试。
 
 > Windows 下如果生成/打包 Next.js standalone 应用时触发 symlink 权限错误，WorldBase 会在构建阶段自动拉起管理员授权。

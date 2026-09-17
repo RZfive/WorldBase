@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { computerUsePermissions as permissionState } from '../../utils/computer-use-permissions'
+import type { ComputerUsePermissionTarget } from '../../../shared/computer-use-permissions'
 import { loadAIExecutionPreferences, persistAIExecutionPreferences } from '../../utils/ai-execution-preferences'
 import type { ThemePreference } from '../../utils/theme'
 import { applyThemePreference, resolveThemePreference, watchSystemThemeChange } from '../../utils/theme'
@@ -537,8 +538,8 @@ onUnmounted(() => {
 const computerUsePermissions = permissionState.status
 const requestingComputerUse = permissionState.requesting
 
-async function requestComputerUsePermissions () {
-  await permissionState.request()
+async function requestComputerUsePermissions (target?: ComputerUsePermissionTarget) {
+  await permissionState.request(target)
 }
 
 function handleFontReposition () {
@@ -753,19 +754,30 @@ function handleFontReposition () {
             <div class="gs-control-copy">
               <span class="gs-control-title">{{ $t('settings.general.execution.computerUseTitle') }}</span>
               <p class="gs-control-hint">{{ $t('settings.general.execution.computerUseHint') }}</p>
-              <p v-if="computerUsePermissions && !computerUsePermissions.granted" class="gs-control-hint computer-use-perm-hint">
-                <span class="perm-dot" :class="{ ok: computerUsePermissions.screen === 'granted' }" />
-                {{ $t('settings.general.execution.computerUseScreen') }}
-                <span class="perm-dot" :class="{ ok: computerUsePermissions.accessibility }" />
-                {{ $t('settings.general.execution.computerUseAccessibility') }}
-              </p>
+              <div v-if="computerUsePermissions && !computerUsePermissions.granted" class="gs-control-hint computer-use-perm-hint">
+                <button type="button" class="gs-permission-link" :disabled="requestingComputerUse" @click="requestComputerUsePermissions('screen')">
+                  <span class="perm-dot" :class="{ ok: computerUsePermissions.screen === 'granted' }" />
+                  {{ $t('settings.general.execution.computerUseScreen') }} ↗
+                </button>
+                <button type="button" class="gs-permission-link" :disabled="requestingComputerUse" @click="requestComputerUsePermissions('accessibility')">
+                  <span class="perm-dot" :class="{ ok: computerUsePermissions.accessibility }" />
+                  {{ $t('settings.general.execution.computerUseAccessibility') }} ↗
+                </button>
+              </div>
+              <template v-if="computerUsePermissions?.platform === 'darwin' && computerUsePermissions.isPackaged && !computerUsePermissions.granted">
+                <p class="gs-control-hint">{{ $t('settings.general.execution.computerUsePackagedHint') }}</p>
+                <p class="gs-control-hint computer-use-app-path">
+                  {{ $t('settings.general.execution.computerUseAppPath') }}
+                  <code>{{ computerUsePermissions.appPath }}</code>
+                </p>
+              </template>
             </div>
             <button
               type="button"
               class="gs-permission-btn"
               :class="{ granted: computerUsePermissions?.granted }"
               :disabled="requestingComputerUse || computerUsePermissions?.granted"
-              @click="requestComputerUsePermissions"
+              @click="requestComputerUsePermissions()"
             >
               {{ computerUsePermissions?.granted
                 ? $t('settings.general.execution.computerUseGranted')
@@ -1498,6 +1510,35 @@ function handleFontReposition () {
   align-items: center;
   gap: 5px;
   flex-wrap: wrap;
+}
+
+.gs-permission-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.gs-permission-link:hover:not(:disabled) {
+  color: var(--app-accent);
+  border-color: var(--app-accent);
+}
+
+.gs-permission-link:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.computer-use-app-path code {
+  display: block;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .perm-dot {

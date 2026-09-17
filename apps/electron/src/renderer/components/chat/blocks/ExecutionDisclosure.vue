@@ -72,20 +72,24 @@ watch(
   align-items: center;
   gap: 7px;
   padding: 6px 9px;
-  border: 1px solid var(--app-border);
+  /* Visually weakened (design v1.7): translucent muted surface, hairline
+     border, no shadow — the row reads as part of the flow, not a card. */
+  border: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
   border-radius: 9px;
-  background: var(--app-panel);
+  background: var(--app-panel-muted);
   color: inherit;
   font: inherit;
   font-size: 0.78em;
   line-height: 1.45;
   text-align: left;
   cursor: pointer;
-  box-shadow: var(--shadow-1);
 }
 
 .execution-summary:disabled { cursor: default; }
-.execution-summary:hover:not(:disabled) { border-color: var(--app-border-strong); }
+.execution-summary:hover:not(:disabled) {
+  border-color: var(--app-border-strong);
+  background: color-mix(in srgb, var(--app-panel) 78%, transparent);
+}
 .execution-summary:hover:not(:disabled) .execution-title,
 .execution-summary:hover:not(:disabled) .execution-detail { color: var(--app-text); }
 .execution-summary:hover:not(:disabled) .execution-chevron,
@@ -146,14 +150,15 @@ watch(
 .execution-disclosure.expanded .execution-chevron { transform: rotate(90deg); }
 .execution-body {
   margin-top: 6px;
-  padding: 10px 10px 11px 13px;
-  border: 1px solid var(--app-border);
-  border-radius: 9px;
-  background: var(--app-panel);
+  padding: 10px 12px 11px;
+  /* Soft tint instead of a stark white card — the trace reads as part of the
+     flow, not a modal dropped into it. */
+  border: none;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-panel-muted) 44%, transparent);
   min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
-  box-shadow: var(--shadow-1);
 }
 .execution-disclosure.failed .execution-title { color: var(--app-danger-strong); }
 </style>

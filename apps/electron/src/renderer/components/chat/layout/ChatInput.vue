@@ -1119,6 +1119,59 @@ onUnmounted(() => {
   box-shadow: var(--chat-input-shadow);
 }
 
+/* --- design v1.7 motion: the signature gradient flows around the composer
+   while the agent works (thinking / executing). --- */
+@property --wb-ring-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.input-container::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--wb-ring-angle),
+    var(--app-accent),
+    var(--app-accent-strong) 25%,
+    var(--app-accent) 50%,
+    var(--app-accent-strong) 75%,
+    var(--app-accent)
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.24s ease;
+}
+
+.input-container.busy::before {
+  opacity: 1;
+  animation: input-ring-spin 3.6s linear infinite;
+}
+
+/* Waiting for authorization keeps the flow but tints it amber (状态即颜色). */
+.input-container.busy.waitingAuth::before {
+  background: conic-gradient(
+    from var(--wb-ring-angle),
+    var(--app-warning),
+    var(--app-warning-strong) 25%,
+    var(--app-warning) 50%,
+    var(--app-warning-strong) 75%,
+    var(--app-warning)
+  );
+}
+
+@keyframes input-ring-spin {
+  to { --wb-ring-angle: 360deg; }
+}
+
 :global(:root[data-theme='light'] .chat-input .input-container) {
   --chat-input-border: var(--app-border);
   --chat-input-control-surface: rgba(15, 23, 42, 0.035);
@@ -1936,42 +1989,78 @@ onUnmounted(() => {
   height: 32px;
   margin-left: auto;
   border-radius: 999px;
-  background: var(--app-sig);
+  /* 220% wide gradient sheet: lets the signature gradient swing while running. */
+  background: var(--app-sig) 0% 50% / 220% 100% no-repeat;
   color: #ffffff;
   box-shadow: 0 4px 14px color-mix(in srgb, var(--app-accent) 32%, transparent);
+  transition:
+    transform 0.16s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.2s ease;
 }
 
 .action-btn.send-btn:hover:not(:disabled) {
-  background: var(--app-sig);
-  filter: none;
+  transform: translateY(-1px) scale(1.05);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--app-accent) 42%, transparent);
 }
 
-/* Running: the icon becomes a stop square, the gradient stays (design v1.7). */
+.action-btn.send-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+/* Running: the icon becomes a stop square, the gradient flows and the glow
+   breathes (design v1.7 — 状态即形状). */
 .action-btn.send-btn.stopping {
-  background: var(--app-sig);
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--app-accent) 32%, transparent), 0 0 0 2px var(--app-accent-soft);
+  animation:
+    send-gradient-swing 2.6s ease-in-out infinite,
+    send-glow-pulse 2.4s ease-in-out infinite;
 }
 
-.action-btn.send-btn.stopping:hover:not(:disabled) {
-  background: var(--app-sig);
-  filter: none;
-}
-
-/* Waiting for authorization tints the key amber. */
+/* Waiting for authorization tints the key amber and slows the breath. */
 .action-btn.send-btn.stopping.waitingAuth {
-  background: var(--app-warning);
-  box-shadow: 0 10px 24px color-mix(in srgb, var(--app-warning) 28%, transparent);
+  background: var(--app-warning) 0% 50% / 220% 100% no-repeat;
+  animation: send-amber-glow-pulse 2.2s ease-in-out infinite;
 }
 
 .action-btn.send-btn.stopping.waitingAuth:hover:not(:disabled) {
   background: var(--app-warning-strong);
-  filter: none;
 }
 
 .action-btn.send-btn:disabled {
   background: var(--chat-input-disabled-surface);
   color: var(--app-text-faint);
   cursor: not-allowed;
+}
+
+@keyframes send-gradient-swing {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes send-glow-pulse {
+  0%, 100% { box-shadow: 0 4px 14px color-mix(in srgb, var(--app-accent) 32%, transparent), 0 0 0 2px var(--app-accent-soft); }
+  50% { box-shadow: 0 6px 22px color-mix(in srgb, var(--app-accent) 48%, transparent), 0 0 0 3px var(--app-accent-soft); }
+}
+
+@keyframes send-amber-glow-pulse {
+  0%, 100% { box-shadow: 0 4px 14px color-mix(in srgb, var(--app-warning) 28%, transparent); }
+  50% { box-shadow: 0 6px 22px color-mix(in srgb, var(--app-warning) 46%, transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input-container.busy::before,
+  .input-container.busy.waitingAuth::before {
+    animation: none;
+  }
+
+  .action-btn.send-btn.stopping,
+  .action-btn.send-btn.stopping.waitingAuth {
+    animation: none;
+  }
+
+  .action-btn.send-btn {
+    transition: none;
+  }
 }
 
 @keyframes runtime-pulse {

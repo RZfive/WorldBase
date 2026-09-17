@@ -1077,8 +1077,8 @@ interface ElectronAPI {
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
   onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
-  getComputerUsePermissions: () => Promise<{ platform: string; screen: string; accessibility: boolean; granted: boolean }>
-  requestComputerUsePermissions: () => Promise<{ granted: boolean }>
+  getComputerUsePermissions: () => Promise<import('./shared/computer-use-permissions').ComputerUsePermissionStatus>
+  requestComputerUsePermissions: (target?: import('./shared/computer-use-permissions').ComputerUsePermissionTarget) => Promise<{ granted: boolean }>
 
   // Process management
   getProcessSnapshot: () => Promise<ProcessManagerSnapshot>

@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-permissions.js'
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
@@ -902,7 +903,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getSystemStatus: () => ipcRenderer.invoke('system:getStatus'),
   getComputerUsePermissions: () => ipcRenderer.invoke('permissions:getComputerUse'),
-  requestComputerUsePermissions: () => ipcRenderer.invoke('permissions:requestComputerUse'),
+  requestComputerUsePermissions: (target?: ComputerUsePermissionTarget) => ipcRenderer.invoke('permissions:requestComputerUse', target),
 
   // Process management
   getProcessSnapshot: () => ipcRenderer.invoke('process:getSnapshot'),

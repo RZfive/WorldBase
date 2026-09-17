@@ -1,8 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560" viewBox="0 0 900 560">
-  <rect width="900" height="560" rx="24" fill="#f7f8fc"/>
-  <text x="450" y="92" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif" font-size="30" font-weight="700" fill="#1f2937">WorldBase 安装说明</text>
-  <text x="450" y="138" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif" font-size="20" fill="#4b5563">将 WorldBase 拖入 Applications 文件夹</text>
-  <text x="450" y="414" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif" font-size="18" fill="#374151">首次打开受阻时，在终端复制执行：</text>
-  <text x="450" y="458" text-anchor="middle" font-family="Menlo,Monaco,monospace" font-size="16" fill="#111827">xattr -dr com.apple.quarantine "/Applications/WorldBase.app"</text>
-  <text x="450" y="500" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif" font-size="15" fill="#6b7280">应用路径不同，请将命令中的路径替换为实际位置</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <rect width="660" height="400" rx="24" fill="#f7f8fc"/>
+  <text x="330" y="52" text-anchor="middle" font-family="PingFang SC,'Helvetica Neue',Arial,sans-serif" font-size="26" font-weight="700" fill="#1f2937">WorldBase 安装说明</text>
+  <text x="330" y="82" text-anchor="middle" font-family="PingFang SC,'Helvetica Neue',Arial,sans-serif" font-size="16" fill="#4b5563">将 WorldBase 拖入 Applications 文件夹</text>
+
+  <!-- 图标插槽：与 electron-builder.json 中 dmg.contents 的图标中心一致（contents x/y 为图标中心） -->
+  <rect x="152" y="172" width="96" height="96" rx="22" fill="none" stroke="#9ca3af" stroke-width="2" stroke-dasharray="7 5"/>
+  <rect x="412" y="172" width="96" height="96" rx="22" fill="none" stroke="#9ca3af" stroke-width="2" stroke-dasharray="7 5"/>
+
+  <line x1="266" y1="220" x2="386" y2="220" stroke="#3b82f6" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="386,211 402,220 386,229" fill="#3b82f6"/>
+
+  <text x="330" y="322" text-anchor="middle" font-family="PingFang SC,'Helvetica Neue',Arial,sans-serif" font-size="15" fill="#374151">首次打开受阻时，双击右下角「修复安装」脚本，或在终端执行：</text>
+
+  <rect x="70" y="338" width="440" height="32" rx="9" fill="#e8edf5"/>
+  <text x="290" y="359" text-anchor="middle" font-family="Menlo,Monaco,monospace" font-size="13" fill="#111827">xattr -dr com.apple.quarantine "/Applications/WorldBase.app"</text>
 </svg>

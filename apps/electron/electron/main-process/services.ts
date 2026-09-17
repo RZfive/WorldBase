@@ -151,14 +151,27 @@ export async function applyMcpServersToService (): Promise<MCPServerConfig[]> {
   }
   if (rust) {
     await parkElectronMcpForRust()
+    const client = rust
     try {
-      await rust.syncMcpServers()
-      broadcastToAppWindows('settings:mcpStateChanged', await rust.getMcpState())
+      await client.syncMcpServers()
+      broadcastToAppWindows('settings:mcpStateChanged', await client.getMcpState())
     } catch (error) {
       // Do not reconnect Electron MCP clients here. Rust remains selected and
       // the Settings panel can surface its native connection error on refresh.
       console.error('[main:mcp] Failed to apply Rust MCP settings:', error)
     }
+    // `mcp.status` only reports stored discovery metadata, and a fresh
+    // `mcp.reload` clears it. Rediscover enabled servers in the background so
+    // Settings fills in live tools/resources/prompts without a manual refresh,
+    // mirroring the TS service's refreshEnabledServers() inside updateServers.
+    void client.refreshMcpServer()
+      .then(async (refreshed) => {
+        const state = 'servers' in refreshed ? refreshed : await client.getMcpState()
+        broadcastToAppWindows('settings:mcpStateChanged', state)
+      })
+      .catch((error) => {
+        console.error('[main:mcp] Background MCP discovery failed:', error)
+      })
     return servers
   }
 

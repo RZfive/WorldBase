@@ -35,11 +35,13 @@
     "test:provider-models": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/provider-model-service.test.mjs",
     "test:renderer-navigation": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/renderer-navigation-performance.test.mjs tests/chat-history-performance.test.mjs tests/sidebar-performance.test.mjs",
     "test:message-branching": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-branching.test.mjs",
+    "test:computer-use-permissions": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/computer-use-permissions.test.mjs",
     "test:im-gateway": "node scripts/im-gateway-smoke.mjs",
     "electron:dev": "pnpm rebuild:native && pnpm build:harness && pnpm build && pnpm build:electron && pnpm exec electron .",
     "electron:build": "pnpm build:harness && pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --publish never",
     "electron:build:win": "pnpm build:harness && pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --win --publish never",
     "electron:build:mac:arm64": "pnpm build:harness && pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --mac --arm64 --publish never",
+    "electron:build:mac:arm64:signed": "pnpm build:harness && pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --mac --arm64 --publish never -c.mac.forceCodeSigning=true -c.mac.type=distribution",
     "electron:build:linux": "pnpm build:harness && pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --linux --publish never"
   },
   "dependencies": {

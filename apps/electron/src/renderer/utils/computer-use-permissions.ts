@@ -1,4 +1,5 @@
 import { computed, ref, shallowRef } from 'vue'
+import type { ComputerUsePermissionTarget } from '../../shared/computer-use-permissions'
 
 export type ComputerUsePermissionStatus = Awaited<ReturnType<NonNullable<Window['electronAPI']>['getComputerUsePermissions']>>
 type PermissionAPI = Pick<NonNullable<Window['electronAPI']>, 'getComputerUsePermissions' | 'requestComputerUsePermissions'>
@@ -24,13 +25,13 @@ export function createComputerUsePermissionState (
     return initialization
   }
 
-  function request (): Promise<void> {
+  function request (target?: ComputerUsePermissionTarget): Promise<void> {
     if (requestingPromise) return requestingPromise
     requesting.value = true
     requestingPromise = Promise.resolve().then(async () => {
       // Explicitly open the authorization UI, but keep the startup snapshot.
       // New grants/revocations are reflected after restarting the application.
-      await getAPI()?.requestComputerUsePermissions()
+      await getAPI()?.requestComputerUsePermissions(target)
     }).catch(() => {}).finally(() => {
       requesting.value = false
       requestingPromise = null

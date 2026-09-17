@@ -215,7 +215,9 @@ watch(
 }
 
 .conv-item.active {
-  background: var(--app-accent-wash, color-mix(in srgb, var(--app-accent) 16%, transparent));
+  /* Softened wash: keep the accent identity without a saturated block of
+     indigo in the light theme (design v1.7 sidebar pass). */
+  background: color-mix(in srgb, var(--app-accent-wash, color-mix(in srgb, var(--app-accent) 16%, transparent)) 60%, transparent);
   color: var(--app-text-strong);
 }
 

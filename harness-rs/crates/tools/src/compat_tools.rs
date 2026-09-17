@@ -7398,6 +7398,14 @@ impl Tool for GenerateImageTool {
     fn permission(&self) -> &str {
         "ask"
     }
+    // Rust owns execution: the tool hands Studio requests to the native
+    // `studio_pending_tasks` queue, which is the same queue the Electron
+    // renderer drains (`studio.tasks.drain`). A same-named TypeScript host
+    // override would write to Electron's in-memory buffer instead, stranding
+    // agent tasks whenever the Rust backend is selected.
+    fn electron_native(&self) -> bool {
+        true
+    }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         enqueue_studio_batch(&input, services, false).await
     }
@@ -7417,6 +7425,11 @@ impl Tool for EditImageTool {
     }
     fn permission(&self) -> &str {
         "ask"
+    }
+    // Same ownership rationale as `generate_image`: the edit queue lives in
+    // Rust so the Electron renderer can drain and execute it.
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         enqueue_studio_batch(&input, services, true).await

@@ -6,10 +6,14 @@ import { formatElapsedDuration } from '../message-utils'
 import ExecutionDisclosure from './ExecutionDisclosure.vue'
 import ThinkingBlock from './ThinkingBlock.vue'
 import ToolRunBlock from './ToolRunBlock.vue'
+import WebSearchBlock from './WebSearchBlock.vue'
+import WebFetchBlock from './WebFetchBlock.vue'
 
 type ThinkingBlockModel = Extract<ChatMessageBlock, { kind: 'thinking' }>
 type ToolBlockModel = Extract<ChatMessageBlock, { kind: 'tool' }>
-type GroupBlock = ThinkingBlockModel | ToolBlockModel
+type WebSearchBlockModel = Extract<ChatMessageBlock, { kind: 'web_search' }>
+type WebFetchBlockModel = Extract<ChatMessageBlock, { kind: 'web_fetch' }>
+type GroupBlock = ThinkingBlockModel | ToolBlockModel | WebSearchBlockModel | WebFetchBlockModel
 
 const props = withDefaults(defineProps<{
   blocks: GroupBlock[]
@@ -21,9 +25,10 @@ const props = withDefaults(defineProps<{
 
 const { t } = useI18n()
 
-// Codex-style work summary: consecutive thinking + tool runs collapse into
-// ONE row — live seconds while working, frozen total once settled — expanding
-// to the full trace (thinking pills + per-tool rows) underneath.
+// Codex-style work summary: consecutive thinking + tool + web result runs
+// collapse into ONE row — live seconds while working, frozen total once
+// settled — expanding to the full trace (thinking pills, per-tool rows and
+// web result cards) underneath.
 
 const hasRunningTool = computed(() => {
   return props.blocks.some(block => block.kind === 'tool' && block.toolRun.status === 'running')
@@ -63,10 +68,10 @@ onBeforeUnmount(() => {
 
 const elapsedLabel = computed(() => {
   const startedValues = props.blocks
-    .map(block => (block.kind === 'tool' ? block.toolRun.startedAt : block.startedAt))
+    .map(block => (block.kind === 'tool' ? block.toolRun.startedAt : block.kind === 'thinking' ? block.startedAt : undefined))
     .filter((value): value is number => typeof value === 'number')
   const endedValues = props.blocks
-    .map(block => (block.kind === 'tool' ? block.toolRun.endedAt : block.endedAt))
+    .map(block => (block.kind === 'tool' ? block.toolRun.endedAt : block.kind === 'thinking' ? block.endedAt : undefined))
     .filter((value): value is number => typeof value === 'number')
 
   if (startedValues.length === 0) return ''
@@ -84,7 +89,7 @@ const elapsedLabel = computed(() => {
   return formatElapsedDuration(seconds, t)
 })
 
-// Executed-work summary, e.g. "思考 1 · 读取 2 · 编辑 1".
+// Executed-work summary, e.g. "思考 1 · 检索 2 · 搜索 4".
 function getToolVerbKey (name: string): string {
   const normalized = name.toLowerCase()
   if (normalized.includes('todo')) return 'chatUi.toolVerbTodo'
@@ -96,19 +101,20 @@ function getToolVerbKey (name: string): string {
   return 'chatUi.toolVerbRun'
 }
 
-const summaryText = computed(() => {
-  const parts: string[] = []
-  const thinkingCount = props.blocks.filter(block => block.kind === 'thinking').length
-  if (thinkingCount > 0) {
-    parts.push(`${t('chatUi.toolVerbThink')} ${thinkingCount}`)
-  }
+function getBlockVerbKey (block: GroupBlock): string {
+  if (block.kind === 'thinking') return 'chatUi.toolVerbThink'
+  if (block.kind === 'web_search') return 'chatUi.toolVerbWebSearch'
+  if (block.kind === 'web_fetch') return 'chatUi.toolVerbFetch'
+  return getToolVerbKey(block.toolRun.name)
+}
 
+const summaryText = computed(() => {
   const verbCounts = new Map<string, number>()
   for (const block of props.blocks) {
-    if (block.kind !== 'tool') continue
-    const verbKey = getToolVerbKey(block.toolRun.name)
+    const verbKey = getBlockVerbKey(block)
     verbCounts.set(verbKey, (verbCounts.get(verbKey) || 0) + 1)
   }
+  const parts: string[] = []
   for (const [verbKey, count] of verbCounts) {
     parts.push(`${t(verbKey)} ${count}`)
   }
@@ -161,6 +167,16 @@ function isInnerThinkingStreaming (block: ThinkingBlockModel, index: number): bo
           :is-collapsed="isThinkingCollapsed(block)"
           class="tool-group-item"
           @toggle="toggleThinking(block.id)"
+        />
+        <WebSearchBlock
+          v-else-if="block.kind === 'web_search'"
+          :block="block"
+          class="tool-group-item"
+        />
+        <WebFetchBlock
+          v-else-if="block.kind === 'web_fetch'"
+          :block="block"
+          class="tool-group-item"
         />
         <ToolRunBlock
           v-else

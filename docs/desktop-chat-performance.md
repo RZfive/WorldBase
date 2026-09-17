@@ -5,7 +5,8 @@
 - Electron reads Screen Recording and Accessibility status once in `setupIPC`, after `app.whenReady` and before creating renderer windows.
 - `permissions:getComputerUse` only returns that in-memory startup snapshot. There is no TTL, polling, focus/visibility refresh or retry after a failed probe.
 - Each renderer loads the snapshot once from `App.vue`. Settings and the chat toggle share it; conversation/provider selection does not invoke permission APIs.
-- The explicit Grant button can open the system authorization UI. Changes in System Settings take effect in the app UI after a restart; the grant flow does not trigger another status probe.
+- The explicit Grant button requests missing permissions as the Electron app before opening System Settings. Screen Recording uses `desktopCapturer.getSources` with zero-size thumbnails and no icons; the result is discarded and is never treated as proof of a grant. Separate Screen Recording / Accessibility buttons select the intended pane even when the startup snapshot is stale. Changes take effect in the app UI after a full quit/restart; the grant flow does not refresh the snapshot.
+- Screen and Accessibility probe failures are logged independently. Startup diagnostics include the running application path and packaged/development mode. Packaged-app recovery and signing instructions are in `docs/macos-computer-use-permissions.md`.
 - This is a UI-status policy, not a bypass of actual tool permissions. The native screenshot/input backend still enforces OS permissions when those tools are used.
 
 ## Conversation persistence
@@ -26,6 +27,7 @@ Conversation navigation selects from the already-loaded provider catalog. Startu
 `apps/electron/scripts/build-main.mjs` produces `dist-electron/electron/chat-history-worker.cjs` alongside both ESM and bytecode main entries. The existing Electron Builder file glob includes this worker. Rebuild **main, preload and renderer** and restart the application to load this change.
 
 ```sh
+pnpm --dir apps/electron test:computer-use-permissions
 pnpm --dir apps/electron test:renderer-navigation
 pnpm electron:typecheck
 pnpm electron:test

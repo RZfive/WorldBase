@@ -80,6 +80,25 @@ function getTextSegments (text?: string) {
   return splitMarkdownWithMermaid(text || '')
 }
 
+// design v1.7 motion: the streaming caret lives at the TEXT tail — a 2.5px
+// signature-gradient lightbar with soft glow, injected inline into the last
+// rendered block so it hugs the newest character.
+const STREAM_CARET_HTML = '<span class="stream-caret" aria-hidden="true"></span>'
+
+function withStreamCaret (html: string): string {
+  const trimmed = html.trimEnd()
+  if (!trimmed) return STREAM_CARET_HTML
+  // Raw code/preview surfaces would read the caret as markup — skip them.
+  if (/<\/(pre|code|table)>$/i.test(trimmed)) return trimmed
+  const injected = trimmed.replace(/(<\/(p|li|h[1-6]|blockquote)>\s*)$/, `${STREAM_CARET_HTML}$1`)
+  return injected === trimmed ? `${trimmed}${STREAM_CARET_HTML}` : injected
+}
+
+function renderSegmentHtml (text: string): string {
+  const html = renderMarkdown(text)
+  return props.isStreamingBlock ? withStreamCaret(html) : html
+}
+
 function getMermaidPreviewText (code: string): string {
   return `\`\`\`mermaid\n${code}\n\`\`\``
 }
@@ -206,7 +225,7 @@ onBeforeUnmount(() => {
               <div
                 v-if="segment.type === 'markdown'"
                 class="message-text markdown-body"
-                v-html="renderMarkdown(segment.text)"
+                v-html="renderSegmentHtml(segment.text)"
                 v-stable-images
               ></div>
 
@@ -299,19 +318,6 @@ onBeforeUnmount(() => {
   position: relative;
 }
 
-.message-output.streaming::before {
-  content: '';
-  position: absolute;
-  left: -14px;
-  top: 2px;
-  bottom: 2px;
-  width: 2px;
-  border-radius: var(--radius-pill);
-  background: var(--chat-stream-bar);
-  box-shadow: var(--chat-stream-glow);
-  opacity: 0.85;
-}
-
 .message-placeholder {
   color: var(--app-text-muted);
   min-width: 160px;
@@ -329,6 +335,71 @@ onBeforeUnmount(() => {
 
 .message-text + .message-text {
   margin-top: 10px;
+}
+
+/* design v1.7 motion: streaming caret — a 2.5px signature-gradient lightbar
+   at the text tail with a soft glow, so words feel "written" out. */
+.message-text :deep(.stream-caret) {
+  position: relative;
+  display: inline-block;
+  width: 2.5px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: -0.15em;
+  border-radius: 2px;
+  background: var(--app-sig);
+  box-shadow: 0 0 10px var(--app-accent-glow), 0 0 4px var(--app-accent-glow);
+  animation: stream-caret-breathe 1.1s ease-in-out infinite;
+}
+
+/* Tiny rising sparks — the "particles composing the text" shimmer. */
+.message-text :deep(.stream-caret)::before,
+.message-text :deep(.stream-caret)::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--app-accent);
+  filter: blur(0.5px);
+  pointer-events: none;
+}
+
+.message-text :deep(.stream-caret)::before {
+  animation: stream-spark-a 1.1s ease-out infinite;
+}
+
+.message-text :deep(.stream-caret)::after {
+  width: 2px;
+  height: 2px;
+  background: var(--app-accent-strong);
+  animation: stream-spark-b 1.4s ease-out infinite;
+  animation-delay: 0.3s;
+}
+
+@keyframes stream-caret-breathe {
+  0%, 100% { opacity: 0.6; transform: scaleY(0.72); }
+  50% { opacity: 1; transform: scaleY(1); }
+}
+
+@keyframes stream-spark-a {
+  0% { opacity: 0.9; transform: translate(-50%, 0) scale(1); }
+  100% { opacity: 0; transform: translate(-30%, -9px) scale(0.4); }
+}
+
+@keyframes stream-spark-b {
+  0% { opacity: 0.7; transform: translate(-70%, 0) scale(1); }
+  100% { opacity: 0; transform: translate(-20%, -12px) scale(0.3); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-text :deep(.stream-caret),
+  .message-text :deep(.stream-caret)::before,
+  .message-text :deep(.stream-caret)::after {
+    animation: none;
+  }
 }
 
 .message-text-group {
