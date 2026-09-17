@@ -89,17 +89,17 @@
     "background": "build/dmg-background.png",
     "window": {
       "width": 660,
-      "height": 400
+      "height": 500
     },
     "contents": [
       {
         "x": 200,
-        "y": 268,
+        "y": 200,
         "type": "file"
       },
       {
         "x": 460,
-        "y": 268,
+        "y": 200,
         "type": "link",
         "path": "/Applications"
       }
