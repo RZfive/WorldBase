@@ -440,13 +440,11 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
   color: var(--app-text-strong);
 }
 
+/* Plain faint text, not a pill chip — the model label shouldn't compete
+   with the author name next to it. */
 .message-model-chip {
   display: inline-flex;
   align-items: center;
-  padding: 2px 7px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--app-border);
-  background: var(--app-panel-muted);
   color: var(--app-text-faint);
   font-size: 0.7rem;
 }

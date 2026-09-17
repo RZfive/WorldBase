@@ -246,22 +246,74 @@ const conversationSidebarWidth = computed(() => conversationSidebarCollapsed.val
   ? CONVERSATION_SIDEBAR_COLLAPSED_WIDTH
   : CONVERSATION_SIDEBAR_WIDTH
 )
-const sidebarTotalCount = computed(() => (
-  agentSidebarItems.value.length +
-  groupSidebarItems.value.length +
-  longTermGoalSidebarItems.value.length +
-  conversationSidebarItems.value.length
-))
 
 // The collapsed capsule shows which list owns the active conversation
-// (design v1.7: the capsule is a context marker, not a quick-switch rail —
-// expanding the list is the switching surface).
+// (context marker icon); hovering it opens a compact quick-switch flyout —
+// expanding the list remains the full switching surface.
 const collapsedCapsuleIcon = computed(() => {
   if (agentSidebarItems.value.some(item => item.isActive)) return 'robot'
   if (groupSidebarItems.value.some(item => item.isActive)) return 'people'
   if (longTermGoalSidebarItems.value.some(item => item.isActive)) return 'target'
   return 'bubble'
 })
+
+type CapsuleFlyoutRowStatus = 'idle' | 'streaming' | 'auth' | 'unread'
+type CapsuleFlyoutRow = { id: string; title: string; active: boolean; status: CapsuleFlyoutRowStatus }
+type CapsuleFlyoutSection = {
+  key: 'agents' | 'groups' | 'goals' | 'conversations'
+  label: string
+  rows: CapsuleFlyoutRow[]
+}
+
+// Compact quick-switch rows for the collapsed-capsule hover flyout: titles
+// and status dots only — the expanded list is the full-detail surface.
+const capsuleFlyoutSections = computed<CapsuleFlyoutSection[]>(() => {
+  const statusOf = (item: { isStreaming: boolean; pendingAuthCount: number; unreadCount: number }): CapsuleFlyoutRowStatus => {
+    if (item.pendingAuthCount > 0) return 'auth'
+    if (item.isStreaming) return 'streaming'
+    if (item.unreadCount > 0) return 'unread'
+    return 'idle'
+  }
+  const sections: CapsuleFlyoutSection[] = []
+  if (agentSidebarItems.value.length > 0) {
+    sections.push({
+      key: 'agents',
+      label: 'Agent',
+      rows: agentSidebarItems.value.map(item => ({ id: item.id, title: item.title, active: item.isActive, status: statusOf(item) }))
+    })
+  }
+  if (groupSidebarItems.value.length > 0) {
+    sections.push({
+      key: 'groups',
+      label: t('chatUi.groups'),
+      rows: groupSidebarItems.value.map(item => ({ id: item.id, title: item.title, active: item.isActive, status: statusOf(item) }))
+    })
+  }
+  if (longTermGoalSidebarItems.value.length > 0) {
+    sections.push({
+      key: 'goals',
+      label: t('chatUi.longTermGoalsShort'),
+      rows: longTermGoalSidebarItems.value.map(item => ({ id: item.id, title: item.title, active: item.isActive, status: statusOf(item) }))
+    })
+  }
+  if (conversationSidebarItems.value.length > 0) {
+    sections.push({
+      key: 'conversations',
+      label: t('appShell.chat'),
+      rows: conversationSidebarItems.value.map(item => ({ id: item.id, title: item.title, active: item.isActive, status: statusOf(item) }))
+    })
+  }
+  return sections
+})
+
+const hasCapsuleFlyoutRows = computed(() => capsuleFlyoutSections.value.some(section => section.rows.length > 0))
+
+function openCapsuleFlyoutRow (key: CapsuleFlyoutSection['key'], id: string): void {
+  if (key === 'agents') void openAgentWorkspaceConversation(id)
+  else if (key === 'groups') void openGroupWorkspaceConversation(id)
+  else if (key === 'goals') void openLongTermGoal(id)
+  else void loadConversation(id)
+}
 
 function toggleConversationSidebar (): void {
   conversationSidebarCollapsed.value = !conversationSidebarCollapsed.value
@@ -497,8 +549,10 @@ watch(
       :class="['conversation-sidebar-shell', { collapsed: conversationSidebarCollapsed }]"
       :aria-label="conversationSidebarCollapsed ? $t('chatUi.conversationListCollapsed') : $t('chatUi.conversationList')"
     >
-      <template v-if="!conversationSidebarCollapsed">
+      <Transition name="conv-morph">
         <ConversationSidebar
+          v-if="!conversationSidebarCollapsed"
+          key="conv-list"
           :agent-items="agentSidebarItems"
           :group-items="groupSidebarItems"
           :long-term-goal-items="longTermGoalSidebarItems"
@@ -515,27 +569,61 @@ watch(
           @delete-conversation="deleteConversation"
           @rename-conversation="renameConversation"
         />
-      </template>
 
-      <div
-        v-else
-        class="conversation-sidebar-capsule"
-        role="button"
-        :tabindex="0"
-        :aria-label="$t('chatUi.expandConversationList')"
-        @click="toggleConversationSidebar"
-        @keydown.enter.prevent="toggleConversationSidebar"
-        @keydown.space.prevent="toggleConversationSidebar"
-      >
-        <span class="conversation-capsule-btn" aria-hidden="true">
-          <SidebarIcon name="panel" :size="14" />
-        </span>
-        <span class="conversation-capsule-av" aria-hidden="true">
-          <SidebarIcon :name="collapsedCapsuleIcon" :size="12" />
-        </span>
-        <span class="conversation-capsule-n" aria-hidden="true">{{ sidebarTotalCount }}</span>
-        <span class="conversation-capsule-tip" aria-hidden="true">{{ $t('chatUi.expandConversationList') }} · ⌘\</span>
-      </div>
+        <div v-else key="conv-capsule" class="conversation-sidebar-capsule-wrap">
+          <div class="conversation-sidebar-capsule">
+            <button
+              class="conversation-capsule-btn"
+              type="button"
+              :aria-label="$t('chatUi.expandConversationList')"
+              @click="toggleConversationSidebar"
+            >
+              <SidebarIcon name="panel" :size="14" />
+            </button>
+            <span class="conversation-capsule-av" aria-hidden="true">
+              <SidebarIcon :name="collapsedCapsuleIcon" :size="12" />
+            </span>
+            <button
+              class="conversation-capsule-new"
+              type="button"
+              :title="$t('chatUi.newConversation')"
+              :aria-label="$t('chatUi.newConversation')"
+              @click="newConversation"
+            >
+              <SidebarIcon name="plus" :size="13" />
+            </button>
+          </div>
+
+          <div class="conversation-capsule-flyout" :aria-label="$t('chatUi.quickSwitch')">
+          <div class="capsule-flyout-head" aria-hidden="true">{{ $t('chatUi.quickSwitch') }}</div>
+          <div class="capsule-flyout-body">
+            <section
+              v-for="section in capsuleFlyoutSections"
+              :key="section.key"
+              class="capsule-flyout-section"
+            >
+              <div class="capsule-flyout-label" aria-hidden="true">{{ section.label }}</div>
+              <button
+                v-for="row in section.rows"
+                :key="row.id"
+                :class="['capsule-flyout-row', { active: row.active }]"
+                type="button"
+                :title="row.title"
+                @click="openCapsuleFlyoutRow(section.key, row.id)"
+              >
+                <span :class="['capsule-flyout-dot', row.status]" aria-hidden="true"></span>
+                <span class="capsule-flyout-title">{{ row.title }}</span>
+              </button>
+            </section>
+            <div v-if="!hasCapsuleFlyoutRows" class="capsule-flyout-empty">{{ $t('chatUi.quickSwitchEmpty') }}</div>
+          </div>
+          <button class="capsule-flyout-foot" type="button" @click="toggleConversationSidebar">
+            <span>{{ $t('chatUi.expandConversationList') }}</span>
+            <kbd aria-hidden="true">⌘\</kbd>
+          </button>
+        </div>
+        </div>
+      </Transition>
     </aside>
 
     <div
@@ -757,13 +845,19 @@ watch(
 /* ---- Collapsed state: floating glass capsule (design v1.7) ----
    The collapsed list occupies no column. A translucent vertical capsule
    hovers over the chat's left edge; hover turns the border solid accent,
-   click restores the list. */
-.conversation-sidebar-capsule {
+   click restores the list. Hovering also opens a compact quick-switch
+   flyout so conversations can be switched without expanding the rail. */
+/* Positioning wrapper — must stay filter-free: a backdrop-filter here would
+   become the flyout's backdrop root and its blur would sample nothing. */
+.conversation-sidebar-capsule-wrap {
   position: absolute;
   left: 12px;
   top: 50%;
   transform: translateY(-50%);
   z-index: 22;
+}
+
+.conversation-sidebar-capsule {
   width: 36px;
   padding: 8px 0;
   display: flex;
@@ -773,23 +867,67 @@ watch(
   border-radius: 999px;
   border: 1px solid var(--app-border);
   background: color-mix(in srgb, var(--app-chat-list-raised) 58%, transparent);
+  backdrop-filter: blur(16px) saturate(150%);
   box-shadow: var(--shadow-2);
   color: var(--app-text-muted);
-  cursor: pointer;
   user-select: none;
   transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
-  animation: conversation-capsule-in 0.22s var(--ease-out);
 }
 
-@keyframes conversation-capsule-in {
-  from {
-    opacity: 0;
-    transform: translateY(-50%) translateX(-6px);
-  }
+/* ---- Collapse morph (conv-morph transition) ----
+   The list squashes down onto the capsule's footprint and fades; the capsule
+   grows out of the same spot. Origin 30px/50% is the capsule's center
+   (left 12px + 36px/2, vertically centered). The leaving/entering list is
+   pinned absolute at full 224px so the shell's 224→0 width collapse never
+   reflows it — the scale transform does all the visible squashing. */
+.conv-sidebar.conv-morph-leave-active,
+.conv-sidebar.conv-morph-enter-active {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 224px;
+  transform-origin: 30px 50%;
+  pointer-events: none;
 }
 
-.conversation-sidebar-capsule:hover,
-.conversation-sidebar-capsule:focus-visible {
+.conv-sidebar.conv-morph-leave-active {
+  transition: opacity 0.2s ease, transform 0.24s var(--ease-out), border-radius 0.24s var(--ease-out);
+}
+
+.conv-sidebar.conv-morph-enter-active {
+  transition: opacity 0.18s ease, transform 0.24s var(--ease-out), border-radius 0.24s var(--ease-out);
+}
+
+/* Corners round as it squashes — the rectangle literally becomes the capsule. */
+.conv-sidebar.conv-morph-leave-to,
+.conv-sidebar.conv-morph-enter-from {
+  opacity: 0;
+  transform: scale(0.16, 0.2);
+  border-radius: 999px;
+}
+
+/* Capsule counterparty: slightly delayed so the list visibly lands first. */
+.conversation-sidebar-capsule-wrap.conv-morph-enter-active {
+  transition: opacity 0.16s ease 0.08s, transform 0.18s var(--ease-out) 0.08s;
+}
+
+.conversation-sidebar-capsule-wrap.conv-morph-enter-from {
+  opacity: 0;
+  transform: translateY(-50%) scale(0.5);
+}
+
+.conversation-sidebar-capsule-wrap.conv-morph-leave-active {
+  transition: opacity 0.14s ease, transform 0.16s var(--ease-out);
+}
+
+.conversation-sidebar-capsule-wrap.conv-morph-leave-to {
+  opacity: 0;
+  transform: translateY(-50%) scale(0.5);
+}
+
+.conversation-sidebar-capsule-wrap:hover .conversation-sidebar-capsule,
+.conversation-sidebar-capsule-wrap:focus-within .conversation-sidebar-capsule {
   border: 1.5px solid var(--app-accent);
   background: color-mix(in srgb, var(--app-chat-list-raised) 90%, transparent);
   box-shadow: var(--shadow-3), 0 0 0 3px var(--app-accent-soft);
@@ -800,15 +938,19 @@ watch(
 .conversation-capsule-btn {
   width: 26px;
   height: 26px;
+  padding: 0;
+  border: none;
   border-radius: 999px;
+  background: transparent;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--app-text-soft);
+  cursor: pointer;
 }
 
-.conversation-sidebar-capsule:hover .conversation-capsule-btn,
-.conversation-sidebar-capsule:focus-visible .conversation-capsule-btn {
+.conversation-sidebar-capsule-wrap:hover .conversation-capsule-btn,
+.conversation-sidebar-capsule-wrap:focus-within .conversation-capsule-btn {
   color: var(--app-accent-strong);
 }
 
@@ -823,26 +965,44 @@ watch(
   color: var(--app-accent-strong);
 }
 
-.conversation-capsule-n {
-  font-size: 0.56rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+.conversation-capsule-new {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--app-text-faint);
+  cursor: pointer;
+  transition: color 0.16s ease, background 0.16s ease;
 }
 
-.conversation-capsule-tip {
+.conversation-capsule-new:hover {
+  color: var(--app-accent-strong);
+  background: color-mix(in srgb, var(--app-accent-soft) 55%, transparent);
+}
+
+/* ---- Capsule hover flyout: compact quick-switch list ----
+   No overflow:hidden here — it would clip the hover bridge below. The
+   body scrolls (and clips) on its own; the footer rounds its own corners.
+   Sibling of the capsule (not its child) so its backdrop-filter samples
+   the page behind instead of the capsule's backdrop root. */
+.conversation-capsule-flyout {
   position: absolute;
-  left: calc(100% + 9px);
+  left: calc(100% + 10px);
   top: 50%;
-  z-index: 23;
-  white-space: nowrap;
-  font-size: 0.68rem;
-  color: var(--app-text-strong);
-  background: color-mix(in srgb, var(--app-panel-strong) 96%, transparent);
+  width: 236px;
+  max-height: min(420px, 64vh);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
   border: 1px solid var(--app-border);
-  border-radius: 8px;
-  padding: 4px 9px;
-  box-shadow: var(--shadow-2);
+  background: color-mix(in srgb, var(--app-panel-strong) 86%, transparent);
+  backdrop-filter: blur(14px) saturate(130%);
+  box-shadow: var(--shadow-3);
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -850,15 +1010,178 @@ watch(
   transition: opacity 0.16s ease, transform 0.16s var(--ease-out), visibility 0.16s ease;
 }
 
-.conversation-sidebar-capsule:hover .conversation-capsule-tip,
-.conversation-sidebar-capsule:focus-visible .conversation-capsule-tip {
+/* Invisible bridge so the pointer can travel the capsule→flyout gap
+   without the flyout closing. */
+.conversation-capsule-flyout::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -12px;
+  width: 12px;
+}
+
+.conversation-sidebar-capsule-wrap:hover .conversation-capsule-flyout,
+.conversation-sidebar-capsule-wrap:focus-within .conversation-capsule-flyout {
   opacity: 1;
   visibility: visible;
+  pointer-events: auto;
   transform: translateY(-50%) translateX(0);
 }
 
+.capsule-flyout-head {
+  padding: 10px 13px 6px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--app-text-faint);
+}
+
+.capsule-flyout-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 6px 6px;
+}
+
+.capsule-flyout-section + .capsule-flyout-section {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--app-border) 60%, transparent);
+}
+
+.capsule-flyout-label {
+  padding: 3px 7px;
+  font-size: 0.58rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--app-text-faint);
+}
+
+.capsule-flyout-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-soft);
+  font: inherit;
+  font-size: 0.74rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.capsule-flyout-row:hover {
+  background: color-mix(in srgb, var(--app-panel-muted) 72%, transparent);
+  color: var(--app-text);
+}
+
+.capsule-flyout-row.active {
+  background: color-mix(in srgb, var(--app-accent-wash, color-mix(in srgb, var(--app-accent) 16%, transparent)) 60%, transparent);
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.capsule-flyout-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capsule-flyout-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--app-text-faint) 55%, transparent);
+}
+
+.capsule-flyout-dot.streaming {
+  background: var(--app-accent-strong);
+  animation: capsule-flyout-pulse 1.15s ease-in-out infinite;
+}
+
+.capsule-flyout-dot.auth {
+  background: var(--app-warning-strong);
+  animation: capsule-flyout-pulse 1.45s ease-in-out infinite;
+}
+
+.capsule-flyout-dot.unread {
+  background: var(--app-danger);
+}
+
+@keyframes capsule-flyout-pulse {
+  0%, 100% { transform: scale(0.85); opacity: 0.72; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+
+.capsule-flyout-empty {
+  padding: 14px 10px 16px;
+  font-size: 0.72rem;
+  color: var(--app-text-muted);
+  text-align: center;
+}
+
+.capsule-flyout-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 13px;
+  border: none;
+  border-top: 1px solid var(--app-border);
+  border-radius: 0 0 13px 13px;
+  background: color-mix(in srgb, var(--app-panel-muted) 50%, transparent);
+  color: var(--app-text-muted);
+  font: inherit;
+  font-size: 0.68rem;
+  cursor: pointer;
+  transition: color 0.14s ease, background 0.14s ease;
+}
+
+.capsule-flyout-foot:hover {
+  color: var(--app-accent-strong);
+  background: color-mix(in srgb, var(--app-accent-soft) 26%, transparent);
+}
+
+.capsule-flyout-foot kbd {
+  font-family: inherit;
+  font-size: 0.62rem;
+  color: var(--app-text-faint);
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .conversation-sidebar-capsule {
+  .conv-sidebar.conv-morph-enter-active,
+  .conv-sidebar.conv-morph-leave-active,
+  .conversation-sidebar-capsule-wrap.conv-morph-enter-active,
+  .conversation-sidebar-capsule-wrap.conv-morph-leave-active {
+    transition: opacity 0.15s ease;
+  }
+
+  .conv-sidebar.conv-morph-enter-from,
+  .conv-sidebar.conv-morph-leave-to {
+    transform: none;
+  }
+
+  .conversation-sidebar-capsule-wrap.conv-morph-enter-from,
+  .conversation-sidebar-capsule-wrap.conv-morph-leave-to {
+    transform: translateY(-50%);
+  }
+
+  .capsule-flyout-dot.streaming,
+  .capsule-flyout-dot.auth {
     animation: none;
   }
 }

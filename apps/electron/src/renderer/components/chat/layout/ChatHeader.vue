@@ -180,18 +180,15 @@ const showContextDetail = computed(() => Boolean(
   pointer-events: none;
 }
 
-/* Subdued agent badge for bound conversations — identity without shouting. */
+/* Bound conversations drop the capsule chrome entirely — plain identity
+   text. The pill look stays only on the new-conversation picker, where the
+   capsule signals "this is a control you can change". */
 .header-agent-badge {
   flex: 0 1 auto;
   display: inline-flex;
   align-items: center;
   min-width: 0;
   max-width: min(260px, 30vw);
-  height: 24px;
-  padding: 0 10px;
-  border: 1px solid var(--app-border);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--app-panel-strong) 55%, transparent);
   color: var(--app-text-muted);
 }
 

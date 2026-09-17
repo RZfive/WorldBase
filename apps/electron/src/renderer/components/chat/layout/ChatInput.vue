@@ -1096,7 +1096,9 @@ onUnmounted(() => {
 }
 
 .input-container {
-  --chat-input-surface: var(--app-panel);
+  /* Frosted glass per design doc: translucent panel over the message stream
+     + backdrop blur (plain see-through reads as a rendering bug). */
+  --chat-input-surface: color-mix(in srgb, var(--app-panel) 80%, transparent);
   --chat-input-border: var(--app-input-border);
   --chat-input-control-surface: color-mix(in srgb, var(--app-panel-muted) 84%, transparent);
   --chat-input-control-border: var(--app-border-strong);
@@ -1112,6 +1114,7 @@ onUnmounted(() => {
   position: relative;
   box-sizing: border-box;
   background: var(--chat-input-surface);
+  backdrop-filter: blur(18px) saturate(150%);
   border: 1px solid var(--chat-input-border);
   border-radius: 15px;
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;

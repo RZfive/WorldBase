@@ -371,6 +371,12 @@ watch(
   line-height: 1.3;
 }
 
+/* Agent rows repeat the provider·model line on every card; keep it as faint
+   plain text so the model name doesn't compete with the title. */
+.agent-item .conv-subtitle {
+  color: var(--app-text-faint);
+}
+
 .conv-actions {
   /* Non-compact (agent/group) cards keep the buttons as inline flex children. */
   display: contents;
@@ -530,38 +536,33 @@ watch(
   transition-delay: 0.04s;
 }
 
+/* Status as plain light text, not a pill chip — the colored dot carries the
+   state, so a tinted capsule behind the label is visual noise. */
 .conv-status {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 6px;
-  border-radius: 999px;
   font-size: 0.62rem;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0.01em;
   flex-shrink: 0;
 }
 
 .conv-status.compact {
   gap: 0;
-  padding: 0;
   min-width: 7px;
-  background: transparent;
 }
 
 .conv-status.streaming {
   color: var(--app-accent-strong);
-  background: color-mix(in srgb, var(--app-accent-soft) 82%, transparent);
 }
 
 .conv-status.auth {
   color: var(--app-warning-strong);
-  background: var(--app-warning-soft);
 }
 
 .conv-status.unread {
   color: var(--app-danger);
-  background: var(--app-danger-soft);
 }
 
 .conv-status-dot {

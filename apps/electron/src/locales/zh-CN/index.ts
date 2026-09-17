@@ -673,6 +673,7 @@ const zhCN = {
     conversationList: '对话列表',
     expandConversationList: '展开对话列表',
     quickSwitch: '快速切换',
+    quickSwitchEmpty: '暂无可切换的对话',
     noAgentConversations: '暂无 Agent 会话',
     noGroupConversations: '暂无群组会话',
     conversations: '对话',

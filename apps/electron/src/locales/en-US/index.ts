@@ -673,6 +673,7 @@ const enUS: MessageSchema = {
     conversationList: 'Conversation list',
     expandConversationList: 'Expand conversation list',
     quickSwitch: 'Quick switch',
+    quickSwitchEmpty: 'Nothing to switch yet',
     noAgentConversations: 'No Agent conversations yet',
     noGroupConversations: 'No group conversations yet',
     conversations: 'Conversations',
