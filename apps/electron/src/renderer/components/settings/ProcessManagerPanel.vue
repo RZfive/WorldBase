@@ -384,7 +384,7 @@ function isAlive (status: string): boolean {
                 <td class="pm-mono">{{ process.pid }}</td>
                 <td>{{ process.name }}</td>
                 <td class="pm-mono">{{ formatBytes(process.memoryRssBytes) }}</td>
-                <td class="pm-cmdline" :title="process.commandLine">{{ process.commandLine }}</td>
+                <td class="pm-cmd" :title="process.commandLine"><span class="pm-cmdline">{{ process.commandLine }}</span></td>
                 <td class="pm-actions">
                   <button
                     class="pm-action-btn pm-action-kill"
@@ -648,8 +648,11 @@ function isAlive (status: string): boolean {
   white-space: nowrap;
 }
 
-.pm-cmdline {
+.pm-cmd {
   max-width: 260px;
+}
+
+.pm-cmdline {
   font-size: 0.78rem;
   color: var(--app-text-soft);
 }

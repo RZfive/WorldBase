@@ -268,7 +268,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.dv-root { flex: 1; display: flex; flex-direction: column; overflow: hidden; color: var(--app-text); }
+.dv-root { height: 100%; display: flex; flex-direction: column; overflow: hidden; color: var(--app-text); }
 
 /* ── List View ── */
 .dv-list { flex: 1; display: flex; flex-direction: column; overflow: hidden; }

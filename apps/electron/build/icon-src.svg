@@ -1,0 +1,456 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+  fill="none"
+>
+  <title>WorldBase</title>
+  <desc>
+    A cheerful coral-red W with a yellow smiling face,
+    turquoise accents and a small ringed planet.
+  </desc>
+
+  <defs>
+    <linearGradient
+      id="coral"
+      x1="250" y1="340"
+      x2="720" y2="810"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop stop-color="#FF5149"/>
+      <stop offset="1" stop-color="#FA493E"/>
+    </linearGradient>
+
+    <linearGradient
+      id="gold"
+      x1="340" y1="335"
+      x2="630" y2="740"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop stop-color="#FFC91A"/>
+      <stop offset="1" stop-color="#FFD20B"/>
+    </linearGradient>
+
+    <linearGradient
+      id="teal"
+      x1="245" y1="250"
+      x2="714" y2="849"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop stop-color="#35C2B9"/>
+      <stop offset="1" stop-color="#0DBBB2"/>
+    </linearGradient>
+
+    <linearGradient
+      id="planet"
+      x1="803" y1="151"
+      x2="865" y2="244"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop stop-color="#34D3C5"/>
+      <stop offset="1" stop-color="#00A99F"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 背景：需要透明底时删除此矩形 -->
+  <rect width="1024" height="1024" fill="#FCF2E5"/>
+
+  <!-- 左上方动态短线 -->
+  <g
+    stroke="#06112E"
+    stroke-width="12"
+    stroke-linecap="round"
+  >
+    <path d="M120 276 C126 262 136 253 145 250"/>
+    <path d="M133 313 C143 287 159 272 179 261"/>
+  </g>
+
+  <!-- 右侧动态短线 -->
+  <path
+    d="M892 325 C904 340 912 357 914 372"
+    stroke="#06112E"
+    stroke-width="12"
+    stroke-linecap="round"
+  />
+
+  <!-- W 底部的青绿色轮廓 -->
+  <path
+    d="
+      M172 422
+      C151 507 205 691 270 777
+      C307 827 354 848 411 835
+      C455 825 472 790 488 754
+      C501 723 519 735 536 768
+      C564 826 601 855 652 854
+      C739 853 807 777 820 699
+      C833 626 801 579 757 548
+      L666 584
+      L582 598
+      L477 573
+      L364 530
+      Z
+    "
+    fill="url(#teal)"
+    stroke="#06112E"
+    stroke-width="19"
+    stroke-linejoin="round"
+  />
+
+  <!-- 黄色主体 -->
+  <path
+    d="
+      M233 377
+      C269 343 311 320 355 320
+      C405 320 444 349 455 393
+      L491 478
+      C508 491 526 494 542 480
+      L594 433
+      L660 401
+      C675 337 709 301 753 301
+      C806 301 851 343 866 399
+      C884 467 859 543 818 603
+      L737 710
+      L657 777
+      L561 734
+      C544 702 530 672 511 668
+      C482 667 468 719 449 764
+      C434 798 411 821 378 830
+      C321 835 278 800 246 746
+      C202 671 166 541 171 455
+      C176 417 199 395 233 377
+      Z
+    "
+    fill="url(#gold)"
+    stroke="#06112E"
+    stroke-width="18"
+    stroke-linejoin="round"
+  />
+
+  <!-- 左上青绿色翻边 -->
+  <path
+    d="
+      M158 474
+      C143 451 143 418 151 387
+      C167 323 216 270 276 246
+      C328 225 379 229 420 246
+      C451 259 465 284 457 310
+      C450 338 430 349 405 336
+      C372 317 356 312 327 319
+      C281 329 242 356 211 393
+      C185 421 168 447 158 474
+      Z
+    "
+    fill="url(#teal)"
+    stroke="#06112E"
+    stroke-width="18"
+    stroke-linejoin="round"
+  />
+
+  <!-- 青绿色翻边高光 -->
+  <path
+    d="
+      M185 336
+      C219 289 274 253 335 249
+      C376 246 410 253 433 272
+    "
+    stroke="#FFF9EB"
+    stroke-width="10"
+    stroke-linecap="round"
+  />
+  <path
+    d="M163 397 C170 368 185 340 205 317"
+    stroke="#FFF9EB"
+    stroke-width="6"
+    stroke-linecap="round"
+  />
+  <path
+    d="M437 277 C448 295 440 318 425 321"
+    stroke="#70DBCE"
+    stroke-width="4"
+    stroke-linecap="round"
+    opacity=".65"
+  />
+
+  <!-- 珊瑚红 W 主体，右上卷曲形成环形结构 -->
+  <path
+    d="
+      M260 361
+      C310 357 349 391 352 436
+      C357 474 338 517 331 561
+      C324 607 327 650 344 668
+      C367 693 386 653 401 608
+      C415 564 429 541 459 541
+      C478 541 494 550 515 550
+      C543 550 562 532 584 541
+      C615 553 622 595 634 636
+      C643 666 655 686 676 679
+      C707 669 730 608 748 560
+      C766 513 785 458 778 416
+      C774 389 759 373 741 375
+      C717 377 707 399 709 426
+      C711 463 728 502 747 529
+      L733 571
+      C699 535 677 487 670 441
+      C659 382 678 336 713 312
+      C746 290 783 300 812 320
+      C855 350 879 402 880 460
+      C883 544 844 634 799 699
+      C756 761 711 800 659 800
+      C607 802 578 770 557 726
+      C541 693 533 663 513 663
+      C487 662 476 694 465 727
+      C448 779 425 815 384 822
+      C331 833 291 802 260 755
+      C222 697 193 617 177 545
+      C162 481 156 433 177 402
+      C195 376 226 363 260 361
+      Z
+    "
+    fill="url(#coral)"
+    stroke="#06112E"
+    stroke-width="18"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!-- 左侧红色笔画高光 -->
+  <path
+    d="M183 440 C194 404 227 376 264 376"
+    stroke="#FFF8E9"
+    stroke-width="6"
+    stroke-linecap="round"
+  />
+  <path
+    d="M222 478 C219 448 239 416 274 413"
+    stroke="#FFF8E9"
+    stroke-width="18"
+    stroke-linecap="round"
+  />
+
+  <!-- 右侧红色笔画高光 -->
+  <path
+    d="M697 356 C726 317 775 305 817 335"
+    stroke="#FFF8E9"
+    stroke-width="10"
+    stroke-linecap="round"
+  />
+  <path
+    d="M833 352 C858 383 869 425 868 465"
+    stroke="#FFD26C"
+    stroke-width="4"
+    stroke-linecap="round"
+  />
+
+  <!-- 右侧卷曲内部 -->
+  <path
+    d="
+      M745 393
+      C729 396 730 421 735 446
+      C739 466 746 486 753 500
+      C762 468 769 438 762 411
+      C759 399 753 392 745 393
+      Z
+    "
+    fill="#FFF8EA"
+  />
+  <path
+    d="M750 408 C747 432 750 458 753 477"
+    stroke="#FFA997"
+    stroke-width="11"
+    stroke-linecap="round"
+  />
+  <path
+    d="M748 411 L750 442"
+    stroke="#FFD4BE"
+    stroke-width="4"
+    stroke-linecap="round"
+  />
+
+  <!-- 左眉毛 -->
+  <path
+    d="M423 377 C433 366 446 365 453 370"
+    stroke="#06112E"
+    stroke-width="22"
+    stroke-linecap="round"
+  />
+
+  <!-- 右眉毛 -->
+  <path
+    d="M568 347 C577 338 590 342 598 349"
+    stroke="#06112E"
+    stroke-width="22"
+    stroke-linecap="round"
+  />
+
+  <!-- 双眼 -->
+  <path
+    d="
+      M441 403
+      C407 403 384 431 386 469
+      C388 505 413 531 445 529
+      C480 528 503 501 500 468
+      C498 433 474 403 441 403
+      Z
+    "
+    fill="#FFF9ED"
+    stroke="#06112E"
+    stroke-width="8"
+  />
+
+  <path
+    d="
+      M591 387
+      C559 387 535 416 533 451
+      C530 488 550 516 583 520
+      C616 524 643 501 649 468
+      C655 432 630 389 598 387
+      Z
+    "
+    fill="#FFF9ED"
+    stroke="#06112E"
+    stroke-width="8"
+  />
+
+  <!-- 瞳孔 -->
+  <ellipse
+    cx="457" cy="477"
+    rx="35" ry="43"
+    transform="rotate(-8 457 477)"
+    fill="#06112E"
+  />
+  <ellipse
+    cx="579" cy="464"
+    rx="35" ry="43"
+    transform="rotate(-8 579 464)"
+    fill="#06112E"
+  />
+
+  <!-- 眼睛高光 -->
+  <ellipse cx="445" cy="460" rx="11" ry="12" fill="#FFFDF4"/>
+  <ellipse cx="566" cy="448" rx="10" ry="12" fill="#FFFDF4"/>
+
+  <!-- 鼻间的小高光 -->
+  <path
+    d="M507 489 Q521 482 531 489"
+    stroke="#FFF9ED"
+    stroke-width="6"
+    stroke-linecap="round"
+  />
+
+  <!-- 脸颊 -->
+  <ellipse
+    cx="419" cy="556"
+    rx="29" ry="19"
+    fill="#FF7080"
+    transform="rotate(5 419 556)"
+  />
+  <ellipse
+    cx="632" cy="538"
+    rx="29" ry="20"
+    fill="#FF7080"
+    transform="rotate(-8 632 538)"
+  />
+
+  <!-- 微笑嘴巴 -->
+  <path
+    d="
+      M481 536
+      C504 547 532 546 554 529
+      C562 523 570 529 568 540
+      C565 570 550 591 528 593
+      C503 596 485 580 480 556
+      C477 545 476 538 481 536
+      Z
+    "
+    fill="#06112E"
+    stroke="#06112E"
+    stroke-width="7"
+    stroke-linejoin="round"
+  />
+
+  <!-- 舌头 -->
+  <path
+    d="
+      M501 579
+      C505 565 516 558 524 564
+      C535 552 548 557 555 567
+      C549 580 539 586 527 586
+      C516 587 507 584 501 579
+      Z
+    "
+    fill="#FF6664"
+  />
+
+  <!-- 右上角行星：后半轨道 -->
+  <ellipse
+    cx="833" cy="205"
+    rx="86" ry="26"
+    transform="rotate(-10 833 205)"
+    stroke="#EAA10B"
+    stroke-width="13"
+  />
+  <ellipse
+    cx="833" cy="203"
+    rx="86" ry="26"
+    transform="rotate(-10 833 203)"
+    stroke="#FFC32C"
+    stroke-width="9"
+  />
+
+  <!-- 行星主体 -->
+  <path
+    d="
+      M832 137
+      C863 137 886 161 886 194
+      C887 226 865 250 838 252
+      C807 254 780 230 779 199
+      C777 164 800 138 832 137
+      Z
+    "
+    fill="url(#planet)"
+    stroke="#06112E"
+    stroke-width="11"
+  />
+
+  <!-- 行星上缘高光 -->
+  <path
+    d="M788 186 C795 157 815 147 836 149 C854 150 866 160 872 172"
+    stroke="#FFF9ED"
+    stroke-width="7"
+    stroke-linecap="round"
+  />
+
+  <!-- 星球表面 -->
+  <g stroke="#73E3D3" stroke-width="2">
+    <ellipse cx="813" cy="176" rx="7" ry="8" fill="#06112E"/>
+    <ellipse cx="859" cy="198" rx="9" ry="10" fill="#073046"/>
+    <ellipse cx="837" cy="216" rx="6" ry="7" fill="#07516A"/>
+  </g>
+  <circle cx="846" cy="168" r="8" stroke="#06112E" stroke-width="5"/>
+  <circle cx="808" cy="207" r="8" stroke="#06112E" stroke-width="5"/>
+
+  <!-- 前半轨道覆盖星球 -->
+  <path
+    d="
+      M748 207
+      C744 219 768 230 801 231
+      C838 233 885 220 907 206
+      C915 201 918 196 915 191
+    "
+    stroke="#EAA10B"
+    stroke-width="15"
+    stroke-linecap="round"
+  />
+  <path
+    d="
+      M748 205
+      C744 217 768 227 801 228
+      C838 230 885 217 907 203
+      C915 198 918 193 915 189
+    "
+    stroke="#FFC72D"
+    stroke-width="11"
+    stroke-linecap="round"
+  />
+</svg>

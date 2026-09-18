@@ -1225,6 +1225,10 @@ impl ProjectRuntime {
                 .filter_map(|handle| handle.info.pid)
                 .collect::<std::collections::HashSet<_>>()
         };
+        // Our own argv embeds the projects directory (--workspace …/projects),
+        // so without this exclusion the harness would list itself as an orphan
+        // and kill itself when the user closes "leftover" processes.
+        let self_pid = std::process::id();
         let roots = self.projects_dir.to_string_lossy().to_ascii_lowercase();
         let mut orphans = Vec::new();
         for line in String::from_utf8_lossy(&output.stdout).lines().skip(1) {
@@ -1238,7 +1242,7 @@ impl ProjectRuntime {
             let Ok(pid) = fields[0].parse::<u32>() else {
                 continue;
             };
-            if managed_pids.contains(&pid) {
+            if managed_pids.contains(&pid) || pid == self_pid {
                 continue;
             }
             let rss = fields[1].parse::<u64>().unwrap_or(0).saturating_mul(1024);
@@ -1270,6 +1274,10 @@ impl ProjectRuntime {
 
     pub async fn kill_orphan_process_for_ui(&self, pid: u32) -> Result<()> {
         anyhow::ensure!(pid > 1, "invalid process id");
+        anyhow::ensure!(
+            pid != std::process::id(),
+            "refusing to kill the harness itself (pid {pid})"
+        );
         #[cfg(windows)]
         let output = tokio::process::Command::new("taskkill")
             .args(["/pid", &pid.to_string(), "/t", "/f"])
