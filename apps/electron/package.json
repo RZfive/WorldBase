@@ -36,6 +36,7 @@
     "test:renderer-navigation": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/renderer-navigation-performance.test.mjs tests/chat-history-performance.test.mjs tests/sidebar-performance.test.mjs",
     "test:message-branching": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-branching.test.mjs",
     "test:computer-use-permissions": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/computer-use-permissions.test.mjs",
+    "test:mcp-settings": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/mcp-settings-toggle.test.mjs",
     "test:im-gateway": "node scripts/im-gateway-smoke.mjs",
     "electron:dev": "pnpm rebuild:native && pnpm build:harness && pnpm build && pnpm build:electron && pnpm exec electron .",
     "electron:build": "pnpm build:harness && pnpm build && pnpm build:electron:bytecode && pnpm exec electron-builder --publish never",

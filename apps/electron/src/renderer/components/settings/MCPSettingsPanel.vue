@@ -63,6 +63,15 @@ const detailStats = computed(() => {
   }
 })
 
+// A server with a live (or in-flight) transport offers "disconnect"; any other
+// state offers "connect" so the user can bring it back without editing config.
+const selectedIsLive = computed(() => {
+  const status = selectedSnapshot.value?.status
+  return status === 'connected' || status === 'connecting'
+})
+
+const busy = computed(() => saving.value || refreshing.value)
+
 onMounted(async () => {
   await loadData()
   if (window.electronAPI?.onMcpStateChanged) {
@@ -112,7 +121,18 @@ function statusClass (value?: MCPServerSnapshot['status']): string {
 }
 
 function sortServers () {
-  servers.value = [...servers.value].sort((left, right) => left.name.localeCompare(locale.value))
+  servers.value = [...servers.value].sort((left, right) => left.name.localeCompare(right.name, locale.value))
+}
+
+function mergeServerSnapshot (snapshot: MCPServerSnapshot) {
+  state.value = {
+    ...state.value,
+    updatedAt: new Date().toISOString(),
+    servers: state.value.servers
+      .filter(server => server.id !== snapshot.id)
+      .concat(snapshot)
+      .sort((left, right) => left.name.localeCompare(right.name, locale.value))
+  }
 }
 
 function encodeArgs (args: string[]): string {
@@ -244,18 +264,37 @@ function cancelEdit () {
   draft.value = null
 }
 
-async function persistServers (successMessage: string) {
-  if (!window.electronAPI?.saveMcpServers || !window.electronAPI?.getMcpState) return
+async function persistServers (successMessage: string): Promise<boolean> {
+  if (!window.electronAPI?.saveMcpServers || !window.electronAPI?.getMcpState) return false
 
   saving.value = true
   try {
     await window.electronAPI.saveMcpServers(JSON.parse(JSON.stringify(servers.value)))
     state.value = await window.electronAPI.getMcpState()
     setStatus(successMessage)
+    return true
   } catch (error) {
     setStatus(t('settings.mcp.saveFailed', { message: (error as Error).message }))
+    return false
   } finally {
     saving.value = false
+  }
+}
+
+/**
+ * Flip the selected server's enabled flag directly from the detail header.
+ * Saving runs the same path as the editor: the main process re-applies the
+ * catalog, which disconnects a disabled server or (re)connects an enabled one.
+ */
+async function toggleSelectedEnabled () {
+  const server = selectedConfig.value
+  if (!server || busy.value) return
+
+  const nextEnabled = !server.enabled
+  servers.value = servers.value.map(item => item.id === server.id ? { ...item, enabled: nextEnabled } : item)
+  const persisted = await persistServers(t(nextEnabled ? 'settings.mcp.enabledOne' : 'settings.mcp.disabledOne', { name: server.name }))
+  if (!persisted) {
+    servers.value = servers.value.map(item => item.id === server.id ? { ...item, enabled: server.enabled } : item)
   }
 }
 
@@ -314,18 +353,40 @@ async function refreshSelected () {
       state.value = result
       setStatus(t('settings.mcp.refreshedAll'))
     } else {
-      state.value = {
-        ...state.value,
-        updatedAt: new Date().toISOString(),
-        servers: state.value.servers
-          .filter(server => server.id !== result.id)
-          .concat(result)
-          .sort((left, right) => left.name.localeCompare(locale.value))
-      }
+      mergeServerSnapshot(result)
       setStatus(t('settings.mcp.refreshedOne', { name: result.name }))
     }
   } catch (error) {
     setStatus(t('settings.mcp.refreshFailed', { message: (error as Error).message }))
+  } finally {
+    refreshing.value = false
+  }
+}
+
+/**
+ * Reconnect the selected server without touching its saved config. Both
+ * harnesses expose this as a per-server refresh, and both keep a failed
+ * connection as an `error` snapshot instead of throwing, so surface that here.
+ */
+async function connectSelected () {
+  const server = selectedConfig.value
+  if (!window.electronAPI?.refreshMcpServer || !server || !server.enabled) return
+  refreshing.value = true
+  try {
+    const result = await window.electronAPI.refreshMcpServer(server.id)
+    if ('servers' in result) {
+      state.value = result
+    } else {
+      mergeServerSnapshot(result)
+    }
+    const snapshot = stateMap.value[server.id]
+    if (snapshot?.status === 'error') {
+      setStatus(t('settings.mcp.connectFailed', { message: snapshot.error || t('settings.mcp.statusError') }))
+    } else {
+      setStatus(t('settings.mcp.connected', { name: server.name }))
+    }
+  } catch (error) {
+    setStatus(t('settings.mcp.connectFailed', { message: (error as Error).message }))
   } finally {
     refreshing.value = false
   }
@@ -336,14 +397,7 @@ async function disconnectSelected () {
   refreshing.value = true
   try {
     const snapshot = await window.electronAPI.disconnectMcpServer(selectedConfig.value.id)
-    state.value = {
-      ...state.value,
-      updatedAt: new Date().toISOString(),
-      servers: state.value.servers
-        .filter(server => server.id !== snapshot.id)
-        .concat(snapshot)
-        .sort((left, right) => left.name.localeCompare(locale.value))
-    }
+    mergeServerSnapshot(snapshot)
     setStatus(t('settings.mcp.disconnected', { name: snapshot.name }))
   } catch (error) {
     setStatus(t('settings.mcp.disconnectFailed', { message: (error as Error).message }))
@@ -410,9 +464,38 @@ function formatTimestamp (value?: string | null): string {
         </div>
 
         <div class="mcp-main-actions" v-if="!editing && selectedConfig">
+          <button
+            class="mcp-switch"
+            type="button"
+            role="switch"
+            :aria-checked="selectedConfig.enabled"
+            :aria-label="selectedConfig.enabled ? $t('settings.mcp.disableServer') : $t('settings.mcp.enableServer')"
+            :title="selectedConfig.enabled ? $t('settings.mcp.disableServer') : $t('settings.mcp.enableServer')"
+            :disabled="busy"
+            @click="toggleSelectedEnabled"
+          >
+            <span class="mcp-switch-track" :class="{ on: selectedConfig.enabled }">
+              <span class="mcp-switch-thumb" />
+            </span>
+            <span class="mcp-switch-label">{{ selectedConfig.enabled ? $t('settings.mcp.enabled') : $t('settings.mcp.disabled') }}</span>
+          </button>
           <button class="ghost-btn" type="button" @click="startEdit">{{ $t('settings.mcp.edit') }}</button>
-          <button class="ghost-btn" type="button" @click="disconnectSelected" :disabled="refreshing">{{ $t('settings.mcp.disconnect') }}</button>
-          <button class="danger-btn" type="button" @click="deleteSelected">{{ $t('common.delete') }}</button>
+          <button
+            v-if="selectedIsLive"
+            class="ghost-btn"
+            type="button"
+            @click="disconnectSelected"
+            :disabled="busy"
+          >{{ $t('settings.mcp.disconnect') }}</button>
+          <button
+            v-else
+            class="ghost-btn"
+            type="button"
+            @click="connectSelected"
+            :disabled="busy || !selectedConfig.enabled"
+            :title="selectedConfig.enabled ? '' : $t('settings.mcp.connectRequiresEnabled')"
+          >{{ $t('settings.mcp.connect') }}</button>
+          <button class="danger-btn" type="button" @click="deleteSelected" :disabled="busy">{{ $t('common.delete') }}</button>
         </div>
       </div>
 
@@ -741,6 +824,62 @@ function formatTimestamp (value?: string | null): string {
   cursor: not-allowed;
   opacity: 0.65;
   transform: none;
+}
+
+.mcp-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--app-text-soft);
+  font-size: 0.82rem;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mcp-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.mcp-switch-track {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--app-border);
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.mcp-switch-track.on {
+  background: #22c55e;
+  border-color: transparent;
+}
+
+.mcp-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.16s ease;
+}
+
+.mcp-switch-track.on .mcp-switch-thumb {
+  transform: translateX(16px);
+}
+
+.mcp-switch-track.on + .mcp-switch-label {
+  color: var(--app-text);
 }
 
 .mcp-server-card {

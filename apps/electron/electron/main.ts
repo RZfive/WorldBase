@@ -10,6 +10,7 @@ import { isRustHarnessSelected, startSelectedRustHarness } from './main-process/
 import { setMainLocale } from '../src/main/i18n/main-i18n.js'
 import { createWindow, setupEmbeddedAppCorsWorkaround } from './main-process/windows.js'
 import { reportStartup } from '../src/main/app-start-report/startup-report-service.js'
+import { ensureLoginShellPath } from '../src/main/system-capabilities/shell-path.js'
 
 app.setName(APP_DISPLAY_NAME)
 app.setAppUserModelId('com.theworld.app')
@@ -42,6 +43,10 @@ if (!gotTheLock) {
 }
 
 app.whenReady().then(async () => {
+  // Finder/Dock launches carry a minimal PATH. Merge the login shell PATH first
+  // so MCP stdio servers (npx / uvx), the Rust app-server, and project runtimes
+  // spawned below can resolve user-installed toolchains.
+  await ensureLoginShellPath()
   await initializeServices()
   setupEmbeddedAppCorsWorkaround()
   // Bootstrap main-process locale from the persisted preference so IPC errors,

@@ -878,30 +878,183 @@ async fn read_legacy_sse_stream(
     fail_legacy_sse_pending(&state, failure).await;
 }
 
+const LOGIN_SHELL_PATH_MARKER: &str = "__WORLDBASE_PATH__";
+const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn is_bare_command(target: &str) -> bool {
+    !target.chars().any(std::path::is_separator)
+}
+
+/// Extract the PATH echoed by the login-shell probe. Shell rc files may print
+/// banners or warnings, so the value is delimited by markers instead of being
+/// read from the whole stdout.
+fn parse_login_shell_path(stdout: &str) -> Option<String> {
+    let start = stdout.find(LOGIN_SHELL_PATH_MARKER)? + LOGIN_SHELL_PATH_MARKER.len();
+    let end = stdout[start..].find(LOGIN_SHELL_PATH_MARKER)? + start;
+    let path = stdout[start..end].trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+/// Keep the current PATH order (an explicit `env.PATH` from the server config
+/// or the Electron-bundled runtime dir must stay first) and append every
+/// login-shell directory that is not already present.
+fn merge_path_entries(current: Option<&str>, login_shell_path: &str) -> String {
+    let mut entries: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for source in [current.unwrap_or_default(), login_shell_path] {
+        for entry in std::env::split_paths(source) {
+            let entry = entry.to_string_lossy().to_string();
+            if entry.is_empty() || !seen.insert(entry.clone()) {
+                continue;
+            }
+            entries.push(entry);
+        }
+    }
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    entries.join(separator)
+}
+
+/// Resolve the PATH the user's interactive login shell exports. Desktop
+/// launchers (Finder, Dock, `.desktop` files) start the harness with a
+/// minimal PATH that omits Homebrew / nvm / volta / uv directories, so a bare
+/// `npx` or `uvx` MCP command is not found even though it runs fine from a
+/// terminal. Probed once per process and cached, including a failed probe.
+#[cfg(unix)]
+async fn login_shell_path() -> Option<String> {
+    static CACHE: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+    CACHE
+        .get_or_init(|| async {
+            let shell = std::env::var("SHELL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "/bin/sh".to_string());
+            let is_fish = std::path::Path::new(&shell)
+                .file_name()
+                .map(|name| name == "fish")
+                .unwrap_or(false);
+            let script = if is_fish {
+                format!(
+                    "printf '{m}%s{m}' (string join ':' $PATH)",
+                    m = LOGIN_SHELL_PATH_MARKER
+                )
+            } else {
+                format!("printf '{m}%s{m}' \"$PATH\"", m = LOGIN_SHELL_PATH_MARKER)
+            };
+            let probe = Command::new(&shell)
+                .args(["-ilc", &script])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output();
+            match tokio::time::timeout(LOGIN_SHELL_PROBE_TIMEOUT, probe).await {
+                Ok(Ok(output)) => {
+                    let resolved =
+                        parse_login_shell_path(&String::from_utf8_lossy(&output.stdout));
+                    if resolved.is_none() {
+                        tracing::warn!(shell = %shell, "mcp login shell PATH probe returned no PATH");
+                    }
+                    resolved
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(shell = %shell, error = %error, "mcp login shell PATH probe failed");
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(shell = %shell, "mcp login shell PATH probe timed out");
+                    None
+                }
+            }
+        })
+        .await
+        .clone()
+}
+
+#[cfg(not(unix))]
+async fn login_shell_path() -> Option<String> {
+    None
+}
+
+fn stdio_spawn_error(
+    config: &McpServerConfig,
+    error: std::io::Error,
+    environment: &BTreeMap<String, String>,
+) -> anyhow::Error {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!(
+            "spawn mcp server {}: command not found. Install it or use an absolute path; searched PATH={}",
+            config.target,
+            environment.get("PATH").map(String::as_str).unwrap_or("")
+        )
+    } else {
+        anyhow::anyhow!("spawn mcp server {}: {error}", config.target)
+    }
+}
+
+fn build_stdio_command(
+    config: &McpServerConfig,
+    environment: &BTreeMap<String, String>,
+) -> Command {
+    let mut command = Command::new(&config.target);
+    command
+        .args(&config.args)
+        .env_clear()
+        .envs(environment)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    if let Some(cwd) = config.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
+        command.current_dir(cwd);
+    }
+    command
+}
+
+/// Spawn a stdio MCP server. Electron's StdioClientTransport inherits
+/// process.env and then overlays the server-specific environment; preserve
+/// that contract so npx/node/path-based servers behave identically after
+/// switching to Rust. When a bare command is not on the inherited PATH, retry
+/// once with the login shell's PATH merged in (see [`login_shell_path`]).
+async fn spawn_stdio_server(config: &McpServerConfig) -> Result<Child> {
+    let mut environment: BTreeMap<String, String> = std::env::vars().collect();
+    environment.extend(config.env.clone());
+
+    let error = match build_stdio_command(config, &environment).spawn() {
+        Ok(child) => return Ok(child),
+        Err(error) => error,
+    };
+    if error.kind() != std::io::ErrorKind::NotFound || !is_bare_command(&config.target) {
+        return Err(stdio_spawn_error(config, error, &environment));
+    }
+
+    let Some(login_path) = login_shell_path().await else {
+        return Err(stdio_spawn_error(config, error, &environment));
+    };
+    let merged = merge_path_entries(environment.get("PATH").map(String::as_str), &login_path);
+    if environment.get("PATH") == Some(&merged) {
+        return Err(stdio_spawn_error(config, error, &environment));
+    }
+    tracing::info!(
+        server = %config.name,
+        command = %config.target,
+        "mcp command not on inherited PATH; retrying with login shell PATH"
+    );
+    environment.insert("PATH".to_string(), merged);
+    build_stdio_command(config, &environment)
+        .spawn()
+        .map_err(|retry_error| stdio_spawn_error(config, retry_error, &environment))
+}
+
 pub async fn connect(config: &McpServerConfig) -> Result<Arc<McpConnection>> {
     let display_name = config.display_name_or_id();
     match config.transport.as_str() {
         "stdio" => {
-            let mut command = Command::new(&config.target);
-            // Electron's StdioClientTransport inherits process.env and then
-            // overlays the server-specific environment. Preserve that
-            // contract so npx/node/path-based MCP servers behave identically
-            // after switching to Rust.
-            let mut environment: BTreeMap<String, String> = std::env::vars().collect();
-            environment.extend(config.env.clone());
-            command
-                .args(&config.args)
-                .envs(environment)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true);
-            if let Some(cwd) = config.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
-                command.current_dir(cwd);
-            }
-            let mut child = command
-                .spawn()
-                .with_context(|| format!("spawn mcp server {}", config.target))?;
+            let mut child = spawn_stdio_server(config).await?;
             let stdin = child.stdin.take().context("mcp stdin")?;
             let stdout = child.stdout.take().context("mcp stdout")?;
             Ok(Arc::new(McpConnection::Stdio {
@@ -1085,12 +1238,12 @@ impl McpManager {
         let connection = match connect(&config).await {
             Ok(connection) => connection,
             Err(error) => {
-                self.record_error(server, error.to_string()).await;
+                self.record_error(server, format!("{error:#}")).await;
                 return Err(error);
             }
         };
         if let Err(error) = connection.initialize().await {
-            self.record_error(server, error.to_string()).await;
+            self.record_error(server, format!("{error:#}")).await;
             return Err(error);
         }
 
@@ -1209,7 +1362,7 @@ impl McpManager {
         match self.refresh_metadata(server).await {
             Ok(metadata) => self.store_metadata(server, metadata).await,
             Err(error) => {
-                let message = error.to_string();
+                let message = format!("{error:#}");
                 self.remove_connection(server).await;
                 self.record_error(server, message).await;
             }
@@ -1579,6 +1732,88 @@ mod tests {
                 if buffer.len() >= expected {
                     return String::from_utf8(buffer).unwrap();
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn login_shell_path_probe_output_is_delimited_by_markers() {
+        let stdout = format!(
+            "banner\n{m}/opt/homebrew/bin:/usr/bin{m}\ntrailing",
+            m = LOGIN_SHELL_PATH_MARKER
+        );
+        assert_eq!(
+            parse_login_shell_path(&stdout).as_deref(),
+            Some("/opt/homebrew/bin:/usr/bin")
+        );
+        assert_eq!(parse_login_shell_path(""), None);
+        assert_eq!(
+            parse_login_shell_path(&format!("{m}/usr/bin", m = LOGIN_SHELL_PATH_MARKER)),
+            None
+        );
+        assert_eq!(
+            parse_login_shell_path(&format!("{m}  {m}", m = LOGIN_SHELL_PATH_MARKER)),
+            None
+        );
+    }
+
+    #[test]
+    fn merged_path_keeps_current_order_and_appends_login_entries_once() {
+        let merged = merge_path_entries(
+            Some("/tmp/runtime:/usr/bin"),
+            "/opt/homebrew/bin:/usr/bin:/Users/me/n/bin:/opt/homebrew/bin",
+        );
+        assert_eq!(merged, "/tmp/runtime:/usr/bin:/opt/homebrew/bin:/Users/me/n/bin");
+        assert_eq!(merge_path_entries(None, ":/usr/local/bin::/usr/bin"), "/usr/local/bin:/usr/bin");
+    }
+
+    #[test]
+    fn bare_commands_are_distinguished_from_paths() {
+        assert!(is_bare_command("npx"));
+        assert!(!is_bare_command("./server"));
+        assert!(!is_bare_command("/usr/local/bin/npx"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_stdio_command_reports_not_found_with_searched_path() {
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "name": "missing",
+            "transport": "stdio",
+            "target": "worldbase-definitely-missing-mcp-command",
+            "env": { "PATH": "/nonexistent-worldbase-dir" }
+        }))
+        .unwrap();
+        let error = spawn_stdio_server(&config).await.err().expect("spawn must fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("spawn mcp server worldbase-definitely-missing-mcp-command"), "{message}");
+        assert!(message.contains("command not found"), "{message}");
+        assert!(message.contains("/nonexistent-worldbase-dir"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_command_found_only_on_login_shell_path_still_spawns() {
+        // `sh` exists at /bin/sh on every Unix; make it unreachable through the
+        // inherited PATH so only the login-shell merge can find it.
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "name": "shell",
+            "transport": "stdio",
+            "target": "sh",
+            "args": ["-c", "exit 0"],
+            "env": { "PATH": "/nonexistent-worldbase-dir" }
+        }))
+        .unwrap();
+        match spawn_stdio_server(&config).await {
+            Ok(mut child) => {
+                let _ = child.wait().await;
+            }
+            Err(error) => {
+                // A CI login shell without /bin on PATH is the only legitimate
+                // failure; anything else means the fallback is broken.
+                let message = format!("{error:#}");
+                assert!(message.contains("command not found"), "{message}");
+                assert!(login_shell_path().await.is_none(), "{message}");
             }
         }
     }
