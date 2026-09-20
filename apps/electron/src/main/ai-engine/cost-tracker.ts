@@ -52,8 +52,14 @@ export const DEFAULT_MODEL_PRICING: Array<[string, ModelPricing]> = [
   ['claude-opus-4-20250514', { inputPerMillion: 15, outputPerMillion: 75 }],
   ['claude-3-5-sonnet-20241022', { inputPerMillion: 3, outputPerMillion: 15 }],
   ['claude-3-5-haiku-20241022', { inputPerMillion: 0.8, outputPerMillion: 4 }],
-  ['deepseek-chat', { inputPerMillion: 0.14, outputPerMillion: 0.28 }],
-  ['deepseek-reasoner', { inputPerMillion: 0.55, outputPerMillion: 2.19 }]
+  // DeepSeek USD peak-hour list prices (off-peak is half), per
+  // https://api-docs.deepseek.com/quick_start/pricing on 2026-09-20. Must stay
+  // equal to the DeepSeek template in src/shared/provider-templates.ts. The
+  // legacy `deepseek-v4-flash*` names are routed to V4.1-Flash and billed at
+  // the Flash price; `deepseek-chat` / `deepseek-reasoner` were retired.
+  ['deepseek-flash', { inputPerMillion: 0.3, outputPerMillion: 1.2, cacheReadPerMillion: 0.006 }],
+  ['deepseek-v4-flash', { inputPerMillion: 0.3, outputPerMillion: 1.2, cacheReadPerMillion: 0.006 }],
+  ['deepseek-v4-pro', { inputPerMillion: 1.32, outputPerMillion: 3.96, cacheReadPerMillion: 0.044 }]
 ]
 
 export function resolveDefaultModelPricing (model: string): ModelPricing | undefined {

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/glass.dart';
 import '../../core/ios_ui.dart';
 import '../../core/providers.dart';
+import 'daily_suggestions_page.dart';
 
 /// 我的 Tab：设置层级与 Electron 桌面端一致（降级项除外）：
 /// 模型供应商 / 用量统计 / MCP 服务 / 技能 / Agent 工作区 / 定时任务 / 通用与关于。
@@ -70,6 +71,13 @@ class SettingsTab extends ConsumerWidget {
                 title: '定时任务',
                 subtitle: 'cron 定时 · 移动端补跑语义',
                 page: SchedulesPage(),
+              ),
+              SettingsEntry(
+                icon: CupertinoIcons.lightbulb_fill,
+                iconColor: iosPurple,
+                title: '每日推荐',
+                subtitle: '空态灵感手牌 · 每日推荐与知识探索',
+                page: DailySuggestionsPage(),
               ),
             ],
           ),

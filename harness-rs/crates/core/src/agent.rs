@@ -632,6 +632,7 @@ async fn provider_context_summary(
     }
 }
 
+#[cfg(test)]
 fn compress_context_if_needed(
     base_system: &str,
     messages: &mut Vec<LlmMessage>,
@@ -3753,8 +3754,8 @@ async fn run_chat_inner(
     let mut context_compression = ContextCompressionState::from_messages(&llm_messages);
     let tool_result_storage_dir = worldbase_memory::Store::default_dir().join("tool-results");
 
-    let mut result: std::result::Result<String, anyhow::Error> = Err(anyhow::anyhow!("no steps"));
-    let mut terminal_emitted = false;
+    // Every `break` below emits a terminal frame and assigns `result`.
+    let result: std::result::Result<String, anyhow::Error>;
     let mut last_iteration_fingerprint: Option<String> = None;
     let mut duplicate_iterations = 0usize;
     let mut total_cost = 0.0f64;
@@ -3784,7 +3785,6 @@ async fn run_chat_inner(
                 },
             )
             .await;
-            terminal_emitted = true;
             result = Ok("aborted".into());
             break;
         }
@@ -3808,7 +3808,6 @@ async fn run_chat_inner(
                 },
             )
             .await;
-            terminal_emitted = true;
             result = Ok(message.into());
             break;
         }
@@ -3888,7 +3887,6 @@ async fn run_chat_inner(
                     },
                 )
                 .await;
-                terminal_emitted = true;
                 result = Ok(message);
                 break;
             }
@@ -4119,7 +4117,6 @@ async fn run_chat_inner(
                 },
             )
             .await;
-            terminal_emitted = true;
             result = Ok("aborted".into());
             break;
         }
@@ -4178,7 +4175,6 @@ async fn run_chat_inner(
                 .await;
             }
             publish(&hub, &channel, &stream_id, EventKind::Done { stop_reason }).await;
-            terminal_emitted = true;
             result = Ok(finish_content);
             break;
         }
@@ -4234,11 +4230,9 @@ async fn run_chat_inner(
             if finish_task_state.should_nudge() {
                 llm_messages.push(assistant_msg);
                 finish_task_state.record_missing_finish();
-                result = Ok(String::new());
                 continue;
             }
             publish(&hub, &channel, &stream_id, EventKind::Done { stop_reason }).await;
-            terminal_emitted = true;
             result = Ok(assistant_content);
             break;
         }
@@ -4386,45 +4380,13 @@ async fn run_chat_inner(
             )
             .await;
             result = Err(anyhow::anyhow!(message));
-            terminal_emitted = true;
             break;
         }
-        result = Ok(String::new());
     }
 
-    let final_result = match result {
-        Ok(text) => Ok(text),
-        Err(error) => {
-            if !terminal_emitted {
-                publish(
-                    &hub,
-                    &channel,
-                    &stream_id,
-                    EventKind::Error {
-                        message: error.to_string(),
-                    },
-                )
-                .await;
-            }
-            Err(error)
-        }
-    };
-    // A stream must always have a terminal frame.  This is especially
-    // important after exhausting MAX_STEPS: clients use Done/Error to release
-    // their per-session state and otherwise would remain stuck indefinitely.
-    if !terminal_emitted && final_result.is_ok() {
-        // The normal no-tool path emits Done above.  For exhausted tool loops,
-        // no terminal event has been published yet.
-        publish(
-            &hub,
-            &channel,
-            &stream_id,
-            EventKind::Done {
-                stop_reason: "max_steps".into(),
-            },
-        )
-        .await;
-    }
+    // Every `break` above has already published its terminal Done/Error frame,
+    // so no fallback terminal event is needed here.
+    let final_result = result;
     cleanup(&hub, &stream_id);
     final_result
 }

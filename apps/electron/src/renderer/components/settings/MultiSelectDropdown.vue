@@ -46,6 +46,15 @@ const filteredOptions = computed(() => {
       || option.description?.toLowerCase().includes(normalizedQuery)
   })
 })
+/**
+ * Trigger badge: "selected/available". Showing only the selected count read
+ * as "0 models" whenever options had loaded but nothing was picked yet.
+ */
+const countText = computed(() => `${props.modelValue.length}/${props.options.length}`)
+const countTitle = computed(() => t('settings.multiSelect.countTitle', {
+  selected: props.modelValue.length,
+  total: props.options.length
+}))
 const summaryText = computed(() => {
   if (props.modelValue.length === 0) return placeholderText.value
   const selectedLabels = props.options
@@ -236,7 +245,7 @@ watch(open, (isOpen) => {
     >
       <span class="multi-select-summary-text">{{ summaryText }}</span>
       <span class="multi-select-trigger-meta">
-        <span class="multi-select-summary-count">{{ props.modelValue.length }}</span>
+        <span class="multi-select-summary-count" :title="countTitle">{{ countText }}</span>
         <svg class="multi-select-caret" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
         </svg>

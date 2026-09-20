@@ -191,6 +191,9 @@ app.on('before-quit', (event) => {
       if (mainState.scheduledTaskService) {
         mainState.scheduledTaskService.dispose()
       }
+      if (mainState.dailySuggestionService) {
+        mainState.dailySuggestionService.dispose()
+      }
       if (mainState.memoryStore) {
         mainState.memoryStore.close()
       }

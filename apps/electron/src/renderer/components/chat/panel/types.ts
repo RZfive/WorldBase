@@ -86,10 +86,16 @@ export interface ChatSurfaceStatusSummary {
   primaryTaskTitle: string | null
 }
 
+export interface OpenSettingsOptions {
+  /** Open the provider panel straight into "use this template" for the given template id. */
+  useProviderTemplate?: string
+}
+
 export interface ChatPanelEmit {
   (e: 'contextConsumed'): void
   (e: 'openWebLink', url: string): void
   (e: 'statusChange', status: ChatSurfaceStatusSummary): void
+  (e: 'openSettings', category?: string, options?: OpenSettingsOptions): void
 }
 
 export interface SidebarAgentItem {

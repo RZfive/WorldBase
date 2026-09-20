@@ -16,6 +16,7 @@ import { readDocumentRenderAsset } from '../../src/main/document-preview/documen
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../../src/main/settings/settings-transfer.js'
 import { runImageStudioRequest } from '../../src/main/settings/image-generation-service.js'
 import { fetchProviderModels } from '../../src/main/settings/provider-model-service.js'
+import { isAllowedExternalUrl } from '../../src/shared/provider-templates.js'
 import type { AIExecutionAuthMode, AIExecutionPreferences, AIProvidersConfig, ChatFontPreferences, LanguagePreference, LaunchpadLayout, PinnedDockApp, PortableSettingsConfig, WebAppShortcut } from '../../src/main/settings/settings-store.js'
 import { setMainLocale, t } from '../../src/main/i18n/main-i18n.js'
 import type { Conversation } from '../../src/main/settings/chat-history.js'
@@ -2670,6 +2671,56 @@ export function setupIPC (): void {
 
   ipcMain.handle('scheduler:getReport', async (_event: IpcMainInvokeEvent, reportId: string) => {
     return scheduledTaskService!.getReport(reportId)
+  })
+
+  ipcMain.handle('dailySuggestions:getSnapshot', async () => {
+    return mainState.dailySuggestionService!.getSnapshot()
+  })
+
+  ipcMain.handle('dailySuggestions:getPreferences', async () => {
+    return mainState.dailySuggestionService!.getPreferences()
+  })
+
+  ipcMain.handle('dailySuggestions:savePreferences', async (_event: IpcMainInvokeEvent, preferences: unknown) => {
+    return mainState.dailySuggestionService!.savePreferences(preferences)
+  })
+
+  ipcMain.handle('dailySuggestions:generateNow', async () => {
+    return await mainState.dailySuggestionService!.generateNow()
+  })
+
+  ipcMain.handle('dailySuggestions:dismiss', async (_event: IpcMainInvokeEvent, suggestionId: string) => {
+    return mainState.dailySuggestionService!.dismiss(String(suggestionId || ''))
+  })
+
+  ipcMain.handle('dailySuggestions:recordPick', async (_event: IpcMainInvokeEvent, suggestionId: string) => {
+    mainState.dailySuggestionService!.recordPick(String(suggestionId || ''))
+    return { success: true }
+  })
+
+  ipcMain.handle('dailySuggestions:markSeen', async () => {
+    mainState.dailySuggestionService!.markSeen()
+    return { success: true }
+  })
+
+  ipcMain.handle('dailySuggestions:shuffleKnowledge', async () => {
+    return mainState.dailySuggestionService!.shuffleKnowledge()
+  })
+
+  // Generic "open in the system browser", restricted to https hosts that a
+  // built-in provider template links to. The renderer cannot use it as an
+  // arbitrary open-URL primitive.
+  ipcMain.handle('shell:openExternal', async (_event: IpcMainInvokeEvent, url: unknown) => {
+    const target = typeof url === 'string' ? url.trim() : ''
+    if (!target || !isAllowedExternalUrl(target)) {
+      return { ok: false, error: 'url-not-allowed' }
+    }
+    try {
+      await shell.openExternal(target)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: (error as Error).message || 'open-failed' }
+    }
   })
 
   ipcMain.handle('longTermGoals:list', async () => {

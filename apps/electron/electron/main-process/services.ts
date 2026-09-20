@@ -35,6 +35,9 @@ import { DocumentStore } from '../../src/main/ai-engine/agent/tools/document-sto
 import { MCPService, type MCPServerSnapshot, type MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
 import { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
 import { LongTermGoalService } from '../../src/main/long-term-goals/long-term-goal-service.js'
+import { DailySuggestionStore } from '../../src/main/settings/daily-suggestion-store.js'
+import { DailySuggestionService, type SuggestionProjectContext } from '../../src/main/suggestions/daily-suggestion-service.js'
+import { getMainLocale } from '../../src/main/i18n/main-i18n.js'
 import type { AppUpdateState } from '../../src/shared/app-update-types.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../src/shared/page-automation-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
@@ -465,6 +468,44 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
   throw new Error(`Unsupported Rust host request: ${request.requestKind}`)
 }
 
+/**
+ * Project list for daily-suggestion context: name, type and run state only.
+ * Mirrors the `projects:list` IPC so the Rust harness owns the list when selected.
+ */
+async function listProjectsForSuggestions (): Promise<SuggestionProjectContext[]> {
+  if (isRustHarnessSelected()) {
+    const harness = await startSelectedRustHarness()
+    const client = harness ? mainState.rustHarness : null
+    if (client) {
+      const native = await client.call<Record<string, unknown>>('project.list', {})
+      const projects = recordsFromRustValue(native.projects)
+      const list = await Promise.all(projects.map(async project => {
+        const id = optionalString(project, 'id') || ''
+        const context: SuggestionProjectContext = {
+          id,
+          name: optionalString(project, 'name') || id,
+          type: optionalString(project, 'type') || 'unknown'
+        }
+        if (!id) return context
+        try {
+          const runtime = await client.call<Record<string, unknown>>('project.status', { projectId: id })
+          context.status = optionalString(runtime, 'status')
+          context.port = optionalNumber(runtime, 'port')
+        } catch {
+          context.status = 'unknown'
+        }
+        return context
+      }))
+      return list.filter(project => project.id)
+    }
+  }
+  const projects = await mainState.projectFS!.listProjects()
+  return projects.map(project => {
+    const runtime = mainState.runtimeManager!.getStatus(project.id)
+    return { id: project.id, name: project.name || project.id, type: project.type || 'unknown', status: runtime.status, port: runtime.port }
+  })
+}
+
 async function handleRustPermissionRequest (request: { requestId: string; toolName: string; argsSummary: string; sessionId: string }): Promise<boolean> {
   const win = getActiveAiRequestWindow()
   if (!win || win.isDestroyed()) return false
@@ -518,6 +559,7 @@ export async function initializeServices (): Promise<void> {
   mainState.memoryEngine = new MemoryEngine(mainState.memoryStore)
   mainState.scheduledTaskStore = new ScheduledTaskStore(userDataPath)
   mainState.longTermGoalStore = new LongTermGoalStore(userDataPath)
+  mainState.dailySuggestionStore = new DailySuggestionStore(userDataPath)
   mainState.imageLibraryStore = new ImageLibraryStore(userDataPath)
   mainState.studioTaskStore = new StudioTaskStore(userDataPath)
   mainState.usageStore = new UsageStore(userDataPath)
@@ -714,6 +756,32 @@ export async function initializeServices (): Promise<void> {
     }
   })
   mainState.longTermGoalService.start()
+
+  mainState.dailySuggestionService = new DailySuggestionService({
+    store: mainState.dailySuggestionStore,
+    resolveAiEngine: getSelectedExecutionEngine,
+    resolveProviderConfig: (providerId, modelId) => resolveProviderConfig(providerId || undefined, modelId || undefined),
+    listProjects: listProjectsForSuggestions,
+    listConversations: async () => {
+      const entries = await mainState.chatHistory!.list()
+      return entries
+        .slice()
+        .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0))
+        .map(entry => ({ title: entry.title, updatedAt: entry.updatedAt, previewText: entry.previewText }))
+    },
+    getCapabilities: async () => ({
+      skillNames: mainState.skillStore!.list().map(skill => skill.name),
+      mcpServerNames: mainState.settingsStore!.getMcpServers().filter(server => server.enabled).map(server => server.name),
+      scheduledTaskCount: mainState.scheduledTaskService!.listTasks().length,
+      longTermGoalCount: mainState.longTermGoalService!.listGoals().length,
+      agentGroupCount: mainState.agentGroupStore!.list().length
+    }),
+    getLocale: () => getMainLocale(),
+    onChanged: (snapshot) => {
+      broadcastToAppWindows('dailySuggestions:changed', JSON.parse(JSON.stringify(snapshot)))
+    }
+  })
+  mainState.dailySuggestionService.start()
 
   // Apply saved AI settings on startup
   const providersConfig = applyActiveProviderToAiEngine()

@@ -620,6 +620,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     computerUseEnabled,
     computerUsePermissionGranted,
     providers,
+    providersConfig,
     providerDefaultTemperature,
     conversationTemperature,
     reasoningStrength,

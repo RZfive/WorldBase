@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ConversationSidebar from '../layout/ConversationSidebar.vue'
 import SidebarIcon from '../layout/SidebarIcon.vue'
 import MessageList from '../messages/MessageList.vue'
+import EmptyStateSuggestions from '../messages/EmptyStateSuggestions.vue'
 import ChatInput from '../layout/ChatInput.vue'
 import ChatHeader from '../layout/ChatHeader.vue'
 import DocumentWorkspace from '../layout/DocumentWorkspace.vue'
@@ -14,6 +15,18 @@ import AuthPermissionPanel from '../layout/AuthPermissionPanel.vue'
 import SudoPasswordPanel from '../layout/SudoPasswordPanel.vue'
 import LongTermGoalPanel from '../layout/LongTermGoalPanel.vue'
 import { useChatPanel } from './useChatPanel'
+import {
+  dailySuggestionSnapshot,
+  dismissDailySuggestion,
+  ensureDailySuggestionSubscription,
+  knowledgeShuffling,
+  loadDailySuggestions,
+  markDailySuggestionsSeen,
+  recordDailySuggestionPick,
+  shuffleKnowledgeSuggestion
+} from './suggestion-state'
+import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
+import { getRecommendedProviderTemplate } from '../../../../shared/provider-templates.js'
 import type { ChatPanelEmit, ChatPanelProps } from './types'
 
 const props = defineProps<ChatPanelProps>()
@@ -98,6 +111,7 @@ const {
   computerUseEnabled,
   computerUsePermissionGranted,
   providers,
+  providersConfig,
   providerDefaultTemperature,
   conversationTemperature,
   reasoningStrength,
@@ -327,6 +341,88 @@ function onSidebarShortcut (event: KeyboardEvent): void {
     toggleConversationSidebar()
   }
 }
+
+// ── Daily suggestions (chat empty state) ─────────────────────────────────
+// Cards resolve to a prompt plus a "scene": composer toggles that get applied
+// before the text is filled or sent, so one click lands in a working setup.
+const suggestionProjectNames = ref<Record<string, string>>({})
+const suggestionRefreshing = ref(false)
+const showEmptyStateSuggestions = computed(() => messages.value.length === 0 && !isGroupConversation.value)
+
+async function loadSuggestionProjectNames (): Promise<void> {
+  if (!window.electronAPI?.listProjects) return
+  try {
+    const projects = await window.electronAPI.listProjects()
+    const names: Record<string, string> = {}
+    for (const project of projects) {
+      const id = typeof project.id === 'string' ? project.id : ''
+      if (!id) continue
+      names[id] = typeof project.name === 'string' && project.name.trim() ? project.name : id
+    }
+    suggestionProjectNames.value = names
+  } catch {
+    /* names fall back to ids */
+  }
+}
+
+function focusComposer (): void {
+  const textarea = chatInputRef.value?.$el?.querySelector<HTMLTextAreaElement>('textarea')
+  textarea?.focus({ preventScroll: true })
+}
+
+async function applySuggestionScene (suggestion: WorkSuggestion): Promise<void> {
+  const scene = suggestion.scene
+  if (!scene) return
+  if (scene.planMode && !planModeActive.value) await togglePlanMode()
+  if (scene.computerUse && !computerUseEnabled.value) await toggleComputerUse()
+  if (scene.authMode && currentAuthMode.value !== scene.authMode) await handleAuthModeChange(scene.authMode)
+  if (scene.skillIds?.length) {
+    const available = new Set(availableSkills.value.map(skill => skill.id))
+    for (const skillId of scene.skillIds) {
+      if (available.has(skillId) && !activeSkillIds.value.has(skillId)) toggleSkill(skillId)
+    }
+  }
+}
+
+async function pickSuggestion (suggestion: WorkSuggestion, payload: { prompt: string; projectName?: string }): Promise<void> {
+  if (isLoading.value) return
+  recordDailySuggestionPick(suggestion)
+  await applySuggestionScene(suggestion)
+  // Project targeting rides on the same [[project:...]] tag the composer already
+  // understands, so the chip shows up and message-sender binds the conversation.
+  const projectId = suggestion.scene?.targetProjectId
+  const projectTag = projectId ? `[[project:${projectId}|${payload.projectName || projectId}]] ` : ''
+  inputText.value = `${projectTag}${payload.prompt}`
+  if (suggestion.sendMode === 'send') {
+    await sendMessage()
+    return
+  }
+  await nextTick()
+  focusComposer()
+}
+
+function refreshDailySuggestions (): void {
+  if (suggestionRefreshing.value || !window.electronAPI?.generateDailySuggestionsNow) return
+  suggestionRefreshing.value = true
+  window.electronAPI.generateDailySuggestionsNow()
+    .then(snapshot => { dailySuggestionSnapshot.value = snapshot })
+    .catch(() => { void loadDailySuggestions(true) })
+    .finally(() => { suggestionRefreshing.value = false })
+}
+
+/** No provider configured at all: the empty state leads with a setup card. */
+const providersMissing = computed(() => conversationsLoaded.value && providersConfig.value.providers.length === 0)
+
+function openProviderSetup (mode: 'recommended' | 'browse'): void {
+  emit('openSettings', 'providers', mode === 'recommended' ? { useProviderTemplate: getRecommendedProviderTemplate().id } : undefined)
+}
+
+watch(showEmptyStateSuggestions, (visible) => {
+  if (!visible) return
+  ensureDailySuggestionSubscription()
+  void loadDailySuggestions()
+  void loadSuggestionProjectNames()
+}, { immediate: true })
 
 function deleteLongTermGoalById (goalId: string): void {
   const goal = currentLongTermGoal.value?.id === goalId
@@ -724,7 +820,24 @@ watch(
             @fork-message="forkFromMessage"
             @submit-edit="(payload) => editUserMessage(payload.messageId, payload.text, payload.mode)"
             @cancel-edit="cancelEditMessage"
-          />
+          >
+            <template v-if="showEmptyStateSuggestions" #empty>
+              <EmptyStateSuggestions
+                :snapshot="dailySuggestionSnapshot"
+                :refreshing="suggestionRefreshing"
+                :shuffling="knowledgeShuffling"
+                :project-names="suggestionProjectNames"
+                :providers-missing="providersMissing"
+                @pick="pickSuggestion"
+                @dismiss="(item) => dismissDailySuggestion(item)"
+                @refresh="refreshDailySuggestions"
+                @shuffle="shuffleKnowledgeSuggestion"
+                @open-settings="emit('openSettings', 'daily-suggestions')"
+                @setup-provider="openProviderSetup"
+                @seen="markDailySuggestionsSeen"
+              />
+            </template>
+          </MessageList>
 
           <div class="chat-attention-zone" aria-live="polite">
             <!-- design v1.7 stacking priority: auth > ask > todo (auth on top). -->

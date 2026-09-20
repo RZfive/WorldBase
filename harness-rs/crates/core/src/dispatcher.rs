@@ -409,23 +409,6 @@ fn string_array_param(
     Ok(result)
 }
 
-fn required_string_array_param(
-    params: &Value,
-    aliases: &[&str],
-    label: &str,
-) -> Result<Vec<String>, ErrorObject> {
-    let Some((key, value)) = aliases
-        .iter()
-        .find_map(|key| params.get(*key).map(|value| (*key, value)))
-    else {
-        return Err(params_err(format!("missing {label}")));
-    };
-    if value.is_null() {
-        return Err(params_err(format!("{key} must be an array of strings")));
-    }
-    string_array_param(params, aliases, label)
-}
-
 fn optional_bool_param(
     params: &Value,
     aliases: &[&str],

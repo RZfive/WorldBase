@@ -13,5 +13,6 @@ const emit = defineEmits<ChatPanelEmit>()
     @context-consumed="emit('contextConsumed')"
     @open-web-link="(url) => emit('openWebLink', url)"
     @status-change="(status) => emit('statusChange', status)"
+    @open-settings="(category, options) => emit('openSettings', category, options)"
   />
 </template>

@@ -9,15 +9,18 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../../core/daily_suggestions_provider.dart';
 import '../../core/glass.dart';
 import '../../core/ios_ui.dart';
 import '../../core/markdown_renderer.dart';
 import '../../core/providers.dart';
 import '../common/model_picker.dart';
 import '../launchpad/launchpad_tab.dart';
+import '../settings/daily_suggestions_page.dart';
 import '../settings/settings_tab.dart';
 import '../studio/studio_tab.dart';
 import 'group_page.dart';
+import 'suggestion_hand.dart';
 
 /// 对话主页(晨昏 2.0):对话即主页。
 /// 悬浮顶栏(抽屉 / 模型胶囊 / 新会话)+ 空态问候 + 流体玻璃对话流
@@ -31,6 +34,7 @@ class ChatTab extends ConsumerStatefulWidget {
 
 class _ChatTabState extends ConsumerState<ChatTab> {
   final _inputCtrl = TextEditingController();
+  final _inputFocus = FocusNode();
   final List<ChatAttachment> _pendingAttachments = [];
   bool _advancedExpanded = false;
   bool _isImportingAttachments = false;
@@ -62,7 +66,27 @@ class _ChatTabState extends ConsumerState<ChatTab> {
   @override
   void dispose() {
     _inputCtrl.dispose();
+    _inputFocus.dispose();
     super.dispose();
+  }
+
+  /// 采用一张推荐卡:先切换场景(深度思考),再把提示词填入输入框并聚焦,
+  /// 让用户可以改一改再发,而不是直接替用户发送。
+  void _pickSuggestion(WorkSuggestion suggestion) {
+    if (ref.read(chatProvider.notifier).busy) return;
+    unawaited(ref.read(dailySuggestionsProvider.notifier).recordPick(suggestion));
+    if (suggestion.scene?.enableThinking == true &&
+        !ref.read(chatSwitchesProvider).enableThinking) {
+      ref.read(chatSwitchesProvider.notifier).setEnableThinking(true);
+    }
+    _inputCtrl
+      ..text = suggestion.prompt
+      ..selection = TextSelection.collapsed(offset: suggestion.prompt.length);
+    _inputFocus.requestFocus();
+  }
+
+  void _openDailySuggestionSettings() {
+    Navigator.of(context).push(cupertinoRoute(const DailySuggestionsPage()));
   }
 
   Future<void> _send([String? preset]) async {
@@ -249,6 +273,8 @@ class _ChatTabState extends ConsumerState<ChatTab> {
                           ((_attachmentError != null || _isImportingAttachments)
                               ? 34
                               : 0),
+                      onPick: _pickSuggestion,
+                      onOpenSettings: _openDailySuggestionSettings,
                     )
                   : _buildMessageList(messages),
             ),
@@ -465,6 +491,7 @@ class _ChatTabState extends ConsumerState<ChatTab> {
                 Expanded(
                   child: CupertinoTextField(
                     controller: _inputCtrl,
+                    focusNode: _inputFocus,
                     placeholder: '问点什么…',
                     placeholderStyle: TextStyle(fontSize: 15, color: p.ink3),
                     style: TextStyle(fontSize: 15, color: p.ink),
@@ -800,38 +827,56 @@ class _GlassIconButton extends StatelessWidget {
   }
 }
 
-/// 空态:只保留品牌呼吸 Orb 与时间问候，不用预设提示词干扰输入。
+/// 空态:品牌呼吸 Orb 与时间问候,下方是一列可选的推荐手牌。
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.bottomInset});
+  const _EmptyState({
+    required this.bottomInset,
+    required this.onPick,
+    required this.onOpenSettings,
+  });
 
   final double bottomInset;
+  final void Function(WorkSuggestion suggestion) onPick;
+  final VoidCallback onOpenSettings;
 
   @override
   Widget build(BuildContext context) {
     final p = DawnPalette.of(context);
-    return Padding(
-      padding: EdgeInsets.fromLTRB(18, 72, 18, bottomInset),
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const DawnOrb(size: 56),
-            const SizedBox(height: 14),
-            Text(
-              dawnGreeting(),
-              style: TextStyle(
-                fontSize: 21,
-                fontWeight: FontWeight.w600,
-                color: p.ink,
-              ),
+    const topInset = 72.0;
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        physics: const ClampingScrollPhysics(),
+        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+        padding: EdgeInsets.only(top: topInset, bottom: bottomInset),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: math.max(0.0, constraints.maxHeight - topInset - bottomInset),
+          ),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const DawnOrb(size: 56),
+                const SizedBox(height: 14),
+                Text(
+                  dawnGreeting(),
+                  style: TextStyle(
+                    fontSize: 21,
+                    fontWeight: FontWeight.w600,
+                    color: p.ink,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '我是晨昏,今天想做点什么?',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12.5, color: p.ink2),
+                ),
+                const SizedBox(height: 26),
+                SuggestionHand(onPick: onPick, onOpenSettings: onOpenSettings),
+              ],
             ),
-            const SizedBox(height: 6),
-            Text(
-              '我是晨昏,今天想做点什么?',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12.5, color: p.ink2),
-            ),
-          ],
+          ),
         ),
       ),
     );

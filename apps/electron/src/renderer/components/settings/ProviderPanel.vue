@@ -3,7 +3,24 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ModelPricing } from '../../../main/ai-engine/cost-tracker'
 import { resolveDefaultModelPricing } from '../../../main/ai-engine/cost-tracker'
+import {
+  PROVIDER_TEMPLATES,
+  getProviderTemplate,
+  getRecommendedProviderTemplate,
+  looksLikeApiKey,
+  type ProviderTemplate,
+  type ProviderTemplateLinks
+} from '../../../shared/provider-templates'
 import MultiSelectDropdown from './MultiSelectDropdown.vue'
+
+const props = defineProps<{
+  /** Template id to open straight into "use this template"; consumed once. */
+  useTemplate?: string | null
+}>()
+
+const emit = defineEmits<{
+  (e: 'templateConsumed'): void
+}>()
 
 interface ModelPricingEntry {
   inputPerMillion: number
@@ -27,6 +44,10 @@ interface AIProvider {
   activeModel: string
   enableThinking?: boolean
   temperature?: number
+  /** Built-in template this provider was created from. */
+  templateId?: string
+  /** Snapshot of the template's website links at creation time. */
+  links?: ProviderTemplateLinks
 }
 
 interface AIProvidersConfig {
@@ -43,9 +64,10 @@ interface CostSettings {
 type PricingField = keyof ModelPricingEntry
 
 const CONTEXT_WINDOW_UNIT = 1000
+const CONTEXT_WINDOW_MILLION = 1_000_000
 const DEFAULT_CONTEXT_WINDOW = 100000
 const FEEDBACK_DISPLAY_DURATION_MS = 2200
-const { t, locale } = useI18n()
+const { t, te, locale } = useI18n()
 
 const providers = ref<AIProvider[]>([])
 const defaultProviderId = ref('')
@@ -69,6 +91,178 @@ const detectionBusy = ref(false)
 const detectionFailed = ref(false)
 const detectionStatusMessage = ref('')
 let lastDetectionKey = ''
+
+// ── Built-in templates ───────────────────────────────────────────────────
+// Read-only, listed apart from the user's providers. "Use" copies one into a
+// real provider whose only missing field is the API key.
+const selectedTemplateId = ref('')
+const selectedTemplate = computed(() => selectedTemplateId.value ? getProviderTemplate(selectedTemplateId.value) ?? null : null)
+const recommendedTemplate = computed(() => getRecommendedProviderTemplate())
+/** Set after "Get a key" opened the vendor site; the next window focus checks the clipboard. */
+const awaitingKeyFromWeb = ref(false)
+const clipboardKeyCandidate = ref('')
+const ignoredClipboardKeys = new Set<string>()
+const keyInputRef = ref<HTMLInputElement | null>(null)
+
+const filteredTemplates = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  const list = [...PROVIDER_TEMPLATES].sort((a, b) => a.order - b.order)
+  if (!query) return list
+  return list.filter(template =>
+    template.name.toLowerCase().includes(query)
+    || template.baseUrl.toLowerCase().includes(query)
+    || template.models.some(model => model.id.toLowerCase().includes(query))
+  )
+})
+
+function templateTagline (template: ProviderTemplate): string {
+  const key = `settings.provider.templates.${template.id}.tagline`
+  return te(key) ? t(key) : ''
+}
+
+function templateUsageCount (templateId: string): number {
+  return providers.value.filter(provider => provider.templateId === templateId).length
+}
+
+function editDraftTemplate (): ProviderTemplate | null {
+  const id = editDraft.value?.templateId
+  return id ? getProviderTemplate(id) ?? null : null
+}
+
+/** Address or protocol no longer match the template the provider came from. */
+const driftedFromTemplate = computed(() => {
+  const draft = editDraft.value
+  const template = editDraftTemplate()
+  if (!draft || !template) return false
+  return draft.baseUrl.trim() !== template.baseUrl || (draft.apiProtocol || '') !== template.apiProtocol
+})
+
+const editKeyPlaceholder = computed(() => editDraftTemplate()?.apiKeyPlaceholder || 'sk-...')
+const editLinks = computed<ProviderTemplateLinks | null>(() => editDraft.value?.links || editDraftTemplate()?.links || null)
+
+function uniqueProviderName (base: string): string {
+  const taken = new Set(providers.value.map(provider => provider.name.trim().toLowerCase()))
+  if (!taken.has(base.trim().toLowerCase())) return base
+  for (let index = 2; index < 100; index++) {
+    const candidate = `${base} ${index}`
+    if (!taken.has(candidate.toLowerCase())) return candidate
+  }
+  return `${base} ${Date.now().toString(36)}`
+}
+
+function selectTemplate (id: string) {
+  if (editing.value) return
+  selectedTemplateId.value = id
+  selectedProviderId.value = ''
+}
+
+/** Copy a template into a fresh provider draft; the user only has to paste a key. */
+function useTemplate (template: ProviderTemplate) {
+  if (editing.value) return
+  const modelContextWindows: Record<string, number> = {}
+  const modelPricing: Record<string, ModelPricingEntry> = {}
+  const modelCapabilities: NonNullable<AIProvider['modelCapabilities']> = {}
+  for (const model of template.models) {
+    modelContextWindows[model.id] = model.contextWindow
+    modelPricing[model.id] = clonePricing(model.pricing || getDefaultPricing(model.id))
+    modelCapabilities[model.id] = {
+      imageGeneration: model.capabilities?.imageGeneration === true,
+      imageEditing: model.capabilities?.imageEditing === true
+    }
+  }
+  const id = `${template.id}_${Date.now().toString(36)}`
+  editDraft.value = {
+    id,
+    name: uniqueProviderName(template.name),
+    baseUrl: template.baseUrl,
+    apiKey: '',
+    apiProtocol: template.apiProtocol,
+    models: template.models.map(model => model.id),
+    modelContextWindows,
+    modelPricing,
+    modelCapabilities,
+    activeModel: template.defaultModel,
+    enableThinking: false,
+    templateId: template.id,
+    links: { ...template.links }
+  }
+  selectedTemplateId.value = ''
+  selectedProviderId.value = id
+  editing.value = true
+  newModelInput.value = ''
+  resetRemoteModels()
+  window.setTimeout(() => keyInputRef.value?.focus(), 0)
+}
+
+function restoreTemplateDefaults () {
+  const draft = editDraft.value
+  const template = editDraftTemplate()
+  if (!draft || !template) return
+  draft.baseUrl = template.baseUrl
+  draft.apiProtocol = template.apiProtocol
+  draft.links = { ...template.links }
+}
+
+async function openProviderLink (url: string | undefined, awaitKey = false) {
+  if (!url || !window.electronAPI?.openExternalUrl) return
+  try {
+    const result = await window.electronAPI.openExternalUrl(url)
+    if (!result.ok) {
+      statusMsg.value = t('settings.provider.openExternalFailed')
+      return
+    }
+    if (awaitKey) awaitingKeyFromWeb.value = true
+  } catch {
+    statusMsg.value = t('settings.provider.openExternalFailed')
+  }
+}
+
+function openKeyPage () {
+  const links = editLinks.value
+  void openProviderLink(links?.apiKeys || links?.console || links?.homepage, true)
+}
+
+/** Back from the vendor site: offer to fill the key if the clipboard holds one. Never auto-fills. */
+async function checkClipboardForKey () {
+  if (!awaitingKeyFromWeb.value || !editing.value || !editDraft.value) return
+  let text = ''
+  try {
+    text = (await navigator.clipboard?.readText?.()) || ''
+  } catch {
+    return
+  }
+  const candidate = text.trim()
+  if (!candidate || ignoredClipboardKeys.has(candidate)) return
+  if (!looksLikeApiKey(candidate, editDraftTemplate())) return
+  if (editDraft.value.apiKey.trim() === candidate) return
+  clipboardKeyCandidate.value = candidate
+}
+
+function fillClipboardKey () {
+  if (!editDraft.value || !clipboardKeyCandidate.value) return
+  editDraft.value.apiKey = clipboardKeyCandidate.value
+  clipboardKeyCandidate.value = ''
+  awaitingKeyFromWeb.value = false
+}
+
+function ignoreClipboardKey () {
+  if (clipboardKeyCandidate.value) ignoredClipboardKeys.add(clipboardKeyCandidate.value)
+  clipboardKeyCandidate.value = ''
+}
+
+function onWindowFocus () {
+  void checkClipboardForKey()
+}
+
+watch(() => props.useTemplate, (id) => {
+  if (!id) return
+  const template = getProviderTemplate(id)
+  if (template) {
+    if (editing.value) cancelEdit()
+    useTemplate(template)
+  }
+  emit('templateConsumed')
+}, { immediate: true })
 
 const filteredProviders = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
@@ -99,6 +293,13 @@ const remoteModelOptions = computed(() => {
     .map(model => ({ value: model, label: model }))
 })
 
+/** Trigger text for the remote-model picker; says so when every fetched model is already configured. */
+const remoteModelsPlaceholder = computed(() => {
+  if (remoteModelsLoading.value) return t('settings.provider.remoteModelsLoading')
+  if (remoteModels.value.length > 0 && remoteModelOptions.value.length === 0) return t('settings.provider.remoteModelsAllAdded')
+  return t('settings.provider.remoteModelsPlaceholder')
+})
+
 /** Select proxy with '' meaning "auto-detect via protocol probing". */
 const editApiProtocol = computed<'' | 'openai-chat' | 'openai-responses' | 'anthropic'>({
   get: () => editDraft.value?.apiProtocol ?? '',
@@ -126,10 +327,12 @@ function providerProtocolLabel (provider: AIProvider): string {
 }
 
 onMounted(async () => {
+  window.addEventListener('focus', onWindowFocus)
   await loadSettings()
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('focus', onWindowFocus)
   if (remoteModelsTimer !== undefined) window.clearTimeout(remoteModelsTimer)
   remoteModelsRequestId += 1
 })
@@ -315,10 +518,10 @@ async function loadSettings () {
     budgetLimit.value = costSettings.budgetLimit != null ? String(costSettings.budgetLimit) : ''
 
     if (providers.value.length > 0) {
-      if (!providers.value.some(provider => provider.id === selectedProviderId.value)) {
+      if (!selectedTemplateId.value && !editing.value && !providers.value.some(provider => provider.id === selectedProviderId.value)) {
         selectedProviderId.value = providers.value[0].id
       }
-    } else {
+    } else if (!editing.value) {
       selectedProviderId.value = ''
     }
   } catch (err) {
@@ -340,6 +543,7 @@ function getOrderedEnabledIds (nextIds: string[]): string[] {
 
 function selectProvider (id: string) {
   if (editing.value) return
+  selectedTemplateId.value = ''
   selectedProviderId.value = id
 }
 
@@ -348,7 +552,7 @@ function startAdd () {
   editDraft.value = {
     id,
     name: '',
-    baseUrl: 'https://api.openai.com/v1',
+    baseUrl: '',
     apiKey: '',
     models: [],
     modelContextWindows: {},
@@ -357,6 +561,7 @@ function startAdd () {
     activeModel: '',
     enableThinking: false
   }
+  selectedTemplateId.value = ''
   selectedProviderId.value = id
   editing.value = true
   newModelInput.value = ''
@@ -397,6 +602,8 @@ function cancelEdit () {
   editDraft.value = null
   editing.value = false
   newModelInput.value = ''
+  awaitingKeyFromWeb.value = false
+  clipboardKeyCandidate.value = ''
   resetRemoteModels()
 }
 
@@ -629,6 +836,10 @@ async function saveEdit () {
     statusMsg.value = t('settings.provider.requiredName')
     return
   }
+  if (!nextProvider.baseUrl.trim()) {
+    statusMsg.value = t('settings.provider.requiredUrl')
+    return
+  }
   if (nextProvider.models.length === 0) {
     statusMsg.value = t('settings.provider.requiredModel')
     return
@@ -671,6 +882,8 @@ async function saveEdit () {
   editDraft.value = null
   editing.value = false
   newModelInput.value = ''
+  awaitingKeyFromWeb.value = false
+  clipboardKeyCandidate.value = ''
   resetRemoteModels()
   await saveAll()
 }
@@ -741,6 +954,9 @@ function formatContextWindow (value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return t('settings.provider.contextWindowK', { count: DEFAULT_CONTEXT_WINDOW / CONTEXT_WINDOW_UNIT })
   }
+  if (value % CONTEXT_WINDOW_MILLION === 0) {
+    return t('settings.provider.contextWindowM', { count: value / CONTEXT_WINDOW_MILLION })
+  }
   if (value % CONTEXT_WINDOW_UNIT === 0) {
     return t('settings.provider.contextWindowK', { count: value / CONTEXT_WINDOW_UNIT })
   }
@@ -756,21 +972,49 @@ function formatContextWindow (value: number): string {
       </div>
 
       <div class="pp-providers">
+        <div class="pp-group-label">{{ $t('settings.provider.sections.mine') }}</div>
         <button
           v-for="provider in filteredProviders"
           :key="provider.id"
-          :class="['pp-item', { active: selectedProviderId === provider.id }]"
+          :class="['pp-item', { active: selectedProviderId === provider.id && !selectedTemplateId }]"
           @click="selectProvider(provider.id)"
         >
           <span class="pp-item-name">{{ provider.name || $t('settings.provider.unnamed') }}</span>
           <span class="pp-item-badges">
+            <span v-if="provider.templateId" class="pp-template-badge" :title="$t('settings.provider.templates.badgeHint')">{{ $t('settings.provider.templates.badge') }}</span>
             <span v-if="isEnabled(provider.id)" class="pp-on-badge">{{ $t('settings.provider.on') }}</span>
             <span v-if="isDefault(provider.id)" class="pp-default-badge">{{ $t('settings.provider.default') }}</span>
           </span>
         </button>
+        <p v-if="providers.length === 0" class="pp-group-empty">{{ $t('settings.provider.mineEmpty') }}</p>
+
+        <div class="pp-group-label">{{ $t('settings.provider.sections.templates') }}</div>
+        <div
+          v-for="template in filteredTemplates"
+          :key="template.id"
+          :class="['pp-item', 'pp-item-template', { active: selectedTemplateId === template.id }]"
+          role="button"
+          tabindex="0"
+          @click="selectTemplate(template.id)"
+          @keydown.enter.prevent="selectTemplate(template.id)"
+        >
+          <span class="pp-item-name">{{ template.name }}</span>
+          <span class="pp-item-badges">
+            <span v-if="template.recommended" class="pp-default-badge">{{ $t('settings.provider.templates.recommended') }}</span>
+            <button
+              type="button"
+              class="pp-use-btn"
+              :disabled="editing"
+              :title="templateUsageCount(template.id) > 0 ? $t('settings.provider.templates.alreadyCreated', { count: templateUsageCount(template.id) }) : ''"
+              @click.stop="useTemplate(template)"
+            >
+              {{ $t('settings.provider.templates.use') }}
+            </button>
+          </span>
+        </div>
       </div>
 
-      <button class="pp-add-btn" @click="startAdd">{{ $t('settings.provider.addButton') }}</button>
+      <button class="pp-add-btn" :disabled="editing" @click="startAdd">{{ $t('settings.provider.customProvider') }}</button>
     </div>
 
     <div class="pp-detail">
@@ -803,12 +1047,92 @@ function formatContextWindow (value: number): string {
           <p class="pp-global-note">{{ $t('settings.provider.pricingNote') }}</p>
         </section>
 
-        <div v-if="!selectedProvider && !editing" class="pp-empty">
-          <p>{{ $t('settings.provider.emptyHint') }}</p>
+        <!-- Read-only template detail -->
+        <template v-if="selectedTemplate && !editing">
+          <div class="pp-detail-head">
+            <h3 class="pp-section-title-main">
+              {{ selectedTemplate.name }}
+              <span class="pp-template-badge">{{ $t('settings.provider.templates.badge') }}</span>
+              <span v-if="selectedTemplate.recommended" class="pp-default-badge">{{ $t('settings.provider.templates.recommended') }}</span>
+            </h3>
+            <button class="pp-btn-primary pp-btn-small" type="button" @click="useTemplate(selectedTemplate)">{{ $t('settings.provider.templates.useThis') }}</button>
+          </div>
+          <p v-if="templateTagline(selectedTemplate)" class="pp-hint">{{ templateTagline(selectedTemplate) }}</p>
+          <p class="pp-hint">{{ $t('settings.provider.templates.readOnlyHint') }}</p>
+
+          <div class="pp-separator" />
+
+          <div class="pp-row">
+            <span class="pp-row-label">{{ $t('settings.provider.apiUrl') }}</span>
+            <span class="pp-row-value">{{ selectedTemplate.baseUrl }}</span>
+          </div>
+
+          <div class="pp-separator" />
+
+          <div class="pp-row">
+            <span class="pp-row-label">{{ $t('settings.provider.apiProtocol') }}</span>
+            <span class="pp-row-value">{{ protocolDisplayName(selectedTemplate.apiProtocol) }}</span>
+          </div>
+
+          <div class="pp-separator" />
+
+          <div class="pp-section-label">{{ $t('settings.provider.models') }} <small>{{ selectedTemplate.models.length }}</small></div>
+          <div v-for="model in selectedTemplate.models" :key="model.id" class="pp-model-view-row">
+            <div class="pp-model-view-main">
+              <span class="pp-model-view-name">{{ model.id }}</span>
+              <div class="pp-model-view-meta">
+                <span>{{ formatContextWindow(model.contextWindow) }}</span>
+                <template v-if="model.pricing">
+                  <span>{{ $t('settings.provider.inputMeta', { price: formatPricing(model.pricing.inputPerMillion) }) }}</span>
+                  <span>{{ $t('settings.provider.outputMeta', { price: formatPricing(model.pricing.outputPerMillion) }) }}</span>
+                  <span>{{ $t('settings.provider.cacheMeta', { price: formatPricing(model.pricing.cacheReadPerMillion) }) }}</span>
+                </template>
+              </div>
+            </div>
+            <span v-if="model.id === selectedTemplate.defaultModel" class="pp-default-badge">{{ $t('settings.provider.default') }}</span>
+          </div>
+
+          <div class="pp-separator" />
+
+          <div class="pp-row">
+            <span class="pp-row-label">{{ $t('settings.provider.links.title') }}</span>
+            <span class="pp-row-value pp-link-row">
+              <button type="button" class="pp-link" @click="openProviderLink(selectedTemplate.links.homepage)">{{ $t('settings.provider.links.homepage') }}</button>
+              <button v-if="selectedTemplate.links.console" type="button" class="pp-link" @click="openProviderLink(selectedTemplate.links.console)">{{ $t('settings.provider.links.console') }}</button>
+              <button v-if="selectedTemplate.links.pricing" type="button" class="pp-link" @click="openProviderLink(selectedTemplate.links.pricing)">{{ $t('settings.provider.links.pricing') }}</button>
+            </span>
+          </div>
+
+          <div class="pp-separator" />
+
+          <div class="pp-row">
+            <span class="pp-row-label">{{ $t('settings.provider.templates.verifiedAt') }}</span>
+            <span class="pp-row-value">{{ selectedTemplate.verifiedAt }}</span>
+          </div>
+
+          <span v-if="statusMsg" class="pp-status">{{ statusMsg }}</span>
+        </template>
+
+        <!-- Nothing selected: three-step guide around the recommended template -->
+        <div v-else-if="!selectedProvider && !editing" class="pp-guide">
+          <h3 class="pp-guide-title">{{ $t('settings.provider.guide.title', { name: recommendedTemplate.name }) }}</h3>
+          <ol class="pp-guide-steps">
+            <li><span class="pp-guide-step">1</span><span>{{ $t('settings.provider.guide.step1') }}</span></li>
+            <li><span class="pp-guide-step">2</span><span>{{ $t('settings.provider.guide.step2') }}</span></li>
+            <li><span class="pp-guide-step">3</span><span>{{ $t('settings.provider.guide.step3') }}</span></li>
+          </ol>
+          <div class="pp-actions">
+            <button class="pp-btn-primary" type="button" @click="useTemplate(recommendedTemplate)">{{ $t('settings.provider.guide.useRecommended', { name: recommendedTemplate.name }) }}</button>
+            <button class="pp-btn-ghost" type="button" @click="startAdd">{{ $t('settings.provider.customProvider') }}</button>
+          </div>
+          <p v-if="templateTagline(recommendedTemplate)" class="pp-hint">{{ templateTagline(recommendedTemplate) }}</p>
         </div>
 
         <template v-else-if="editing && editDraft">
-          <h3 class="pp-section-title-main">{{ editingProviderLabel }}</h3>
+          <h3 class="pp-section-title-main">
+            {{ editingProviderLabel }}
+            <span v-if="editDraft.templateId" class="pp-template-badge">{{ editDraftTemplate()?.name || editDraft.templateId }}</span>
+          </h3>
 
           <div class="pp-field">
             <label>{{ $t('settings.provider.name') }}</label>
@@ -819,7 +1143,11 @@ function formatContextWindow (value: number): string {
 
           <div class="pp-field">
             <label>{{ $t('settings.provider.apiUrl') }}</label>
-            <input v-model="editDraft.baseUrl" type="text" placeholder="https://api.openai.com/v1" />
+            <input v-model="editDraft.baseUrl" type="text" :placeholder="$t('settings.provider.apiUrlPlaceholder')" />
+            <span v-if="driftedFromTemplate" class="pp-hint pp-drift">
+              {{ $t('settings.provider.driftedFromTemplate') }}
+              <button type="button" class="pp-link" @click="restoreTemplateDefaults">{{ $t('settings.provider.restoreTemplate') }}</button>
+            </span>
           </div>
 
           <div class="pp-separator" />
@@ -859,7 +1187,20 @@ function formatContextWindow (value: number): string {
 
           <div class="pp-field">
             <label>{{ $t('settings.provider.apiKey') }}</label>
-            <input v-model="editDraft.apiKey" type="password" placeholder="sk-..." />
+            <div v-if="clipboardKeyCandidate" class="pp-clip-banner" role="status">
+              <span>{{ $t('settings.provider.clipboardKeyDetected') }}</span>
+              <span class="pp-clip-actions">
+                <button type="button" class="pp-btn-primary pp-btn-small" @click="fillClipboardKey">{{ $t('settings.provider.clipboardKeyFill') }}</button>
+                <button type="button" class="pp-btn-ghost pp-btn-small" @click="ignoreClipboardKey">{{ $t('settings.provider.clipboardKeyIgnore') }}</button>
+              </span>
+            </div>
+            <input ref="keyInputRef" v-model="editDraft.apiKey" type="password" :placeholder="editKeyPlaceholder" />
+            <div v-if="editLinks" class="pp-key-links">
+              <button type="button" class="pp-btn-primary pp-btn-small" @click="openKeyPage">{{ $t('settings.provider.getKeyFromWebsite') }}</button>
+              <button v-if="editLinks.signup" type="button" class="pp-link" @click="openProviderLink(editLinks.signup)">{{ $t('settings.provider.links.signup') }}</button>
+              <button v-if="editLinks.billing" type="button" class="pp-link" @click="openProviderLink(editLinks.billing)">{{ $t('settings.provider.links.billing') }}</button>
+              <button v-if="editLinks.pricing" type="button" class="pp-link" @click="openProviderLink(editLinks.pricing)">{{ $t('settings.provider.links.pricing') }}</button>
+            </div>
             <span class="pp-hint">{{ $t('settings.provider.apiKeyHint') }}</span>
           </div>
 
@@ -870,7 +1211,7 @@ function formatContextWindow (value: number): string {
               v-model="selectedRemoteModels"
               :options="remoteModelOptions"
               :label="$t('settings.provider.remoteModels')"
-              :placeholder="remoteModelsLoading ? $t('settings.provider.remoteModelsLoading') : $t('settings.provider.remoteModelsPlaceholder')"
+              :placeholder="remoteModelsPlaceholder"
               :search-placeholder="$t('settings.provider.remoteModelsSearch')"
               :empty-text="remoteModels.length > 0 ? $t('settings.provider.remoteModelsAllAdded') : $t('settings.provider.remoteModelsEmpty')"
               :disabled="remoteModelsLoading || remoteModelOptions.length === 0"
@@ -878,7 +1219,7 @@ function formatContextWindow (value: number): string {
             <div class="pp-remote-model-actions">
               <span v-if="remoteModelsLoading" class="pp-hint">{{ $t('settings.provider.remoteModelsLoading') }}</span>
               <span v-else-if="remoteModelsError" class="pp-remote-model-error">{{ $t('settings.provider.remoteModelsFailed', { message: remoteModelsError }) }}</span>
-              <span v-else-if="remoteModels.length > 0" class="pp-hint">{{ $t('settings.provider.remoteModelsLoaded', { count: remoteModels.length }) }}</span>
+              <span v-else-if="remoteModels.length > 0" class="pp-hint">{{ $t('settings.provider.remoteModelsLoaded', { count: remoteModels.length, available: remoteModelOptions.length }) }}</span>
               <span v-else class="pp-hint">{{ $t('settings.provider.remoteModelsHint') }}</span>
               <div class="pp-remote-model-buttons">
                 <button
@@ -1038,7 +1379,10 @@ function formatContextWindow (value: number): string {
 
         <template v-else-if="selectedProvider">
           <div class="pp-detail-head">
-            <h3 class="pp-section-title-main">{{ selectedProvider.name }}</h3>
+            <h3 class="pp-section-title-main">
+              {{ selectedProvider.name }}
+              <span v-if="selectedProvider.templateId" class="pp-template-badge" :title="$t('settings.provider.templates.badgeHint')">{{ $t('settings.provider.templates.badge') }}</span>
+            </h3>
             <div class="pp-detail-head-actions">
               <button
                 v-if="!isDefault(selectedProvider.id)"
@@ -1069,8 +1413,25 @@ function formatContextWindow (value: number): string {
 
           <div class="pp-row">
             <span class="pp-row-label">{{ $t('settings.provider.apiUrl') }}</span>
-            <span class="pp-row-value">{{ selectedProvider.baseUrl }}</span>
+            <span class="pp-row-value pp-link-row">
+              {{ selectedProvider.baseUrl }}
+              <template v-if="selectedProvider.links">
+                <button type="button" class="pp-link" @click="openProviderLink(selectedProvider.links.homepage)">{{ $t('settings.provider.links.homepage') }}</button>
+                <button v-if="selectedProvider.links.console" type="button" class="pp-link" @click="openProviderLink(selectedProvider.links.console)">{{ $t('settings.provider.links.console') }}</button>
+              </template>
+            </span>
           </div>
+
+          <template v-if="selectedProvider.links && (selectedProvider.links.apiKeys || selectedProvider.links.billing)">
+            <div class="pp-separator" />
+            <div class="pp-row">
+              <span class="pp-row-label">{{ $t('settings.provider.quickActions') }}</span>
+              <span class="pp-row-value pp-link-row">
+                <button v-if="selectedProvider.links.apiKeys" type="button" class="pp-btn-ghost pp-btn-small" @click="openProviderLink(selectedProvider.links.apiKeys)">{{ $t('settings.provider.links.apiKeys') }}</button>
+                <button v-if="selectedProvider.links.billing" type="button" class="pp-btn-ghost pp-btn-small" @click="openProviderLink(selectedProvider.links.billing)">{{ $t('settings.provider.links.billing') }}</button>
+              </span>
+            </div>
+          </template>
 
           <div class="pp-separator" />
 
@@ -1321,6 +1682,163 @@ function formatContextWindow (value: number): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ── Template section ────────────────────────────────────────────────── */
+.pp-group-label {
+  padding: 10px 16px 4px;
+  font-size: 0.7em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--app-text-faint);
+}
+
+.pp-group-empty {
+  margin: 0;
+  padding: 6px 16px 10px;
+  font-size: 0.8em;
+  color: var(--app-text-faint);
+}
+
+.pp-item-template {
+  cursor: pointer;
+}
+
+.pp-template-badge {
+  flex-shrink: 0;
+  font-size: 0.68em;
+  font-weight: 600;
+  color: var(--app-text-muted);
+  background: var(--app-panel-subtle);
+  border: 1px solid var(--app-border);
+  padding: 1px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.pp-section-title-main .pp-template-badge,
+.pp-section-title-main .pp-default-badge {
+  margin-left: 8px;
+  font-size: 0.6em;
+  vertical-align: middle;
+}
+
+.pp-use-btn {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 50%, var(--app-border));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-accent);
+  font-size: 0.76em;
+  cursor: pointer;
+}
+
+.pp-use-btn:hover:not(:disabled) {
+  background: var(--app-accent-soft);
+}
+
+.pp-use-btn:disabled,
+.pp-add-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pp-link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--app-accent);
+  font-size: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.pp-link-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.pp-drift {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  color: #d97706;
+}
+
+.pp-key-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 0.8em;
+}
+
+.pp-clip-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 45%, var(--app-border));
+  border-radius: 8px;
+  background: var(--app-accent-soft);
+  font-size: 0.82em;
+}
+
+.pp-clip-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.pp-guide {
+  padding: 20px 4px;
+}
+
+.pp-guide-title {
+  margin: 0 0 14px;
+  font-size: 1.02em;
+  color: var(--app-text-strong);
+}
+
+.pp-guide-steps {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pp-guide-steps li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.88em;
+  color: var(--app-text-soft);
+}
+
+.pp-guide-step {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--app-accent);
+  color: #fff;
+  font-size: 0.72em;
+  font-weight: 700;
 }
 
 .pp-item-badges,

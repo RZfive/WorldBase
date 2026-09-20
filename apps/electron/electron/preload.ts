@@ -9,6 +9,7 @@ import type { UsageRecord, UsageSummary } from '../src/main/settings/usage-store
 import type { ConversationFolderWorkspaceState, FolderWorkspaceChangeEvent, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
 import type { LongTermGoalChangeSet, LongTermGoalDefinition, LongTermGoalIntervention, LongTermGoalMessageResult, LongTermGoalRun, LongTermGoalSaveInput, LongTermGoalSnapshot, LongTermGoalStreamEvent } from '../src/shared/long-term-goal-types.js'
 import type { DocumentEditExportRequest, DocumentEditExportResult, DocumentEditImagePickResult, DocumentEditSourceState } from '../src/shared/document-edit-types.js'
+import type { DailySuggestionPreferences, DailySuggestionSnapshot } from '../src/shared/daily-suggestion-types.js'
 
 interface ChatMessage {
   role: string
@@ -127,6 +128,8 @@ interface AIProvider {
   activeModel: string
   enableThinking?: boolean
   temperature?: number
+  templateId?: string
+  links?: import('../src/shared/provider-templates.js').ProviderTemplateLinks
 }
 
 interface AIProvidersConfig {
@@ -750,6 +753,18 @@ export interface ElectronAPI {
   listFolderWorkspaceFiles: (rootPath: string) => Promise<FolderWorkspaceListResult>
   readFolderWorkspaceFile: (rootPath: string, filePath: string) => Promise<FolderWorkspaceReadResult>
   onFolderWorkspaceChanged: (callback: (event: FolderWorkspaceChangeEvent) => void) => () => void
+
+  // Daily suggestions (chat empty state)
+  getDailySuggestionSnapshot: () => Promise<DailySuggestionSnapshot>
+  getDailySuggestionPreferences: () => Promise<DailySuggestionPreferences>
+  saveDailySuggestionPreferences: (preferences: DailySuggestionPreferences) => Promise<DailySuggestionPreferences>
+  generateDailySuggestionsNow: () => Promise<DailySuggestionSnapshot>
+  dismissDailySuggestion: (suggestionId: string) => Promise<DailySuggestionSnapshot>
+  recordDailySuggestionPick: (suggestionId: string) => Promise<{ success: boolean }>
+  markDailySuggestionsSeen: () => Promise<{ success: boolean }>
+  shuffleKnowledgeSuggestion: () => Promise<DailySuggestionSnapshot>
+  openExternalUrl: (url: string) => Promise<{ ok: boolean; error?: string }>
+  onDailySuggestionsChanged: (callback: (snapshot: DailySuggestionSnapshot) => void) => () => void
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -1117,5 +1132,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_e: Electron.IpcRendererEvent, event: FolderWorkspaceChangeEvent) => callback(event)
     ipcRenderer.on('folderWorkspace:changed', handler)
     return () => { ipcRenderer.removeListener('folderWorkspace:changed', handler) }
+  },
+
+  // Daily suggestions (chat empty state)
+  getDailySuggestionSnapshot: () => ipcRenderer.invoke('dailySuggestions:getSnapshot'),
+  getDailySuggestionPreferences: () => ipcRenderer.invoke('dailySuggestions:getPreferences'),
+  saveDailySuggestionPreferences: (preferences: DailySuggestionPreferences) => ipcRenderer.invoke('dailySuggestions:savePreferences', preferences),
+  generateDailySuggestionsNow: () => ipcRenderer.invoke('dailySuggestions:generateNow'),
+  dismissDailySuggestion: (suggestionId: string) => ipcRenderer.invoke('dailySuggestions:dismiss', suggestionId),
+  recordDailySuggestionPick: (suggestionId: string) => ipcRenderer.invoke('dailySuggestions:recordPick', suggestionId),
+  markDailySuggestionsSeen: () => ipcRenderer.invoke('dailySuggestions:markSeen'),
+  shuffleKnowledgeSuggestion: () => ipcRenderer.invoke('dailySuggestions:shuffleKnowledge'),
+  openExternalUrl: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+  onDailySuggestionsChanged: (callback: (snapshot: DailySuggestionSnapshot) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, snapshot: DailySuggestionSnapshot) => callback(snapshot)
+    ipcRenderer.on('dailySuggestions:changed', handler)
+    return () => { ipcRenderer.removeListener('dailySuggestions:changed', handler) }
   }
 } satisfies ElectronAPI)

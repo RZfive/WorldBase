@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { t } from '../i18n/main-i18n.js'
 import type { AppUpdateAssetInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateNotes, AppUpdateProgress, AppUpdateState, AppUpdateStatus, AppUpdateWebsiteLinks } from '../../shared/app-update-types.js'
+import type { ProviderTemplateLinks } from '../../shared/provider-templates.js'
 import { CHAT_FONT_SIZE_MAX, CHAT_FONT_SIZE_MIN, DEFAULT_CHAT_FONT_SIZE } from '../../shared/chat-font-preferences.js'
 
 export interface AISettings {
@@ -48,6 +49,10 @@ export interface AIProvider {
   enableThinking?: boolean
   /** Default sampling temperature for this provider. Unset → engine default (0.3). */
   temperature?: number
+  /** Built-in template this provider was created from; absent for hand-made providers. */
+  templateId?: string
+  /** Snapshot of the template's website links at creation time. */
+  links?: ProviderTemplateLinks
 }
 
 export interface AIProvidersConfig {
@@ -244,6 +249,26 @@ function normalizeDetectedApiProtocol (value: unknown): ConcreteApiProtocol | un
   return undefined
 }
 
+const PROVIDER_LINK_KEYS = ['homepage', 'signup', 'console', 'apiKeys', 'billing', 'pricing'] as const
+
+/** Keep only well-formed https links; drop the whole object without a homepage. */
+function normalizeProviderLinks (value: unknown): ProviderTemplateLinks | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const links: Partial<ProviderTemplateLinks> = {}
+  for (const key of PROVIDER_LINK_KEYS) {
+    const candidate = typeof raw[key] === 'string' ? (raw[key] as string).trim() : ''
+    if (!candidate) continue
+    try {
+      if (new URL(candidate).protocol !== 'https:') continue
+    } catch {
+      continue
+    }
+    links[key] = candidate
+  }
+  return links.homepage ? links as ProviderTemplateLinks : undefined
+}
+
 function normalizeProvider (input: AIProvider): AIProvider {
   const rawModels = Array.isArray(input.models) ? input.models : []
   const models: string[] = []
@@ -296,7 +321,9 @@ function normalizeProvider (input: AIProvider): AIProvider {
     modelCapabilities,
     activeModel,
     enableThinking: input.enableThinking ?? false,
-    temperature: normalizeTemperature(input.temperature)
+    temperature: normalizeTemperature(input.temperature),
+    ...(typeof input.templateId === 'string' && input.templateId.trim() ? { templateId: input.templateId.trim() } : {}),
+    ...(normalizeProviderLinks(input.links) ? { links: normalizeProviderLinks(input.links) } : {})
   }
 }
 

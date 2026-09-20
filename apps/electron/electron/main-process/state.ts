@@ -34,6 +34,8 @@ import type { DocumentStore } from '../../src/main/ai-engine/agent/tools/documen
 import type { MCPService } from '../../src/main/mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
 import type { LongTermGoalService } from '../../src/main/long-term-goals/long-term-goal-service.js'
+import type { DailySuggestionStore } from '../../src/main/settings/daily-suggestion-store.js'
+import type { DailySuggestionService } from '../../src/main/suggestions/daily-suggestion-service.js'
 import type { RustHarnessClient } from './rust-harness-client.js'
 import type { MemoryCompactionResult, MemoryCompactionStatus } from '../../src/shared/agent-workspace-types.js'
 import type { PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
@@ -111,6 +113,8 @@ export const mainState = {
   scheduledTaskService: null as ScheduledTaskService | null,
   longTermGoalStore: null as LongTermGoalStore | null,
   longTermGoalService: null as LongTermGoalService | null,
+  dailySuggestionStore: null as DailySuggestionStore | null,
+  dailySuggestionService: null as DailySuggestionService | null,
   documentStore: null as DocumentStore | null,
   imageLibraryStore: null as ImageLibraryStore | null,
   studioTaskStore: null as StudioTaskStore | null,

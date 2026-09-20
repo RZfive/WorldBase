@@ -543,6 +543,17 @@ function openSettings () {
   hideDockCtx()
 }
 
+/** Settings category to land on when opened from a deep link (e.g. the chat empty state). */
+const settingsInitialCategory = ref<string | null>(null)
+/** Provider template to open straight into "use this template"; consumed once by the provider panel. */
+const settingsProviderTemplate = ref<string | null>(null)
+
+function openSettingsCategory (category?: string, options?: { useProviderTemplate?: string }) {
+  settingsInitialCategory.value = category || null
+  settingsProviderTemplate.value = options?.useProviderTemplate || null
+  openSettings()
+}
+
 function openStudio () {
   appChatPresentation.value = 'full'
   currentView.value = 'studio'
@@ -1343,6 +1354,7 @@ onUnmounted(() => {
                   @contextConsumed="chatProjectContext = null"
                   @open-web-link="openWebLinkInApp"
                   @status-change="handleChatSurfaceStatusChange"
+                  @open-settings="(category, options) => openSettingsCategory(category, options)"
                 />
               </div>
             </div>
@@ -1363,7 +1375,12 @@ onUnmounted(() => {
             @back="sourceProject = null; openChat()"
           />
 
-          <AISettings v-if="currentView === 'settings'" />
+          <AISettings
+            v-if="currentView === 'settings'"
+            :initial-category="settingsInitialCategory"
+            :provider-template="settingsProviderTemplate"
+            @provider-template-consumed="settingsProviderTemplate = null"
+          />
 
           <!-- Cached so the studio's in-memory task queue and form survive leaving
                the view (e.g. switching to a conversation); discarded only on app close. -->

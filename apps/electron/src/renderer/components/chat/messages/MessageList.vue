@@ -392,17 +392,19 @@ onUnmounted(() => {
       @contextmenu="handleSelectionContextMenu"
     >
       <div v-if="props.messages.length === 0" class="empty-state">
-        <div class="empty-state-card">
-          <div class="empty-state-icon">AI</div>
-          <h3>{{ $t('chatUi.emptyChatTitle') }}</h3>
-          <p>{{ $t('chatUi.emptyChatHint') }}</p>
-          <ul>
-            <li>{{ $t('chatUi.emptyChatIdeaCreateWebApp') }}</li>
-            <li>{{ $t('chatUi.emptyChatIdeaModifyProject') }}</li>
-            <li>{{ $t('chatUi.emptyChatIdeaAnalyzeData') }}</li>
-            <li>{{ $t('chatUi.emptyChatIdeaDebugApi') }}</li>
-          </ul>
-        </div>
+        <slot name="empty">
+          <div class="empty-state-card">
+            <div class="empty-state-icon">AI</div>
+            <h3>{{ $t('chatUi.emptyChatTitle') }}</h3>
+            <p>{{ $t('chatUi.emptyChatHint') }}</p>
+            <ul>
+              <li>{{ $t('chatUi.emptyChatIdeaCreateWebApp') }}</li>
+              <li>{{ $t('chatUi.emptyChatIdeaModifyProject') }}</li>
+              <li>{{ $t('chatUi.emptyChatIdeaAnalyzeData') }}</li>
+              <li>{{ $t('chatUi.emptyChatIdeaDebugApi') }}</li>
+            </ul>
+          </div>
+        </slot>
       </div>
       <template v-else>
         <div v-if="props.messages.length > 0" class="message-date-divider" aria-hidden="true">

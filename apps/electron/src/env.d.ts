@@ -43,6 +43,8 @@ type LongTermGoalMessageResult = import('./shared/long-term-goal-types.js').Long
 type LongTermGoalRun = import('./shared/long-term-goal-types.js').LongTermGoalRun
 type LongTermGoalActivityEvent = import('./shared/long-term-goal-types.js').LongTermGoalActivityEvent
 type LongTermGoalStreamEvent = import('./shared/long-term-goal-types.js').LongTermGoalStreamEvent
+type DailySuggestionPreferences = import('./shared/daily-suggestion-types.js').DailySuggestionPreferences
+type DailySuggestionSnapshot = import('./shared/daily-suggestion-types.js').DailySuggestionSnapshot
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -509,6 +511,8 @@ interface AIProviderConfig {
   modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
   activeModel: string
   enableThinking?: boolean
+  templateId?: string
+  links?: import('./shared/provider-templates.js').ProviderTemplateLinks
 }
 
 interface AIProvidersConfig {
@@ -1219,6 +1223,19 @@ interface ElectronAPI {
   listFolderWorkspaceFiles: (rootPath: string) => Promise<FolderWorkspaceListResult>
   readFolderWorkspaceFile: (rootPath: string, filePath: string) => Promise<FolderWorkspaceReadResult>
   onFolderWorkspaceChanged: (callback: (event: FolderWorkspaceChangeEvent) => void) => () => void
+
+  // Daily suggestions (chat empty state)
+  getDailySuggestionSnapshot: () => Promise<DailySuggestionSnapshot>
+  getDailySuggestionPreferences: () => Promise<DailySuggestionPreferences>
+  saveDailySuggestionPreferences: (preferences: DailySuggestionPreferences) => Promise<DailySuggestionPreferences>
+  generateDailySuggestionsNow: () => Promise<DailySuggestionSnapshot>
+  dismissDailySuggestion: (suggestionId: string) => Promise<DailySuggestionSnapshot>
+  recordDailySuggestionPick: (suggestionId: string) => Promise<{ success: boolean }>
+  markDailySuggestionsSeen: () => Promise<{ success: boolean }>
+  shuffleKnowledgeSuggestion: () => Promise<DailySuggestionSnapshot>
+  /** Opens an https URL in the system browser; only provider-template hosts are allowed. */
+  openExternalUrl: (url: string) => Promise<{ ok: boolean; error?: string }>
+  onDailySuggestionsChanged: (callback: (snapshot: DailySuggestionSnapshot) => void) => () => void
 }
 
 interface Window {
