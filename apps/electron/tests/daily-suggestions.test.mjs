@@ -4,11 +4,11 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import './register-ts-hooks.mjs'
-import { DailySuggestionStore } from '../src/main/settings/daily-suggestion-store.ts'
-import { DailySuggestionService, extractJsonArray, normalizeKnowledgeSuggestion, normalizeLlmSuggestion } from '../src/main/suggestions/daily-suggestion-service.ts'
+import { DailySuggestionStore, MAX_GENERATED_SEEDS } from '../src/main/settings/daily-suggestion-store.ts'
+import { DailySuggestionService, KNOWLEDGE_REPLENISH_BATCH, extractJsonArray, normalizeGeneratedSeed, normalizeKnowledgeSuggestion, normalizeLlmSuggestion } from '../src/main/suggestions/daily-suggestion-service.ts'
 import { buildExploreSuggestions, resolveWeeklyTheme, isoWeekNumber } from '../src/main/suggestions/static-suggestions.ts'
-import { KNOWLEDGE_SEEDS, drawKnowledgeSeed, hashString } from '../src/main/suggestions/knowledge-seeds.ts'
-import { DEFAULT_DAILY_SUGGESTION_PREFERENCES, KNOWLEDGE_SHUFFLE_LIMIT, normalizeDailySuggestionPreferences } from '../src/shared/daily-suggestion-types.ts'
+import { KNOWLEDGE_DISCIPLINES, KNOWLEDGE_SEEDS, buildKnowledgePool, drawKnowledgeSeed, hashString } from '../src/main/suggestions/knowledge-seeds.ts'
+import { DEFAULT_DAILY_SUGGESTION_PREFERENCES, KNOWLEDGE_SHUFFLE_LIMIT, formatLocalDate, normalizeDailySuggestionPreferences } from '../src/shared/daily-suggestion-types.ts'
 import zhCN from '../src/locales/zh-CN/index.ts'
 import enUS from '../src/locales/en-US/index.ts'
 
@@ -29,7 +29,7 @@ function fakeEngine (reply) {
     engine: {
       async chat (messages, options) {
         calls.push({ messages, options })
-        const content = typeof reply === 'function' ? reply(calls.length) : reply
+        const content = typeof reply === 'function' ? reply(calls.length, messages[0].content) : reply
         if (content instanceof Error) throw content
         return { role: 'assistant', content }
       },
@@ -39,9 +39,15 @@ function fakeEngine (reply) {
   }
 }
 
-function createService (t, { reply, preferences = {}, now = () => new Date('2026-09-19T10:00:00'), providerConfig = { apiKey: 'k', baseUrl: 'u', model: 'm', providerId: 'p' }, seedPreferences = true } = {}) {
+/**
+ * `allowReplenish` opts a test into the random-pool top-up. Everything else
+ * marks today as already attempted, using the store's own once-a-day gate, so
+ * model-call counts stay about the daily / knowledge requests under test.
+ */
+function createService (t, { reply, preferences = {}, now = () => new Date('2026-09-19T10:00:00'), providerConfig = { apiKey: 'k', baseUrl: 'u', model: 'm', providerId: 'p' }, seedPreferences = true, allowReplenish = false, locale = 'zh-CN' } = {}) {
   const store = new DailySuggestionStore(tempDir(t))
   if (seedPreferences) store.savePreferences(normalizeDailySuggestionPreferences({ ...DEFAULT_DAILY_SUGGESTION_PREFERENCES, ...preferences }))
+  if (!allowReplenish) store.setKnowledgeReplenish({ lastAttemptDate: formatLocalDate(now()) })
   const { engine, calls } = fakeEngine(reply)
   const changes = []
   const service = new DailySuggestionService({
@@ -51,7 +57,7 @@ function createService (t, { reply, preferences = {}, now = () => new Date('2026
     listProjects: async () => [{ id: 'proj-1', name: 'Demo', type: 'web', status: 'running', port: 3000 }],
     listConversations: async () => [{ title: 'Fix login bug', updatedAt: '2026-09-18T00:00:00Z', previewText: 'secret text' }],
     getCapabilities: async () => ({ skillNames: [], mcpServerNames: [], scheduledTaskCount: 0, longTermGoalCount: 0, agentGroupCount: 0 }),
-    getLocale: () => 'zh-CN',
+    getLocale: () => locale,
     onChanged: snapshot => changes.push(snapshot),
     now
   })
@@ -61,6 +67,21 @@ function createService (t, { reply, preferences = {}, now = () => new Date('2026
 
 function llmItem (type, index = 0, extra = {}) {
   return { type, title: `${type} #${index}`, description: 'why', prompt: `do ${type} ${index}`, ...extra }
+}
+
+/** A model reply for the pool top-up: one seed per discipline, distinct slugs. */
+function seedReply (count = KNOWLEDGE_REPLENISH_BATCH, tag = 'a') {
+  return JSON.stringify(KNOWLEDGE_DISCIPLINES.slice(0, count).map((discipline, index) => ({
+    discipline,
+    slug: `${discipline}-topic-${tag}-${index}`,
+    title: `为什么 ${discipline} ${tag} ${index}？`,
+    description: `hook ${index}`,
+    prompt: `我对「${discipline} ${tag} ${index}」有点好奇。`
+  })))
+}
+
+function isReplenishPrompt (content) {
+  return /## Already in the pool/.test(content)
 }
 
 test('preferences normalize to safe defaults and never end up with zero types', () => {
@@ -436,4 +457,186 @@ test('knowledge LLM sources run even when daily picks are off', async t => {
   // Dismissing a knowledge item feeds a per-source streak; picking clears it.
   service.dismiss(snapshot.knowledge[1].id)
   assert.equal(service.getSnapshot().knowledge.length, 1)
+})
+
+// ── Random pool replenishment ─────────────────────────────────────────────
+// Built-in seeds cover the cold start; once a provider exists the model tops
+// the pool up. Generated seeds must draw like built-in ones, dedupe against
+// everything already known, respect the locale, and never fire more than
+// once a day.
+
+test('normalizeGeneratedSeed derives a stable id from the slug and rejects collisions and bad disciplines', () => {
+  const now = new Date('2026-09-19T10:00:00')
+  const ids = new Set(KNOWLEDGE_SEEDS.map(seed => seed.id))
+  const titles = new Set()
+  const base = { discipline: 'physics', slug: 'Physics Mpemba Effect!', title: '热水为什么比冷水先结冰？', description: 'd', prompt: '我对「姆潘巴效应」有点好奇。' }
+
+  const ok = normalizeGeneratedSeed(base, 'zh-CN', now, ids, titles)
+  assert.equal(ok.id, 'gen-physics-mpemba-effect')
+  assert.equal(ok.discipline, 'physics')
+  assert.deepEqual(ok.copy, { locale: 'zh-CN', title: base.title, description: 'd', prompt: base.prompt, createdAt: now.toISOString() })
+  assert.ok(ids.has('gen-physics-mpemba-effect'), 'accepted ids extend the set so one reply cannot repeat itself')
+
+  assert.equal(normalizeGeneratedSeed({ ...base }, 'zh-CN', now, ids, titles), null, 'same slug again → dropped')
+  assert.equal(normalizeGeneratedSeed({ ...base, slug: 'bio-thermal-inversion', title: '热水为什么比冷水先结冰?' }, 'zh-CN', now, ids, titles), null, 'same title modulo punctuation → dropped')
+  assert.equal(normalizeGeneratedSeed({ ...base, slug: 'math-birthday-paradox' }, 'zh-CN', now, ids, titles), null, 'collides with a built-in id')
+  assert.equal(normalizeGeneratedSeed({ ...base, slug: 'econ-x', discipline: 'astrology' }, 'zh-CN', now, ids, titles), null, 'unknown discipline')
+  assert.equal(normalizeGeneratedSeed({ ...base, slug: 'ab' }, 'zh-CN', now, ids, titles), null, 'slug too short')
+  assert.equal(normalizeGeneratedSeed({ ...base, slug: 'econ-no-prompt', title: 'x', prompt: '' }, 'zh-CN', now, ids, titles), null, 'prompt required')
+})
+
+test('the draw covers generated seeds of the current locale and a generated card carries literal text', () => {
+  const generated = [
+    { id: 'gen-physics-a', discipline: 'physics', copy: { locale: 'zh-CN', title: 'zh', description: '', prompt: 'p', createdAt: '2026-09-01T00:00:00.000Z' } },
+    { id: 'gen-physics-b', discipline: 'physics', copy: { locale: 'en-US', title: 'en', description: '', prompt: 'p', createdAt: '2026-09-01T00:00:00.000Z' } }
+  ]
+  const pool = buildKnowledgePool(generated, 'zh-CN')
+  assert.equal(pool.length, KNOWLEDGE_SEEDS.length + 1, 'only seeds written for the active locale join the pool')
+
+  // Everything built-in shown recently → the only fresh candidate is the generated one.
+  const history = KNOWLEDGE_SEEDS.map(seed => ({ seedId: seed.id, date: '2026-09-15' }))
+  const drawn = drawKnowledgeSeed('2026-09-19', 'salt', history, 0, pool)
+  assert.equal(drawn.id, 'gen-physics-a')
+})
+
+test('automatic top-up runs once a provider exists, dedupes against the pool, and is gated to once a day', async t => {
+  const replies = []
+  const { service, store, calls } = createService(t, {
+    reply: (call, content) => {
+      replies.push(content)
+      return isReplenishPrompt(content) ? seedReply() : '[]'
+    },
+    allowReplenish: true
+  })
+  service.start()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(calls.length, 1, 'the only model call at startup is the pool top-up')
+  assert.ok(isReplenishPrompt(calls[0].messages[0].content))
+  assert.match(calls[0].messages[0].content, /- math-birthday-paradox/, 'built-in ids are listed as already covered')
+  assert.match(calls[0].messages[0].content, /locale tag "zh-CN"/)
+
+  const generated = store.getGeneratedSeeds()
+  assert.equal(generated.length, KNOWLEDGE_REPLENISH_BATCH)
+  assert.ok(generated.every(seed => seed.id.startsWith('gen-') && seed.copy.locale === 'zh-CN'))
+  const pool = service.getSnapshot().knowledgePool
+  assert.equal(pool.builtin, KNOWLEDGE_SEEDS.length)
+  assert.equal(pool.generated, KNOWLEDGE_REPLENISH_BATCH)
+  assert.equal(pool.unseen, KNOWLEDGE_SEEDS.length + KNOWLEDGE_REPLENISH_BATCH - 1, 'today\'s pinned seed is the only one seen')
+  assert.ok(pool.lastReplenishAt)
+  assert.equal(pool.lastReplenishError, null)
+
+  // Same day: nothing else triggers another top-up, not even a manual generation.
+  store.savePreferences(normalizeDailySuggestionPreferences({ ...DEFAULT_DAILY_SUGGESTION_PREFERENCES, enabled: true, types: ['new-idea'] }))
+  await service.generateNow()
+  assert.equal(calls.filter(call => isReplenishPrompt(call.messages[0].content)).length, 1, 'once a day')
+
+  // The next call lists the generated ids too and the same reply yields nothing new.
+  store.setKnowledgeReplenish({ lastAttemptDate: '' , lastSuccessAt: '2026-09-01T00:00:00.000Z' })
+  await assert.rejects(() => service.replenishKnowledgePoolNow(), /MODEL_OUTPUT_EMPTY/)
+  const second = calls.filter(call => isReplenishPrompt(call.messages[0].content))[1]
+  assert.match(second.messages[0].content, /- gen-math-topic-a-0: 为什么 math a 0？/, 'generated seeds are listed with their title for the same locale')
+  assert.equal(store.getGeneratedSeeds().length, KNOWLEDGE_REPLENISH_BATCH, 'duplicates are not appended')
+  assert.match(service.getSnapshot().knowledgePool.lastReplenishError, /MODEL_OUTPUT_EMPTY/)
+})
+
+test('top-up stays quiet without a provider or with the random source off, and skips when the pool is fresh and full', async t => {
+  const noProvider = createService(t, { reply: seedReply(), providerConfig: null, allowReplenish: true })
+  noProvider.service.start()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(noProvider.calls.length, 0, 'no provider → the built-in pool alone')
+  assert.equal(noProvider.service.getSnapshot().knowledgePool.generated, 0)
+  await assert.rejects(() => noProvider.service.replenishKnowledgePoolNow(), /PROVIDER_MISSING/)
+
+  const randomOff = createService(t, {
+    reply: seedReply(),
+    allowReplenish: true,
+    preferences: { knowledge: { enabled: true, sources: ['work-domain'], interests: [], profession: '', countPerSource: 1 } }
+  })
+  randomOff.service.start()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(randomOff.calls.filter(call => isReplenishPrompt(call.messages[0].content)).length, 0, 'random source off → no top-up')
+  await assert.rejects(() => randomOff.service.replenishKnowledgePoolNow(), /KNOWLEDGE_RANDOM_DISABLED/)
+
+  // Turning the random source on afterwards triggers the top-up right away.
+  randomOff.service.savePreferences({ ...DEFAULT_DAILY_SUGGESTION_PREFERENCES, knowledge: { enabled: true, sources: ['random', 'work-domain'], interests: [], profession: '', countPerSource: 1 } })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(randomOff.calls.filter(call => isReplenishPrompt(call.messages[0].content)).length, 1)
+
+  // A recent successful top-up with plenty of unseen seeds → nothing to do.
+  const fresh = createService(t, { reply: seedReply(), allowReplenish: true })
+  fresh.store.setKnowledgeReplenish({ lastSuccessAt: '2026-09-17T09:00:00.000Z' })
+  fresh.service.start()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(fresh.calls.length, 0, 'topped up two days ago and 35 unseen seeds → skip')
+
+  // Older than a week → due again even though the pool is not low.
+  const stale = createService(t, { reply: seedReply(), allowReplenish: true })
+  stale.store.setKnowledgeReplenish({ lastSuccessAt: '2026-09-10T09:00:00.000Z' })
+  stale.service.start()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(stale.calls.length, 1, 'weekly refresh')
+})
+
+test('a generated seed survives as today\'s card across locale switches and pool eviction keeps it', async t => {
+  let locale = 'zh-CN'
+  const { service, store } = createService(t, { reply: seedReply(), allowReplenish: true, locale })
+  // Redirect the service's locale through a mutable binding.
+  service.options.getLocale = () => locale
+  await service.replenishKnowledgePoolNow()
+
+  // Everything built-in was shown recently, so today's draw must be a generated seed.
+  for (const seed of KNOWLEDGE_SEEDS) store.setKnowledgeToday('2026-09-01', seed.id, false)
+  const today = service.getSnapshot()
+  const card = today.knowledge[0]
+  assert.match(card.knowledge.seedId, /^gen-/)
+  assert.equal(card.source, 'llm', 'generated seeds carry literal text')
+  assert.match(card.title, /^为什么/)
+  assert.ok(KNOWLEDGE_DISCIPLINES.includes(card.knowledge.discipline))
+  assert.match(card.id, /^knowledge:2026-09-19:gen-/)
+
+  // Dismiss / pick resolve the card through the generated pool.
+  service.recordPick(card.id)
+  service.dismiss(card.id)
+  assert.equal(store.getKnowledgeDismissStreaks().random, 1)
+
+  // Switching locale mid-day keeps the pinned card; the pool for the draw shrinks to built-in only.
+  locale = 'en-US'
+  const switched = service.getSnapshot()
+  assert.equal(switched.knowledgePool.generated, 0, 'en-US has no generated seeds')
+  assert.equal(store.getKnowledgeToday('2026-09-19').seedId, card.knowledge.seedId, 'pinned seed is kept for the day')
+
+  // Overflowing the cap evicts the oldest seeds but never today's pinned one.
+  locale = 'zh-CN'
+  const filler = Array.from({ length: MAX_GENERATED_SEEDS }, (_, index) => ({
+    id: `gen-filler-${index}`,
+    discipline: 'math',
+    copy: { locale: 'zh-CN', title: `filler ${index}`, description: '', prompt: 'p', createdAt: '2026-09-02T00:00:00.000Z' }
+  }))
+  store.appendGeneratedSeeds(filler, [card.knowledge.seedId])
+  const remaining = store.getGeneratedSeeds()
+  assert.equal(remaining.length, MAX_GENERATED_SEEDS)
+  assert.ok(remaining.some(seed => seed.id === card.knowledge.seedId), 'today\'s seed survives eviction')
+  const survivingOriginals = remaining.filter(seed => seed.id.startsWith('gen-') && !seed.id.startsWith('gen-filler-'))
+  assert.deepEqual(survivingOriginals.map(seed => seed.id), [card.knowledge.seedId], 'older unpinned seeds are evicted first')
+})
+
+test('the store drops malformed generated seeds and keeps the newest within the cap', t => {
+  const store = new DailySuggestionStore(tempDir(t))
+  const good = { id: 'gen-ok', discipline: 'design', copy: { locale: 'zh-CN', title: 't', description: 'd', prompt: 'p', createdAt: '2026-09-19T00:00:00.000Z' } }
+  assert.equal(store.appendGeneratedSeeds([good, good]), 1, 'duplicates within one call collapse')
+  assert.equal(store.appendGeneratedSeeds([good]), 0)
+
+  const filePath = path.join(store.filePath ? path.dirname(store.filePath) : tempDir(t), 'daily-suggestions.json')
+  const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+  raw.knowledgeGeneratedSeeds.push(
+    { id: 'no-prefix', discipline: 'design', copy: good.copy },
+    { id: 'gen-bad-discipline', discipline: 'astrology', copy: good.copy },
+    { id: 'gen-no-copy', discipline: 'design' },
+    { id: 'gen-Colon:Id', discipline: 'design', copy: good.copy },
+    { id: 'gen-fine', discipline: 'design', copy: { ...good.copy, description: undefined } }
+  )
+  fs.writeFileSync(filePath, JSON.stringify(raw))
+  const reloaded = new DailySuggestionStore(path.dirname(filePath))
+  assert.deepEqual(reloaded.getGeneratedSeeds().map(seed => seed.id), ['gen-ok', 'gen-fine'])
+  assert.equal(reloaded.getGeneratedSeeds()[1].copy.description, '')
 })

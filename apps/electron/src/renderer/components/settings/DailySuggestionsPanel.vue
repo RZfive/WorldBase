@@ -29,7 +29,7 @@ interface ProviderChoice {
   models: string[]
 }
 
-const { t, locale } = useI18n()
+const { t, te, locale } = useI18n()
 
 const FEEDBACK_DISPLAY_DURATION_MS = 2200
 const COUNT_OPTIONS: DailySuggestionCountPerType[] = [2, 3, 5]
@@ -89,6 +89,35 @@ const refreshRemaining = computed(() => {
   return Math.max(0, state.manualRefreshLimit - state.manualRefreshCount)
 })
 const generateDisabled = computed(() => (!enabled.value && !(knowledgeEnabled.value && knowledge.value.sources.some(source => (LLM_KNOWLEDGE_SOURCES as readonly string[]).includes(source)))) || saving.value || generating.value || snapshot.value?.generating === true || refreshRemaining.value === 0)
+
+const replenishing = ref(false)
+const knowledgePool = computed(() => snapshot.value?.knowledgePool ?? null)
+const randomSelected = computed(() => knowledgeEnabled.value && knowledge.value.sources.includes('random'))
+const replenishDisabled = computed(() => !randomSelected.value || !hasProviders.value || saving.value || replenishing.value || knowledgePool.value?.replenishing === true)
+const knowledgePoolLabel = computed(() => {
+  const pool = knowledgePool.value
+  if (!pool) return ''
+  return t('settings.dailySuggestions.knowledge.poolSize', { builtin: pool.builtin, generated: pool.generated, unseen: pool.unseen })
+})
+const knowledgePoolStatus = computed(() => {
+  const pool = knowledgePool.value
+  if (!pool) return ''
+  if (pool.lastReplenishError) {
+    const reason = pool.lastReplenishError === 'PROVIDER_MISSING'
+      ? t('settings.dailySuggestions.errorProviderMissing')
+      : pool.lastReplenishError === 'MODEL_OUTPUT_NOT_JSON' || pool.lastReplenishError === 'MODEL_OUTPUT_EMPTY'
+        ? t('settings.dailySuggestions.errorNotJson')
+        : pool.lastReplenishError
+    return t('settings.dailySuggestions.knowledge.poolFailed', { reason })
+  }
+  if (!pool.lastReplenishAt) {
+    return hasProviders.value
+      ? t('settings.dailySuggestions.knowledge.poolNeverReplenished')
+      : t('settings.dailySuggestions.knowledge.poolNoProvider')
+  }
+  const when = new Intl.DateTimeFormat(locale.value, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(pool.lastReplenishAt))
+  return t('settings.dailySuggestions.knowledge.poolReplenishedAt', { time: when })
+})
 
 const lastGenerationLabel = computed(() => {
   const state = lastGeneration.value
@@ -257,11 +286,31 @@ function setKnowledgeCount (count: KnowledgeCountPerSource): void {
   patchKnowledge({ countPerSource: count })
 }
 
+/** Built-in seeds carry i18n keys; generated seeds carry literal model text. */
 function todayRandomText (field: 'title' | 'description'): string {
   const item = todayRandom.value
   if (!item) return ''
   const raw = item[field]
-  return raw ? t(raw) : ''
+  if (!raw) return ''
+  return item.source === 'static' && te(raw) ? t(raw) : raw
+}
+
+async function replenishPool (): Promise<void> {
+  if (replenishDisabled.value || !window.electronAPI?.replenishKnowledgePool) return
+  replenishing.value = true
+  try {
+    const before = knowledgePool.value?.generated ?? 0
+    dailySuggestionSnapshot.value = await window.electronAPI.replenishKnowledgePool()
+    const after = dailySuggestionSnapshot.value.knowledgePool?.generated ?? before
+    setFeedback(t('settings.dailySuggestions.knowledge.poolReplenishDone', { count: Math.max(0, after - before) }))
+  } catch (error) {
+    const message = (error as Error).message || ''
+    setFeedback(message.includes('PROVIDER_MISSING')
+      ? t('settings.dailySuggestions.errorProviderMissing')
+      : t('settings.dailySuggestions.generateFailedWith', { message }))
+  } finally {
+    replenishing.value = false
+  }
 }
 
 async function generateNow (): Promise<void> {
@@ -270,7 +319,8 @@ async function generateNow (): Promise<void> {
   try {
     dailySuggestionSnapshot.value = await window.electronAPI.generateDailySuggestionsNow()
     const state = dailySuggestionSnapshot.value.lastGeneration
-    const count = dailySuggestionSnapshot.value.daily.length + dailySuggestionSnapshot.value.knowledge.filter(item => item.source === 'llm').length
+    // The random card may be a generated seed; only count items this run produced.
+    const count = dailySuggestionSnapshot.value.daily.length + dailySuggestionSnapshot.value.knowledge.filter(item => item.source === 'llm' && item.knowledge?.source !== 'random').length
     setFeedback(state?.status === 'failed'
       ? t('settings.dailySuggestions.generateFailed')
       : t('settings.dailySuggestions.generateDone', { count }))
@@ -475,6 +525,18 @@ onMounted(() => {
         <span class="ds-section-meta">{{ $t('settings.dailySuggestions.knowledge.todayRandom') }}</span>
         <span class="ds-today-title">{{ todayRandomText('title') }}</span>
         <p class="ds-card-hint">{{ todayRandomText('description') }}</p>
+      </section>
+
+      <!-- Seed pool: built-in seeds cover the cold start; the model tops the pool up once a provider exists. -->
+      <section v-if="knowledgePool" class="ds-card ds-status-card">
+        <div class="ds-card-copy">
+          <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.poolTitle') }}</span>
+          <p class="ds-card-hint">{{ knowledgePoolLabel }}</p>
+          <p class="ds-card-hint" :class="{ failed: !!knowledgePool.lastReplenishError }">{{ knowledgePoolStatus }}</p>
+        </div>
+        <button type="button" class="ds-primary-btn" :disabled="replenishDisabled" @click="replenishPool">
+          {{ replenishing || knowledgePool.replenishing ? $t('settings.dailySuggestions.knowledge.poolReplenishing') : $t('settings.dailySuggestions.knowledge.poolReplenishNow') }}
+        </button>
       </section>
 
       <section class="ds-card">

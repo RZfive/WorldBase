@@ -1,11 +1,10 @@
 name: Build & Release
 
 on:
-  pull_request:
+  push:
     branches:
       - main
-    types:
-      - closed
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -16,8 +15,6 @@ permissions:
 
 jobs:
   cleanup:
-    # All build jobs depend on cleanup, so closing an unmerged PR skips packaging.
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Delete old artifacts (keep latest 5 per name)

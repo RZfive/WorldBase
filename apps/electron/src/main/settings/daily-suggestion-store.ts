@@ -10,7 +10,20 @@ import {
   type SuggestionType,
   type WorkSuggestion
 } from '../../shared/daily-suggestion-types.js'
-import type { KnowledgeSeedHistoryEntry } from '../suggestions/knowledge-seeds.js'
+import {
+  GENERATED_SEED_ID_PREFIX,
+  isKnowledgeDiscipline,
+  type GeneratedKnowledgeSeed,
+  type KnowledgeSeedHistoryEntry
+} from '../suggestions/knowledge-seeds.js'
+
+export interface KnowledgeReplenishState {
+  /** ISO time of the last successful top-up, empty when none. */
+  lastSuccessAt: string
+  /** Local date of the last attempt (success or failure); at most one attempt per day. */
+  lastAttemptDate: string
+  lastError: string
+}
 
 interface DailySuggestionStoreSnapshot {
   preferences: DailySuggestionPreferences
@@ -27,11 +40,18 @@ interface DailySuggestionStoreSnapshot {
   knowledgeToday: { date: string; seedId: string; shuffleCount: number }
   /** Per-installation salt so two users do not draw the same seed on the same day. */
   knowledgeSalt: string
+  /** Model-written seeds, oldest first, capped at MAX_GENERATED_SEEDS. */
+  knowledgeGeneratedSeeds: GeneratedKnowledgeSeed[]
+  knowledgeReplenish: KnowledgeReplenishState
 }
 
 const MAX_BATCH_HISTORY = 7
 const MAX_DISMISSED_IDS = 400
 const MAX_SEED_HISTORY = 60
+export const MAX_GENERATED_SEEDS = 120
+const GENERATED_TITLE_MAX = 80
+const GENERATED_DESCRIPTION_MAX = 200
+const GENERATED_PROMPT_MAX = 1000
 
 function normalizeString (value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
@@ -140,6 +160,61 @@ function normalizeSeedHistory (value: unknown): KnowledgeSeedHistoryEntry[] {
   return entries.slice(-MAX_SEED_HISTORY)
 }
 
+function clipStored (value: unknown, max: number): string {
+  const text = normalizeString(value).replace(/\s+/g, ' ')
+  return text.length <= max ? text : text.slice(0, max)
+}
+
+/** One persisted generated seed; anything malformed is dropped rather than repaired. */
+function normalizeGeneratedSeedRecord (value: unknown): GeneratedKnowledgeSeed | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const id = normalizeString(raw.id)
+  if (!id.startsWith(GENERATED_SEED_ID_PREFIX) || !/^[a-z0-9-]+$/.test(id)) return null
+  if (!isKnowledgeDiscipline(raw.discipline)) return null
+  const rawCopy = raw.copy && typeof raw.copy === 'object' && !Array.isArray(raw.copy) ? raw.copy as Record<string, unknown> : null
+  if (!rawCopy) return null
+  const locale = normalizeString(rawCopy.locale)
+  const title = clipStored(rawCopy.title, GENERATED_TITLE_MAX)
+  const description = clipStored(rawCopy.description, GENERATED_DESCRIPTION_MAX)
+  const prompt = clipStored(rawCopy.prompt, GENERATED_PROMPT_MAX)
+  if (!locale || !title || !prompt) return null
+  return {
+    id,
+    discipline: raw.discipline,
+    copy: {
+      locale,
+      title,
+      description,
+      prompt,
+      createdAt: normalizeString(rawCopy.createdAt) || new Date(0).toISOString()
+    }
+  }
+}
+
+function normalizeGeneratedSeeds (value: unknown): GeneratedKnowledgeSeed[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const seeds: GeneratedKnowledgeSeed[] = []
+  for (const item of value) {
+    const seed = normalizeGeneratedSeedRecord(item)
+    if (!seed || seen.has(seed.id)) continue
+    seen.add(seed.id)
+    seeds.push(seed)
+  }
+  return seeds.slice(-MAX_GENERATED_SEEDS)
+}
+
+function normalizeReplenish (value: unknown): KnowledgeReplenishState {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  const lastAttemptDate = normalizeString(raw.lastAttemptDate)
+  return {
+    lastSuccessAt: normalizeString(raw.lastSuccessAt),
+    lastAttemptDate: /^\d{4}-\d{2}-\d{2}$/.test(lastAttemptDate) ? lastAttemptDate : '',
+    lastError: normalizeString(raw.lastError)
+  }
+}
+
 function normalizeSnapshot (value: unknown): DailySuggestionStoreSnapshot {
   const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
   const batches = Array.isArray(raw.batches)
@@ -160,7 +235,9 @@ function normalizeSnapshot (value: unknown): DailySuggestionStoreSnapshot {
     knowledgeToday: /^\d{4}-\d{2}-\d{2}$/.test(todayDate) && todaySeedId
       ? { date: todayDate, seedId: todaySeedId, shuffleCount }
       : { date: '', seedId: '', shuffleCount: 0 },
-    knowledgeSalt: normalizeString(raw.knowledgeSalt) || crypto.randomUUID()
+    knowledgeSalt: normalizeString(raw.knowledgeSalt) || crypto.randomUUID(),
+    knowledgeGeneratedSeeds: normalizeGeneratedSeeds(raw.knowledgeGeneratedSeeds),
+    knowledgeReplenish: normalizeReplenish(raw.knowledgeReplenish)
   }
 }
 
@@ -292,5 +369,44 @@ export class DailySuggestionStore {
       ? snapshot.knowledgeSeedHistory
       : [...snapshot.knowledgeSeedHistory, { seedId, date }].slice(-MAX_SEED_HISTORY)
     this.write({ ...snapshot, knowledgeToday: { date, seedId, shuffleCount }, knowledgeSeedHistory: history })
+  }
+
+  getGeneratedSeeds (): GeneratedKnowledgeSeed[] {
+    return JSON.parse(JSON.stringify(this.read().knowledgeGeneratedSeeds)) as GeneratedKnowledgeSeed[]
+  }
+
+  /**
+   * Append model-written seeds, skipping ids already present. When the pool
+   * overflows, the oldest seeds go first, except any listed in `keepIds`
+   * (today's pinned seed must survive so the card does not change mid-day).
+   */
+  appendGeneratedSeeds (seeds: GeneratedKnowledgeSeed[], keepIds: readonly string[] = []): number {
+    const snapshot = this.read()
+    const existing = new Set(snapshot.knowledgeGeneratedSeeds.map(seed => seed.id))
+    const fresh = seeds.filter(seed => {
+      if (existing.has(seed.id)) return false
+      existing.add(seed.id)
+      return true
+    })
+    if (fresh.length === 0) return 0
+    let merged = [...snapshot.knowledgeGeneratedSeeds, ...fresh]
+    if (merged.length > MAX_GENERATED_SEEDS) {
+      const keep = new Set(keepIds)
+      const evictable = merged.filter(seed => !keep.has(seed.id))
+      const excess = merged.length - MAX_GENERATED_SEEDS
+      const evicted = new Set(evictable.slice(0, excess).map(seed => seed.id))
+      merged = merged.filter(seed => !evicted.has(seed.id))
+    }
+    this.write({ ...snapshot, knowledgeGeneratedSeeds: merged })
+    return fresh.length
+  }
+
+  getKnowledgeReplenish (): KnowledgeReplenishState {
+    return { ...this.read().knowledgeReplenish }
+  }
+
+  setKnowledgeReplenish (state: Partial<KnowledgeReplenishState>): void {
+    const snapshot = this.read()
+    this.write({ ...snapshot, knowledgeReplenish: { ...snapshot.knowledgeReplenish, ...state } })
   }
 }

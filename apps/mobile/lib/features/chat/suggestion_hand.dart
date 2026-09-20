@@ -150,7 +150,8 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     }
     _cutting ??= from.round();
     final spring = SpringDescription.withDampingRatio(mass: 1, stiffness: 340, ratio: 0.88);
-    _pageCtrl.animateWith(SpringSimulation(spring, from, to, velocity));
+    // A hard fling still lands on the next card; cap the carry-over so it does not overshoot past it.
+    _pageCtrl.animateWith(SpringSimulation(spring, from, to, velocity.clamp(-6.0, 6.0).toDouble()));
   }
 
   void _onDragStart(DragStartDetails details) {
@@ -292,9 +293,19 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
                         child: Transform(
                           alignment: Alignment.bottomCenter,
                           transform: _cardTransform(index, _pageCtrl.value, deal),
-                          child: deal < 1
-                              ? Opacity(opacity: deal, child: _buildCard(index, cards[index], index == active, state))
-                              : _buildCard(index, cards[index], index == active, state),
+                          // Opacity at 1.0 paints straight through, so keeping the
+                          // wrapper avoids re-parenting the card when the deal ends.
+                          child: Opacity(
+                            opacity: deal,
+                            child: _buildCard(
+                              index,
+                              cards[index],
+                              index == active,
+                              // Far cards only show a sliver; skip their backdrop blur.
+                              (index - page).abs() <= 2.05,
+                              state,
+                            ),
+                          ),
                         ),
                       ),
                   ],
@@ -307,11 +318,12 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     );
   }
 
-  Widget _buildCard(int index, _HandCard card, bool active, DailySuggestionState state) {
+  Widget _buildCard(int index, _HandCard card, bool active, bool blur, DailySuggestionState state) {
     if (card.isEnableCta) {
       return _EnableCard(
         key: ValueKey(card.id),
         lifted: active,
+        blur: blur,
         onTap: () => _tapCard(index, card),
       );
     }
@@ -321,6 +333,7 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
       item: item,
       group: card.group!,
       lifted: active,
+      blur: blur,
       shuffleRemaining: state.knowledgeShuffleRemaining,
       shuffling: _shuffling,
       onTap: () => _tapCard(index, card),
@@ -530,6 +543,7 @@ class _FrostedCard extends StatelessWidget {
   const _FrostedCard({
     required this.child,
     required this.lifted,
+    this.blur = true,
     this.tint,
     this.dashed = false,
     this.padding = const EdgeInsets.fromLTRB(14, 12, 12, 12),
@@ -537,6 +551,9 @@ class _FrostedCard extends StatelessWidget {
 
   final Widget child;
   final bool lifted;
+
+  /// 是否做背景模糊。牌堆深处只露一条牌边的牌可以省掉。
+  final bool blur;
 
   /// 分组色:今日推荐偏晨蓝,知识探索偏琥珀,能力探索中性。
   final Color? tint;
@@ -560,6 +577,58 @@ class _FrostedCard extends StatelessWidget {
     final shadowColor = dark ? const Color(0xFF000000) : const Color(0xFF0F172A);
     final border = BorderRadius.circular(radius);
 
+    Widget face = DecoratedBox(
+      decoration: BoxDecoration(color: body.withValues(alpha: fillAlpha), borderRadius: border),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: border,
+          border: dashed ? null : Border.all(color: borderColor),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              const Color(0xFFFFFFFF).withValues(alpha: dark ? 0.09 : 0.28),
+              const Color(0xFFFFFFFF).withValues(alpha: dark ? 0.015 : 0.04),
+            ],
+          ),
+        ),
+        child: Stack(
+          children: [
+            if (dashed)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(painter: _DashedBorderPainter(color: borderColor, radius: radius)),
+                ),
+              ),
+            // 顶部一条 1px 内高光:透镜边缘感,而不是一片白雾。
+            Positioned(
+              top: 1,
+              left: 14,
+              right: 14,
+              height: 1,
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [
+                        const Color(0x00FFFFFF),
+                        const Color(0xFFFFFFFF).withValues(alpha: dark ? 0.16 : 0.6),
+                        const Color(0x00FFFFFF),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Padding(padding: padding, child: child),
+          ],
+        ),
+      ),
+    );
+    if (blur) {
+      face = BackdropFilter(filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22), child: face);
+    }
+
     return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: border,
@@ -571,60 +640,7 @@ class _FrostedCard extends StatelessWidget {
           ),
         ],
       ),
-      child: ClipRRect(
-        borderRadius: border,
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-          child: DecoratedBox(
-            decoration: BoxDecoration(color: body.withValues(alpha: fillAlpha), borderRadius: border),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: border,
-                border: dashed ? null : Border.all(color: borderColor),
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    const Color(0xFFFFFFFF).withValues(alpha: dark ? 0.09 : 0.28),
-                    const Color(0xFFFFFFFF).withValues(alpha: dark ? 0.015 : 0.04),
-                  ],
-                ),
-              ),
-              child: Stack(
-                children: [
-                  if (dashed)
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: CustomPaint(painter: _DashedBorderPainter(color: borderColor, radius: radius)),
-                      ),
-                    ),
-                  // 顶部一条 1px 内高光:透镜边缘感,而不是一片白雾。
-                  Positioned(
-                    top: 1,
-                    left: 14,
-                    right: 14,
-                    height: 1,
-                    child: IgnorePointer(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [
-                              const Color(0x00FFFFFF),
-                              const Color(0xFFFFFFFF).withValues(alpha: dark ? 0.16 : 0.6),
-                              const Color(0x00FFFFFF),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  Padding(padding: padding, child: child),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
+      child: ClipRRect(borderRadius: border, child: face),
     );
   }
 }
@@ -669,6 +685,7 @@ class _SuggestionCard extends StatelessWidget {
     required this.item,
     required this.group,
     required this.lifted,
+    required this.blur,
     required this.shuffleRemaining,
     required this.shuffling,
     required this.onTap,
@@ -680,6 +697,7 @@ class _SuggestionCard extends StatelessWidget {
   final WorkSuggestion item;
   final _CardGroup group;
   final bool lifted;
+  final bool blur;
   final int shuffleRemaining;
   final bool shuffling;
   final VoidCallback onTap;
@@ -730,6 +748,7 @@ class _SuggestionCard extends StatelessWidget {
       onTap: onTap,
       child: _FrostedCard(
         lifted: lifted,
+        blur: blur,
         tint: tint,
         child: Stack(
           clipBehavior: Clip.none,
@@ -869,9 +888,10 @@ class _ToolButton extends StatelessWidget {
 
 /// 未开启每日推荐时,牌堆末尾的入口牌。
 class _EnableCard extends StatelessWidget {
-  const _EnableCard({required this.lifted, required this.onTap, super.key});
+  const _EnableCard({required this.lifted, required this.blur, required this.onTap, super.key});
 
   final bool lifted;
+  final bool blur;
   final VoidCallback onTap;
 
   @override
@@ -882,6 +902,7 @@ class _EnableCard extends StatelessWidget {
       onTap: onTap,
       child: _FrostedCard(
         lifted: lifted,
+        blur: blur,
         tint: p.indigo,
         dashed: true,
         padding: const EdgeInsets.all(14),

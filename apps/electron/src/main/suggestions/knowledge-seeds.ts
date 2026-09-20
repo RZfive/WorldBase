@@ -1,11 +1,17 @@
 import { formatLocalDate, type KnowledgeSource, type WorkSuggestion } from '../../shared/daily-suggestion-types.js'
 
 /**
- * Built-in "random knowledge" pool. Each seed is a curiosity hook: the title is
- * a question or a counter-intuitive fact, the description deepens the hook,
- * and the prompt opens a conversation rather than a task. Text lives in i18n
- * under `chatUi.suggestions.knowledgeSeeds.<id>` so the main process only
- * decides which seed shows today.
+ * "Random knowledge" pool. Each seed is a curiosity hook: the title is a
+ * question or a counter-intuitive fact, the description deepens the hook, and
+ * the prompt opens a conversation rather than a task.
+ *
+ * The pool has two halves:
+ *  - Built-in seeds ship with the app and cover the cold start. Their text
+ *    lives in i18n under `chatUi.suggestions.knowledgeSeeds.<id>`, so the main
+ *    process only decides which seed shows today.
+ *  - Generated seeds are written by the model once a provider is configured
+ *    (see `DailySuggestionService.replenishKnowledgePool`). They carry literal
+ *    copy in the locale they were written for and persist in the store.
  *
  * Ids are stable once shipped: the store keeps a 30-day history keyed by them.
  */
@@ -13,10 +19,39 @@ export type KnowledgeDiscipline =
   | 'math' | 'physics' | 'economics' | 'psychology' | 'design' | 'history'
   | 'biology' | 'philosophy' | 'linguistics' | 'management' | 'statistics' | 'systems'
 
+export const KNOWLEDGE_DISCIPLINES: readonly KnowledgeDiscipline[] = [
+  'math', 'physics', 'economics', 'psychology', 'design', 'history',
+  'biology', 'philosophy', 'linguistics', 'management', 'statistics', 'systems'
+] as const
+
+export function isKnowledgeDiscipline (value: unknown): value is KnowledgeDiscipline {
+  return typeof value === 'string' && (KNOWLEDGE_DISCIPLINES as readonly string[]).includes(value)
+}
+
+/** A built-in seed: copy is resolved through i18n by the renderer. */
 export interface KnowledgeSeedDefinition {
   id: string
   discipline: KnowledgeDiscipline
+  copy?: undefined
 }
+
+export interface KnowledgeSeedCopy {
+  /** Locale tag the copy was written in, e.g. `zh-CN`. */
+  locale: string
+  title: string
+  description: string
+  prompt: string
+  createdAt: string
+}
+
+/** A model-generated seed: literal copy, stored per installation. */
+export interface GeneratedKnowledgeSeed {
+  id: string
+  discipline: KnowledgeDiscipline
+  copy: KnowledgeSeedCopy
+}
+
+export type KnowledgeSeed = KnowledgeSeedDefinition | GeneratedKnowledgeSeed
 
 /** Verified against the copy in locales on 2026-09-19. */
 export const KNOWLEDGE_SEEDS: readonly KnowledgeSeedDefinition[] = [
@@ -65,9 +100,21 @@ export const KNOWLEDGE_SEED_REUSE_DAYS = 30
 const KNOWLEDGE_SEED_REUSE_DAYS_RELAXED = 14
 
 export const KNOWLEDGE_STATIC_ID_PREFIX = 'knowledge:'
+/** Generated seed ids are `gen-<slug>`; slugs are lowercase kebab-case, never containing a colon. */
+export const GENERATED_SEED_ID_PREFIX = 'gen-'
 
 export function knowledgeSeedById (id: string): KnowledgeSeedDefinition | undefined {
   return SEED_BY_ID.get(id)
+}
+
+/** Built-in seeds plus the generated seeds written for `locale`. */
+export function buildKnowledgePool (generated: readonly GeneratedKnowledgeSeed[], locale: string): KnowledgeSeed[] {
+  return [...KNOWLEDGE_SEEDS, ...generated.filter(seed => seed.copy.locale === locale)]
+}
+
+/** Look a seed up in the built-in list first, then among generated seeds of any locale. */
+export function findKnowledgeSeed (id: string, generated: readonly GeneratedKnowledgeSeed[]): KnowledgeSeed | undefined {
+  return SEED_BY_ID.get(id) || generated.find(seed => seed.id === id)
 }
 
 /** FNV-1a: stable across runs and platforms, which Math.random and V8's string hash are not. */
@@ -92,27 +139,44 @@ export interface KnowledgeSeedHistoryEntry {
   date: string
 }
 
+/** Ids of the seeds in `history` shown within `windowDays` of `date`. */
+export function recentlyShownSeedIds (date: string, history: readonly KnowledgeSeedHistoryEntry[], windowDays = KNOWLEDGE_SEED_REUSE_DAYS): Set<string> {
+  return new Set(
+    history
+      .filter(entry => daysBetweenDates(entry.date, date) < windowDays)
+      .map(entry => entry.seedId)
+  )
+}
+
+/** How many seeds in `pool` are eligible for a fresh draw on `date`. */
+export function countUnseenSeeds (pool: readonly KnowledgeSeed[], date: string, history: readonly KnowledgeSeedHistoryEntry[]): number {
+  const recent = recentlyShownSeedIds(date, history)
+  return pool.filter(seed => !recent.has(seed.id)).length
+}
+
 /**
- * Pick the seed for `date`. Deterministic for a given (date, salt, history)
- * so reopening the app on the same day shows the same card; the salt is a
+ * Pick the seed for `date`. Deterministic for a given (date, salt, history,
+ * pool) so reopening the app on the same day shows the same card; the salt is a
  * per-installation random string so different users do not all see the same
  * seed on the same day. Recently shown seeds are excluded; when the pool runs
  * dry the window relaxes, and finally nothing is excluded.
  */
-export function drawKnowledgeSeed (date: string, salt: string, history: KnowledgeSeedHistoryEntry[], attempt = 0): KnowledgeSeedDefinition {
+export function drawKnowledgeSeed (
+  date: string,
+  salt: string,
+  history: KnowledgeSeedHistoryEntry[],
+  attempt = 0,
+  pool: readonly KnowledgeSeed[] = KNOWLEDGE_SEEDS
+): KnowledgeSeed {
   const windows = [KNOWLEDGE_SEED_REUSE_DAYS, KNOWLEDGE_SEED_REUSE_DAYS_RELAXED, 0]
   for (const window of windows) {
-    const excluded = new Set(
-      history
-        .filter(entry => window === 0 ? false : daysBetweenDates(entry.date, date) < window)
-        .map(entry => entry.seedId)
-    )
-    const candidates = KNOWLEDGE_SEEDS.filter(seed => !excluded.has(seed.id))
+    const excluded = window === 0 ? new Set<string>() : recentlyShownSeedIds(date, history, window)
+    const candidates = pool.filter(seed => !excluded.has(seed.id))
     if (candidates.length === 0) continue
     const index = hashString(`${date}|${salt}|${attempt}`) % candidates.length
     return candidates[index]
   }
-  return KNOWLEDGE_SEEDS[0]
+  return pool[0] || KNOWLEDGE_SEEDS[0]
 }
 
 function endOfLocalDayIso (now: Date): string {
@@ -121,20 +185,22 @@ function endOfLocalDayIso (now: Date): string {
   return end.toISOString()
 }
 
-export function buildKnowledgeSeedSuggestion (seed: KnowledgeSeedDefinition, now: Date): WorkSuggestion {
+export function buildKnowledgeSeedSuggestion (seed: KnowledgeSeed, now: Date): WorkSuggestion {
   const prefix = `chatUi.suggestions.knowledgeSeeds.${seed.id}`
+  const copy = seed.copy
   return {
     // Date-scoped so dismissing today's card does not hide the seed forever.
     id: `${KNOWLEDGE_STATIC_ID_PREFIX}${formatLocalDate(now)}:${seed.id}`,
     layer: 'knowledge',
     type: 'knowledge',
-    title: `${prefix}.title`,
-    description: `${prefix}.description`,
-    prompt: `${prefix}.prompt`,
+    title: copy ? copy.title : `${prefix}.title`,
+    description: copy ? copy.description : `${prefix}.description`,
+    prompt: copy ? copy.prompt : `${prefix}.prompt`,
     sendMode: 'fill',
-    source: 'static',
+    // Generated seeds carry literal model text; built-in seeds carry i18n keys.
+    source: copy ? 'llm' : 'static',
     knowledge: { source: 'random' satisfies KnowledgeSource, discipline: seed.discipline, seedId: seed.id },
-    generatedAt: now.toISOString(),
+    generatedAt: copy ? copy.createdAt : now.toISOString(),
     validUntil: endOfLocalDayIso(now)
   }
 }

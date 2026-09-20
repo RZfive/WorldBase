@@ -14,6 +14,7 @@ import {
   type DailySuggestionBatchStatus,
   type DailySuggestionPreferences,
   type DailySuggestionSnapshot,
+  type KnowledgePoolState,
   type KnowledgePreferences,
   type KnowledgeSource,
   type SuggestionScene,
@@ -22,11 +23,18 @@ import {
 } from '../../shared/daily-suggestion-types.js'
 import { buildExploreSuggestions, staticFallbacksForType } from './static-suggestions.js'
 import {
+  GENERATED_SEED_ID_PREFIX,
+  KNOWLEDGE_DISCIPLINES,
+  KNOWLEDGE_SEEDS,
   KNOWLEDGE_STATIC_ID_PREFIX,
+  buildKnowledgePool,
   buildKnowledgeSeedSuggestion,
+  countUnseenSeeds,
   drawKnowledgeSeed,
-  knowledgeSeedById,
-  type KnowledgeSeedDefinition
+  findKnowledgeSeed,
+  isKnowledgeDiscipline,
+  type GeneratedKnowledgeSeed,
+  type KnowledgeSeed
 } from './knowledge-seeds.js'
 
 export interface SuggestionProjectContext {
@@ -75,6 +83,18 @@ const PROMPT_MAX_LENGTH = 800
 const RESCHEDULE_CHECK_INTERVAL_MS = 15 * 60 * 1000
 /** A failed batch is reused for at most this many days before the daily group goes quiet. */
 const STALE_BATCH_MAX_AGE_DAYS = 3
+
+/**
+ * Random-seed pool replenishment. The built-in seeds cover the cold start;
+ * once a provider is configured the model writes new seeds in batches so the
+ * pool never cycles back to repeats. A top-up runs when the pool has few
+ * seeds left outside the 30-day window, or at least weekly, and never more
+ * than once a day so a broken provider does not retry on every check.
+ */
+export const KNOWLEDGE_REPLENISH_BATCH = 12
+export const KNOWLEDGE_REPLENISH_MIN_UNSEEN = 12
+export const KNOWLEDGE_REPLENISH_INTERVAL_DAYS = 7
+const GENERATED_SEED_SLUG_MAX = 48
 
 const TYPE_INSTRUCTIONS: Record<SuggestionType, string> = {
   'new-idea': 'Propose a concrete new project the user could start today, matched to the technology and domains visible in their context. The prompt must ask the assistant to scaffold or plan that project.',
@@ -218,11 +238,68 @@ export function knowledgeNeedsModel (preferences: DailySuggestionPreferences): b
   return preferences.knowledge.enabled && preferences.knowledge.sources.some(source => (LLM_KNOWLEDGE_SOURCES as readonly string[]).includes(source))
 }
 
+/** Whether the random seed pool is in use, which is what replenishment serves. */
+export function knowledgeUsesRandomPool (preferences: DailySuggestionPreferences): boolean {
+  return preferences.knowledge.enabled && preferences.knowledge.sources.includes('random')
+}
+
+function slugify (value: string): string {
+  return value
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, GENERATED_SEED_SLUG_MAX)
+    .replace(/-+$/g, '')
+}
+
+/** Titles compare after case folding and stripping punctuation and spaces. */
+function titleKey (value: string): string {
+  return value.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '')
+}
+
+/**
+ * Validate one model-emitted seed for the random pool. The id is derived from
+ * the model's English slug so duplicates across runs collapse regardless of
+ * locale; a slug that collides with a built-in id or an existing generated
+ * seed is dropped. `existingIds` and `existingTitles` are extended in place so
+ * a single reply cannot contain the same topic twice.
+ */
+export function normalizeGeneratedSeed (
+  raw: unknown,
+  locale: string,
+  now: Date,
+  existingIds: Set<string>,
+  existingTitles: Set<string>
+): GeneratedKnowledgeSeed | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const item = raw as Record<string, unknown>
+  if (!isKnowledgeDiscipline(item.discipline)) return null
+  const slug = typeof item.slug === 'string' ? slugify(item.slug) : ''
+  if (slug.length < 3) return null
+  const id = `${GENERATED_SEED_ID_PREFIX}${slug}`
+  if (existingIds.has(id) || existingIds.has(slug)) return null
+  const title = typeof item.title === 'string' ? clip(item.title, TITLE_MAX_LENGTH) : ''
+  const description = typeof item.description === 'string' ? clip(item.description, DESCRIPTION_MAX_LENGTH) : ''
+  const prompt = typeof item.prompt === 'string' ? clip(item.prompt, PROMPT_MAX_LENGTH) : ''
+  if (!title || !prompt) return null
+  const key = titleKey(title)
+  if (!key || existingTitles.has(key)) return null
+  existingIds.add(id)
+  existingTitles.add(key)
+  return {
+    id,
+    discipline: item.discipline,
+    copy: { locale, title, description, prompt, createdAt: now.toISOString() }
+  }
+}
+
 export class DailySuggestionService {
   private readonly options: DailySuggestionServiceOptions
   private timer: ReturnType<typeof setTimeout> | null = null
   private checkInterval: ReturnType<typeof setInterval> | null = null
   private generating: Promise<DailySuggestionBatch | null> | null = null
+  private replenishing: Promise<number> | null = null
   private providerMissing = false
   private disposed = false
 
@@ -237,8 +314,12 @@ export class DailySuggestionService {
   start (): void {
     this.disposed = false
     this.reschedule()
-    this.checkInterval = setInterval(() => this.reschedule(), RESCHEDULE_CHECK_INTERVAL_MS)
+    this.checkInterval = setInterval(() => {
+      this.reschedule()
+      void this.maybeReplenishKnowledgePool()
+    }, RESCHEDULE_CHECK_INTERVAL_MS)
     void this.runIfDue('startup')
+    void this.maybeReplenishKnowledgePool()
   }
 
   dispose (): void {
@@ -268,6 +349,9 @@ export class DailySuggestionService {
     )
     if ((isActive && !wasActive) || (next.enabled && !previous.enabled) || knowledgeScopeGrew) {
       void this.runIfDue('enable')
+    }
+    if (knowledgeUsesRandomPool(next) && !knowledgeUsesRandomPool(previous)) {
+      void this.maybeReplenishKnowledgePool()
     }
     return next
   }
@@ -303,6 +387,7 @@ export class DailySuggestionService {
       explore: explore.items.filter(item => !dismissed.has(item.id)),
       knowledge,
       knowledgeShuffleRemaining: shuffleRemaining,
+      knowledgePool: this.knowledgePoolState(today),
       weekTheme: explore.theme,
       lastGeneration: batch
         ? {
@@ -353,10 +438,11 @@ export class DailySuggestionService {
     if (shuffleCount >= KNOWLEDGE_SHUFFLE_LIMIT) throw new Error('KNOWLEDGE_SHUFFLE_LIMIT')
     const history = this.options.store.getKnowledgeSeedHistory()
     const salt = this.options.store.getKnowledgeSalt()
-    let next: KnowledgeSeedDefinition | null = null
+    const pool = this.knowledgePool()
+    let next: KnowledgeSeed | null = null
     // Attempts are deterministic; walk forward until the draw lands on a different seed.
     for (let attempt = shuffleCount + 1; attempt <= shuffleCount + 40 && !next; attempt++) {
-      const candidate = drawKnowledgeSeed(today, salt, history, attempt)
+      const candidate = drawKnowledgeSeed(today, salt, history, attempt, pool)
       if (candidate.id !== current?.seedId) next = candidate
     }
     if (!next) throw new Error('KNOWLEDGE_POOL_EXHAUSTED')
@@ -390,14 +476,146 @@ export class DailySuggestionService {
   }
 
   /** Today's random seed, drawing and pinning one on the first call of the day. */
-  private resolveRandomSeed (now: Date): KnowledgeSeedDefinition {
+  private resolveRandomSeed (now: Date): KnowledgeSeed {
     const today = formatLocalDate(now)
     const pinned = this.options.store.getKnowledgeToday(today)
-    const existing = pinned ? knowledgeSeedById(pinned.seedId) : undefined
+    // Any locale: a seed pinned before a language switch stays for the day.
+    const existing = pinned ? findKnowledgeSeed(pinned.seedId, this.options.store.getGeneratedSeeds()) : undefined
     if (existing) return existing
-    const seed = drawKnowledgeSeed(today, this.options.store.getKnowledgeSalt(), this.options.store.getKnowledgeSeedHistory(), 0)
+    const seed = drawKnowledgeSeed(today, this.options.store.getKnowledgeSalt(), this.options.store.getKnowledgeSeedHistory(), 0, this.knowledgePool())
     this.options.store.setKnowledgeToday(today, seed.id, false)
     return seed
+  }
+
+  /** Built-in seeds plus generated seeds written for the current UI locale. */
+  private knowledgePool (): KnowledgeSeed[] {
+    return buildKnowledgePool(this.options.store.getGeneratedSeeds(), this.options.getLocale())
+  }
+
+  private knowledgePoolState (today: string): KnowledgePoolState {
+    const pool = this.knowledgePool()
+    const replenish = this.options.store.getKnowledgeReplenish()
+    return {
+      builtin: KNOWLEDGE_SEEDS.length,
+      generated: pool.length - KNOWLEDGE_SEEDS.length,
+      unseen: countUnseenSeeds(pool, today, this.options.store.getKnowledgeSeedHistory()),
+      lastReplenishAt: replenish.lastSuccessAt || null,
+      lastReplenishError: replenish.lastError || null,
+      replenishing: this.replenishing !== null
+    }
+  }
+
+  /**
+   * Top the random pool up when it is running low or stale. Silent on every
+   * precondition (pool unused, no provider, already tried today) so callers
+   * can fire it from any check without guarding.
+   */
+  private async maybeReplenishKnowledgePool (): Promise<void> {
+    if (this.disposed) return
+    const preferences = this.options.store.getPreferences()
+    if (!knowledgeUsesRandomPool(preferences)) return
+    const today = formatLocalDate(this.now())
+    const replenish = this.options.store.getKnowledgeReplenish()
+    if (replenish.lastAttemptDate === today) return
+    const unseen = countUnseenSeeds(this.knowledgePool(), today, this.options.store.getKnowledgeSeedHistory())
+    const stale = !replenish.lastSuccessAt || daysBetween(formatLocalDate(new Date(replenish.lastSuccessAt)), today) >= KNOWLEDGE_REPLENISH_INTERVAL_DAYS
+    if (unseen >= KNOWLEDGE_REPLENISH_MIN_UNSEEN && !stale) return
+    if (!this.options.resolveProviderConfig(preferences.providerId, preferences.modelId)?.model) return
+    try {
+      await this.replenishKnowledgePool()
+    } catch (error) {
+      console.warn('[daily-suggestions] Knowledge pool replenishment failed:', (error as Error).message)
+    }
+  }
+
+  /**
+   * User-initiated top-up from Settings. Ignores the due checks but still
+   * needs a provider and the random source; returns how many seeds were added.
+   */
+  async replenishKnowledgePoolNow (): Promise<DailySuggestionSnapshot> {
+    const preferences = this.options.store.getPreferences()
+    if (!knowledgeUsesRandomPool(preferences)) throw new Error('KNOWLEDGE_RANDOM_DISABLED')
+    if (!this.options.resolveProviderConfig(preferences.providerId, preferences.modelId)?.model) throw new Error('PROVIDER_MISSING')
+    await this.replenishKnowledgePool()
+    return this.getSnapshot()
+  }
+
+  private async replenishKnowledgePool (): Promise<number> {
+    if (this.replenishing) return await this.replenishing
+    this.replenishing = this.replenishInternal()
+    this.emitChanged()
+    try {
+      return await this.replenishing
+    } finally {
+      this.replenishing = null
+      this.emitChanged()
+    }
+  }
+
+  private async replenishInternal (): Promise<number> {
+    const now = this.now()
+    const today = formatLocalDate(now)
+    const preferences = this.options.store.getPreferences()
+    const locale = this.options.getLocale()
+    this.options.store.setKnowledgeReplenish({ lastAttemptDate: today })
+    const providerConfig = this.options.resolveProviderConfig(preferences.providerId, preferences.modelId)
+    if (!providerConfig || !providerConfig.model) {
+      this.options.store.setKnowledgeReplenish({ lastError: 'PROVIDER_MISSING' })
+      throw new Error('PROVIDER_MISSING')
+    }
+    const generated = this.options.store.getGeneratedSeeds()
+    const existingIds = new Set<string>()
+    for (const seed of KNOWLEDGE_SEEDS) existingIds.add(seed.id)
+    for (const seed of generated) existingIds.add(seed.id)
+    const existingTitles = new Set(generated.filter(seed => seed.copy.locale === locale).map(seed => titleKey(seed.copy.title)))
+    try {
+      const engine = await this.options.resolveAiEngine()
+      const reply = await engine.chat([{ role: 'user', content: this.buildReplenishPrompt(locale, generated) }], {
+        providerConfig,
+        authMode: 'auto',
+        allowedToolNames: [NO_TOOLS_SENTINEL],
+        conversationId: `daily-suggestions:pool:${today}:${crypto.randomUUID()}`
+      })
+      const text = typeof reply.content === 'string'
+        ? reply.content
+        : reply.content.map(part => ('text' in part && typeof part.text === 'string' ? part.text : '')).join('\n')
+      const parsed = extractJsonArray(text)
+      if (!parsed) throw new Error('MODEL_OUTPUT_NOT_JSON')
+      const seeds = parsed
+        .map(raw => normalizeGeneratedSeed(raw, locale, now, existingIds, existingTitles))
+        .filter((seed): seed is GeneratedKnowledgeSeed => seed !== null)
+        .slice(0, KNOWLEDGE_REPLENISH_BATCH)
+      if (seeds.length === 0) throw new Error('MODEL_OUTPUT_EMPTY')
+      const pinned = this.options.store.getKnowledgeToday(today)
+      const added = this.options.store.appendGeneratedSeeds(seeds, pinned ? [pinned.seedId] : [])
+      this.options.store.setKnowledgeReplenish({ lastSuccessAt: now.toISOString(), lastError: '' })
+      return added
+    } catch (caught) {
+      const message = (caught as Error).message || String(caught)
+      this.options.store.setKnowledgeReplenish({ lastError: message })
+      throw caught
+    }
+  }
+
+  private buildReplenishPrompt (locale: string, generated: GeneratedKnowledgeSeed[]): string {
+    const lines: string[] = []
+    lines.push('You extend a pool of "curiosity hook" cards for WorldBase, a desktop AI workspace. Each card is shown on an empty chat screen once a day; clicking it starts a relaxed conversation with the assistant about an idea, phenomenon or story the user probably never dug into. The goal is to make them curious, not to make them productive.')
+    lines.push(`Write every title, description and prompt in the language with locale tag "${locale}". The "slug" field is always English.`)
+    lines.push('')
+    lines.push('## Already in the pool (never repeat these topics or close variants)')
+    for (const seed of KNOWLEDGE_SEEDS) lines.push(`- ${seed.id}`)
+    for (const seed of generated) lines.push(`- ${seed.id}${seed.copy.locale === locale ? `: ${clip(seed.copy.title, 60)}` : ''}`)
+    lines.push('')
+    lines.push('## What to generate')
+    lines.push(`Produce exactly ${KNOWLEDGE_REPLENISH_BATCH} items, one for each of these disciplines in this order: ${KNOWLEDGE_DISCIPLINES.join(', ')}.`)
+    lines.push('Each item is a real, well-documented concept, effect, paradox, law, experiment or historical episode. The title must be a question or a counter-intuitive fact, never a dictionary headword. The description is one sentence that deepens the hook or names an unexpected connection.')
+    lines.push('')
+    lines.push('## Output format')
+    lines.push('Reply with a JSON array only, no prose, no code fence. Each element:')
+    lines.push('{"discipline": "<one of the discipline keys above>", "slug": "<discipline>-<2-4 english kebab-case words naming the topic, e.g. physics-mpemba-effect>", "title": "<= 20 words", "description": "one sentence", "prompt": "the full message the user would send to the assistant"}')
+    lines.push('The prompt must follow this shape, adapted to the topic: "I\'m curious about X. Start with an everyday analogy for what it is, then tell me the most counter-intuitive thing about it. Afterwards give me three directions I could ask about next and I\'ll pick one. Don\'t open with a definition."')
+    lines.push('Rules: interesting first, useful second; never invent facts; never use software engineering as the subject; no two items about the same topic.')
+    return lines.join('\n')
   }
 
   private findSuggestion (suggestionId: string): WorkSuggestion | null {
@@ -407,7 +625,7 @@ export class DailySuggestionService {
     if (suggestionId.startsWith(KNOWLEDGE_STATIC_ID_PREFIX)) {
       // `knowledge:<date>:<seedId>`; seed ids never contain a colon.
       const seedId = suggestionId.split(':')[2] || ''
-      const seed = knowledgeSeedById(seedId)
+      const seed = findKnowledgeSeed(seedId, this.options.store.getGeneratedSeeds())
       return seed ? buildKnowledgeSeedSuggestion(seed, this.now()) : null
     }
     for (const batch of this.options.store.getBatches()) {
@@ -676,7 +894,7 @@ export class DailySuggestionService {
       }
     }
     const pinned = this.options.store.getKnowledgeToday(formatLocalDate(now))
-    const seed = pinned ? knowledgeSeedById(pinned.seedId) : undefined
+    const seed = pinned ? findKnowledgeSeed(pinned.seedId, this.options.store.getGeneratedSeeds()) : undefined
     if (seed && knowledge.sources.includes('random')) {
       lines.push(`Already shown today from the built-in pool: a card about "${seed.discipline}". Avoid that discipline.`)
     }

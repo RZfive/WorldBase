@@ -1233,6 +1233,7 @@ interface ElectronAPI {
   recordDailySuggestionPick: (suggestionId: string) => Promise<{ success: boolean }>
   markDailySuggestionsSeen: () => Promise<{ success: boolean }>
   shuffleKnowledgeSuggestion: () => Promise<DailySuggestionSnapshot>
+  replenishKnowledgePool: () => Promise<DailySuggestionSnapshot>
   /** Opens an https URL in the system browser; only provider-template hosts are allowed. */
   openExternalUrl: (url: string) => Promise<{ ok: boolean; error?: string }>
   onDailySuggestionsChanged: (callback: (snapshot: DailySuggestionSnapshot) => void) => () => void

@@ -176,15 +176,12 @@ function knowledgeSourceLabel (item: WorkSuggestion): string {
   return te(key) ? t(key) : source
 }
 
-/** Seed disciplines are i18n keys; model-written disciplines are literal text. */
+/** Seed disciplines (built-in or generated) are keys; model-written disciplines are literal text. */
 function disciplineLabel (item: WorkSuggestion): string {
   const discipline = item.knowledge?.discipline
   if (!discipline) return ''
-  if (item.source === 'static') {
-    const key = `chatUi.suggestions.disciplines.${discipline}`
-    return te(key) ? t(key) : discipline
-  }
-  return discipline
+  const key = `chatUi.suggestions.disciplines.${discipline}`
+  return te(key) ? t(key) : discipline
 }
 
 function chipLabel (card: Extract<HandCard, { kind: 'item' }>): string {

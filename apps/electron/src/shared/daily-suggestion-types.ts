@@ -4,9 +4,11 @@
  *  - `explore`:   a static, weekly-rotating pool of product-capability tips. Always on.
  *  - `daily`:     LLM-generated ideas/questions, opt-in from Settings, constrained to
  *                 the suggestion types the user selected.
- *  - `knowledge`: curiosity hooks. One "random" seed a day from a built-in pool
- *                 (works without a model) plus optional LLM items drawn from other
- *                 disciplines, the user's own field, or declared interests.
+ *  - `knowledge`: curiosity hooks. One "random" seed a day from a local pool
+ *                 (built-in seeds work without a model; once a provider exists the
+ *                 model tops the pool up with new seeds) plus optional LLM items
+ *                 drawn from other disciplines, the user's own field, or declared
+ *                 interests.
  *
  * Clicking a card drops the user straight into a working scene: the prompt is
  * filled (or sent) and the composer toggles described by `scene` are applied.
@@ -33,9 +35,25 @@ export const LLM_KNOWLEDGE_SOURCES: readonly KnowledgeSource[] = ['cross-discipl
 
 export interface KnowledgeMeta {
   source: KnowledgeSource
-  /** Seed pool entry id for `random`; otherwise the model's discipline label (≤ 20 chars). */
+  /** Discipline key of the seed for `random`; otherwise the model's discipline label (≤ 20 chars). */
   discipline?: string
+  /** Seed pool entry id for `random`: a built-in id or a generated `gen-<slug>`. */
   seedId?: string
+}
+
+/** Where today's random seed comes from and how full the pool is. */
+export interface KnowledgePoolState {
+  /** Seeds shipped with the app. */
+  builtin: number
+  /** Model-written seeds stored for the current locale. */
+  generated: number
+  /** Seeds in the current pool not shown within the reuse window. */
+  unseen: number
+  /** ISO time of the last successful replenishment, null when none has run. */
+  lastReplenishAt: string | null
+  /** Error of the last replenishment attempt, null when it succeeded or never ran. */
+  lastReplenishError: string | null
+  replenishing: boolean
 }
 
 export type KnowledgeCountPerSource = 1 | 2
@@ -131,7 +149,7 @@ export interface WorkSuggestion {
   layer: SuggestionLayer
   /** Knowledge cards use the fixed type `'knowledge'`; their origin lives in `knowledge`. */
   type: SuggestionType | 'weekly-theme' | 'knowledge'
-  /** Literal text for `source: 'llm'`; an i18n key for `source: 'static'`. */
+  /** Literal text for `source: 'llm'` (model items and generated seeds); an i18n key for `source: 'static'`. */
   title: string
   description?: string
   prompt: string
@@ -179,6 +197,7 @@ export interface DailySuggestionSnapshot {
   knowledge: WorkSuggestion[]
   /** How many times the random seed can still be swapped today. */
   knowledgeShuffleRemaining: number
+  knowledgePool: KnowledgePoolState
   /** i18n key suffix of this week's theme, e.g. `automation`. */
   weekTheme: string
   lastGeneration: DailySuggestionGenerationState | null

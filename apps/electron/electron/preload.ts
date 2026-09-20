@@ -763,6 +763,7 @@ export interface ElectronAPI {
   recordDailySuggestionPick: (suggestionId: string) => Promise<{ success: boolean }>
   markDailySuggestionsSeen: () => Promise<{ success: boolean }>
   shuffleKnowledgeSuggestion: () => Promise<DailySuggestionSnapshot>
+  replenishKnowledgePool: () => Promise<DailySuggestionSnapshot>
   openExternalUrl: (url: string) => Promise<{ ok: boolean; error?: string }>
   onDailySuggestionsChanged: (callback: (snapshot: DailySuggestionSnapshot) => void) => () => void
 }
@@ -1143,6 +1144,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   recordDailySuggestionPick: (suggestionId: string) => ipcRenderer.invoke('dailySuggestions:recordPick', suggestionId),
   markDailySuggestionsSeen: () => ipcRenderer.invoke('dailySuggestions:markSeen'),
   shuffleKnowledgeSuggestion: () => ipcRenderer.invoke('dailySuggestions:shuffleKnowledge'),
+  replenishKnowledgePool: () => ipcRenderer.invoke('dailySuggestions:replenishKnowledgePool'),
   openExternalUrl: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
   onDailySuggestionsChanged: (callback: (snapshot: DailySuggestionSnapshot) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, snapshot: DailySuggestionSnapshot) => callback(snapshot)

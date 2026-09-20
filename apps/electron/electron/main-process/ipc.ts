@@ -2707,6 +2707,10 @@ export function setupIPC (): void {
     return mainState.dailySuggestionService!.shuffleKnowledge()
   })
 
+  ipcMain.handle('dailySuggestions:replenishKnowledgePool', async () => {
+    return await mainState.dailySuggestionService!.replenishKnowledgePoolNow()
+  })
+
   // Generic "open in the system browser", restricted to https hosts that a
   // built-in provider template links to. The renderer cannot use it as an
   // arbitrary open-URL primitive.
