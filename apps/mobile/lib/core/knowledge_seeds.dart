@@ -1,8 +1,14 @@
 /// 随机知识题库(与桌面端 `knowledge-seeds.ts` 及 zh-CN 文案对齐)。
 ///
 /// 每条题目是一个「好奇心钩子」:标题是一个问题或反直觉的事实,描述加深悬念,
-/// prompt 用统一的讨论模板打开一段对话而不是一个任务。移动端只有简体中文,
-/// 文案直接内置;`id` 一旦发布不可改,本地 30 天历史按它去重。
+/// prompt 用统一的讨论模板打开一段对话而不是一个任务。
+///
+/// 题库分两半:
+///  - **内置题**随包发布([knowledgeSeeds]),负责冷启动与无模型时的兜底。
+///  - **生成题**由模型在配置了模型服务后按需补充(见
+///    `DailySuggestionsNotifier.replenishKnowledgePoolNow`),字面文案存在本地。
+///
+/// 移动端只有简体中文,文案直接内置;`id` 一旦发布不可改,本地 30 天历史按它去重。
 library;
 
 /// 学科(与桌面端 key 一致,附中文标签)。
@@ -38,27 +44,93 @@ enum KnowledgeDiscipline {
 String knowledgeDisciplineLabel(String discipline) =>
     KnowledgeDiscipline.fromKey(discipline)?.label ?? discipline;
 
+/// 生成题的 id 前缀;完整形式 `gen-<英文 slug>`,只含 `[a-z0-9-]`,永不含冒号。
+const String generatedSeedIdPrefix = 'gen-';
+
+/// 本地最多保留的生成题条数。
+const int maxGeneratedSeeds = 120;
+
 class KnowledgeSeed {
+  /// 内置题:prompt 由 [topic] 套统一模板得到。
   const KnowledgeSeed({
     required this.id,
     required this.discipline,
     required this.title,
     required this.description,
     required this.topic,
-  });
+  })  : _literalPrompt = null,
+        createdAt = null;
+
+  /// 模型生成题:文案全部为字面文本。
+  const KnowledgeSeed.generated({
+    required this.id,
+    required this.discipline,
+    required this.title,
+    required this.description,
+    required String prompt,
+    required String this.createdAt,
+  })  : topic = '',
+        _literalPrompt = prompt;
 
   final String id;
   final KnowledgeDiscipline discipline;
   final String title;
   final String description;
 
-  /// 讨论模板里的「X」。
+  /// 讨论模板里的「X」;生成题为空串。
   final String topic;
+
+  final String? _literalPrompt;
+
+  /// 生成时间(ISO);内置题为 null。
+  final String? createdAt;
+
+  bool get isGenerated => createdAt != null;
 
   /// 统一讨论模板:先类比、再反直觉之处、最后给三个追问方向。
   String get prompt =>
+      _literalPrompt ??
       '我对「$topic」有点好奇。先用一个日常类比给我讲讲它是什么，然后告诉我一个关于它最反直觉的地方。'
-      '讲完后给我三个可以继续追问的方向，我选一个我们接着聊。不要一上来就下定义。';
+          '讲完后给我三个可以继续追问的方向，我选一个我们接着聊。不要一上来就下定义。';
+
+  /// 仅生成题需要持久化。
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'discipline': discipline.key,
+    'title': title,
+    'description': description,
+    'prompt': prompt,
+    'createdAt': createdAt,
+  };
+
+  /// 读回一条生成题;任何字段不合法都丢弃而不是修补。
+  static KnowledgeSeed? generatedFromJson(Object? value) {
+    if (value is! Map) return null;
+    final id = value['id'];
+    if (id is! String || !id.startsWith(generatedSeedIdPrefix) || !RegExp(r'^[a-z0-9-]+$').hasMatch(id)) {
+      return null;
+    }
+    final discipline = KnowledgeDiscipline.fromKey(value['discipline']);
+    if (discipline == null) return null;
+    String clean(Object? raw, int max) {
+      if (raw is! String) return '';
+      final text = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+      return text.length <= max ? text : text.substring(0, max);
+    }
+
+    final title = clean(value['title'], 80);
+    final prompt = clean(value['prompt'], 1000);
+    if (title.isEmpty || prompt.isEmpty) return null;
+    final createdAt = value['createdAt'];
+    return KnowledgeSeed.generated(
+      id: id,
+      discipline: discipline,
+      title: title,
+      description: clean(value['description'], 200),
+      prompt: prompt,
+      createdAt: createdAt is String && createdAt.isNotEmpty ? createdAt : DateTime.fromMillisecondsSinceEpoch(0).toIso8601String(),
+    );
+  }
 }
 
 /// 文案于 2026-09-19 与桌面端 zh-CN 校对一致。
@@ -319,7 +391,21 @@ const List<KnowledgeSeed> knowledgeSeeds = [
 
 final Map<String, KnowledgeSeed> _seedById = {for (final seed in knowledgeSeeds) seed.id: seed};
 
+/// 只查内置题。
 KnowledgeSeed? knowledgeSeedById(String id) => _seedById[id];
+
+/// 先查内置题,再查生成题。
+KnowledgeSeed? findKnowledgeSeed(String id, List<KnowledgeSeed> generated) {
+  final builtin = _seedById[id];
+  if (builtin != null) return builtin;
+  for (final seed in generated) {
+    if (seed.id == id) return seed;
+  }
+  return null;
+}
+
+/// 抽签用的完整题库:内置 + 生成。
+List<KnowledgeSeed> buildKnowledgePool(List<KnowledgeSeed> generated) => [...knowledgeSeeds, ...generated];
 
 /// 最近这些天内出现过的题目在新一轮抽签中被排除。
 const int knowledgeSeedReuseDays = 30;
@@ -364,7 +450,23 @@ int _daysBetween(String from, String to) {
   return parse(to).difference(parse(from)).inDays;
 }
 
-/// 抽出 `date` 这一天的题目。同一组 (date, salt, history, attempt) 结果固定,
+/// `date` 前 [windowDays] 天内出现过的题目 id。
+Set<String> recentlyShownSeedIds(
+  String date,
+  List<KnowledgeSeedHistoryEntry> history, {
+  int windowDays = knowledgeSeedReuseDays,
+}) => {
+  for (final entry in history)
+    if (_daysBetween(entry.date, date) < windowDays) entry.seedId,
+};
+
+/// 题库里还有多少条可以在 `date` 这天被新抽到。
+int countUnseenSeeds(List<KnowledgeSeed> pool, String date, List<KnowledgeSeedHistoryEntry> history) {
+  final recent = recentlyShownSeedIds(date, history);
+  return pool.where((seed) => !recent.contains(seed.id)).length;
+}
+
+/// 抽出 `date` 这一天的题目。同一组 (date, salt, history, attempt, pool) 结果固定,
 /// 所以当天反复打开看到的是同一张;salt 按安装随机,不同用户同一天不会抽到同一条。
 /// 近期出现过的题目被排除;池子抽干时先放宽到 14 天,再不够就不排除。
 KnowledgeSeed drawKnowledgeSeed(
@@ -372,15 +474,13 @@ KnowledgeSeed drawKnowledgeSeed(
   String salt,
   List<KnowledgeSeedHistoryEntry> history, {
   int attempt = 0,
+  List<KnowledgeSeed> pool = knowledgeSeeds,
 }) {
   for (final window in [knowledgeSeedReuseDays, _knowledgeSeedReuseDaysRelaxed, 0]) {
-    final excluded = <String>{
-      for (final entry in history)
-        if (window != 0 && _daysBetween(entry.date, date) < window) entry.seedId,
-    };
-    final candidates = knowledgeSeeds.where((seed) => !excluded.contains(seed.id)).toList();
+    final excluded = window == 0 ? const <String>{} : recentlyShownSeedIds(date, history, windowDays: window);
+    final candidates = pool.where((seed) => !excluded.contains(seed.id)).toList();
     if (candidates.isEmpty) continue;
     return candidates[hashString('$date|$salt|$attempt') % candidates.length];
   }
-  return knowledgeSeeds.first;
+  return pool.isEmpty ? knowledgeSeeds.first : pool.first;
 }

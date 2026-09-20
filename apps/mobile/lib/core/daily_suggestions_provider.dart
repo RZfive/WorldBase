@@ -7,6 +7,8 @@
 ///    完成后删除临时会话,不污染会话列表。每日推荐与知识探索是两次独立请求,
 ///    一个失败不会清空另一个。
 ///  - 未开启任何需要模型的组时只展示内置能力探索池与随机知识,不会消耗模型调用。
+///  - 随机题库 = 内置题 + 模型补充题:配置了模型后,题库偏少或超过一周时自动补一批
+///    (每天最多尝试一次),失败沿用旧池。
 library;
 
 import 'dart:async';
@@ -55,6 +57,7 @@ class DailySuggestionState {
     this.explore = const [],
     this.knowledge = const [],
     this.knowledgeShuffleRemaining = 0,
+    this.knowledgePool = const KnowledgePoolState(),
     this.weekTheme = '',
     this.lastGeneration,
     this.generating = false,
@@ -75,6 +78,9 @@ class DailySuggestionState {
 
   /// 今天还能「换一个」随机知识的次数。
   final int knowledgeShuffleRemaining;
+
+  /// 随机题库概况。
+  final KnowledgePoolState knowledgePool;
   final String weekTheme;
   final DailySuggestionGenerationState? lastGeneration;
   final bool generating;
@@ -98,6 +104,7 @@ class DailySuggestionState {
     List<WorkSuggestion>? explore,
     List<WorkSuggestion>? knowledge,
     int? knowledgeShuffleRemaining,
+    KnowledgePoolState? knowledgePool,
     String? weekTheme,
     Object? lastGeneration = _unset,
     bool? generating,
@@ -109,6 +116,7 @@ class DailySuggestionState {
     explore: explore ?? this.explore,
     knowledge: knowledge ?? this.knowledge,
     knowledgeShuffleRemaining: knowledgeShuffleRemaining ?? this.knowledgeShuffleRemaining,
+    knowledgePool: knowledgePool ?? this.knowledgePool,
     weekTheme: weekTheme ?? this.weekTheme,
     lastGeneration: identical(lastGeneration, _unset)
         ? this.lastGeneration
@@ -162,6 +170,8 @@ class _StoreSnapshot {
     required this.knowledgeSeedHistory,
     required this.knowledgeSalt,
     this.knowledgeToday,
+    this.knowledgeGeneratedSeeds = const [],
+    this.knowledgeReplenish = const KnowledgeReplenishState(),
     this.dirty = false,
   });
 
@@ -180,6 +190,10 @@ class _StoreSnapshot {
   /// 按安装随机的盐,让不同用户同一天不会抽到同一条。
   String knowledgeSalt;
 
+  /// 模型补充的题目,旧的在前,上限 [maxGeneratedSeeds]。
+  List<KnowledgeSeed> knowledgeGeneratedSeeds;
+  KnowledgeReplenishState knowledgeReplenish;
+
   /// 加载时补生成了盐,需要写回一次。
   bool dirty;
 
@@ -196,6 +210,8 @@ class _StoreSnapshot {
     'knowledgeSeedHistory': knowledgeSeedHistory.map((entry) => entry.toJson()).toList(),
     'knowledgeToday': knowledgeToday?.toJson(),
     'knowledgeSalt': knowledgeSalt,
+    'knowledgeGeneratedSeeds': knowledgeGeneratedSeeds.map((seed) => seed.toJson()).toList(),
+    'knowledgeReplenish': knowledgeReplenish.toJson(),
   };
 
   static _StoreSnapshot fromJson(Object? value) {
@@ -232,6 +248,12 @@ class _StoreSnapshot {
         .toList();
     final rawSalt = raw['knowledgeSalt'];
     final hasSalt = rawSalt is String && rawSalt.trim().isNotEmpty;
+    final generatedIds = <String>{};
+    final generated = <KnowledgeSeed>[];
+    for (final item in raw['knowledgeGeneratedSeeds'] is List ? raw['knowledgeGeneratedSeeds'] as List : const []) {
+      final seed = KnowledgeSeed.generatedFromJson(item);
+      if (seed != null && generatedIds.add(seed.id)) generated.add(seed);
+    }
     return _StoreSnapshot(
       preferences: DailySuggestionPreferences.fromJson(raw['preferences']),
       batches: batches.take(_maxBatchHistory).toList(),
@@ -245,6 +267,10 @@ class _StoreSnapshot {
           : history,
       knowledgeToday: _KnowledgeToday.fromJson(raw['knowledgeToday']),
       knowledgeSalt: hasSalt ? rawSalt.trim() : _newSalt(),
+      knowledgeGeneratedSeeds: generated.length > maxGeneratedSeeds
+          ? generated.sublist(generated.length - maxGeneratedSeeds)
+          : generated,
+      knowledgeReplenish: KnowledgeReplenishState.fromJson(raw['knowledgeReplenish']),
       dirty: !hasSalt,
     );
   }
@@ -415,6 +441,7 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
     knowledgeSalt: _newSalt(),
   );
   Future<void>? _generating;
+  Future<int>? _replenishing;
   Timer? _timeTriggerTimer;
   bool _providerMissing = false;
 
@@ -452,8 +479,10 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
     }
     if (!ref.mounted) return;
     // Pin today's random seed before the first projection so the salt and the
-    // draw are both persisted together.
-    final needsSave = _store.dirty || _pinRandomSeed(formatLocalDate(_now()));
+    // draw are both persisted together. Evaluate the pin unconditionally: a
+    // store that only needed a salt must still get its card for the day.
+    final pinned = _pinRandomSeed(formatLocalDate(_now()));
+    final needsSave = _store.dirty || pinned;
     _store.dirty = false;
     state = _project(loaded: true);
     if (needsSave) await _persist();
@@ -504,11 +533,16 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
 
   // ---------------------------------------------------------------- knowledge seeds
 
+  /// 抽签用的完整题库:内置 + 已生成。
+  List<KnowledgeSeed> _pool() => buildKnowledgePool(_store.knowledgeGeneratedSeeds);
+
+  KnowledgeSeed? _findSeed(String id) => findKnowledgeSeed(id, _store.knowledgeGeneratedSeeds);
+
   /// 当天钉住的随机题目;还没抽过时抽一条并钉住。返回是否有改动需要持久化。
   bool _pinRandomSeed(String today) {
     final current = _store.knowledgeToday;
-    if (current != null && current.date == today && knowledgeSeedById(current.seedId) != null) return false;
-    final seed = drawKnowledgeSeed(today, _store.knowledgeSalt, _store.knowledgeSeedHistory);
+    if (current != null && current.date == today && _findSeed(current.seedId) != null) return false;
+    final seed = drawKnowledgeSeed(today, _store.knowledgeSalt, _store.knowledgeSeedHistory, pool: _pool());
     _setKnowledgeToday(today, seed.id, shuffle: false);
     return true;
   }
@@ -516,7 +550,7 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
   KnowledgeSeed? _todaySeed(String today) {
     final current = _store.knowledgeToday;
     if (current == null || current.date != today) return null;
-    return knowledgeSeedById(current.seedId);
+    return _findSeed(current.seedId);
   }
 
   void _setKnowledgeToday(String today, String seedId, {required bool shuffle}) {
@@ -551,9 +585,16 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
     final current = _store.knowledgeToday!;
     if (current.shuffleCount >= knowledgeShuffleLimit) throw StateError('KNOWLEDGE_SHUFFLE_LIMIT');
     KnowledgeSeed? next;
+    final pool = _pool();
     // Attempts are deterministic; walk forward until the draw lands on a different seed.
     for (var attempt = current.shuffleCount + 1; attempt <= current.shuffleCount + 40; attempt++) {
-      final candidate = drawKnowledgeSeed(today, _store.knowledgeSalt, _store.knowledgeSeedHistory, attempt: attempt);
+      final candidate = drawKnowledgeSeed(
+        today,
+        _store.knowledgeSalt,
+        _store.knowledgeSeedHistory,
+        attempt: attempt,
+        pool: pool,
+      );
       if (candidate.id != current.seedId) {
         next = candidate;
         break;
@@ -563,6 +604,112 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
     _setKnowledgeToday(today, next.id, shuffle: true);
     _publish();
     await _persist();
+  }
+
+  KnowledgePoolState _poolState(String today) {
+    final pool = _pool();
+    final replenish = _store.knowledgeReplenish;
+    return KnowledgePoolState(
+      builtin: knowledgeSeeds.length,
+      generated: _store.knowledgeGeneratedSeeds.length,
+      unseen: countUnseenSeeds(pool, today, _store.knowledgeSeedHistory),
+      lastReplenishAt: replenish.lastSuccessAt.isEmpty ? null : replenish.lastSuccessAt,
+      lastReplenishError: replenish.lastError.isEmpty ? null : replenish.lastError,
+      replenishing: _replenishing != null,
+    );
+  }
+
+  /// 随机来源开启即为题库补充服务的对象。
+  bool get _usesRandomPool {
+    final knowledge = _store.preferences.knowledge;
+    return knowledge.enabled && knowledge.sources.contains(KnowledgeSource.random);
+  }
+
+  /// 题库偏少或过期时自动补充。任一前置条件不满足就静默返回,调用方无需判断。
+  Future<void> _maybeReplenishKnowledgePool() async {
+    if (!ref.mounted || !_usesRandomPool) return;
+    final today = formatLocalDate(_now());
+    final replenish = _store.knowledgeReplenish;
+    if (replenish.lastAttemptDate == today) return;
+    final unseen = countUnseenSeeds(_pool(), today, _store.knowledgeSeedHistory);
+    final lastSuccess = DateTime.tryParse(replenish.lastSuccessAt);
+    final stale = lastSuccess == null ||
+        daysBetweenLocalDates(formatLocalDate(lastSuccess), today) >= knowledgeReplenishIntervalDays;
+    if (unseen >= knowledgeReplenishMinUnseen && !stale) return;
+    final backend = _backend;
+    if (!backend.isConnected || !await backend.hasProvider(_store.preferences.providerId)) return;
+    try {
+      await _replenishKnowledgePool();
+    } catch (_) {
+      // 已写入 lastError;抽签照常用旧池。
+    }
+  }
+
+  /// 设置页「补充题库」:跳过到期判断,但仍要求随机来源开启且有模型。
+  Future<int> replenishKnowledgePoolNow() async {
+    if (!_usesRandomPool) throw StateError('KNOWLEDGE_RANDOM_DISABLED');
+    if (!await _backend.hasProvider(_store.preferences.providerId)) throw StateError('PROVIDER_MISSING');
+    return _replenishKnowledgePool();
+  }
+
+  Future<int> _replenishKnowledgePool() {
+    final active = _replenishing;
+    if (active != null) return active;
+    final future = _replenishInternal();
+    _replenishing = future;
+    _publish();
+    return future.whenComplete(() {
+      if (identical(_replenishing, future)) _replenishing = null;
+      _publish();
+    });
+  }
+
+  Future<int> _replenishInternal() async {
+    final now = _now();
+    final today = formatLocalDate(now);
+    _store.knowledgeReplenish = _store.knowledgeReplenish.copyWith(lastAttemptDate: today);
+    final generated = _store.knowledgeGeneratedSeeds;
+    final existingIds = <String>{for (final seed in knowledgeSeeds) seed.id, for (final seed in generated) seed.id};
+    final existingTitles = <String>{for (final seed in generated) knowledgeTitleKey(seed.title)};
+    try {
+      final reply = await _backend.complete(
+        buildReplenishPrompt(generated),
+        providerId: _store.preferences.providerId,
+        modelId: _store.preferences.modelId,
+      );
+      final parsed = extractJsonArray(reply);
+      if (parsed == null) throw const FormatException('MODEL_OUTPUT_NOT_JSON');
+      final seeds = parsed
+          .map((item) => normalizeGeneratedSeed(item, now, existingIds, existingTitles))
+          .whereType<KnowledgeSeed>()
+          .take(knowledgeReplenishBatch)
+          .toList();
+      if (seeds.isEmpty) throw const FormatException('MODEL_OUTPUT_EMPTY');
+      final pinned = _store.knowledgeToday;
+      final added = _appendGeneratedSeeds(seeds, keepId: pinned?.date == today ? pinned!.seedId : null);
+      _store.knowledgeReplenish = _store.knowledgeReplenish.copyWith(lastSuccessAt: now.toIso8601String(), lastError: '');
+      await _persist();
+      return added;
+    } catch (caught) {
+      _store.knowledgeReplenish = _store.knowledgeReplenish.copyWith(lastError: caught.toString());
+      await _persist();
+      rethrow;
+    }
+  }
+
+  /// 追加生成题,跳过已有 id;超过上限时淘汰最旧的,但保留 [keepId](当天钉住的题)。
+  int _appendGeneratedSeeds(List<KnowledgeSeed> seeds, {String? keepId}) {
+    final existing = {for (final seed in _store.knowledgeGeneratedSeeds) seed.id};
+    final fresh = seeds.where((seed) => existing.add(seed.id)).toList();
+    if (fresh.isEmpty) return 0;
+    var merged = [..._store.knowledgeGeneratedSeeds, ...fresh];
+    if (merged.length > maxGeneratedSeeds) {
+      final excess = merged.length - maxGeneratedSeeds;
+      final evicted = merged.where((seed) => seed.id != keepId).take(excess).map((seed) => seed.id).toSet();
+      merged = merged.where((seed) => !evicted.contains(seed.id)).toList();
+    }
+    _store.knowledgeGeneratedSeeds = merged;
+    return fresh.length;
   }
 
   List<WorkSuggestion> _knowledgeItems(DailySuggestionBatch? batch, String today, Set<String> dismissed) {
@@ -600,6 +747,7 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
       explore: explore.items.where((item) => !dismissed.contains(item.id)).toList(),
       knowledge: _knowledgeItems(batch, today, dismissed),
       knowledgeShuffleRemaining: _shuffleRemaining(today),
+      knowledgePool: _poolState(today),
       weekTheme: explore.theme.label,
       lastGeneration: batch == null
           ? null
@@ -639,6 +787,8 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
     if ((current.needsModel && !previous.needsModel) || (current.enabled && !previous.enabled) || knowledgeScopeGrew) {
       unawaited(runIfDue(force: true));
     }
+    final previousRandom = previous.knowledge.enabled && previous.knowledge.sources.contains(KnowledgeSource.random);
+    if (_usesRandomPool && !previousRandom) unawaited(_maybeReplenishKnowledgePool());
   }
 
   Future<void> setEnabled(bool enabled) => setPreferences(_store.preferences.copyWith(enabled: enabled));
@@ -721,6 +871,8 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
   ///  - 固定时间:只有当天该时刻已过才补跑(定时器到点时也走这里)。
   ///  - `force`(刚开启某个组):已有批次但缺少该组的条目时也再跑一次。
   Future<void> runIfDue({bool force = false}) async {
+    // 题库补充与每日批次无关:只要随机来源开着就顺带检查一次。
+    unawaited(_maybeReplenishKnowledgePool());
     final preferences = _store.preferences;
     if (!preferences.needsModel) return;
     final now = _now();

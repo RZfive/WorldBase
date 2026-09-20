@@ -3,8 +3,8 @@
 /// 对话空态展示三类可点击卡片:
 ///  - `explore`:内置能力探索池,按 ISO 周轮换主题,始终可用。
 ///  - `daily`:开启后每天由模型生成一次,内容严格限定在用户勾选的类型内。
-///  - `knowledge`:知识探索。每天一条来自内置题库的「随机知识」(不需要模型),
-///    加上可选的模型来源:跨学科 / 工作领域 / 我想学的。
+///  - `knowledge`:知识探索。每天一条来自本地题库的「随机知识」(内置题开箱即用,
+///    配置模型后题库会自动补充新题),加上可选的模型来源:跨学科 / 工作领域 / 我想学的。
 ///
 /// 本文件只放纯数据与纯函数(类型、静态池、偏好归一化、模型输出解析),
 /// 不依赖 Flutter,便于单元测试;状态与持久化见 `daily_suggestions_provider.dart`。
@@ -18,7 +18,7 @@ export 'knowledge_seeds.dart';
 
 /// 知识来源(与桌面端 key 一致)。`random` 走本地题库,其余三种需要模型。
 enum KnowledgeSource {
-  random('random', '随机', '每天从内置题库抽一条有趣的知识,不需要模型。'),
+  random('random', '随机', '每天从本地题库抽一条有趣的知识。内置题目开箱即用,配置模型后题库会自动补充新题。'),
   crossDiscipline('cross-discipline', '跨学科', '来自你工作之外的其他领域的一个概念、现象或故事。'),
   workDomain('work-domain', '工作领域', '你所在领域里大概率没深究过的一个原理或冷知识。'),
   interest('interest', '我想学的', '围绕你填写的兴趣主题,给一个能引出追问的切入点。');
@@ -551,13 +551,155 @@ WorkSuggestion buildKnowledgeSeedSuggestion(KnowledgeSeed seed, String date) => 
   title: seed.title,
   description: seed.description,
   prompt: seed.prompt,
-  source: 'static',
+  // 生成题是模型写的字面文本;内置题是随包发布的固定文案。
+  source: seed.isGenerated ? 'llm' : 'static',
   knowledge: KnowledgeMeta(
     source: KnowledgeSource.random,
     discipline: seed.discipline.key,
     seedId: seed.id,
   ),
 );
+
+// ---------------------------------------------------------------------------
+// 随机题库动态补充:内置题冷启动 + 模型定期补充
+// ---------------------------------------------------------------------------
+
+/// 每次补充的条数,12 个学科各一条。
+const int knowledgeReplenishBatch = 12;
+
+/// 近 30 天没出现过的题少于这个数时触发补充。
+const int knowledgeReplenishMinUnseen = 12;
+
+/// 距上次成功补充超过这么多天也触发补充。
+const int knowledgeReplenishIntervalDays = 7;
+
+const int _generatedSeedSlugMax = 48;
+
+/// 补充状态(持久化)。
+class KnowledgeReplenishState {
+  const KnowledgeReplenishState({this.lastSuccessAt = '', this.lastAttemptDate = '', this.lastError = ''});
+
+  /// 上次成功补充的 ISO 时间;从未成功为空。
+  final String lastSuccessAt;
+
+  /// 上次尝试(成功或失败)的本地日期;每天最多尝试一次。
+  final String lastAttemptDate;
+  final String lastError;
+
+  KnowledgeReplenishState copyWith({String? lastSuccessAt, String? lastAttemptDate, String? lastError}) =>
+      KnowledgeReplenishState(
+        lastSuccessAt: lastSuccessAt ?? this.lastSuccessAt,
+        lastAttemptDate: lastAttemptDate ?? this.lastAttemptDate,
+        lastError: lastError ?? this.lastError,
+      );
+
+  Map<String, dynamic> toJson() => {
+    'lastSuccessAt': lastSuccessAt,
+    'lastAttemptDate': lastAttemptDate,
+    'lastError': lastError,
+  };
+
+  static KnowledgeReplenishState fromJson(Object? value) {
+    if (value is! Map) return const KnowledgeReplenishState();
+    String clean(Object? raw) => raw is String ? raw.trim() : '';
+    final attempt = clean(value['lastAttemptDate']);
+    return KnowledgeReplenishState(
+      lastSuccessAt: clean(value['lastSuccessAt']),
+      lastAttemptDate: RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(attempt) ? attempt : '',
+      lastError: clean(value['lastError']),
+    );
+  }
+}
+
+/// 题库概况(供设置页展示)。
+class KnowledgePoolState {
+  const KnowledgePoolState({
+    this.builtin = 0,
+    this.generated = 0,
+    this.unseen = 0,
+    this.lastReplenishAt,
+    this.lastReplenishError,
+    this.replenishing = false,
+  });
+
+  final int builtin;
+  final int generated;
+
+  /// 近 30 天没出现过、可被新抽到的条数。
+  final int unseen;
+  final String? lastReplenishAt;
+  final String? lastReplenishError;
+  final bool replenishing;
+}
+
+String _slugify(String value) {
+  var slug = value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '-').replaceAll(RegExp(r'^-+|-+$'), '');
+  if (slug.length > _generatedSeedSlugMax) slug = slug.substring(0, _generatedSeedSlugMax).replaceAll(RegExp(r'-+$'), '');
+  return slug;
+}
+
+/// 标题比较键:小写、去掉标点符号与空白。
+String knowledgeTitleKey(String value) =>
+    value.toLowerCase().replaceAll(RegExp(r'[\s\p{P}\p{S}]+', unicode: true), '');
+
+/// 校验一条模型生成的题目。id 由模型给出的英文 slug 派生,这样不同批次、不同
+/// 措辞的同一话题会折叠成同一个 id;与内置 id、已生成 id 或同一回复内前面的条目
+/// 相撞即丢弃。[existingIds] 与 [existingTitles] 会被就地扩充。
+KnowledgeSeed? normalizeGeneratedSeed(
+  Object? value,
+  DateTime now,
+  Set<String> existingIds,
+  Set<String> existingTitles,
+) {
+  if (value is! Map) return null;
+  final discipline = KnowledgeDiscipline.fromKey(value['discipline']);
+  if (discipline == null) return null;
+  final slug = value['slug'] is String ? _slugify(value['slug'] as String) : '';
+  if (slug.length < 3) return null;
+  final id = '$generatedSeedIdPrefix$slug';
+  if (existingIds.contains(id) || existingIds.contains(slug)) return null;
+  final title = value['title'] is String ? clipText(value['title'] as String, _titleMaxLength) : '';
+  final prompt = value['prompt'] is String ? clipText(value['prompt'] as String, _promptMaxLength) : '';
+  if (title.isEmpty || prompt.isEmpty) return null;
+  final description = value['description'] is String
+      ? clipText(value['description'] as String, _descriptionMaxLength)
+      : '';
+  final key = knowledgeTitleKey(title);
+  if (key.isEmpty || existingTitles.contains(key)) return null;
+  existingIds.add(id);
+  existingTitles.add(key);
+  return KnowledgeSeed.generated(
+    id: id,
+    discipline: discipline,
+    title: title,
+    description: description,
+    prompt: prompt,
+    createdAt: now.toIso8601String(),
+  );
+}
+
+/// 补充题库的提示词:把内置 id 与已生成题全部列为「已覆盖」,要求 12 学科各一条。
+String buildReplenishPrompt(List<KnowledgeSeed> generated) {
+  final lines = <String>[
+    'You extend a pool of "curiosity hook" cards for WorldBase Mobile, an AI workspace app. Each card is shown on an empty chat screen once a day; tapping it starts a relaxed conversation with the assistant about an idea, phenomenon or story the user probably never dug into. The goal is to make them curious, not to make them productive.',
+    'Write every title, description and prompt in Simplified Chinese. The "slug" field is always English.',
+    '',
+    '## Already in the pool (never repeat these topics or close variants)',
+    for (final seed in knowledgeSeeds) '- ${seed.id}',
+    for (final seed in generated) '- ${seed.id}: ${clipText(seed.title, 60)}',
+    '',
+    '## What to generate',
+    'Produce exactly $knowledgeReplenishBatch items, one for each of these disciplines in this order: ${KnowledgeDiscipline.values.map((d) => d.key).join(', ')}.',
+    'Each item is a real, well-documented concept, effect, paradox, law, experiment or historical episode. The title must be a question or a counter-intuitive fact, never a dictionary headword. The description is one sentence that deepens the hook or names an unexpected connection.',
+    '',
+    '## Output format',
+    'Reply with a JSON array only, no prose, no code fence. Each element:',
+    '{"discipline": "<one of the discipline keys above>", "slug": "<discipline>-<2-4 english kebab-case words naming the topic, e.g. physics-mpemba-effect>", "title": "<= 20 characters", "description": "one sentence", "prompt": "the full message the user would send to the assistant"}',
+    'The prompt must follow this shape, adapted to the topic: "I\'m curious about X. Start with an everyday analogy for what it is, then tell me the most counter-intuitive thing about it. Afterwards give me three directions I could ask about next and I\'ll pick one. Don\'t open with a definition."',
+    'Rules: interesting first, useful second; never invent facts; never use software engineering as the subject; no two items about the same topic.',
+  ];
+  return lines.join('\n');
+}
 
 /// 一天一批的生成结果。
 class DailySuggestionBatch {

@@ -36,6 +36,7 @@ class _DailySuggestionsCard extends ConsumerStatefulWidget {
 class _DailySuggestionsCardState extends ConsumerState<_DailySuggestionsCard> {
   bool _generating = false;
   bool _shuffling = false;
+  bool _replenishing = false;
   String? _feedback;
   Timer? _feedbackTimer;
   final _interestCtrl = TextEditingController();
@@ -154,6 +155,39 @@ class _DailySuggestionsCardState extends ConsumerState<_DailySuggestionsCard> {
     }
   }
 
+  Future<void> _replenishPool() async {
+    if (_replenishing) return;
+    setState(() => _replenishing = true);
+    try {
+      final added = await _notifier.replenishKnowledgePoolNow();
+      _setFeedback('新增 $added 条题目');
+    } on StateError catch (error) {
+      _setFeedback(error.message == 'PROVIDER_MISSING' ? '没有可用的模型服务' : '补充失败:${error.message}');
+    } catch (error) {
+      _setFeedback('补充失败:${_replenishReason(error.toString())}');
+    } finally {
+      if (mounted) setState(() => _replenishing = false);
+    }
+  }
+
+  String _replenishReason(String error) {
+    if (error.contains('PROVIDER_MISSING')) return '没有可用的模型服务';
+    if (error.contains('MODEL_OUTPUT_NOT_JSON') || error.contains('MODEL_OUTPUT_EMPTY')) return '模型返回的内容无法解析';
+    if (error.contains('MODEL_TIMEOUT')) return '模型响应超时';
+    return error;
+  }
+
+  String _poolStatusLabel(KnowledgePoolState pool, {required bool hasProviders}) {
+    final error = pool.lastReplenishError;
+    if (error != null) return '上次补充失败:${_replenishReason(error)}';
+    final at = pool.lastReplenishAt == null ? null : DateTime.tryParse(pool.lastReplenishAt!);
+    if (at == null) {
+      return hasProviders ? '还没有补充过。题库变少或超过一周时会自动补充一批。' : '配置模型服务后,题库会自动补充新题。';
+    }
+    final when = '${at.month}/${at.day} ${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+    return '上次补充 $when,每周或题库变少时自动补充。';
+  }
+
   Future<void> _pickTime(DailySuggestionPreferences prefs) async {
     final p = DawnPalette.of(context);
     final parts = prefs.trigger.timeOfDay.split(':').map(int.parse).toList();
@@ -224,7 +258,9 @@ class _DailySuggestionsCardState extends ConsumerState<_DailySuggestionsCard> {
     try {
       await _notifier.generateNow();
       final state = ref.read(dailySuggestionsProvider);
-      final count = state.daily.length + state.knowledge.where((item) => item.source == 'llm').length;
+      // 今日随机卡可能是生成题;只统计本次请求产出的条目。
+      final count = state.daily.length +
+          state.knowledge.where((item) => item.source == 'llm' && !item.isRandomKnowledge).length;
       _setFeedback(
         state.lastGeneration?.status == 'failed'
             ? '生成失败,请查看下方原因'
@@ -523,7 +559,7 @@ class _DailySuggestionsCardState extends ConsumerState<_DailySuggestionsCard> {
         const SizedBox(height: 24),
         IosSection(
           header: '知识探索',
-          footer: '每天在对话页放几张能引起好奇的知识卡片,点开就能和 AI 聊起来。随机知识不需要模型,其余来源需要配置模型服务。',
+          footer: '每天在对话页放几张能引起好奇的知识卡片,点开就能和 AI 聊起来。随机知识用本地题库,不依赖模型;配置模型后题库会自动补充,其余来源需要模型服务。',
           children: [
             _SwitchRow(
               icon: CupertinoIcons.sparkles,
@@ -547,6 +583,53 @@ class _DailySuggestionsCardState extends ConsumerState<_DailySuggestionsCard> {
             ),
           ),
         ],
+        // 随机题库:内置题冷启动,配置模型后由模型补充。
+        const SizedBox(height: 14),
+        gated(
+          on: knowledgeEnabled,
+          IosSection(
+            header: '随机题库',
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '内置 ${state.knowledgePool.builtin} 条,模型补充 ${state.knowledgePool.generated} 条,'
+                      '其中 ${state.knowledgePool.unseen} 条近 30 天没出现过',
+                      style: TextStyle(fontSize: 13, height: 1.5, color: p.ink2),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _poolStatusLabel(state.knowledgePool, hasProviders: hasProviders),
+                      style: TextStyle(
+                        fontSize: 13,
+                        height: 1.5,
+                        color: state.knowledgePool.lastReplenishError != null ? iosRed : p.ink2,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: CupertinoButton.filled(
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        onPressed: !knowledgeEnabled ||
+                                !knowledge.sources.contains(KnowledgeSource.random) ||
+                                !hasProviders ||
+                                _replenishing ||
+                                state.knowledgePool.replenishing
+                            ? null
+                            : _replenishPool,
+                        child: Text(_replenishing || state.knowledgePool.replenishing ? '补充中…' : '补充题库'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
         const SizedBox(height: 14),
         gated(
           on: knowledgeEnabled,
