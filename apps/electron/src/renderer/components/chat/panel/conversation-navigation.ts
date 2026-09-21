@@ -28,6 +28,8 @@ interface ChatConversationNavigationOptions {
   reasoningStrength: Ref<ReasoningStrength>
   conversationTemperature: Ref<number | null>
   selectedLongTermGoalId: Ref<string | null>
+  /** Optional: cleared whenever navigation leaves the goal workspace. */
+  longTermGoalWorkspaceActive?: Ref<boolean>
   selectedAgentId: Ref<string>
   selectedGroupId: Ref<string>
   selectedChannelBindingId: Ref<string>
@@ -72,6 +74,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     reasoningStrength,
     conversationTemperature,
     selectedLongTermGoalId,
+    longTermGoalWorkspaceActive,
     selectedAgentId,
     selectedGroupId,
     selectedChannelBindingId,
@@ -169,6 +172,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
 
     stashCurrentConversationForNavigation()
     selectedLongTermGoalId.value = null
+    if (longTermGoalWorkspaceActive) longTermGoalWorkspaceActive.value = false
     currentConversationId.value = conversationId
     resetConversationComposerState()
     selectedAgentId.value = context.agentId || ''
@@ -219,6 +223,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     stashCurrentConversationForNavigation()
     currentConversationId.value = conversationId
     selectedLongTermGoalId.value = null
+    if (longTermGoalWorkspaceActive) longTermGoalWorkspaceActive.value = false
     messages.value = []
     targetProjectId.value = projectId
     currentAuthMode.value = 'strict'
@@ -248,6 +253,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     navigationVersion++
     stashCurrentConversationForNavigation()
     selectedLongTermGoalId.value = null
+    if (longTermGoalWorkspaceActive) longTermGoalWorkspaceActive.value = false
     currentConversationId.value = null
     resetConversationComposerState()
     selectedAgentId.value = getDefaultAgentId()
@@ -265,6 +271,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     }
 
     selectedLongTermGoalId.value = null
+    if (longTermGoalWorkspaceActive) longTermGoalWorkspaceActive.value = false
     clearConversationUnread(conversationId)
     conversationDetailState.value = 'loading'
     conversationDetailError.value = null
@@ -335,6 +342,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     navigationVersion++
     stashCurrentConversationForNavigation()
     currentConversationId.value = null
+    if (longTermGoalWorkspaceActive) longTermGoalWorkspaceActive.value = true
     messages.value = []
     inputText.value = ''
     resetTransientStreamState()

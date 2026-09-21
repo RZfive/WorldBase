@@ -26,6 +26,8 @@ interface LongTermGoalMemoryCompactionProgress {
 const props = defineProps<{
   goal: LongTermGoalDefinition | null
   snapshot: LongTermGoalSnapshot | null
+  /** Open the create dialog as soon as the panel mounts without a goal (sidebar "new goal"). */
+  autoOpenCreate?: boolean
   loading?: boolean
   providers?: ProviderItem[]
   activeProviderId?: string
@@ -801,6 +803,16 @@ watch(
       closeDialog()
     }
   }
+)
+
+// Sidebar "new goal" mounts this panel with goal === null and autoOpenCreate set;
+// go straight to the create dialog instead of showing the empty state first.
+watch(
+  () => props.autoOpenCreate === true && !props.goal,
+  (shouldOpen) => {
+    if (shouldOpen && activeDialog.value !== 'create') openCreateDialog()
+  },
+  { immediate: true }
 )
 </script>
 

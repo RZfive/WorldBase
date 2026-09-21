@@ -300,34 +300,38 @@ class _DawnOrbState extends State<DawnOrb> with SingleTickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     final p = DawnPalette.of(context);
-    return AnimatedBuilder(
-      animation: _ctrl,
-      builder: (context, _) {
-        final t = widget.animate ? _ctrl.value : 0.0;
-        final scale = 1.0 + 0.045 * t;
-        final glow = 0.4 + 0.25 * t;
-        return Transform.scale(
-          scale: scale,
-          child: Container(
-            width: widget.size,
-            height: widget.size,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: SweepGradient(
-                colors: [p.indigo, const Color(0xFFB078D8), p.coral, p.indigo],
-                transform: const GradientRotation(3.6),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Color.lerp(p.indigo, p.coral, 0.5)!.withValues(alpha: glow),
-                  blurRadius: widget.size * (0.55 + 0.35 * t),
-                  spreadRadius: widget.size * 0.06,
+    // Orb 的呼吸动画整段圈在自己的重绘边界里:否则它每帧的阴影重绘会把
+    // 整个空态(包括下方整副牌的磨砂模糊)拖着一起重新合成。
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        builder: (context, _) {
+          final t = widget.animate ? _ctrl.value : 0.0;
+          final scale = 1.0 + 0.045 * t;
+          final glow = 0.4 + 0.25 * t;
+          return Transform.scale(
+            scale: scale,
+            child: Container(
+              width: widget.size,
+              height: widget.size,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: SweepGradient(
+                  colors: [p.indigo, const Color(0xFFB078D8), p.coral, p.indigo],
+                  transform: const GradientRotation(3.6),
                 ),
-              ],
+                boxShadow: [
+                  BoxShadow(
+                    color: Color.lerp(p.indigo, p.coral, 0.5)!.withValues(alpha: glow),
+                    blurRadius: widget.size * (0.55 + 0.35 * t),
+                    spreadRadius: widget.size * 0.06,
+                  ),
+                ],
+              ),
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }

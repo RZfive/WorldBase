@@ -363,7 +363,8 @@ onBeforeUnmount(() => {
   height: 3px;
   border-radius: 50%;
   background: var(--app-accent);
-  filter: blur(0.5px);
+  /* No `filter: blur()` here: a filter on a transform-animated element adds a
+     GPU filter pass per frame for a 3px dot nobody can see sharpened. */
   pointer-events: none;
 }
 

@@ -27,6 +27,7 @@ const emit = defineEmits<{
   (e: 'pick', suggestion: WorkSuggestion, payload: { prompt: string; projectName?: string }): void
   (e: 'dismiss', suggestion: WorkSuggestion): void
   (e: 'refresh'): void
+  (e: 'refreshCard', suggestion: WorkSuggestion): void
   (e: 'shuffle'): void
   (e: 'openSettings'): void
   (e: 'setupProvider', mode: 'recommended' | 'browse'): void
@@ -58,20 +59,19 @@ let handObserver: ResizeObserver | null = null
 const preferences = computed(() => props.snapshot?.preferences ?? null)
 const dailyEnabled = computed(() => preferences.value?.enabled === true)
 const knowledgeEnabled = computed(() => preferences.value?.knowledge?.enabled === true)
+/** Knowledge sources that need a model — they make the knowledge group refreshable. */
+const knowledgeModelOn = computed(() => {
+  const sources = preferences.value?.knowledge?.sources ?? []
+  return knowledgeEnabled.value && sources.some(source => source !== 'random')
+})
 const dailyItems = computed(() => (props.snapshot?.daily ?? []).slice(0, MAX_DAILY_CARDS))
 const knowledgeItems = computed(() => (props.snapshot?.knowledge ?? []).slice(0, MAX_KNOWLEDGE_CARDS))
 const exploreItems = computed(() => props.snapshot?.explore ?? [])
 const hasFreshDaily = computed(() => dailyItems.value.some(item => item.fresh) || knowledgeItems.value.some(item => item.fresh))
 const generating = computed(() => props.snapshot?.generating === true || props.refreshing === true)
 const lastGeneration = computed(() => props.snapshot?.lastGeneration ?? null)
-const refreshRemaining = computed(() => {
-  const state = lastGeneration.value
-  if (!state) return null
-  return Math.max(0, state.manualRefreshLimit - state.manualRefreshCount)
-})
-const refreshDisabled = computed(() => generating.value || refreshRemaining.value === 0)
-const shuffleRemaining = computed(() => props.snapshot?.knowledgeShuffleRemaining ?? 0)
-const shuffleDisabled = computed(() => props.shuffling === true || shuffleRemaining.value <= 0)
+const refreshDisabled = computed(() => generating.value)
+const shuffleDisabled = computed(() => props.shuffling === true)
 const todayDiscipline = computed(() => {
   const random = knowledgeItems.value.find(item => item.knowledge?.source === 'random')
   return random ? disciplineLabel(random) : ''
@@ -190,10 +190,6 @@ function chipLabel (card: Extract<HandCard, { kind: 'item' }>): string {
   return featureLabel(card.item) || t('chatUi.suggestions.exploreTitle')
 }
 
-function isRandomKnowledge (item: WorkSuggestion): boolean {
-  return item.layer === 'knowledge' && item.knowledge?.source === 'random'
-}
-
 function projectName (projectId?: string): string | undefined {
   if (!projectId) return undefined
   return props.projectNames?.[projectId] || projectId
@@ -230,6 +226,12 @@ function shuffle (event: Event): void {
   event.stopPropagation()
   if (shuffleDisabled.value) return
   emit('shuffle')
+}
+
+function refreshCard (event: Event, item: WorkSuggestion): void {
+  event.stopPropagation()
+  if (shuffleDisabled.value) return
+  emit('refreshCard', item)
 }
 
 function setupProvider (event: Event, mode: 'recommended' | 'browse'): void {
@@ -294,7 +296,7 @@ onBeforeUnmount(() => {
           <span v-if="todayDiscipline" class="ess-strip-theme">{{ $t('chatUi.suggestions.knowledgeToday', { discipline: todayDiscipline }) }}</span>
         </template>
       </div>
-      <div v-if="dailyEnabled" class="ess-strip-actions">
+      <div v-if="dailyEnabled || knowledgeModelOn" class="ess-strip-actions">
         <span v-if="generating" class="ess-generating">
           <span class="ess-spinner" aria-hidden="true" />
           {{ $t('chatUi.suggestions.generating') }}
@@ -304,7 +306,7 @@ onBeforeUnmount(() => {
           type="button"
           class="ess-link-btn"
           :disabled="refreshDisabled"
-          :title="refreshRemaining === 0 ? $t('chatUi.suggestions.refreshExhausted') : $t('chatUi.suggestions.refreshHint', { remaining: refreshRemaining ?? '' })"
+          :title="$t('chatUi.suggestions.refreshHint')"
           @click="emit('refresh')"
         >
           {{ $t('chatUi.suggestions.refresh') }}
@@ -344,14 +346,14 @@ onBeforeUnmount(() => {
             </span>
             <span class="ess-card-tools">
               <span
-                v-if="isRandomKnowledge(card.item)"
+                v-if="card.group === 'knowledge'"
                 class="ess-tool"
                 :class="{ disabled: shuffleDisabled }"
                 role="button"
                 :aria-disabled="shuffleDisabled"
                 :aria-label="$t('chatUi.suggestions.shuffle')"
-                :title="shuffleRemaining > 0 ? $t('chatUi.suggestions.shuffleHint', { remaining: shuffleRemaining }) : $t('chatUi.suggestions.shuffleExhausted')"
-                @click="shuffle($event)"
+                :title="$t('chatUi.suggestions.shuffleHint')"
+                @click="card.item.knowledge?.source === 'random' ? shuffle($event) : refreshCard($event, card.item)"
               >↻</span>
               <span
                 class="ess-tool"
@@ -542,13 +544,16 @@ onBeforeUnmount(() => {
   padding: 12px 14px 11px;
   border: 1px solid color-mix(in srgb, var(--app-border-strong) 70%, transparent);
   border-radius: 16px;
-  /* Frosted glass: a near-opaque tint plus a backdrop blur, so cards underneath
-     read as soft light rather than legible text bleeding through. */
-  background:
+  /* Opaque base + tint layers. The tints below use `background-image` so
+     they never reset this colour: the earlier `background:` shorthands mixed
+     a low-alpha accent into the panel and the fanned cards behind bled
+     through as ghost text. No backdrop-filter here on purpose (8+ moving
+     blurred layers spiked GPU power on every hover frame). */
+  --ess-card-base: #ffffff;
+  background-color: var(--ess-card-base);
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0.04)),
-    color-mix(in srgb, var(--app-panel) 82%, transparent);
-  backdrop-filter: blur(22px) saturate(1.45);
-  -webkit-backdrop-filter: blur(22px) saturate(1.45);
+    linear-gradient(color-mix(in srgb, var(--app-panel) 96%, transparent), color-mix(in srgb, var(--app-panel) 96%, transparent));
   color: var(--app-text);
   text-align: left;
   cursor: pointer;
@@ -560,51 +565,55 @@ onBeforeUnmount(() => {
     transform 0.26s cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 0.26s ease,
     border-color 0.2s ease,
-    filter 0.2s ease;
+    opacity 0.2s ease;
   will-change: transform;
 }
 
 .ess-card.daily {
-  background:
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.04)),
-    color-mix(in srgb, var(--app-accent-soft) 40%, color-mix(in srgb, var(--app-panel) 84%, transparent));
+    linear-gradient(color-mix(in srgb, var(--app-accent-soft) 40%, color-mix(in srgb, var(--app-panel) 96%, transparent)), color-mix(in srgb, var(--app-accent-soft) 40%, color-mix(in srgb, var(--app-panel) 96%, transparent)));
 }
 
 .ess-card.lifted {
   border-color: color-mix(in srgb, var(--app-accent) 60%, var(--app-border-strong));
-  background:
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.06)),
-    color-mix(in srgb, var(--app-panel) 94%, transparent);
+    linear-gradient(color-mix(in srgb, var(--app-panel) 98%, transparent), color-mix(in srgb, var(--app-panel) 98%, transparent));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.55),
     0 22px 40px rgba(15, 23, 42, 0.18);
 }
 
+/* Dim siblings with opacity (compositor) instead of a `filter` chain, which
+   re-rasterised every non-hovered card on each frame of the fan animation. */
 .ess-card.dimmed {
-  filter: saturate(0.85) brightness(0.985);
+  opacity: 0.86;
 }
 
 /* The app always stamps the resolved theme on <html>, so one dark selector suffices. */
 :root[data-theme='dark'] .ess-card {
+  /* rgba(15,23,42,.92) panel flattened onto the #0b1018 surface. */
+  --ess-card-base: #0f1629;
   border-color: color-mix(in srgb, var(--app-border-strong) 80%, transparent);
-  background:
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.015)),
-    color-mix(in srgb, var(--app-panel) 78%, transparent);
+    linear-gradient(color-mix(in srgb, var(--app-panel) 96%, transparent), color-mix(in srgb, var(--app-panel) 96%, transparent));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     0 6px 18px rgba(0, 0, 0, 0.28);
 }
 
 :root[data-theme='dark'] .ess-card.daily {
-  background:
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.015)),
-    color-mix(in srgb, var(--app-accent-soft) 35%, color-mix(in srgb, var(--app-panel) 80%, transparent));
+    linear-gradient(color-mix(in srgb, var(--app-accent-soft) 35%, color-mix(in srgb, var(--app-panel) 96%, transparent)), color-mix(in srgb, var(--app-accent-soft) 35%, color-mix(in srgb, var(--app-panel) 96%, transparent)));
 }
 
 :root[data-theme='dark'] .ess-card.lifted {
-  background:
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.02)),
-    color-mix(in srgb, var(--app-panel) 92%, transparent);
+    linear-gradient(color-mix(in srgb, var(--app-panel) 98%, transparent), color-mix(in srgb, var(--app-panel) 98%, transparent));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.16),
     0 22px 40px rgba(0, 0, 0, 0.45);
@@ -784,15 +793,15 @@ onBeforeUnmount(() => {
 
 /* Knowledge cards: a warm tint so the group reads apart from tasks and tips. */
 .ess-card.knowledge {
-  background:
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.04)),
-    color-mix(in srgb, #f59e0b 12%, color-mix(in srgb, var(--app-panel) 84%, transparent));
+    linear-gradient(color-mix(in srgb, #f59e0b 12%, color-mix(in srgb, var(--app-panel) 84%, transparent)), color-mix(in srgb, #f59e0b 12%, color-mix(in srgb, var(--app-panel) 84%, transparent)));
 }
 
 :root[data-theme='dark'] .ess-card.knowledge {
-  background:
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.015)),
-    color-mix(in srgb, #f59e0b 14%, color-mix(in srgb, var(--app-panel) 80%, transparent));
+    linear-gradient(color-mix(in srgb, #f59e0b 14%, color-mix(in srgb, var(--app-panel) 80%, transparent)), color-mix(in srgb, #f59e0b 14%, color-mix(in srgb, var(--app-panel) 80%, transparent)));
 }
 
 .ess-card.knowledge .ess-card-title {
@@ -820,9 +829,9 @@ onBeforeUnmount(() => {
 .ess-card-setup {
   border-style: solid;
   border-color: color-mix(in srgb, var(--app-accent) 55%, var(--app-border));
-  background:
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.04)),
-    color-mix(in srgb, var(--app-accent-soft) 70%, color-mix(in srgb, var(--app-panel) 84%, transparent));
+    linear-gradient(color-mix(in srgb, var(--app-accent-soft) 70%, color-mix(in srgb, var(--app-panel) 84%, transparent)), color-mix(in srgb, var(--app-accent-soft) 70%, color-mix(in srgb, var(--app-panel) 84%, transparent)));
 }
 
 .ess-chip.setup {
@@ -862,9 +871,9 @@ onBeforeUnmount(() => {
   gap: 6px;
   border-style: dashed;
   border-color: color-mix(in srgb, var(--app-accent) 45%, var(--app-border));
-  background:
+  background-image:
     linear-gradient(160deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.02)),
-    color-mix(in srgb, var(--app-accent-soft) 50%, color-mix(in srgb, var(--app-panel) 80%, transparent));
+    linear-gradient(color-mix(in srgb, var(--app-accent-soft) 50%, color-mix(in srgb, var(--app-panel) 80%, transparent)), color-mix(in srgb, var(--app-accent-soft) 50%, color-mix(in srgb, var(--app-panel) 80%, transparent)));
 }
 
 @media (max-width: 720px) {

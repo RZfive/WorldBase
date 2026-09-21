@@ -63,6 +63,8 @@ export const sharedChatPanelState = {
   longTermGoals: ref<LongTermGoalDefinition[]>([]),
   longTermGoalSnapshot: ref<LongTermGoalSnapshot | null>(null),
   selectedLongTermGoalId: ref<string | null>(null),
+  /** True while the goal workspace is shown with no goal selected (creating a new one). */
+  longTermGoalWorkspaceActive: ref(false),
   selectedAgentId: ref(''),
   selectedGroupId: ref(''),
   selectedChannelBindingId: ref(''),

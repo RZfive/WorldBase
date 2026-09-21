@@ -51,6 +51,19 @@ export interface GeneratedKnowledgeSeed {
   copy: KnowledgeSeedCopy
 }
 
+/**
+ * A model-written card for one of the LLM knowledge sources (cross-discipline,
+ * work-domain, interest). Same shape as a generated seed but the discipline is
+ * free text and the source is recorded, so one pool serves every source and a
+ * refresh just draws the next cards instead of calling the model again.
+ */
+export interface GeneratedKnowledgeCard {
+  id: string
+  source: Exclude<KnowledgeSource, 'random'>
+  discipline?: string
+  copy: KnowledgeSeedCopy
+}
+
 export type KnowledgeSeed = KnowledgeSeedDefinition | GeneratedKnowledgeSeed
 
 /** Verified against the copy in locales on 2026-09-19. */
@@ -102,6 +115,10 @@ const KNOWLEDGE_SEED_REUSE_DAYS_RELAXED = 14
 export const KNOWLEDGE_STATIC_ID_PREFIX = 'knowledge:'
 /** Generated seed ids are `gen-<slug>`; slugs are lowercase kebab-case, never containing a colon. */
 export const GENERATED_SEED_ID_PREFIX = 'gen-'
+/** Pool-card suggestion ids are `kcard:<date>:<cardId>`; card ids never contain a colon. */
+export const KNOWLEDGE_CARD_ID_PREFIX = 'kcard:'
+/** Cards shown within this many days are skipped when a draw needs fresh ones. */
+export const KNOWLEDGE_CARD_REUSE_DAYS = 14
 
 export function knowledgeSeedById (id: string): KnowledgeSeedDefinition | undefined {
   return SEED_BY_ID.get(id)
@@ -125,6 +142,11 @@ export function hashString (value: string): number {
     hash = Math.imul(hash, 0x01000193) >>> 0
   }
   return hash >>> 0
+}
+
+/** Titles compare after case folding and stripping punctuation and spaces. */
+export function titleKey (value: string): string {
+  return value.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '')
 }
 
 function daysBetweenDates (a: string, b: string): number {
@@ -183,6 +205,64 @@ function endOfLocalDayIso (now: Date): string {
   const end = new Date(now)
   end.setHours(23, 59, 59, 999)
   return end.toISOString()
+}
+
+/**
+ * `count` entries starting at `start`, wrapping around the list. Rotating the
+ * start offset per (date, salt, source, cursor) is what makes successive
+ * refreshes hand out different cards from the same pool.
+ */
+export function pickRotated<T> (list: readonly T[], start: number, count: number): T[] {
+  if (list.length === 0) return []
+  const out: T[] = []
+  for (let index = 0; index < list.length && out.length < count; index++) {
+    out.push(list[((start % list.length) + list.length + index) % list.length])
+  }
+  return out
+}
+
+/** Pool cards of `locale` that are eligible for a draw on `date`, freshest first. */
+export function drawableKnowledgeCards (
+  cards: readonly GeneratedKnowledgeCard[],
+  source: KnowledgeSource,
+  date: string,
+  history: readonly KnowledgeSeedHistoryEntry[],
+  excludeIds: ReadonlySet<string>
+): GeneratedKnowledgeCard[] {
+  const recent = recentlyShownSeedIds(date, history, KNOWLEDGE_CARD_REUSE_DAYS)
+  const fresh = cards.filter(card => card.source === source && !recent.has(card.id) && !excludeIds.has(card.id))
+  if (fresh.length > 0) return fresh
+  // Pool exhausted within the window: anything not excluded today is fair game.
+  return cards.filter(card => card.source === source && !excludeIds.has(card.id))
+}
+
+/** How many pool cards of `locale` can still be drawn without repeating. */
+export function countUnseenKnowledgeCards (
+  cards: readonly GeneratedKnowledgeCard[],
+  date: string,
+  history: readonly KnowledgeSeedHistoryEntry[]
+): number {
+  const recent = recentlyShownSeedIds(date, history, KNOWLEDGE_CARD_REUSE_DAYS)
+  return cards.filter(card => !recent.has(card.id)).length
+}
+
+export function buildKnowledgeCardSuggestion (card: GeneratedKnowledgeCard, now: Date): WorkSuggestion {
+  return {
+    // Date-scoped so dismissing a drawn card does not hide the pool entry forever.
+    id: `${KNOWLEDGE_CARD_ID_PREFIX}${formatLocalDate(now)}:${card.id}`,
+    layer: 'knowledge',
+    type: 'knowledge',
+    title: card.copy.title,
+    description: card.copy.description || undefined,
+    prompt: card.copy.prompt,
+    sendMode: 'fill',
+    source: 'llm',
+    // seedId carries the pool-card id so dismiss / pick / redraw can resolve it.
+    knowledge: { source: card.source, discipline: card.discipline, seedId: card.id },
+    generatedAt: card.copy.createdAt,
+    validUntil: endOfLocalDayIso(now),
+    fresh: true
+  }
 }
 
 export function buildKnowledgeSeedSuggestion (seed: KnowledgeSeed, now: Date): WorkSuggestion {

@@ -13,6 +13,8 @@ import {
 import {
   GENERATED_SEED_ID_PREFIX,
   isKnowledgeDiscipline,
+  titleKey,
+  type GeneratedKnowledgeCard,
   type GeneratedKnowledgeSeed,
   type KnowledgeSeedHistoryEntry
 } from '../suggestions/knowledge-seeds.js'
@@ -20,7 +22,7 @@ import {
 export interface KnowledgeReplenishState {
   /** ISO time of the last successful top-up, empty when none. */
   lastSuccessAt: string
-  /** Local date of the last attempt (success or failure); at most one attempt per day. */
+  /** Local date of the last attempt (success or failure); an attempt is only repeated the same day when a refresh has driven a pool to 80% consumption. */
   lastAttemptDate: string
   lastError: string
 }
@@ -34,7 +36,7 @@ interface DailySuggestionStoreSnapshot {
   typeDismissStreaks: Partial<Record<SuggestionType, number>>
   /** Same idea for knowledge sources. */
   knowledgeDismissStreaks: Partial<Record<KnowledgeSource, number>>
-  /** Random seeds shown recently, oldest first, so the daily draw avoids repeats. */
+  /** Seeds and pool cards shown recently, oldest first, so draws avoid repeats. */
   knowledgeSeedHistory: KnowledgeSeedHistoryEntry[]
   /** The random seed resolved for today plus how often it was swapped. */
   knowledgeToday: { date: string; seedId: string; shuffleCount: number }
@@ -42,13 +44,18 @@ interface DailySuggestionStoreSnapshot {
   knowledgeSalt: string
   /** Model-written seeds, oldest first, capped at MAX_GENERATED_SEEDS. */
   knowledgeGeneratedSeeds: GeneratedKnowledgeSeed[]
+  /** Model-written cards for the LLM knowledge sources, oldest first, capped at MAX_KNOWLEDGE_CARDS. */
+  knowledgeCardPool: GeneratedKnowledgeCard[]
+  /** Rotated on every knowledge draw so the next draw hands out different cards. */
+  knowledgeCardCursor: number
   knowledgeReplenish: KnowledgeReplenishState
 }
 
 const MAX_BATCH_HISTORY = 7
 const MAX_DISMISSED_IDS = 400
-const MAX_SEED_HISTORY = 60
+const MAX_SEED_HISTORY = 200
 export const MAX_GENERATED_SEEDS = 120
+export const MAX_KNOWLEDGE_CARDS = 60
 const GENERATED_TITLE_MAX = 80
 const GENERATED_DESCRIPTION_MAX = 200
 const GENERATED_PROMPT_MAX = 1000
@@ -205,6 +212,50 @@ function normalizeGeneratedSeeds (value: unknown): GeneratedKnowledgeSeed[] {
   return seeds.slice(-MAX_GENERATED_SEEDS)
 }
 
+const KNOWLEDGE_CARD_SOURCES = new Set(['cross-discipline', 'work-domain', 'interest'])
+const KNOWLEDGE_CARD_ID_PREFIX = 'kc-'
+
+/** One persisted pool card; anything malformed is dropped rather than repaired. */
+function normalizeKnowledgeCard (value: unknown): GeneratedKnowledgeCard | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const id = normalizeString(raw.id)
+  if (!id.startsWith(KNOWLEDGE_CARD_ID_PREFIX) || /[:\s]/.test(id)) return null
+  if (typeof raw.source !== 'string' || !KNOWLEDGE_CARD_SOURCES.has(raw.source)) return null
+  const rawCopy = raw.copy && typeof raw.copy === 'object' && !Array.isArray(raw.copy) ? raw.copy as Record<string, unknown> : null
+  if (!rawCopy) return null
+  const locale = normalizeString(rawCopy.locale)
+  const title = clipStored(rawCopy.title, GENERATED_TITLE_MAX)
+  const description = clipStored(rawCopy.description, GENERATED_DESCRIPTION_MAX)
+  const prompt = clipStored(rawCopy.prompt, GENERATED_PROMPT_MAX)
+  if (!locale || !title || !prompt) return null
+  return {
+    id,
+    source: raw.source as GeneratedKnowledgeCard['source'],
+    discipline: normalizeString(raw.discipline) || undefined,
+    copy: {
+      locale,
+      title,
+      description,
+      prompt,
+      createdAt: normalizeString(rawCopy.createdAt) || new Date(0).toISOString()
+    }
+  }
+}
+
+function normalizeKnowledgeCards (value: unknown): GeneratedKnowledgeCard[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const cards: GeneratedKnowledgeCard[] = []
+  for (const item of value) {
+    const card = normalizeKnowledgeCard(item)
+    if (!card || seen.has(card.id)) continue
+    seen.add(card.id)
+    cards.push(card)
+  }
+  return cards.slice(-MAX_KNOWLEDGE_CARDS)
+}
+
 function normalizeReplenish (value: unknown): KnowledgeReplenishState {
   const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
   const lastAttemptDate = normalizeString(raw.lastAttemptDate)
@@ -225,6 +276,7 @@ function normalizeSnapshot (value: unknown): DailySuggestionStoreSnapshot {
   const todayDate = normalizeString(rawToday.date)
   const todaySeedId = normalizeString(rawToday.seedId)
   const shuffleCount = typeof rawToday.shuffleCount === 'number' && Number.isFinite(rawToday.shuffleCount) ? Math.max(0, Math.floor(rawToday.shuffleCount)) : 0
+  const cursor = typeof raw.knowledgeCardCursor === 'number' && Number.isFinite(raw.knowledgeCardCursor) ? Math.max(0, Math.floor(raw.knowledgeCardCursor)) : 0
   return {
     preferences: normalizeDailySuggestionPreferences(raw.preferences),
     batches: batches.slice(0, MAX_BATCH_HISTORY),
@@ -237,6 +289,8 @@ function normalizeSnapshot (value: unknown): DailySuggestionStoreSnapshot {
       : { date: '', seedId: '', shuffleCount: 0 },
     knowledgeSalt: normalizeString(raw.knowledgeSalt) || crypto.randomUUID(),
     knowledgeGeneratedSeeds: normalizeGeneratedSeeds(raw.knowledgeGeneratedSeeds),
+    knowledgeCardPool: normalizeKnowledgeCards(raw.knowledgeCardPool),
+    knowledgeCardCursor: cursor,
     knowledgeReplenish: normalizeReplenish(raw.knowledgeReplenish)
   }
 }
@@ -399,6 +453,69 @@ export class DailySuggestionStore {
     }
     this.write({ ...snapshot, knowledgeGeneratedSeeds: merged })
     return fresh.length
+  }
+
+  getKnowledgeCards (): GeneratedKnowledgeCard[] {
+    return JSON.parse(JSON.stringify(this.read().knowledgeCardPool)) as GeneratedKnowledgeCard[]
+  }
+
+  getKnowledgeCardCursor (): number {
+    return this.read().knowledgeCardCursor
+  }
+
+  /** Advance the draw cursor so the next draw starts past what was shown. */
+  bumpKnowledgeCardCursor (): number {
+    const snapshot = this.read()
+    const next = snapshot.knowledgeCardCursor + 1
+    this.write({ ...snapshot, knowledgeCardCursor: next })
+    return next
+  }
+
+  /**
+   * Append pool cards, skipping ids and same-source same-locale titles already
+   * present. Overflow evicts the oldest entries first, except `keepIds` — ids
+   * shown today must survive so refreshes keep working within the day.
+   */
+  appendKnowledgeCards (cards: GeneratedKnowledgeCard[], keepIds: readonly string[] = []): number {
+    const snapshot = this.read()
+    const existingIds = new Set(snapshot.knowledgeCardPool.map(card => card.id))
+    const existingTitles = new Set(
+      snapshot.knowledgeCardPool.map(card => `${card.source}|${card.copy.locale}|${titleKey(card.copy.title)}`)
+    )
+    const fresh = cards.filter(card => {
+      if (existingIds.has(card.id)) return false
+      const title = `${card.source}|${card.copy.locale}|${titleKey(card.copy.title)}`
+      if (existingTitles.has(title)) return false
+      existingIds.add(card.id)
+      existingTitles.add(title)
+      return true
+    })
+    if (fresh.length === 0) return 0
+    let merged = [...snapshot.knowledgeCardPool, ...fresh]
+    if (merged.length > MAX_KNOWLEDGE_CARDS) {
+      const keep = new Set(keepIds)
+      const evictable = merged.filter(card => !keep.has(card.id))
+      const excess = merged.length - MAX_KNOWLEDGE_CARDS
+      const evicted = new Set(evictable.slice(0, excess).map(card => card.id))
+      merged = merged.filter(card => !evicted.has(card.id))
+    }
+    this.write({ ...snapshot, knowledgeCardPool: merged })
+    return fresh.length
+  }
+
+  /** Record drawn card ids in the shown-history so the reuse window skips them. */
+  recordKnowledgeShown (date: string, ids: readonly string[]): void {
+    if (ids.length === 0) return
+    const snapshot = this.read()
+    const known = new Set(snapshot.knowledgeSeedHistory.map(entry => `${entry.seedId}|${entry.date}`))
+    const entries = snapshot.knowledgeSeedHistory.slice()
+    for (const id of ids) {
+      const key = `${id}|${date}`
+      if (known.has(key)) continue
+      known.add(key)
+      entries.push({ seedId: id, date })
+    }
+    this.write({ ...snapshot, knowledgeSeedHistory: entries.slice(-MAX_SEED_HISTORY) })
   }
 
   getKnowledgeReplenish (): KnowledgeReplenishState {

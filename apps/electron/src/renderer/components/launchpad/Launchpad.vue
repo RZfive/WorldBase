@@ -1292,11 +1292,15 @@ onUnmounted(() => {
   border-top-left-radius: var(--app-frame-corner-radius, 16px);
   z-index: 20;
   color: var(--app-text);
+  /* Solid base layer instead of a full-screen 40px backdrop-filter: the
+     overlay already covers the window, so blurring what is underneath
+     bought nothing visible while re-running a screen-sized blur on every
+     frame the shell repainted (streaming text, dock hover, etc.). */
   background:
     radial-gradient(circle at 18% 18%, var(--lp-accent-soft), transparent 24%),
     radial-gradient(circle at 82% 12%, rgba(245, 158, 11, 0.1), transparent 20%),
-    linear-gradient(180deg, var(--app-main-surface), var(--app-shell-bg));
-  backdrop-filter: blur(40px) saturate(1.2);
+    linear-gradient(180deg, var(--app-main-surface), var(--app-shell-bg)),
+    var(--app-main-surface);
   display: flex;
   flex-direction: column;
   animation: lp-fade-in 0.25s ease;
@@ -1641,8 +1645,9 @@ onUnmounted(() => {
 
 .folder-bubble {
   position: relative;
+  /* --app-panel-strong is already ~opaque; the 30px blur underneath it was
+     invisible but re-ran on every frame of the pop-in/out animation. */
   background: var(--app-panel-strong);
-  backdrop-filter: blur(30px);
   border: 1px solid var(--app-border-strong);
   border-radius: 24px;
   width: 420px;

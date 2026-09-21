@@ -23,6 +23,7 @@ import {
   loadDailySuggestions,
   markDailySuggestionsSeen,
   recordDailySuggestionPick,
+  refreshKnowledgeSuggestionCard,
   shuffleKnowledgeSuggestion
 } from './suggestion-state'
 import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
@@ -135,6 +136,8 @@ const {
   selectAllSkills,
   sendMessage,
   sendLongTermGoalMessage,
+  startLongTermGoalCreation,
+  longTermGoalWorkspaceActive,
   startEditUserMessage,
   compactLongTermGoalMemory,
   deleteLongTermGoalMemory,
@@ -655,7 +658,7 @@ watch(
           :conversation-items="conversationSidebarItems"
           :conversation-list-loaded="conversationsLoaded"
           @new-conversation="newConversation"
-          @new-long-term-goal="createLongTermGoal"
+          @new-long-term-goal="startLongTermGoalCreation"
           @toggle-collapse="toggleConversationSidebar"
           @select-conversation="loadConversation"
           @open-agent="openAgentWorkspaceConversation"
@@ -734,8 +737,9 @@ watch(
         }"
       >
         <LongTermGoalPanel
-          v-if="currentLongTermGoal"
+          v-if="currentLongTermGoal || longTermGoalWorkspaceActive"
           :goal="currentLongTermGoal"
+          :auto-open-create="longTermGoalWorkspaceActive && !currentLongTermGoal"
           :snapshot="longTermGoalSnapshot"
           :providers="providers"
           :active-provider-id="activeProviderId"
@@ -831,6 +835,7 @@ watch(
                 @pick="pickSuggestion"
                 @dismiss="(item) => dismissDailySuggestion(item)"
                 @refresh="refreshDailySuggestions"
+                @refresh-card="(item) => refreshKnowledgeSuggestionCard(item.id)"
                 @shuffle="shuffleKnowledgeSuggestion"
                 @open-settings="emit('openSettings', 'daily-suggestions')"
                 @setup-provider="openProviderSetup"

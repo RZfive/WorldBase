@@ -117,10 +117,28 @@ export function createLongTermGoalState (options: LongTermGoalStateOptions) {
     await loadLongTermGoalSnapshot(goalId)
   }
 
+  /**
+   * Enter the goal workspace with no goal selected so the panel's empty state
+   * (and its create dialog) can show. The sidebar's "new goal" buttons used to
+   * call createLongTermGoal() with no seed, which returned early and did
+   * nothing visible.
+   */
+  function startLongTermGoalCreation (): void {
+    prepareGoalWorkspace()
+    selectedLongTermGoalId.value = null
+    longTermGoalSnapshot.value = null
+    pendingCreationConfirm.value = null
+    createConversationHistory.value = []
+    streamingCreate.value = null
+  }
+
   async function createLongTermGoal (seed?: string, options?: { providerId?: string | null; modelId?: string | null }): Promise<void> {
-    if (!window.electronAPI?.streamLongTermGoalCreate) return
     const normalizedSeed = typeof seed === 'string' ? seed.trim() : ''
-    if (!normalizedSeed) return
+    if (!normalizedSeed) {
+      startLongTermGoalCreation()
+      return
+    }
+    if (!window.electronAPI?.streamLongTermGoalCreate) return
 
     const streamId = generateId()
     const message: ChatMessage = {
@@ -686,6 +704,7 @@ export function createLongTermGoalState (options: LongTermGoalStateOptions) {
     runLongTermGoalNow,
     saveLongTermGoalPatch,
     sendLongTermGoalMessage,
+    startLongTermGoalCreation,
     streamingAdjust,
     streamingCreate,
     streamingReplan,

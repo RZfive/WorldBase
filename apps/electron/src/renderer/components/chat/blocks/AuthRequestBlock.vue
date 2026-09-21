@@ -82,6 +82,7 @@ const statusText = computed(() => {
 }
 
 .auth-request-card {
+  position: relative;
   padding: 10px 12px;
   border-color: rgba(245, 158, 11, 0.35);
   background: linear-gradient(180deg, var(--app-panel), var(--app-panel-subtle));
@@ -91,6 +92,17 @@ const statusText = computed(() => {
 .auth-request-card.pending {
   border-color: rgba(245, 158, 11, 0.45);
   box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.08), 0 12px 30px rgba(15, 23, 42, 0.08);
+}
+
+/* Pulse ring: animates opacity on a static inset ring instead of `box-shadow`,
+   so the breath runs on the compositor rather than re-blurring every frame. */
+.auth-request-card.pending::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 2px rgba(245, 158, 11, 0.14);
+  pointer-events: none;
   animation: auth-pulse 2s ease-in-out infinite;
 }
 
@@ -104,8 +116,12 @@ const statusText = computed(() => {
 }
 
 @keyframes auth-pulse {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.08), 0 12px 30px rgba(15, 23, 42, 0.08); }
-  50% { box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.12), 0 12px 30px rgba(15, 23, 42, 0.08); }
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-request-card.pending::after { animation: none; opacity: 0.6; }
 }
 
 .auth-request-icon-row {

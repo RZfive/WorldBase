@@ -84,10 +84,28 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
   bool _refreshing = false;
   bool _shuffling = false;
 
+  /// 牌面子树按牌 id 缓存。切牌动画每帧只改 Transform 与层级顺序:widget 实例
+  /// 不变时 Flutter 会整棵跳过重建,再配合 RepaintBoundary,动画帧退化为纯合成。
+  final Map<String, (int, Widget)> _faces = <String, (int, Widget)>{};
+
   @override
   void initState() {
     super.initState();
     _pageCtrl.addStatusListener(_onPageStatus);
+  }
+
+  @override
+  void didUpdateWidget(SuggestionHand oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 回调闭包可能已换新,牌面上挂着的旧闭包不能再用。
+    _faces.clear();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 主题/明暗切换后,旧配色画出来的牌面全部作废。
+    _faces.clear();
   }
 
   @override
@@ -293,17 +311,14 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
                         child: Transform(
                           alignment: Alignment.bottomCenter,
                           transform: _cardTransform(index, _pageCtrl.value, deal),
-                          // Opacity at 1.0 paints straight through, so keeping the
-                          // wrapper avoids re-parenting the card when the deal ends.
-                          child: Opacity(
-                            opacity: deal,
-                            child: _buildCard(
-                              index,
-                              cards[index],
-                              index == active,
-                              // Far cards only show a sliver; skip their backdrop blur.
-                              (index - page).abs() <= 2.05,
-                              state,
+                          // 边界在 Transform 内侧:矩阵每帧变化只重画这一层的合成,
+                          // 牌面(连同 40px 投影)的位图被缓存,拖动不再整片重绘。
+                          child: RepaintBoundary(
+                            // Opacity at 1.0 paints straight through, so keeping the
+                            // wrapper avoids re-parenting the card when the deal ends.
+                            child: Opacity(
+                              opacity: deal,
+                              child: _cardFace(index, cards[index], index == active, state),
                             ),
                           ),
                         ),
@@ -318,12 +333,34 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     );
   }
 
-  Widget _buildCard(int index, _HandCard card, bool active, bool blur, DailySuggestionState state) {
+  /// 取(或建)一张牌的牌面。只在离散状态变化时重建;动画帧之间返回同一个
+  /// widget 实例,Flutter 检测到 identical 后整棵子树都不重建、不重排版。
+  /// 索引参与键:移除一张牌后其余牌会前移,闭包里的旧索引不能复用。
+  Widget _cardFace(int index, _HandCard card, bool active, DailySuggestionState state) {
+    final key = Object.hash(
+      index,
+      identityHashCode(card.item),
+      active,
+      state.knowledgeShuffleRemaining,
+      _shuffling,
+      identityHashCode(widget.onPick),
+      identityHashCode(widget.onOpenSettings),
+    );
+    final cached = _faces[card.id];
+    if (cached != null && cached.$1 == key) return cached.$2;
+    final face = _buildCard(index, card, active, state);
+    _faces[card.id] = (key, face);
+    return face;
+  }
+
+  Widget _buildCard(int index, _HandCard card, bool active, DailySuggestionState state) {
     if (card.isEnableCta) {
       return _EnableCard(
         key: ValueKey(card.id),
         lifted: active,
-        blur: blur,
+        // 只有当前这张做背景模糊:两侧的牌只露一条 11~26px 的牌边,磨砂底色
+        // 本就近乎不透明,省掉它们的 BackdropFilter 是滑动流畅度的大头。
+        blur: active,
         onTap: () => _tapCard(index, card),
       );
     }
@@ -333,7 +370,7 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
       item: item,
       group: card.group!,
       lifted: active,
-      blur: blur,
+      blur: active,
       shuffleRemaining: state.knowledgeShuffleRemaining,
       shuffling: _shuffling,
       onTap: () => _tapCard(index, card),
@@ -360,6 +397,11 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     _scheduleSeen(state);
     final cards = _cards(state);
     _cardCount = cards.length;
+    // 牌被换掉/移除后,缓存里不再存在的牌面一并清掉。
+    if (_faces.length > cards.length) {
+      final ids = {for (final card in cards) card.id};
+      _faces.removeWhere((id, _) => !ids.contains(id));
+    }
     if (cards.isEmpty) {
       _dealt = false;
     } else if (!_dealt) {

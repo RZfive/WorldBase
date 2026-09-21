@@ -64,12 +64,25 @@ export async function dismissDailySuggestion (suggestion: WorkSuggestion): Promi
 
 export const knowledgeShuffling = ref(false)
 
-/** Swap today's random knowledge seed. Errors (limit reached, disabled) leave the snapshot as is. */
+/** Swap today's random knowledge seed. Unlimited; errors leave the snapshot as is. */
 export async function shuffleKnowledgeSuggestion (): Promise<void> {
   if (!window.electronAPI?.shuffleKnowledgeSuggestion || knowledgeShuffling.value) return
   knowledgeShuffling.value = true
   try {
     dailySuggestionSnapshot.value = await window.electronAPI.shuffleKnowledgeSuggestion()
+  } catch {
+    await loadDailySuggestions(true)
+  } finally {
+    knowledgeShuffling.value = false
+  }
+}
+
+/** Swap one knowledge card (any source) for the next pool entry. Unlimited. */
+export async function refreshKnowledgeSuggestionCard (suggestionId: string): Promise<void> {
+  if (!window.electronAPI?.refreshKnowledgeSuggestionCard || knowledgeShuffling.value) return
+  knowledgeShuffling.value = true
+  try {
+    dailySuggestionSnapshot.value = await window.electronAPI.refreshKnowledgeSuggestionCard(suggestionId)
   } catch {
     await loadDailySuggestions(true)
   } finally {

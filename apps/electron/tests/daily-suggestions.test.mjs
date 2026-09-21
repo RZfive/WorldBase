@@ -5,16 +5,17 @@ import os from 'node:os'
 import path from 'node:path'
 import './register-ts-hooks.mjs'
 import { DailySuggestionStore, MAX_GENERATED_SEEDS } from '../src/main/settings/daily-suggestion-store.ts'
-import { DailySuggestionService, KNOWLEDGE_REPLENISH_BATCH, extractJsonArray, normalizeGeneratedSeed, normalizeKnowledgeSuggestion, normalizeLlmSuggestion } from '../src/main/suggestions/daily-suggestion-service.ts'
+import { DailySuggestionService, KNOWLEDGE_CARD_REPLENISH_BATCH, KNOWLEDGE_REPLENISH_BATCH, extractJsonArray, knowledgeCopyLooksBroken, normalizeGeneratedKnowledgeCard, normalizeGeneratedSeed, normalizeKnowledgeSuggestion, normalizeLlmSuggestion } from '../src/main/suggestions/daily-suggestion-service.ts'
 import { buildExploreSuggestions, resolveWeeklyTheme, isoWeekNumber } from '../src/main/suggestions/static-suggestions.ts'
-import { KNOWLEDGE_DISCIPLINES, KNOWLEDGE_SEEDS, buildKnowledgePool, drawKnowledgeSeed, hashString } from '../src/main/suggestions/knowledge-seeds.ts'
-import { DEFAULT_DAILY_SUGGESTION_PREFERENCES, KNOWLEDGE_SHUFFLE_LIMIT, formatLocalDate, normalizeDailySuggestionPreferences } from '../src/shared/daily-suggestion-types.ts'
+import { KNOWLEDGE_DISCIPLINES, KNOWLEDGE_SEEDS, buildKnowledgePool, countUnseenKnowledgeCards, drawKnowledgeSeed, hashString, titleKey } from '../src/main/suggestions/knowledge-seeds.ts'
+import { DEFAULT_DAILY_SUGGESTION_PREFERENCES, formatLocalDate, normalizeDailySuggestionPreferences } from '../src/shared/daily-suggestion-types.ts'
 import zhCN from '../src/locales/zh-CN/index.ts'
 import enUS from '../src/locales/en-US/index.ts'
 
 // Daily suggestions: the opt-in feature must never generate outside the types
 // the user selected, must fall back to built-in tips when the model comes up
-// short, and must enforce the per-day manual regeneration limit.
+// short, must serve knowledge cards from a local pool with automatic top-ups,
+// and must allow unlimited manual refresh.
 
 function tempDir (t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-suggestions-'))
@@ -40,14 +41,14 @@ function fakeEngine (reply) {
 }
 
 /**
- * `allowReplenish` opts a test into the random-pool top-up. Everything else
- * marks today as already attempted, using the store's own once-a-day gate, so
- * model-call counts stay about the daily / knowledge requests under test.
+ * `allowReplenish` opts a test into the pool top-ups. Everything else records a
+ * failed attempt today (the store's own back-off), so model-call counts stay
+ * about the daily / knowledge requests under test.
  */
 function createService (t, { reply, preferences = {}, now = () => new Date('2026-09-19T10:00:00'), providerConfig = { apiKey: 'k', baseUrl: 'u', model: 'm', providerId: 'p' }, seedPreferences = true, allowReplenish = false, locale = 'zh-CN' } = {}) {
   const store = new DailySuggestionStore(tempDir(t))
   if (seedPreferences) store.savePreferences(normalizeDailySuggestionPreferences({ ...DEFAULT_DAILY_SUGGESTION_PREFERENCES, ...preferences }))
-  if (!allowReplenish) store.setKnowledgeReplenish({ lastAttemptDate: formatLocalDate(now()) })
+  if (!allowReplenish) store.setKnowledgeReplenish({ lastAttemptDate: formatLocalDate(now()), lastError: 'SUPPRESSED_FOR_TEST' })
   const { engine, calls } = fakeEngine(reply)
   const changes = []
   const service = new DailySuggestionService({
@@ -82,6 +83,21 @@ function seedReply (count = KNOWLEDGE_REPLENISH_BATCH, tag = 'a') {
 
 function isReplenishPrompt (content) {
   return /## Already in the pool/.test(content)
+}
+
+function isCardPrompt (content) {
+  return /## Cards already in the pool/.test(content)
+}
+
+/** A model reply for the card-pool top-up: distinct Chinese cards for one source. */
+function cardReply (source = 'cross-discipline', count = KNOWLEDGE_CARD_REPLENISH_BATCH, tag = 'a') {
+  return JSON.stringify(Array.from({ length: count }, (_, index) => ({
+    source,
+    discipline: `领域${tag}${index}`,
+    title: `为什么${source}${tag}${index}如此反直觉？`,
+    description: `hook ${index}`,
+    prompt: `我对「${source}${tag}${index}」有点好奇。`
+  })))
 }
 
 test('preferences normalize to safe defaults and never end up with zero types', () => {
@@ -168,15 +184,17 @@ test('generation is constrained to selected types, capped per type, and topped u
   assert.ok(snapshot.daily.every(item => item.type !== 'automation'))
 })
 
-test('manual regeneration is limited per day and the first run of a day does not count', async t => {
-  const { service } = createService(t, { reply: JSON.stringify([llmItem('new-idea', 1)]), preferences: { enabled: true, types: ['new-idea'], countPerType: 2 } })
+test('manual regeneration is unlimited and keeps counting the runs', async t => {
+  const reply = JSON.stringify([llmItem('new-idea', 1), llmItem('new-idea', 2), llmItem('new-idea', 3)])
+  const { service } = createService(t, { reply, preferences: { enabled: true, types: ['new-idea'], countPerType: 3 } })
   await service.generateNow()
   assert.equal(service.getSnapshot().lastGeneration.manualRefreshCount, 0)
-  await service.generateNow()
-  await service.generateNow()
-  await service.generateNow()
-  assert.equal(service.getSnapshot().lastGeneration.manualRefreshCount, 3)
-  await assert.rejects(() => service.generateNow(), /DAILY_SUGGESTIONS_REFRESH_LIMIT/)
+  for (let index = 0; index < 6; index++) {
+    await service.generateNow()
+  }
+  const state = service.getSnapshot().lastGeneration
+  assert.equal(state.manualRefreshCount, 6, 'every press counts, none is rejected')
+  assert.equal(state.status, 'ok')
 })
 
 test('a failed generation keeps the previous good batch visible and reports the failure', async t => {
@@ -348,20 +366,42 @@ test('normalizeKnowledgeSuggestion enforces the source allow-list, needs interes
   const base = { title: 'Why is the sky blue?', description: 'hook', prompt: 'tell me', discipline: 'physics', scene: { planMode: true } }
   const prefs = { enabled: true, sources: ['random', 'cross-discipline', 'interest'], interests: [], profession: '', countPerSource: 1 }
 
-  assert.equal(normalizeKnowledgeSuggestion({ ...base, source: 'work-domain' }, prefs, now), null, 'not selected')
-  assert.equal(normalizeKnowledgeSuggestion({ ...base, source: 'random' }, prefs, now), null, 'random is never model-generated')
-  assert.equal(normalizeKnowledgeSuggestion({ ...base, source: 'interest' }, prefs, now), null, 'no interests declared')
-  assert.equal(normalizeKnowledgeSuggestion({ ...base, source: 'cross-discipline', title: '' }, prefs, now), null)
+  assert.equal(normalizeKnowledgeSuggestion({ ...base, source: 'work-domain' }, prefs, now, 'en-US'), null, 'not selected')
+  assert.equal(normalizeKnowledgeSuggestion({ ...base, source: 'random' }, prefs, now, 'en-US'), null, 'random is never model-generated')
+  assert.equal(normalizeKnowledgeSuggestion({ ...base, source: 'interest' }, prefs, now, 'en-US'), null, 'no interests declared')
+  assert.equal(normalizeKnowledgeSuggestion({ ...base, source: 'cross-discipline', title: '' }, prefs, now, 'en-US'), null)
 
-  const ok = normalizeKnowledgeSuggestion({ ...base, source: 'cross-discipline' }, prefs, now)
+  const ok = normalizeKnowledgeSuggestion({ ...base, source: 'cross-discipline' }, prefs, now, 'en-US')
   assert.equal(ok.layer, 'knowledge')
   assert.equal(ok.type, 'knowledge')
   assert.equal(ok.source, 'llm')
   assert.deepEqual(ok.knowledge, { source: 'cross-discipline', discipline: 'physics' })
   assert.equal(ok.scene, undefined, 'knowledge cards never carry a scene')
 
-  const withInterests = normalizeKnowledgeSuggestion({ ...base, source: 'interest' }, { ...prefs, interests: ['astronomy'] }, now)
+  const withInterests = normalizeKnowledgeSuggestion({ ...base, source: 'interest' }, { ...prefs, interests: ['astronomy'] }, now, 'en-US')
   assert.equal(withInterests.knowledge.source, 'interest')
+})
+
+test('broken model copy is rejected: template placeholders and wrong-language prompts', () => {
+  const now = new Date('2026-09-19T10:00:00')
+  const prefs = { enabled: true, sources: ['cross-discipline'], interests: [], profession: '', countPerSource: 1 }
+  const base = { source: 'cross-discipline', title: '为什么热水结冰更快？', description: 'd', discipline: 'physics', prompt: '我对「姆潘巴效应」有点好奇。' }
+
+  // The model echoed the prompt template with the placeholder X still in it.
+  assert.equal(normalizeKnowledgeSuggestion({ ...base, prompt: 'I\'m curious about X. Start with an everyday analogy, then tell me the most counter-intuitive thing.' }, prefs, now, 'zh-CN'), null, 'English template for a zh locale')
+  assert.equal(normalizeKnowledgeSuggestion({ ...base, prompt: '关于X，先讲讲它是什么。' }, prefs, now, 'zh-CN'), null, 'bare placeholder X kept')
+  assert.equal(normalizeKnowledgeSuggestion({ ...base, prompt: '我对「X」有点好奇。' }, prefs, now, 'zh-CN'), null, 'quoted placeholder kept')
+  assert.equal(knowledgeCopyLooksBroken('zh-CN', '热冰悖论', '我对「X光」的发现史有点好奇。'), false, 'X-ray style compounds stay fine')
+
+  const good = normalizeKnowledgeSuggestion({ ...base, prompt: '我对「姆潘巴效应」有点好奇，先用日常类比讲讲它。' }, prefs, now, 'zh-CN')
+  assert.ok(good, 'clean Chinese copy passes')
+  assert.equal(normalizeKnowledgeSuggestion({ ...base, title: 'Why hot water freezes faster?' }, prefs, now, 'en-US') !== null, true, 'clean English copy passes for en locale')
+
+  const card = normalizeGeneratedKnowledgeCard(base, prefs, 'zh-CN', now, new Set())
+  assert.equal(card.source, 'cross-discipline')
+  assert.match(card.id, /^kc-/)
+  assert.equal(card.copy.locale, 'zh-CN')
+  assert.equal(normalizeGeneratedKnowledgeCard(base, prefs, 'zh-CN', now, new Set([`cross-discipline|zh-CN|${titleKey(card.copy.title)}`])), null, 'duplicate title dropped')
 })
 
 test('with no provider the random knowledge card still shows and never calls the model', async t => {
@@ -374,28 +414,25 @@ test('with no provider the random knowledge card still shows and never calls the
   assert.equal(snapshot.knowledge[0].knowledge.source, 'random')
   assert.equal(snapshot.knowledge[0].source, 'static')
   assert.match(snapshot.knowledge[0].title, /^chatUi\.suggestions\.knowledgeSeeds\./)
-  assert.equal(snapshot.knowledgeShuffleRemaining, KNOWLEDGE_SHUFFLE_LIMIT)
   assert.equal(snapshot.providerMissing, false, 'the random card alone does not need a provider')
   // Same day → same card.
   assert.equal(service.getSnapshot().knowledge[0].id, snapshot.knowledge[0].id)
 })
 
-test('shuffling swaps the random seed, is limited per day, and resets the next day', async t => {
+test('shuffling swaps the random seed without a per-day cap and resets the next day', async t => {
   let clock = new Date('2026-09-19T10:00:00')
   const { service, store } = createService(t, { reply: '[]', now: () => clock })
   const first = service.getSnapshot().knowledge[0].knowledge.seedId
   const seen = new Set([first])
-  for (let index = 0; index < KNOWLEDGE_SHUFFLE_LIMIT; index++) {
+  // Well past the old five-per-day cap: every swap still yields a new seed.
+  for (let index = 0; index < 10; index++) {
     const next = service.shuffleKnowledge().knowledge[0].knowledge.seedId
     assert.ok(!seen.has(next), 'each shuffle yields a seed not shown today')
     seen.add(next)
   }
-  assert.equal(service.getSnapshot().knowledgeShuffleRemaining, 0)
-  assert.throws(() => service.shuffleKnowledge(), /KNOWLEDGE_SHUFFLE_LIMIT/)
-  assert.equal(store.getKnowledgeSeedHistory().length, KNOWLEDGE_SHUFFLE_LIMIT + 1, 'shuffled-away seeds enter the history')
+  assert.equal(store.getKnowledgeSeedHistory().length, 11, 'shuffled-away seeds enter the history')
 
   clock = new Date('2026-09-20T10:00:00')
-  assert.equal(service.getSnapshot().knowledgeShuffleRemaining, KNOWLEDGE_SHUFFLE_LIMIT)
   assert.ok(!seen.has(service.getSnapshot().knowledge[0].knowledge.seedId), 'tomorrow avoids everything shown today')
 
   // Dismissing today's random card hides it for the day; no replacement is pushed.
@@ -404,14 +441,14 @@ test('shuffling swaps the random seed, is limited per day, and resets the next d
   assert.equal(store.getKnowledgeDismissStreaks().random, 1)
 })
 
-test('LLM knowledge sources run as a separate request, respect countPerSource, and survive the daily group failing', async t => {
+test('LLM knowledge sources run as a separate request, respect countPerSource, and bank results into the pool', async t => {
   const knowledgeReply = JSON.stringify([
-    { source: 'cross-discipline', discipline: 'biology', title: 'Why hexagons?', description: 'd', prompt: 'p1' },
-    { source: 'cross-discipline', discipline: 'history', title: 'Extra', description: 'd', prompt: 'p2' }, // over countPerSource → dropped
-    { source: 'interest', discipline: 'astronomy', title: 'Why is Venus hot?', description: 'd', prompt: 'p3' },
-    { source: 'work-domain', discipline: 'x', title: 'not selected', description: 'd', prompt: 'p4' }
+    { source: 'cross-discipline', discipline: 'biology', title: '为什么蜂巢是六边形？', description: 'd', prompt: '我对「蜂巢猜想」有点好奇。' },
+    { source: 'cross-discipline', discipline: 'history', title: '额外的卡片为什么出现了？', description: 'd', prompt: '我对「额外的卡片」有点好奇。' }, // over countPerSource → not shown today, banked into the pool
+    { source: 'interest', discipline: 'astronomy', title: '金星为什么比水星更热？', description: 'd', prompt: '我对「金星温室效应」有点好奇。' },
+    { source: 'work-domain', discipline: 'x', title: 'not selected', description: 'd', prompt: 'p4' } // not selected → dropped
   ])
-  const { service, calls } = createService(t, {
+  const { service, store, calls } = createService(t, {
     reply: (call) => (call === 1 ? new Error('daily boom') : knowledgeReply),
     preferences: {
       enabled: true,
@@ -437,11 +474,19 @@ test('LLM knowledge sources run as a separate request, respect countPerSource, a
   assert.deepEqual(llm.map(item => item.knowledge.source).sort(), ['cross-discipline', 'interest'])
   assert.ok(llm.every(item => item.fresh && item.layer === 'knowledge'))
   assert.deepEqual(snapshot.daily, [], 'a fully failed daily request keeps the previous daily items (none on day one)')
+
+  // Everything valid the model produced is banked for future draws, even the
+  // card that was capped out of today's hand.
+  const banked = store.getKnowledgeCards()
+  assert.equal(banked.length, 3)
+  assert.ok(banked.every(card => card.copy.locale === 'zh-CN' && card.id.startsWith('kc-')))
+  assert.equal(snapshot.knowledgePool.cards, 3)
+  assert.equal(snapshot.knowledgePool.cardsUnseen, 3, 'nothing has been drawn from the pool yet')
 })
 
 test('knowledge LLM sources run even when daily picks are off', async t => {
-  const reply = JSON.stringify([{ source: 'work-domain', discipline: 'backend', title: 'Why idempotency?', description: 'd', prompt: 'p' }])
-  const { service, calls } = createService(t, {
+  const reply = JSON.stringify([{ source: 'work-domain', discipline: 'backend', title: '幂等性为什么重要？', description: 'd', prompt: '我想聊聊幂等性。' }])
+  const { service, store, calls } = createService(t, {
     reply,
     preferences: { enabled: false, knowledge: { enabled: true, sources: ['random', 'work-domain'], interests: [], profession: '', countPerSource: 1 } }
   })
@@ -453,10 +498,132 @@ test('knowledge LLM sources run even when daily picks are off', async t => {
   assert.deepEqual(snapshot.daily, [])
   assert.equal(snapshot.knowledge.length, 2)
   assert.equal(snapshot.knowledge[1].knowledge.source, 'work-domain')
+  assert.equal(store.getKnowledgeCards().length, 1, 'the produced card is banked')
 
   // Dismissing a knowledge item feeds a per-source streak; picking clears it.
   service.dismiss(snapshot.knowledge[1].id)
   assert.equal(service.getSnapshot().knowledge.length, 1)
+})
+
+// ── Knowledge card pool (题库) ─────────────────────────────────────────────
+// Every knowledge refresh draws from the local pool without a model call; the
+// model only fills the shortfall and banks its output. A pool that has been
+// 80% consumed schedules the next batch.
+
+test('a stocked pool serves knowledge cards with zero model calls and rotates on refresh', async t => {
+  const { service, store, calls } = createService(t, {
+    reply: () => { throw new Error('must not be called') },
+    preferences: { enabled: false, knowledge: { enabled: true, sources: ['random', 'cross-discipline'], interests: [], profession: '', countPerSource: 1 } }
+  })
+  const cards = Array.from({ length: 4 }, (_, index) => ({
+    id: `kc-pool-${index}`,
+    source: 'cross-discipline',
+    discipline: `领域${index}`,
+    copy: { locale: 'zh-CN', title: `为什么题目${index}如此反直觉？`, description: 'd', prompt: `我对「题目${index}」有点好奇。`, createdAt: '2026-09-01T00:00:00.000Z' }
+  }))
+  store.appendKnowledgeCards(cards)
+  store.appendKnowledgeCards(cards, []) // duplicates are ignored
+
+  const first = await service.generateNow()
+  assert.equal(calls.length, 0, 'pool covers the request → no completion')
+  assert.equal(first.knowledge.length, 2, 'random seed plus one pool card')
+  assert.match(first.knowledge[1].id, /^kcard:2026-09-19:kc-pool-/)
+  assert.equal(first.knowledge[1].source, 'llm')
+  assert.equal(first.knowledge[1].knowledge.seedId.startsWith('kc-pool-'), true)
+  assert.equal(first.lastGeneration.status, 'ok')
+  assert.equal(first.knowledgePool.cards, 4)
+  assert.equal(first.knowledgePool.cardsUnseen, 3, 'the drawn card counts as seen')
+
+  const second = await service.generateNow()
+  assert.equal(calls.length, 0)
+  assert.notEqual(second.knowledge[1].knowledge.seedId, first.knowledge[1].knowledge.seedId, 'the next refresh draws a different card')
+
+  // A dismissed pool card never comes back the same day.
+  const shown = second.knowledge[1]
+  service.dismiss(shown.id)
+  const third = await service.generateNow()
+  assert.ok(third.knowledge.every(item => item.id !== shown.id))
+})
+
+test('a single knowledge card can be swapped for the next pool entry, unlimited', async t => {
+  const { service, store } = createService(t, {
+    reply: () => { throw new Error('must not be called') },
+    preferences: { enabled: false, knowledge: { enabled: true, sources: ['random', 'work-domain'], interests: [], profession: '', countPerSource: 1 } }
+  })
+  const cards = Array.from({ length: 5 }, (_, index) => ({
+    id: `kc-swap-${index}`,
+    source: 'work-domain',
+    discipline: `后端${index}`,
+    copy: { locale: 'zh-CN', title: `为什么套路${index}总被忽视？`, description: 'd', prompt: `我对「套路${index}」有点好奇。`, createdAt: '2026-09-01T00:00:00.000Z' }
+  }))
+  store.appendKnowledgeCards(cards)
+  const hand = await service.generateNow()
+  const card = hand.knowledge.find(item => item.knowledge?.source === 'work-domain')
+
+  const seen = new Set([card.knowledge.seedId])
+  let current = card
+  for (let index = 0; index < 4; index++) {
+    const next = await service.refreshKnowledgeCard(current.id)
+    const swapped = next.knowledge.find(item => item.knowledge?.source === 'work-domain')
+    assert.ok(!seen.has(swapped.knowledge.seedId), 'each swap yields a card not currently shown')
+    assert.ok(swapped.id.startsWith('kcard:2026-09-19:'))
+    assert.equal(next.knowledge.find(item => item.knowledge?.source === 'random').knowledge.source, 'random', 'the random card is untouched')
+    seen.add(swapped.knowledge.seedId)
+    current = swapped
+  }
+
+  // The random card goes through the seed shuffle instead of the card pool.
+  const randomCard = service.getSnapshot().knowledge[0]
+  const shuffled = await service.refreshKnowledgeCard(randomCard.id)
+  assert.notEqual(shuffled.knowledge[0].knowledge.seedId, randomCard.knowledge.seedId)
+
+  await assert.rejects(() => service.refreshKnowledgeCard('kcard:2026-09-19:kc-missing'), /KNOWLEDGE_CARD_NOT_FOUND/)
+})
+
+test('an 80% consumed pool triggers the next batch; a failed attempt backs off until tomorrow', async t => {
+  let clock = new Date('2026-09-19T10:00:00')
+  const { service, store, calls } = createService(t, {
+    reply: (_call, content) => (isCardPrompt(content) ? cardReply() : '[]'),
+    allowReplenish: true,
+    preferences: { enabled: false, knowledge: { enabled: true, sources: ['cross-discipline'], interests: [], profession: '', countPerSource: 1 } },
+    now: () => clock
+  })
+  const seedPool = Array.from({ length: 5 }, (_, index) => ({
+    id: `kc-drain-${index}`,
+    source: 'cross-discipline',
+    discipline: '历史',
+    copy: { locale: 'zh-CN', title: `为什么事件${index}被遗忘了？`, description: 'd', prompt: `我对「事件${index}」有点好奇。`, createdAt: '2026-09-01T00:00:00.000Z' }
+  }))
+  store.appendKnowledgeCards(seedPool)
+  // 4 of 5 shown within the reuse window → 80% consumed.
+  store.recordKnowledgeShown('2026-09-18', seedPool.slice(0, 4).map(card => card.id))
+  assert.equal(store.getKnowledgeCardCursor(), 0)
+
+  await service.maybeReplenishKnowledgePool()
+  const cardCalls = calls.filter(call => isCardPrompt(call.messages[0].content))
+  assert.equal(cardCalls.length, 1, 'drained pool → the next batch is generated')
+  assert.match(cardCalls[0].messages[0].content, /locale tag "zh-CN"/)
+  assert.match(cardCalls[0].messages[0].content, /- cross-discipline: 为什么事件0被遗忘了？/, 'existing titles are listed as covered')
+  assert.equal(store.getKnowledgeCards().length, 9, 'the four new cards are banked')
+  assert.ok(store.getKnowledgeReplenish().lastSuccessAt, 'success is recorded')
+
+  // A fresh success does not block a further drained-pool top-up, but a full pool is left alone.
+  await service.maybeReplenishKnowledgePool()
+  assert.equal(calls.filter(call => isCardPrompt(call.messages[0].content)).length, 1, 'pool no longer drained → nothing to do')
+
+  // A failed attempt today stops retries, even when a refresh drains the pool again.
+  clock = new Date('2026-09-20T10:00:00')
+  const failing = createService(t, {
+    reply: () => new Error('boom'),
+    allowReplenish: false,
+    preferences: { enabled: false, knowledge: { enabled: true, sources: ['cross-discipline'], interests: [], profession: '', countPerSource: 1 } },
+    now: () => clock
+  })
+  failing.store.appendKnowledgeCards(seedPool)
+  failing.store.recordKnowledgeShown('2026-09-19', seedPool.slice(0, 4).map(card => card.id))
+  failing.store.setKnowledgeReplenish({ lastAttemptDate: '2026-09-20', lastError: 'MODEL_OUTPUT_NOT_JSON' })
+  await failing.service.maybeReplenishKnowledgePool()
+  assert.equal(failing.calls.length, 0, 'failed today → back off until tomorrow')
 })
 
 // ── Random pool replenishment ─────────────────────────────────────────────
@@ -539,7 +706,7 @@ test('automatic top-up runs once a provider exists, dedupes against the pool, an
   assert.match(service.getSnapshot().knowledgePool.lastReplenishError, /MODEL_OUTPUT_EMPTY/)
 })
 
-test('top-up stays quiet without a provider or with the random source off, and skips when the pool is fresh and full', async t => {
+test('top-up stays quiet without a provider or with both pools off, and skips when the pool is fresh and full', async t => {
   const noProvider = createService(t, { reply: seedReply(), providerConfig: null, allowReplenish: true })
   noProvider.service.start()
   await new Promise(resolve => setTimeout(resolve, 20))
@@ -547,20 +714,28 @@ test('top-up stays quiet without a provider or with the random source off, and s
   assert.equal(noProvider.service.getSnapshot().knowledgePool.generated, 0)
   await assert.rejects(() => noProvider.service.replenishKnowledgePoolNow(), /PROVIDER_MISSING/)
 
+  // Random off but a model-backed source on: the card pool is the one topped up.
   const randomOff = createService(t, {
-    reply: seedReply(),
+    reply: (_call, content) => (isCardPrompt(content) ? cardReply('work-domain') : seedReply()),
     allowReplenish: true,
     preferences: { knowledge: { enabled: true, sources: ['work-domain'], interests: [], profession: '', countPerSource: 1 } }
   })
   randomOff.service.start()
   await new Promise(resolve => setTimeout(resolve, 20))
-  assert.equal(randomOff.calls.filter(call => isReplenishPrompt(call.messages[0].content)).length, 0, 'random source off → no top-up')
-  await assert.rejects(() => randomOff.service.replenishKnowledgePoolNow(), /KNOWLEDGE_RANDOM_DISABLED/)
+  const seedCalls = () => randomOff.calls.filter(call => isReplenishPrompt(call.messages[0].content))
+  assert.equal(seedCalls().length, 0, 'random source off → no seed top-up')
+  assert.equal(randomOff.store.getKnowledgeCards().length, KNOWLEDGE_CARD_REPLENISH_BATCH, 'empty card pool → one batch generated at startup')
 
-  // Turning the random source on afterwards triggers the top-up right away.
+  // Turning the random source on afterwards: today's slot was used by the card
+  // batch, so the seed top-up waits for tomorrow (or a manual run).
   randomOff.service.savePreferences({ ...DEFAULT_DAILY_SUGGESTION_PREFERENCES, knowledge: { enabled: true, sources: ['random', 'work-domain'], interests: [], profession: '', countPerSource: 1 } })
   await new Promise(resolve => setTimeout(resolve, 20))
-  assert.equal(randomOff.calls.filter(call => isReplenishPrompt(call.messages[0].content)).length, 1)
+  assert.equal(seedCalls().length, 0, 'one replenish slot per day across pools')
+  // Clearing the day's attempt (tomorrow, or a manual run) lets the seeds top up.
+  randomOff.store.setKnowledgeReplenish({ lastAttemptDate: '', lastError: '', lastSuccessAt: '' })
+  await randomOff.service.maybeReplenishKnowledgePool()
+  assert.equal(seedCalls().length, 1, 'due again once the day gate clears')
+  assert.ok(randomOff.store.getGeneratedSeeds().length > 0)
 
   // A recent successful top-up with plenty of unseen seeds → nothing to do.
   const fresh = createService(t, { reply: seedReply(), allowReplenish: true })
@@ -639,4 +814,28 @@ test('the store drops malformed generated seeds and keeps the newest within the 
   const reloaded = new DailySuggestionStore(path.dirname(filePath))
   assert.deepEqual(reloaded.getGeneratedSeeds().map(seed => seed.id), ['gen-ok', 'gen-fine'])
   assert.equal(reloaded.getGeneratedSeeds()[1].copy.description, '')
+})
+
+test('the card pool persists, dedupes by source+locale+title, and shown cards leave the unseen count', t => {
+  const store = new DailySuggestionStore(tempDir(t))
+  const card = (id, title) => ({
+    id,
+    source: 'cross-discipline',
+    discipline: '历史',
+    copy: { locale: 'zh-CN', title, description: 'd', prompt: 'p', createdAt: '2026-09-19T00:00:00.000Z' }
+  })
+  assert.equal(store.appendKnowledgeCards([card('kc-a', '为什么A成立？'), card('kc-a', '重复id'), card('kc-b', '为什么A成立？')]), 1, 'same id and same title dedupe')
+  assert.equal(store.appendKnowledgeCards([card('kc-c', '为什么B成立？')]), 1)
+  assert.equal(store.getKnowledgeCards().length, 2)
+
+  const filePath = path.dirname(store.filePath)
+  const reloaded = new DailySuggestionStore(filePath)
+  assert.deepEqual(reloaded.getKnowledgeCards().map(entry => entry.id), ['kc-a', 'kc-c'])
+  assert.equal(reloaded.getKnowledgeCardCursor(), 0)
+  assert.equal(reloaded.bumpKnowledgeCardCursor(), 1)
+
+  const history = [{ seedId: 'kc-a', date: '2026-09-18' }]
+  const pool = buildKnowledgePool(reloaded.getGeneratedSeeds(), 'zh-CN')
+  assert.equal(countUnseenKnowledgeCards(reloaded.getKnowledgeCards(), '2026-09-19', history), 1, 'kc-a shown yesterday → only kc-c unseen')
+  assert.ok(pool.length >= KNOWLEDGE_SEEDS.length)
 })

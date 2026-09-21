@@ -49,6 +49,10 @@ export interface KnowledgePoolState {
   generated: number
   /** Seeds in the current pool not shown within the reuse window. */
   unseen: number
+  /** Model-written cards for the LLM knowledge sources, current locale. */
+  cards: number
+  /** Pool cards not shown within the reuse window, i.e. immediately drawable. */
+  cardsUnseen: number
   /** ISO time of the last successful replenishment, null when none has run. */
   lastReplenishAt: string | null
   /** Error of the last replenishment attempt, null when it succeeded or never ran. */
@@ -74,7 +78,6 @@ export interface KnowledgePreferences {
 export const KNOWLEDGE_MAX_INTERESTS = 10
 export const KNOWLEDGE_INTEREST_MAX_LENGTH = 30
 export const KNOWLEDGE_PROFESSION_MAX_LENGTH = 60
-export const KNOWLEDGE_SHUFFLE_LIMIT = 5
 
 export type SuggestionType =
   | 'new-idea'
@@ -183,8 +186,8 @@ export interface DailySuggestionGenerationState {
   at: string
   status: DailySuggestionBatchStatus
   error?: string
+  /** How many times the batch was regenerated today; informational only, there is no cap. */
   manualRefreshCount: number
-  manualRefreshLimit: number
 }
 
 export interface DailySuggestionSnapshot {
@@ -195,8 +198,6 @@ export interface DailySuggestionSnapshot {
   explore: WorkSuggestion[]
   /** Today's knowledge hooks (random seed first), dismissed ones removed. Empty when off. */
   knowledge: WorkSuggestion[]
-  /** How many times the random seed can still be swapped today. */
-  knowledgeShuffleRemaining: number
   knowledgePool: KnowledgePoolState
   /** i18n key suffix of this week's theme, e.g. `automation`. */
   weekTheme: string
@@ -206,7 +207,10 @@ export interface DailySuggestionSnapshot {
   providerMissing: boolean
 }
 
-export const DAILY_SUGGESTION_MANUAL_REFRESH_LIMIT = 3
+/**
+ * Manual refresh is unlimited: every press regenerates the daily group from
+ * the model and re-draws the knowledge group from the local pool.
+ */
 
 export const DEFAULT_DAILY_SUGGESTION_PREFERENCES: DailySuggestionPreferences = {
   enabled: false,

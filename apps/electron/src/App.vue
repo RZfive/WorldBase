@@ -1157,18 +1157,43 @@ async function refreshRunningApps () {
       }
     }
 
-    // Atomic replacement ensures Vue detects the change reliably
-    runningApps.value = nextRunningApps
+    // Only replace the Map when something actually changed. Every poll used to
+    // assign a fresh Map, which re-rendered the dock every 5s even when idle.
+    if (!runningAppsEqual(oldRunningApps, nextRunningApps)) {
+      runningApps.value = nextRunningApps
+    }
     syncEmbeddedProjectStates(projects)
   } catch {
     // ignore transient runtime errors
   }
 }
 
+function runningAppsEqual (a: Map<string, RunningApp>, b: Map<string, RunningApp>): boolean {
+  if (a.size !== b.size) return false
+  for (const [id, next] of b) {
+    const prev = a.get(id)
+    if (!prev) return false
+    if (
+      prev.name !== next.name ||
+      prev.type !== next.type ||
+      prev.icon !== next.icon ||
+      prev.port !== next.port ||
+      prev.isWindow !== next.isWindow ||
+      prev.closable !== next.closable
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
 function minimizeWindow () { window.electronAPI?.minimizeWindow() }
 function maximizeWindow () { window.electronAPI?.maximizeWindow() }
 function closeWindow () { window.electronAPI?.closeWindow() }
 function onDocClickGlobal () { hideDockCtx() }
+function onVisibilityChangeGlobal () {
+  if (!document.hidden) void refreshRunningApps()
+}
 
 onMounted(async () => {
   void computerUsePermissions.initialize()
@@ -1200,8 +1225,11 @@ onMounted(async () => {
   await loadPinnedDockApps()
   await refreshRunningApps()
   runningAppsInterval = setInterval(() => {
+    // Skip disk + IPC work while the window is hidden; catch up on return.
+    if (document.hidden) return
     void refreshRunningApps()
   }, RUNNING_APPS_REFRESH_INTERVAL_MS)
+  document.addEventListener('visibilitychange', onVisibilityChangeGlobal)
   document.addEventListener('click', onDocClickGlobal)
 
   if (window.electronAPI?.onProjectChanged) {
@@ -1261,6 +1289,7 @@ onUnmounted(() => {
   if (isStandaloneProjectWindow) return
 
   document.removeEventListener('click', onDocClickGlobal)
+  document.removeEventListener('visibilitychange', onVisibilityChangeGlobal)
   projectChangedCleanup?.()
   windowClosedCleanup?.()
   projectOpenInShellCleanup?.()

@@ -830,6 +830,10 @@ onUnmounted(() => {
       @dragleave="handleDragLeave"
       @drop="handleDrop"
     >
+      <!-- Busy ring: a masked wrapper whose rotating child carries the gradient.
+           Rotation is a pure transform, so the ring animates on the compositor
+           instead of repainting a conic-gradient every frame. -->
+      <span class="input-ring" aria-hidden="true"></span>
       <!-- Image preview inside input -->
       <div v-if="props.pendingFiles.length > 0" class="file-preview-bar">
         <div v-for="file in props.pendingFiles" :key="file.id" class="file-preview-item">
@@ -1123,28 +1127,19 @@ onUnmounted(() => {
 }
 
 /* --- design v1.7 motion: the signature gradient flows around the composer
-   while the agent works (thinking / executing). --- */
-@property --wb-ring-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
-
-.input-container::before {
-  content: '';
+   while the agent works (thinking / executing). ---
+   Energy note: the ring used to animate a registered custom property feeding a
+   conic-gradient, which forced Chromium to repaint the whole composer border
+   (and re-run the backdrop blur) on every frame. It now rotates a static
+   gradient sheet with `transform`, so the animation runs on the compositor
+   and the ring's raster is painted once. */
+.input-ring {
   position: absolute;
   inset: -1px;
   z-index: 0;
   border-radius: inherit;
   padding: 1px;
-  background: conic-gradient(
-    from var(--wb-ring-angle),
-    var(--app-accent),
-    var(--app-accent-strong) 25%,
-    var(--app-accent) 50%,
-    var(--app-accent-strong) 75%,
-    var(--app-accent)
-  );
+  overflow: hidden;
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
@@ -1154,15 +1149,37 @@ onUnmounted(() => {
   transition: opacity 0.24s ease;
 }
 
-.input-container.busy::before {
+.input-ring::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  /* A square wider than the composer's diagonal so rotation never exposes a corner. */
+  width: 240%;
+  aspect-ratio: 1 / 1;
+  background: conic-gradient(
+    from 0deg,
+    var(--app-accent),
+    var(--app-accent-strong) 25%,
+    var(--app-accent) 50%,
+    var(--app-accent-strong) 75%,
+    var(--app-accent)
+  );
+  transform: translate(-50%, -50%) rotate(0deg);
+}
+
+.input-container.busy .input-ring {
   opacity: 1;
+}
+
+.input-container.busy .input-ring::before {
   animation: input-ring-spin 3.6s linear infinite;
 }
 
 /* Waiting for authorization keeps the flow but tints it amber (状态即颜色). */
-.input-container.busy.waitingAuth::before {
+.input-container.busy.waitingAuth .input-ring::before {
   background: conic-gradient(
-    from var(--wb-ring-angle),
+    from 0deg,
     var(--app-warning),
     var(--app-warning-strong) 25%,
     var(--app-warning) 50%,
@@ -1172,7 +1189,8 @@ onUnmounted(() => {
 }
 
 @keyframes input-ring-spin {
-  to { --wb-ring-angle: 360deg; }
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
 }
 
 :global(:root[data-theme='light'] .chat-input .input-container) {
@@ -1988,17 +2006,50 @@ onUnmounted(() => {
 }
 
 .action-btn.send-btn {
+  position: relative;
   width: 32px;
   height: 32px;
   margin-left: auto;
   border-radius: 999px;
-  /* 220% wide gradient sheet: lets the signature gradient swing while running. */
-  background: var(--app-sig) 0% 50% / 220% 100% no-repeat;
+  overflow: hidden;
+  isolation: isolate;
+  background: var(--app-accent);
   color: #ffffff;
   box-shadow: 0 4px 14px color-mix(in srgb, var(--app-accent) 32%, transparent);
   transition:
     transform 0.16s cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 0.2s ease;
+}
+
+.action-btn.send-btn > svg {
+  position: relative;
+  z-index: 2;
+}
+
+/* Gradient sheet: 220% wide so the signature gradient can swing across the
+   key. It is moved with `transform` (compositor-only) instead of animating
+   `background-position`, which repainted the button every frame. */
+.action-btn.send-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 220%;
+  z-index: 0;
+  background: var(--app-sig);
+  transform: translateX(0);
+}
+
+/* Breathing halo: opacity/scale on a pre-rasterised ring instead of animating
+   `box-shadow`, which re-blurs the shadow on the CPU every frame. */
+.action-btn.send-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 2px var(--app-accent-soft);
+  opacity: 0;
+  pointer-events: none;
 }
 
 .action-btn.send-btn:hover:not(:disabled) {
@@ -2013,18 +2064,38 @@ onUnmounted(() => {
 /* Running: the icon becomes a stop square, the gradient flows and the glow
    breathes (design v1.7 — 状态即形状). */
 .action-btn.send-btn.stopping {
-  animation:
-    send-gradient-swing 2.6s ease-in-out infinite,
-    send-glow-pulse 2.4s ease-in-out infinite;
+  box-shadow: 0 5px 18px color-mix(in srgb, var(--app-accent) 40%, transparent);
+}
+
+.action-btn.send-btn.stopping::before {
+  animation: send-gradient-swing 2.6s ease-in-out infinite;
+}
+
+.action-btn.send-btn.stopping::after {
+  animation: send-glow-pulse 2.4s ease-in-out infinite;
 }
 
 /* Waiting for authorization tints the key amber and slows the breath. */
 .action-btn.send-btn.stopping.waitingAuth {
-  background: var(--app-warning) 0% 50% / 220% 100% no-repeat;
+  background: var(--app-warning);
+  box-shadow: 0 5px 18px color-mix(in srgb, var(--app-warning) 38%, transparent);
+}
+
+.action-btn.send-btn.stopping.waitingAuth::before {
+  animation: none;
+  background: var(--app-warning);
+}
+
+.action-btn.send-btn.stopping.waitingAuth::after {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--app-warning) 45%, transparent);
   animation: send-amber-glow-pulse 2.2s ease-in-out infinite;
 }
 
 .action-btn.send-btn.stopping.waitingAuth:hover:not(:disabled) {
+  background: var(--app-warning-strong);
+}
+
+.action-btn.send-btn.stopping.waitingAuth:hover:not(:disabled)::before {
   background: var(--app-warning-strong);
 }
 
@@ -2034,31 +2105,42 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
+.action-btn.send-btn:disabled::before,
+.action-btn.send-btn:disabled::after {
+  display: none;
+}
+
 @keyframes send-gradient-swing {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
+  /* Sheet is 220% of the button; sliding by its extra width sweeps the gradient. */
+  0% { transform: translateX(0); }
+  50% { transform: translateX(-54.5%); }
+  100% { transform: translateX(0); }
 }
 
 @keyframes send-glow-pulse {
-  0%, 100% { box-shadow: 0 4px 14px color-mix(in srgb, var(--app-accent) 32%, transparent), 0 0 0 2px var(--app-accent-soft); }
-  50% { box-shadow: 0 6px 22px color-mix(in srgb, var(--app-accent) 48%, transparent), 0 0 0 3px var(--app-accent-soft); }
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
 }
 
 @keyframes send-amber-glow-pulse {
-  0%, 100% { box-shadow: 0 4px 14px color-mix(in srgb, var(--app-warning) 28%, transparent); }
-  50% { box-shadow: 0 6px 22px color-mix(in srgb, var(--app-warning) 46%, transparent); }
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .input-container.busy::before,
-  .input-container.busy.waitingAuth::before {
+  .input-container.busy .input-ring::before {
     animation: none;
   }
 
-  .action-btn.send-btn.stopping,
-  .action-btn.send-btn.stopping.waitingAuth {
+  .action-btn.send-btn.stopping::before,
+  .action-btn.send-btn.stopping::after,
+  .action-btn.send-btn.stopping.waitingAuth::before,
+  .action-btn.send-btn.stopping.waitingAuth::after {
     animation: none;
+  }
+
+  .action-btn.send-btn.stopping::after {
+    opacity: 1;
   }
 
   .action-btn.send-btn {

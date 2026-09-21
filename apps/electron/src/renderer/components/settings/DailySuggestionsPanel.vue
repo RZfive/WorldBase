@@ -15,12 +15,15 @@ import {
   type DailySuggestionSnapshot,
   type KnowledgeCountPerSource,
   type KnowledgeSource,
-  type SuggestionType
+  type SuggestionType,
+  type WorkSuggestion
 } from '../../../shared/daily-suggestion-types.js'
 import {
   dailySuggestionSnapshot,
   ensureDailySuggestionSubscription,
-  loadDailySuggestions
+  knowledgeShuffling,
+  loadDailySuggestions,
+  refreshKnowledgeSuggestionCard
 } from '../chat/panel/suggestion-state'
 
 interface ProviderChoice {
@@ -50,7 +53,7 @@ const knowledge = computed(() => preferences.value.knowledge)
 const knowledgeEnabled = computed(() => knowledge.value.enabled)
 const hasProviders = computed(() => providers.value.length > 0)
 const needsInterests = computed(() => knowledge.value.sources.includes('interest') && knowledge.value.interests.length === 0)
-const todayRandom = computed(() => (snapshot.value?.knowledge ?? []).find(item => item.knowledge?.source === 'random') ?? null)
+const knowledgeCards = computed(() => snapshot.value?.knowledge ?? [])
 const knowledgeSourceOptions = computed(() => KNOWLEDGE_SOURCES.map(source => ({
   id: source,
   label: t(`chatUi.suggestions.knowledgeSources.${source}.label`),
@@ -83,21 +86,24 @@ const triggerTime = computed({
     void persist()
   }
 })
-const refreshRemaining = computed(() => {
-  const state = lastGeneration.value
-  if (!state) return null
-  return Math.max(0, state.manualRefreshLimit - state.manualRefreshCount)
-})
-const generateDisabled = computed(() => (!enabled.value && !(knowledgeEnabled.value && knowledge.value.sources.some(source => (LLM_KNOWLEDGE_SOURCES as readonly string[]).includes(source)))) || saving.value || generating.value || snapshot.value?.generating === true || refreshRemaining.value === 0)
+/** Manual refresh is unlimited: the button only waits for a running generation. */
+const generateDisabled = computed(() => (!enabled.value && !(knowledgeEnabled.value && knowledge.value.sources.some(source => (LLM_KNOWLEDGE_SOURCES as readonly string[]).includes(source)))) || saving.value || generating.value || snapshot.value?.generating === true)
 
 const replenishing = ref(false)
 const knowledgePool = computed(() => snapshot.value?.knowledgePool ?? null)
 const randomSelected = computed(() => knowledgeEnabled.value && knowledge.value.sources.includes('random'))
-const replenishDisabled = computed(() => !randomSelected.value || !hasProviders.value || saving.value || replenishing.value || knowledgePool.value?.replenishing === true)
+/** Any pool-backed source (random seeds or model-written cards) can be topped up. */
+const poolBacked = computed(() => randomSelected.value || knowledge.value.sources.some(source => (LLM_KNOWLEDGE_SOURCES as readonly string[]).includes(source)))
+const replenishDisabled = computed(() => !poolBacked.value || !hasProviders.value || saving.value || replenishing.value || knowledgePool.value?.replenishing === true)
 const knowledgePoolLabel = computed(() => {
   const pool = knowledgePool.value
   if (!pool) return ''
   return t('settings.dailySuggestions.knowledge.poolSize', { builtin: pool.builtin, generated: pool.generated, unseen: pool.unseen })
+})
+const knowledgeCardsLabel = computed(() => {
+  const pool = knowledgePool.value
+  if (!pool) return ''
+  return t('settings.dailySuggestions.knowledge.cardPoolSize', { cards: pool.cards, unseen: pool.cardsUnseen })
 })
 const knowledgePoolStatus = computed(() => {
   const pool = knowledgePool.value
@@ -286,13 +292,23 @@ function setKnowledgeCount (count: KnowledgeCountPerSource): void {
   patchKnowledge({ countPerSource: count })
 }
 
-/** Built-in seeds carry i18n keys; generated seeds carry literal model text. */
-function todayRandomText (field: 'title' | 'description'): string {
-  const item = todayRandom.value
-  if (!item) return ''
+/** Built-in seeds carry i18n keys; generated copy carries literal model text. */
+function knowledgeCardText (item: WorkSuggestion, field: 'title' | 'description'): string {
   const raw = item[field]
   if (!raw) return ''
   return item.source === 'static' && te(raw) ? t(raw) : raw
+}
+
+function knowledgeCardSourceLabel (item: WorkSuggestion): string {
+  const source = item.knowledge?.source
+  if (!source) return ''
+  return t(`chatUi.suggestions.knowledgeSources.${source}.label`)
+}
+
+/** Swap one knowledge card for the next pool entry; unlimited. */
+async function refreshCard (item: WorkSuggestion): Promise<void> {
+  await refreshKnowledgeSuggestionCard(item.id)
+  setFeedback(t('settings.dailySuggestions.knowledge.cardRefreshed'))
 }
 
 async function replenishPool (): Promise<void> {
@@ -325,10 +341,7 @@ async function generateNow (): Promise<void> {
       ? t('settings.dailySuggestions.generateFailed')
       : t('settings.dailySuggestions.generateDone', { count }))
   } catch (error) {
-    const message = (error as Error).message || ''
-    setFeedback(message.includes('DAILY_SUGGESTIONS_REFRESH_LIMIT')
-      ? t('settings.dailySuggestions.refreshLimitReached')
-      : t('settings.dailySuggestions.generateFailedWith', { message }))
+    setFeedback(t('settings.dailySuggestions.generateFailedWith', { message: (error as Error).message }))
   } finally {
     generating.value = false
   }
@@ -494,7 +507,6 @@ onMounted(() => {
         <div class="ds-card-copy">
           <span class="ds-card-title">{{ $t('settings.dailySuggestions.statusTitle') }}</span>
           <p class="ds-card-hint" :class="{ failed: lastGeneration?.status === 'failed' }">{{ lastGenerationLabel }}</p>
-          <p v-if="lastGeneration" class="ds-card-hint">{{ $t('settings.dailySuggestions.refreshRemaining', { remaining: refreshRemaining ?? 0, limit: lastGeneration.manualRefreshLimit }) }}</p>
         </div>
         <button type="button" class="ds-primary-btn" :disabled="generateDisabled" @click="generateNow">
           {{ generating || snapshot?.generating ? $t('settings.dailySuggestions.generating') : $t('settings.dailySuggestions.generateNow') }}
@@ -521,17 +533,37 @@ onMounted(() => {
     </section>
 
     <div class="ds-body" :class="{ disabled: !knowledgeEnabled }" :aria-disabled="!knowledgeEnabled">
-      <section v-if="todayRandom" class="ds-card ds-today-card">
-        <span class="ds-section-meta">{{ $t('settings.dailySuggestions.knowledge.todayRandom') }}</span>
-        <span class="ds-today-title">{{ todayRandomText('title') }}</span>
-        <p class="ds-card-hint">{{ todayRandomText('description') }}</p>
+      <!-- Today's knowledge cards; each one can be swapped for the next pool entry right here. -->
+      <section v-if="knowledgeCards.length > 0" class="ds-card">
+        <div class="ds-section-head">
+          <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.todayTitle') }}</span>
+          <span class="ds-section-meta">{{ $t('settings.dailySuggestions.knowledge.todayMeta', { count: knowledgeCards.length }) }}</span>
+        </div>
+        <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.todayHint') }}</p>
+        <div class="ds-today-list">
+          <div v-for="item in knowledgeCards" :key="item.id" class="ds-today-item">
+            <div class="ds-today-copy">
+              <span class="ds-today-source">{{ knowledgeCardSourceLabel(item) }}</span>
+              <span class="ds-today-title">{{ knowledgeCardText(item, 'title') }}</span>
+              <p class="ds-card-hint">{{ knowledgeCardText(item, 'description') }}</p>
+            </div>
+            <button
+              type="button"
+              class="ds-secondary-btn"
+              :disabled="knowledgeShuffling"
+              :title="$t('chatUi.suggestions.shuffleHint')"
+              @click="refreshCard(item)"
+            >↻ {{ $t('chatUi.suggestions.shuffle') }}</button>
+          </div>
+        </div>
       </section>
 
-      <!-- Seed pool: built-in seeds cover the cold start; the model tops the pool up once a provider exists. -->
+      <!-- Pools: built-in seeds cover the cold start; the model tops both pools up once a provider exists. -->
       <section v-if="knowledgePool" class="ds-card ds-status-card">
         <div class="ds-card-copy">
           <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.poolTitle') }}</span>
           <p class="ds-card-hint">{{ knowledgePoolLabel }}</p>
+          <p class="ds-card-hint">{{ knowledgeCardsLabel }}</p>
           <p class="ds-card-hint" :class="{ failed: !!knowledgePool.lastReplenishError }">{{ knowledgePoolStatus }}</p>
         </div>
         <button type="button" class="ds-primary-btn" :disabled="replenishDisabled" @click="replenishPool">
@@ -997,16 +1029,68 @@ onMounted(() => {
   margin-top: 6px;
 }
 
-.ds-today-card {
-  gap: 4px;
-  border-color: color-mix(in srgb, #f59e0b 40%, var(--app-border));
-  background: color-mix(in srgb, #f59e0b 8%, transparent);
+.ds-today-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ds-today-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, #f59e0b 32%, var(--app-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, #f59e0b 7%, transparent);
+}
+
+.ds-today-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ds-today-source {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #b45309;
+}
+
+:root[data-theme='dark'] .ds-today-source {
+  color: #fbbf24;
 }
 
 .ds-today-title {
   font-size: 0.92rem;
   font-weight: 600;
   color: var(--app-text-strong);
+}
+
+.ds-secondary-btn {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 5px 12px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 8px;
+  background: var(--app-panel);
+  color: var(--app-text-soft);
+  font-size: 0.78rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ds-secondary-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--app-accent) 55%, var(--app-border-strong));
+  color: var(--app-text);
+}
+
+.ds-secondary-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .ds-inline-warn {

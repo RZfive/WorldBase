@@ -2707,6 +2707,10 @@ export function setupIPC (): void {
     return mainState.dailySuggestionService!.shuffleKnowledge()
   })
 
+  ipcMain.handle('dailySuggestions:refreshKnowledgeCard', async (_event: IpcMainInvokeEvent, suggestionId: string) => {
+    return await mainState.dailySuggestionService!.refreshKnowledgeCard(String(suggestionId || ''))
+  })
+
   ipcMain.handle('dailySuggestions:replenishKnowledgePool', async () => {
     return await mainState.dailySuggestionService!.replenishKnowledgePoolNow()
   })
