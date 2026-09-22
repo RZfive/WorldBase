@@ -104,17 +104,18 @@ const lastContentBlockIndex = computed(() => getLastContentBlockIndex(blocks.val
 const messageText = computed(() => getMessageText())
 
 /**
- * Codex-style work summary: consecutive thinking + tool + web result runs
- * collapse into ONE row (live seconds while working, frozen total once
- * settled), expanding to the full trace — thinking pills, per-tool rows and
- * web result cards. A run needs ≥2 renderable items and at least one
- * non-thinking item to group; lone thinking stays a standalone pill. Purely a
- * render-level transform, so stored/legacy conversations group the same way
- * as live ones.
+ * Codex-style work summary: consecutive thinking + tool + web result + file
+ * write runs collapse into ONE row (live seconds while working, frozen total
+ * once settled), expanding to the full trace — thinking pills, per-tool rows,
+ * web result cards and file-write rows. Any run holding at least one
+ * non-thinking item collapses into a summary row — including a lone tool
+ * call — so every tool execution stays inside the expandable summary; lone
+ * thinking stays a standalone pill. Purely a render-level transform, so
+ * stored/legacy conversations group the same way as live ones.
  */
-type WorkBurstBlock = Extract<ChatMessageBlock, { kind: 'thinking' | 'tool' | 'web_search' | 'web_fetch' }>
+type WorkBurstBlock = Extract<ChatMessageBlock, { kind: 'thinking' | 'tool' | 'web_search' | 'web_fetch' | 'file_preview' }>
 
-const GROUPABLE_KINDS = new Set<ChatMessageBlock['kind']>(['thinking', 'tool', 'web_search', 'web_fetch'])
+const GROUPABLE_KINDS = new Set<ChatMessageBlock['kind']>(['thinking', 'tool', 'web_search', 'web_fetch', 'file_preview'])
 
 interface MessageRenderSegment {
   type: 'single' | 'group'
@@ -133,7 +134,7 @@ const renderSegments = computed<MessageRenderSegment[]>(() => {
     if (run.length === 0) return
     const renderable = run.filter(entry => entry.block.kind !== 'thinking' || hasRenderableBlock(entry.block))
     const hasWork = renderable.some(entry => entry.block.kind !== 'thinking')
-    if (hasWork && renderable.length >= 2) {
+    if (hasWork) {
       segments.push({
         type: 'group',
         key: `group-${renderable[0].block.id}`,

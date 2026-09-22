@@ -794,6 +794,7 @@ const enUS: MessageSchema = {
     toolVerbSearch: 'Search',
     toolVerbWebSearch: 'Web search',
     toolVerbEdit: 'Edit',
+    toolVerbWrite: 'Write',
     toolVerbFetch: 'Fetch',
     toolVerbTodo: 'Todo',
     toolVerbSubagent: 'Subtask',

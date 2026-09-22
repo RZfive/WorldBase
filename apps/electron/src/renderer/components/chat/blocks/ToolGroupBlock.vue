@@ -8,12 +8,14 @@ import ThinkingBlock from './ThinkingBlock.vue'
 import ToolRunBlock from './ToolRunBlock.vue'
 import WebSearchBlock from './WebSearchBlock.vue'
 import WebFetchBlock from './WebFetchBlock.vue'
+import FilePreviewBlock from './FilePreviewBlock.vue'
 
 type ThinkingBlockModel = Extract<ChatMessageBlock, { kind: 'thinking' }>
 type ToolBlockModel = Extract<ChatMessageBlock, { kind: 'tool' }>
 type WebSearchBlockModel = Extract<ChatMessageBlock, { kind: 'web_search' }>
 type WebFetchBlockModel = Extract<ChatMessageBlock, { kind: 'web_fetch' }>
-type GroupBlock = ThinkingBlockModel | ToolBlockModel | WebSearchBlockModel | WebFetchBlockModel
+type FilePreviewBlockModel = Extract<ChatMessageBlock, { kind: 'file_preview' }>
+type GroupBlock = ThinkingBlockModel | ToolBlockModel | WebSearchBlockModel | WebFetchBlockModel | FilePreviewBlockModel
 
 const props = withDefaults(defineProps<{
   blocks: GroupBlock[]
@@ -34,11 +36,15 @@ const hasRunningTool = computed(() => {
   return props.blocks.some(block => block.kind === 'tool' && block.toolRun.status === 'running')
 })
 
+const hasActiveFilePreview = computed(() => {
+  return props.blocks.some(block => block.kind === 'file_preview' && block.active)
+})
+
 const hasOpenThinking = computed(() => {
   return props.blocks.some(block => block.kind === 'thinking' && block.endedAt == null)
 })
 
-const isActive = computed(() => props.messageStreaming && (hasRunningTool.value || hasOpenThinking.value))
+const isActive = computed(() => props.messageStreaming && (hasRunningTool.value || hasActiveFilePreview.value || hasOpenThinking.value))
 
 const hasFailedTool = computed(() => {
   return props.blocks.some(block => block.kind === 'tool' && block.toolRun.status === 'failed')
@@ -68,10 +74,18 @@ onBeforeUnmount(() => {
 
 const elapsedLabel = computed(() => {
   const startedValues = props.blocks
-    .map(block => (block.kind === 'tool' ? block.toolRun.startedAt : block.kind === 'thinking' ? block.startedAt : undefined))
+    .map(block => {
+      if (block.kind === 'tool') return block.toolRun.startedAt
+      if (block.kind === 'thinking') return block.startedAt
+      return undefined
+    })
     .filter((value): value is number => typeof value === 'number')
   const endedValues = props.blocks
-    .map(block => (block.kind === 'tool' ? block.toolRun.endedAt : block.kind === 'thinking' ? block.endedAt : undefined))
+    .map(block => {
+      if (block.kind === 'tool') return block.toolRun.endedAt
+      if (block.kind === 'thinking') return block.endedAt
+      return undefined
+    })
     .filter((value): value is number => typeof value === 'number')
 
   if (startedValues.length === 0) return ''
@@ -105,6 +119,7 @@ function getBlockVerbKey (block: GroupBlock): string {
   if (block.kind === 'thinking') return 'chatUi.toolVerbThink'
   if (block.kind === 'web_search') return 'chatUi.toolVerbWebSearch'
   if (block.kind === 'web_fetch') return 'chatUi.toolVerbFetch'
+  if (block.kind === 'file_preview') return 'chatUi.toolVerbWrite'
   return getToolVerbKey(block.toolRun.name)
 }
 
@@ -175,6 +190,11 @@ function isInnerThinkingStreaming (block: ThinkingBlockModel, index: number): bo
         />
         <WebFetchBlock
           v-else-if="block.kind === 'web_fetch'"
+          :block="block"
+          class="tool-group-item"
+        />
+        <FilePreviewBlock
+          v-else-if="block.kind === 'file_preview'"
           :block="block"
           class="tool-group-item"
         />

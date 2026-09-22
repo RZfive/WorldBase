@@ -794,6 +794,7 @@ const zhCN = {
     toolVerbRead: '读取',    toolVerbSearch: '检索',
     toolVerbWebSearch: '网页搜索',
     toolVerbEdit: '编辑',
+    toolVerbWrite: '写入',
     toolVerbFetch: '抓取',
     toolVerbTodo: 'Todo',
     toolVerbSubagent: '子任务',

@@ -93,10 +93,16 @@ const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
 const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 const CODE_TAG_PATTERN = /\[\[code:([^\]#|]+)#L(\d+)(?:-L?(\d+))?(?:\|([^\]]*))?\]\]/g
 
+// Fixed width of the teleported skills popover; the positioning computed
+// uses it to clamp the popover inside the viewport's right edge. Keep in
+// sync with the `.composer-skill-dropdown` width below.
+const COMPOSER_SKILL_DROPDOWN_WIDTH = 220
+
 const inputFocused = ref(false)
 const dragDepth = ref(0)
 const dragActive = ref(false)
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
+const composerSkillSelectorRef = ref<HTMLElement | null>(null)
 const activeMention = ref<MentionQueryState | null>(null)
 const activeMentionIndex = ref(0)
 const pendingSelection = ref<{ start: number; end: number } | null>(null)
@@ -329,6 +335,31 @@ const mentionDropdownStyle = computed<CSSProperties>(() => {
     width: `${preferredWidth}px`,
     maxWidth: `${Math.max(220, Math.min(window.innerWidth - viewportPadding * 2, availableWidth))}px`,
     maxHeight: `${resolvedMaxHeight}px`
+  }
+})
+
+// The skills popover is teleported to <body> so it can spread above the
+// conversation list without being clipped or z-trapped by the input card's
+// stacking context. Center it on the skills pill, then clamp it to the
+// viewport when the pill sits near either edge.
+const composerSkillDropdownStyle = computed<CSSProperties>(() => {
+  const trigger = composerSkillSelectorRef.value
+  if (!trigger) {
+    return {}
+  }
+
+  const rect = trigger.getBoundingClientRect()
+  const viewportPadding = 8
+  // The pill lives in the composer's bottom toolbar, so positioning the
+  // panel's bottom edge above it keeps it clear of the toolbar on any height.
+  const bottom = Math.max(viewportPadding, window.innerHeight - rect.top + 8)
+  const centeredLeft = rect.left + (rect.width - COMPOSER_SKILL_DROPDOWN_WIDTH) / 2
+  const maxLeft = window.innerWidth - COMPOSER_SKILL_DROPDOWN_WIDTH - viewportPadding
+  const left = Math.max(viewportPadding, Math.min(centeredLeft, maxLeft))
+
+  return {
+    bottom: `${bottom}px`,
+    left: `${left}px`
   }
 })
 
@@ -937,7 +968,7 @@ onUnmounted(() => {
           <span class="tooltip-text">{{ $t('chatUi.documentCenter') }}</span>
         </div>
         <!-- Readable state pills follow (design v1.7): 技能 / 计划 / 电脑使用 / 授权模式. -->
-        <div v-if="props.availableSkills && props.availableSkills.length > 0" class="composer-skill-selector">
+        <div v-if="props.availableSkills && props.availableSkills.length > 0" ref="composerSkillSelectorRef" class="composer-skill-selector">
             <button
               class="action-btn state-pill skills-pill"
               :class="{ active: (props.activeSkillIds?.size || 0) > 0 }"
@@ -947,7 +978,8 @@ onUnmounted(() => {
               <span class="skills-pill-spark" aria-hidden="true">✦</span>
               {{ $t('chatUi.skillsLabel') }}{{ (props.activeSkillIds?.size || 0) > 0 ? ` (${props.activeSkillIds?.size})` : '' }}
             </button>
-            <div v-if="props.showSkillPicker" class="composer-skill-dropdown">
+            <Teleport to="body">
+              <div v-if="props.showSkillPicker" class="composer-skill-dropdown" :style="composerSkillDropdownStyle" @mousedown.stop.prevent @click.stop @contextmenu.prevent>
               <div class="composer-skill-actions">
                 <button type="button" :disabled="props.activeSkillIds?.size === props.availableSkills.length" @click="emit('selectAllSkills')">{{ $t('common.selectAll') }}</button>
                 <button type="button" :disabled="(props.activeSkillIds?.size || 0) === 0" @click="emit('clearSkills')">{{ $t('common.clear') }}</button>
@@ -964,6 +996,7 @@ onUnmounted(() => {
                 <span>{{ skill.name }}</span>
               </button>
             </div>
+            </Teleport>
           </div>
           <!-- Plan mode: readable text pill (design v1.7) -->
           <div class="tooltip-container">
@@ -1818,10 +1851,8 @@ onUnmounted(() => {
 }
 
 .composer-skill-dropdown {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 8px);
-  z-index: 30;
+  position: fixed;
+  z-index: 100;
   width: 220px;
   max-height: min(320px, 42vh);
   overflow-y: auto;

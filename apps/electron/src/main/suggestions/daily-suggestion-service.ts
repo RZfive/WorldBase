@@ -451,7 +451,7 @@ export class DailySuggestionService {
     const preferences = this.options.store.getPreferences()
     const dismissed = this.options.store.getDismissedIds()
     const explore = buildExploreSuggestions(now)
-    const batch = this.resolveDisplayBatch(preferences, now)
+    const batch = this.ensureKnowledgeBatchFromPool(preferences, now)
     const knowledge: WorkSuggestion[] = []
     if (preferences.knowledge.enabled) {
       if (preferences.knowledge.sources.includes('random')) {
@@ -486,6 +486,63 @@ export class DailySuggestionService {
       generating: this.generating !== null,
       providerMissing: this.providerMissing
     }
+  }
+
+  /**
+   * A daily batch can predate its card pool top-up: the model-backed knowledge
+   * request may finish empty while the background pool replenish succeeds later.
+   * When the displayed day is missing selected sources, draw the shortfall from
+   * cards that are already local (no provider/model call), then persist it into
+   * today's batch so repeated snapshots stay stable.
+   */
+  private ensureKnowledgeBatchFromPool (
+    preferences: DailySuggestionPreferences,
+    now: Date
+  ): DailySuggestionBatch | null {
+    const batch = this.resolveDisplayBatch(preferences, now)
+    if (!preferences.knowledge.enabled) return batch
+
+    const today = formatLocalDate(now)
+    const todays = this.options.store.getBatch(today)
+    if (!todays || todays.status === 'failed') return batch
+
+    const sources = this.selectedKnowledgeLlmSources(preferences)
+    if (sources.length === 0) return batch
+
+    const existingKnowledge = todays.items.filter(item => item.layer === 'knowledge')
+    const counts = new Map<KnowledgeSource, number>()
+    for (const item of existingKnowledge) {
+      const source = item.knowledge?.source
+      if (!source) continue
+      counts.set(source, (counts.get(source) || 0) + 1)
+    }
+    const missing = sources.filter(source => (counts.get(source) || 0) < preferences.knowledge.countPerSource)
+    if (missing.length === 0) return batch
+
+    const excluded = new Set(this.options.store.getDismissedIds())
+    for (const item of existingKnowledge) {
+      if (item.knowledge?.seedId) excluded.add(item.id)
+    }
+    const cursor = this.options.store.getKnowledgeCardCursor()
+    const cards = this.knowledgeCardPool()
+    if (cards.length === 0) return batch
+
+    const salt = this.options.store.getKnowledgeSalt()
+    const history = this.options.store.getKnowledgeSeedHistory()
+    const excludedCardIds = new Set([...excluded].map(toCardId))
+    const wantedCounts = new Map(missing.map(source => [
+      source,
+      preferences.knowledge.countPerSource - (counts.get(source) || 0)
+    ]))
+    const drawn = this.drawPoolKnowledgeItems(preferences, now, excluded, cursor, wantedCounts)
+    if (drawn.length === 0) return batch
+
+    this.options.store.saveBatch({ ...todays, items: [...todays.items, ...drawn] })
+    const drawnIds = drawn
+      .map(item => item.knowledge?.seedId)
+      .filter((id): id is string => !!id)
+    this.options.store.recordKnowledgeShown(today, drawnIds)
+    return this.options.store.getBatch(today) || batch
   }
 
   dismiss (suggestionId: string): DailySuggestionSnapshot {
@@ -659,7 +716,8 @@ export class DailySuggestionService {
     preferences: DailySuggestionPreferences,
     now: Date,
     excludeSuggestionIds: ReadonlySet<string>,
-    cursor: number
+    cursor: number,
+    sourceCounts?: ReadonlyMap<KnowledgeSource, number>
   ): WorkSuggestion[] {
     const sources = this.selectedKnowledgeLlmSources(preferences)
     const cards = this.knowledgeCardPool()
@@ -670,9 +728,11 @@ export class DailySuggestionService {
     const excludedCardIds = new Set([...excludeSuggestionIds].map(toCardId))
     const drawn: WorkSuggestion[] = []
     for (const source of sources) {
+      const wanted = sourceCounts?.get(source) ?? preferences.knowledge.countPerSource
+      if (wanted <= 0) continue
       const candidates = drawableKnowledgeCards(cards, source, today, history, excludedCardIds)
       const start = hashString(`${today}|${salt}|${source}|${cursor}`)
-      for (const card of pickRotated(candidates, start, preferences.knowledge.countPerSource)) {
+      for (const card of pickRotated(candidates, start, wanted)) {
         drawn.push(buildKnowledgeCardSuggestion(card, now))
       }
     }

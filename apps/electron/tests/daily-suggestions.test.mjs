@@ -545,6 +545,38 @@ test('a stocked pool serves knowledge cards with zero model calls and rotates on
   assert.ok(third.knowledge.every(item => item.id !== shown.id))
 })
 
+test('a batch generated before the pool was stocked backfills knowledge cards from the pool', async t => {
+  const { service, store, calls } = createService(t, {
+    reply: (_call, content) => (/curiosity hooks/.test(content) ? '[]' : JSON.stringify([llmItem('new-idea')])),
+    preferences: {
+      enabled: true,
+      types: ['new-idea'],
+      countPerType: 1,
+      knowledge: { enabled: true, sources: ['random', 'cross-discipline'], interests: [], profession: '', countPerSource: 1 }
+    }
+  })
+  const stale = await service.generateNow()
+  assert.equal(stale.knowledge.length, 1, 'the model returned no pool cards, so only the random seed is visible')
+
+  // Simulate the background pool top-up landing after today's batch was saved.
+  store.appendKnowledgeCards([{
+    id: 'kc-late',
+    source: 'cross-discipline',
+    discipline: '历史',
+    copy: { locale: 'zh-CN', title: '为什么_longitude_prize_被遗忘了？', description: 'd', prompt: '我对「经度奖」有点好奇。', createdAt: new Date().toISOString() }
+  }])
+  const cursorBefore = store.getKnowledgeCardCursor()
+  const first = service.getSnapshot()
+  const backfilled = first.knowledge.find(item => item.knowledge?.source === 'cross-discipline')
+  assert.ok(backfilled, 'the late pool card is drawn onto the empty knowledge hand')
+  assert.equal(backfilled.knowledge.seedId, 'kc-late')
+
+  const second = service.getSnapshot()
+  assert.equal(second.knowledge.find(item => item.knowledge?.seedId === 'kc-late')?.knowledge.seedId, 'kc-late', 'the backfill is persisted and stable')
+  assert.equal(store.getKnowledgeCardCursor(), cursorBefore, 'snapshot reads do not rotate the pool cursor')
+  assert.equal(calls.length, 2, 'backfill uses the local pool, not another completion')
+})
+
 test('a single knowledge card can be swapped for the next pool entry, unlimited', async t => {
   const { service, store } = createService(t, {
     reply: () => { throw new Error('must not be called') },
