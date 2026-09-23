@@ -142,10 +142,10 @@ watch(
           <span
             v-else-if="item.unreadCount > 0"
             :class="['conv-status', 'unread', { compact: isCompactConversation }]"
-            :title="$t('chatUi.unreadReply')"
+            :title="$t('chatUi.conversationCompletedReply')"
           >
             <span class="conv-status-dot"></span>
-            <template v-if="!isCompactConversation">{{ $t('chatUi.unread') }}</template>
+            <template v-if="!isCompactConversation">{{ $t('chatUi.conversationCompleted') }}</template>
           </span>
         </div>
         <span v-if="!isCompactConversation" class="conv-subtitle">{{ item.subtitle }}</span>
@@ -562,7 +562,7 @@ watch(
 }
 
 .conv-status.unread {
-  color: var(--app-danger);
+  color: var(--app-warning-strong);
 }
 
 .conv-status-dot {

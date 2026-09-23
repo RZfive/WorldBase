@@ -200,6 +200,10 @@ app.on('before-quit', (event) => {
     } finally {
       // Drain accepted history writes even if another service failed cleanup.
       await mainState.chatHistory?.dispose().catch(error => console.warn('[main] History shutdown failed:', error))
+      // Now that every service is down, hand off to the update installer if
+      // one was requested. It must run here, not earlier: the NSIS installer
+      // kills WorldBase.exe on start, which would abort the cleanup above.
+      await mainState.updateService?.launchPendingInstaller().catch(error => console.warn('[main] Installer launch failed:', error))
       mainState.hasFinishedQuitCleanup = true
       mainState.isQuitCleanupRunning = false
       app.quit()

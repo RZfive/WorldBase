@@ -449,6 +449,8 @@ const enUS: MessageSchema = {
     pendingAuthShort: 'Pending auth',
     generating: 'Generating',
     runningShort: 'Running',
+    conversationCompletedReply: 'Task completed — view the result',
+    conversationCompleted: 'Completed',
     unreadReply: 'Unread reply',
     unread: 'Unread',
     pin: 'Pin',

@@ -450,6 +450,8 @@ const zhCN = {
     pendingAuthShort: '待授权',
     generating: '生成中',
     runningShort: '运行中',
+    conversationCompletedReply: '任务已完成，查看结果',
+    conversationCompleted: '已完成',
     unreadReply: '有未查看的回复',
     unread: '未读',
     pin: '置顶',

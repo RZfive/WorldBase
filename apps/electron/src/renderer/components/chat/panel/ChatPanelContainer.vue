@@ -1234,7 +1234,7 @@ watch(
 }
 
 .capsule-flyout-dot.unread {
-  background: var(--app-danger);
+  background: var(--app-warning-strong);
 }
 
 @keyframes capsule-flyout-pulse {

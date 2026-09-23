@@ -27,8 +27,12 @@ const DEFAULT_UPDATE_API_PATH = '/api/releases?latest=1'
 const CHECK_TIMEOUT_MS = 15000
 const DOWNLOADS_SUBDIR = 'updates'
 const PROGRESS_EMIT_INTERVAL_MS = 120
-const INSTALLER_LAUNCH_DELAY_SECONDS = 2
 const APP_QUIT_AFTER_INSTALL_TRIGGER_MS = 300
+// If quit cleanup hangs (e.g. a stuck harness child), launch the installer
+// anyway and hard-exit so the user never ends up with neither app nor installer.
+const INSTALL_QUIT_CLEANUP_TIMEOUT_MS = 15_000
+const INSTALLER_SPAWN_CONFIRM_TIMEOUT_MS = 5_000
+const UPDATER_LOG_FILE = 'updater.log'
 const UPDATE_CONFIG_ERROR_KEY = 'mainDialog.updateConfigRequired'
 
 interface RemoteUpdateResponse {
@@ -68,7 +72,6 @@ interface AssetSelectionOptions {
 interface InstallerLaunchConfig {
   command: string
   args: string[]
-  windowsHide?: boolean
 }
 
 type UpdatePlatformFamily = 'win' | 'mac' | 'linux'
@@ -700,44 +703,69 @@ async function ensureDeleted (targetPath: string): Promise<void> {
   }
 }
 
-function buildDelayedWindowsInstallerCommand (installerPath: string): string {
-  const escapedPath = installerPath.replace(/"/g, '""')
-  return `timeout /t ${INSTALLER_LAUNCH_DELAY_SECONDS} /nobreak >nul & start "" "${escapedPath}"`
-}
-
+/**
+ * The installer is launched only after quit cleanup has finished (see
+ * `launchPendingInstaller`), so no launch-side delay is needed. Windows runs
+ * the NSIS installer directly: wrapping it in `cmd /c start "" "<path>"` broke
+ * because Node re-quotes arguments for CreateProcess and turns the inner
+ * quotes into `\"`, which cmd does not understand, so `start` received a
+ * mangled path and silently failed inside a hidden console.
+ */
 function buildInstallerLaunchConfig (installerPath: string, platform: string): InstallerLaunchConfig | null {
   switch (normalizePlatformFamily(platform)) {
     case 'win':
-      return {
-        command: process.env.ComSpec || 'cmd.exe',
-        args: ['/d', '/s', '/c', buildDelayedWindowsInstallerCommand(installerPath)],
-        windowsHide: true
-      }
+      // `--updated` is the electron-builder NSIS flag electron-updater passes on
+      // upgrades: skips the "already installed" prompt and keeps user choices.
+      return { command: installerPath, args: ['--updated'] }
     case 'mac':
-      return {
-        command: '/bin/sh',
-        args: [
-          '-c',
-          'sleep "$1"; open "$2"',
-          'worldbase-update-launcher',
-          String(INSTALLER_LAUNCH_DELAY_SECONDS),
-          installerPath
-        ]
-      }
+      return { command: '/usr/bin/open', args: [installerPath] }
     case 'linux':
-      return {
-        command: '/bin/sh',
-        args: [
-          '-c',
-          'sleep "$1"; chmod +x "$2"; "$2" >/dev/null 2>&1 &',
-          'worldbase-update-launcher',
-          String(INSTALLER_LAUNCH_DELAY_SECONDS),
-          installerPath
-        ]
-      }
+      return { command: installerPath, args: [] }
     default:
       return null
   }
+}
+
+function isWindowsSpawnError (error: NodeJS.ErrnoException): boolean {
+  // libuv reports ERROR_ELEVATION_REQUIRED (740) as EACCES, and older Node
+  // builds surface it as UNKNOWN. Both mean "needs ShellExecute + UAC".
+  return error.code === 'EACCES' || error.code === 'UNKNOWN' || error.code === 'EPERM'
+}
+
+/**
+ * Spawn detached and wait until the OS confirms the child exists. The
+ * synchronous `spawn()` return value does not prove the process started; on
+ * Windows a launch failure only surfaces through the async `error` event.
+ */
+async function spawnDetachedAndConfirm (config: InstallerLaunchConfig): Promise<void> {
+  const child = spawn(config.command, config.args, {
+    detached: true,
+    stdio: 'ignore'
+  })
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup()
+      reject(new Error(`Installer spawn not confirmed within ${INSTALLER_SPAWN_CONFIRM_TIMEOUT_MS}ms`))
+    }, INSTALLER_SPAWN_CONFIRM_TIMEOUT_MS)
+    const onSpawn = () => {
+      cleanup()
+      resolve()
+    }
+    const onError = (error: Error) => {
+      cleanup()
+      reject(error)
+    }
+    const cleanup = () => {
+      clearTimeout(timeout)
+      child.off('spawn', onSpawn)
+      child.off('error', onError)
+    }
+    child.once('spawn', onSpawn)
+    child.once('error', onError)
+  })
+
+  child.unref()
 }
 
 function isInstallerPathSupportedForPlatform (installerPath: string, platform: string): boolean {
@@ -749,11 +777,15 @@ function isInstallerPathSupportedForPlatform (installerPath: string, platform: s
 export class UpdateService extends EventEmitter {
   private readonly settingsStore: SettingsStore
   private readonly updatesDir: string
+  private readonly logFilePath: string
   private config: AppUpdateConfig
   private website: AppUpdateWebsiteLinks
   private updateApiUrl: string
   private state: AppUpdateState
   private activeDownloadAbortController: AbortController | null = null
+  private pendingInstallerPath: string | null = null
+  private pendingInstallerLaunch: Promise<boolean> | null = null
+  private installQuitGuard: NodeJS.Timeout | null = null
   private disposed = false
 
   constructor (settingsStore: SettingsStore) {
@@ -763,7 +795,19 @@ export class UpdateService extends EventEmitter {
     this.website = createWebsiteLinks(this.config)
     this.updateApiUrl = createUpdateApiUrl(this.config, this.website)
     this.updatesDir = path.join(app.getPath('userData'), DOWNLOADS_SUBDIR)
+    this.logFilePath = path.join(app.getPath('userData'), UPDATER_LOG_FILE)
     this.state = this.restorePersistedState()
+  }
+
+  /**
+   * Append-only diagnostics for the install hand-off. The window is already
+   * closing when the installer launches, so this file is the only place a
+   * Windows launch failure can be seen after the fact.
+   */
+  private log (message: string): void {
+    const line = `[${new Date().toISOString()}] ${message}\n`
+    console.log(`[update] ${message}`)
+    fsp.appendFile(this.logFilePath, line).catch(() => {})
   }
 
   getConfig (): AppUpdateConfig {
@@ -1075,23 +1119,19 @@ export class UpdateService extends EventEmitter {
 
     this.updateState({ status: 'installing', error: null })
 
-    try {
-      const launchConfig = buildInstallerLaunchConfig(installerPath, process.platform)
-      if (!launchConfig) {
-        throw new Error(t('mainDialog.updateInstallUnsupportedPlatform'))
-      }
-
-      const launcher = spawn(launchConfig.command, launchConfig.args, {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: launchConfig.windowsHide
-      })
-      launcher.unref()
-    } catch (error) {
-      const message = (error as Error).message || t('mainDialog.updateInstallFailed')
+    if (!buildInstallerLaunchConfig(installerPath, process.platform)) {
+      const message = t('mainDialog.updateInstallUnsupportedPlatform')
       const state = this.fail(message)
       return { success: false, state, error: message }
     }
+
+    // Do not launch yet. The NSIS installer taskkills WorldBase.exe as soon
+    // as it starts (build/installer.nsh), which would cut quit cleanup short
+    // and could corrupt history/harness state. Instead, record the pending
+    // installer and let the before-quit cleanup in electron/main.ts call
+    // `launchPendingInstaller()` once every service has shut down.
+    this.pendingInstallerPath = installerPath
+    this.log(`install requested: ${installerPath} (v${this.state.latestVersion ?? '?'} over v${app.getVersion()})`)
 
     this.updateState({
       status: 'install_triggered',
@@ -1099,11 +1139,92 @@ export class UpdateService extends EventEmitter {
       error: null
     })
 
+    this.installQuitGuard = setTimeout(() => {
+      this.log(`quit cleanup exceeded ${INSTALL_QUIT_CLEANUP_TIMEOUT_MS}ms; launching installer and forcing exit`)
+      void this.launchPendingInstaller().finally(() => app.exit(0))
+    }, INSTALL_QUIT_CLEANUP_TIMEOUT_MS)
+
+    // Let the IPC reply reach the renderer before quit begins.
     setTimeout(() => {
       app.quit()
     }, APP_QUIT_AFTER_INSTALL_TRIGGER_MS)
 
     return { success: true, state: this.getState() }
+  }
+
+  /**
+   * Launch the installer recorded by `installDownloadedUpdate`. Called from the
+   * before-quit cleanup after all services are down and again by the quit
+   * guard timer; both callers share one launch attempt. Resolves true when
+   * the OS confirmed the installer process started. Safe to call when nothing
+   * is pending and after `dispose()`.
+   */
+  async launchPendingInstaller (): Promise<boolean> {
+    if (this.pendingInstallerLaunch) return await this.pendingInstallerLaunch
+    const installerPath = this.pendingInstallerPath
+    if (!installerPath) return false
+
+    if (this.installQuitGuard) {
+      clearTimeout(this.installQuitGuard)
+      this.installQuitGuard = null
+    }
+
+    this.pendingInstallerLaunch = this.launchInstaller(installerPath)
+    return await this.pendingInstallerLaunch
+  }
+
+  private async launchInstaller (installerPath: string): Promise<boolean> {
+    const launchConfig = buildInstallerLaunchConfig(installerPath, process.platform)
+    if (!launchConfig) {
+      this.recordInstallLaunchFailure(t('mainDialog.updateInstallUnsupportedPlatform'))
+      return false
+    }
+
+    if (normalizePlatformFamily(process.platform) === 'linux') {
+      await fsp.chmod(installerPath, 0o755).catch((error: Error) => {
+        this.log(`chmod failed (continuing): ${error.message}`)
+      })
+    }
+
+    this.log(`spawning: ${launchConfig.command} ${launchConfig.args.join(' ')}`)
+    try {
+      await spawnDetachedAndConfirm(launchConfig)
+      this.log('installer process started')
+      return true
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException
+      this.log(`spawn failed: code=${err.code ?? 'n/a'} errno=${err.errno ?? 'n/a'} ${err.message}`)
+      if (normalizePlatformFamily(process.platform) !== 'win' || !isWindowsSpawnError(err)) {
+        this.recordInstallLaunchFailure(err.message || t('mainDialog.updateInstallFailed'))
+        return false
+      }
+    }
+
+    // Elevation required (a previous per-machine install) or an odd CreateProcess
+    // refusal: hand off to ShellExecute, which shows the UAC prompt itself.
+    this.log('falling back to shell.openPath')
+    const shellError = await shell.openPath(installerPath)
+    if (shellError) {
+      this.log(`shell.openPath failed: ${shellError}`)
+      this.recordInstallLaunchFailure(shellError)
+      return false
+    }
+    this.log('installer opened via shell')
+    return true
+  }
+
+  /**
+   * The window is gone by the time a launch fails, so persist the failure;
+   * `restorePersistedState` surfaces it in About & Updates on next start.
+   */
+  private recordInstallLaunchFailure (message: string): void {
+    this.state = {
+      ...this.state,
+      status: 'failed',
+      progress: null,
+      error: message
+    }
+    this.settingsStore.saveAppUpdateState(this.state)
   }
 
   async openWebsitePage (kind: AppUpdateWebsiteKind): Promise<{ success: boolean; error?: string }> {
@@ -1119,6 +1240,8 @@ export class UpdateService extends EventEmitter {
   dispose (): void {
     this.disposed = true
     this.activeDownloadAbortController?.abort()
+    // Keep pendingInstallerPath and the quit guard: dispose() runs during quit
+    // cleanup, and launchPendingInstaller() is called right after it.
     this.removeAllListeners()
   }
 
