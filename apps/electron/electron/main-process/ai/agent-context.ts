@@ -1,6 +1,6 @@
 import type { AIExecutionPreferences, AIProvidersConfig } from '../../../src/main/settings/settings-store.js'
 import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, MemoryEmbeddingRuntimeConfig } from '../../../src/shared/agent-workspace-types.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
 import { mainState } from '../state.js'
 import { broadcastToAppWindows } from '../windows.js'
@@ -19,6 +19,7 @@ export interface ResolvedAgentRuntimeContext {
   deniedToolNames: string[]
   memoryScopeTypes: AgentMemoryScope[] | undefined
   memoryScopes: Array<{ scopeType: AgentMemoryScope; scopeId: string }>
+  memoryEmbedding?: MemoryEmbeddingRuntimeConfig
 }
 
 export function notifyAgentWorkspaceChanged (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }): void {
@@ -66,6 +67,34 @@ function resolveRustMemoryScopes (input: {
   if (input.channelBinding && enabled.has('channel')) scopes.push({ scopeType: 'channel', scopeId: input.channelBinding.id })
   if (input.targetProjectId && enabled.has('project')) scopes.push({ scopeType: 'project', scopeId: input.targetProjectId })
   return scopes
+}
+
+/**
+ * Resolve the current Memory Settings selection into the per-request
+ * embedding runtime config handed to the Rust harness. Returns null when no
+ * usable provider/model is configured — the harness then does keyword-only
+ * recall and never touches the embedding API (design §7.3).
+ */
+export function resolveMemoryEmbeddingRuntimeConfig (): MemoryEmbeddingRuntimeConfig | undefined {
+  const settings = mainState.settingsStore?.getMemoryEmbeddingSettings()
+  if (!settings?.enabled) return undefined
+  const providerId = settings.providerId?.trim()
+  const modelId = settings.modelId?.trim()
+  if (!providerId || !modelId) return undefined
+  const provider = mainState.settingsStore?.getProviders().providers.find(item => item.id === providerId)
+  const model = (provider?.embeddingModels || []).find(item => item.id === modelId && item.enabled !== false)
+  if (!provider?.baseUrl?.trim()) return undefined
+  return {
+    providerId: provider.id,
+    baseUrl: provider.baseUrl,
+    apiKey: provider.apiKey,
+    modelId: model?.id || modelId,
+    ...(model?.dimensions ? { dimensions: model.dimensions } : {}),
+    ...(model?.distance ? { distance: model.distance } : {}),
+    ...(model?.normalized != null ? { normalized: model.normalized } : {}),
+    ...(model?.queryPrefix ? { queryPrefix: model.queryPrefix } : {}),
+    ...(model?.documentPrefix ? { documentPrefix: model.documentPrefix } : {})
+  }
 }
 
 export function resolveSkillContentsByIds (skillIds?: string[]): string[] {
@@ -183,7 +212,7 @@ export function applyActiveProviderToAiEngine (): AIProvidersConfig {
     temperature: active?.temperature,
     contextWindow: active?.activeModel ? active.modelContextWindows?.[active.activeModel] : undefined
   }
-  mainState.aiEngine!.configure(config)
+  // Rust is the only execution backend.
   mainState.rustHarnessEngine?.configure(config)
 
   return normalizedConfig
@@ -225,7 +254,7 @@ export function resolveProviderConfig (requestedProviderId?: string, requestedMo
   }
 }
 
-export function resolveAgentRuntimeContext (input: {
+export async function resolveAgentRuntimeContext (input: {
   messages: Array<{ role: string; content: MessageContent }>
   agentId?: string
   groupId?: string
@@ -236,7 +265,7 @@ export function resolveAgentRuntimeContext (input: {
   requestedReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
   requestedTemperature?: number
   userId?: string
-}): ResolvedAgentRuntimeContext {
+}): Promise<ResolvedAgentRuntimeContext> {
   const group = input.groupId ? mainState.agentGroupStore?.get(input.groupId) || null : null
   const channelBinding = input.channelBindingId ? mainState.channelBindingStore?.get(input.channelBindingId) || null : null
   const explicitAgent = input.agentId ? mainState.agentStore?.get(input.agentId) || null : null
@@ -259,23 +288,15 @@ export function resolveAgentRuntimeContext (input: {
     enabledScopeTypes: memoryScopeTypes,
     userId: input.userId
   })
-  const useRustMemory = mainState.settingsStore?.getAIExecutionPreferences().harnessBackend === 'rust'
-  const memoryContext = !useRustMemory
-    ? mainState.memoryEngine?.buildPromptContext({
-        agent,
-        group,
-        channelBinding,
-        userMessage: getLastUserMessageText(input.messages),
-        targetProjectId: effectiveTargetProjectId,
-        userId: 'local-user',
-        enabledScopeTypes: memoryScopeTypes
-      })
-    : undefined
+  // Memory is owned by the Rust harness (single source): recall happens
+  // Rust-side from the shared agent-memory databases. The host supplies the
+  // resolved scopes, the current query, and the per-request embedding config
+  // resolved from Memory Settings (design §12/§17).
+  const memoryEmbedding = resolveMemoryEmbeddingRuntimeConfig()
   const systemPromptSections = [
     agent ? buildActiveAgentSection(agent) : null,
     group ? buildActiveGroupSection(group) : null,
-    channelBinding ? buildActiveChannelSection(channelBinding) : null,
-    ...(memoryContext?.sections || [])
+    channelBinding ? buildActiveChannelSection(channelBinding) : null
   ].filter((value): value is string => Boolean(value))
 
   return {
@@ -289,6 +310,7 @@ export function resolveAgentRuntimeContext (input: {
     allowedToolNames: agent?.allowedTools || [],
     deniedToolNames: agent?.deniedTools || [],
     memoryScopeTypes,
-    memoryScopes
+    memoryScopes,
+    memoryEmbedding
   }
 }

@@ -1,7 +1,7 @@
 import type { AILogSessionLogger } from '../settings/ai-log-store.js'
 import type { AIExecutionAuthMode } from '../settings/settings-store.js'
 import type { ChatMessage, ToolDefinition } from './contracts.js'
-import type { MemorySearchScope } from '../../shared/agent-workspace-types.js'
+import type { MemoryEmbeddingRuntimeConfig, MemorySearchScope } from '../../shared/agent-workspace-types.js'
 
 export type { ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
 
@@ -81,6 +81,8 @@ export interface AIRequestOptions {
   deniedToolNames?: string[]
   /** Resolved scopes for Rust-owned memory retrieval. */
   memoryScopes?: MemorySearchScope[]
+  /** Per-request embedding config for Rust-side semantic recall. */
+  memoryEmbedding?: MemoryEmbeddingRuntimeConfig
   customTools?: CustomToolRegistration[]
   /** Internal nesting depth for Electron-hosted subagent runs. */
   subagentNestingDepth?: number

@@ -8,7 +8,7 @@ import { USER_ABORT_MESSAGE } from '../../src/main/ai-engine/abort-utils.js'
 import { resolveModelPricing, type ModelPricing } from '../../src/main/ai-engine/cost-tracker.js'
 import type { MCPServerSnapshot, MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
 import type { AIProvidersConfig, MCPServerConfig } from '../../src/main/settings/settings-store.js'
-import type { AgentDefinition, AgentGroupDefinition, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, MemoryEmbeddingRuntimeConfig, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
 import type { ImageStudioGenerateRequest, ImageStudioTask } from '../../src/shared/image-studio-types.js'
 import type { ToolDefinition } from '../../src/main/ai-harness/contracts.js'
 
@@ -119,6 +119,8 @@ export interface RustChatOptions {
   memoryScopes?: MemorySearchScope[]
   /** Current user message used for Rust-side memory retrieval. */
   memoryQuery?: string
+  /** Per-request embedding config for Rust-side semantic recall. */
+  memoryEmbedding?: MemoryEmbeddingRuntimeConfig
   /** Explicit per-run opt-in for OS-level Computer Use tools. */
   computerUseEnabled?: boolean
 }
@@ -823,6 +825,7 @@ export class RustHarnessClient {
         budgetLimit: normalizeBudgetLimit(options?.budgetLimit),
         memoryScopes: Array.isArray(options?.memoryScopes) ? options.memoryScopes : [],
         memoryQuery: normalizeOptionalString(options?.memoryQuery || text),
+        ...(options?.memoryEmbedding ? { memoryEmbedding: options.memoryEmbedding } : {}),
         computerUseEnabled: options?.computerUseEnabled === true
       })
       const streamId = result.streamId || result.stream_id
@@ -988,6 +991,7 @@ export class RustHarnessClient {
     userMessages: string[]
     finalAssistantText?: string
     toolNames?: string[]
+    targetProjectId?: string | null
     sourceConversationId?: string
     sourceSessionId?: string
   }): Promise<MemoryEntry[]> {
@@ -1738,6 +1742,7 @@ function nativeGroupContext (options?: RustChatOptions): Record<string, unknown>
     budgetLimit: normalizeBudgetLimit(options?.budgetLimit),
     memoryScopes: Array.isArray(options?.memoryScopes) ? options.memoryScopes : [],
     memoryQuery: normalizeOptionalString(options?.memoryQuery),
+    ...(options?.memoryEmbedding ? { memoryEmbedding: options.memoryEmbedding } : {}),
     computerUseEnabled: options?.computerUseEnabled === true
   }
 }

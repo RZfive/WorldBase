@@ -51,7 +51,7 @@ import { toolAskUser } from './tool-ask-user.js'
 import { toolGenerateImage, toolEditImage } from './tool-generate-image.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
-import type { AgentCore, SessionState } from '../agent-core.js'
+import type { AgentCore, SessionState, SubagentService } from '../agent-core.js'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
 import type { BuilderService } from '../../../project-runtime/builder-service.js'
@@ -66,7 +66,7 @@ import type { ImageStudioGenerateRequest } from '../../../../shared/image-studio
 import type { MCPService } from '../../../mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-service.js'
 import type { BrowserWindow } from 'electron'
-import type { SubagentService } from '../subagent-service.js'
+
 import { toolSpawnSubagents } from './tool-spawn-subagent.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
 import type { FolderWorkspaceChangeEvent } from '../../../../shared/folder-workspace-types.js'
@@ -108,7 +108,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     ...agent.sessionState,
     authMode: agent.getEffectiveAuthMode()
   })
-  const getAbortSignal = (): AbortSignal | undefined => agent.getAbortSignal()
+  const getAbortSignal = (): AbortSignal | undefined => agent.getAbortSignal() ?? undefined
   const todoState: { items: TodoItem[] } = { items: [] }
   // Shared across read/write/edit so exact-string edits can require the file to
   // have been read (or written) earlier in this agent's lifetime.

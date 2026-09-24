@@ -16,6 +16,18 @@ use worldbase_protocol::types::{
     WorkspaceMemoryEntry, WorkspaceMemorySearchOptions,
 };
 
+mod embedding;
+mod embedding_service;
+mod embedding_store;
+mod vector;
+
+pub use embedding::{
+    EMBEDDING_PREPROCESS_VERSION, EmbeddingProvider, FakeEmbeddingProvider,
+    OpenAIEmbeddingProvider,
+};
+pub use embedding_service::MemoryEmbeddingQueue;
+pub use vector::VectorIndex;
+
 pub struct Store {
     conn: Mutex<Connection>,
     /// Electron's Agent Workspace memory lives in its own database at
@@ -23,6 +35,8 @@ pub struct Store {
     /// `memories` table used by the original memory tools so both contracts
     /// remain available during the backend migration.
     memory_conn: Mutex<Connection>,
+    /// 主库文件路径，用于按需打开共享的派生向量库 `memory-vector.sqlite`。
+    memory_path: PathBuf,
     memory_compaction_status: Mutex<MemoryCompactionStatus>,
 }
 
@@ -451,11 +465,103 @@ impl Store {
             )
             .context("migrate memory schema")?;
 
+        // Shared-memory governance fields and the embedding pipeline tables
+        // mirror the Electron main database exactly: both runtimes open the
+        // same `agent-memory/memory.sqlite`, so the schema (and the FTS and
+        // vector projections built on it) must stay byte-compatible.
+        Self::migrate_shared_memory_schema(&memory_conn)?;
+
         Ok(Self {
             conn: Mutex::new(conn),
             memory_conn: Mutex::new(memory_conn),
+            memory_path: memory_path.clone(),
             memory_compaction_status: Mutex::new(empty_memory_compaction_status()),
         })
+    }
+
+    /// Shared-memory schema migration. SQLite has no `ADD COLUMN IF NOT
+    /// EXISTS`, so each governance column is added defensively and duplicate
+    /// errors are ignored; the embedding pipeline tables are idempotent
+    /// `CREATE TABLE IF NOT EXISTS` statements identical to the Electron DDL.
+    fn migrate_shared_memory_schema(conn: &Connection) -> Result<()> {
+        for statement in [
+            "ALTER TABLE memory_entries ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE memory_entries ADD COLUMN sensitivity TEXT NOT NULL DEFAULT 'normal'",
+            "ALTER TABLE memory_entries ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE memory_entries ADD COLUMN last_confirmed_at TEXT",
+            "ALTER TABLE memory_entries ADD COLUMN expires_at TEXT",
+        ] {
+            let _ = conn.execute(statement, []);
+        }
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS memory_events (
+                id TEXT PRIMARY KEY,
+                entry_id TEXT,
+                event_type TEXT NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_events_entry
+                ON memory_events(entry_id);
+
+            CREATE TABLE IF NOT EXISTS embedding_documents (
+                id TEXT PRIMARY KEY,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                embedding_text TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                active_generation_id TEXT,
+                status TEXT NOT NULL DEFAULT 'queued',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_embedding_documents_source
+                ON embedding_documents(source_type, source_id);
+            CREATE INDEX IF NOT EXISTS idx_embedding_documents_status
+                ON embedding_documents(status);
+
+            CREATE TABLE IF NOT EXISTS embedding_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_embedding_jobs_status
+                ON embedding_jobs(status, next_retry_at);
+            CREATE INDEX IF NOT EXISTS idx_embedding_jobs_document
+                ON embedding_jobs(document_id);
+
+            CREATE TABLE IF NOT EXISTS embedding_generations (
+                id TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                model_revision TEXT,
+                dimensions INTEGER NOT NULL,
+                distance_metric TEXT NOT NULL DEFAULT 'cosine',
+                normalized INTEGER NOT NULL DEFAULT 0,
+                preprocess_version TEXT NOT NULL,
+                index_path TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'building',
+                total_documents INTEGER NOT NULL DEFAULT 0,
+                indexed_documents INTEGER NOT NULL DEFAULT 0,
+                failed_documents INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                activated_at TEXT
+            );
+            "#,
+        )
+        .context("create shared-memory embedding tables")?;
+        Ok(())
     }
 
     /// 默认数据目录：`$WORLDBASE_HOME` 或 `~/.the-world`。
@@ -1765,6 +1871,24 @@ impl Store {
                 normalized.tags.join(" "),
             ],
         )?;
+        // Embedding document + job enqueue share this exact transaction so a
+        // crash can never leave the main record and its retrieval projection
+        // inconsistent (design §10.1). The vector write itself stays async.
+        let embedding_text = Self::build_embedding_text(
+            &normalized.title,
+            &normalized.summary,
+            normalized.details.as_deref(),
+            &normalized.tags,
+            None,
+        );
+        let _ = Self::sync_embedding_document_in_tx(
+            &tx,
+            embedding_store::EMBEDDING_SOURCE_MEMORY,
+            &normalized.id,
+            &normalized.scope_type,
+            &normalized.scope_id,
+            &embedding_text,
+        );
         tx.commit()?;
         Ok(normalized)
     }
@@ -1900,11 +2024,32 @@ impl Store {
         if id.is_empty() {
             return Ok(false);
         }
+        let document = self.get_embedding_document(embedding_store::EMBEDDING_SOURCE_MEMORY, id)?;
         let mut conn = self.memory_conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM memory_entries_fts WHERE id = ?1", params![id])?;
         let changed = tx.execute("DELETE FROM memory_entries WHERE id = ?1", params![id])?;
+        if changed > 0 {
+            // §10.3: the main record disappears immediately; the derived
+            // vector follows right after (deletion failures leave a
+            // tombstone so forgotten memory cannot resurface).
+            let _ = tx.execute(
+                "DELETE FROM embedding_jobs WHERE document_id = ?1",
+                params![embedding_store::document_id_for(embedding_store::EMBEDDING_SOURCE_MEMORY, id)],
+            )?;
+            let _ = tx.execute(
+                "DELETE FROM embedding_documents WHERE id = ?1",
+                params![embedding_store::document_id_for(embedding_store::EMBEDDING_SOURCE_MEMORY, id)],
+            )?;
+        }
         tx.commit()?;
+        drop(conn);
+        if changed > 0 {
+            self.record_memory_event("forget", Some(id), "{}");
+            if let Some(document) = document {
+                self.delete_document_vectors(&document.id);
+            }
+        }
         Ok(changed > 0)
     }
 

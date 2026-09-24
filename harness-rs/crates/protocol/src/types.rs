@@ -322,6 +322,13 @@ pub struct ChatRunContext {
     /// The current user message used for scoped memory retrieval.
     #[serde(default)]
     pub memory_query: Option<String>,
+    /// Runtime embedding model for the shared memory pipeline. The host
+    /// (Electron Memory Settings) still owns model selection and credentials;
+    /// the harness only acts as the provider API adapter and indexes the
+    /// shared `agent-memory` databases (design §12/§17). Absent ⇒ keyword
+    /// (FTS5) recall only; no vector work and no embedding network calls.
+    #[serde(default)]
+    pub memory_embedding: Option<MemoryEmbeddingRuntimeConfig>,
     /// Enables OS-level Computer Use tools for this run. The UI toggle is
     /// intentionally ephemeral and does not alter the persisted conversation.
     #[serde(default)]
@@ -334,6 +341,30 @@ pub struct ChatRunContext {
 pub struct MemoryScopeRef {
     pub scope_type: String,
     pub scope_id: String,
+}
+
+/// Per-run embedding model description handed to the harness by the host.
+/// The harness generates vectors through the provider API and stores them in
+/// the shared derived index; it never bundles or downloads model weights.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryEmbeddingRuntimeConfig {
+    pub provider_id: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model_id: String,
+    #[serde(default)]
+    pub dimensions: Option<u32>,
+    /// `cosine` | `dot` | `l2`; defaults to `cosine`.
+    #[serde(default)]
+    pub distance: Option<String>,
+    #[serde(default)]
+    pub normalized: Option<bool>,
+    /// Input template prefix, e.g. `query: ` / `passage: `.
+    #[serde(default)]
+    pub query_prefix: Option<String>,
+    #[serde(default)]
+    pub document_prefix: Option<String>,
 }
 
 /// chat.send 返回：流 id，事件经通知下发。

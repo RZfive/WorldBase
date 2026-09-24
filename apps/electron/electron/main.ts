@@ -6,7 +6,7 @@ import { APP_DISPLAY_NAME } from './main-process/constants.js'
 import { mainState } from './main-process/state.js'
 import { initializeServices } from './main-process/services.js'
 import { setupIPC } from './main-process/ipc.js'
-import { isRustHarnessSelected, startSelectedRustHarness } from './main-process/ai/selected-execution-engine.js'
+import { startSelectedRustHarness } from './main-process/ai/selected-execution-engine.js'
 import { setMainLocale } from '../src/main/i18n/main-i18n.js'
 import { createWindow, setupEmbeddedAppCorsWorkaround } from './main-process/windows.js'
 import { reportStartup } from '../src/main/app-start-report/startup-report-service.js'
@@ -80,13 +80,11 @@ app.whenReady().then(async () => {
   // with a stale instance still holding its port / file locks — that race is
   // what caused the internal-app crash-on-open.
   try {
-    if (isRustHarnessSelected()) {
+    {
       const rustHarness = await startSelectedRustHarness()
       if (rustHarness && mainState.rustHarness) {
         await mainState.rustHarness.call('project.process.cleanupOrphans', {})
       }
-    } else {
-      await mainState.processManagerService!.cleanupOrphanProcesses()
     }
   } catch (err) {
     console.warn('[main] Orphan process cleanup failed on startup:', (err as Error).message)
@@ -120,7 +118,6 @@ app.whenReady().then(async () => {
  * gallery cache to have imported the image first.
  */
 async function readRustStudioImage (rawUrl: string): Promise<Response | null> {
-  if (mainState.settingsStore?.getAIExecutionPreferences().harnessBackend !== 'rust') return null
   const client = mainState.rustHarness
   if (!client?.isAvailable()) return new Response(null, { status: 503 })
   let id = ''
@@ -169,20 +166,16 @@ app.on('before-quit', (event) => {
 
   void (async () => {
     try {
-      const rustSelected = isRustHarnessSelected()
-      if (!rustSelected && mainState.runtimeManager) {
-        await mainState.runtimeManager.stopAll()
-      }
       if (mainState.lanServer) {
         await mainState.lanServer.stop()
       }
-      if (!rustSelected && mainState.mcpService) {
+      if (mainState.mcpService) {
         await mainState.mcpService.dispose()
       }
       if (mainState.rustHarness) {
-        // Rust mode owns project children and MCP transports entirely in the
-        // app-server. Do not touch their dormant Electron counterparts.
-        if (rustSelected) await mainState.rustHarness.stopAllProjects().catch(() => {})
+        // Rust owns project children and MCP transports entirely in the
+        // app-server. Do not touch their Electron counterparts.
+        await mainState.rustHarness.stopAllProjects().catch(() => {})
         mainState.rustHarness.dispose()
       }
       if (mainState.updateService) {
@@ -193,9 +186,6 @@ app.on('before-quit', (event) => {
       }
       if (mainState.dailySuggestionService) {
         mainState.dailySuggestionService.dispose()
-      }
-      if (mainState.memoryStore) {
-        mainState.memoryStore.close()
       }
     } finally {
       // Drain accepted history writes even if another service failed cleanup.

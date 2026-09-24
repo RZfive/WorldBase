@@ -44,6 +44,9 @@ pub struct RunHandle {
 pub struct Hub {
     pub workspace: PathBuf,
     pub store: Arc<Store>,
+    /// 共享记忆 embedding 队列（design §6.4）。配置由 chat 请求注入，
+    /// 后台循环在此进程内消费共享的 `embedding_jobs` 表。
+    pub memory_queue: Arc<worldbase_memory::MemoryEmbeddingQueue>,
     pub skills: Arc<SkillRegistry>,
     pub scheduler: Arc<Scheduler>,
     pub mcp: Arc<McpManager>,
@@ -97,9 +100,11 @@ impl Hub {
         let (event_tx, _rx) = tokio::sync::broadcast::channel(4096);
         let skills = Arc::new(SkillRegistry::new(SkillRegistry::default_dirs(&workspace)));
         let scheduler = Arc::new(Scheduler::new(store.clone()));
+        let memory_queue = worldbase_memory::MemoryEmbeddingQueue::new(store.clone());
         let hub = Arc::new(Self {
             workspace: workspace.clone(),
             store,
+            memory_queue,
             skills,
             scheduler,
             mcp: Arc::new(McpManager::default()),

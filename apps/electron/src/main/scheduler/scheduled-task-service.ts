@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { type BrowserWindow } from 'electron'
-import { type AIConfigInput, type CustomToolRegistration, type ProgressEvent } from '../ai-engine/ai-engine.js'
+import type { AIConfigInput, CustomToolRegistration } from '../ai-engine/engine-contracts.js'
+import type { ProgressEvent } from '../ai-harness/types.js'
 import type { AIExecutionEngine } from '../ai-harness/types.js'
 import { t } from '../i18n/main-i18n.js'
 import { focusMainWindow, isNotificationSupported, showAppNotification } from '../notifications.js'

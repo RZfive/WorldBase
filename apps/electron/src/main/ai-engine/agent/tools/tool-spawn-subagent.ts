@@ -1,6 +1,6 @@
 import type { ToolDefinition } from '../../providers/openai-provider.js'
-import type { ProgressCallback } from '../agent-core.js'
-import type { SubagentService } from '../subagent-service.js'
+import type { ProgressCallback, SubagentService } from '../agent-core.js'
+
 
 interface Tool {
   definition: ToolDefinition

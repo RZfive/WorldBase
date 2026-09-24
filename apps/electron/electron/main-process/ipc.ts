@@ -30,7 +30,7 @@ import type { LongTermGoalSaveInput, LongTermGoalStreamEvent } from '../../src/s
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '../../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
 import type { FolderWorkspacePickResult } from '../../src/shared/folder-workspace-types.js'
 import type { DocumentEditExportRequest } from '../../src/shared/document-edit-types.js'
 import { assertFolderWorkspaceRoot, getFolderWorkspaceRootName, listFolderWorkspaceFiles, readFolderWorkspaceFile } from '../../src/main/folder-workspace/folder-workspace-fs.js'
@@ -42,12 +42,10 @@ import { readUploadedAttachmentFromBuffer, readUploadedAttachmentFromPath, type 
 import { ensureDocumentRenderPreview } from './media/document-preview.js'
 import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, notifyAiTaskStatus, resolveAgentRuntimeContext } from './ai/agent-context.js'
 import { startSelectedRustHarness } from './ai/selected-execution-engine.js'
-import { transitionHarnessOwnership } from './ai/harness-ownership.js'
 import type { JsonRpcResult } from './rust-harness-client.js'
 import { getAllUserMessageTexts, getConversationTitleFromMessages, getLastUserMessageText, getMessageText } from './chat-message-utils.js'
-import { buildDirectGroupReplyPromptSection, buildGroupDeliberationSection, parseGroupRouting, resolveDirectGroupReplyRoute, type GroupDeliberationProgressCallback } from './ai/group-deliberation.js'
+import { buildDirectGroupReplyPromptSection, parseGroupRouting, resolveDirectGroupReplyRoute, type GroupDeliberationProgressCallback, type GroupDeliberationResult } from './ai/group-deliberation.js'
 import { buildNativeRustGroupDeliberation, hasNativeRustGroupSession, injectNativeRustGroup } from './ai/native-rust-group-deliberation.js'
-import { groupSessionRegistry } from './ai/group-session.js'
 import { cloneMemoryCompactionStatus, runMemoryCompactionWithStatus } from './ai/memory-compaction.js'
 import {
   applyMcpServersToService,
@@ -248,7 +246,6 @@ export function setupIPC (): void {
   // setupIPC runs once after app.whenReady, before any renderer is opened.
   console.info('[permissions] Computer Use startup snapshot:', computerUsePermissions.initialize())
   const getMainWindow = () => mainState.mainWindow
-  const aiEngine = mainState.aiEngine!
   const projectFS = mainState.projectFS!
   const runtimeManager = mainState.runtimeManager!
   const builderService = mainState.builderService!
@@ -265,8 +262,6 @@ export function setupIPC (): void {
   const agentStore = mainState.agentStore!
   const agentGroupStore = mainState.agentGroupStore!
   const channelBindingStore = mainState.channelBindingStore!
-  const memoryStore = mainState.memoryStore!
-  const memoryEngine = mainState.memoryEngine!
   const scheduledTaskService = mainState.scheduledTaskService!
   const longTermGoalService = mainState.longTermGoalService!
   const documentStore = mainState.documentStore!
@@ -301,7 +296,7 @@ export function setupIPC (): void {
   ipcMain.handle('ai:chat', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => {
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
     const folderWorkspacePromptSection = buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
-    const baseRuntimeContext = resolveAgentRuntimeContext({
+    const baseRuntimeContext = await resolveAgentRuntimeContext({
       messages,
       agentId,
       groupId,
@@ -319,7 +314,7 @@ export function setupIPC (): void {
       ? groupRouting.plannerAgentId
       : directGroupReply?.targetAgentId
     const runtimeContext = routedAgentId
-      ? resolveAgentRuntimeContext({
+      ? await resolveAgentRuntimeContext({
           messages,
           agentId: routedAgentId,
           groupId,
@@ -339,7 +334,7 @@ export function setupIPC (): void {
     const group = runtimeContext.group
     const groupDeliberation = group && !directGroupReply
       ? await runWithAiRequestWindow(requestWindow, async () => {
-          if (rustHarness) {
+          {
             const client = mainState.rustHarness
             if (!client) throw new Error('Rust harness client is not initialized.')
             return await buildNativeRustGroupDeliberation({
@@ -364,22 +359,10 @@ export function setupIPC (): void {
                 ],
                 activeSkillContents: runtimeContext.activeSkillContents,
                 memoryScopes: runtimeContext.memoryScopes,
-                memoryQuery: getLastUserMessageText(messages)
+                memoryEmbedding: runtimeContext.memoryEmbedding
               }
             })
           }
-          return await buildGroupDeliberationSection({
-            messages,
-            group,
-            routing: groupRouting || undefined,
-            channelBinding: runtimeContext.channelBinding,
-            targetProjectId: runtimeContext.effectiveTargetProjectId,
-            fallbackReasoningStrength: reasoningStrength,
-            runtimeRequestContext: {
-              workspaceRoot: resolvedFolderWorkspaceRoot,
-              memoryScopes: runtimeContext.memoryScopes
-            }
-          })
         })
       : { promptSection: null, transcript: null }
 
@@ -399,10 +382,14 @@ export function setupIPC (): void {
         ],
         allowedToolNames: runtimeContext.allowedToolNames,
         deniedToolNames: runtimeContext.deniedToolNames,
-        memoryScopes: runtimeContext.memoryScopes
+        // Rust-side semantic recall needs scopes + query + embedding config;
+        // the TS engine ignores these fields.
+        memoryScopes: runtimeContext.memoryScopes,
+        memoryQuery: getLastUserMessageText(messages),
+        memoryEmbedding: runtimeContext.memoryEmbedding
       }
-      if (rustHarness) return await rustHarness.chat(messages, requestOptions)
-      return await aiEngine.chat(messages, requestOptions)
+      // Rust is the only execution backend.
+      return await rustHarness.chat(messages, requestOptions)
     })
   })
 
@@ -422,7 +409,7 @@ export function setupIPC (): void {
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
     const folderWorkspacePromptSection = buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
-    const baseRuntimeContext = resolveAgentRuntimeContext({
+    const baseRuntimeContext = await resolveAgentRuntimeContext({
       messages,
       agentId,
       groupId,
@@ -441,7 +428,7 @@ export function setupIPC (): void {
       ? groupRouting.plannerAgentId
       : directGroupReply?.targetAgentId
     const runtimeContext = routedAgentId
-      ? resolveAgentRuntimeContext({
+      ? await resolveAgentRuntimeContext({
           messages,
           agentId: routedAgentId,
           groupId,
@@ -621,7 +608,7 @@ export function setupIPC (): void {
         sendEventToRenderer(stageOrEvent as unknown as Record<string, unknown>)
       }
     }
-    let groupDeliberation = { promptSection: null, transcript: null } as Awaited<ReturnType<typeof buildGroupDeliberationSection>>
+    let groupDeliberation: GroupDeliberationResult = { promptSection: null, transcript: null }
     let groupTranscriptSent = false
     const emitGroupTranscriptIfNeeded = () => {
       if (groupTranscriptSent || !groupDeliberation.transcript || sender.isDestroyed()) {
@@ -647,7 +634,7 @@ export function setupIPC (): void {
             if (!group) {
               return { promptSection: null, transcript: null }
             }
-            if (rustHarness) {
+            {
               const client = mainState.rustHarness
               if (!client) throw new Error('Rust harness client is not initialized.')
               return await buildNativeRustGroupDeliberation({
@@ -677,30 +664,11 @@ export function setupIPC (): void {
                   ],
                   activeSkillContents: runtimeContext.activeSkillContents,
                   memoryScopes: runtimeContext.memoryScopes,
-                  memoryQuery: getLastUserMessageText(messages),
+                  memoryEmbedding: runtimeContext.memoryEmbedding,
                   computerUseEnabled: computerUseEnabled === true
                 }
               })
             }
-            return await buildGroupDeliberationSection({
-              messages,
-              group,
-              routing: groupRouting || undefined,
-              channelBinding: runtimeContext.channelBinding,
-              targetProjectId: runtimeContext.effectiveTargetProjectId,
-              fallbackReasoningStrength: reasoningStrength,
-              onProgress,
-              sessionId,
-              abortSignal: abortController.signal,
-              runtimeRequestContext: {
-                hostConversationId: conversationId,
-                hostSessionId: sessionId,
-                workspaceRoot: resolvedFolderWorkspaceRoot,
-                authMode: authModeRef.current,
-                getAuthMode: () => authModeRef.current,
-                memoryScopes: runtimeContext.memoryScopes
-              }
-            })
           })
         : { promptSection: null, transcript: null }
 
@@ -728,11 +696,14 @@ export function setupIPC (): void {
           ],
           allowedToolNames: runtimeContext.allowedToolNames,
           deniedToolNames: runtimeContext.deniedToolNames,
-          memoryScopes: runtimeContext.memoryScopes
+          // Rust-side semantic recall needs scopes + query + embedding config;
+          // the TS engine ignores these fields.
+          memoryScopes: runtimeContext.memoryScopes,
+          memoryQuery: getLastUserMessageText(messages),
+          memoryEmbedding: runtimeContext.memoryEmbedding
         }
-        const stream = rustHarness
-          ? rustHarness.chatStream(messages, onProgress, requestOptions)
-          : aiEngine.chatStream(messages, onProgress, requestOptions)
+        // Rust is the only execution backend.
+        const stream = rustHarness.chatStream(messages, onProgress, requestOptions)
         for await (const streamEvent of stream) {
           if (streamEvent.type === 'tool_start' && streamEvent.name) {
             executedToolNames.push(streamEvent.name)
@@ -742,7 +713,9 @@ export function setupIPC (): void {
             notifyAiTaskStatus(executionPreferences, messages, 'completed')
             aiLogger?.finish('completed', streamEvent.message)
 
-            if (rustHarness && mainState.rustHarness) {
+            // Session memory ingestion goes to the Rust harness — the single
+            // owner of the shared agent-memory store (design §12).
+            if (mainState.rustHarness) {
               try {
                 await mainState.rustHarness.ingestMemory({
                   agent: runtimeContext.agent,
@@ -750,27 +723,9 @@ export function setupIPC (): void {
                   userMessages: getAllUserMessageTexts(messages),
                   finalAssistantText: getMessageText(streamEvent.message.content),
                   toolNames: executedToolNames,
-                  sourceConversationId: conversationId,
-                  sourceSessionId: sessionId
-                })
-              } catch (memoryError) {
-                console.error('[ai:chatStream] Failed to ingest Rust memory:', memoryError)
-                aiLogger?.logError('session', memoryError as Error, { phase: 'rust-memory-ingest', sessionId, conversationId })
-              }
-            } else if (memoryEngine) {
-              try {
-                memoryEngine.ingestSessionMemory({
-                  agent: runtimeContext.agent,
-                  group: runtimeContext.group,
-                  channelBinding: runtimeContext.channelBinding,
-                  userMessages: getAllUserMessageTexts(messages),
-                  finalAssistantText: getMessageText(streamEvent.message.content),
-                  toolNames: executedToolNames,
                   targetProjectId: runtimeContext.effectiveTargetProjectId,
                   sourceConversationId: conversationId,
-                  sourceSessionId: sessionId,
-                  userId: 'local-user',
-                  enabledScopeTypes: runtimeContext.memoryScopeTypes
+                  sourceSessionId: sessionId
                 })
               } catch (memoryError) {
                 console.error('[ai:chatStream] Failed to ingest memory:', memoryError)
@@ -838,25 +793,15 @@ export function setupIPC (): void {
   // The stream session id prevents concurrent conversations using the same
   // group from receiving each other's clarifications.
   ipcMain.handle('ai:groupInject', async (_event: IpcMainInvokeEvent, sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => {
-    if (hasNativeRustGroupSession(sessionId)) {
-      return await injectNativeRustGroup(sessionId, groupId, content, targetAgentIds)
-    }
-    const session = groupSessionRegistry.get(sessionId)
-    if (!session) {
+    // Group sessions are native Rust runs; there is no host-side session map.
+    if (!hasNativeRustGroupSession(sessionId)) {
       return { ok: false, injected: false, error: 'No active group session for this stream.' }
-    }
-    if (session.groupId !== groupId) {
-      return { ok: false, injected: false, error: 'The active group session does not match this conversation.' }
     }
     if (typeof content !== 'string' || !content.trim()) {
       return { ok: false, injected: false, error: 'content is required.' }
     }
     try {
-      const injection = session.inject({
-        content: content.trim(),
-        targetAgentIds: Array.isArray(targetAgentIds) ? targetAgentIds : undefined
-      })
-      return { ok: true, injected: true, injection }
+      return await injectNativeRustGroup(sessionId, groupId, content, targetAgentIds)
     } catch (error) {
       return { ok: false, injected: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -952,7 +897,7 @@ export function setupIPC (): void {
 
   ipcMain.handle('agentWorkspace:listToolDefinitions', async () => {
     const selectedHarness = await startSelectedRustHarness()
-    return (selectedHarness || aiEngine).getAvailableTools()
+    return selectedHarness!.getAvailableTools()
       .map(tool => ({
         name: tool.name,
         description: getAgentWorkspaceToolDescription(tool.name, tool.description)
@@ -1054,22 +999,19 @@ export function setupIPC (): void {
     return { ok: true, reply }
   })
 
+  // All memory CRUD flows through the Memory Service — the single owner of
+  // user-shared memory. There is no per-backend branch anymore (design §12).
+  // Memory is owned by the Rust harness (single source). All CRUD flows go
+  // through harness RPC against the shared agent-memory store (design §12);
+  // the embedding settings live in Electron's settings.json and are handed
+  // to the harness per chat request.
   ipcMain.handle('memory:list', async (_event: IpcMainInvokeEvent, options?: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number; scopeType?: AgentMemoryScope; scopeId?: string }) => {
     const scopes = options?.scopes || (options?.scopeType && options?.scopeId
       ? [{ scopeType: options.scopeType, scopeId: options.scopeId }]
       : undefined)
-
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) {
-      return await rustClient.listMemory({
-        query: options?.query,
-        scopes,
-        memoryTypes: options?.memoryTypes,
-        limit: options?.limit
-      })
-    }
-
-    return memoryStore!.search({
+    if (!rustClient) throw new Error('Rust harness is required for memory access.')
+    return await rustClient.listMemory({
       query: options?.query,
       scopes,
       memoryTypes: options?.memoryTypes,
@@ -1107,26 +1049,33 @@ export function setupIPC (): void {
       updatedAt: entry.updatedAt || new Date().toISOString()
     }
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.saveMemory(normalizedEntry)
-    return memoryStore!.upsert(normalizedEntry)
+    if (!rustClient) throw new Error('Rust harness is required for memory access.')
+    return await rustClient.saveMemory(normalizedEntry)
   })
 
   ipcMain.handle('memory:pin', async (_event: IpcMainInvokeEvent, id: string, pinned: boolean) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.pinMemory(id, pinned)
-    return memoryEngine!.pinMemory(id, pinned)
+    if (!rustClient) throw new Error('Rust harness is required for memory access.')
+    return await rustClient.pinMemory(id, pinned)
   })
 
   ipcMain.handle('memory:delete', async (_event: IpcMainInvokeEvent, id: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.deleteWorkspaceMemory(id)
-    return memoryEngine!.deleteMemory(id)
+    if (!rustClient) throw new Error('Rust harness is required for memory access.')
+    return await rustClient.deleteWorkspaceMemory(id)
   })
 
-  ipcMain.handle('memory:compact', async (): Promise<MemoryCompactionResult> => {
-    if (mainState.activeMemoryCompactionPromise) return mainState.activeMemoryCompactionPromise
-    mainState.activeMemoryCompactionPromise = runMemoryCompactionWithStatus()
-    return mainState.activeMemoryCompactionPromise
+  ipcMain.handle('memory:getEmbeddingSettings', async () => {
+    return settingsStore!.getMemoryEmbeddingSettings()
+  })
+
+  ipcMain.handle('memory:setEmbeddingSettings', async (_event: IpcMainInvokeEvent, settings: MemoryEmbeddingSettings) => {
+    settingsStore!.saveMemoryEmbeddingSettings({
+      enabled: settings?.enabled === true,
+      providerId: typeof settings?.providerId === 'string' ? settings.providerId : undefined,
+      modelId: typeof settings?.modelId === 'string' ? settings.modelId : undefined
+    })
+    return settingsStore!.getMemoryEmbeddingSettings()
   })
 
   ipcMain.handle('memory:compactStatus', async (): Promise<MemoryCompactionStatus> => {
@@ -2172,7 +2121,6 @@ export function setupIPC (): void {
 
   ipcMain.handle('settings:saveAI', async (_event: IpcMainInvokeEvent, config: { apiKey?: string; baseUrl?: string; model?: string }) => {
     settingsStore!.saveAISettings(config)
-    aiEngine.configure(config)
     mainState.rustHarnessEngine?.configure(config)
     return { success: true }
   })
@@ -2204,7 +2152,7 @@ export function setupIPC (): void {
   ipcMain.handle('settings:saveProviders', async (_event: IpcMainInvokeEvent, config: AIProvidersConfig) => {
     settingsStore!.saveProviders(config)
     const normalizedConfig = applyActiveProviderToAiEngine()
-    if (settingsStore!.getAIExecutionPreferences().harnessBackend === 'rust' && mainState.rustHarness?.isAvailable()) {
+    if (mainState.rustHarness?.isAvailable()) {
       try {
         await mainState.rustHarness.syncProviders()
       } catch (error) {
@@ -2297,51 +2245,7 @@ export function setupIPC (): void {
   })
 
   ipcMain.handle('settings:saveAIExecutionPreferences', async (_event: IpcMainInvokeEvent, preferences: AIExecutionPreferences) => {
-    const previous = settingsStore!.getAIExecutionPreferences()
     settingsStore!.saveAIExecutionPreferences(preferences)
-    const next = settingsStore!.getAIExecutionPreferences()
-    try {
-      await transitionHarnessOwnership(
-        previous.harnessBackend,
-        next.harnessBackend,
-        mainState.rustHarness?.isRunning() ?? false,
-        {
-          stopTypeScriptHealthChecks: async () => await appGateway.stopHealthChecks(),
-          startTypeScriptHealthChecks: () => appGateway.startHealthChecks(),
-          startRustHarness: async () => { await startSelectedRustHarness() },
-          stopTypeScriptProjects: async () => await runtimeManager.stopAll(),
-          handoffRustToTypeScript: async () => {
-            // Native Rust image tools may have handed requests to the Rust
-            // queue while no Studio window was mounted. Move those requests
-            // into Electron's transient handoff buffer before disposing Rust,
-            // otherwise a TS selection would strand them in the old process.
-            const pendingImageTasks = await mainState.rustHarness?.studioTasksDrain() ?? []
-            if (pendingImageTasks.length > 0) {
-              mainState.pendingStudioImageTasks.push(...pendingImageTasks)
-              broadcastToAppWindows('image:studio:tasksAdded', {
-                count: pendingImageTasks.length,
-                source: 'rust-to-ts'
-              })
-            }
-            await mainState.rustHarness?.handoffToTypeScript()
-          },
-          rebuildTypeScriptImageLibrary: () => imageLibraryStore?.rebuildIndexFromMirrors(),
-          notifyImageLibraryChanged: () => broadcastToAppWindows('image:library:changed', { source: 'rust-to-ts' }),
-          onRustHandoffError: error => console.warn('[settings] Rust harness handoff did not complete cleanly:', error)
-        }
-      )
-      await applyMcpServersToService()
-    } catch (error) {
-      // Do not persist a UI choice that says Rust while the process could not
-      // start. The ownership helper has already restored TS health checks for
-      // this TS -> Rust transaction; now restore the durable preference and
-      // its MCP catalog as well.
-      if (previous.harnessBackend === 'ts' && next.harnessBackend === 'rust') {
-        settingsStore!.saveAIExecutionPreferences(previous)
-        await applyMcpServersToService()
-      }
-      throw error
-    }
     return { success: true }
   })
 
@@ -2566,7 +2470,6 @@ export function setupIPC (): void {
       const skill = skillStore!.get(id)
       if (skill) contents.push(skill.content)
     }
-    aiEngine.setActiveSkills(contents)
     mainState.rustHarnessEngine?.setActiveSkills(contents)
     return { success: true, count: contents.length }
   })
@@ -2621,7 +2524,6 @@ export function setupIPC (): void {
 
   // --- Plan Mode ---
   ipcMain.handle('ai:setPlanMode', async (_event: IpcMainInvokeEvent, active: boolean) => {
-    aiEngine.setPlanMode(active)
     mainState.rustHarnessEngine?.setPlanMode(active)
     return { success: true }
   })
@@ -2642,8 +2544,6 @@ export function setupIPC (): void {
         cacheReadPerMillion: entry.cacheReadPerMillion || undefined
       }
     }
-    aiEngine.setCustomModelPricing(pricingMap)
-    aiEngine.setBudgetLimit(costSettings.budgetLimit)
     mainState.rustHarnessEngine?.setCustomModelPricing(pricingMap)
     mainState.rustHarnessEngine?.setBudgetLimit(costSettings.budgetLimit)
     return { success: true }

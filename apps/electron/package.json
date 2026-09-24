@@ -21,11 +21,8 @@
     "build:electron:bytecode": "pnpm build:main:bytecode && pnpm build:preload:bytecode",
     "rebuild:native": "pnpm exec electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps",
-    "test:group-session": "node --experimental-strip-types --test tests/group-session.test.mjs",
     "test:group-rust-routing": "node --test tests/group-rust-routing.test.mjs",
     "test:im-rust-group-routing": "node --test tests/im-rust-group-routing.test.mjs",
-    "test:harness-ownership": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/harness-ownership.test.mjs",
-    "test:harness-settings": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/settings-harness-default.test.mjs",
     "test:image-library-mirror": "node scripts/run-electron-node-test.mjs tests/image-library-mirror.test.mjs",
     "test:rust-harness-host-callbacks": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/rust-harness-host-callbacks.test.mjs",
     "test:harness-tool-contracts": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs scripts/generate-rust-tool-contracts.mjs --check",
@@ -75,6 +72,7 @@
     "qrcode": "^1.5.4",
     "readable-stream": "2.3.8",
     "sharp": "^0.34.4",
+    "sqlite-vec": "^0.1.9",
     "vue-i18n": "^9.14.5"
   },
   "devDependencies": {

@@ -1540,7 +1540,36 @@ fn static_system_prompt_sections(
     sections
 }
 
-fn memory_prompt_sections(hub: &Hub, context: &ChatRunContext) -> Vec<String> {
+/// 一次召回所需的 query embedding：由宿主下发的配置生成，仅在本请求
+/// 生命周期内有效。生成失败时退化为关键词召回（design §11）。
+struct MemoryQueryVector {
+    config: worldbase_protocol::types::MemoryEmbeddingRuntimeConfig,
+    #[allow(dead_code)]
+    vector: Vec<f32>,
+}
+
+async fn resolve_memory_query_vector(
+    hub: &Hub,
+    context: &ChatRunContext,
+) -> Option<MemoryQueryVector> {
+    let config = context.memory_embedding.clone()?;
+    let query = context.memory_query.as_deref()?.trim();
+    if query.is_empty() || context.memory_scopes.is_empty() {
+        return None;
+    }
+    // 语义召回依赖已激活的共享 generation（由 Electron 或本进程的队列建
+    // 立）。没有 active generation 时不存在一致向量空间，只做关键词召回。
+    let generation = hub.store.active_embedding_generation().ok().flatten()?;
+    let provider = hub.memory_queue.provider_for(&config);
+    let vector = provider.embed_query(query).await.ok()?;
+    Some(MemoryQueryVector { config, vector })
+}
+
+async fn memory_prompt_sections(
+    hub: &Hub,
+    context: &ChatRunContext,
+    memory_query: Option<&MemoryQueryVector>,
+) -> Vec<String> {
     if context.memory_scopes.is_empty() {
         return Vec::new();
     }
@@ -1557,9 +1586,44 @@ fn memory_prompt_sections(hub: &Hub, context: &ChatRunContext) -> Vec<String> {
         memory_types: Vec::new(),
         limit: Some(40),
     };
-    let Ok(entries) = hub.store.search_workspace_memories(&options) else {
-        return Vec::new();
+    let mut entries = match hub.store.search_workspace_memories(&options) {
+        Ok(entries) => entries,
+        Err(_) => Vec::new(),
     };
+
+    // Hybrid recall: merge scoped FTS hits with vector-KNN hits from the
+    // shared derived index; semantic matches come first (design §11).
+    if let Some(query_vector) = memory_query {
+        let query_text = context.memory_query.as_deref().unwrap_or("").trim();
+        let scope_keys: Vec<String> = context
+            .memory_scopes
+            .iter()
+            .map(|scope| format!("{}:{}", scope.scope_type, scope.scope_id))
+            .collect();
+        if let Ok(Some(generation)) = hub.store.active_embedding_generation() {
+            if let Ok(semantic) = hub
+                .store
+                .recall_semantic_entries(
+                    &*hub.memory_queue.provider_for(&query_vector.config),
+                    &generation.id,
+                    query_text,
+                    &scope_keys,
+                    20,
+                )
+                .await
+            {
+                let mut merged = semantic;
+                let seen: std::collections::HashSet<String> =
+                    merged.iter().map(|entry| entry.id.clone()).collect();
+                for entry in entries {
+                    if !seen.contains(&entry.id) {
+                        merged.push(entry);
+                    }
+                }
+                entries = merged;
+            }
+        }
+    }
 
     let mut sections = Vec::new();
     for (kind, title) in [
@@ -1589,11 +1653,12 @@ fn memory_prompt_sections(hub: &Hub, context: &ChatRunContext) -> Vec<String> {
     sections
 }
 
-fn system_prompt(
+async fn system_prompt(
     hub: &Hub,
     agent: Option<&worldbase_protocol::types::AgentDefinition>,
     context: &ChatRunContext,
     llm_tools: &[LlmTool],
+    memory_query: Option<&MemoryQueryVector>,
 ) -> String {
     let mut sections = Vec::new();
     if let Some(agent) = agent.filter(|agent| !agent.system_prompt.trim().is_empty()) {
@@ -1665,7 +1730,7 @@ fn system_prompt(
 
     // Rust owns scoped memory retrieval on the Rust-selected path. Keeping it
     // in this dynamic tail avoids opening the TypeScript memory store.
-    sections.extend(memory_prompt_sections(hub, context));
+    sections.extend(memory_prompt_sections(hub, context, memory_query).await);
     sections.join("\n\n")
 }
 
@@ -3739,7 +3804,8 @@ async fn run_chat_inner(
     tools_meta.extend(llm_custom_tools(&custom_tools));
     tools_meta.retain(|tool| tool.name != FINISH_TASK_TOOL_NAME);
     tools_meta.push(finish_task_tool_definition());
-    let system = system_prompt(&hub, agent.as_ref(), &context, &tools_meta);
+    let memory_query_vector = resolve_memory_query_vector(&hub, &context).await;
+    let system = system_prompt(&hub, agent.as_ref(), &context, &tools_meta, memory_query_vector.as_ref()).await;
     let selected_model = model_override
         .as_deref()
         .unwrap_or_else(|| provider.model());

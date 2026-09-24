@@ -1,5 +1,6 @@
 import { app, ipcMain, shell } from 'electron'
-import { AIEngine, type AIEngineServices } from '../../src/main/ai-engine/ai-engine.js'
+import path from 'node:path'
+import type { AIEngineServices } from '../../src/main/ai-engine/engine-contracts.js'
 import { RustHarnessEngine } from '../../src/main/ai-harness/rust-harness-engine.js'
 import { ProjectFS } from '../../src/main/project-fs/project-fs.js'
 import { ProjectPackageService } from '../../src/main/project-fs/project-package-service.js'
@@ -28,8 +29,6 @@ import { ScheduledTaskStore, type ScheduledTaskDefinition, type ScheduledTaskRun
 import { LongTermGoalStore } from '../../src/main/settings/long-term-goal-store.js'
 import { ChannelBindingStore } from '../../src/main/im/channel-binding-store.js'
 import { ImGatewayService } from '../../src/main/im/im-gateway-service.js'
-import { MemoryStore } from '../../src/main/ai-engine/memory/memory-store.js'
-import { MemoryEngine } from '../../src/main/ai-engine/memory/memory-engine.js'
 import { AsyncTaskManager } from '../../src/main/ai-engine/agent/tools/async-task-manager.js'
 import { DocumentStore } from '../../src/main/ai-engine/agent/tools/document-store.js'
 import { MCPService, type MCPServerSnapshot, type MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
@@ -44,7 +43,8 @@ import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AgentDefinition, AgentGroupDefinition } from '../../src/shared/agent-workspace-types.js'
 import { mainState } from './state.js'
 import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, resolveProviderConfig } from './ai/agent-context.js'
-import { getSelectedExecutionEngine, isRustHarnessSelected, startSelectedRustHarness } from './ai/selected-execution-engine.js'
+import { getSelectedExecutionEngine, startSelectedRustHarness } from './ai/selected-execution-engine.js'
+
 import { enqueueStudioImageTasks } from './media/image-studio-queue.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
 import { normalizeRustAskUserQuestions, normalizeRustAskUserResponse } from './ai/rust-ask-user-contract.js'
@@ -76,7 +76,6 @@ function optionalNumber (record: Record<string, unknown>, key: string): number |
  * RuntimeManager/AppGateway for the project's part of that snapshot.
  */
 async function resolveRustProjectRuntimeSnapshot (): Promise<HarnessProjectRuntimeSnapshot | null> {
-  if (mainState.settingsStore?.getAIExecutionPreferences().harnessBackend !== 'rust') return null
   const engine = await startSelectedRustHarness()
   const client = engine ? mainState.rustHarness : null
   if (!client) return null
@@ -121,10 +120,6 @@ async function resolveRustProjectRuntimeSnapshot (): Promise<HarnessProjectRunti
 }
 
 async function selectedRustMcpClient (): Promise<RustHarnessClient | null> {
-  if (mainState.settingsStore?.getAIExecutionPreferences().harnessBackend !== 'rust') {
-    electronMcpParkedForRust = false
-    return null
-  }
   const engine = await startSelectedRustHarness()
   return engine ? mainState.rustHarness : null
 }
@@ -473,7 +468,7 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
  * Mirrors the `projects:list` IPC so the Rust harness owns the list when selected.
  */
 async function listProjectsForSuggestions (): Promise<SuggestionProjectContext[]> {
-  if (isRustHarnessSelected()) {
+  {
     const harness = await startSelectedRustHarness()
     const client = harness ? mainState.rustHarness : null
     if (client) {
@@ -499,11 +494,7 @@ async function listProjectsForSuggestions (): Promise<SuggestionProjectContext[]
       return list.filter(project => project.id)
     }
   }
-  const projects = await mainState.projectFS!.listProjects()
-  return projects.map(project => {
-    const runtime = mainState.runtimeManager!.getStatus(project.id)
-    return { id: project.id, name: project.name || project.id, type: project.type || 'unknown', status: runtime.status, port: runtime.port }
-  })
+  return []
 }
 
 async function handleRustPermissionRequest (request: { requestId: string; toolName: string; argsSummary: string; sessionId: string }): Promise<boolean> {
@@ -555,8 +546,8 @@ export async function initializeServices (): Promise<void> {
     bindingStore: mainState.channelBindingStore!,
     generateReply: generateImGatewayReply
   })
-  mainState.memoryStore = new MemoryStore(userDataPath)
-  mainState.memoryEngine = new MemoryEngine(mainState.memoryStore)
+  // Memory is owned by the Rust harness: the shared agent-memory databases, the
+  // embedding pipeline, and recall all live in harness-rs (single source).
   mainState.scheduledTaskStore = new ScheduledTaskStore(userDataPath)
   mainState.longTermGoalStore = new LongTermGoalStore(userDataPath)
   mainState.dailySuggestionStore = new DailySuggestionStore(userDataPath)
@@ -628,7 +619,6 @@ export async function initializeServices (): Promise<void> {
     mcpService: mainState.mcpService!,
     scheduledTaskService: undefined
   }
-  mainState.aiEngine = new AIEngine(aiEngineServices)
 
   // Start Rust lazily when the user selects it in Settings. The TS engine is
   // still initialized here because the rest of the Electron shell (runtime,
@@ -708,7 +698,7 @@ export async function initializeServices (): Promise<void> {
   })
   mainState.scheduledTaskService = new ScheduledTaskService({
     store: mainState.scheduledTaskStore,
-    aiEngine: mainState.aiEngine!,
+    aiEngine: mainState.rustHarnessEngine!,
     resolveAiEngine: getSelectedExecutionEngine,
     skillStore: mainState.skillStore!,
     getMainWindow: () => mainState.mainWindow,
@@ -730,14 +720,13 @@ export async function initializeServices (): Promise<void> {
       broadcastToAppWindows('scheduler:reportRequested', JSON.parse(JSON.stringify(report)))
     }
   })
-  mainState.aiEngine.setScheduledTaskService(mainState.scheduledTaskService)
   aiEngineServices.scheduledTaskService = mainState.scheduledTaskService
   mainState.scheduledTaskService.start()
 
   mainState.longTermGoalService = new LongTermGoalService({
     store: mainState.longTermGoalStore,
     scheduledTaskService: mainState.scheduledTaskService,
-    aiEngine: mainState.aiEngine!,
+    aiEngine: mainState.rustHarnessEngine!,
     resolveAiEngine: getSelectedExecutionEngine,
     skillStore: mainState.skillStore!,
     projectFS: mainState.projectFS!,
@@ -801,11 +790,9 @@ export async function initializeServices (): Promise<void> {
         cacheReadPerMillion: entry.cacheReadPerMillion || undefined
       }
     }
-    mainState.aiEngine.setCustomModelPricing(pricingMap)
     mainState.rustHarnessEngine.setCustomModelPricing(pricingMap)
   }
   if (savedCostSettings.budgetLimit != null) {
-    mainState.aiEngine.setBudgetLimit(savedCostSettings.budgetLimit)
     mainState.rustHarnessEngine.setBudgetLimit(savedCostSettings.budgetLimit)
   }
 
@@ -813,19 +800,12 @@ export async function initializeServices (): Promise<void> {
 
   mainState.appGateway = new AppGateway(mainState.runtimeManager, mainState.projectFS, mainState.builderService)
   mainState.processManagerService = new ProcessManagerService(mainState.runtimeManager, mainState.projectFS)
-  // A Rust-selected configuration never lets the legacy gateway touch project
-  // state. Keep Electron bootable if its binary is missing so Settings can
-  // switch back, but leave TS recovery dormant until then.
-  if (isRustHarnessSelected()) {
-    try {
-      await startSelectedRustHarness()
-      console.log('[main] Rust project gateway health checks started')
-    } catch (error) {
-      console.error('[main] Rust harness is unavailable; TypeScript project recovery remains disabled:', error)
-    }
-  } else {
-    mainState.appGateway.startHealthChecks()
-    console.log('[main] AppGateway health checks started')
+  // Rust owns project process state; there is no TS gateway fallback.
+  try {
+    await startSelectedRustHarness()
+    console.log('[main] Rust project gateway health checks started')
+  } catch (error) {
+    console.error('[main] Rust harness is unavailable; project recovery is disabled:', error)
   }
 
   mainState.systemService = new SystemService(
@@ -841,17 +821,16 @@ export async function initializeServices (): Promise<void> {
     runtimeManager: mainState.runtimeManager!,
     apiClient: mainState.apiClient!,
     dataAccess: mainState.dataAccess!,
-    aiEngine: mainState.aiEngine!,
+    aiEngine: mainState.rustHarnessEngine!,
     resolveAiEngine: getSelectedExecutionEngine,
     configureAiEngines: (config) => {
-      mainState.aiEngine?.configure(config)
+      mainState.rustHarnessEngine?.configure(config)
       mainState.rustHarnessEngine?.configure(config)
     },
     systemService: mainState.systemService!,
     settingsStore: mainState.settingsStore!,
     imGatewayService: mainState.imGatewayService!,
     resolveRustProjectControl: async (): Promise<LanProjectControl | null> => {
-      if (mainState.settingsStore?.getAIExecutionPreferences().harnessBackend !== 'rust') return null
       const engine = await startSelectedRustHarness()
       return engine ? mainState.rustHarness : null
     }

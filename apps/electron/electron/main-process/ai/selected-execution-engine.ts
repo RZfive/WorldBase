@@ -5,7 +5,7 @@ import { mainState } from '../state.js'
 /**
  * Rust mode is an execution boundary, not a best-effort preference.  This
  * error deliberately reaches renderer/LAN callers so they never continue on
- * the TypeScript harness while Settings still says Rust.
+ * a TypeScript harness while the Rust deployment is broken.
  */
 export class RustHarnessUnavailableError extends Error {
   constructor (message: string, cause?: unknown) {
@@ -15,25 +15,17 @@ export class RustHarnessUnavailableError extends Error {
   }
 }
 
-export function isRustHarnessSelected (): boolean {
-  return mainState.settingsStore?.getAIExecutionPreferences().harnessBackend === 'rust'
-}
-
 /**
- * Resolve the configured chat backend before a model/tool loop begins.
- * Context never affects this choice. Rust is the default and the only actively
- * developed backend; an explicitly persisted `ts` value is supported solely
- * for compatibility with existing installations. A missing binary or failed
- * handshake is surfaced to the caller; silently returning TS would hide a
- * broken Rust deployment and could duplicate side effects.
+ * The Rust harness is the only execution backend. There is no TypeScript
+ * fallback anymore: a missing binary or a failed handshake is surfaced to
+ * the caller instead of silently degrading to a second implementation.
  */
-export async function startSelectedRustHarness (): Promise<RustHarnessEngine | null> {
-  if (!isRustHarnessSelected()) return null
+export async function startSelectedRustHarness (): Promise<RustHarnessEngine> {
   const engine = mainState.rustHarnessEngine
   const client = mainState.rustHarness
   if (!engine || !client?.isAvailable()) {
     throw new RustHarnessUnavailableError(
-      'Rust harness is selected but unavailable. Build worldbase-app-server or choose the TypeScript harness.'
+      'Rust harness is unavailable. Build worldbase-app-server and ensure it is installed.'
     )
   }
   try {
@@ -48,9 +40,5 @@ export async function startSelectedRustHarness (): Promise<RustHarnessEngine | n
 }
 
 export async function getSelectedExecutionEngine (): Promise<AIExecutionEngine> {
-  const rust = await startSelectedRustHarness()
-  if (rust) return rust
-  const engine = mainState.aiEngine
-  if (!engine) throw new Error('AI engine is not initialized')
-  return engine
+  return await startSelectedRustHarness()
 }

@@ -75,8 +75,7 @@ const themePreference = ref<ThemePreference>('system')
 const languagePreference = ref<LanguagePreference>('system')
 const executionPreferences = ref<AIExecutionPreferences>({
   notifyOnTaskComplete: true,
-  enableAiLogging: false,
-  harnessBackend: 'rust'
+  enableAiLogging: false
 })
 const savingTheme = ref(false)
 const savingLanguage = ref(false)
@@ -447,32 +446,6 @@ async function saveTaskNotificationPreference (notifyOnTaskComplete: boolean) {
   }
 }
 
-async function saveHarnessBackend (harnessBackend: 'ts' | 'rust') {
-  if (savingExecution.value || executionPreferences.value.harnessBackend === harnessBackend) return
-
-  const previous = executionPreferences.value.harnessBackend
-  executionPreferences.value = {
-    ...executionPreferences.value,
-    harnessBackend
-  }
-
-  savingExecution.value = true
-  feedback.value = ''
-
-  try {
-    await persistAIExecutionPreferences(executionPreferences.value)
-    setFeedback(t('common.saved'))
-  } catch (err) {
-    executionPreferences.value = {
-      ...executionPreferences.value,
-      harnessBackend: previous
-    }
-    setFeedback(t('common.saveFailed', { message: (err as Error).message }))
-  } finally {
-    savingExecution.value = false
-  }
-}
-
 function toggleTaskNotificationPreference () {
   void saveTaskNotificationPreference(!executionPreferences.value.notifyOnTaskComplete)
 }
@@ -713,42 +686,6 @@ function handleFontReposition () {
             </button>
           </section>
 
-          <section class="gs-control-card gs-harness-card">
-            <div class="gs-control-copy">
-              <span class="gs-control-title">{{ $t('settings.general.execution.harnessTitle') }}</span>
-              <p class="gs-control-hint">{{ $t('settings.general.execution.harnessHint') }}</p>
-            </div>
-            <div
-              class="gs-harness-segmented"
-              role="radiogroup"
-              :aria-label="$t('settings.general.execution.harnessTitle')"
-            >
-              <button
-                type="button"
-                class="gs-harness-option"
-                :class="{ active: executionPreferences.harnessBackend === 'ts' }"
-                :disabled="savingExecution"
-                role="radio"
-                :aria-checked="executionPreferences.harnessBackend === 'ts'"
-                @click="saveHarnessBackend('ts')"
-              >
-                <span>{{ $t('settings.general.execution.harnessTs') }}</span>
-                <small>{{ $t('settings.general.execution.harnessTsHint') }}</small>
-              </button>
-              <button
-                type="button"
-                class="gs-harness-option"
-                :class="{ active: executionPreferences.harnessBackend === 'rust' }"
-                :disabled="savingExecution"
-                role="radio"
-                :aria-checked="executionPreferences.harnessBackend === 'rust'"
-                @click="saveHarnessBackend('rust')"
-              >
-                <span>{{ $t('settings.general.execution.harnessRust') }}</span>
-                <small>{{ $t('settings.general.execution.harnessRustHint') }}</small>
-              </button>
-            </div>
-          </section>
 
           <section class="gs-control-card">
             <div class="gs-control-copy">

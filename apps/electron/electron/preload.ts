@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-permissions.js'
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../src/shared/image-studio-types.js'
@@ -336,7 +336,6 @@ interface MCPStateSnapshot {
 interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
   enableAiLogging: boolean
-  harnessBackend: 'ts' | 'rust'
 }
 
 interface ChatFontPreferences {
@@ -551,6 +550,8 @@ export interface ElectronAPI {
   saveMemory: (entry: Partial<MemoryEntry>) => Promise<MemoryEntry>
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
+  getMemoryEmbeddingSettings: () => Promise<MemoryEmbeddingSettings>
+  saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => Promise<MemoryEmbeddingSettings>
   compactMemory: () => Promise<MemoryCompactionResult>
   getMemoryCompactionStatus: () => Promise<MemoryCompactionStatus>
   onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => () => void
@@ -836,6 +837,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveMemory: (entry: Partial<MemoryEntry>) => ipcRenderer.invoke('memory:save', entry),
   pinMemory: (id: string, pinned: boolean) => ipcRenderer.invoke('memory:pin', id, pinned),
   deleteMemory: (id: string) => ipcRenderer.invoke('memory:delete', id),
+  getMemoryEmbeddingSettings: () => ipcRenderer.invoke('memory:getEmbeddingSettings'),
+  saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => ipcRenderer.invoke('memory:setEmbeddingSettings', settings),
   compactMemory: () => ipcRenderer.invoke('memory:compact'),
   getMemoryCompactionStatus: () => ipcRenderer.invoke('memory:compactStatus'),
   onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => {

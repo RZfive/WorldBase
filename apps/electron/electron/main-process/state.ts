@@ -1,6 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { BrowserWindow } from 'electron'
-import type { AIEngine } from '../../src/main/ai-engine/ai-engine.js'
 import type { RustHarnessEngine } from '../../src/main/ai-harness/rust-harness-engine.js'
 import type { ProjectFS } from '../../src/main/project-fs/project-fs.js'
 import type { ProjectPackageService } from '../../src/main/project-fs/project-package-service.js'
@@ -27,17 +26,15 @@ import type { ScheduledTaskStore } from '../../src/main/settings/scheduled-task-
 import type { LongTermGoalStore } from '../../src/main/settings/long-term-goal-store.js'
 import type { ChannelBindingStore } from '../../src/main/im/channel-binding-store.js'
 import type { ImGatewayService } from '../../src/main/im/im-gateway-service.js'
-import type { MemoryStore } from '../../src/main/ai-engine/memory/memory-store.js'
-import type { MemoryEngine } from '../../src/main/ai-engine/memory/memory-engine.js'
-import type { AsyncTaskManager } from '../../src/main/ai-engine/agent/tools/async-task-manager.js'
+import type { RustHarnessClient } from './rust-harness-client.js'
+import type { MemoryCompactionResult, MemoryCompactionStatus } from '../../src/shared/agent-workspace-types.js'
 import type { DocumentStore } from '../../src/main/ai-engine/agent/tools/document-store.js'
+import type { AsyncTaskManager } from '../../src/main/ai-engine/agent/tools/async-task-manager.js'
 import type { MCPService } from '../../src/main/mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
 import type { LongTermGoalService } from '../../src/main/long-term-goals/long-term-goal-service.js'
 import type { DailySuggestionStore } from '../../src/main/settings/daily-suggestion-store.js'
 import type { DailySuggestionService } from '../../src/main/suggestions/daily-suggestion-service.js'
-import type { RustHarnessClient } from './rust-harness-client.js'
-import type { MemoryCompactionResult, MemoryCompactionStatus } from '../../src/shared/agent-workspace-types.js'
 import type { PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
 import { t } from '../../src/main/i18n/main-i18n.js'
 
@@ -72,10 +69,8 @@ export const activeWindowWidthAnimations = new Map<number, ActiveWindowWidthAnim
 
 export const mainState = {
   mainWindow: null as BrowserWindow | null,
-  aiEngine: null as AIEngine | null,
   rustHarness: null as RustHarnessClient | null,
-  // Keep the Rust facade separate from AIEngine while migration is in
-  // progress. Callers choose it per request from the persisted preference.
+  // Rust is the only execution backend (design: harness-rs owns the loop).
   rustHarnessEngine: null as RustHarnessEngine | null,
   projectFS: null as ProjectFS | null,
   runtimeManager: null as RuntimeManager | null,
@@ -97,8 +92,6 @@ export const mainState = {
   agentGroupStore: null as AgentGroupStore | null,
   channelBindingStore: null as ChannelBindingStore | null,
   imGatewayService: null as ImGatewayService | null,
-  memoryStore: null as MemoryStore | null,
-  memoryEngine: null as MemoryEngine | null,
   activeMemoryCompactionPromise: null as Promise<MemoryCompactionResult> | null,
   memoryCompactionStatus: {
     id: null,

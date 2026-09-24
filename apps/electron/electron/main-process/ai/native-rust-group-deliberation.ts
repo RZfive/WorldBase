@@ -71,6 +71,7 @@ export interface RustNativeGroupDeliberationInput {
     | 'activeSkillContents'
     | 'memoryScopes'
     | 'memoryQuery'
+    | 'memoryEmbedding'
     | 'computerUseEnabled'
   > & {
     /** Live Electron authorization mode used by Node-hosted tool handlers. */
@@ -294,7 +295,8 @@ export async function buildNativeRustGroupDeliberation (
               getAuthMode: input.context?.getAuthMode,
               hostConversationId: input.context?.hostConversationId,
               hostSessionId: input.sessionId,
-              memoryScopes: commonContext.memoryScopes
+              memoryScopes: commonContext.memoryScopes,
+              memoryEmbedding: commonContext.memoryEmbedding
             }
           })
           // The selected Rust engine must be supplied for planner-driven
@@ -458,6 +460,7 @@ function nativeGroupContext (input: RustNativeGroupDeliberationInput): RustChatO
     budgetLimit: input.context?.budgetLimit,
     memoryScopes: input.context?.memoryScopes,
     memoryQuery: input.context?.memoryQuery,
+    memoryEmbedding: input.context?.memoryEmbedding,
     computerUseEnabled: input.context?.computerUseEnabled === true,
     systemPromptSections: uniqueStrings(input.context?.systemPromptSections),
     activeSkillContents: uniqueStrings(input.context?.activeSkillContents),
@@ -492,6 +495,7 @@ function nativeGroupHostToolContext (
     activeSkillContents: input.context?.activeSkillContents,
     systemPromptSections: input.context?.systemPromptSections,
     memoryScopes: input.context?.memoryScopes,
+    memoryEmbedding: input.context?.memoryEmbedding,
     abortSignal: input.abortSignal
   }
 }

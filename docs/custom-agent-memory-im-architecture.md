@@ -1,5 +1,7 @@
 # WorldBase — 自定义 Agent、长期记忆、群协作与 IM 接入升级方案
 
+> 记忆、Embedding、跨 conversation 召回和供应商模型配置的现行设计基线见 [`shared-memory-embedding-architecture.md`](./shared-memory-embedding-architecture.md)。本文保留 Agent、群协作和 IM 接入的产品方案；其中早期“先做 FTS5、后做 embeddings”的表述是历史分阶段建议，不覆盖新的记忆向量架构。
+
 ## 1. 目标
 
 本次升级要解决四个连续问题，而不是四个彼此独立的功能点。
@@ -76,9 +78,9 @@ Agent 应该是稳定对象，至少包含这些内容：
 
 未来接入企业微信、飞书、Slack、Discord 或 Telegram 时，都应该先归一化成统一的 `ChannelEvent`，再进入同一套会话和权限链路。
 
-### 3.5 先做 SQLite FTS，后做向量检索
+### 3.5 记忆检索采用 SQLite FTS5 + 向量索引
 
-当前应用本地存储已经依赖 SQLite，MVP 阶段优先用 Electron 内置 `node:sqlite` 或 Rust bundled `rusqlite` 搭配 FTS5 做记忆索引，先把写回、去重、筛选、召回链路跑通。向量检索可以作为第二阶段增强，而不是前置阻塞项。
+当前应用本地存储已经依赖 SQLite。记忆事实和关键词索引继续使用 SQLite/FTS5；跨 Agent、跨 conversation 的模糊语义召回在配置供应商 embedding 模型后使用 sqlite-vec 向量索引。完整的数据模型、模型生命周期、容量估算、供应商模型和 Rust/Electron 边界见 [`shared-memory-embedding-architecture.md`](./shared-memory-embedding-architecture.md)。
 
 ---
 
@@ -370,7 +372,7 @@ Raw session
 
 ## 6.6 为什么这套设计可行
 
-因为它不依赖一开始就上复杂向量库。
+因为它不依赖一开始就上独立向量数据库服务。
 
 MVP 阶段直接使用：
 
@@ -379,7 +381,7 @@ MVP 阶段直接使用：
 - tags + scope 做过滤
 - importance/confidence 做排序
 
-当数据量上来后，再补 embeddings 字段和相似度召回，不会影响前面数据模型。
+当用户在供应商配置中设置 embedding 模型后，再启用 sqlite-vec 相似度召回；没有设置模型时继续使用 SQLite/FTS5，不创建向量存储。
 
 ---
 
@@ -789,7 +791,7 @@ apps/electron/src/renderer/components/chat/
 - 记忆去重优化
 - 记忆使用反馈回路
 - 记忆质量评分
-- 可选 embeddings 检索
+- 供应商 embedding 模型与向量检索
 
 交付标准：
 

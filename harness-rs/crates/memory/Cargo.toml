@@ -12,3 +12,12 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 worldbase-protocol = { path = "../protocol" }
+# sqlite-vec: compiled-in vec0 virtual table module for the derived vector
+# index (`memory-vector.sqlite`). Loaded via sqlite3_auto_extension, which
+# only registers the module — existing connections keep working unchanged.
+sqlite-vec = "0.1.6"
+sha2 = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

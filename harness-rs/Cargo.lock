@@ -1971,6 +1971,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlite-vec"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0ba424237a9a5db2f6071f193319e2b6a32f7f3961debb2fbbfe67067abce3f"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2892,11 +2901,17 @@ name = "worldbase-memory"
 version = "1.5.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "image",
  "regex",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "sqlite-vec",
+ "tokio",
+ "tracing",
  "uuid",
  "worldbase-protocol",
 ]

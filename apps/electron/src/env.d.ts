@@ -376,6 +376,64 @@ interface MemoryEntry {
   lastUsedAt?: string
   createdAt: string
   updatedAt: string
+  status?: MemoryEntryStatus
+  sensitivity?: MemorySensitivity
+  evidenceCount?: number
+  lastConfirmedAt?: string
+  expiresAt?: string
+}
+
+type MemoryEntryStatus = 'active' | 'pending_confirmation' | 'superseded' | 'deleted'
+
+type MemorySensitivity = 'normal' | 'sensitive'
+
+type EmbeddingDistanceMetric = 'cosine' | 'dot' | 'l2'
+
+interface ProviderEmbeddingModel {
+  id: string
+  dimensions?: number
+  maxInputTokens?: number
+  distance?: EmbeddingDistanceMetric
+  normalized?: boolean
+  queryPrefix?: string
+  documentPrefix?: string
+  enabled?: boolean
+}
+
+interface MemoryEmbeddingSettings {
+  enabled: boolean
+  providerId?: string
+  modelId?: string
+}
+
+interface EmbeddingGenerationInfo {
+  id: string
+  providerId: string
+  modelId: string
+  modelRevision?: string
+  dimensions: number
+  distanceMetric: EmbeddingDistanceMetric
+  normalized: boolean
+  preprocessVersion: string
+  indexPath: string
+  status: 'building' | 'active' | 'retired' | 'failed'
+  totalDocuments: number
+  indexedDocuments: number
+  failedDocuments: number
+  createdAt: string
+  activatedAt?: string
+}
+
+interface MemoryIndexStatus {
+  embeddingEnabled: boolean
+  configured: boolean
+  vectorAvailable: boolean
+  providerId?: string
+  modelId?: string
+  dimensions?: number
+  generation: EmbeddingGenerationInfo | null
+  queue: { queued: number; running: number; failed: number }
+  vectorDbPath: string | null
 }
 
 interface ConnectorDefinition {
@@ -560,7 +618,6 @@ type AIExecutionAuthMode = 'strict' | 'auto'
 interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
   enableAiLogging: boolean
-  harnessBackend: 'ts' | 'rust'
 }
 
 interface ChatFontPreferences {
@@ -1026,6 +1083,8 @@ interface ElectronAPI {
   saveMemory: (entry: Partial<MemoryEntry>) => Promise<MemoryEntry>
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
+  getMemoryEmbeddingSettings: () => Promise<MemoryEmbeddingSettings>
+  saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => Promise<MemoryIndexStatus>
   compactMemory: () => Promise<MemoryCompactionResult>
   getMemoryCompactionStatus: () => Promise<MemoryCompactionStatus>
   onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => () => void

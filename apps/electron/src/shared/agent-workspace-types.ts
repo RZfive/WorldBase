@@ -282,11 +282,151 @@ export interface MemoryEntry {
   lastUsedAt?: string
   createdAt: string
   updatedAt: string
+  /** Lifecycle gate: only `active` entries participate in recall. */
+  status?: MemoryEntryStatus
+  /** Privacy hint; `sensitive` entries stay out of cross-scope recall. */
+  sensitivity?: MemorySensitivity
+  /** How many conversations/user confirmations back this entry. */
+  evidenceCount?: number
+  lastConfirmedAt?: string
+  /** Expiry for phase-bound preferences; null means durable. */
+  expiresAt?: string
+}
+
+export type MemoryEntryStatus = 'active' | 'pending_confirmation' | 'superseded' | 'deleted'
+
+export type MemorySensitivity = 'normal' | 'sensitive'
+
+export type EmbeddingDistanceMetric = 'cosine' | 'dot' | 'l2'
+
+export type EmbeddingDocumentSourceType = 'memory' | 'conversation_summary' | 'decision' | 'chunk'
+
+export type EmbeddingDocumentStatus = 'queued' | 'indexing' | 'indexed' | 'failed'
+
+export type EmbeddingJobStatus = 'queued' | 'running' | 'succeeded' | 'retry' | 'failed' | 'canceled'
+
+export type EmbeddingGenerationStatus = 'building' | 'active' | 'retired' | 'failed'
+
+/**
+ * An embedding model declared under a provider. Availability lives in the
+ * provider config; Memory Settings picks which one is current. The model
+ * itself is never bundled or downloaded — vectors come from the provider API.
+ */
+export interface ProviderEmbeddingModel {
+  id: string
+  /** Optional until first health probe pins the real dimension. */
+  dimensions?: number
+  maxInputTokens?: number
+  distance?: EmbeddingDistanceMetric
+  normalized?: boolean
+  /** Input template prefix, e.g. `query: ` / `passage: `. Versioned via generation. */
+  queryPrefix?: string
+  documentPrefix?: string
+  enabled?: boolean
+}
+
+/** Global "which embedding model does memory use right now" selection. */
+export interface MemoryEmbeddingSettings {
+  enabled: boolean
+  providerId?: string
+  modelId?: string
+}
+
+/**
+ * Per-request embedding runtime config handed from the host to the Rust
+ * harness. Model selection and credentials stay with the host's Memory
+ * Settings; the harness only acts as the provider API adapter (design §12/§17).
+ */
+export interface MemoryEmbeddingRuntimeConfig {
+  providerId: string
+  baseUrl: string
+  apiKey: string
+  modelId: string
+  dimensions?: number
+  distance?: EmbeddingDistanceMetric
+  normalized?: boolean
+  queryPrefix?: string
+  documentPrefix?: string
+}
+
+/** Fingerprint of the embedding model backing one vector space. */
+export interface EmbeddingModelDescriptor {
+  providerId: string
+  modelId: string
+  modelRevision?: string
+  dimensions: number
+  distance: EmbeddingDistanceMetric
+  normalized: boolean
+  preprocessVersion: string
+  queryPrefix?: string
+  documentPrefix?: string
+}
+
+export interface EmbeddingHealth {
+  ok: boolean
+  dimensions?: number
+  latencyMs?: number
+  error?: string
+}
+
+export interface EmbeddingGenerationInfo {
+  id: string
+  providerId: string
+  modelId: string
+  modelRevision?: string
+  dimensions: number
+  distanceMetric: EmbeddingDistanceMetric
+  normalized: boolean
+  preprocessVersion: string
+  indexPath: string
+  status: EmbeddingGenerationStatus
+  totalDocuments: number
+  indexedDocuments: number
+  failedDocuments: number
+  createdAt: string
+  activatedAt?: string
+}
+
+/** Renderer-facing snapshot of the semantic index pipeline. */
+export interface MemoryIndexStatus {
+  /** Master switch from Memory Settings. */
+  embeddingEnabled: boolean
+  /** True when provider+model resolve to a usable remote embedding service. */
+  configured: boolean
+  /** True when the sqlite-vec extension loaded in this runtime. */
+  vectorAvailable: boolean
+  providerId?: string
+  modelId?: string
+  dimensions?: number
+  generation: EmbeddingGenerationInfo | null
+  queue: { queued: number; running: number; failed: number }
+  vectorDbPath: string | null
 }
 
 export interface MemorySearchScope {
   scopeType: AgentMemoryScope
   scopeId: string
+}
+
+export interface MemoryCompactionPlan {
+  deleteIds?: string[]
+  mergeGroups?: Array<{
+    ids: string[]
+    targetId?: string
+    title?: string
+    summary?: string
+    details?: string
+    tags?: string[]
+  }>
+  updates?: Array<{
+    id: string
+    title?: string
+    summary?: string
+    details?: string
+    tags?: string[]
+    importance?: number
+    confidence?: number
+  }>
 }
 
 export interface MemoryCompactionResult {

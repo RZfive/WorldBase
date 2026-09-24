@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express'
-import type { AIConfigInput } from '../../ai-engine/ai-engine.js'
+import type { AIConfigInput } from '../../ai-engine/engine-contracts.js'
 import type { AIExecutionEngine } from '../../ai-harness/types.js'
 import type { SettingsStore } from '../../settings/settings-store.js'
 

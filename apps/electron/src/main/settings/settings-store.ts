@@ -3,6 +3,7 @@ import path from 'node:path'
 import { t } from '../i18n/main-i18n.js'
 import type { AppUpdateAssetInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateNotes, AppUpdateProgress, AppUpdateState, AppUpdateStatus, AppUpdateWebsiteLinks } from '../../shared/app-update-types.js'
 import type { ProviderTemplateLinks } from '../../shared/provider-templates.js'
+import type { MemoryEmbeddingSettings, ProviderEmbeddingModel } from '../../shared/agent-workspace-types.js'
 import { CHAT_FONT_SIZE_MAX, CHAT_FONT_SIZE_MIN, DEFAULT_CHAT_FONT_SIZE } from '../../shared/chat-font-preferences.js'
 
 export interface AISettings {
@@ -45,6 +46,10 @@ export interface AIProvider {
   modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
   /** Currently selected model for this provider */
   activeModel: string
+  /** Embedding model catalog for this provider; separate from chat `models`. */
+  embeddingModels?: ProviderEmbeddingModel[]
+  /** Wire protocol for embedding requests. Only OpenAI-compatible today. */
+  embeddingProtocol?: 'openai-embeddings'
   /** Whether to enable thinking/reasoning mode for compatible models */
   enableThinking?: boolean
   /** Default sampling temperature for this provider. Unset → engine default (0.3). */
@@ -113,13 +118,10 @@ export type LanguagePreference = 'zh-CN' | 'en-US' | 'system'
 
 export const DEFAULT_LANGUAGE_PREFERENCE: LanguagePreference = 'system'
 export type AIExecutionAuthMode = 'strict' | 'auto'
-/** Which agent harness handles chat execution in Electron. */
-export type HarnessBackend = 'ts' | 'rust'
 
 export interface AIExecutionPreferences {
   notifyOnTaskComplete: boolean
   enableAiLogging: boolean
-  harnessBackend: HarnessBackend
 }
 
 /**
@@ -171,10 +173,7 @@ export interface PortableSettingsConfig {
 
 export const DEFAULT_AI_EXECUTION_PREFERENCES: AIExecutionPreferences = {
   notifyOnTaskComplete: true,
-  enableAiLogging: false,
-  // Rust is the only actively developed harness.  `ts` remains readable for
-  // existing user settings as a frozen compatibility backend.
-  harnessBackend: 'rust'
+  enableAiLogging: false
 }
 
 export const DEFAULT_CHAT_FONT_PREFERENCES: ChatFontPreferences = {
@@ -320,10 +319,58 @@ function normalizeProvider (input: AIProvider): AIProvider {
     modelContextWindows,
     modelCapabilities,
     activeModel,
+    embeddingModels: normalizeEmbeddingModels(input.embeddingModels),
+    embeddingProtocol: input.embeddingProtocol,
     enableThinking: input.enableThinking ?? false,
     temperature: normalizeTemperature(input.temperature),
     ...(typeof input.templateId === 'string' && input.templateId.trim() ? { templateId: input.templateId.trim() } : {}),
     ...(normalizeProviderLinks(input.links) ? { links: normalizeProviderLinks(input.links) } : {})
+  }
+}
+
+/**
+ * Embedding models are a separate catalog from chat models. A provider entry
+ * never implies `/embeddings` support — only models listed here may be picked
+ * as the memory embedding model.
+ */
+function normalizeEmbeddingModels (value: unknown): ProviderEmbeddingModel[] {
+  if (!Array.isArray(value)) return []
+
+  const seen = new Set<string>()
+  const result: ProviderEmbeddingModel[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const id = typeof record.id === 'string' ? record.id.trim() : ''
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+
+    const dimensions = Number(record.dimensions)
+    const maxInputTokens = Number(record.maxInputTokens)
+    const distance = record.distance
+    result.push({
+      id,
+      ...(Number.isFinite(dimensions) && dimensions > 0 ? { dimensions: Math.floor(dimensions) } : {}),
+      ...(Number.isFinite(maxInputTokens) && maxInputTokens > 0 ? { maxInputTokens: Math.floor(maxInputTokens) } : {}),
+      ...(distance === 'cosine' || distance === 'dot' || distance === 'l2' ? { distance } : {}),
+      ...(record.normalized === true ? { normalized: true } : {}),
+      ...(typeof record.queryPrefix === 'string' ? { queryPrefix: record.queryPrefix } : {}),
+      ...(typeof record.documentPrefix === 'string' ? { documentPrefix: record.documentPrefix } : {}),
+      ...(record.enabled === false ? { enabled: false } : {})
+    })
+  }
+  return result
+}
+
+/** Normalize the global memory embedding selection; clears dangling ids. */
+function normalizeMemoryEmbeddingSettings (value: unknown): MemoryEmbeddingSettings {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+  const providerId = typeof input.providerId === 'string' ? input.providerId.trim() : ''
+  const modelId = typeof input.modelId === 'string' ? input.modelId.trim() : ''
+  const enabled = input.enabled === true && Boolean(providerId) && Boolean(modelId)
+  return {
+    enabled,
+    ...(providerId && modelId ? { providerId, modelId } : {})
   }
 }
 
@@ -404,11 +451,7 @@ function normalizeAIExecutionPreferences (value: unknown): AIExecutionPreference
       : DEFAULT_AI_EXECUTION_PREFERENCES.notifyOnTaskComplete,
     enableAiLogging: typeof input.enableAiLogging === 'boolean'
       ? input.enableAiLogging
-      : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging,
-    // Rust is the only actively maintained Harness. Preserve an explicit
-    // legacy `ts` choice for existing installations, but treat missing or
-    // invalid values as the Rust default instead of reviving Node silently.
-    harnessBackend: input.harnessBackend === 'ts' ? 'ts' : 'rust'
+      : DEFAULT_AI_EXECUTION_PREFERENCES.enableAiLogging
   }
 }
 
@@ -1095,6 +1138,17 @@ export class SettingsStore {
   /** Save AI execution preferences. */
   saveAIExecutionPreferences (preferences: AIExecutionPreferences): void {
     this.write({ aiExecutionPreferences: normalizeAIExecutionPreferences(preferences) })
+  }
+
+  /** Global selection of the current memory embedding provider/model. */
+  getMemoryEmbeddingSettings (): MemoryEmbeddingSettings {
+    const settings = this.read()
+    return normalizeMemoryEmbeddingSettings(settings.memoryEmbeddingSettings)
+  }
+
+  /** Persist the memory embedding selection. */
+  saveMemoryEmbeddingSettings (settings: MemoryEmbeddingSettings): void {
+    this.write({ memoryEmbeddingSettings: normalizeMemoryEmbeddingSettings(settings) })
   }
 
   /** Get chat message font preferences. */

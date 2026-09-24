@@ -187,6 +187,7 @@ the-world/
 重点方案文档：
 
 - [`docs/custom-agent-memory-im-architecture.md`](./docs/custom-agent-memory-im-architecture.md) — 自定义 Agent、长期记忆、群协作与未来 IM 接入的整体升级方案
+- [`docs/shared-memory-embedding-architecture.md`](./docs/shared-memory-embedding-architecture.md) — 跨 Agent、跨对话共享记忆、供应商 Embedding 模型、索引容量与 sqlite-vec 方案
 
 ## macOS 安装说明
 

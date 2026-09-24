@@ -24,31 +24,6 @@ const STUBS = {
     export function truncateSectionText(value, limit) { return String(value || '').slice(0, limit) }
     export function firstNonEmptyLine(value) { return String(value || '').split('\\n').find(Boolean) || '' }
   `,
-  './group-session.js': `
-    export class GroupSession {
-      constructor(input) { Object.assign(this, input); this.round = input.round }
-      setRound(round) { this.round = round }
-      setInjectionRecipients() {}
-      onInjection() { return () => {} }
-      drainInjections() { return [] }
-      finishInjectionTurn() {}
-      buildBoardPromptSection() { return { section: 'board:empty' } }
-      getPeerMessages() { return [] }
-      getDirectReplies() { return [] }
-      getBoardUpdatesByAgent() { return [] }
-      snapshot() {
-        return {
-          groupId: this.groupId,
-          groupName: this.groupName,
-          board: { goal: '', assumptions: [], tasks: [], decisions: [], evidenceRefs: [], openQuestions: [] },
-          recentUpdates: [],
-          updatedAt: '2026-01-01T00:00:00.000Z'
-        }
-      }
-    }
-    export const groupSessionRegistry = { register() {}, release() {} }
-  `,
-  './tool-group-collab.js': 'export function buildGroupCollabTools() { return [] }',
   '../../../src/main/i18n/main-i18n.js': 'export function t(key) { return key }'
 }
 
@@ -224,105 +199,6 @@ function makeGroup () {
     updatedAt: '2026-01-01T00:00:00.000Z'
   }
 }
-
-test('Rust-selected group work keeps planner and member turns on the Rust execution engine', async () => {
-  const agents = new Map([
-    ['coordinator', makeAgent('coordinator', 'Coordinator')],
-    ['member', makeAgent('member', 'Member')]
-  ])
-  globalThis[GROUP_STATE_KEY] = {
-    aiEngine: {},
-    agentStore: { get: id => agents.get(id) },
-    memoryEngine: null
-  }
-  const { buildGroupDeliberationSection, buildGroupRoundCoordinatorPlan } = await loadGroupModule()
-
-  const plannerCalls = []
-  const memberCalls = []
-  const rustEngine = {
-    getAvailableTools: () => [{ name: 'read_project_file', description: '', parameters: {} }],
-    async chat (messages, options) {
-      plannerCalls.push({ messages, options })
-      return {
-        role: 'assistant',
-        content: JSON.stringify({
-          shouldContinue: true,
-          memberIds: ['member'],
-          request: 'Inspect the active project',
-          focus: 'implementation details'
-        })
-      }
-    },
-    async *chatStream (messages, _onProgress, options) {
-      memberCalls.push({ messages, options })
-      yield { type: 'token', content: 'Rust member note' }
-      yield { type: 'done', message: { role: 'assistant', content: 'Rust member note' } }
-    }
-  }
-  const runContext = {
-    hostConversationId: 'electron-conversation',
-    hostSessionId: 'electron-session',
-    workspaceRoot: '/tmp/worldbase-group-workspace',
-    authMode: 'auto',
-    getAuthMode: () => 'auto'
-  }
-  const messages = [{ role: 'user', content: 'Please review the implementation.' }]
-  const group = makeGroup()
-
-  const plan = await buildGroupRoundCoordinatorPlan({
-    runtimeAiEngine: rustEngine,
-    planner: agents.get('coordinator'),
-    group,
-    messages,
-    candidateMemberIds: ['member'],
-    priorNotes: [],
-    latestUserMessage: 'Please review the implementation.',
-    normalizedRequest: 'Please review the implementation.',
-    mentionedMemberIds: [],
-    round: 1,
-    totalRounds: 1,
-    selectionSource: 'coordinator_decides',
-    runtimeRequestContext: runContext
-  })
-
-  assert.deepEqual(plan.selectedMemberIds, ['member'])
-  assert.equal(plannerCalls.length, 1)
-  assert.equal(plannerCalls[0].options.agentId, 'coordinator')
-  assert.equal(plannerCalls[0].options.hostConversationId, 'electron-conversation')
-  assert.equal(plannerCalls[0].options.hostSessionId, 'electron-session')
-  assert.equal(plannerCalls[0].options.workspaceRoot, '/tmp/worldbase-group-workspace')
-  assert.equal(plannerCalls[0].options.getAuthMode(), 'auto')
-
-  const result = await buildGroupDeliberationSection({
-    messages,
-    group,
-    routing: {
-      mode: 'targeted',
-      selectedMemberIds: ['member'],
-      mentionedMemberIds: ['member'],
-      normalizedRequest: 'Please review the implementation.'
-    },
-    sessionId: 'electron-session',
-    runtimeAiHarness: rustEngine,
-    runtimeRequestContext: runContext
-  })
-
-  assert.match(result.promptSection || '', /Rust member note/)
-  assert.equal(memberCalls.length, 1)
-  assert.equal(memberCalls[0].options.agentId, 'member')
-  assert.equal(memberCalls[0].options.hostConversationId, 'electron-conversation')
-  assert.equal(memberCalls[0].options.hostSessionId, 'electron-session')
-  assert.equal(memberCalls[0].options.workspaceRoot, '/tmp/worldbase-group-workspace')
-  assert.equal(memberCalls[0].options.authMode, 'auto')
-  assert.equal(memberCalls[0].options.getAuthMode(), 'auto')
-  assert.deepEqual(memberCalls[0].options.allowedToolNames, [
-    'read_project_file',
-    'message_agent',
-    'read_board',
-    'update_board',
-    'reply_to_user'
-  ])
-})
 
 test('Rust-native group adapter owns group rounds, board state, and live injection', async () => {
   const { buildNativeRustGroupDeliberation, hasNativeRustGroupSession, injectNativeRustGroup } = await loadNativeGroupModule()

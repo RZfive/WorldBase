@@ -138,7 +138,7 @@ function forwardRuntimeLog (port: number, type: 'stdout' | 'stderr', text: strin
     port,
     type,
     text,
-    rustSelected: mainState.settingsStore?.getAIExecutionPreferences().harnessBackend === 'rust',
+    rustSelected: true,
     rust: rustClient
       ? {
           isRunning: () => rustClient.isRunning(),

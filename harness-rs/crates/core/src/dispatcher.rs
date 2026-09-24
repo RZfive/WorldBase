@@ -895,6 +895,16 @@ fn conv_rename(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 fn chat_send(hub: &Arc<Hub>, ctx: &ConnectionContext, params: Value) -> Result<Value, ErrorObject> {
     let p: ChatSendParams =
         serde_json::from_value(params).map_err(|e| params_err(e.to_string()))?;
+    // 共享记忆 embedding 配置由宿主随请求下发（design §12：模型选择归
+    // Memory Settings，harness 只做 provider API 适配）。写入队列配置并
+    // 确保后台消费循环在运行。
+    if let Some(embedding) = p.context.memory_embedding.clone() {
+        let queue = hub.memory_queue.clone();
+        tokio::spawn(async move {
+            queue.set_config(Some(embedding)).await;
+            queue.start().await;
+        });
+    }
     if hub
         .store
         .get_conversation(&p.conversation_id)

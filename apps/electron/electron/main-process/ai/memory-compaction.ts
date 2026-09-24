@@ -3,8 +3,7 @@ import { createProvider } from '../../../src/main/ai-engine/providers/index.js'
 import type { ChatProvider } from '../../../src/main/ai-engine/providers/index.js'
 import type { ChatMessage } from '../../../src/main/ai-engine/providers/openai-provider.js'
 import type { AIExecutionEngine } from '../../../src/main/ai-harness/types.js'
-import type { MemoryCompactionPlan } from '../../../src/main/ai-engine/memory/memory-engine.js'
-import type { MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry } from '../../../src/shared/agent-workspace-types.js'
+import type { MemoryCompactionPlan, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry } from '../../../src/shared/agent-workspace-types.js'
 import { MEMORY_AI_COMPACTION_CHUNK_SIZE, MEMORY_AI_COMPACTION_TIMEOUT_MS } from '../constants.js'
 import { mainState } from '../state.js'
 import { broadcastToAppWindows } from '../windows.js'
@@ -326,11 +325,15 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
   })
 
   try {
+    // Rust is the single memory source; the scan and the apply both go
+    // through harness RPC. The AI plan builder stays host-side.
     const rustHarness = await startSelectedRustHarness()
     const rustClient = rustHarness ? mainState.rustHarness : null
-    const entries = rustClient
-      ? await rustClient.listMemory({ limit: 50000 })
-      : mainState.memoryStore!.listAll(50000)
+    if (!rustClient) throw new Error('Rust harness is required for memory compaction.')
+    const entries = await rustClient.listMemory({ limit: 50000 })
+    // The plan builder may still use the Rust harness as its analysis-model
+    // backend; that is a chat-model role and independent of memory ownership.
+    const analysisEngine = await startSelectedRustHarness()
     updateMemoryCompactionStatus({
       id: taskId,
       status: 'running',
@@ -351,7 +354,7 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
         totalChunks: progress.totalChunks,
         completedChunks: progress.completedChunks
       })
-    }, rustHarness || undefined)
+    }, analysisEngine || undefined)
 
     updateMemoryCompactionStatus({
       id: taskId,
@@ -362,9 +365,9 @@ export async function runMemoryCompactionWithStatus (): Promise<MemoryCompaction
       completedChunks: mainState.memoryCompactionStatus.totalChunks
     })
 
-    const result = rustClient
-      ? await rustClient.compactWorkspaceMemory(plan as unknown as Record<string, unknown>) as unknown as MemoryCompactionResult
-      : mainState.memoryEngine!.compactMemory(plan)
+    // Unified ownership: compaction always applies to the Memory Service
+    // store, regardless of the selected backend.
+    const result = await rustClient.compactWorkspaceMemory(plan as unknown as Record<string, unknown>) as unknown as MemoryCompactionResult
     updateMemoryCompactionStatus({
       id: taskId,
       status: 'completed',

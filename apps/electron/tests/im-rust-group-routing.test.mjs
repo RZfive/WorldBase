@@ -121,8 +121,7 @@ test('Rust-selected IM group replies use the native Rust group adapter', async (
         native: true,
         async ingestMemory (input) { memoryCalls.push(input) }
       },
-      agentStore: { get: id => agents.get(id) },
-      memoryEngine: null
+      agentStore: { get: id => agents.get(id) }
     }
   }
 
