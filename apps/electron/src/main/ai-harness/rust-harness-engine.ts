@@ -116,11 +116,15 @@ export class RustHarnessEngine implements AIHarness {
   }
 
   async chat (messages: ChatMessage[], options?: AIRequestOptions): Promise<ChatMessage> {
-    let result: ChatMessage = { role: 'assistant', content: '' }
+    let result: ChatMessage | null = null
     for await (const event of this.chatStream(messages, undefined, options)) {
       if (event.type === 'done') result = event.message
       if (event.type === 'error') throw new Error(event.error)
     }
+    // A stream that ends without a done event must not silently degrade into
+    // an empty assistant message; callers would read that as "the model said
+    // nothing" instead of "the stream was cut short".
+    if (!result) throw new Error('Rust harness chat stream ended without an assistant message.')
     return result
   }
 

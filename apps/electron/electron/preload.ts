@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-permissions.js'
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../src/shared/image-studio-types.js'
@@ -552,6 +552,8 @@ export interface ElectronAPI {
   deleteMemory: (id: string) => Promise<boolean>
   getMemoryEmbeddingSettings: () => Promise<MemoryEmbeddingSettings>
   saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => Promise<MemoryEmbeddingSettings>
+  getMemoryCompactionSettings: () => Promise<MemoryCompactionSettings>
+  saveMemoryCompactionSettings: (settings: MemoryCompactionSettings) => Promise<MemoryCompactionSettings>
   compactMemory: () => Promise<MemoryCompactionResult>
   getMemoryCompactionStatus: () => Promise<MemoryCompactionStatus>
   onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => () => void
@@ -841,6 +843,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteMemory: (id: string) => ipcRenderer.invoke('memory:delete', id),
   getMemoryEmbeddingSettings: () => ipcRenderer.invoke('memory:getEmbeddingSettings'),
   saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => ipcRenderer.invoke('memory:setEmbeddingSettings', settings),
+  getMemoryCompactionSettings: () => ipcRenderer.invoke('memory:getCompactionSettings'),
+  saveMemoryCompactionSettings: (settings: MemoryCompactionSettings) => ipcRenderer.invoke('memory:setCompactionSettings', settings),
   compactMemory: () => ipcRenderer.invoke('memory:compact'),
   getMemoryCompactionStatus: () => ipcRenderer.invoke('memory:compactStatus'),
   onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => {

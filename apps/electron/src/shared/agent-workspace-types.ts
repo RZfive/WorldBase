@@ -333,6 +333,15 @@ export interface MemoryEmbeddingSettings {
 }
 
 /**
+ * Which chat model runs the AI memory-compaction plan. Empty ids mean
+ * "follow the active chat provider/model" instead of a dedicated pick.
+ */
+export interface MemoryCompactionSettings {
+  providerId?: string
+  modelId?: string
+}
+
+/**
  * Per-request embedding runtime config handed from the host to the Rust
  * harness. Model selection and credentials stay with the host's Memory
  * Settings; the harness only acts as the provider API adapter (design §12/§17).

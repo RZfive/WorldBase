@@ -3,7 +3,7 @@ import path from 'node:path'
 import { t } from '../i18n/main-i18n.js'
 import type { AppUpdateAssetInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateNotes, AppUpdateProgress, AppUpdateState, AppUpdateStatus, AppUpdateWebsiteLinks } from '../../shared/app-update-types.js'
 import type { ProviderTemplateLinks } from '../../shared/provider-templates.js'
-import type { MemoryEmbeddingSettings, ProviderEmbeddingModel } from '../../shared/agent-workspace-types.js'
+import type { MemoryCompactionSettings, MemoryEmbeddingSettings, ProviderEmbeddingModel } from '../../shared/agent-workspace-types.js'
 import { CHAT_FONT_SIZE_MAX, CHAT_FONT_SIZE_MIN, DEFAULT_CHAT_FONT_SIZE } from '../../shared/chat-font-preferences.js'
 
 export interface AISettings {
@@ -371,6 +371,17 @@ function normalizeMemoryEmbeddingSettings (value: unknown): MemoryEmbeddingSetti
   return {
     enabled,
     ...(providerId && modelId ? { providerId, modelId } : {})
+  }
+}
+
+/** Normalize the memory-compaction model selection; empty ids mean "follow the active chat model". */
+function normalizeMemoryCompactionSettings (value: unknown): MemoryCompactionSettings {
+  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
+  const providerId = typeof input.providerId === 'string' ? input.providerId.trim() : ''
+  const modelId = typeof input.modelId === 'string' ? input.modelId.trim() : ''
+  return {
+    ...(providerId ? { providerId } : {}),
+    ...(modelId ? { modelId } : {})
   }
 }
 
@@ -1149,6 +1160,17 @@ export class SettingsStore {
   /** Persist the memory embedding selection. */
   saveMemoryEmbeddingSettings (settings: MemoryEmbeddingSettings): void {
     this.write({ memoryEmbeddingSettings: normalizeMemoryEmbeddingSettings(settings) })
+  }
+
+  /** Chat model used by AI memory compaction; empty ids follow the active chat model. */
+  getMemoryCompactionSettings (): MemoryCompactionSettings {
+    const settings = this.read()
+    return normalizeMemoryCompactionSettings(settings.memoryCompactionSettings)
+  }
+
+  /** Persist the memory-compaction model selection. */
+  saveMemoryCompactionSettings (settings: MemoryCompactionSettings): void {
+    this.write({ memoryCompactionSettings: normalizeMemoryCompactionSettings(settings) })
   }
 
   /** Get chat message font preferences. */

@@ -406,6 +406,11 @@ interface MemoryEmbeddingSettings {
   modelId?: string
 }
 
+interface MemoryCompactionSettings {
+  providerId?: string
+  modelId?: string
+}
+
 interface EmbeddingGenerationInfo {
   id: string
   providerId: string
@@ -1085,6 +1090,8 @@ interface ElectronAPI {
   deleteMemory: (id: string) => Promise<boolean>
   getMemoryEmbeddingSettings: () => Promise<MemoryEmbeddingSettings>
   saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => Promise<MemoryEmbeddingSettings>
+  getMemoryCompactionSettings: () => Promise<MemoryCompactionSettings>
+  saveMemoryCompactionSettings: (settings: MemoryCompactionSettings) => Promise<MemoryCompactionSettings>
   compactMemory: () => Promise<MemoryCompactionResult>
   getMemoryCompactionStatus: () => Promise<MemoryCompactionStatus>
   onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => () => void

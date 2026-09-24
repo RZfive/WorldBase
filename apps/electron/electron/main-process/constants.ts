@@ -22,7 +22,9 @@ export const CRITICAL_USER_DATA_FILE_NAMES = [
 export const DEFAULT_MAIN_WINDOW_MIN_WIDTH = 800
 export const DEFAULT_MAIN_WINDOW_MIN_HEIGHT = 500
 export const DEFAULT_WINDOW_EXPAND_ANIMATION_DURATION_MS = 240
-export const MEMORY_AI_COMPACTION_CHUNK_SIZE = 80
+// Keep batches small: the plan output for a batch scales with its entry count,
+// and an output-token truncation mid-JSON makes the whole batch unparseable.
+export const MEMORY_AI_COMPACTION_CHUNK_SIZE = 40
 export const MEMORY_AI_COMPACTION_TIMEOUT_MS = 180000
 
 export const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])

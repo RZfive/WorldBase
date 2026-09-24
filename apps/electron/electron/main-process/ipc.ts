@@ -31,7 +31,7 @@ import type { LongTermGoalSaveInput, LongTermGoalStreamEvent } from '../../src/s
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '../../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
 import type { FolderWorkspacePickResult } from '../../src/shared/folder-workspace-types.js'
 import type { DocumentEditExportRequest } from '../../src/shared/document-edit-types.js'
 import { assertFolderWorkspaceRoot, getFolderWorkspaceRootName, listFolderWorkspaceFiles, readFolderWorkspaceFile } from '../../src/main/folder-workspace/folder-workspace-fs.js'
@@ -1077,6 +1077,27 @@ export function setupIPC (): void {
       modelId: typeof settings?.modelId === 'string' ? settings.modelId : undefined
     })
     return settingsStore!.getMemoryEmbeddingSettings()
+  })
+
+  ipcMain.handle('memory:getCompactionSettings', async () => {
+    return settingsStore!.getMemoryCompactionSettings()
+  })
+
+  ipcMain.handle('memory:setCompactionSettings', async (_event: IpcMainInvokeEvent, settings: MemoryCompactionSettings) => {
+    settingsStore!.saveMemoryCompactionSettings({
+      providerId: typeof settings?.providerId === 'string' ? settings.providerId : undefined,
+      modelId: typeof settings?.modelId === 'string' ? settings.modelId : undefined
+    })
+    return settingsStore!.getMemoryCompactionSettings()
+  })
+
+  ipcMain.handle('memory:compact', async (): Promise<MemoryCompactionResult> => {
+    // Keep one compaction task per main process. The renderer can be
+    // recreated while the AI plan is still running, so returning the active
+    // promise also makes repeated clicks and multiple settings windows safe.
+    if (mainState.activeMemoryCompactionPromise) return mainState.activeMemoryCompactionPromise
+    mainState.activeMemoryCompactionPromise = runMemoryCompactionWithStatus(settingsStore!.getMemoryCompactionSettings())
+    return mainState.activeMemoryCompactionPromise
   })
 
   ipcMain.handle('memory:compactStatus', async (): Promise<MemoryCompactionStatus> => {
