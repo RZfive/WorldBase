@@ -80,6 +80,50 @@ export type ChatMessageBlock =
   | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
   | { id: string; kind: 'sudo_password_request'; requestId: string; command: string; status: 'pending' | 'submitted' | 'canceled' }
 
+/** Depth preset for a quick-ask annotation; drives the answer prompt. */
+export type QuickAskMode = 'quick' | 'detailed'
+
+/** One question + answer exchange inside an annotation thread. */
+export interface MessageAnnotationTurn {
+  question: string
+  answer: string
+  mode: QuickAskMode
+  /** 'generating' while the quickAsk call is in flight; undefined = done. */
+  status?: 'generating' | 'done' | 'error'
+  error?: string
+  startedAt?: number
+}
+
+/** A quick Q&A thread pinned to a text range inside one message. */
+export interface MessageAnnotation {
+  id: string
+  /** Exact selected text the annotation is anchored to. */
+  text: string
+  /** Full Q&A thread; turns[0] is the original question. */
+  turns: MessageAnnotationTurn[]
+  createdAt: number
+}
+
+/** Viewport-space rect used to anchor lightweight popovers to text. */
+export interface AnnotationAnchor {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+/** State for the inline quick-ask popover (ask mode or thread mode). */
+export interface QuickAskPopoverState {
+  mode: 'ask' | 'thread'
+  text: string
+  messageId: string | null
+  messageIndex: number
+  anchor: AnnotationAnchor
+  /** thread mode: the annotation being continued. */
+  annotationId: string | null
+  turns: MessageAnnotationTurn[]
+}
+
 export interface ChatMessage {
   role: string
   content: MessageContent
@@ -90,6 +134,8 @@ export interface ChatMessage {
   modelLabel?: string
   toolRuns?: ToolRun[]
   blocks?: ChatMessageBlock[]
+  /** Quick-ask annotations attached to text ranges of this message. */
+  annotations?: MessageAnnotation[]
 }
 
 /** Lightweight navigation entry for one user question. */

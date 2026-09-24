@@ -42,12 +42,25 @@ interface AIProvider {
   modelPricing?: Record<string, ModelPricingEntry>
   modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
   activeModel: string
+  /** Embedding model catalog for semantic memory; separate from chat models. */
+  embeddingModels?: ProviderEmbeddingModelRow[]
   enableThinking?: boolean
   temperature?: number
   /** Built-in template this provider was created from. */
   templateId?: string
   /** Snapshot of the template's website links at creation time. */
   links?: ProviderTemplateLinks
+}
+
+interface ProviderEmbeddingModelRow {
+  id: string
+  dimensions?: number
+  maxInputTokens?: number
+  distance?: 'cosine' | 'dot' | 'l2'
+  normalized?: boolean
+  queryPrefix?: string
+  documentPrefix?: string
+  enabled?: boolean
 }
 
 interface AIProvidersConfig {
@@ -77,6 +90,9 @@ const saving = ref(false)
 const statusMsg = ref('')
 const showKey = ref<Record<string, boolean>>({})
 const newModelInput = ref('')
+const newEmbeddingModelInput = ref('')
+const newEmbeddingDimensionsInput = ref('')
+const embeddingTestState = ref<Record<string, { running: boolean; ok?: boolean; dimensions?: number; latencyMs?: number; error?: string }>>({})
 const searchQuery = ref('')
 const selectedProviderId = ref('')
 const editing = ref(false)
@@ -498,7 +514,8 @@ function hydrateProvider (provider: AIProvider, pricingMap: Record<string, Model
     models: [...provider.models],
     modelContextWindows: { ...(provider.modelContextWindows || {}) },
     modelCapabilities,
-    modelPricing
+    modelPricing,
+    embeddingModels: (provider.embeddingModels || []).map(row => ({ ...row }))
   }
 }
 
@@ -558,6 +575,7 @@ function startAdd () {
     modelContextWindows: {},
     modelPricing: {},
     modelCapabilities: {},
+    embeddingModels: [],
     activeModel: '',
     enableThinking: false
   }
@@ -587,10 +605,12 @@ function startEdit () {
     models: [...provider.models],
     modelContextWindows: { ...(provider.modelContextWindows || {}) },
     modelCapabilities,
-    modelPricing
+    modelPricing,
+    embeddingModels: (provider.embeddingModels || []).map(row => ({ ...row }))
   }
   editing.value = true
   newModelInput.value = ''
+  newEmbeddingModelInput.value = ''
   resetRemoteModels()
 }
 
@@ -801,7 +821,8 @@ async function saveAll (successMessage = t('settings.provider.saved')) {
     const providerPayload = providers.value.map(({ modelPricing, ...provider }) => ({
       ...provider,
       models: [...provider.models],
-      modelContextWindows: { ...(provider.modelContextWindows || {}) }
+      modelContextWindows: { ...(provider.modelContextWindows || {}) },
+      embeddingModels: provider.embeddingModels ? [...provider.embeddingModels] : undefined
     }))
 
     await Promise.all([
@@ -826,6 +847,67 @@ async function saveAll (successMessage = t('settings.provider.saved')) {
 
 async function saveBudgetOnly () {
   await saveAll(t('settings.provider.budgetSaved'))
+}
+
+function addEmbeddingModel () {
+  if (!editDraft.value) return
+  const id = newEmbeddingModelInput.value.trim()
+  if (!id) {
+    statusMsg.value = t('settings.provider.embeddingIdRequired')
+    return
+  }
+  if (!editDraft.value.embeddingModels) editDraft.value.embeddingModels = []
+  if (editDraft.value.embeddingModels.some(row => row.id === id)) {
+    statusMsg.value = t('settings.provider.embeddingIdDuplicate')
+    return
+  }
+  const dimensions = Number.parseInt(newEmbeddingDimensionsInput.value, 10)
+  editDraft.value.embeddingModels.push({
+    id,
+    ...(Number.isFinite(dimensions) && dimensions > 0 ? { dimensions } : {})
+  })
+  newEmbeddingModelInput.value = ''
+  newEmbeddingDimensionsInput.value = ''
+}
+
+function removeEmbeddingModel (index: number) {
+  if (!editDraft.value?.embeddingModels) return
+  const removed = editDraft.value.embeddingModels.splice(index, 1)[0]
+  if (removed) delete embeddingTestState.value[removed.id]
+}
+
+function handleEmbeddingDimensionsInput (id: string, event: Event) {
+  if (!editDraft.value?.embeddingModels) return
+  const row = editDraft.value.embeddingModels.find(item => item.id === id)
+  if (!row) return
+  const parsed = Number.parseInt((event.target as HTMLInputElement).value, 10)
+  if (Number.isFinite(parsed) && parsed > 0) row.dimensions = parsed
+  else delete row.dimensions
+}
+
+async function testEmbeddingModel (modelId: string) {
+  const providerId = editDraft.value?.id
+  if (!providerId || embeddingTestState.value[modelId]?.running) return
+  embeddingTestState.value = {
+    ...embeddingTestState.value,
+    [modelId]: { running: true }
+  }
+  try {
+    const result = await window.electronAPI?.testEmbeddingModel?.({ providerId, modelId })
+    if (!result) {
+      embeddingTestState.value = { ...embeddingTestState.value, [modelId]: { running: false, ok: false, error: 'IPC unavailable' } }
+      return
+    }
+    embeddingTestState.value = {
+      ...embeddingTestState.value,
+      [modelId]: { running: false, ok: result.ok, dimensions: result.dimensions, latencyMs: result.latencyMs, error: result.error }
+    }
+  } catch (err) {
+    embeddingTestState.value = {
+      ...embeddingTestState.value,
+      [modelId]: { running: false, ok: false, error: (err as Error).message }
+    }
+  }
 }
 
 async function saveEdit () {
@@ -862,7 +944,8 @@ async function saveEdit () {
     models: [...nextProvider.models],
     modelContextWindows: { ...(nextProvider.modelContextWindows || {}) },
     modelCapabilities: Object.fromEntries(nextProvider.models.map(model => [model, getModelCapabilities(nextProvider, model)])),
-    modelPricing: Object.fromEntries(nextProvider.models.map(model => [model, getPricing(nextProvider, model)]))
+    modelPricing: Object.fromEntries(nextProvider.models.map(model => [model, getPricing(nextProvider, model)])),
+    embeddingModels: nextProvider.embeddingModels ? nextProvider.embeddingModels.map(row => ({ ...row })) : undefined
   }
 
   const index = providers.value.findIndex(provider => provider.id === normalizedProvider.id)
@@ -1330,6 +1413,74 @@ function formatContextWindow (value: number): string {
             <select v-model="editDraft.activeModel" class="pp-select">
               <option v-for="model in editDraft.models" :key="model" :value="model">{{ model }}</option>
             </select>
+          </div>
+
+          <div class="pp-separator" />
+
+          <div class="pp-field">
+            <label>{{ $t('settings.provider.embeddingSectionTitle') }}</label>
+            <p class="pp-hint">{{ $t('settings.provider.embeddingSectionHint') }}</p>
+
+            <div v-if="editDraft.embeddingModels && editDraft.embeddingModels.length > 0" class="pp-model-list">
+              <div v-for="(row, index) in editDraft.embeddingModels" :key="row.id" class="pp-model-card pp-embedding-card">
+                <div class="pp-model-card-head">
+                  <span class="pp-model-name">{{ row.id }}</span>
+                  <button class="pp-model-rm" @click="removeEmbeddingModel(index)">×</button>
+                </div>
+                <div class="pp-model-fields">
+                  <label class="pp-inline-field">
+                    <span>{{ $t('settings.provider.embeddingDimensions') }}</span>
+                    <input
+                      :value="row.dimensions"
+                      type="number"
+                      min="1"
+                      step="1"
+                      class="pp-inline-input"
+                      :placeholder="$t('settings.provider.embeddingDimensionsPlaceholder')"
+                      @input="handleEmbeddingDimensionsInput(row.id, $event)"
+                    >
+                  </label>
+                  <div class="pp-inline-field pp-embedding-test">
+                    <span>{{ $t('settings.provider.embeddingDistance') }}</span>
+                    <span class="pp-embedding-distance">{{ row.distance || 'cosine' }}</span>
+                  </div>
+                </div>
+                <div class="pp-embedding-test-row">
+                  <button
+                    class="pp-btn-ghost pp-btn-small"
+                    type="button"
+                    :disabled="embeddingTestState[row.id]?.running"
+                    @click="testEmbeddingModel(row.id)"
+                  >
+                    {{ embeddingTestState[row.id]?.running ? $t('settings.provider.embeddingTesting') : $t('settings.provider.embeddingTestButton') }}
+                  </button>
+                  <span
+                    v-if="embeddingTestState[row.id] && !embeddingTestState[row.id].running"
+                    :class="['pp-embedding-test-result', embeddingTestState[row.id].ok ? 'ok' : 'error']"
+                  >
+                    {{ embeddingTestState[row.id].ok
+                      ? $t('settings.provider.embeddingTestOk', { dimensions: embeddingTestState[row.id].dimensions, latency: embeddingTestState[row.id].latencyMs })
+                      : $t('settings.provider.embeddingTestFailed', { message: embeddingTestState[row.id].error || '' }) }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <p v-else class="pp-hint pp-embedding-empty">{{ $t('settings.provider.embeddingEmpty') }}</p>
+
+            <div class="pp-model-add">
+              <input v-model="newEmbeddingModelInput" type="text" :placeholder="$t('settings.provider.embeddingAddPlaceholder')" @keydown.enter.prevent="addEmbeddingModel" />
+              <input
+                v-model="newEmbeddingDimensionsInput"
+                type="number"
+                min="1"
+                step="1"
+                class="pp-embedding-dims-input"
+                :placeholder="$t('settings.provider.embeddingDimensions')"
+                @keydown.enter.prevent="addEmbeddingModel"
+              />
+              <button @click="addEmbeddingModel">{{ $t('settings.provider.embeddingAddButton') }}</button>
+            </div>
           </div>
 
           <div class="pp-separator" />
@@ -2182,5 +2333,40 @@ function formatContextWindow (value: number): string {
   .pp-providers {
     max-height: 180px;
   }
+}
+
+/* Embedding model catalog */
+.pp-embedding-card .pp-embedding-distance {
+  color: var(--app-text-soft);
+  padding: 6px 0;
+}
+
+.pp-embedding-test-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.pp-embedding-test-result {
+  font-size: 0.8rem;
+}
+
+.pp-embedding-test-result.ok {
+  color: var(--app-success, #2e9e5b);
+}
+
+.pp-embedding-test-result.error {
+  color: var(--app-danger, #d64545);
+  word-break: break-all;
+}
+
+.pp-embedding-dims-input {
+  max-width: 140px;
+}
+
+.pp-embedding-empty {
+  color: var(--app-text-soft);
 }
 </style>

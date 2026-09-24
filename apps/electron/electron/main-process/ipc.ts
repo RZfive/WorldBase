@@ -10,6 +10,7 @@ import { createProvider } from '../../src/main/ai-engine/providers/index.js'
 import type { MessageContent } from '../../src/main/ai-engine/providers/openai-provider.js'
 import { PROJECT_PACKAGE_EXTENSION } from '../../src/main/project-fs/project-package-service.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../../src/main/ai-engine/agent/tools/office-utils.js'
+import { probeEmbeddingModel } from '../../src/main/ai-engine/providers/embedding-probe.js'
 import { parseDocument, isSupportedDocument } from '../../src/main/ai-engine/agent/tools/document-parser.js'
 import type { CreateSelectionPayload } from '../../src/main/ai-engine/agent/tools/document-types.js'
 import { readDocumentRenderAsset } from '../../src/main/document-preview/document-render-service.js'
@@ -1360,6 +1361,72 @@ export function setupIPC (): void {
     return { updated }
   })
 
+  // One-shot Q&A over a text selection from the conversation (快速问答).
+  // Resolves the active provider when the caller does not pin one; the mode
+  // only shapes the system prompt - it never grants tools.
+  ipcMain.handle('ai:quickAsk', async (_event: IpcMainInvokeEvent, req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string }): Promise<{ ok: boolean; answer?: string; error?: string }> => {
+    try {
+      const providersConfig = settingsStore!.getProviders()
+      // The renderer passes the conversation's current provider/model (the
+      // same selection the chat header shows). If that provider no longer
+      // resolves, fall back to the global active provider instead of failing.
+      const requestedProvider = req.providerId
+        ? providersConfig.providers.find(p => p.id === req.providerId)
+        : null
+      const provider = requestedProvider
+        || providersConfig.providers.find(p => p.id === providersConfig.activeProviderId)
+        || providersConfig.providers[0]
+      if (!provider) throw new Error(t('mainDialog.providerNotFound'))
+      if (!provider.apiKey) throw new Error(t('mainDialog.providerApiKeyMissing'))
+      const model = req.model && provider.models.includes(req.model) ? req.model : provider.activeModel
+      if (!model) throw new Error(t('mainDialog.providerNoModels'))
+
+      const detailed = req.mode === 'detailed'
+      const systemPrompt = detailed
+        ? '你是一个问答助手。用户会给你一段从对话中选中的文字，并针对它提问。请给出详尽、深入的回答：解释原理、给出背景、必要时分点展开或举例子。直接回答问题本身，不要复述选中内容，不要添加开场白或结语。使用与用户问题相同的语言。'
+        : '你是一个问答助手。用户会给你一段从对话中选中的文字，并针对它提问。请用简洁的两三句话直接回答，只保留最关键的信息。不要复述选中内容，不要添加开场白或结语。使用与用户问题相同的语言。'
+      const userContent = `【选中的对话内容】\n${req.selection}\n【选中内容结束】\n\n问题：${req.question}`
+
+      const rustHarness = await startSelectedRustHarness()
+      let answer = ''
+      if (rustHarness) {
+        answer = getMessageText((await rustHarness.chat([
+          { role: 'user', content: userContent }
+        ], {
+          providerConfig: {
+            apiKey: provider.apiKey,
+            baseUrl: provider.baseUrl,
+            model,
+            apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined,
+            providerId: provider.id,
+            providerName: provider.name
+          },
+          systemPromptSections: [systemPrompt],
+          // Intentionally a JSON-free, tool-free completion.
+          allowedToolNames: ['__quick_ask_no_tools__']
+        })).content).trim()
+      } else {
+        const aiProvider = createProvider({
+          baseUrl: provider.baseUrl,
+          apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined
+        })
+        aiProvider.setApiKey(provider.apiKey)
+        aiProvider.setBaseUrl(provider.baseUrl)
+        aiProvider.setModel(model)
+        const result = await aiProvider.chatCompletion([
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent }
+        ])
+        answer = typeof result.content === 'string' ? result.content.trim() : ''
+      }
+      if (!answer) throw new Error(t('mainDialog.aiNoValidResult'))
+
+      return { ok: true, answer }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : t('mainDialog.aiNoValidResult') }
+    }
+  })
+
   ipcMain.handle('image:prompt:optimize', async (_event: IpcMainInvokeEvent, req: { providerId: string; model: string; prompt: string; isNegative?: boolean }): Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }> => {
     try {
       const providersConfig = settingsStore!.getProviders()
@@ -2128,6 +2195,28 @@ export function setupIPC (): void {
   // Settings — multi-provider
   ipcMain.handle('settings:getProviders', async () => {
     return settingsStore!.getProviders()
+  })
+
+  // Embedding probe (design §7.4/§8.1): the request is issued from the main
+  // process only, and the model id must come from the provider's declared
+  // embedding catalog — a chat model is never guessed to support /embeddings.
+  ipcMain.handle('settings:testEmbeddingModel', async (_event: IpcMainInvokeEvent, input: { providerId: string; modelId: string }) => {
+    const providerId = typeof input?.providerId === 'string' ? input.providerId.trim() : ''
+    const modelId = typeof input?.modelId === 'string' ? input.modelId.trim() : ''
+    if (!providerId || !modelId) throw new Error('providerId and modelId are required')
+    const provider = settingsStore!.getProviders().providers.find(item => item.id === providerId)
+    if (!provider) throw new Error(`provider ${providerId} not found`)
+    const model = (provider.embeddingModels || []).find(item => item.id === modelId)
+    if (!model) throw new Error(`embedding model ${modelId} is not declared on provider ${providerId}`)
+    const probe = await probeEmbeddingModel({
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      modelId: model.id,
+      distance: model.distance,
+      queryPrefix: model.queryPrefix,
+      documentPrefix: model.documentPrefix
+    })
+    return probe
   })
 
   ipcMain.handle('settings:fetchProviderModels', async (_event: IpcMainInvokeEvent, input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => {

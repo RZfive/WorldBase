@@ -1084,7 +1084,7 @@ interface ElectronAPI {
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
   getMemoryEmbeddingSettings: () => Promise<MemoryEmbeddingSettings>
-  saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => Promise<MemoryIndexStatus>
+  saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => Promise<MemoryEmbeddingSettings>
   compactMemory: () => Promise<MemoryCompactionResult>
   getMemoryCompactionStatus: () => Promise<MemoryCompactionStatus>
   onMemoryCompactionStatusChanged: (callback: (status: MemoryCompactionStatus) => void) => () => void
@@ -1104,6 +1104,7 @@ interface ElectronAPI {
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
   onImageLibraryChanged: (callback: (payload: { source?: string }) => void) => () => void
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
+  quickAsk: (req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string }) => Promise<{ ok: boolean; answer?: string; error?: string }>
   drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
   loadStudioImageTasks: () => Promise<ImageStudioTask[]>
   saveStudioImageTasks: (tasks: ImageStudioTask[]) => Promise<void>
@@ -1168,6 +1169,7 @@ interface ElectronAPI {
   fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => Promise<{ models: string[] }>
   detectProviderProtocol: (input: { baseUrl: string; apiKey: string; model: string }) => Promise<{ protocol: 'openai-chat' | 'openai-responses' | 'anthropic' | null; probes: Array<{ protocol: string; ok: boolean; error?: string }> }>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
+  testEmbeddingModel: (input: { providerId: string; modelId: string }) => Promise<{ ok: boolean; dimensions?: number; latencyMs?: number; error?: string }>
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>

@@ -11,11 +11,13 @@ import { createChatMessageSender } from './message-sender'
 import { createChatMessageBranching } from './message-branching'
 import { createChatProviderState } from './provider-state'
 import { getLatestVisibleTodoItems } from './message-runtime'
+import { addSelectionQuote } from './selection-quote-state'
 import { sharedChatPanelState } from './shared-state'
 import { createChatSidebarState } from './sidebar-state'
 import { createChatWorkspaceOptionsState } from './workspace-options-state'
 import { createChatWorkspaceState } from './workspace-state'
 import type { ChatPanelProps } from './types'
+import type { MessageAnnotationTurn } from '../types'
 
 interface UseChatPanelBindings {
   onContextConsumed: () => void
@@ -321,6 +323,58 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       added: 0,
       removed: 0
     }
+  }
+
+  /** Parks the selected conversation text and appends its quote tag to the draft. */
+  function addSelectionQuoteToInput (text: string): void {
+    const tag = addSelectionQuote(text)
+    const current = inputText.value
+    inputText.value = current.trim().length > 0 ? `${current.trimEnd()} ${tag}` : tag
+  }
+
+  function findMessageForAnnotation (messageId: string | null, messageIndex: number) {
+    if (messageId) {
+      const byId = messages.value.find(message => message.id === messageId)
+      if (byId) return byId
+    }
+    return messageIndex >= 0 && messageIndex < messages.value.length ? messages.value[messageIndex] : undefined
+  }
+
+  function persistAnnotationChange (): void {
+    const conversationId = currentConversationId.value
+    // While a stream is running its final save owns the file; annotating a
+    // settled message is the normal path, so saving here would only race.
+    if (!conversationId || streamingConvIds.has(conversationId)) return
+    void doSaveConversation(conversationId, messages.value)
+  }
+
+  /** Creates the annotation on first ask, then appends/replaces its thread.
+      Writes are immutable (new arrays) so annotation consumers re-render
+      reliably. Pending ('generating') turns are created with persist=false so
+      an app exit mid-flight never persists a stuck generating turn. */
+  function upsertAnnotationTurns (payload: { messageId: string | null; messageIndex: number; annotationId: string; text: string; turns: MessageAnnotationTurn[] }, persist = true): void {
+    const message = findMessageForAnnotation(payload.messageId, payload.messageIndex)
+    if (!message) return
+    const annotations = message.annotations || []
+    const nextAnnotations = annotations.some(item => item.id === payload.annotationId)
+      ? annotations.map(item => item.id === payload.annotationId
+          ? { ...item, turns: payload.turns }
+          : item)
+      : [...annotations, {
+          id: payload.annotationId,
+          text: payload.text,
+          turns: payload.turns,
+          createdAt: Date.now()
+        }]
+    message.annotations = nextAnnotations
+    if (persist) persistAnnotationChange()
+  }
+
+  function removeMessageAnnotation (payload: { messageId: string | null; messageIndex: number; annotationId: string }): void {
+    const message = findMessageForAnnotation(payload.messageId, payload.messageIndex)
+    if (!message?.annotations) return
+    message.annotations = message.annotations.filter(item => item.id !== payload.annotationId)
+    persistAnnotationChange()
   }
 
   const {
@@ -667,6 +721,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     updateDocumentWorkspaceState,
     updateFolderWorkspaceState,
     uploadFeedback,
-    addAttachments
+    addAttachments,
+    addSelectionQuoteToInput,
+    upsertAnnotationTurns,
+    removeMessageAnnotation
   }
 }

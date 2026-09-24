@@ -85,6 +85,13 @@ export interface ChatMessage {
   modelLabel?: string
   toolRuns?: ToolRun[]
   blocks?: ChatMessageBlock[]
+  /** Quick-ask annotation threads pinned to text ranges of this message. */
+  annotations?: Array<{
+    id: string
+    text: string
+    turns: Array<{ question: string; answer: string; mode: 'quick' | 'detailed'; status?: 'done' | 'error'; error?: string }>
+    createdAt: number
+  }>
 }
 
 export interface ConversationDocumentReference {

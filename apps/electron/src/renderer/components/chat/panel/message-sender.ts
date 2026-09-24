@@ -7,6 +7,11 @@ import {
   extractProjectTagRefs
 } from './attachment-utils'
 import {
+  getSelectionQuoteText,
+  pruneSelectionQuotes,
+  SELECTION_QUOTE_TAG_PATTERN
+} from './selection-quote-state'
+import {
   appendFinalContentBlock,
   createAttachmentBlock,
   createContentBlock,
@@ -115,6 +120,28 @@ export interface PreparedUserMessage {
   blocks?: ChatMessageBlock[]
   /** Plain text used for assistant speaker-name resolution. */
   text: string
+}
+
+export function extractSelectionQuoteRefs (text: string, pattern: RegExp): { quoteIds: string[]; normalizedText: string } {
+  const quoteIds: string[] = []
+  const normalizedText = text.replace(pattern, (_match, quoteId: string, rawLabel?: string) => {
+    if (!quoteIds.includes(quoteId)) quoteIds.push(quoteId)
+    const label = rawLabel?.trim() || '对话引用'
+    return `对话引用「${label}」`
+  }).replace(/\n{3,}/g, '\n\n')
+
+  return { quoteIds, normalizedText }
+}
+
+/** Builds the prompt block that carries quoted conversation text into the model context. */
+export function buildSelectionQuotesPrompt (quoteIds: string[]): string {
+  const blocks: string[] = []
+  for (const id of quoteIds) {
+    const text = getSelectionQuoteText(id)
+    if (!text) continue
+    blocks.push(`【引用的对话片段】\n${text}\n【引用片段结束】`)
+  }
+  return blocks.join('\n\n')
 }
 
 export function createChatMessageSender (options: ChatMessageSenderOptions) {
@@ -235,7 +262,9 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
         setConversationTarget(currentConversationId.value || '', taggedProjectId)
       }
       const { regionIds: referencedDocumentRegionIds, normalizedText: textAfterDocuments } = extractDocumentTagRefs(textAfterProject, DOCUMENT_TAG_PATTERN)
-      const { normalizedText } = extractCodeTagRefs(textAfterDocuments, CODE_TAG_PATTERN)
+      const codeExtract = extractCodeTagRefs(textAfterDocuments, CODE_TAG_PATTERN)
+      const quoteExtract = extractSelectionQuoteRefs(codeExtract.normalizedText, SELECTION_QUOTE_TAG_PATTERN)
+      const normalizedText = quoteExtract.normalizedText
 
       let docSelectionsPrompt = ''
       if (referencedDocumentRegionIds.length > 0 && window.electronAPI?.buildDocumentSelectionsPrompt) {
@@ -244,7 +273,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
         } catch { /* ignore */ }
       }
 
-      const combinedText = [normalizedText, filePrompt, docSelectionsPrompt].filter(Boolean).join('\n\n')
+      const quotesPrompt = buildSelectionQuotesPrompt(quoteExtract.quoteIds)
+      pruneSelectionQuotes([])
+
+      const combinedText = [quotesPrompt, normalizedText, filePrompt, docSelectionsPrompt].filter(Boolean).join('\n\n')
 
       if (normalizedText) {
         userBlocks.push(createContentBlock(normalizedText))

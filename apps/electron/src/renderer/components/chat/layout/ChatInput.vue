@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, type CSSProperties } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { copyTextToClipboard } from '../export-utils'
+import { removeSelectionQuote, SELECTION_QUOTE_TAG_PATTERN } from '../panel/selection-quote-state'
 
 interface PendingAttachment {
   id: string
@@ -23,6 +24,12 @@ interface ProjectTagChip {
 }
 
 interface CodeTagChip {
+  id: string
+  label: string
+  raw: string
+}
+
+interface SelectionQuoteChip {
   id: string
   label: string
   raw: string
@@ -185,11 +192,29 @@ const codeTags = computed<CodeTagChip[]>(() => {
 
   return tags
 })
+const quoteTags = computed<SelectionQuoteChip[]>(() => {
+  const seenIds = new Set<string>()
+  const tags: SelectionQuoteChip[] = []
+
+  for (const match of props.modelValue.matchAll(SELECTION_QUOTE_TAG_PATTERN)) {
+    const quoteId = match[1]
+    if (!quoteId || seenIds.has(quoteId)) continue
+    seenIds.add(quoteId)
+    tags.push({
+      id: quoteId,
+      label: match[2]?.trim() || t('chatUi.selectionQuoteFallback'),
+      raw: match[0]
+    })
+  }
+
+  return tags
+})
 const plainDraftText = computed(() => {
   return props.modelValue
     .replace(PROJECT_TAG_PATTERN, '')
     .replace(DOCUMENT_TAG_PATTERN, '')
     .replace(CODE_TAG_PATTERN, '')
+    .replace(SELECTION_QUOTE_TAG_PATTERN, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n[ \t]+/g, '\n')
     .replace(/[ \t]{2,}/g, ' ')
@@ -399,7 +424,8 @@ function buildDraftValue (tags: DocumentTagChip[], text: string): string {
   const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
   const docSegment = tags.map(tag => tag.raw).join(' ')
   const codeSegment = codeTags.value.map(tag => tag.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment, codeSegment].filter(Boolean).join(' ')
+  const quoteSegment = quoteTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment].filter(Boolean).join(' ')
   if (tagSegment && text) return `${tagSegment}\n${text}`
   return tagSegment || text
 }
@@ -408,7 +434,8 @@ function buildTaggedDraftValue (text: string): string {
   const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
   const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
   const codeSegment = codeTags.value.map(tag => tag.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment, codeSegment].filter(Boolean).join(' ')
+  const quoteSegment = quoteTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment].filter(Boolean).join(' ')
   if (tagSegment && text) return `${tagSegment}\n${text}`
   return tagSegment || text
 }
@@ -576,10 +603,23 @@ function removeCodeTag (id: string) {
   const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
   const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
   const codeSegment = codeTags.value.filter(tag => tag.id !== id).map(tag => tag.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment, codeSegment].filter(Boolean).join(' ')
+  const quoteSegment = quoteTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment].filter(Boolean).join(' ')
   const text = plainDraftText.value
   if (tagSegment && text) { emit('update:modelValue', `${tagSegment}\n${text}`); return }
   emit('update:modelValue', tagSegment || text)
+}
+
+function removeQuoteTag (id: string) {
+  const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
+  const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
+  const codeSegment = codeTags.value.map(tag => tag.raw).join(' ')
+  const quoteSegment = quoteTags.value.filter(tag => tag.id !== id).map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment].filter(Boolean).join(' ')
+  const text = plainDraftText.value
+  if (tagSegment && text) { emit('update:modelValue', `${tagSegment}\n${text}`); return }
+  emit('update:modelValue', tagSegment || text)
+  removeSelectionQuote(id)
 }
 
 function handleKeydown (e: KeyboardEvent) {
@@ -616,6 +656,11 @@ function handleKeydown (e: KeyboardEvent) {
     if (codeTags.value.length > 0) {
       e.preventDefault()
       removeCodeTag(codeTags.value[codeTags.value.length - 1].id)
+      return
+    }
+    if (quoteTags.value.length > 0) {
+      e.preventDefault()
+      removeQuoteTag(quoteTags.value[quoteTags.value.length - 1].id)
       return
     }
     if (projectTags.value.length > 0) {
@@ -901,6 +946,13 @@ onUnmounted(() => {
           <span class="code-tag-chip-prefix">&lt;/&gt;</span>
           <span class="code-tag-chip-label">{{ tag.label }}</span>
           <button class="code-tag-chip-remove" @click="removeCodeTag(tag.id)" :title="$t('chatUi.removeCodeTag')">×</button>
+        </div>
+      </div>
+      <div v-if="quoteTags.length > 0" class="quote-tag-bar">
+        <div v-for="tag in quoteTags" :key="tag.id" class="quote-tag-chip">
+          <span class="quote-tag-chip-prefix">💬</span>
+          <span class="quote-tag-chip-label">{{ tag.label }}</span>
+          <button class="quote-tag-chip-remove" @click="removeQuoteTag(tag.id)" :title="$t('chatUi.removeSelectionQuote')">×</button>
         </div>
       </div>
       <div class="textarea-shell">
@@ -1582,6 +1634,56 @@ onUnmounted(() => {
 }
 
 .code-tag-chip-remove:hover {
+  background: var(--chat-input-chip-remove-hover);
+  color: var(--app-danger);
+}
+
+.quote-tag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px 0;
+}
+
+.quote-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 32%, transparent);
+  background: var(--app-accent-soft);
+  color: var(--app-text-soft);
+}
+
+.quote-tag-chip-prefix {
+  font-size: 0.78em;
+  line-height: 1;
+}
+
+.quote-tag-chip-label {
+  max-width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.76em;
+  font-weight: 700;
+}
+
+.quote-tag-chip-remove {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+}
+
+.quote-tag-chip-remove:hover {
   background: var(--chat-input-chip-remove-hover);
   color: var(--app-danger);
 }

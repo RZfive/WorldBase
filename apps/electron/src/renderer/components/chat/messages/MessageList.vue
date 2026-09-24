@@ -29,10 +29,15 @@ const emit = defineEmits<{
   (e: 'forkMessage', messageId: string): void
   (e: 'submitEdit', payload: { messageId: string; text: string; mode: 'fork' | 'inplace' }): void
   (e: 'cancelEdit'): void
+  (e: 'addToContext', text: string): void
+  (e: 'openQuickAsk', payload: { text: string; messageId: string | null; messageIndex: number; anchor: { left: number; top: number; right: number; bottom: number } }): void
+  (e: 'removeMessageAnnotation', payload: { messageId: string | null; messageIndex: number; annotationId: string }): void
+  (e: 'openAnnotationThread', payload: { messageId: string | null; messageIndex: number; annotationId: string; anchor: { left: number; top: number; right: number; bottom: number } }): void
 }>()
 
 const messagesContainer = ref<HTMLElement | null>(null)
 const lightboxRef = ref<InstanceType<typeof ImageLightbox> | null>(null)
+const selectionToolbarRef = ref<HTMLElement | null>(null)
 const collapsedThinking = reactive<Record<string, boolean>>({})
 const activeMermaidPreview = ref<{ code: string } | null>(null)
 const scrollTop = ref(0)
@@ -40,6 +45,18 @@ const viewportVisible = ref(false)
 const autoStickEnabled = ref(true)
 const nearBottom = ref(true)
 const selectionCopyMenu = reactive({ visible: false, text: '', x: 0, y: 0, copied: false })
+// Selection toolbar: 加入上下文 / 快速问答 — appears under a mouse selection
+// inside the message list, like the right-click copy menu but committed on
+// mouseup rather than contextmenu.
+const selectionToolbar = reactive({
+  visible: false,
+  text: '',
+  x: 0,
+  y: 0,
+  anchor: null as { left: number; top: number; right: number; bottom: number } | null,
+  messageId: null as string | null,
+  messageIndex: -1
+})
 const galleryActive = ref(false)
 let containerObserver: ResizeObserver | null = null
 let programmaticScrollFrameId: number | null = null
@@ -53,6 +70,8 @@ const AUTO_SCROLL_THRESHOLD = 96
 const RESTORE_AUTO_SCROLL_THRESHOLD = 4
 const SELECTION_COPY_MENU_WIDTH = 112
 const SELECTION_COPY_MENU_HEIGHT = 40
+const SELECTION_TOOLBAR_WIDTH = 188
+const SELECTION_TOOLBAR_HEIGHT = 40
 
 const dateAnchorLabel = computed(() => {
   const date = new Date()
@@ -190,7 +209,10 @@ function handleSelectionContextMenu (event: MouseEvent): void {
 }
 
 function handleDocumentSelectionChange (): void {
-  if (!getChatSelectionText()) hideSelectionCopyMenu()
+  if (!getChatSelectionText()) {
+    hideSelectionCopyMenu()
+    hideSelectionToolbar()
+  }
 }
 
 async function copySelectedText (): Promise<void> {
@@ -207,6 +229,90 @@ async function copySelectedText (): Promise<void> {
     console.error('Failed to copy selected message text:', error)
     hideSelectionCopyMenu()
   }
+}
+
+function hideSelectionToolbar (): void {
+  selectionToolbar.visible = false
+  selectionToolbar.text = ''
+  selectionToolbar.messageId = null
+  selectionToolbar.messageIndex = -1
+}
+
+/** Message element that owns the current selection anchor, if any. */
+function resolveSelectionMessageAnchor (): HTMLElement | null {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) return null
+  const anchorNode = selection.anchorNode
+  const element = anchorNode?.nodeType === Node.TEXT_NODE ? anchorNode.parentElement : anchorNode as HTMLElement | null
+  return element?.closest('[data-message-index]') as HTMLElement | null
+}
+
+function showSelectionToolbar (event?: MouseEvent): void {
+  // Right-button release belongs to the context menu, not this toolbar.
+  if (event && event.button !== 0) return
+  const text = getChatSelectionText()
+  if (!text) {
+    hideSelectionToolbar()
+    return
+  }
+  const selection = window.getSelection()
+  const container = messagesContainer.value
+  if (!selection || selection.rangeCount === 0 || !container) {
+    hideSelectionToolbar()
+    return
+  }
+
+  const rect = selection.getRangeAt(0).getBoundingClientRect()
+  if (rect.width === 0 && rect.height === 0) {
+    hideSelectionToolbar()
+    return
+  }
+
+  const messageAnchor = resolveSelectionMessageAnchor()
+  selectionToolbar.text = text
+  selectionToolbar.anchor = rect.toJSON()
+  selectionToolbar.messageId = messageAnchor?.getAttribute('data-message-id') || null
+  selectionToolbar.messageIndex = messageAnchor
+    ? Number.parseInt(messageAnchor.getAttribute('data-message-index') || '', 10)
+    : -1
+  if (Number.isNaN(selectionToolbar.messageIndex)) selectionToolbar.messageIndex = -1
+
+  const centerX = rect.left + rect.width / 2
+  selectionToolbar.x = Math.max(8, Math.min(centerX - SELECTION_TOOLBAR_WIDTH / 2, window.innerWidth - SELECTION_TOOLBAR_WIDTH - 8))
+  const belowY = rect.bottom + 8
+  if (belowY + SELECTION_TOOLBAR_HEIGHT > window.innerHeight - 8 && rect.top - SELECTION_TOOLBAR_HEIGHT - 8 > 8) {
+    selectionToolbar.y = rect.top - SELECTION_TOOLBAR_HEIGHT - 8
+  } else {
+    selectionToolbar.y = belowY
+  }
+  selectionToolbar.visible = true
+}
+
+function addSelectionToContext (): void {
+  const text = selectionToolbar.text
+  hideSelectionToolbar()
+  window.getSelection()?.removeAllRanges()
+  if (text) emit('addToContext', text)
+}
+
+function openQuickAskForSelection (): void {
+  const { text, anchor, messageId, messageIndex } = selectionToolbar
+  hideSelectionToolbar()
+  window.getSelection()?.removeAllRanges()
+  if (text && anchor) emit('openQuickAsk', { text, messageId, messageIndex, anchor })
+}
+
+// Hide the toolbar on the NEXT press outside it — mousedown, not click, so the
+// click that follows the selecting gesture can't immediately dismiss it.
+function handleGlobalMousedown (event: MouseEvent): void {
+  if (!selectionToolbar.visible) return
+  const target = event.target as Node | null
+  if (selectionToolbarRef.value && target && selectionToolbarRef.value.contains(target)) return
+  hideSelectionToolbar()
+}
+
+function handleGlobalKeydown (event: KeyboardEvent): void {
+  if (event.key === 'Escape' && selectionToolbar.visible) hideSelectionToolbar()
 }
 
 function hasVisibleViewport (): boolean {
@@ -269,6 +375,7 @@ function scrollToBottom (): void {
 
 function handleScroll (): void {
   hideSelectionCopyMenu()
+  hideSelectionToolbar()
   const element = messagesContainer.value
   if (!element) return
   if (!viewportVisible.value) {
@@ -283,6 +390,7 @@ function handleScroll (): void {
 
 function handleWheel (event: WheelEvent): void {
   hideSelectionCopyMenu()
+  hideSelectionToolbar()
   if (event.deltaY < 0) autoStickEnabled.value = false
 }
 
@@ -352,6 +460,9 @@ onMounted(() => {
   document.addEventListener('selectionchange', handleDocumentSelectionChange)
   document.addEventListener('visibilitychange', syncViewportState)
   window.addEventListener('blur', hideSelectionCopyMenu)
+  window.addEventListener('blur', hideSelectionToolbar)
+  document.addEventListener('mousedown', handleGlobalMousedown)
+  document.addEventListener('keydown', handleGlobalKeydown)
   syncViewportState()
   if (props.messages.length > 0) nextTick(scrollToBottom)
   if (typeof ResizeObserver !== 'undefined' && messagesContainer.value) {
@@ -367,6 +478,9 @@ onUnmounted(() => {
   document.removeEventListener('selectionchange', handleDocumentSelectionChange)
   document.removeEventListener('visibilitychange', syncViewportState)
   window.removeEventListener('blur', hideSelectionCopyMenu)
+  window.removeEventListener('blur', hideSelectionToolbar)
+  document.removeEventListener('mousedown', handleGlobalMousedown)
+  document.removeEventListener('keydown', handleGlobalKeydown)
   if (selectionCopyResetTimer != null) window.clearTimeout(selectionCopyResetTimer)
   if (programmaticScrollFrameId != null) window.cancelAnimationFrame(programmaticScrollFrameId)
   if (bottomScrollFrameId != null) window.cancelAnimationFrame(bottomScrollFrameId)
@@ -390,6 +504,7 @@ onUnmounted(() => {
       @wheel.capture.passive="handleWheel"
       @click.capture="handleMessageLinkClick"
       @contextmenu="handleSelectionContextMenu"
+      @mouseup="showSelectionToolbar"
     >
       <div v-if="props.messages.length === 0" class="empty-state">
         <slot name="empty">
@@ -415,6 +530,7 @@ onUnmounted(() => {
           :key="getMessageKey(msg, index)"
           class="message-item"
           :data-message-index="index"
+          :data-message-id="msg.id || null"
           :class="{ 'with-leading-gap': index > 0, 'jump-highlight': getMessageKey(msg, index) === highlightedMessageKey }"
         >
           <MessageRow
@@ -436,6 +552,8 @@ onUnmounted(() => {
             @fork-message="(messageId) => emit('forkMessage', messageId)"
             @submit-edit="(payload) => emit('submitEdit', payload)"
             @cancel-edit="() => emit('cancelEdit')"
+            @remove-annotation="(annotationId) => emit('removeMessageAnnotation', { messageId: msg.id || null, messageIndex: index, annotationId })"
+            @open-annotation-thread="({ annotationId, anchor }) => emit('openAnnotationThread', { messageId: msg.id || null, messageIndex: index, annotationId, anchor })"
           />
         </div>
       </template>
@@ -444,6 +562,23 @@ onUnmounted(() => {
       <MermaidPreviewDialog :diagram="activeMermaidPreview" @close="closeMermaidPreview" />
 
       <Teleport to="body">
+        <div
+          v-if="selectionToolbar.visible"
+          ref="selectionToolbarRef"
+          class="message-selection-toolbar"
+          :style="{ left: `${selectionToolbar.x}px`, top: `${selectionToolbar.y}px` }"
+          @mousedown.prevent
+          @click.stop
+          @contextmenu.prevent
+        >
+          <button class="message-selection-toolbar-action" type="button" @click.stop="addSelectionToContext">
+            {{ $t('chatUi.addToContext') }}
+          </button>
+          <span class="message-selection-toolbar-divider" aria-hidden="true"></span>
+          <button class="message-selection-toolbar-action" type="button" @click.stop="openQuickAskForSelection">
+            {{ $t('chatUi.quickAskAction') }}
+          </button>
+        </div>
         <div
           v-if="selectionCopyMenu.visible"
           class="message-selection-copy-menu"
@@ -534,6 +669,42 @@ onUnmounted(() => {
   border-radius: 10px;
   background: var(--app-panel);
   box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+}
+
+.message-selection-toolbar {
+  position: fixed;
+  z-index: 5000;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-panel);
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+}
+
+.message-selection-toolbar-action {
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font-size: 0.84rem;
+  white-space: nowrap;
+  cursor: pointer;
+  text-align: left;
+}
+
+.message-selection-toolbar-action:hover {
+  background: var(--app-panel-subtle);
+}
+
+.message-selection-toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--app-border);
 }
 
 .message-selection-copy-action {

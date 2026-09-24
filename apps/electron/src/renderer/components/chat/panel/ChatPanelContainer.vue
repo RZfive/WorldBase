@@ -7,6 +7,8 @@ import MessageList from '../messages/MessageList.vue'
 import EmptyStateSuggestions from '../messages/EmptyStateSuggestions.vue'
 import ChatInput from '../layout/ChatInput.vue'
 import ChatHeader from '../layout/ChatHeader.vue'
+import QuickAskPopover from '../layout/QuickAskPopover.vue'
+import { generateId } from './message-blocks'
 import DocumentWorkspace from '../layout/DocumentWorkspace.vue'
 import FolderWorkspace from '../layout/FolderWorkspace.vue'
 import PinnedTodoPanel from '../layout/PinnedTodoPanel.vue'
@@ -29,6 +31,7 @@ import {
 import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
 import { getRecommendedProviderTemplate } from '../../../../shared/provider-templates.js'
 import type { ChatPanelEmit, ChatPanelProps } from './types'
+import type { AnnotationAnchor, QuickAskMode, QuickAskPopoverState } from '../types'
 
 const props = defineProps<ChatPanelProps>()
 const emit = defineEmits<ChatPanelEmit>()
@@ -50,6 +53,7 @@ const {
   activeProviderId,
   activeSkillIds,
   activeTodoItems,
+  addSelectionQuoteToInput,
   agentSelectorValue,
   agentSidebarItems,
   availableChannelBindings,
@@ -119,6 +123,8 @@ const {
   renameConversation,
   removeFile,
   removeImage,
+  removeMessageAnnotation,
+  upsertAnnotationTurns,
   resumeLongTermGoal,
   runLongTermGoalNow,
   archiveLongTermGoal,
@@ -170,6 +176,124 @@ const {
 } = useChatPanel(props, {
   onContextConsumed: () => emit('contextConsumed')
 })
+
+// Quick Q&A over a text selection: an inline popover anchored next to the
+// text. The first answer creates the annotation; the popover stays open as a
+// thread so the user can keep asking in 简略/详细 depth.
+const quickAskState = ref<QuickAskPopoverState | null>(null)
+
+function handleAddSelectionToContext (text: string): void {
+  addSelectionQuoteToInput(text)
+}
+
+function handleOpenQuickAsk (payload: { text: string; messageId: string | null; messageIndex: number; anchor: AnnotationAnchor }): void {
+  quickAskState.value = {
+    mode: 'ask',
+    text: payload.text,
+    messageId: payload.messageId,
+    messageIndex: payload.messageIndex,
+    anchor: payload.anchor,
+    annotationId: null,
+    turns: []
+  }
+}
+
+function handleOpenAnnotationThread (payload: { messageId: string | null; messageIndex: number; annotationId: string; anchor: AnnotationAnchor }): void {
+  let message = null as typeof messages.value[number] | null
+  if (payload.messageId) {
+    message = messages.value.find(item => item.id === payload.messageId) || null
+  }
+  if (!message && payload.messageIndex >= 0 && payload.messageIndex < messages.value.length) {
+    message = messages.value[payload.messageIndex]
+  }
+  const annotation = message?.annotations?.find(item => item.id === payload.annotationId)
+  if (!annotation) return
+  quickAskState.value = {
+    mode: 'thread',
+    text: annotation.text,
+    messageId: payload.messageId,
+    messageIndex: payload.messageIndex,
+    anchor: payload.anchor,
+    annotationId: annotation.id,
+    turns: annotation.turns.map(turn => ({ ...turn }))
+  }
+}
+
+function handleCloseQuickAsk (): void {
+  quickAskState.value = null
+}
+
+function handleQuickAskAsk (payload: { question: string; mode: QuickAskMode }): void {
+  void handleQuickAskFlight(payload)
+}
+
+/** Owns one quickAsk flight: creates the annotation immediately with a
+    pending turn (highlight + hover state appear at once), then fills in the
+    answer. Dismissing the popover never cancels it. */
+async function handleQuickAskFlight (payload: { question: string; mode: QuickAskMode }): Promise<void> {
+  const state = quickAskState.value
+  if (!state) return
+  if (state.turns.some(turn => turn.status === 'generating')) return
+  // Pending turns live in the in-memory message list; if the user switches
+  // conversations mid-flight both the pending turn and this result are gone.
+  const flightConversationId = currentConversationId.value
+
+  const annotationId = state.annotationId || generateId()
+  const pendingTurn = { question: payload.question, answer: '', mode: payload.mode, status: 'generating' as const, startedAt: Date.now() }
+  const nextTurns = [...state.turns, pendingTurn]
+
+  // In-memory only: persisted once the turn resolves.
+  upsertAnnotationTurns({
+    messageId: state.messageId,
+    messageIndex: state.messageIndex,
+    annotationId,
+    text: state.text,
+    turns: nextTurns
+  }, false)
+  quickAskState.value = { ...state, mode: 'thread', annotationId, turns: nextTurns }
+
+  let result: { ok: boolean; answer?: string; error?: string }
+  if (window.electronAPI?.quickAsk) {
+    try {
+      result = await window.electronAPI.quickAsk({
+        question: pendingTurn.question,
+        selection: state.text,
+        mode: payload.mode,
+        // Follow the provider/model the main conversation is using (the same
+        // selection the header shows, agent-synced included). Empty values let
+        // main resolve its default.
+        providerId: activeProviderId.value || undefined,
+        model: selectedModel.value || undefined
+      })
+    } catch (error) {
+      result = { ok: false, error: error instanceof Error ? error.message : t('chatUi.quickAskFailed') }
+    }
+  } else {
+    result = { ok: false, error: t('chatUi.quickAskUnsupported') }
+  }
+
+  const resolvedTurn = result.ok && result.answer
+    ? { ...pendingTurn, answer: result.answer, status: 'done' as const }
+    : { ...pendingTurn, status: 'error' as const, error: result.error || t('chatUi.quickAskFailed') }
+
+  // Conversation switched while generating: the pending turn died with the old
+  // message list, so drop the result instead of writing into the new one.
+  if (currentConversationId.value !== flightConversationId) return
+
+  const finalTurns = [...nextTurns.slice(0, -1), resolvedTurn]
+
+  upsertAnnotationTurns({
+    messageId: state.messageId,
+    messageIndex: state.messageIndex,
+    annotationId,
+    text: state.text,
+    turns: finalTurns
+  }, true)
+  // The popover may have been dismissed or re-anchored meanwhile.
+  if (quickAskState.value?.annotationId === annotationId) {
+    quickAskState.value = { ...quickAskState.value, turns: finalTurns }
+  }
+}
 
 const chatSurfaceStatus = computed(() => ({
   contextLabel: currentContextLabel.value,
@@ -824,6 +948,10 @@ watch(
             @fork-message="forkFromMessage"
             @submit-edit="(payload) => editUserMessage(payload.messageId, payload.text, payload.mode)"
             @cancel-edit="cancelEditMessage"
+            @add-to-context="handleAddSelectionToContext"
+            @open-quick-ask="handleOpenQuickAsk"
+            @remove-message-annotation="removeMessageAnnotation"
+            @open-annotation-thread="handleOpenAnnotationThread"
           >
             <template v-if="showEmptyStateSuggestions" #empty>
               <EmptyStateSuggestions
@@ -910,6 +1038,12 @@ watch(
             @select-all-skills="selectAllSkills"
             @clear-skills="clearSkills"
             @toggle-skill="toggleSkill"
+          />
+
+          <QuickAskPopover
+            :state="quickAskState"
+            @close="handleCloseQuickAsk"
+            @ask="handleQuickAskAsk"
           />
         </template>
       </div>

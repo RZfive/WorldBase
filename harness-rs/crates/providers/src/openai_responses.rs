@@ -17,13 +17,15 @@ use anyhow::{bail, Result};
 use futures::stream::StreamExt;
 use reqwest::{Client, Response, StatusCode};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::sync::Mutex;
 
 pub struct OpenAIResponsesProvider {
     client: Client,
     api_key: String,
     model: String,
     base_url: String,
+    rejected_optional_parameters: Mutex<HashSet<&'static str>>,
 }
 
 /// Responses `input` items：普通轮次用 easy message（user 消息支持
@@ -100,6 +102,56 @@ fn to_wire_input(messages: &[LlmMessage]) -> Vec<Value> {
     input
 }
 
+// A successful minimal protocol probe does not establish support for every
+// optional Responses field. Keep required input, tools and streaming intact;
+// only remove one optional field at a time on a matching 400/422 error.
+const OPTIONAL_COMPATIBILITY_PARAMETERS: [&str; 3] = ["temperature", "reasoning", "tool_choice"];
+
+fn remove_rejected_optional_parameter(body: &mut Value, text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    for key in OPTIONAL_COMPATIBILITY_PARAMETERS {
+        if body.get(key).is_some() && lower.contains(key) {
+            body.as_object_mut()?.remove(key);
+            return Some(key);
+        }
+    }
+    None
+}
+
+fn is_generic_invalid_parameter_error(text: &str) -> bool {
+    let Ok(response) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    let error = response.get("error").unwrap_or(&response);
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let parameter = error
+        .get("param")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    code.eq_ignore_ascii_case("InvalidParameter")
+        && parameter.is_empty()
+        && message.contains("a parameter specified in the request is not valid")
+}
+
+fn remove_ambiguous_optional_parameter(body: &mut Value) -> Option<&'static str> {
+    for key in OPTIONAL_COMPATIBILITY_PARAMETERS {
+        if body.get(key).is_some() {
+            body.as_object_mut()?.remove(key);
+            return Some(key);
+        }
+    }
+    None
+}
+
 fn suggests_unsupported_responses_endpoint(status: StatusCode, text: &str) -> bool {
     if status == StatusCode::NOT_FOUND {
         return true;
@@ -115,6 +167,7 @@ impl OpenAIResponsesProvider {
             api_key,
             model,
             base_url: base_url.unwrap_or_else(|| crate::openai::DEFAULT_BASE_URL.into()),
+            rejected_optional_parameters: Mutex::new(HashSet::new()),
         }
     }
 
@@ -163,30 +216,58 @@ impl OpenAIResponsesProvider {
         body
     }
 
-    async fn send_request(&self, url: reqwest::Url, body: &Value) -> Result<Response> {
-        let response = crate::http::send_with_retry("openai responses", || {
-            self.client
-                .post(url.clone())
-                .bearer_auth(&self.api_key)
-                .json(body)
-        })
-        .await?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response);
+    async fn send_request(&self, url: reqwest::Url, mut body: Value) -> Result<Response> {
+        let rejected = self.rejected_optional_parameters.lock().unwrap().clone();
+        if let Some(object) = body.as_object_mut() {
+            for key in rejected {
+                object.remove(key);
+            }
         }
-        let text = response.text().await.unwrap_or_default();
-        // The Responses protocol is opt-in; an endpoint that lacks it must fail
-        // loudly with fix instructions instead of silently switching wire
-        // formats mid-conversation.
-        if suggests_unsupported_responses_endpoint(status, &text) {
-            bail!(
-                "openai responses api error ({status}): {text}\n\
-                 this endpoint does not support the Responses protocol; \
-                 switch the provider protocol to OpenAI Chat Completions in settings"
-            );
+        let mut removed = Vec::new();
+        loop {
+            let response = crate::http::send_with_retry("openai responses", || {
+                self.client
+                    .post(url.clone())
+                    .bearer_auth(&self.api_key)
+                    .json(&body)
+            })
+            .await?;
+            let status = response.status();
+            if status.is_success() {
+                // Cache only a *successful* downgrade. A vague 400 caused by
+                // invalid tools must not disable reasoning in future requests.
+                self.rejected_optional_parameters
+                    .lock()
+                    .unwrap()
+                    .extend(removed);
+                return Ok(response);
+            }
+            let text = response.text().await.unwrap_or_default();
+            if matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+            ) {
+                let key = remove_rejected_optional_parameter(&mut body, &text).or_else(|| {
+                    is_generic_invalid_parameter_error(&text)
+                        .then(|| remove_ambiguous_optional_parameter(&mut body))
+                        .flatten()
+                });
+                if let Some(key) = key {
+                    removed.push(key);
+                    continue;
+                }
+            }
+            // An endpoint without Responses support must never silently switch
+            // protocols; the user can choose Chat Completions explicitly.
+            if suggests_unsupported_responses_endpoint(status, &text) {
+                bail!(
+                    "openai responses api error ({status}): {text}\n\
+                     this endpoint does not support the Responses protocol; \
+                     switch the provider protocol to OpenAI Chat Completions in settings"
+                );
+            }
+            bail!("openai responses api error ({status}): {text}");
         }
-        bail!("openai responses api error ({status}): {text}")
     }
 }
 
@@ -217,7 +298,7 @@ impl Provider for OpenAIResponsesProvider {
     ) -> Result<ChunkStream> {
         let body = self.request_body(system, &messages, &tools, &options);
         let url = crate::urls::responses_url(&self.base_url)?;
-        let resp = self.send_request(url, &body).await?;
+        let resp = self.send_request(url, body).await?;
 
         // 累积状态：output_text 增量 + 按 item_id 的 function_call 参数分片。
         struct StreamState {
@@ -751,6 +832,96 @@ mod tests {
             &assistant.content[0],
             ContentBlock::Text { text } if text == "partial"
         ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_invalid_parameter_downgrades_optional_responses_fields() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (_, body) = read_http_request(&mut socket).await;
+                let payload: Value = serde_json::from_str(&body).unwrap();
+                match attempt {
+                    0 => assert!(payload.get("temperature").is_some()),
+                    1 => {
+                        assert!(payload.get("temperature").is_none());
+                        assert!(payload.get("reasoning").is_some());
+                    }
+                    2 => {
+                        assert!(payload.get("temperature").is_none());
+                        assert!(payload.get("reasoning").is_none());
+                        assert!(payload.get("tool_choice").is_some());
+                    }
+                    3 => {
+                        assert!(payload.get("temperature").is_none());
+                        assert!(payload.get("reasoning").is_none());
+                        assert!(payload.get("tool_choice").is_none());
+                    }
+                    _ => unreachable!(),
+                }
+                if attempt < 3 {
+                    let error = r#"{"error":{"code":"InvalidParameter","message":"A parameter specified in the request is not valid","param":"","type":"BadRequest"}}"#;
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{error}",
+                                error.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                } else {
+                    write_sse(
+                        &mut socket,
+                        &[
+                            (
+                                "response.output_text.delta",
+                                r#"{"type":"response.output_text.delta","delta":"ok"}"#,
+                            ),
+                            (
+                                "response.completed",
+                                r#"{"type":"response.completed","response":{"usage":{}}}"#,
+                            ),
+                        ],
+                    )
+                    .await;
+                }
+            }
+        });
+
+        let provider = OpenAIResponsesProvider::new(
+            "test-key".into(),
+            "compatible-model".into(),
+            Some(format!("http://{address}/v1")),
+        );
+        let mut options = ChatOptions::default();
+        options.enable_thinking = true;
+        options.reasoning_effort = Some("medium".into());
+        let mut stream = provider
+            .chat_stream(
+                None,
+                vec![LlmMessage::text(LlmRole::User, "hi")],
+                vec![LlmTool {
+                    name: "tool".into(),
+                    description: "test".into(),
+                    input_schema: json!({"type":"object"}),
+                }],
+                8192,
+                options,
+            )
+            .await
+            .unwrap();
+        let mut text = String::new();
+        while let Some(chunk) = stream.next().await {
+            if let StreamChunk::TextDelta(delta) = chunk.unwrap() {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(text, "ok");
         server.await.unwrap();
     }
 

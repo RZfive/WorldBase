@@ -571,6 +571,7 @@ export interface ElectronAPI {
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
   onImageLibraryChanged: (callback: (payload: { source?: string }) => void) => () => void
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
+  quickAsk: (req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string }) => Promise<{ ok: boolean; answer?: string; error?: string }>
   drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
   loadStudioImageTasks: () => Promise<ImageStudioTask[]>
   saveStudioImageTasks: (tasks: ImageStudioTask[]) => Promise<void>
@@ -642,6 +643,7 @@ export interface ElectronAPI {
   fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => Promise<{ models: string[] }>
   detectProviderProtocol: (input: { baseUrl: string; apiKey: string; model: string }) => Promise<{ protocol: 'openai-chat' | 'openai-responses' | 'anthropic' | null; probes: Array<{ protocol: string; ok: boolean; error?: string }> }>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
+  testEmbeddingModel: (input: { providerId: string; modelId: string }) => Promise<{ ok: boolean; dimensions?: number; latencyMs?: number; error?: string }>
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => () => void
   getThemePreference: () => Promise<ThemePreference>
   saveThemePreference: (preference: ThemePreference) => Promise<{ success: boolean }>
@@ -866,6 +868,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => { ipcRenderer.removeListener('image:library:changed', handler) }
   },
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }): Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }> => ipcRenderer.invoke('image:prompt:optimize', req),
+  quickAsk: (req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string }): Promise<{ ok: boolean; answer?: string; error?: string }> => ipcRenderer.invoke('ai:quickAsk', req),
   drainPendingStudioImageTasks: (): Promise<ImageStudioGenerateRequest[]> => ipcRenderer.invoke('image:studio:drainPendingTasks'),
   loadStudioImageTasks: (): Promise<ImageStudioTask[]> => ipcRenderer.invoke('image:studio:loadTasks'),
   saveStudioImageTasks: (tasks: ImageStudioTask[]) => ipcRenderer.invoke('image:studio:saveTasks', tasks),
@@ -950,6 +953,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => ipcRenderer.invoke('settings:fetchProviderModels', input),
   detectProviderProtocol: (input: { baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke('settings:detectProviderProtocol', input),
   saveProviders: (config: AIProvidersConfig) => ipcRenderer.invoke('settings:saveProviders', config),
+  testEmbeddingModel: (input: { providerId: string; modelId: string }) => ipcRenderer.invoke('settings:testEmbeddingModel', input),
   onProvidersChanged: (callback: (config: AIProvidersConfig) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, config: AIProvidersConfig) => callback(config)
     ipcRenderer.on('settings:providersChanged', handler)

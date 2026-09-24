@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, type Ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../markdown'
 import { getContentParts, hasRenderableContent, collapseWhitespace } from '../message-utils'
@@ -12,7 +12,7 @@ import {
   messageContentToMarkdown,
   renderElementToPngDataUrl
 } from '../export-utils'
-import type { ChatMessageBlock } from '../types'
+import type { AnnotationAnchor, ChatMessageBlock, MessageAnnotation } from '../types'
 import MermaidDiagram from '../media/MermaidDiagram.vue'
 import { vStableImages, vStableImage } from '../media/image-stability'
 
@@ -26,11 +26,14 @@ const props = defineProps<{
   blockIndex: number
   isStreamingBlock: boolean
   messageText: string
+  annotations?: MessageAnnotation[]
 }>()
 
 const emit = defineEmits<{
   (e: 'openLightbox', messageIndex: number, blockIndex: number, partIndex: number): void
   (e: 'openMermaidPreview', code: string): void
+  (e: 'removeAnnotation', annotationId: string): void
+  (e: 'openAnnotationThread', payload: { annotationId: string; anchor: AnnotationAnchor }): void
 }>()
 
 const { t } = useI18n()
@@ -195,7 +198,283 @@ async function copyMessageContent (): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Quick-ask annotations: wrap the annotated text range in a
+// `.chat-annotation-mark` span after each render and show a hover bubble with
+// the question + answer. Marks are re-applied after every re-render because
+// v-html replaces the DOM wholesale.
+// ---------------------------------------------------------------------------
+
+const activeAnnotationId = ref<string | null>(null)
+const activeAnnotationPos = ref<{ x: number; y: number; anchor: AnnotationAnchor } | null>(null)
+let annotationHideTimer: number | null = null
+const ANNOTATION_BUBBLE_WIDTH = 340
+const ANNOTATION_BUBBLE_GAP = 8
+
+// Looked up from props on every access so a generating turn refreshes the
+// bubble in place the moment its flight resolves.
+const activeAnnotation = computed<MessageAnnotation | null>(() => {
+  const id = activeAnnotationId.value
+  if (!id) return null
+  return (props.annotations || []).find(item => item.id === id) || null
+})
+
+const activeAnnotationTurn = computed(() => {
+  const annotation = activeAnnotation.value
+  return annotation?.turns?.[annotation.turns.length - 1] || null
+})
+
+function hideAnnotationBubble (): void {
+  activeAnnotationId.value = null
+  activeAnnotationPos.value = null
+}
+
+function openAnnotationThreadFor (annotation: MessageAnnotation, anchor: AnnotationAnchor): void {
+  if (annotationHideTimer != null) {
+    window.clearTimeout(annotationHideTimer)
+    annotationHideTimer = null
+  }
+  hideAnnotationBubble()
+  emit('openAnnotationThread', { annotationId: annotation.id, anchor })
+}
+
+function handleAnnotationClick (event: MouseEvent): void {
+  const target = event.target as HTMLElement | null
+  const mark = target?.closest('.chat-annotation-mark') as HTMLElement | null
+  if (!mark) return
+  const annotationId = mark.dataset.annotationId
+  const annotation = (props.annotations || []).find(item => item.id === annotationId)
+  if (!annotation) return
+  event.preventDefault()
+  openAnnotationThreadFor(annotation, mark.getBoundingClientRect().toJSON())
+}
+
+const ANNOTATION_BLOCK_SELECTOR = 'p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, td, th'
+
+/** Block-level ancestor used to keep a wrapped range inside one block. */
+function getWrapSafeRoot (node: Node, fallback?: Element | null): Element | null {
+  const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node as Element
+  return element?.closest(ANNOTATION_BLOCK_SELECTOR) ?? (fallback || null)
+}
+
+function unwrapAnnotationMarks (root: HTMLElement): void {
+  const marks = root.querySelectorAll('.chat-annotation-mark')
+  for (const mark of marks) {
+    const parent = mark.parentNode
+    if (!parent) continue
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark)
+    parent.removeChild(mark)
+    parent.normalize()
+  }
+}
+
+function wrapRangeWithAnnotationMark (startNode: Text, startOffset: number, endNode: Text, endOffset: number, annotationId: string): boolean {
+  try {
+    const range = document.createRange()
+    range.setStart(startNode, startOffset)
+    range.setEnd(endNode, endOffset)
+    const span = document.createElement('span')
+    span.className = 'chat-annotation-mark'
+    span.dataset.annotationId = annotationId
+    span.appendChild(range.extractContents())
+    range.insertNode(span)
+    return true
+  } catch {
+    return false
+  }
+}
+
+interface AnnotationCharSource {
+  node: Text
+  offset: number
+}
+
+interface AnnotationRootIndex {
+  root: Element
+  /** Whitespace-normalized text of the whole block root. */
+  chars: string[]
+  /** chars[i] originates from mapping[i]. */
+  mapping: AnnotationCharSource[]
+}
+
+function normalizeAnnotationText (text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Indexes every block root's text once, whitespace-normalized, with a
+ * char->(node, offset) mapping. Normalization matters because the stored
+ * annotation text comes from selection.toString(): soft line breaks, real
+ * newlines inside <pre>, and collapsed markdown spaces all differ from the
+ * raw text-node data, and an exact indexOf against raw node text silently
+ * missed most real-world selections.
+ */
+function buildAnnotationRootIndexes (root: HTMLElement): AnnotationRootIndex[] {
+  const indexes: AnnotationRootIndex[] = []
+  const byRoot = new Map<Element, AnnotationRootIndex>()
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let current = walker.nextNode() as Text | null
+  while (current) {
+    const blockRoot = getWrapSafeRoot(current, current.parentElement?.closest('.message-text') || root)
+    if (blockRoot) {
+      let index = byRoot.get(blockRoot)
+      if (!index) {
+        index = { root: blockRoot, chars: [], mapping: [] }
+        byRoot.set(blockRoot, index)
+        indexes.push(index)
+      }
+      const data = current.data
+      let i = 0
+      while (i < data.length) {
+        const char = data[i]
+        if (/\s/.test(char)) {
+          const runStart = i
+          while (i < data.length && /\s/.test(data[i])) i++
+          // A whitespace run collapses to one space; attribute it to the run's
+          // first char so a match ending here terminates inside the run.
+          if (index.chars.length > 0 && index.chars[index.chars.length - 1] !== ' ') {
+            index.chars.push(' ')
+            index.mapping.push({ node: current, offset: runStart })
+          }
+          continue
+        }
+        index.chars.push(char)
+        index.mapping.push({ node: current, offset: i })
+        i++
+      }
+    }
+    current = walker.nextNode() as Text | null
+  }
+  return indexes
+}
+
+function wrapIndexRange (index: AnnotationRootIndex, start: number, end: number, annotationId: string): boolean {
+  const first = index.mapping[start]
+  const last = index.mapping[end - 1]
+  if (!first || !last) return false
+  return wrapRangeWithAnnotationMark(first.node, first.offset, last.node, last.offset + 1, annotationId)
+}
+
+/**
+ * Longest prefix of the needle that occurs inside one root - used when the
+ * selection crossed block boundaries (selection.toString() then contains
+ * paragraph separators no single text node has). The highlight anchors where
+ * the selection began instead of vanishing entirely.
+ */
+function findAnnotationPrefix (needle: string, index: AnnotationRootIndex): { start: number; length: number } | null {
+  const haystack = index.chars.join('')
+  const maxLen = Math.min(needle.length, haystack.length)
+  for (let len = maxLen; len >= 1; len--) {
+    const at = haystack.indexOf(needle.slice(0, len))
+    if (at >= 0) return { start: at, length: len }
+  }
+  return null
+}
+
+function wrapTextMatchInRoot (root: HTMLElement, annotation: MessageAnnotation): boolean {
+  const needle = normalizeAnnotationText(annotation.text)
+  if (!needle) return false
+  const indexes = buildAnnotationRootIndexes(root)
+
+  // 1. Prefer a full match inside one block root (handles selections that
+  //    start mid-text-node and cross inline elements like code/bold/links).
+  for (const index of indexes) {
+    const at = index.chars.join('').indexOf(needle)
+    if (at >= 0 && wrapIndexRange(index, at, at + needle.length, annotation.id)) return true
+  }
+
+  // 2. Cross-block selection: wrap the leading portion in the first root
+  //    that carries enough of it.
+  const minPrefix = Math.max(3, Math.ceil(needle.length * 0.25))
+  for (const index of indexes) {
+    const prefix = findAnnotationPrefix(needle, index)
+    if (prefix && prefix.length >= minPrefix && wrapIndexRange(index, prefix.start, prefix.start + prefix.length, annotation.id)) {
+      return true
+    }
+  }
+  return false
+}
+
+function applyAnnotationMarks (): void {
+  const root = exportCaptureRef.value
+  if (!root) return
+  unwrapAnnotationMarks(root)
+  if (props.isStreamingBlock) return
+  const annotations = props.annotations || []
+  if (annotations.length === 0) return
+  for (const annotation of annotations) {
+    wrapTextMatchInRoot(root, annotation)
+  }
+}
+
+function handleAnnotationMouseOver (event: MouseEvent): void {
+  const target = event.target as HTMLElement | null
+  const mark = target?.closest('.chat-annotation-mark') as HTMLElement | null
+  if (!mark) return
+  const annotationId = mark.dataset.annotationId
+  const annotation = (props.annotations || []).find(item => item.id === annotationId)
+  if (!annotation) return
+
+  if (annotationHideTimer != null) {
+    window.clearTimeout(annotationHideTimer)
+    annotationHideTimer = null
+  }
+
+  const rect = mark.getBoundingClientRect()
+  const x = Math.max(8, Math.min(rect.left + rect.width / 2 - ANNOTATION_BUBBLE_WIDTH / 2, window.innerWidth - ANNOTATION_BUBBLE_WIDTH - 8))
+  const spaceBelow = window.innerHeight - rect.bottom
+  const y = spaceBelow < 160 && rect.top > 200
+    ? Math.max(8, rect.top - ANNOTATION_BUBBLE_GAP - 260)
+    : rect.bottom + ANNOTATION_BUBBLE_GAP
+  activeAnnotationId.value = annotation.id
+  activeAnnotationPos.value = { x, y, anchor: rect.toJSON() }
+}
+
+function handleAnnotationMouseLeave (): void {
+  if (annotationHideTimer != null) window.clearTimeout(annotationHideTimer)
+  annotationHideTimer = window.setTimeout(() => {
+    hideAnnotationBubble()
+    annotationHideTimer = null
+  }, 180)
+}
+
+function keepAnnotationBubble (): void {
+  if (annotationHideTimer != null) {
+    window.clearTimeout(annotationHideTimer)
+    annotationHideTimer = null
+  }
+}
+
+function removeActiveAnnotation (): void {
+  const annotationId = activeAnnotation.value?.id
+  if (!annotationId) return
+  hideAnnotationBubble()
+  emit('removeAnnotation', annotationId)
+}
+
+// Content revision instead of array identity: fires on new arrays AND on
+// in-place mutations, whichever way the annotation store writes.
+const annotationsRevision = computed(() => {
+  return (props.annotations || [])
+    .map(annotation => `${annotation.id}:${(annotation.turns || [])
+      .map(turn => `${turn.status ?? 'done'}:${turn.answer?.length ?? 0}`)
+      .join(',')}`)
+    .join('|')
+})
+
+watch(
+  [annotationsRevision, () => props.isStreamingBlock, () => props.block.content],
+  () => {
+    nextTick(applyAnnotationMarks)
+  }
+)
+
+onMounted(() => {
+  nextTick(applyAnnotationMarks)
+})
+
 onBeforeUnmount(() => {
+  if (annotationHideTimer != null) window.clearTimeout(annotationHideTimer)
   clearResetTimer('md')
   clearResetTimer('image')
   clearResetTimer('copy')
@@ -207,6 +486,9 @@ onBeforeUnmount(() => {
     ref="exportCaptureRef"
     class="message-output"
     :class="[props.role, { streaming: props.isStreamingBlock }]"
+    @mouseover="handleAnnotationMouseOver"
+    @mouseout="handleAnnotationMouseLeave"
+    @click="handleAnnotationClick"
   >
     <template v-if="hasRenderableContent(props.block.content)">
       <div class="message-content-body">
@@ -287,6 +569,30 @@ onBeforeUnmount(() => {
       {{ props.role === 'assistant' ? $t('chatUi.streamingOutput') : collapseWhitespace(props.messageText) }}
     </div>
   </div>
+
+  <Teleport to="body">
+    <div
+      v-if="activeAnnotation && activeAnnotationPos"
+      class="chat-annotation-bubble"
+      :style="{ left: `${activeAnnotationPos.x}px`, top: `${activeAnnotationPos.y}px`, width: `${ANNOTATION_BUBBLE_WIDTH}px` }"
+      @mouseenter="keepAnnotationBubble"
+      @mouseleave="handleAnnotationMouseLeave"
+      @click="activeAnnotation && openAnnotationThreadFor(activeAnnotation, activeAnnotationPos.anchor)"
+    >
+      <div class="chat-annotation-bubble-head">
+        <span class="chat-annotation-bubble-badge">{{ activeAnnotationTurn?.mode === 'detailed' ? $t('chatUi.quickAskModeDetailed') : $t('chatUi.quickAskModeQuick') }}</span>
+        <span class="chat-annotation-bubble-hint">{{ activeAnnotationTurn?.status === 'generating' ? $t('chatUi.quickAskThinking') : $t('chatUi.quickAskThreadHint') }}</span>
+        <button class="chat-annotation-bubble-remove" type="button" @click.stop="removeActiveAnnotation" :title="$t('chatUi.removeAnnotation')">✕</button>
+      </div>
+      <p class="chat-annotation-bubble-question">{{ activeAnnotationTurn?.question }}</p>
+      <div v-if="activeAnnotationTurn?.status === 'generating'" class="chat-annotation-bubble-loading">
+        <span class="chat-annotation-bubble-spinner" aria-hidden="true"></span>
+        <span>{{ $t('chatUi.quickAskThinking') }}</span>
+      </div>
+      <p v-else-if="activeAnnotationTurn?.status === 'error'" class="chat-annotation-bubble-errorline">{{ activeAnnotationTurn.error || $t('chatUi.quickAskFailed') }}</p>
+      <div v-else class="chat-annotation-bubble-answer markdown-body" v-html="renderMarkdown(activeAnnotationTurn?.answer || '')"></div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -620,6 +926,126 @@ onBeforeUnmount(() => {
   max-width: 100%;
   height: auto;
   border-radius: 12px;
+}
+
+/* Quick-ask annotation: a light wash marks annotated text at rest; the hover
+   bubble carries the question + answer. */
+.message-output :deep(.chat-annotation-mark) {
+  background: color-mix(in srgb, var(--app-accent) 13%, transparent);
+  border-bottom: 1px dashed color-mix(in srgb, var(--app-accent) 45%, transparent);
+  border-radius: 3px;
+  padding: 0 1px;
+  margin: 0 -1px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.message-output :deep(.chat-annotation-mark:hover) {
+  background: color-mix(in srgb, var(--app-accent) 22%, transparent);
+}
+
+.chat-annotation-bubble {
+  position: fixed;
+  z-index: 6000;
+  max-width: min(340px, calc(100vw - 16px));
+  padding: 12px 14px;
+  border: 1px solid var(--app-input-border, var(--app-border-strong));
+  border-radius: 14px;
+  /* Same frosted-glass recipe as the composer and the quick-ask popover. */
+  background: color-mix(in srgb, var(--app-panel) 84%, transparent);
+  backdrop-filter: blur(18px) saturate(150%);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chat-annotation-bubble:hover {
+  border-color: color-mix(in srgb, var(--app-accent) 42%, var(--app-border));
+  box-shadow: 0 0 0 2px var(--app-accent-soft), 0 16px 36px rgba(0, 0, 0, 0.18);
+}
+
+.chat-annotation-bubble-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.chat-annotation-bubble-badge {
+  font-size: 0.68em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
+}
+
+.chat-annotation-bubble-hint {
+  flex: 1;
+  font-size: 0.68em;
+  color: var(--app-text-faint);
+}
+
+.chat-annotation-bubble-remove {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font-size: 0.72em;
+  line-height: 1;
+  padding: 0;
+}
+
+.chat-annotation-bubble-remove:hover {
+  background: var(--app-panel-muted);
+  color: var(--app-danger);
+}
+
+.chat-annotation-bubble-question {
+  margin: 0 0 8px;
+  font-size: 0.8em;
+  font-weight: 700;
+  color: var(--app-text-strong);
+  line-height: 1.5;
+}
+
+.chat-annotation-bubble-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--app-text-muted);
+  font-size: 0.78em;
+}
+
+.chat-annotation-bubble-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--app-border-strong);
+  border-top-color: var(--app-accent);
+  animation: chat-annotation-spin 1s linear infinite;
+}
+
+@keyframes chat-annotation-spin {
+  from { transform: rotate(0); }
+  to { transform: rotate(360deg); }
+}
+
+.chat-annotation-bubble-errorline {
+  margin: 0;
+  font-size: 0.78em;
+  color: var(--app-danger);
+}
+
+.chat-annotation-bubble-answer {
+  font-size: 0.8em;
+  line-height: 1.6;
+  color: var(--app-text);
+  max-height: 240px;
+  overflow-y: auto;
 }
 
 @media (max-width: 860px) {

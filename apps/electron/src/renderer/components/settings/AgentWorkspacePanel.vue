@@ -8,31 +8,15 @@ interface ToolCatalogEntry {
   description: string
 }
 
-type WorkspaceTab = 'agents' | 'groups' | 'bindings' | 'memory'
+type WorkspaceTab = 'agents' | 'groups' | 'bindings'
 
 const { t } = useI18n()
-
-const memoryScopeOptions: Array<{ value: AgentMemoryScope; labelKey: string }> = [
-  { value: 'user', labelKey: 'settings.agentWorkspace.scopeUser' },
-  { value: 'agent', labelKey: 'settings.agentWorkspace.scopeAgent' },
-  { value: 'project', labelKey: 'settings.agentWorkspace.scopeProject' },
-  { value: 'group', labelKey: 'settings.agentWorkspace.scopeGroup' },
-  { value: 'channel', labelKey: 'settings.agentWorkspace.scopeChannel' }
-]
-
-const memoryTypeOptions: Array<{ value: MemoryType; labelKey: string }> = [
-  { value: 'knowledge', labelKey: 'settings.agentWorkspace.memoryTypeKnowledge' },
-  { value: 'user_trait', labelKey: 'settings.agentWorkspace.memoryTypeUserTrait' },
-  { value: 'agent_skill', labelKey: 'settings.agentWorkspace.memoryTypeAgentSkill' },
-  { value: 'step', labelKey: 'settings.agentWorkspace.memoryTypeStep' }
-]
 
 const activeTab = ref<WorkspaceTab>('agents')
 const agents = ref<AgentDefinition[]>([])
 const groups = ref<AgentGroupDefinition[]>([])
 const bindings = ref<ChannelBinding[]>([])
 const connectors = ref<ConnectorDefinition[]>([])
-const memoryEntries = ref<MemoryEntry[]>([])
 const providersConfig = ref<AIProvidersConfig>({
   providers: [],
   activeProviderId: '',
@@ -40,20 +24,10 @@ const providersConfig = ref<AIProvidersConfig>({
 })
 const skills = ref<SkillInfo[]>([])
 const agentTools = ref<ToolCatalogEntry[]>([])
-const memoryQuery = ref('')
-const memoryScopeType = ref<AgentMemoryScope>('user')
-const memoryScopeId = ref('')
-const showMemoryFilters = ref(false)
-const addingMemory = ref(false)
-const savingMemory = ref(false)
-const memoryCompactionStatus = ref<MemoryCompactionStatus | null>(null)
-const memoryCompactionStarting = ref(false)
-const memoryCompacting = computed(() => memoryCompactionStarting.value || memoryCompactionStatus.value?.status === 'running')
 const statusMessage = ref('')
 let providerChangeCleanup: (() => void) | null = null
 let skillsChangeCleanup: (() => void) | null = null
 let workspaceChangeCleanup: (() => void) | null = null
-let memoryCompactionCleanup: (() => void) | null = null
 
 const draftAgent = reactive({
   id: '',
@@ -116,17 +90,6 @@ const bindingTest = reactive({
   result: ''
 })
 
-const draftMemory = reactive({
-  title: '',
-  summary: '',
-  details: '',
-  tagsText: '',
-  scopeType: 'user' as AgentMemoryScope,
-  scopeId: 'local-user',
-  memoryType: 'knowledge' as MemoryType,
-  pinned: true
-})
-
 const selectedConnector = computed(() => {
   return connectors.value.find(connector => connector.id === draftBinding.connectorType) || null
 })
@@ -144,158 +107,6 @@ const bindingOpenClawUrl = computed(() => {
 function setStatus (message: string) {
   statusMessage.value = message
 }
-
-function memoryScopeLabel (value: AgentMemoryScope): string {
-  const option = memoryScopeOptions.find(item => item.value === value)
-  return option ? t(option.labelKey) : value
-}
-
-function memoryTypeLabel (value: MemoryType): string {
-  const option = memoryTypeOptions.find(item => item.value === value)
-  return option ? t(option.labelKey) : value
-}
-
-function formatMemoryCompactionResult (result: MemoryCompactionResult): string {
-  return t('settings.agentWorkspace.memoryCompactionCompleted', {
-    scanned: result.scanned,
-    removed: result.removedUseless,
-    merged: result.merged,
-    updated: result.updated,
-    retained: result.retained
-  })
-}
-
-const MEMORY_COMPACTION_TEXT_KEYS: Record<string, string> = {
-  '空闲': 'mainDialog.memoryCompactionIdle',
-  Idle: 'mainDialog.memoryCompactionIdle',
-  '准备整理': 'mainDialog.memoryCompactionPreparing',
-  'Preparing compaction': 'mainDialog.memoryCompactionPreparing',
-  'AI 分析记忆': 'mainDialog.memoryCompactionAnalyzing',
-  'AI analyzing memory': 'mainDialog.memoryCompactionAnalyzing',
-  '扫描记忆': 'mainDialog.memoryCompactionScanning',
-  'Scanning memory': 'mainDialog.memoryCompactionScanning',
-  '正在读取当前所有记忆': 'mainDialog.memoryCompactionReadingAll',
-  'Reading all current memories': 'mainDialog.memoryCompactionReadingAll',
-  '无需整理': 'mainDialog.memoryCompactionNoop',
-  'No compaction needed': 'mainDialog.memoryCompactionNoop',
-  '当前没有可整理的记忆': 'mainDialog.memoryCompactionNoEntries',
-  'There are no memories to compact': 'mainDialog.memoryCompactionNoEntries',
-  '应用整理结果': 'mainDialog.memoryCompactionApplying',
-  'Applying compaction result': 'mainDialog.memoryCompactionApplying',
-  '正在删除、合并和更新记忆': 'mainDialog.memoryCompactionApplyingDetail',
-  'Deleting, merging, and updating memories': 'mainDialog.memoryCompactionApplyingDetail',
-  '整理完成': 'mainDialog.memoryCompactionDone',
-  'Compaction complete': 'mainDialog.memoryCompactionDone',
-  '整理失败': 'mainDialog.memoryCompactionFailedStage',
-  'Compaction failed': 'mainDialog.memoryCompactionFailedStage'
-}
-
-function translateMemoryCompactionText (text?: string): string {
-  if (!text) return ''
-
-  const directKey = MEMORY_COMPACTION_TEXT_KEYS[text]
-  if (directKey) return t(directKey)
-
-  const batchCountMatch = text.match(/^共 (\d+) 批记忆$/)
-  if (batchCountMatch) return t('mainDialog.memoryCompactionBatchCount', { count: batchCountMatch[1] })
-
-  const englishBatchCountMatch = text.match(/^(\d+) memory batches$/)
-  if (englishBatchCountMatch) return t('mainDialog.memoryCompactionBatchCount', { count: englishBatchCountMatch[1] })
-
-  const analyzingBatchMatch = text.match(/^正在整理第 (\d+)\/(\d+) 批$/)
-  if (analyzingBatchMatch) return t('mainDialog.memoryCompactionAnalyzingBatch', { current: analyzingBatchMatch[1], total: analyzingBatchMatch[2] })
-
-  const englishAnalyzingBatchMatch = text.match(/^Compacting batch (\d+)\/(\d+)$/)
-  if (englishAnalyzingBatchMatch) return t('mainDialog.memoryCompactionAnalyzingBatch', { current: englishAnalyzingBatchMatch[1], total: englishAnalyzingBatchMatch[2] })
-
-  const batchDoneMatch = text.match(/^已完成 (\d+)\/(\d+) 批$/)
-  if (batchDoneMatch) return t('mainDialog.memoryCompactionBatchDone', { current: batchDoneMatch[1], total: batchDoneMatch[2] })
-
-  const englishBatchDoneMatch = text.match(/^Completed (\d+)\/(\d+) batches$/)
-  if (englishBatchDoneMatch) return t('mainDialog.memoryCompactionBatchDone', { current: englishBatchDoneMatch[1], total: englishBatchDoneMatch[2] })
-
-  const scannedMatch = text.match(/^已扫描 (\d+) 条记忆$/)
-  if (scannedMatch) return t('mainDialog.memoryCompactionScannedCount', { count: scannedMatch[1] })
-
-  const englishScannedMatch = text.match(/^Scanned (\d+) memories$/)
-  if (englishScannedMatch) return t('mainDialog.memoryCompactionScannedCount', { count: englishScannedMatch[1] })
-
-  const doneDetailMatch = text.match(/^扫描 (\d+) 条，删除 (\d+) 条，合并 (\d+) 条，更新 (\d+) 条$/)
-  if (doneDetailMatch) {
-    return t('mainDialog.memoryCompactionDoneDetail', {
-      scanned: doneDetailMatch[1],
-      removed: doneDetailMatch[2],
-      merged: doneDetailMatch[3],
-      updated: doneDetailMatch[4]
-    })
-  }
-
-  const englishDoneDetailMatch = text.match(/^Scanned (\d+), deleted (\d+), merged (\d+), updated (\d+)$/)
-  if (englishDoneDetailMatch) {
-    return t('mainDialog.memoryCompactionDoneDetail', {
-      scanned: englishDoneDetailMatch[1],
-      removed: englishDoneDetailMatch[2],
-      merged: englishDoneDetailMatch[3],
-      updated: englishDoneDetailMatch[4]
-    })
-  }
-
-  return text
-}
-
-const hasMemoryScopeFilter = computed(() => memoryScopeId.value.trim().length > 0)
-
-const memoryScopeFilterText = computed(() => {
-  if (!hasMemoryScopeFilter.value) return t('settings.agentWorkspace.allScopes')
-  return `${memoryScopeLabel(memoryScopeType.value)} / ${memoryScopeId.value.trim()}`
-})
-
-function formatMemoryCompactionStatus (status: MemoryCompactionStatus): string {
-  if (status.status === 'running') {
-    const batchText = status.totalChunks > 0
-      ? t('settings.agentWorkspace.memoryBatchProgressWrapped', { completed: status.completedChunks, total: status.totalChunks })
-      : ''
-    const stage = translateMemoryCompactionText(status.stage)
-    const translatedDetail = translateMemoryCompactionText(status.detail)
-    const detail = translatedDetail ? t('settings.agentWorkspace.colonDetail', { detail: translatedDetail }) : ''
-    return t('settings.agentWorkspace.memoryCompactionRunning', { stage, batch: batchText, detail })
-  }
-
-  if (status.status === 'completed' && status.result) {
-    return formatMemoryCompactionResult(status.result)
-  }
-
-  if (status.status === 'failed') {
-    return t('settings.agentWorkspace.memoryCompactionFailed', { message: status.error || translateMemoryCompactionText(status.detail) || t('common.unknown') })
-  }
-
-  return ''
-}
-
-function applyMemoryCompactionStatus (status: MemoryCompactionStatus) {
-  memoryCompactionStatus.value = status
-  memoryCompactionStarting.value = false
-  const message = formatMemoryCompactionStatus(status)
-  if (message) {
-    setStatus(message)
-  }
-  if (status.status === 'completed') {
-    void loadMemory()
-  }
-}
-
-const memoryCompactionProgressText = computed(() => {
-  const status = memoryCompactionStatus.value
-  if (!status || status.status !== 'running') return ''
-  const batchText = status.totalChunks > 0
-    ? t('settings.agentWorkspace.memoryBatchProgress', { completed: status.completedChunks, total: status.totalChunks })
-    : t('settings.agentWorkspace.preparing')
-  const stage = translateMemoryCompactionText(status.stage)
-  const detail = translateMemoryCompactionText(status.detail)
-  return detail
-    ? `${batchText} · ${stage} · ${detail}`
-    : `${batchText} · ${stage}`
-})
 
 function toggleStringValue<T extends string> (collection: T[], value: T): T[] {
   return collection.includes(value)
@@ -550,100 +361,6 @@ async function loadToolCatalog () {
   pruneAgentSelections()
 }
 
-async function loadMemory () {
-  if (!window.electronAPI?.listMemory) return
-  memoryEntries.value = await window.electronAPI.listMemory({
-    query: memoryQuery.value || undefined,
-    scopeType: memoryScopeId.value ? memoryScopeType.value : undefined,
-    scopeId: memoryScopeId.value || undefined,
-    limit: 50
-  })
-}
-
-function clearMemoryScopeFilter () {
-  memoryScopeId.value = ''
-  void loadMemory()
-}
-
-function resetMemoryDraft () {
-  draftMemory.title = ''
-  draftMemory.summary = ''
-  draftMemory.details = ''
-  draftMemory.tagsText = ''
-  draftMemory.scopeType = memoryScopeType.value
-  draftMemory.scopeId = memoryScopeId.value.trim() || (memoryScopeType.value === 'user' ? 'local-user' : '')
-  draftMemory.memoryType = 'knowledge'
-  draftMemory.pinned = true
-}
-
-function toggleMemoryCreator () {
-  addingMemory.value = !addingMemory.value
-  if (addingMemory.value) {
-    resetMemoryDraft()
-  }
-}
-
-function parseMemoryTags (value: string): string[] {
-  const seen = new Set<string>()
-  const tags: string[] = []
-  for (const rawTag of value.split(/[,，\n]/)) {
-    const tag = rawTag.trim()
-    if (!tag || seen.has(tag)) continue
-    seen.add(tag)
-    tags.push(tag)
-  }
-  return tags
-}
-
-async function saveManualMemory () {
-  if (!window.electronAPI?.saveMemory || savingMemory.value) return
-
-  const title = draftMemory.title.trim()
-  const summary = draftMemory.summary.trim()
-  const scopeId = draftMemory.scopeId.trim()
-  if (!title) {
-    setStatus(t('settings.agentWorkspace.requiredMemoryTitle'))
-    return
-  }
-  if (!summary) {
-    setStatus(t('settings.agentWorkspace.requiredMemorySummary'))
-    return
-  }
-  if (!scopeId) {
-    setStatus(t('settings.agentWorkspace.requiredScopeId'))
-    return
-  }
-
-  savingMemory.value = true
-  try {
-    await window.electronAPI.saveMemory({
-      title,
-      summary,
-      details: draftMemory.details.trim() || undefined,
-      tags: parseMemoryTags(draftMemory.tagsText),
-      scopeType: draftMemory.scopeType,
-      scopeId,
-      memoryType: draftMemory.memoryType,
-      pinned: draftMemory.pinned,
-      importance: draftMemory.pinned ? 0.85 : 0.7,
-      confidence: 1
-    })
-    addingMemory.value = false
-    await loadMemory()
-    setStatus(t('settings.agentWorkspace.memoryAdded'))
-    resetMemoryDraft()
-  } catch (error) {
-    setStatus(t('settings.agentWorkspace.memoryAddFailed', { message: (error as Error).message }))
-  } finally {
-    savingMemory.value = false
-  }
-}
-
-async function syncMemoryCompactionStatus () {
-  if (!window.electronAPI?.getMemoryCompactionStatus) return
-  applyMemoryCompactionStatus(await window.electronAPI.getMemoryCompactionStatus())
-}
-
 async function loadAll () {
   await Promise.all([
     loadProvidersCatalog(),
@@ -651,8 +368,7 @@ async function loadAll () {
     loadToolCatalog(),
     loadAgents(),
     loadGroups(),
-    loadBindings(),
-    loadMemory()
+    loadBindings()
   ])
 }
 
@@ -804,39 +520,9 @@ async function testBindingReply () {
   }
 }
 
-async function toggleMemoryPinned (entry: MemoryEntry) {
-  if (!window.electronAPI?.pinMemory) return
-  await window.electronAPI.pinMemory(entry.id, !entry.pinned)
-  await loadMemory()
-}
-
-async function removeMemory (entry: MemoryEntry) {
-  if (!window.electronAPI?.deleteMemory) return
-  await window.electronAPI.deleteMemory(entry.id)
-  await loadMemory()
-}
-
-async function compactMemory () {
-  if (!window.electronAPI?.compactMemory || memoryCompacting.value) return
-  if (!window.confirm(t('settings.agentWorkspace.memoryCompactConfirm'))) return
-
-  memoryCompactionStarting.value = true
-  setStatus(t('settings.agentWorkspace.memoryCompactionStarting'))
-  try {
-    const result = await window.electronAPI.compactMemory()
-    await loadMemory()
-    setStatus(formatMemoryCompactionResult(result))
-  } catch (err) {
-    setStatus(t('settings.agentWorkspace.memoryCompactionFailed', { message: (err as Error).message }))
-  } finally {
-    memoryCompactionStarting.value = false
-    void syncMemoryCompactionStatus()
-  }
-}
 
 onMounted(() => {
   void loadAll()
-  void syncMemoryCompactionStatus()
 
   if (window.electronAPI?.onProvidersChanged) {
     providerChangeCleanup = window.electronAPI.onProvidersChanged(() => {
@@ -856,18 +542,12 @@ onMounted(() => {
     })
   }
 
-  if (window.electronAPI?.onMemoryCompactionStatusChanged) {
-    memoryCompactionCleanup = window.electronAPI.onMemoryCompactionStatusChanged((status) => {
-      applyMemoryCompactionStatus(status)
-    })
-  }
 })
 
 onUnmounted(() => {
   providerChangeCleanup?.()
   skillsChangeCleanup?.()
   workspaceChangeCleanup?.()
-  memoryCompactionCleanup?.()
 })
 
 watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
@@ -875,11 +555,6 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
   syncDraftAgentModel(true)
 })
 
-watch(activeTab, (nextTab, previousTab) => {
-  if (nextTab !== 'memory' || nextTab === previousTab) return
-  void loadMemory()
-  void syncMemoryCompactionStatus()
-})
 </script>
 
 <template>
@@ -896,7 +571,6 @@ watch(activeTab, (nextTab, previousTab) => {
       <button :class="['tab-btn', { active: activeTab === 'agents' }]" @click="activeTab = 'agents'">Agent</button>
       <button :class="['tab-btn', { active: activeTab === 'groups' }]" @click="activeTab = 'groups'">{{ $t('settings.agentWorkspace.tabGroups') }}</button>
       <button :class="['tab-btn', { active: activeTab === 'bindings' }]" @click="activeTab = 'bindings'">{{ $t('settings.agentWorkspace.tabBindings') }}</button>
-      <button :class="['tab-btn', { active: activeTab === 'memory' }]" @click="activeTab = 'memory'">{{ $t('settings.agentWorkspace.tabMemory') }}</button>
     </div>
 
     <div v-if="activeTab === 'agents'" class="workspace-grid">
@@ -1256,108 +930,6 @@ watch(activeTab, (nextTab, previousTab) => {
       </section>
     </div>
 
-    <div v-else class="memory-panel">
-      <div class="memory-toolbar">
-        <input
-          v-model="memoryQuery"
-          class="input memory-search"
-          type="search"
-          :placeholder="$t('settings.agentWorkspace.memorySearchPlaceholder')"
-          @keyup.enter="loadMemory"
-        >
-        <span :class="['memory-filter-pill', { active: hasMemoryScopeFilter }]">{{ memoryScopeFilterText }}</span>
-        <button class="primary-btn" type="button" @click="loadMemory">{{ $t('settings.agentWorkspace.query') }}</button>
-        <button :class="['ghost-btn', { active: showMemoryFilters }]" type="button" @click="showMemoryFilters = !showMemoryFilters">{{ $t('settings.agentWorkspace.filter') }}</button>
-        <button class="ghost-btn" type="button" @click="toggleMemoryCreator">{{ addingMemory ? $t('settings.agentWorkspace.collapseAdd') : $t('settings.agentWorkspace.manualAdd') }}</button>
-        <button class="ghost-btn" :disabled="memoryCompacting" @click="compactMemory">
-          {{ memoryCompacting ? $t('settings.agentWorkspace.compacting') : $t('settings.agentWorkspace.aiCompact') }}
-        </button>
-      </div>
-
-      <div v-if="showMemoryFilters" class="memory-filter-row">
-        <label>
-          <span>{{ $t('settings.agentWorkspace.scope') }}</span>
-          <select v-model="memoryScopeType" class="input memory-scope-select">
-            <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ $t(option.labelKey) }}</option>
-          </select>
-        </label>
-        <label>
-          <span>{{ $t('settings.agentWorkspace.scopeId') }}</span>
-          <input v-model="memoryScopeId" class="input memory-scope-id" placeholder="local-user / agent_xxx / project_xxx" @keyup.enter="loadMemory">
-        </label>
-        <button class="ghost-btn" type="button" :disabled="!hasMemoryScopeFilter" @click="clearMemoryScopeFilter">{{ $t('settings.agentWorkspace.all') }}</button>
-      </div>
-
-      <form v-if="addingMemory" class="memory-create-card" @submit.prevent="saveManualMemory">
-        <div class="memory-create-grid">
-          <label>
-            <span>{{ $t('settings.agentWorkspace.memoryTitle') }}</span>
-            <input v-model="draftMemory.title" class="input" :placeholder="$t('settings.agentWorkspace.memoryTitlePlaceholder')">
-          </label>
-          <label>
-            <span>{{ $t('settings.agentWorkspace.type') }}</span>
-            <select v-model="draftMemory.memoryType" class="input">
-              <option v-for="option in memoryTypeOptions" :key="option.value" :value="option.value">{{ $t(option.labelKey) }}</option>
-            </select>
-          </label>
-          <label>
-            <span>{{ $t('settings.agentWorkspace.scope') }}</span>
-            <select v-model="draftMemory.scopeType" class="input">
-              <option v-for="option in memoryScopeOptions" :key="option.value" :value="option.value">{{ $t(option.labelKey) }}</option>
-            </select>
-          </label>
-          <label>
-            <span>{{ $t('settings.agentWorkspace.scopeId') }}</span>
-            <input v-model="draftMemory.scopeId" class="input" placeholder="local-user / agent_xxx / project_xxx">
-          </label>
-          <label class="memory-create-summary">
-            <span>{{ $t('settings.agentWorkspace.summary') }}</span>
-            <textarea v-model="draftMemory.summary" class="textarea" rows="2" :placeholder="$t('settings.agentWorkspace.memorySummaryPlaceholder')" />
-          </label>
-          <label class="memory-create-summary">
-            <span>{{ $t('settings.agentWorkspace.details') }}</span>
-            <textarea v-model="draftMemory.details" class="textarea" rows="3" :placeholder="$t('settings.agentWorkspace.memoryDetailsPlaceholder')" />
-          </label>
-          <label>
-            <span>{{ $t('settings.agentWorkspace.tags') }}</span>
-            <input v-model="draftMemory.tagsText" class="input" :placeholder="$t('settings.agentWorkspace.tagsPlaceholder')">
-          </label>
-          <label class="check-row memory-pin-row">
-            <input v-model="draftMemory.pinned" type="checkbox">
-            <span>{{ $t('settings.agentWorkspace.pin') }}</span>
-          </label>
-        </div>
-        <div class="action-row memory-create-actions">
-          <button class="primary-btn" type="submit" :disabled="savingMemory">{{ savingMemory ? $t('common.saving') : $t('settings.agentWorkspace.saveMemory') }}</button>
-          <button class="ghost-btn" type="button" @click="addingMemory = false">{{ $t('common.cancel') }}</button>
-        </div>
-      </form>
-
-      <div v-if="memoryCompactionProgressText" class="memory-progress" role="status">
-        <span>{{ memoryCompactionProgressText }}</span>
-      </div>
-
-      <div class="memory-list">
-        <div v-if="memoryEntries.length === 0" class="memory-empty">
-          {{ $t('settings.agentWorkspace.noMemoryMatches') }}
-        </div>
-        <article v-for="entry in memoryEntries" :key="entry.id" class="memory-card">
-          <div class="memory-card-head">
-            <div>
-              <strong>{{ entry.title }}</strong>
-              <span>{{ memoryTypeLabel(entry.memoryType) }} · {{ memoryScopeLabel(entry.scopeType) }} / {{ entry.scopeId }}</span>
-            </div>
-            <div class="memory-actions">
-              <button class="ghost-btn small" @click="toggleMemoryPinned(entry)">{{ entry.pinned ? $t('settings.agentWorkspace.unpin') : $t('settings.agentWorkspace.pin') }}</button>
-              <button class="ghost-btn small danger" @click="removeMemory(entry)">{{ $t('common.delete') }}</button>
-            </div>
-          </div>
-          <p>{{ entry.summary }}</p>
-          <p v-if="entry.details" class="memory-details">{{ entry.details }}</p>
-          <small>{{ entry.tags.join(', ') || $t('settings.agentWorkspace.noTags') }}</small>
-        </article>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -1452,8 +1024,7 @@ watch(activeTab, (nextTab, previousTab) => {
 }
 
 .list-panel,
-.editor-panel,
-.memory-panel {
+.editor-panel {
   min-height: 0;
   background: var(--app-panel);
   border: 1px solid var(--app-border);
@@ -1469,8 +1040,7 @@ watch(activeTab, (nextTab, previousTab) => {
 }
 
 .list-toolbar,
-.action-row,
-.memory-toolbar {
+.action-row {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
@@ -1523,8 +1093,7 @@ watch(activeTab, (nextTab, previousTab) => {
   font-size: 0.82rem;
 }
 
-.editor-panel,
-.memory-panel {
+.editor-panel {
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1668,182 +1237,16 @@ label {
   white-space: pre-wrap;
 }
 
-.memory-toolbar {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto auto auto auto auto;
-  align-items: center;
-  gap: 8px;
-}
 
-.memory-toolbar .input,
-.memory-toolbar .ghost-btn,
-.memory-toolbar .primary-btn {
-  min-height: 34px;
-  padding-top: 7px;
-  padding-bottom: 7px;
-}
 
-.memory-filter-pill {
-  display: inline-flex;
-  align-items: center;
-  max-width: 220px;
-  min-height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--app-border);
-  border-radius: 999px;
-  background: var(--app-main-surface);
-  color: var(--app-text-soft);
-  font-size: 0.8rem;
-  line-height: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.memory-filter-pill.active {
-  border-color: color-mix(in srgb, var(--app-accent) 38%, var(--app-border));
-  background: color-mix(in srgb, var(--app-accent-soft) 48%, var(--app-main-surface));
-  color: var(--app-accent);
-}
-
-.memory-filter-row {
-  display: grid;
-  grid-template-columns: minmax(118px, 160px) minmax(220px, 320px) auto;
-  align-items: end;
-  gap: 8px;
-  padding: 8px;
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
-  background: var(--app-main-surface);
-}
-
-.memory-filter-row label {
-  gap: 4px;
-}
-
-.memory-filter-row label span {
-  font-size: 0.78rem;
-}
-
-.memory-filter-row .input,
-.memory-filter-row .ghost-btn {
-  min-height: 34px;
-  padding-top: 7px;
-  padding-bottom: 7px;
-}
-
-.memory-search,
-.memory-scope-id,
-.memory-scope-select {
-  min-width: 0;
-}
-
-.memory-create-card {
-  padding: 12px;
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
-  background: var(--app-main-surface);
-}
-
-.memory-create-grid {
-  display: grid;
-  grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 0.65fr) minmax(120px, 0.65fr) minmax(150px, 1fr);
-  gap: 10px;
-}
-
-.memory-create-summary {
-  grid-column: 1 / -1;
-}
-
-.memory-pin-row {
-  align-self: end;
-  min-height: 38px;
-}
-
-.memory-create-actions {
-  justify-content: flex-end;
-  margin-top: 10px;
-}
-
-.memory-progress {
-  display: flex;
-  align-items: center;
-  min-height: 34px;
-  padding: 8px 12px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--app-accent) 26%, var(--app-border));
-  background: color-mix(in srgb, var(--app-accent-soft) 38%, transparent);
-  color: var(--app-text-soft);
-  font-size: 0.82rem;
-}
-
-.memory-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.memory-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 96px;
-  border: 1px dashed var(--app-border);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--app-main-surface) 68%, transparent);
-  color: var(--app-text-soft);
-  font-size: 0.86rem;
-}
-
-.memory-card {
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
-  padding: 12px;
-  background: var(--app-main-surface);
-}
-
-.memory-card-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.memory-card-head span,
-.memory-card small {
-  display: block;
-  margin-top: 4px;
-  color: var(--app-text-soft);
-}
-
-.memory-card p {
-  margin: 10px 0 0;
-  color: var(--app-text);
-}
-
-.memory-card .memory-details {
-  margin-top: 6px;
-  color: var(--app-text-soft);
-  font-size: 0.82rem;
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-
-.memory-actions {
-  display: flex;
-  gap: 8px;
-}
 
 @media (max-width: 1100px) {
-  .binding-endpoint-card,
-  .memory-filter-row,
-  .memory-create-grid {
+  .binding-endpoint-card {
     grid-template-columns: 1fr 1fr;
   }
 
   .binding-endpoint-card code,
-  .binding-test-row,
-  .memory-filter-row label:nth-child(2),
-  .memory-create-summary {
+  .binding-test-row {
     grid-column: 1 / -1;
   }
 

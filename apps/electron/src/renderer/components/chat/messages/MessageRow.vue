@@ -49,6 +49,8 @@ const emit = defineEmits<{
   (e: 'forkMessage', messageId: string): void
   (e: 'submitEdit', payload: { messageId: string; text: string; mode: 'fork' | 'inplace' }): void
   (e: 'cancelEdit'): void
+  (e: 'removeAnnotation', annotationId: string): void
+  (e: 'openAnnotationThread', payload: { annotationId: string; anchor: { left: number; top: number; right: number; bottom: number } }): void
 }>()
 
 function getBlocks (): ChatMessageBlock[] {
@@ -309,8 +311,11 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
               :block-index="segment.blockIndex"
               :is-streaming-block="isStreamingAssistantMessage && segment.blockIndex === lastContentBlockIndex"
               :message-text="messageText"
+              :annotations="props.msg.annotations"
               @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
               @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
+              @remove-annotation="(annotationId) => emit('removeAnnotation', annotationId)"
+              @open-annotation-thread="(payload) => emit('openAnnotationThread', payload)"
             />
           </template>
 
