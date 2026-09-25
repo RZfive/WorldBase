@@ -1510,6 +1510,17 @@ fn static_system_prompt_sections(
         software_engineering_prompt(&tools),
         execution_safety_prompt(&tools),
     ];
+    if tools.has("memory_search") {
+        if context.memory_scopes.is_empty() {
+            sections.push(
+                "## Long-term memory access\n- `memory_search` reads this application's local shared-memory database; it does not require an MCP memory server.\n- This run has no authorized memory scopes, so do not claim that a memory service is unconfigured and do not try another MCP server. Explain that memory scope access is disabled for this run instead.".into(),
+            );
+        } else {
+            sections.push(
+                "## Long-term memory access\n- `memory_search` reads this application's local shared-memory database; it does not require an MCP memory server.\n- For questions about what the user previously said, prefers, or asked you to remember, use any relevant recalled facts first; if the answer is not present, call `memory_search` before saying you do not remember.\n- If a keyword search returns no hits, retry with an empty query to browse the authorized memories. Treat returned entries as evidence and do not invent personal facts.".into(),
+            );
+        }
+    }
     for section in [
         file_editing_prompt(&tools),
         project_editing_prompt(&tools),
@@ -1559,7 +1570,7 @@ async fn resolve_memory_query_vector(
     }
     // 语义召回依赖已激活的共享 generation（由 Electron 或本进程的队列建
     // 立）。没有 active generation 时不存在一致向量空间，只做关键词召回。
-    let generation = hub.store.active_embedding_generation().ok().flatten()?;
+    let _generation = hub.store.active_embedding_generation().ok().flatten()?;
     let provider = hub.memory_queue.provider_for(&config);
     let vector = provider.embed_query(query).await.ok()?;
     Some(MemoryQueryVector { config, vector })
@@ -1649,6 +1660,15 @@ async fn memory_prompt_sections(
         if !lines.is_empty() {
             sections.push(format!("## {title}\n{}", lines.join("\n")));
         }
+    }
+    if sections.is_empty() {
+        // Nothing matched this message automatically. Point the model at the
+        // memory_search tool so questions like "what do you remember" trigger
+        // an active retrieval instead of a premature "I don't remember".
+        sections.push(
+            "## Memory\n(No stored memory matched this message automatically. When the user asks what you remember or past details would help answer, call the memory_search tool to actively search long-term memory before claiming you do not remember.)"
+                .to_string(),
+        );
     }
     sections
 }
@@ -2318,6 +2338,36 @@ mod tests {
                 "mobile prompt leaked unavailable desktop guidance: {desktop_only}"
             );
         }
+    }
+
+    #[test]
+    fn memory_prompt_explains_local_store_and_respects_scope_policy() {
+        let tools = vec![prompt_tool(
+            "memory_search",
+            "Search shared long-term memories.",
+        )];
+        let mut context = ChatRunContext::default();
+        context
+            .memory_scopes
+            .push(worldbase_protocol::types::MemoryScopeRef {
+                scope_type: "user".into(),
+                scope_id: "local-user".into(),
+            });
+        let prompt =
+            static_system_prompt_sections(std::path::Path::new("/workspace"), &context, &tools)
+                .join("\n\n");
+        assert!(prompt.contains("does not require an MCP memory server"));
+        assert!(prompt.contains("call `memory_search` before saying you do not remember"));
+        assert!(prompt.contains("empty query to browse"));
+
+        let no_scopes = static_system_prompt_sections(
+            std::path::Path::new("/workspace"),
+            &ChatRunContext::default(),
+            &tools,
+        )
+        .join("\n\n");
+        assert!(no_scopes.contains("memory scope access is disabled for this run"));
+        assert!(no_scopes.contains("do not claim that a memory service is unconfigured"));
     }
 
     #[test]
@@ -3732,6 +3782,16 @@ async fn run_chat_inner(
         context.target_project_id.clone(),
         context.allowed_mcp_server_ids.clone(),
     );
+    // The memory tools must see the same scope policy as auto-recall: keyword
+    // hits are scope-filtered and vector recall needs concrete scope keys.
+    services.memory_scopes = context
+        .memory_scopes
+        .iter()
+        .map(|scope| worldbase_protocol::types::MemorySearchScopeEntry {
+            scope_type: scope.scope_type.clone(),
+            scope_id: scope.scope_id.clone(),
+        })
+        .collect();
     services.abort = Some(abort.clone());
     services.group_collaboration = group_collaboration.clone();
     services.set_current_stream(&stream_id);
@@ -3805,7 +3865,14 @@ async fn run_chat_inner(
     tools_meta.retain(|tool| tool.name != FINISH_TASK_TOOL_NAME);
     tools_meta.push(finish_task_tool_definition());
     let memory_query_vector = resolve_memory_query_vector(&hub, &context).await;
-    let system = system_prompt(&hub, agent.as_ref(), &context, &tools_meta, memory_query_vector.as_ref()).await;
+    let system = system_prompt(
+        &hub,
+        agent.as_ref(),
+        &context,
+        &tools_meta,
+        memory_query_vector.as_ref(),
+    )
+    .await;
     let selected_model = model_override
         .as_deref()
         .unwrap_or_else(|| provider.model());

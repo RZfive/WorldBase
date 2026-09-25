@@ -320,7 +320,15 @@ impl Hub {
     }
 
     pub fn services(self: &Arc<Self>) -> ToolServices {
-        self.services_for_run(None, None, None)
+        let mut services = self.services_for_run(None, None, None);
+        // Direct `tool.call` requests are outside an agent-run context. Give
+        // them the same local-user memory scope as a normal default chat;
+        // scoped chat runs replace this with their resolved policy.
+        services.memory_scopes = vec![worldbase_protocol::types::MemorySearchScopeEntry {
+            scope_type: "user".into(),
+            scope_id: "local-user".into(),
+        }];
+        services
     }
 
     /// Build isolated tool services for a stream. The managed project catalog
@@ -359,6 +367,8 @@ impl Hub {
             ),
             visible_tool_catalog: None,
             store: self.store.clone(),
+            memory_queue: Some(self.memory_queue.clone()),
+            memory_scopes: Vec::new(),
             skills: self.skills.clone(),
             scheduler: self.scheduler.clone(),
             mcp: self.mcp.clone(),
