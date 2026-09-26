@@ -587,6 +587,18 @@ export class ImageLibraryStore {
       .map(name => this.resolveFilePath(name))
       .filter(fp => fs.existsSync(fp))
   }
+
+  /** Absolute paths of the given images (unknown ids / missing files skipped), for export. */
+  imagePathsByIds (ids: string[]): string[] {
+    const paths: string[] = []
+    for (const id of ids) {
+      const fileName = this.readRecord(id)?.fileName
+      if (!fileName) continue
+      const fp = this.resolveFilePath(fileName)
+      if (fs.existsSync(fp)) paths.push(fp)
+    }
+    return paths
+  }
 }
 
 function parseJsonStringArray (value: string | null | undefined): string[] | undefined {

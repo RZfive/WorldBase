@@ -14,6 +14,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'refresh'): void
   (e: 'delete', ids: string[]): void
+  (e: 'download', ids: string[]): void
   (e: 'regenerate', entry: ImageLibraryItem): void
   (e: 'load', entry: ImageLibraryItem): void
   (e: 'useAsInput', entry: ImageLibraryItem): void
@@ -550,6 +551,13 @@ function deleteImages (ids: string[]) {
   closeContextMenu()
 }
 
+/** Batch-download every selected image (mirrors the context-menu delete). */
+function downloadSelection () {
+  if (selectedIds.value.size === 0) return
+  emit('download', [...selectedIds.value])
+  closeContextMenu()
+}
+
 /* ---- Context menu ---- */
 
 function openImageMenu (entry: ImageLibraryItem, event: MouseEvent) {
@@ -767,6 +775,19 @@ onUnmounted(() => {
       </template>
     </nav>
 
+    <!-- Selection quick actions: the context-menu operations surfaced as toolbar buttons -->
+    <nav v-if="selectedCount > 0" class="lib-selection-bar">
+      <span class="lib-sel-label">{{ $t('studioUi.selectedCountLabel', { count: selectedCount }) }}</span>
+      <button
+        class="lib-btn"
+        type="button"
+        :title="$t('studioUi.batchDownloadHint')"
+        @click="downloadSelection"
+      >⤓ {{ $t('studioUi.downloadCount', { count: selectedCount }) }}</button>
+      <button class="lib-btn lib-btn-danger" type="button" @click="deleteImages(menuIds)">🗑 {{ $t('studioUi.deleteCount', { count: selectedCount }) }}</button>
+      <button class="lib-btn" type="button" @click="clearSelection">✕ {{ $t('studioUi.cancelSelection') }}</button>
+    </nav>
+
     <div
       ref="viewportRef"
       class="lib-grid-viewport"
@@ -919,6 +940,7 @@ onUnmounted(() => {
           </div>
           <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="emit('useAsInput', menuSingleEntry!); closeContextMenu()">⇲ {{ $t('studioUi.useAsInput') }}</button>
           <button v-if="menuSingleEntry" class="lib-menu-item" type="button" @click="emit('saveToFile', menuSingleEntry!); closeContextMenu()">⤓ {{ $t('studioUi.saveToFile') }}</button>
+          <button class="lib-menu-item" type="button" :title="$t('studioUi.batchDownloadHint')" @click="downloadSelection">⤓ {{ $t('studioUi.downloadCount', { count: selectedCount }) }}</button>
           <div class="lib-menu-divider"></div>
           <button class="lib-menu-item danger" type="button" @click="deleteImages(menuIds)">🗑 {{ selectedCount > 1 ? $t('studioUi.deleteCount', { count: selectedCount }) : $t('common.delete') }}</button>
         </template>
@@ -1165,6 +1187,22 @@ onUnmounted(() => {
 .lib-crumb-sep { color: var(--app-text-faint); }
 .lib-crumb-current { color: var(--app-text-strong); display: flex; align-items: center; gap: 6px; }
 .lib-crumb-count { font-size: 0.85em; color: var(--app-text-faint); }
+
+/* Selection quick-action bar (appears above the grid while images are selected) */
+.lib-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lib-sel-label {
+  font-size: 0.78em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
+  white-space: nowrap;
+}
 
 .lib-empty {
   grid-column: 1 / -1;
