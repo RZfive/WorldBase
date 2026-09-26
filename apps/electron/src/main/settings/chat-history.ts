@@ -89,6 +89,16 @@ export interface ChatMessage {
   annotations?: Array<{
     id: string
     text: string
+    locator?: {
+      version: 1
+      exact: string
+      prefix?: string
+      suffix?: string
+      blockIndex?: number
+      startOffset?: number
+      endOffset?: number
+      status?: 'resolved' | 'ambiguous' | 'orphaned'
+    }
     turns: Array<{ question: string; answer: string; mode: 'quick' | 'detailed'; status?: 'done' | 'error'; error?: string }>
     createdAt: number
   }>

@@ -17,7 +17,7 @@ import { createChatSidebarState } from './sidebar-state'
 import { createChatWorkspaceOptionsState } from './workspace-options-state'
 import { createChatWorkspaceState } from './workspace-state'
 import type { ChatPanelProps } from './types'
-import type { MessageAnnotationTurn } from '../types'
+import type { MessageAnnotationLocator, MessageAnnotationTurn } from '../types'
 
 interface UseChatPanelBindings {
   onContextConsumed: () => void
@@ -352,17 +352,18 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       Writes are immutable (new arrays) so annotation consumers re-render
       reliably. Pending ('generating') turns are created with persist=false so
       an app exit mid-flight never persists a stuck generating turn. */
-  function upsertAnnotationTurns (payload: { messageId: string | null; messageIndex: number; annotationId: string; text: string; turns: MessageAnnotationTurn[] }, persist = true): void {
+  function upsertAnnotationTurns (payload: { messageId: string | null; messageIndex: number; annotationId: string; text: string; locator?: MessageAnnotationLocator; turns: MessageAnnotationTurn[] }, persist = true): void {
     const message = findMessageForAnnotation(payload.messageId, payload.messageIndex)
     if (!message) return
     const annotations = message.annotations || []
     const nextAnnotations = annotations.some(item => item.id === payload.annotationId)
       ? annotations.map(item => item.id === payload.annotationId
-          ? { ...item, turns: payload.turns }
+          ? { ...item, text: item.text || payload.text, locator: item.locator || payload.locator, turns: payload.turns }
           : item)
       : [...annotations, {
           id: payload.annotationId,
           text: payload.text,
+          locator: payload.locator,
           turns: payload.turns,
           createdAt: Date.now()
         }]

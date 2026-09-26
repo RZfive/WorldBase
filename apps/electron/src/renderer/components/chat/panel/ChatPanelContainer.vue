@@ -31,7 +31,7 @@ import {
 import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
 import { getRecommendedProviderTemplate } from '../../../../shared/provider-templates.js'
 import type { ChatPanelEmit, ChatPanelProps } from './types'
-import type { AnnotationAnchor, QuickAskMode, QuickAskPopoverState } from '../types'
+import type { AnnotationAnchor, MessageAnnotationLocator, QuickAskMode, QuickAskPopoverState } from '../types'
 
 const props = defineProps<ChatPanelProps>()
 const emit = defineEmits<ChatPanelEmit>()
@@ -186,10 +186,11 @@ function handleAddSelectionToContext (text: string): void {
   addSelectionQuoteToInput(text)
 }
 
-function handleOpenQuickAsk (payload: { text: string; messageId: string | null; messageIndex: number; anchor: AnnotationAnchor }): void {
+function handleOpenQuickAsk (payload: { text: string; locator?: MessageAnnotationLocator; messageId: string | null; messageIndex: number; anchor: AnnotationAnchor }): void {
   quickAskState.value = {
     mode: 'ask',
     text: payload.text,
+    locator: payload.locator,
     messageId: payload.messageId,
     messageIndex: payload.messageIndex,
     anchor: payload.anchor,
@@ -211,6 +212,7 @@ function handleOpenAnnotationThread (payload: { messageId: string | null; messag
   quickAskState.value = {
     mode: 'thread',
     text: annotation.text,
+    locator: annotation.locator,
     messageId: payload.messageId,
     messageIndex: payload.messageIndex,
     anchor: payload.anchor,
@@ -248,6 +250,7 @@ async function handleQuickAskFlight (payload: { question: string; mode: QuickAsk
     messageIndex: state.messageIndex,
     annotationId,
     text: state.text,
+    locator: state.locator,
     turns: nextTurns
   }, false)
   quickAskState.value = { ...state, mode: 'thread', annotationId, turns: nextTurns }
@@ -287,6 +290,7 @@ async function handleQuickAskFlight (payload: { question: string; mode: QuickAsk
     messageIndex: state.messageIndex,
     annotationId,
     text: state.text,
+    locator: state.locator,
     turns: finalTurns
   }, true)
   // The popover may have been dismissed or re-anchored meanwhile.

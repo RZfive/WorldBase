@@ -12,7 +12,7 @@ import {
   messageContentToMarkdown,
   renderElementToPngDataUrl
 } from '../export-utils'
-import type { AnnotationAnchor, ChatMessageBlock, MessageAnnotation } from '../types'
+import type { AnnotationAnchor, ChatMessageBlock, MessageAnnotation, MessageAnnotationLocator } from '../types'
 import MermaidDiagram from '../media/MermaidDiagram.vue'
 import { vStableImages, vStableImage } from '../media/image-stability'
 
@@ -83,7 +83,7 @@ function getTextSegments (text?: string) {
   return splitMarkdownWithMermaid(text || '')
 }
 
-// design v1.7 motion: the streaming caret lives at the TEXT tail — a 2.5px
+// design v1.7 motion: the streaming caret lives at the TEXT tail �?a 2.5px
 // signature-gradient lightbar with soft glow, injected inline into the last
 // rendered block so it hugs the newest character.
 const STREAM_CARET_HTML = '<span class="stream-caret" aria-hidden="true"></span>'
@@ -91,7 +91,7 @@ const STREAM_CARET_HTML = '<span class="stream-caret" aria-hidden="true"></span>
 function withStreamCaret (html: string): string {
   const trimmed = html.trimEnd()
   if (!trimmed) return STREAM_CARET_HTML
-  // Raw code/preview surfaces would read the caret as markup — skip them.
+  // Raw code/preview surfaces would read the caret as markup �?skip them.
   if (/<\/(pre|code|table)>$/i.test(trimmed)) return trimmed
   const injected = trimmed.replace(/(<\/(p|li|h[1-6]|blockquote)>\s*)$/, `${STREAM_CARET_HTML}$1`)
   return injected === trimmed ? `${trimmed}${STREAM_CARET_HTML}` : injected
@@ -291,6 +291,8 @@ interface AnnotationCharSource {
 
 interface AnnotationRootIndex {
   root: Element
+  /** Normalized character offset of this block within the content root. */
+  rootOffset: number
   /** Whitespace-normalized text of the whole block root. */
   chars: string[]
   /** chars[i] originates from mapping[i]. */
@@ -319,7 +321,16 @@ function buildAnnotationRootIndexes (root: HTMLElement): AnnotationRootIndex[] {
     if (blockRoot) {
       let index = byRoot.get(blockRoot)
       if (!index) {
-        index = { root: blockRoot, chars: [], mapping: [] }
+        let rootOffset = 0
+        try {
+          const before = document.createRange()
+          before.selectNodeContents(root)
+          before.setEnd(blockRoot, 0)
+          rootOffset = normalizeAnnotationText(before.toString()).length
+        } catch {
+          rootOffset = 0
+        }
+        index = { root: blockRoot, rootOffset, chars: [], mapping: [] }
         byRoot.set(blockRoot, index)
         indexes.push(index)
       }
@@ -371,20 +382,86 @@ function findAnnotationPrefix (needle: string, index: AnnotationRootIndex): { st
   return null
 }
 
-function wrapTextMatchInRoot (root: HTMLElement, annotation: MessageAnnotation): boolean {
-  const needle = normalizeAnnotationText(annotation.text)
-  if (!needle) return false
-  const indexes = buildAnnotationRootIndexes(root)
+interface AnnotationMatch {
+  index: AnnotationRootIndex
+  start: number
+  score: number
+}
 
-  // 1. Prefer a full match inside one block root (handles selections that
-  //    start mid-text-node and cross inline elements like code/bold/links).
+function commonPrefixLength (left: string, right: string): number {
+  const length = Math.min(left.length, right.length)
+  let index = 0
+  while (index < length && left[index] === right[index]) index++
+  return index
+}
+
+function commonSuffixLength (left: string, right: string): number {
+  const length = Math.min(left.length, right.length)
+  let index = 0
+  while (index < length && left[left.length - 1 - index] === right[right.length - 1 - index]) index++
+  return index
+}
+
+function annotationMatchScore (index: AnnotationRootIndex, start: number, needle: string, locator?: MessageAnnotationLocator): number {
+  if (!locator) return 0
+  const haystack = index.chars.join('')
+  let score = 0
+  const prefix = normalizeAnnotationText(locator.prefix || '')
+  const suffix = normalizeAnnotationText(locator.suffix || '')
+  if (prefix) {
+    const matched = commonSuffixLength(prefix, haystack.slice(0, start))
+    score += 100 * (matched / prefix.length)
+  }
+  if (suffix) {
+    const matched = commonPrefixLength(suffix, haystack.slice(start + needle.length))
+    score += 100 * (matched / suffix.length)
+  }
+  if (typeof locator.startOffset === 'number') {
+    score += Math.max(0, 24 - Math.min(24, Math.abs(index.rootOffset + start - locator.startOffset) * 0.5))
+  }
+  return score
+}
+function findAnnotationMatches (indexes: AnnotationRootIndex[], annotation: MessageAnnotation): AnnotationMatch[] {
+  const locator = annotation.locator
+  const needle = normalizeAnnotationText(locator?.exact || annotation.text)
+  if (!needle) return []
+  const matches: AnnotationMatch[] = []
   for (const index of indexes) {
-    const at = index.chars.join('').indexOf(needle)
-    if (at >= 0 && wrapIndexRange(index, at, at + needle.length, annotation.id)) return true
+    const haystack = index.chars.join('')
+    let from = 0
+    while (from <= haystack.length - needle.length) {
+      const at = haystack.indexOf(needle, from)
+      if (at < 0) break
+      matches.push({ index, start: at, score: annotationMatchScore(index, at, needle, locator) })
+      from = at + Math.max(1, needle.length)
+    }
+  }
+  return matches
+}
+
+function wrapTextMatchInRoot (root: HTMLElement, annotation: MessageAnnotation): boolean {
+  const locator = annotation.locator
+  // A locator created from a selection belongs to exactly one content block;
+  // this also prevents the same phrase being highlighted in every block.
+  if (typeof locator?.blockIndex === 'number' && locator.blockIndex !== props.blockIndex) return false
+  const indexes = buildAnnotationRootIndexes(root)
+  const needle = normalizeAnnotationText(locator?.exact || annotation.text)
+  if (!needle) return false
+
+  const matches = findAnnotationMatches(indexes, annotation)
+  if (matches.length > 0) {
+    // Legacy annotations have no context. Highlight only a unique occurrence
+    // instead of silently binding the first duplicate phrase.
+    if (!locator && matches.length !== 1) return false
+    const ordered = [...matches].sort((left, right) => right.score - left.score)
+    const best = ordered[0]
+    const second = ordered[1]
+    if (locator && second && best.score <= second.score + 8) return false
+    return wrapIndexRange(best.index, best.start, best.start + needle.length, annotation.id)
   }
 
-  // 2. Cross-block selection: wrap the leading portion in the first root
-  //    that carries enough of it.
+  // Cross-block selections cannot be represented as one DOM mark. Keep the
+  // leading portion visible when enough text survives a markdown re-render.
   const minPrefix = Math.max(3, Math.ceil(needle.length * 0.25))
   for (const index of indexes) {
     const prefix = findAnnotationPrefix(needle, index)
@@ -485,6 +562,7 @@ onBeforeUnmount(() => {
   <div
     ref="exportCaptureRef"
     class="message-output"
+    :data-block-index="props.blockIndex"
     :class="[props.role, { streaming: props.isStreamingBlock }]"
     @mouseover="handleAnnotationMouseOver"
     @mouseout="handleAnnotationMouseLeave"
@@ -582,7 +660,7 @@ onBeforeUnmount(() => {
       <div class="chat-annotation-bubble-head">
         <span class="chat-annotation-bubble-badge">{{ activeAnnotationTurn?.mode === 'detailed' ? $t('chatUi.quickAskModeDetailed') : $t('chatUi.quickAskModeQuick') }}</span>
         <span class="chat-annotation-bubble-hint">{{ activeAnnotationTurn?.status === 'generating' ? $t('chatUi.quickAskThinking') : $t('chatUi.quickAskThreadHint') }}</span>
-        <button class="chat-annotation-bubble-remove" type="button" @click.stop="removeActiveAnnotation" :title="$t('chatUi.removeAnnotation')">✕</button>
+        <button class="chat-annotation-bubble-remove" type="button" @click.stop="removeActiveAnnotation" :title="$t('chatUi.removeAnnotation')">�?/button>
       </div>
       <p class="chat-annotation-bubble-question">{{ activeAnnotationTurn?.question }}</p>
       <div v-if="activeAnnotationTurn?.status === 'generating'" class="chat-annotation-bubble-loading">
@@ -643,7 +721,7 @@ onBeforeUnmount(() => {
   margin-top: 10px;
 }
 
-/* design v1.7 motion: streaming caret — a 2.5px signature-gradient lightbar
+/* design v1.7 motion: streaming caret �?a 2.5px signature-gradient lightbar
    at the text tail with a soft glow, so words feel "written" out. */
 .message-text :deep(.stream-caret) {
   position: relative;
@@ -658,7 +736,7 @@ onBeforeUnmount(() => {
   animation: stream-caret-breathe 1.1s ease-in-out infinite;
 }
 
-/* Tiny rising sparks — the "particles composing the text" shimmer. */
+/* Tiny rising sparks �?the "particles composing the text" shimmer. */
 .message-text :deep(.stream-caret)::before,
 .message-text :deep(.stream-caret)::after {
   content: '';
@@ -1054,3 +1132,4 @@ onBeforeUnmount(() => {
   }
 }
 </style>
+
