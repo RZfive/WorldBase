@@ -3,7 +3,7 @@ import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from
 import { useI18n } from 'vue-i18n'
 import { buildMessageBlocks, getContentExcerpt, getContentParts } from '../message-utils'
 import { copyTextToClipboard } from '../export-utils'
-import type { ChatMessage, GalleryImage, FilePreviewState, QuestionNavigationEntry } from '../types'
+import type { ChatMessage, GalleryImage, FilePreviewState, MessageAnnotation, MessageAnnotationLocator, QuestionAnnotationNavigationEntry, QuestionNavigationEntry } from '../types'
 import MessageRow from './MessageRow.vue'
 import ImageLightbox from '../media/ImageLightbox.vue'
 import MermaidPreviewDialog from '../media/MermaidPreviewDialog.vue'
@@ -30,7 +30,7 @@ const emit = defineEmits<{
   (e: 'submitEdit', payload: { messageId: string; text: string; mode: 'fork' | 'inplace' }): void
   (e: 'cancelEdit'): void
   (e: 'addToContext', text: string): void
-  (e: 'openQuickAsk', payload: { text: string; messageId: string | null; messageIndex: number; anchor: { left: number; top: number; right: number; bottom: number } }): void
+  (e: 'openQuickAsk', payload: { text: string; locator?: MessageAnnotationLocator; messageId: string | null; messageIndex: number; anchor: { left: number; top: number; right: number; bottom: number } }): void
   (e: 'removeMessageAnnotation', payload: { messageId: string | null; messageIndex: number; annotationId: string }): void
   (e: 'openAnnotationThread', payload: { messageId: string | null; messageIndex: number; annotationId: string; anchor: { left: number; top: number; right: number; bottom: number } }): void
 }>()
@@ -54,6 +54,7 @@ const selectionToolbar = reactive({
   x: 0,
   y: 0,
   anchor: null as { left: number; top: number; right: number; bottom: number } | null,
+  locator: null as MessageAnnotationLocator | null,
   messageId: null as string | null,
   messageIndex: -1
 })
@@ -90,15 +91,41 @@ const latestAssistantMessageIndex = computed(() => {
 })
 
 const questionEntries = computed<QuestionNavigationEntry[]>(() => {
-  return props.messages
+  const entries = props.messages
     .map((message, messageIndex) => ({ message, messageIndex }))
     .filter(({ message }) => message.role === 'user')
     .map(({ message, messageIndex }) => ({
       key: message.id || `question-${messageIndex}`,
       messageIndex,
-      excerpt: getContentExcerpt(message.content, 120)
+      excerpt: getContentExcerpt(message.content, 120),
+      annotations: [] as QuestionAnnotationNavigationEntry[]
     }))
+
+  for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+    const entry = entries[entryIndex]
+    const endIndex = entries[entryIndex + 1]?.messageIndex ?? props.messages.length
+    for (let messageIndex = entry.messageIndex + 1; messageIndex < endIndex; messageIndex++) {
+      const message = props.messages[messageIndex]
+      if (message?.role !== 'assistant' || !message.annotations?.length) continue
+      entry.annotations.push(...message.annotations.map(annotation => ({
+        id: annotation.id,
+        messageIndex,
+        excerpt: getAnnotationExcerpt(annotation),
+        status: getAnnotationStatus(annotation)
+      })))
+    }
+  }
+  return entries
 })
+
+function getAnnotationExcerpt (annotation: MessageAnnotation): string {
+  return (annotation.locator?.exact || annotation.text).replace(/\s+/g, ' ').trim().slice(0, 72)
+}
+
+function getAnnotationStatus (annotation: MessageAnnotation): QuestionAnnotationNavigationEntry['status'] {
+  if (annotation.status) return annotation.status
+  return annotation.turns?.some(turn => turn.status === 'generating') ? 'generating' : 'resolved'
+}
 
 const lastMessageGrowthKey = computed(() => {
   const message = props.messages[props.messages.length - 1]
@@ -236,6 +263,7 @@ function hideSelectionToolbar (): void {
   selectionToolbar.text = ''
   selectionToolbar.messageId = null
   selectionToolbar.messageIndex = -1
+  selectionToolbar.locator = null
 }
 
 /** Message element that owns the current selection anchor, if any. */
@@ -245,6 +273,45 @@ function resolveSelectionMessageAnchor (): HTMLElement | null {
   const anchorNode = selection.anchorNode
   const element = anchorNode?.nodeType === Node.TEXT_NODE ? anchorNode.parentElement : anchorNode as HTMLElement | null
   return element?.closest('[data-message-index]') as HTMLElement | null
+}
+
+function normalizeAnnotationText (text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/** Return a normalized text offset for a DOM range inside one content block. */
+function getNormalizedRangeOffset (root: HTMLElement, container: Node, offset: number): number {
+  try {
+    const before = document.createRange()
+    before.selectNodeContents(root)
+    before.setEnd(container, offset)
+    return normalizeAnnotationText(before.toString()).length
+  } catch {
+    return 0
+  }
+}
+
+function buildSelectionLocator (selectedText: string, selection: Selection, blockRoot: HTMLElement | null): MessageAnnotationLocator | undefined {
+  if (!blockRoot || selection.rangeCount === 0) return undefined
+  const range = selection.getRangeAt(0)
+  const exact = normalizeAnnotationText(selectedText)
+  if (!exact) return undefined
+  const blockText = normalizeAnnotationText(blockRoot.textContent || '')
+  const rawStart = getNormalizedRangeOffset(blockRoot, range.startContainer, range.startOffset)
+  const startOffset = Math.max(0, Math.min(rawStart, blockText.length))
+  const endOffset = Math.max(startOffset, Math.min(startOffset + exact.length, blockText.length))
+  const contextLength = 48
+  const rawBlockIndex = Number.parseInt(blockRoot.closest('[data-block-index]')?.getAttribute('data-block-index') || '', 10)
+  return {
+    version: 1,
+    exact,
+    prefix: blockText.slice(Math.max(0, startOffset - contextLength), startOffset),
+    suffix: blockText.slice(endOffset, endOffset + contextLength),
+    blockIndex: Number.isFinite(rawBlockIndex) ? rawBlockIndex : undefined,
+    startOffset,
+    endOffset,
+    status: 'resolved'
+  }
 }
 
 function showSelectionToolbar (event?: MouseEvent): void {
@@ -269,6 +336,9 @@ function showSelectionToolbar (event?: MouseEvent): void {
   }
 
   const messageAnchor = resolveSelectionMessageAnchor()
+  const blockRoot = (selection.anchorNode?.nodeType === Node.TEXT_NODE
+    ? selection.anchorNode.parentElement
+    : selection.anchorNode as HTMLElement | null)?.closest('.message-text') as HTMLElement | null
   selectionToolbar.text = text
   selectionToolbar.anchor = rect.toJSON()
   selectionToolbar.messageId = messageAnchor?.getAttribute('data-message-id') || null
@@ -276,6 +346,7 @@ function showSelectionToolbar (event?: MouseEvent): void {
     ? Number.parseInt(messageAnchor.getAttribute('data-message-index') || '', 10)
     : -1
   if (Number.isNaN(selectionToolbar.messageIndex)) selectionToolbar.messageIndex = -1
+  selectionToolbar.locator = buildSelectionLocator(text, selection, blockRoot) || null
 
   const centerX = rect.left + rect.width / 2
   selectionToolbar.x = Math.max(8, Math.min(centerX - SELECTION_TOOLBAR_WIDTH / 2, window.innerWidth - SELECTION_TOOLBAR_WIDTH - 8))
@@ -296,10 +367,10 @@ function addSelectionToContext (): void {
 }
 
 function openQuickAskForSelection (): void {
-  const { text, anchor, messageId, messageIndex } = selectionToolbar
+  const { text, locator, anchor, messageId, messageIndex } = selectionToolbar
   hideSelectionToolbar()
   window.getSelection()?.removeAllRanges()
-  if (text && anchor) emit('openQuickAsk', { text, messageId, messageIndex, anchor })
+  if (text && anchor) emit('openQuickAsk', { text, locator: locator || undefined, messageId, messageIndex, anchor })
 }
 
 // Hide the toolbar on the NEXT press outside it — mousedown, not click, so the
@@ -394,7 +465,8 @@ function handleWheel (event: WheelEvent): void {
   if (event.deltaY < 0) autoStickEnabled.value = false
 }
 
-function jumpToMessageIndex (index: number): void {
+function jumpToMessageIndex (payload: { messageIndex: number; annotationId?: string }): void {
+  const index = payload.messageIndex
   const element = messagesContainer.value
   const message = props.messages[index]
   if (!element || !message) return
@@ -408,6 +480,25 @@ function jumpToMessageIndex (index: number): void {
     highlightedMessageKey.value = null
     jumpHighlightTimer = null
   }, 1500)
+
+  if (!payload.annotationId) return
+  nextTick(() => {
+    const mark = element.querySelector<HTMLElement>(`[data-annotation-id="${CSS.escape(payload.annotationId!)}"]`)
+    if (!mark) return
+    const containerRect = element.getBoundingClientRect()
+    const markRect = mark.getBoundingClientRect()
+    setContainerScrollTop(element, element.scrollTop + markRect.top - containerRect.top - element.clientHeight / 2 + markRect.height / 2)
+    mark.classList.add('outline-navigation-focus')
+    window.setTimeout(() => mark.classList.remove('outline-navigation-focus'), 1200)
+    const annotation = message.annotations?.find(item => item.id === payload.annotationId)
+    if (!annotation) return
+    nextTick(() => emit('openAnnotationThread', {
+      messageId: message.id || null,
+      messageIndex: index,
+      annotationId: annotation.id,
+      anchor: mark.getBoundingClientRect().toJSON()
+    }))
+  })
 }
 
 watch(

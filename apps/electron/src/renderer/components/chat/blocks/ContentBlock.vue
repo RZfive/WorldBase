@@ -12,7 +12,7 @@ import {
   messageContentToMarkdown,
   renderElementToPngDataUrl
 } from '../export-utils'
-import type { AnnotationAnchor, ChatMessageBlock, MessageAnnotation } from '../types'
+import type { AnnotationAnchor, ChatMessageBlock, MessageAnnotation, MessageAnnotationLocator } from '../types'
 import MermaidDiagram from '../media/MermaidDiagram.vue'
 import { vStableImages, vStableImage } from '../media/image-stability'
 
@@ -83,7 +83,7 @@ function getTextSegments (text?: string) {
   return splitMarkdownWithMermaid(text || '')
 }
 
-// design v1.7 motion: the streaming caret lives at the TEXT tail — a 2.5px
+// design v1.7 motion: the streaming caret lives at the TEXT tail —a 2.5px
 // signature-gradient lightbar with soft glow, injected inline into the last
 // rendered block so it hugs the newest character.
 const STREAM_CARET_HTML = '<span class="stream-caret" aria-hidden="true"></span>'
@@ -91,7 +91,7 @@ const STREAM_CARET_HTML = '<span class="stream-caret" aria-hidden="true"></span>
 function withStreamCaret (html: string): string {
   const trimmed = html.trimEnd()
   if (!trimmed) return STREAM_CARET_HTML
-  // Raw code/preview surfaces would read the caret as markup — skip them.
+  // Raw code/preview surfaces would read the caret as markup —skip them.
   if (/<\/(pre|code|table)>$/i.test(trimmed)) return trimmed
   const injected = trimmed.replace(/(<\/(p|li|h[1-6]|blockquote)>\s*)$/, `${STREAM_CARET_HTML}$1`)
   return injected === trimmed ? `${trimmed}${STREAM_CARET_HTML}` : injected
@@ -331,21 +331,85 @@ function buildAnnotationTextIndex (root: HTMLElement): AnnotationTextIndex {
 }
 
 /**
+ * Longest prefix of the needle that occurs anywhere in the content — used
+ * when the full needle no longer matches because a markdown re-render
+ * dropped or reshaped part of the selected text. The highlight anchors
+ * where the selection began instead of vanishing entirely.
+ */
+function findAnnotationPrefix (needle: string, index: AnnotationTextIndex): { start: number; length: number } | null {
+  const maxLen = Math.min(needle.length, index.text.length)
+  for (let len = maxLen; len >= 1; len--) {
+    const at = index.text.indexOf(needle.slice(0, len))
+    if (at >= 0) return { start: at, length: len }
+  }
+  return null
+}
+
+interface AnnotationMatch {
+  start: number
+  score: number
+}
+
+function commonPrefixLength (left: string, right: string): number {
+  const length = Math.min(left.length, right.length)
+  let index = 0
+  while (index < length && left[index] === right[index]) index++
+  return index
+}
+
+function commonSuffixLength (left: string, right: string): number {
+  const length = Math.min(left.length, right.length)
+  let index = 0
+  while (index < length && left[left.length - 1 - index] === right[right.length - 1 - index]) index++
+  return index
+}
+
+function annotationMatchScore (index: AnnotationTextIndex, start: number, needle: string, locator?: MessageAnnotationLocator): number {
+  if (!locator) return 0
+  let score = 0
+  const prefix = normalizeAnnotationText(locator.prefix || '')
+  const suffix = normalizeAnnotationText(locator.suffix || '')
+  if (prefix) {
+    const matched = commonSuffixLength(prefix, index.text.slice(0, start))
+    score += 100 * (matched / prefix.length)
+  }
+  if (suffix) {
+    const matched = commonPrefixLength(suffix, index.text.slice(start + needle.length))
+    score += 100 * (matched / suffix.length)
+  }
+  if (typeof locator.startOffset === 'number') {
+    score += Math.max(0, 24 - Math.min(24, Math.abs(start - locator.startOffset) * 0.5))
+  }
+  return score
+}
+
+function findAnnotationMatches (index: AnnotationTextIndex, annotation: MessageAnnotation): AnnotationMatch[] {
+  const locator = annotation.locator
+  const needle = normalizeAnnotationText(locator?.exact || annotation.text)
+  if (!needle) return []
+  const matches: AnnotationMatch[] = []
+  let from = 0
+  while (from <= index.text.length - needle.length) {
+    const at = index.text.indexOf(needle, from)
+    if (at < 0) break
+    matches.push({ start: at, score: annotationMatchScore(index, at, needle, locator) })
+    from = at + Math.max(1, needle.length)
+  }
+  return matches
+}
+
+/**
  * Wraps a matched char range in `.chat-annotation-mark` spans. A span must
  * stay inside one block element, so consecutive chars sharing a block root
  * form one span and a cross-paragraph match gets one span per paragraph —
  * all carrying the same annotation id.
  */
-function wrapAnnotationMatch (index: AnnotationTextIndex, needle: string, annotationId: string): boolean {
-  const at = needle ? index.text.indexOf(needle) : -1
-  if (at < 0) return false
-
+function wrapIndexRange (index: AnnotationTextIndex, start: number, end: number, annotationId: string): boolean {
   const blockRootOf = (source: AnnotationCharSource): Element | null =>
     getWrapSafeRoot(source.node, source.node.parentElement?.closest('.message-text') || index.root)
 
   let wrapped = false
-  const end = at + needle.length
-  let runStart = at
+  let runStart = start
   while (runStart < end) {
     const runRoot = blockRootOf(index.mapping[runStart])
     let runEnd = runStart + 1
@@ -360,6 +424,40 @@ function wrapAnnotationMatch (index: AnnotationTextIndex, needle: string, annota
   return wrapped
 }
 
+function wrapTextMatchInRoot (root: HTMLElement, annotation: MessageAnnotation): boolean {
+  const locator = annotation.locator
+  // A locator created from a selection belongs to exactly one content block;
+  // this also prevents the same phrase being highlighted in every block.
+  if (typeof locator?.blockIndex === 'number' && locator.blockIndex !== props.blockIndex) return false
+  // Rebuilt per annotation: wrapping the previous match mutates text nodes
+  // (split/joined by extractContents), which would stale the mapping.
+  const index = buildAnnotationTextIndex(root)
+  const needle = normalizeAnnotationText(locator?.exact || annotation.text)
+  if (!needle) return false
+
+  const matches = findAnnotationMatches(index, annotation)
+  if (matches.length > 0) {
+    // Legacy annotations have no context. Highlight only a unique occurrence
+    // instead of silently binding the first duplicate phrase.
+    if (!locator && matches.length !== 1) return false
+    const ordered = [...matches].sort((left, right) => right.score - left.score)
+    const best = ordered[0]
+    const second = ordered[1]
+    if (locator && second && best.score <= second.score + 8) return false
+    return wrapIndexRange(index, best.start, best.start + needle.length, annotation.id)
+  }
+
+  // Partial matches: a markdown re-render may have reshaped part of the
+  // selected text. Keep the leading portion visible when enough of it
+  // survives, anchoring where the selection began instead of vanishing.
+  const minPrefix = Math.max(3, Math.ceil(needle.length * 0.25))
+  const prefix = findAnnotationPrefix(needle, index)
+  if (prefix && prefix.length >= minPrefix && wrapIndexRange(index, prefix.start, prefix.start + prefix.length, annotation.id)) {
+    return true
+  }
+  return false
+}
+
 function applyAnnotationMarks (): void {
   const root = exportCaptureRef.value
   if (!root) return
@@ -368,10 +466,7 @@ function applyAnnotationMarks (): void {
   const annotations = props.annotations || []
   if (annotations.length === 0) return
   for (const annotation of annotations) {
-    // Rebuilt per annotation: wrapping the previous match mutates text nodes
-    // (split/joined by extractContents), which would stale the mapping.
-    const index = buildAnnotationTextIndex(root)
-    wrapAnnotationMatch(index, normalizeAnnotationText(annotation.text), annotation.id)
+    wrapTextMatchInRoot(root, annotation)
   }
   // Re-wrapped spans carry no state; restore the hover highlight if the
   // bubble is open (e.g. a generating answer refreshed the annotation).
@@ -496,6 +591,7 @@ onBeforeUnmount(() => {
   <div
     ref="exportCaptureRef"
     class="message-output"
+    :data-block-index="props.blockIndex"
     :class="[props.role, { streaming: props.isStreamingBlock }]"
     @mouseover="handleAnnotationMouseOver"
     @mouseout="handleAnnotationMouseLeave"
@@ -654,7 +750,7 @@ onBeforeUnmount(() => {
   margin-top: 10px;
 }
 
-/* design v1.7 motion: streaming caret — a 2.5px signature-gradient lightbar
+/* design v1.7 motion: streaming caret —a 2.5px signature-gradient lightbar
    at the text tail with a soft glow, so words feel "written" out. */
 .message-text :deep(.stream-caret) {
   position: relative;
@@ -669,7 +765,7 @@ onBeforeUnmount(() => {
   animation: stream-caret-breathe 1.1s ease-in-out infinite;
 }
 
-/* Tiny rising sparks — the "particles composing the text" shimmer. */
+/* Tiny rising sparks —the "particles composing the text" shimmer. */
 .message-text :deep(.stream-caret)::before,
 .message-text :deep(.stream-caret)::after {
   content: '';
@@ -1072,3 +1168,4 @@ onBeforeUnmount(() => {
   }
 }
 </style>
+

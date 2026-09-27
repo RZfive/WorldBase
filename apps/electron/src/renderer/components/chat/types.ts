@@ -94,14 +94,37 @@ export interface MessageAnnotationTurn {
   startedAt?: number
 }
 
+/**
+ * Stable text anchor captured when an annotation is created.  `exact` is
+ * whitespace-normalized to match the renderer's markdown text index while
+ * prefix/suffix disambiguate repeated phrases in the same message.
+ */
+export interface MessageAnnotationLocator {
+  version: 1
+  exact: string
+  prefix?: string
+  suffix?: string
+  /** Index of the content block containing the selection. */
+  blockIndex?: number
+  /** Normalized character offsets within the content block, when known. */
+  startOffset?: number
+  endOffset?: number
+  /** Runtime/persisted resolution hint used by navigation surfaces. */
+  status?: 'resolved' | 'ambiguous' | 'orphaned'
+}
+
 /** A quick Q&A thread pinned to a text range inside one message. */
 export interface MessageAnnotation {
   id: string
   /** Exact selected text the annotation is anchored to. */
   text: string
+  /** Contextual anchor; absent on legacy annotations created before locator support. */
+  locator?: MessageAnnotationLocator
   /** Full Q&A thread; turns[0] is the original question. */
   turns: MessageAnnotationTurn[]
   createdAt: number
+  /** Resolver state for stale or ambiguous anchors. */
+  status?: 'resolved' | 'ambiguous' | 'orphaned'
 }
 
 /** Viewport-space rect used to anchor lightweight popovers to text. */
@@ -116,6 +139,7 @@ export interface AnnotationAnchor {
 export interface QuickAskPopoverState {
   mode: 'ask' | 'thread'
   text: string
+  locator?: MessageAnnotationLocator
   messageId: string | null
   messageIndex: number
   anchor: AnnotationAnchor
@@ -143,6 +167,14 @@ export interface QuestionNavigationEntry {
   key: string
   messageIndex: number
   excerpt: string
+  annotations?: QuestionAnnotationNavigationEntry[]
+}
+
+export interface QuestionAnnotationNavigationEntry {
+  id: string
+  messageIndex: number
+  excerpt: string
+  status?: 'resolved' | 'ambiguous' | 'orphaned' | 'generating'
 }
 
 export interface GalleryImage {

@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { QuestionNavigationEntry } from '../types'
+import type { QuestionNavigationEntry, QuestionAnnotationNavigationEntry } from '../types'
 
 const props = defineProps<{
   questions: QuestionNavigationEntry[]
 }>()
 
 const emit = defineEmits<{
-  (e: 'jump', messageIndex: number): void
+  (e: 'jump', payload: { messageIndex: number; annotationId?: string }): void
 }>()
 
 // Fixed navigation slots, unrelated to message heights. These same values are
@@ -121,7 +121,16 @@ function handleListScroll (): void {
 
 function selectQuestion (question: QuestionNavigationEntry): void {
   selectedKey.value = question.key
-  emit('jump', question.messageIndex)
+  emit('jump', { messageIndex: question.messageIndex })
+}
+
+function selectAnnotation (question: QuestionNavigationEntry, annotation: QuestionAnnotationNavigationEntry): void {
+  selectedKey.value = question.key
+  emit('jump', { messageIndex: annotation.messageIndex, annotationId: annotation.id })
+}
+
+function annotationStatus (annotation: QuestionAnnotationNavigationEntry): string {
+  return annotation.status || 'resolved'
 }
 
 // Re-measure the single popup after its text renders, for correct edge clamping.
@@ -172,6 +181,20 @@ onBeforeUnmount(() => {
         @click="selectQuestion(question)"
       >
         <span class="question-outline-line" :style="questionLineStyle(question, index)" />
+        <span
+          v-if="question.annotations?.length"
+          class="question-outline-annotation"
+          :class="`status-${annotationStatus(question.annotations[0])}`"
+          role="button"
+          tabindex="0"
+          :aria-label="`${question.annotations.length} annotations`"
+          @click.stop="selectAnnotation(question, question.annotations[0])"
+          @keydown.enter.stop="selectAnnotation(question, question.annotations[0])"
+          @keydown.space.prevent.stop="selectAnnotation(question, question.annotations[0])"
+        >
+          <span class="question-outline-annotation-dot" aria-hidden="true"></span>
+          <span v-if="question.annotations.length > 1" class="question-outline-annotation-count">{{ question.annotations.length }}</span>
+        </span>
       </button>
     </div>
   </aside>
@@ -185,6 +208,18 @@ onBeforeUnmount(() => {
     >
       <span class="question-outline-tooltip-label">{{ $t('chatUi.minimapQuestionLabel', { current: (hoveredIndex ?? 0) + 1, total: props.questions.length }) }}</span>
       <span class="question-outline-tooltip-text">{{ hoveredQuestion.excerpt || 'Untitled question' }}</span>
+      <div v-if="hoveredQuestion.annotations?.length" class="question-outline-tooltip-annotations">
+        <div class="question-outline-tooltip-annotation-label">{{ hoveredQuestion.annotations.length }} 个批注</div>
+        <div
+          v-for="annotation in hoveredQuestion.annotations.slice(0, 3)"
+          :key="annotation.id"
+          class="question-outline-tooltip-annotation"
+          :class="`status-${annotationStatus(annotation)}`"
+        >
+          <span class="question-outline-tooltip-dot" aria-hidden="true"></span>
+          <span>{{ annotation.excerpt }}</span>
+        </div>
+      </div>
     </div>
   </Teleport>
 </template>
@@ -260,6 +295,69 @@ onBeforeUnmount(() => {
   transition: transform 0.12s cubic-bezier(0.22, 1, 0.36, 1), background 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
 }
 
+.question-outline-annotation {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 12px;
+  height: 16px;
+  margin-left: 4px;
+  border-radius: 999px;
+  color: var(--app-text);
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+.question-outline-annotation:hover,
+.question-outline-annotation:focus-visible {
+  transform: scale(1.18);
+  background: color-mix(in srgb, var(--app-accent) 12%, transparent);
+  outline: none;
+}
+
+.question-outline-annotation-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--app-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-accent) 18%, transparent);
+}
+
+.question-outline-annotation-count {
+  min-width: 13px;
+  height: 13px;
+  margin-left: -2px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--app-accent);
+  color: var(--app-panel);
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
+}
+
+.question-outline-annotation.status-generating .question-outline-annotation-dot {
+  background: transparent;
+  border: 2px solid var(--app-accent);
+  animation: question-annotation-pulse 1.1s ease-in-out infinite;
+}
+
+.question-outline-annotation.status-ambiguous .question-outline-annotation-dot {
+  background: #d38b22;
+}
+
+.question-outline-annotation.status-orphaned .question-outline-annotation-dot {
+  background: var(--app-text-faint);
+  box-shadow: none;
+}
+
+@keyframes question-annotation-pulse {
+  50% { opacity: 0.45; transform: scale(0.72); }
+}
+
 .question-outline-item.hovered .question-outline-line {
   background: var(--app-accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-accent) 16%, transparent);
@@ -315,8 +413,52 @@ onBeforeUnmount(() => {
   -webkit-line-clamp: 3;
 }
 
+.question-outline-tooltip-annotations {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--app-border);
+}
+
+.question-outline-tooltip-annotation-label {
+  color: var(--app-accent-strong);
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.question-outline-tooltip-annotation {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  color: var(--app-text-soft);
+  font-size: 0.66rem;
+}
+
+.question-outline-tooltip-annotation > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.question-outline-tooltip-dot {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--app-accent);
+}
+
+.question-outline-tooltip-annotation.status-ambiguous .question-outline-tooltip-dot { background: #d38b22; }
+.question-outline-tooltip-annotation.status-orphaned .question-outline-tooltip-dot { background: var(--app-text-faint); }
+
 @media (prefers-reduced-motion: reduce) {
   .question-outline-line { transition: none; }
+  .question-outline-annotation { transition: none; }
+  .question-outline-annotation.status-generating .question-outline-annotation-dot { animation: none; }
   .question-outline-tooltip { animation: none; }
 }
 </style>
