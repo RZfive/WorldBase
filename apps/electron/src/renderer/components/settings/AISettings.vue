@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import AboutUpdatesPanel from './AboutUpdatesPanel.vue'
+import { appUpdateState } from '../../utils/app-update-state'
 import SkillManager from './SkillManager.vue'
 import AgentWorkspacePanel from './AgentWorkspacePanel.vue'
 import MemorySettingsPanel from './MemorySettingsPanel.vue'
@@ -72,6 +73,8 @@ const NAV_ICONS: Record<CategoryId, string> = {
 
 const activeCategoryId = ref<CategoryId>('general')
 
+const { updateAvailable } = appUpdateState
+
 const CATEGORY_IDS = new Set<string>(categories.map(category => category.id))
 
 watch(() => props.initialCategory, (category) => {
@@ -91,6 +94,11 @@ watch(() => props.initialCategory, (category) => {
       >
         <span class="cat-icon" v-html="NAV_ICONS[cat.id]" />
         <span class="cat-label">{{ $t(cat.labelKey) }}</span>
+        <span
+          v-if="cat.id === 'about' && updateAvailable"
+          class="cat-update-dot"
+          :title="$t('appShell.updateAvailable')"
+        />
       </button>
     </nav>
 
@@ -180,6 +188,17 @@ watch(() => props.initialCategory, (category) => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* "update available" badge on the About nav entry */
+.cat-update-dot {
+  width: 8px;
+  height: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--app-success);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.45);
 }
 
 /* ── Right content area ── */

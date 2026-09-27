@@ -41,6 +41,7 @@ const enUS: MessageSchema = {
     titleViewApp: 'App',
     titleViewSource: 'Source',
     settings: 'Settings',
+    updateAvailable: 'Update available',
     minimize: 'Minimize',
     maximize: 'Maximize',
     restore: 'Restore',

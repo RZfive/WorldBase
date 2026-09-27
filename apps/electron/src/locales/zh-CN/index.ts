@@ -42,6 +42,7 @@ const zhCN = {
     titleViewApp: '应用',
     titleViewSource: '源码',
     settings: '设置',
+    updateAvailable: '有可用更新',
     minimize: '最小化',
     maximize: '最大化',
     restore: '还原',

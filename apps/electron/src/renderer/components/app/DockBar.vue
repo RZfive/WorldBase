@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { appUpdateState } from '../../utils/app-update-state'
 import { resolveProjectIcon } from '../../utils/project-icon'
 
 interface RunningApp {
@@ -36,6 +38,15 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+const { updateAvailable } = appUpdateState
+
+/** Gear tooltip doubles as the update hint while a newer version is pending. */
+const settingsDockLabel = computed(() =>
+  updateAvailable.value
+    ? `${t('appShell.settings')} · ${t('appShell.updateAvailable')}`
+    : t('appShell.settings')
+)
 
 function handleContextMenu (event: MouseEvent, app: RunningApp): void {
   emit('contextMenu', event, app)
@@ -193,8 +204,8 @@ function appInitial (app: RunningApp): string {
       <!-- 主题切换已移除：深浅主题在 设置 → 外观 中调整 -->
       <div
         :class="['dock-item', { 'dock-active': props.currentView === 'settings' && !props.showLaunchpad }]"
-        :title="$t('appShell.settings')"
-        :data-tip="$t('appShell.settings')"
+        :title="settingsDockLabel"
+        :data-tip="settingsDockLabel"
         @click="emit('openSettings')"
       >
         <span class="dock-item-surface">
@@ -202,8 +213,9 @@ function appInitial (app: RunningApp): string {
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
+          <span v-if="updateAvailable" class="dock-update-dot" aria-hidden="true"></span>
         </span>
-        <span class="dock-tooltip">{{ $t('appShell.settings') }}</span>
+        <span class="dock-tooltip">{{ settingsDockLabel }}</span>
       </div>
     </div>
   </aside>
@@ -481,6 +493,20 @@ function appInitial (app: RunningApp): string {
   border-radius: 999px;
   background: var(--app-success);
   box-shadow: 0 0 8px rgba(34, 197, 94, 0.36);
+}
+
+/* "update available" badge on the settings gear */
+.dock-update-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--app-success);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.45);
+  z-index: 2;
+  pointer-events: none;
 }
 
 .dock-divider {
