@@ -613,6 +613,15 @@ async function handleDelete (ids: string[]) {
   await loadLibrary()
 }
 
+/** Batch-download the selected library images into one user-picked folder. */
+async function handleDownloadSelected (ids: string[]) {
+  if (!window.electronAPI?.exportSelectedLibraryImages || ids.length === 0) return
+  const result = await window.electronAPI.exportSelectedLibraryImages(ids)
+  if (result?.error) {
+    errorMsg.value = result.error
+  }
+}
+
 /* ---- Folder & Tag actions ---- */
 
 async function handleUpdateFolder (ids: string[], folder: string | undefined) {
@@ -978,6 +987,7 @@ onUnmounted(() => {
           :folder-names="folderNames"
           @refresh="handleLibraryRefresh"
           @delete="handleDelete"
+          @download="handleDownloadSelected"
           @regenerate="handleRegenerate"
           @load="handleLoadParams"
           @use-as-input="handleUseAsInput"

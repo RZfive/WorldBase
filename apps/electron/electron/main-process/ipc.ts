@@ -109,6 +109,19 @@ function stringFromUnknown (value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+/** `<base>.<ext>` deduplicated against names already used in one export batch. */
+function uniqueExportName (base: string, ext: string, usedNames: Set<string>): string {
+  const safeExt = (ext || 'png').replace(/[^\w]/g, '') || 'png'
+  let name = `${base}.${safeExt}`
+  let n = 2
+  while (usedNames.has(name)) {
+    name = `${base}-${n}.${safeExt}`
+    n += 1
+  }
+  usedNames.add(name)
+  return name
+}
+
 /** Translate a native Rust Studio event record into Electron's durable index shape. */
 function rustStudioImageEntry (value: unknown, request?: ImageStudioGenerateRequest): ImageLibraryEntry | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
@@ -1344,6 +1357,60 @@ export function setupIPC (): void {
       const buffer = await archive.generateAsync({ type: 'nodebuffer' })
       await fs.writeFile(result.filePath, buffer)
       return { success: true, filePath: result.filePath, count: filePaths.length }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : t('mainDialog.exportFailed') }
+    }
+  })
+
+  // Batch-download selected gallery images into one user-picked directory.
+  ipcMain.handle('image:library:exportSelected', async (event: IpcMainInvokeEvent, ids: string[]): Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; failed?: number; error?: string }> => {
+    try {
+      const idList = Array.isArray(ids) ? ids.filter(id => typeof id === 'string' && id.length > 0) : []
+      if (idList.length === 0) return { error: t('mainDialog.noImagesToExportInFolder') }
+
+      const senderWindow = getSenderWindow(event) || getMainWindow()
+      const dialogOptions = {
+        title: t('mainDialog.exportSelectedImagesTitle'),
+        defaultPath: t('mainDialog.exportSelectedFolderName'),
+        properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>
+      }
+      const picked = senderWindow
+        ? await dialog.showOpenDialog(senderWindow, dialogOptions)
+        : await dialog.showOpenDialog(dialogOptions)
+      if (picked.canceled || picked.filePaths.length === 0) {
+        return { canceled: true }
+      }
+      const destDir = picked.filePaths[0]
+
+      const rustHarness = await startSelectedRustHarness()
+      const nativeRust = rustHarness ? mainState.rustHarness : null
+
+      let saved = 0
+      let failed = 0
+      const usedNames = new Set<string>()
+      for (const id of idList) {
+        try {
+          if (nativeRust) {
+            // Rust owns the index in Rust mode; read the bytes back via its API.
+            const read = await nativeRust.studioLibraryRead(id)
+            if (!read?.dataUrl) throw new Error('missing image data')
+            const { buffer, mimeType } = await resolveImageBuffer(read.dataUrl)
+            const base = `worldbase-${id.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16) || 'image'}`
+            const name = uniqueExportName(base, guessImageExtension(mimeType), usedNames)
+            await fs.writeFile(path.join(destDir, name), buffer)
+          } else {
+            const sourcePath = imageLibraryStore?.imagePathsByIds([id])[0] ?? null
+            if (!sourcePath) throw new Error('missing image file')
+            const name = uniqueExportName(path.basename(sourcePath, path.extname(sourcePath)), path.extname(sourcePath).replace(/^\./, '') || 'png', usedNames)
+            await fs.copyFile(sourcePath, path.join(destDir, name))
+          }
+          saved += 1
+        } catch {
+          failed += 1
+        }
+      }
+      if (saved === 0) return { error: t('mainDialog.exportFailed') }
+      return { success: true, filePath: destDir, count: saved, failed }
     } catch (error) {
       return { error: error instanceof Error ? error.message : t('mainDialog.exportFailed') }
     }

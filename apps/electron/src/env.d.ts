@@ -1106,6 +1106,7 @@ interface ElectronAPI {
   listImageLibraryFolders: () => Promise<ImageLibraryFolderCard[]>
   createImageLibraryFolder: (name: string) => Promise<ImageLibraryFolderCard[]>
   exportImageLibraryFolder: (folderName: string) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; error?: string }>
+  exportSelectedLibraryImages: (ids: string[]) => Promise<{ success?: boolean; canceled?: boolean; filePath?: string; count?: number; failed?: number; error?: string }>
   listImageLibraryTags: () => Promise<string[]>
   renameImageLibraryFolder: (oldName: string, newName: string) => Promise<{ updated: number }>
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>

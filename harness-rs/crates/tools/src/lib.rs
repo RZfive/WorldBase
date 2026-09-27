@@ -115,6 +115,13 @@ pub struct ToolServices {
     /// Agent Workspace uses it to avoid offering Electron-only tools on mobile.
     pub visible_tool_catalog: Option<Arc<Vec<ToolDescriptor>>>,
     pub store: Arc<worldbase_memory::Store>,
+    /// Shared memory embedding queue. Present in chat runs; test fixtures may
+    /// leave it unset. Enables semantic (vector) recall in memory_search.
+    pub memory_queue: Option<Arc<worldbase_memory::MemoryEmbeddingQueue>>,
+    /// Run-scoped memory visibility (scope_type/scope_id pairs), mirroring the
+    /// auto-recall policy. Empty means this run has no memory visibility;
+    /// direct `tool.call` requests are given the default local-user scope.
+    pub memory_scopes: Vec<worldbase_protocol::types::MemorySearchScopeEntry>,
     pub skills: Arc<worldbase_skills::SkillRegistry>,
     pub scheduler: Arc<worldbase_scheduler::Scheduler>,
     pub mcp: Arc<worldbase_mcp_client::McpManager>,
@@ -1204,6 +1211,17 @@ mod tests {
         assert!(actual.contains(&"start_project_server".to_string()));
         assert!(actual.contains(&"computer_observe".to_string()));
         assert!(actual.contains(&"computer_action".to_string()));
+        for name in ["memory_add", "memory_search", "memory_delete"] {
+            assert!(
+                actual.contains(&name.to_string()),
+                "Rust-native memory tool must be visible to Electron: {name}"
+            );
+            let tool = filtered
+                .iter()
+                .find(|tool| tool.name() == name)
+                .expect("visible memory tool");
+            assert!(tool.descriptor().electron_native);
+        }
         let observe = filtered
             .iter()
             .find(|tool| tool.name() == "computer_observe")
@@ -1287,6 +1305,8 @@ mod tests {
             ),
             visible_tool_catalog: None,
             store,
+            memory_queue: None,
+            memory_scopes: Vec::new(),
             skills: std::sync::Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: std::sync::Arc::new(worldbase_scheduler::Scheduler::new(
                 std::sync::Arc::new(
@@ -1330,6 +1350,8 @@ mod tests {
             ),
             visible_tool_catalog: None,
             store,
+            memory_queue: None,
+            memory_scopes: Vec::new(),
             skills: std::sync::Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: std::sync::Arc::new(worldbase_scheduler::Scheduler::new(
                 std::sync::Arc::new(

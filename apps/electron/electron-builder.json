@@ -89,7 +89,7 @@
     "background": "build/dmg-background.png",
     "window": {
       "width": 660,
-      "height": 500
+      "height": 400
     },
     "contents": [
       {
@@ -102,6 +102,13 @@
         "y": 200,
         "type": "link",
         "path": "/Applications"
+      },
+      {
+        "x": 560,
+        "y": 85,
+        "type": "file",
+        "path": "build/WorldBase-修复并打开.command",
+        "name": "修复并打开.command"
       }
     ]
   }

@@ -1,17 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
-  <rect width="660" height="400" rx="24" fill="#f7f8fc"/>
+  <!-- Full-bleed background: avoid a rounded inset edge that looks like a second window frame. -->
+  <rect width="660" height="400" fill="#f7f8fc"/>
+
   <text x="330" y="52" text-anchor="middle" font-family="PingFang SC,'Helvetica Neue',Arial,sans-serif" font-size="26" font-weight="700" fill="#1f2937">WorldBase 安装说明</text>
   <text x="330" y="82" text-anchor="middle" font-family="PingFang SC,'Helvetica Neue',Arial,sans-serif" font-size="16" fill="#4b5563">将 WorldBase 拖入 Applications 文件夹</text>
 
-  <!-- 图标插槽：与 electron-builder.json 中 dmg.contents 的图标中心一致（contents x/y 为图标中心） -->
-  <rect x="152" y="172" width="96" height="96" rx="22" fill="none" stroke="#9ca3af" stroke-width="2" stroke-dasharray="7 5"/>
-  <rect x="412" y="172" width="96" height="96" rx="22" fill="none" stroke="#9ca3af" stroke-width="2" stroke-dasharray="7 5"/>
+  <!-- Icon centers match dmg.contents coordinates in electron-builder.json. -->
+  <line x1="266" y1="200" x2="386" y2="200" stroke="#3b82f6" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="386,191 402,200 386,209" fill="#3b82f6"/>
 
-  <line x1="266" y1="220" x2="386" y2="220" stroke="#3b82f6" stroke-width="3" stroke-linecap="round"/>
-  <polygon points="386,211 402,220 386,229" fill="#3b82f6"/>
-
-  <text x="330" y="322" text-anchor="middle" font-family="PingFang SC,'Helvetica Neue',Arial,sans-serif" font-size="15" fill="#374151">首次打开受阻时，双击右下角「修复安装」脚本，或在终端执行：</text>
-
-  <rect x="70" y="338" width="440" height="32" rx="9" fill="#e8edf5"/>
-  <text x="290" y="359" text-anchor="middle" font-family="Menlo,Monaco,monospace" font-size="13" fill="#111827">xattr -dr com.apple.quarantine "/Applications/WorldBase.app"</text>
+  <text x="32" y="322" font-family="PingFang SC,'Helvetica Neue',Arial,sans-serif" font-size="14" fill="#374151">安装后若首次打开受阻，可双击右侧「修复并打开」脚本。</text>
+  <text x="32" y="346" font-family="PingFang SC,'Helvetica Neue',Arial,sans-serif" font-size="12" fill="#6b7280">脚本仅移除 WorldBase.app 的隔离标记并启动应用；请确认应用来源可信。</text>
 </svg>

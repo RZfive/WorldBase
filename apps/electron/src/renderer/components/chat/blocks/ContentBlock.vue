@@ -83,7 +83,7 @@ function getTextSegments (text?: string) {
   return splitMarkdownWithMermaid(text || '')
 }
 
-// design v1.7 motion: the streaming caret lives at the TEXT tail �?a 2.5px
+// design v1.7 motion: the streaming caret lives at the TEXT tail —a 2.5px
 // signature-gradient lightbar with soft glow, injected inline into the last
 // rendered block so it hugs the newest character.
 const STREAM_CARET_HTML = '<span class="stream-caret" aria-hidden="true"></span>'
@@ -91,7 +91,7 @@ const STREAM_CARET_HTML = '<span class="stream-caret" aria-hidden="true"></span>
 function withStreamCaret (html: string): string {
   const trimmed = html.trimEnd()
   if (!trimmed) return STREAM_CARET_HTML
-  // Raw code/preview surfaces would read the caret as markup �?skip them.
+  // Raw code/preview surfaces would read the caret as markup —skip them.
   if (/<\/(pre|code|table)>$/i.test(trimmed)) return trimmed
   const injected = trimmed.replace(/(<\/(p|li|h[1-6]|blockquote)>\s*)$/, `${STREAM_CARET_HTML}$1`)
   return injected === trimmed ? `${trimmed}${STREAM_CARET_HTML}` : injected
@@ -246,7 +246,8 @@ function handleAnnotationClick (event: MouseEvent): void {
   const annotation = (props.annotations || []).find(item => item.id === annotationId)
   if (!annotation) return
   event.preventDefault()
-  openAnnotationThreadFor(annotation, mark.getBoundingClientRect().toJSON())
+  const rect = getAnnotationEndRect(annotation.id) ?? mark.getBoundingClientRect()
+  openAnnotationThreadFor(annotation, rect.toJSON())
 }
 
 const ANNOTATION_BLOCK_SELECTOR = 'p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, td, th'
@@ -289,101 +290,62 @@ interface AnnotationCharSource {
   offset: number
 }
 
-interface AnnotationRootIndex {
+interface AnnotationTextIndex {
   root: Element
-  /** Normalized character offset of this block within the content root. */
-  rootOffset: number
-  /** Whitespace-normalized text of the whole block root. */
-  chars: string[]
-  /** chars[i] originates from mapping[i]. */
+  /** Visible characters of the whole content, in document order. */
+  text: string
+  /** text[i] originates from mapping[i]. */
   mapping: AnnotationCharSource[]
 }
 
+/**
+ * The stored annotation text comes from selection.toString(), whose newlines
+ * (soft <br> breaks, block boundaries, <pre> content) never line up with the
+ * DOM's text-node stream. Comparing visible characters only makes the match
+ * independent of where those breaks fall.
+ */
 function normalizeAnnotationText (text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
+  return text.replace(/\s+/g, '')
 }
 
 /**
- * Indexes every block root's text once, whitespace-normalized, with a
- * char->(node, offset) mapping. Normalization matters because the stored
- * annotation text comes from selection.toString(): soft line breaks, real
- * newlines inside <pre>, and collapsed markdown spaces all differ from the
- * raw text-node data, and an exact indexOf against raw node text silently
- * missed most real-world selections.
+ * Flattens every text node under the root into one whitespace-free string
+ * with a char->(node, offset) mapping, so a match can be wrapped back into
+ * DOM ranges regardless of how many breaks it crossed.
  */
-function buildAnnotationRootIndexes (root: HTMLElement): AnnotationRootIndex[] {
-  const indexes: AnnotationRootIndex[] = []
-  const byRoot = new Map<Element, AnnotationRootIndex>()
+function buildAnnotationTextIndex (root: HTMLElement): AnnotationTextIndex {
+  const chars: string[] = []
+  const mapping: AnnotationCharSource[] = []
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   let current = walker.nextNode() as Text | null
   while (current) {
-    const blockRoot = getWrapSafeRoot(current, current.parentElement?.closest('.message-text') || root)
-    if (blockRoot) {
-      let index = byRoot.get(blockRoot)
-      if (!index) {
-        let rootOffset = 0
-        try {
-          const before = document.createRange()
-          before.selectNodeContents(root)
-          before.setEnd(blockRoot, 0)
-          rootOffset = normalizeAnnotationText(before.toString()).length
-        } catch {
-          rootOffset = 0
-        }
-        index = { root: blockRoot, rootOffset, chars: [], mapping: [] }
-        byRoot.set(blockRoot, index)
-        indexes.push(index)
-      }
-      const data = current.data
-      let i = 0
-      while (i < data.length) {
-        const char = data[i]
-        if (/\s/.test(char)) {
-          const runStart = i
-          while (i < data.length && /\s/.test(data[i])) i++
-          // A whitespace run collapses to one space; attribute it to the run's
-          // first char so a match ending here terminates inside the run.
-          if (index.chars.length > 0 && index.chars[index.chars.length - 1] !== ' ') {
-            index.chars.push(' ')
-            index.mapping.push({ node: current, offset: runStart })
-          }
-          continue
-        }
-        index.chars.push(char)
-        index.mapping.push({ node: current, offset: i })
-        i++
-      }
+    const data = current.data
+    for (let i = 0; i < data.length; i++) {
+      if (/\s/.test(data[i])) continue
+      chars.push(data[i])
+      mapping.push({ node: current, offset: i })
     }
     current = walker.nextNode() as Text | null
   }
-  return indexes
-}
-
-function wrapIndexRange (index: AnnotationRootIndex, start: number, end: number, annotationId: string): boolean {
-  const first = index.mapping[start]
-  const last = index.mapping[end - 1]
-  if (!first || !last) return false
-  return wrapRangeWithAnnotationMark(first.node, first.offset, last.node, last.offset + 1, annotationId)
+  return { root, text: chars.join(''), mapping }
 }
 
 /**
- * Longest prefix of the needle that occurs inside one root - used when the
- * selection crossed block boundaries (selection.toString() then contains
- * paragraph separators no single text node has). The highlight anchors where
- * the selection began instead of vanishing entirely.
+ * Longest prefix of the needle that occurs anywhere in the content — used
+ * when the full needle no longer matches because a markdown re-render
+ * dropped or reshaped part of the selected text. The highlight anchors
+ * where the selection began instead of vanishing entirely.
  */
-function findAnnotationPrefix (needle: string, index: AnnotationRootIndex): { start: number; length: number } | null {
-  const haystack = index.chars.join('')
-  const maxLen = Math.min(needle.length, haystack.length)
+function findAnnotationPrefix (needle: string, index: AnnotationTextIndex): { start: number; length: number } | null {
+  const maxLen = Math.min(needle.length, index.text.length)
   for (let len = maxLen; len >= 1; len--) {
-    const at = haystack.indexOf(needle.slice(0, len))
+    const at = index.text.indexOf(needle.slice(0, len))
     if (at >= 0) return { start: at, length: len }
   }
   return null
 }
 
 interface AnnotationMatch {
-  index: AnnotationRootIndex
   start: number
   score: number
 }
@@ -402,41 +364,64 @@ function commonSuffixLength (left: string, right: string): number {
   return index
 }
 
-function annotationMatchScore (index: AnnotationRootIndex, start: number, needle: string, locator?: MessageAnnotationLocator): number {
+function annotationMatchScore (index: AnnotationTextIndex, start: number, needle: string, locator?: MessageAnnotationLocator): number {
   if (!locator) return 0
-  const haystack = index.chars.join('')
   let score = 0
   const prefix = normalizeAnnotationText(locator.prefix || '')
   const suffix = normalizeAnnotationText(locator.suffix || '')
   if (prefix) {
-    const matched = commonSuffixLength(prefix, haystack.slice(0, start))
+    const matched = commonSuffixLength(prefix, index.text.slice(0, start))
     score += 100 * (matched / prefix.length)
   }
   if (suffix) {
-    const matched = commonPrefixLength(suffix, haystack.slice(start + needle.length))
+    const matched = commonPrefixLength(suffix, index.text.slice(start + needle.length))
     score += 100 * (matched / suffix.length)
   }
   if (typeof locator.startOffset === 'number') {
-    score += Math.max(0, 24 - Math.min(24, Math.abs(index.rootOffset + start - locator.startOffset) * 0.5))
+    score += Math.max(0, 24 - Math.min(24, Math.abs(start - locator.startOffset) * 0.5))
   }
   return score
 }
-function findAnnotationMatches (indexes: AnnotationRootIndex[], annotation: MessageAnnotation): AnnotationMatch[] {
+
+function findAnnotationMatches (index: AnnotationTextIndex, annotation: MessageAnnotation): AnnotationMatch[] {
   const locator = annotation.locator
   const needle = normalizeAnnotationText(locator?.exact || annotation.text)
   if (!needle) return []
   const matches: AnnotationMatch[] = []
-  for (const index of indexes) {
-    const haystack = index.chars.join('')
-    let from = 0
-    while (from <= haystack.length - needle.length) {
-      const at = haystack.indexOf(needle, from)
-      if (at < 0) break
-      matches.push({ index, start: at, score: annotationMatchScore(index, at, needle, locator) })
-      from = at + Math.max(1, needle.length)
-    }
+  let from = 0
+  while (from <= index.text.length - needle.length) {
+    const at = index.text.indexOf(needle, from)
+    if (at < 0) break
+    matches.push({ start: at, score: annotationMatchScore(index, at, needle, locator) })
+    from = at + Math.max(1, needle.length)
   }
   return matches
+}
+
+/**
+ * Wraps a matched char range in `.chat-annotation-mark` spans. A span must
+ * stay inside one block element, so consecutive chars sharing a block root
+ * form one span and a cross-paragraph match gets one span per paragraph —
+ * all carrying the same annotation id.
+ */
+function wrapIndexRange (index: AnnotationTextIndex, start: number, end: number, annotationId: string): boolean {
+  const blockRootOf = (source: AnnotationCharSource): Element | null =>
+    getWrapSafeRoot(source.node, source.node.parentElement?.closest('.message-text') || index.root)
+
+  let wrapped = false
+  let runStart = start
+  while (runStart < end) {
+    const runRoot = blockRootOf(index.mapping[runStart])
+    let runEnd = runStart + 1
+    while (runEnd < end && blockRootOf(index.mapping[runEnd]) === runRoot) runEnd++
+    const first = index.mapping[runStart]
+    const last = index.mapping[runEnd - 1]
+    if (wrapRangeWithAnnotationMark(first.node, first.offset, last.node, last.offset + 1, annotationId)) {
+      wrapped = true
+    }
+    runStart = runEnd
+  }
+  return wrapped
 }
 
 function wrapTextMatchInRoot (root: HTMLElement, annotation: MessageAnnotation): boolean {
@@ -444,11 +429,13 @@ function wrapTextMatchInRoot (root: HTMLElement, annotation: MessageAnnotation):
   // A locator created from a selection belongs to exactly one content block;
   // this also prevents the same phrase being highlighted in every block.
   if (typeof locator?.blockIndex === 'number' && locator.blockIndex !== props.blockIndex) return false
-  const indexes = buildAnnotationRootIndexes(root)
+  // Rebuilt per annotation: wrapping the previous match mutates text nodes
+  // (split/joined by extractContents), which would stale the mapping.
+  const index = buildAnnotationTextIndex(root)
   const needle = normalizeAnnotationText(locator?.exact || annotation.text)
   if (!needle) return false
 
-  const matches = findAnnotationMatches(indexes, annotation)
+  const matches = findAnnotationMatches(index, annotation)
   if (matches.length > 0) {
     // Legacy annotations have no context. Highlight only a unique occurrence
     // instead of silently binding the first duplicate phrase.
@@ -457,17 +444,16 @@ function wrapTextMatchInRoot (root: HTMLElement, annotation: MessageAnnotation):
     const best = ordered[0]
     const second = ordered[1]
     if (locator && second && best.score <= second.score + 8) return false
-    return wrapIndexRange(best.index, best.start, best.start + needle.length, annotation.id)
+    return wrapIndexRange(index, best.start, best.start + needle.length, annotation.id)
   }
 
-  // Cross-block selections cannot be represented as one DOM mark. Keep the
-  // leading portion visible when enough text survives a markdown re-render.
+  // Partial matches: a markdown re-render may have reshaped part of the
+  // selected text. Keep the leading portion visible when enough of it
+  // survives, anchoring where the selection began instead of vanishing.
   const minPrefix = Math.max(3, Math.ceil(needle.length * 0.25))
-  for (const index of indexes) {
-    const prefix = findAnnotationPrefix(needle, index)
-    if (prefix && prefix.length >= minPrefix && wrapIndexRange(index, prefix.start, prefix.start + prefix.length, annotation.id)) {
-      return true
-    }
+  const prefix = findAnnotationPrefix(needle, index)
+  if (prefix && prefix.length >= minPrefix && wrapIndexRange(index, prefix.start, prefix.start + prefix.length, annotation.id)) {
+    return true
   }
   return false
 }
@@ -482,6 +468,25 @@ function applyAnnotationMarks (): void {
   for (const annotation of annotations) {
     wrapTextMatchInRoot(root, annotation)
   }
+  // Re-wrapped spans carry no state; restore the hover highlight if the
+  // bubble is open (e.g. a generating answer refreshed the annotation).
+  syncAnnotationActiveClass()
+}
+
+/**
+ * Viewport rect of the LAST mark span of one annotation, i.e. the end of the
+ * annotated text. Cross-paragraph matches wrap one span per paragraph, and
+ * anchoring every bubble/thread to this single rect keeps them in one place
+ * no matter which segment is hovered or clicked.
+ */
+function getAnnotationEndRect (annotationId: string): DOMRect | null {
+  const root = exportCaptureRef.value
+  if (!root) return null
+  let last: DOMRect | null = null
+  for (const mark of root.querySelectorAll<HTMLElement>('.chat-annotation-mark')) {
+    if (mark.dataset.annotationId === annotationId) last = mark.getBoundingClientRect()
+  }
+  return last
 }
 
 function handleAnnotationMouseOver (event: MouseEvent): void {
@@ -497,8 +502,15 @@ function handleAnnotationMouseOver (event: MouseEvent): void {
     annotationHideTimer = null
   }
 
-  const rect = mark.getBoundingClientRect()
-  const x = Math.max(8, Math.min(rect.left + rect.width / 2 - ANNOTATION_BUBBLE_WIDTH / 2, window.innerWidth - ANNOTATION_BUBBLE_WIDTH - 8))
+  // One bubble per annotation, pinned to the range's end: moving the pointer
+  // across another segment of the same annotation must not move or re-trigger
+  // it — only switching to a different annotation repositions.
+  if (activeAnnotationId.value === annotation.id && activeAnnotationPos.value) return
+
+  const rect = getAnnotationEndRect(annotation.id) ?? mark.getBoundingClientRect()
+  // Right edge of the bubble sits at the end of the annotated text, clamped
+  // to the viewport.
+  const x = Math.max(8, Math.min(rect.right - ANNOTATION_BUBBLE_WIDTH, window.innerWidth - ANNOTATION_BUBBLE_WIDTH - 8))
   const spaceBelow = window.innerHeight - rect.bottom
   const y = spaceBelow < 160 && rect.top > 200
     ? Math.max(8, rect.top - ANNOTATION_BUBBLE_GAP - 260)
@@ -521,6 +533,23 @@ function keepAnnotationBubble (): void {
     annotationHideTimer = null
   }
 }
+
+/**
+ * Mirrors the hovered annotation id onto every mark span of that annotation.
+ * A cross-paragraph match wraps one span per paragraph, and the hover
+ * highlight must light up the whole range, not just the span under the
+ * pointer (CSS :hover alone only reaches one segment).
+ */
+function syncAnnotationActiveClass (): void {
+  const root = exportCaptureRef.value
+  if (!root) return
+  const activeId = activeAnnotationId.value
+  for (const mark of root.querySelectorAll<HTMLElement>('.chat-annotation-mark')) {
+    mark.classList.toggle('chat-annotation-mark-active', !!activeId && mark.dataset.annotationId === activeId)
+  }
+}
+
+watch(activeAnnotationId, syncAnnotationActiveClass)
 
 function removeActiveAnnotation (): void {
   const annotationId = activeAnnotation.value?.id
@@ -660,7 +689,7 @@ onBeforeUnmount(() => {
       <div class="chat-annotation-bubble-head">
         <span class="chat-annotation-bubble-badge">{{ activeAnnotationTurn?.mode === 'detailed' ? $t('chatUi.quickAskModeDetailed') : $t('chatUi.quickAskModeQuick') }}</span>
         <span class="chat-annotation-bubble-hint">{{ activeAnnotationTurn?.status === 'generating' ? $t('chatUi.quickAskThinking') : $t('chatUi.quickAskThreadHint') }}</span>
-        <button class="chat-annotation-bubble-remove" type="button" @click.stop="removeActiveAnnotation" :title="$t('chatUi.removeAnnotation')">�?/button>
+        <button class="chat-annotation-bubble-remove" type="button" @click.stop="removeActiveAnnotation" :title="$t('chatUi.removeAnnotation')">✕</button>
       </div>
       <p class="chat-annotation-bubble-question">{{ activeAnnotationTurn?.question }}</p>
       <div v-if="activeAnnotationTurn?.status === 'generating'" class="chat-annotation-bubble-loading">
@@ -721,7 +750,7 @@ onBeforeUnmount(() => {
   margin-top: 10px;
 }
 
-/* design v1.7 motion: streaming caret �?a 2.5px signature-gradient lightbar
+/* design v1.7 motion: streaming caret —a 2.5px signature-gradient lightbar
    at the text tail with a soft glow, so words feel "written" out. */
 .message-text :deep(.stream-caret) {
   position: relative;
@@ -736,7 +765,7 @@ onBeforeUnmount(() => {
   animation: stream-caret-breathe 1.1s ease-in-out infinite;
 }
 
-/* Tiny rising sparks �?the "particles composing the text" shimmer. */
+/* Tiny rising sparks —the "particles composing the text" shimmer. */
 .message-text :deep(.stream-caret)::before,
 .message-text :deep(.stream-caret)::after {
   content: '';
@@ -1020,6 +1049,13 @@ onBeforeUnmount(() => {
 
 .message-output :deep(.chat-annotation-mark:hover) {
   background: color-mix(in srgb, var(--app-accent) 22%, transparent);
+}
+
+/* Hovering any segment of an annotation lights up the whole annotated range
+   (the class is synced onto every mark span of the active annotation). */
+.message-output :deep(.chat-annotation-mark-active) {
+  background: color-mix(in srgb, var(--app-accent) 22%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--app-accent) 65%, transparent);
 }
 
 .chat-annotation-bubble {

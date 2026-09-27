@@ -808,6 +808,8 @@ mod tests {
             read_files: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
             store: store.clone(),
+            memory_queue: None,
+            memory_scopes: Vec::new(),
             skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
             mcp: Arc::new(worldbase_mcp_client::McpManager::default()),

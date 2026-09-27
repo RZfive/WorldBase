@@ -163,6 +163,8 @@ mod tests {
             read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
             store: store.clone(),
+            memory_queue: None,
+            memory_scopes: Vec::new(),
             skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![
                 skill_dir.to_path_buf()
             ])),
