@@ -38,7 +38,7 @@ export type {
 }
 
 export type AIExecutionAuthMode = 'strict' | 'auto'
-export type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+export type ReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
 export interface ConversationSummary {
   id: string
@@ -168,7 +168,17 @@ export interface ProviderOption {
   apiKey: string
   models: string[]
   modelContextWindows?: Record<string, number>
-  modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
+  modelCapabilities?: Record<string, {
+    imageGeneration?: boolean
+    imageEditing?: boolean
+    /** Reasoning effort values the gateway declares this model accepts. */
+    reasoningEfforts?: string[]
+    defaultReasoningEffort?: string
+    /** User-chosen default reasoning strength for this model. */
+    reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+    /** Levels the user allows for this model (multi-pick in settings). */
+    allowedReasoningEfforts?: string[]
+  }>
   activeModel: string
   enableThinking?: boolean
   temperature?: number

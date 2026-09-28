@@ -102,7 +102,7 @@ async function buildNativeImGroupDeliberation (input: {
   routing: NonNullable<ReturnType<typeof parseGroupRouting>>
   targetProjectId: string | null
   enableThinking?: boolean
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   temperature?: number
   activeSkillContents: string[]
   systemPromptSections: string[]

@@ -16,7 +16,7 @@ import type { CreateSelectionPayload } from '../../src/main/ai-engine/agent/tool
 import { readDocumentRenderAsset } from '../../src/main/document-preview/document-render-service.js'
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../../src/main/settings/settings-transfer.js'
 import { runImageStudioRequest } from '../../src/main/settings/image-generation-service.js'
-import { fetchProviderModels } from '../../src/main/settings/provider-model-service.js'
+import { fetchProviderCatalog } from '../../src/main/settings/provider-model-service.js'
 import { isAllowedExternalUrl } from '../../src/shared/provider-templates.js'
 import type { AIExecutionAuthMode, AIExecutionPreferences, AIProvidersConfig, ChatFontPreferences, LanguagePreference, LaunchpadLayout, PinnedDockApp, PortableSettingsConfig, WebAppShortcut } from '../../src/main/settings/settings-store.js'
 import { setMainLocale, t } from '../../src/main/i18n/main-i18n.js'
@@ -41,7 +41,7 @@ import { mainState, activeChatSessions, pendingPageAutomationRequests, projectWi
 import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH } from './constants.js'
 import { readUploadedAttachmentFromBuffer, readUploadedAttachmentFromPath, type UploadedAttachmentBufferPayload } from './media/attachments.js'
 import { ensureDocumentRenderPreview } from './media/document-preview.js'
-import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, notifyAiTaskStatus, resolveAgentRuntimeContext } from './ai/agent-context.js'
+import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, notifyAiTaskStatus, refreshProviderReasoningMetadata, resolveAgentRuntimeContext, resolveProviderConfig } from './ai/agent-context.js'
 import { startSelectedRustHarness } from './ai/selected-execution-engine.js'
 import type { JsonRpcResult } from './rust-harness-client.js'
 import { getAllUserMessageTexts, getConversationTitleFromMessages, getLastUserMessageText, getMessageText } from './chat-message-utils.js'
@@ -307,7 +307,7 @@ export function setupIPC (): void {
   })
 
   // AI chat (non-streaming, kept for backward compat)
-  ipcMain.handle('ai:chat', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => {
+  ipcMain.handle('ai:chat', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => {
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
     const folderWorkspacePromptSection = buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
     const baseRuntimeContext = await resolveAgentRuntimeContext({
@@ -408,7 +408,7 @@ export function setupIPC (): void {
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => {
     const sender = event.sender
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const channel = `ai:stream-event:${sessionId}`
@@ -1452,22 +1452,23 @@ export function setupIPC (): void {
   // One-shot Q&A over a text selection from the conversation (快速问答).
   // Resolves the active provider when the caller does not pin one; the mode
   // only shapes the system prompt - it never grants tools.
-  ipcMain.handle('ai:quickAsk', async (_event: IpcMainInvokeEvent, req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string }): Promise<{ ok: boolean; answer?: string; error?: string }> => {
+  ipcMain.handle('ai:quickAsk', async (_event: IpcMainInvokeEvent, req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string; reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'; temperature?: number }): Promise<{ ok: boolean; answer?: string; error?: string }> => {
     try {
-      const providersConfig = settingsStore!.getProviders()
-      // The renderer passes the conversation's current provider/model (the
-      // same selection the chat header shows). If that provider no longer
-      // resolves, fall back to the global active provider instead of failing.
-      const requestedProvider = req.providerId
-        ? providersConfig.providers.find(p => p.id === req.providerId)
-        : null
-      const provider = requestedProvider
-        || providersConfig.providers.find(p => p.id === providersConfig.activeProviderId)
-        || providersConfig.providers[0]
-      if (!provider) throw new Error(t('mainDialog.providerNotFound'))
-      if (!provider.apiKey) throw new Error(t('mainDialog.providerApiKeyMissing'))
-      const model = req.model && provider.models.includes(req.model) ? req.model : provider.activeModel
-      if (!model) throw new Error(t('mainDialog.providerNoModels'))
+      // Same resolution path as the main conversation so the session's
+      // reasoning strength and the provider's thinking/temperature settings
+      // reach this completion; models like glm-5.3-flash reject effort
+      // values outside their own set (e.g. medium).
+      // The panel always sends the live session value; 'max' only covers
+      // direct IPC callers and matches the chat panel default.
+      const providerConfig = resolveProviderConfig(
+        req.providerId,
+        req.model,
+        req.reasoningStrength || 'max',
+        req.temperature
+      )
+      if (!providerConfig) throw new Error(t('mainDialog.providerNotFound'))
+      if (!providerConfig.apiKey) throw new Error(t('mainDialog.providerApiKeyMissing'))
+      if (!providerConfig.model) throw new Error(t('mainDialog.providerNoModels'))
 
       const detailed = req.mode === 'detailed'
       const systemPrompt = detailed
@@ -1481,26 +1482,21 @@ export function setupIPC (): void {
         answer = getMessageText((await rustHarness.chat([
           { role: 'user', content: userContent }
         ], {
-          providerConfig: {
-            apiKey: provider.apiKey,
-            baseUrl: provider.baseUrl,
-            model,
-            apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined,
-            providerId: provider.id,
-            providerName: provider.name
-          },
+          providerConfig,
           systemPromptSections: [systemPrompt],
           // Intentionally a JSON-free, tool-free completion.
           allowedToolNames: ['__quick_ask_no_tools__']
         })).content).trim()
       } else {
         const aiProvider = createProvider({
-          baseUrl: provider.baseUrl,
-          apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined
+          baseUrl: providerConfig.baseUrl,
+          apiProtocol: providerConfig.apiProtocol
         })
-        aiProvider.setApiKey(provider.apiKey)
-        aiProvider.setBaseUrl(provider.baseUrl)
-        aiProvider.setModel(model)
+        aiProvider.setApiKey(providerConfig.apiKey)
+        aiProvider.setBaseUrl(providerConfig.baseUrl)
+        aiProvider.setModel(providerConfig.model)
+        aiProvider.setEnableThinking(providerConfig.enableThinking === true)
+        if (providerConfig.reasoningEffort) aiProvider.setReasoningEffort(providerConfig.reasoningEffort)
         const result = await aiProvider.chatCompletion([
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent }
@@ -2308,7 +2304,9 @@ export function setupIPC (): void {
   })
 
   ipcMain.handle('settings:fetchProviderModels', async (_event: IpcMainInvokeEvent, input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => {
-    return { models: await fetchProviderModels(input) }
+    // One catalog request feeds both the model list and the per-model
+    // reasoning-effort metadata (absent on gateways that don't declare it).
+    return await fetchProviderCatalog(input)
   })
 
   // Probe-based wire-protocol detection: the Rust harness sends the minimal
@@ -2340,6 +2338,12 @@ export function setupIPC (): void {
       }
     }
     broadcastToAppWindows('settings:providersChanged', normalizedConfig)
+    // Fire-and-forget: pulls the per-model reasoning-effort declarations and
+    // persists them; the clamp in resolveProviderConfig uses them on the next
+    // request. Never blocks or fails the save itself.
+    void refreshProviderReasoningMetadata().catch(error => {
+      console.warn('[settings:saveProviders] Reasoning metadata refresh failed:', error)
+    })
     return { success: true }
   })
 

@@ -129,7 +129,7 @@ export function toolCreateAgent (services: ToolServices, getToolDefinitions: () 
           system_prompt: { type: 'string', description: 'System prompt for the agent.' },
           provider_id: { type: 'string', description: 'Existing provider ID from list_agent_workspace_catalog.' },
           model_id: { type: 'string', description: 'Existing model ID under the selected provider.' },
-          reasoning_strength: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+          reasoning_strength: { type: 'string', enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] },
           skill_ids: { type: 'array', items: { type: 'string' }, description: 'Existing skill IDs to bind.' },
           allowed_tools: { type: 'array', items: { type: 'string' }, description: 'Allowed tool names. Leave empty for no allow-list restriction.' },
           denied_tools: { type: 'array', items: { type: 'string' }, description: 'Denied tool names.' },

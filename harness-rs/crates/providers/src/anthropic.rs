@@ -16,12 +16,16 @@ pub const API_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 const CODING_TEMPERATURE: f32 = 0.3;
 
-fn thinking_budget(effort: Option<&str>) -> u32 {
+fn thinking_budget(effort: Option<&str>) -> Option<u32> {
     match effort.unwrap_or("medium") {
-        "low" => 2048,
-        "high" => 16_384,
-        "max" => 32_000,
-        _ => 4096,
+        // `none` means "do not request thinking" — the caller omits the block.
+        "none" => None,
+        "low" => Some(2048),
+        "high" => Some(16_384),
+        "xhigh" => Some(24_000),
+        "max" => Some(32_000),
+        "ultra" => Some(40_000),
+        _ => Some(4096),
     }
 }
 
@@ -170,10 +174,11 @@ impl AnthropicProvider {
         max_tokens: u32,
         options: &ChatOptions,
     ) -> Value {
-        let thinking = options.enable_thinking.then(|| {
-            let budget_tokens = thinking_budget(options.reasoning_effort.as_deref());
-            json!({ "type": "enabled", "budget_tokens": budget_tokens })
-        });
+        let thinking = options
+            .enable_thinking
+            .then(|| thinking_budget(options.reasoning_effort.as_deref()))
+            .flatten()
+            .map(|budget_tokens| json!({ "type": "enabled", "budget_tokens": budget_tokens }));
         let max_tokens = thinking
             .as_ref()
             .and_then(|value| value["budget_tokens"].as_u64())

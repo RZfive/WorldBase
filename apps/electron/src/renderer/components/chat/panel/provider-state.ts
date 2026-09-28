@@ -1,4 +1,5 @@
 import { computed, nextTick, type ComputedRef, type Ref } from 'vue'
+import { clampReasoningEffort } from '../../../../shared/reasoning-effort'
 import { getEnabledProviders } from './provider-utils'
 import type {
   AIExecutionAuthMode,
@@ -54,6 +55,38 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
   } = options
 
   let catalogVersion = 0
+
+  /**
+   * Keep the session reasoning strength on values the selected model actually
+   * accepts. Models declare their supported levels (and default) through the
+   * provider's /models metadata; the user's allowed multi-pick (settings)
+   * narrows that set. An unsupported choice snaps to the model's default,
+   * else to the nearest allowed level. Undeclared models leave the choice
+   * untouched — the main-process clamp still guards the wire value.
+   */
+  function adaptReasoningStrengthToModel (providerId: string, modelId: string): void {
+    const provider = providersConfig.value.providers.find(item => item.id === providerId)
+    const capabilities = provider?.modelCapabilities?.[modelId]
+    const declared = capabilities?.reasoningEfforts
+    const allowed = capabilities?.allowedReasoningEfforts
+    let supported: string[] | undefined = declared
+    if (allowed?.length && declared?.length) {
+      const intersected = allowed.filter(level => declared.includes(level))
+      supported = intersected.length > 0 ? intersected : declared
+    } else if (allowed?.length) {
+      supported = allowed
+    }
+    if (!supported || supported.length === 0 || supported.includes(reasoningStrength.value)) return
+    // Snap target precedence: the model's user-chosen default strength, then
+    // the gateway-declared default, then the nearest allowed level.
+    const declaredDefault = capabilities?.reasoningEffort || capabilities?.defaultReasoningEffort
+    const next = declaredDefault && supported.includes(declaredDefault)
+      ? declaredDefault
+      : clampReasoningEffort(reasoningStrength.value, supported)
+    if ((['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const).includes(next as ReasoningStrength)) {
+      reasoningStrength.value = next as ReasoningStrength
+    }
+  }
 
   async function saveActiveConversationMeta (): Promise<void> {
     if (!currentConversationId.value) return
@@ -130,12 +163,14 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
     selectedModel.value = provider.models.includes(agent.modelId || '')
       ? agent.modelId || ''
       : providerFallbackModel
+    adaptReasoningStrengthToModel(provider.id, selectedModel.value)
   }
 
   async function handleProviderSelectionChange (providerId: string): Promise<void> {
     activeProviderId.value = providerId
     const provider = providers.value.find(item => item.id === providerId)
     selectedModel.value = provider?.activeModel || provider?.models[0] || ''
+    adaptReasoningStrengthToModel(providerId, selectedModel.value)
     if (!syncingProviderOptions.value) await saveActiveConversationMeta()
   }
 
@@ -145,11 +180,13 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
     // the provider's default model first, then saving/reordering the sidebar again.
     activeProviderId.value = selection.providerId
     selectedModel.value = selection.model
+    adaptReasoningStrengthToModel(selection.providerId, selection.model)
     if (!syncingProviderOptions.value) await saveActiveConversationMeta()
   }
 
   async function handleModelSelectionChange (model: string): Promise<void> {
     selectedModel.value = model
+    adaptReasoningStrengthToModel(activeProviderId.value, model)
     if (!syncingProviderOptions.value) await saveActiveConversationMeta()
   }
 

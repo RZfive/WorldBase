@@ -8,7 +8,7 @@ interface ProviderItem {
   models: string[]
 }
 
-type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+type ReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
 const props = withDefaults(defineProps<{
   providers: ProviderItem[]
@@ -19,6 +19,8 @@ const props = withDefaults(defineProps<{
   /** Show the model tuning section (reasoning strength / temperature). */
   showTuning?: boolean
   reasoningStrength?: ReasoningStrength
+  /** Levels the active model declares; empty falls back to the four standard ones. */
+  reasoningEffortOptions?: string[]
   temperature?: number | null
   providerDefaultTemperature?: number
   isGroupConversation?: boolean
@@ -237,12 +239,23 @@ function handlePanelKeydown (e: KeyboardEvent) {
 const TUNING_TEMPERATURE_MIN = 0
 const TUNING_TEMPERATURE_MAX = 2
 const TUNING_SLIDER_THUMB_SIZE = 12
-const reasoningLevels: Array<{ value: ReasoningStrength; labelKey: string }> = [
-  { value: 'low', labelKey: 'chatUi.reasoningLow' },
-  { value: 'medium', labelKey: 'chatUi.reasoningMedium' },
-  { value: 'high', labelKey: 'chatUi.reasoningHigh' },
-  { value: 'max', labelKey: 'chatUi.reasoningMax' }
-]
+const STANDARD_REASONING_LEVELS: ReasoningStrength[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+
+/**
+ * The strength control renders exactly the levels the active model declares;
+ * models without declarations fall back to the four standard levels. Values
+ * are shown as the raw gateway strings (low/medium/high/max) — the English
+ * original matches what the API accepts most directly.
+ */
+const tuningReasoningLevels = computed<string[]>(() => {
+  const declared = props.reasoningEffortOptions || []
+  return declared.length > 0 ? declared : STANDARD_REASONING_LEVELS
+})
+
+function selectReasoningLevel (level: string): void {
+  if (props.isGroupConversation) return
+  emit('update:reasoning-strength', level as ReasoningStrength)
+}
 
 function tuningSliderFill (ratio: number): string {
   const clamped = Math.min(Math.max(ratio, 0), 1)
@@ -259,19 +272,9 @@ const fallbackTuningTemperature = computed(() => {
 const effectiveTuningTemperature = computed(() => {
   return typeof props.temperature === 'number' && Number.isFinite(props.temperature) ? props.temperature : fallbackTuningTemperature.value
 })
-const currentReasoningIndex = computed(() => {
-  const index = reasoningLevels.findIndex(level => level.value === (props.reasoningStrength || 'max'))
-  return index >= 0 ? index : reasoningLevels.length - 1
-})
-const currentReasoningLabel = computed(() => {
-  const level = reasoningLevels[currentReasoningIndex.value]
-  return level ? t(level.labelKey) : t('chatUi.reasoningMax')
-})
+const currentReasoningLabel = computed(() => props.reasoningStrength || 'max')
 const groupReasoningTitle = computed(() => {
   return t('chatUi.groupReasoningTitle', { value: currentReasoningLabel.value })
-})
-const reasoningSliderFill = computed(() => {
-  return tuningSliderFill(currentReasoningIndex.value / Math.max(reasoningLevels.length - 1, 1))
 })
 const temperatureSliderFill = computed(() => {
   const span = Math.max(TUNING_TEMPERATURE_MAX - TUNING_TEMPERATURE_MIN, 1)
@@ -283,13 +286,6 @@ function onTuningTemperatureInput (e: Event) {
   const value = Number.parseFloat((e.target as HTMLInputElement).value)
   if (!Number.isFinite(value)) return
   emit('update:temperature', Math.min(Math.max(value, TUNING_TEMPERATURE_MIN), TUNING_TEMPERATURE_MAX))
-}
-
-function onTuningReasoningInput (e: Event) {
-  const value = Number.parseInt((e.target as HTMLInputElement).value, 10)
-  const level = reasoningLevels[Math.min(Math.max(value, 0), reasoningLevels.length - 1)]
-  if (!level || props.isGroupConversation) return
-  emit('update:reasoning-strength', level.value)
 }
 
 function scrollCurrentIntoView () {
@@ -410,38 +406,41 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- Reasoning + temperature share one compact row. -->
+      <!-- Reasoning + temperature: two self-contained cells that wrap as
+           units on narrow panels; the strength buttons never stack. -->
       <div v-if="props.showTuning" class="provider-model-tuning">
-        <span class="provider-model-tuning-name" :title="props.isGroupConversation ? groupReasoningTitle : ''">
-          {{ $t('chatUi.reasoningStrength') }}
-          <span class="provider-model-tuning-value">{{ currentReasoningLabel }}</span>
-        </span>
-        <input
-          class="provider-model-slider"
-          type="range"
-          min="0"
-          max="3"
-          step="1"
-          :value="currentReasoningIndex"
-          :style="{ '--tuning-slider-fill': reasoningSliderFill }"
-          :disabled="props.isGroupConversation"
-          @input="onTuningReasoningInput"
-        />
-        <span class="provider-model-tuning-divider" aria-hidden="true"></span>
-        <span class="provider-model-tuning-name">
-          {{ $t('chatUi.modelTemperature') }}
-          <span class="provider-model-tuning-value">{{ effectiveTuningTemperature.toFixed(1) }}</span>
-        </span>
-        <input
-          class="provider-model-slider"
-          type="range"
-          :min="TUNING_TEMPERATURE_MIN"
-          :max="TUNING_TEMPERATURE_MAX"
-          step="0.1"
-          :value="effectiveTuningTemperature"
-          :style="{ '--tuning-slider-fill': temperatureSliderFill }"
-          @input="onTuningTemperatureInput"
-        />
+        <div class="provider-model-tuning-cell" :title="props.isGroupConversation ? groupReasoningTitle : ''">
+          <span class="provider-model-tuning-name">{{ $t('chatUi.reasoningStrength') }}</span>
+          <div class="provider-model-strength-group" role="group" :aria-label="$t('chatUi.reasoningStrength')">
+            <button
+              v-for="level in tuningReasoningLevels"
+              :key="level"
+              type="button"
+              class="provider-model-strength-option"
+              :class="{ on: level === (props.reasoningStrength || 'max') }"
+              :disabled="props.isGroupConversation"
+              @click="selectReasoningLevel(level)"
+            >
+            {{ level }}
+          </button>
+          </div>
+        </div>
+        <div class="provider-model-tuning-cell provider-model-tuning-temp">
+          <span class="provider-model-tuning-name">
+            {{ $t('chatUi.modelTemperature') }}
+            <span class="provider-model-tuning-value">{{ effectiveTuningTemperature.toFixed(1) }}</span>
+          </span>
+          <input
+            class="provider-model-slider"
+            type="range"
+            :min="TUNING_TEMPERATURE_MIN"
+            :max="TUNING_TEMPERATURE_MAX"
+            step="0.1"
+            :value="effectiveTuningTemperature"
+            :style="{ '--tuning-slider-fill': temperatureSliderFill }"
+            @input="onTuningTemperatureInput"
+          />
+        </div>
       </div>
     </div>
   </Teleport>
@@ -521,15 +520,27 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(150px, 170px) minmax(210px, 1fr);
 }
 
-/* ---- model tuning section (reasoning strength / temperature, one row) ---- */
+/* ---- model tuning section (reasoning strength / temperature) ---- */
 .provider-model-tuning {
   flex-shrink: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 6px 10px;
   padding: 10px 12px;
   border-top: 1px solid var(--app-border);
   background: color-mix(in srgb, var(--app-panel-muted) 55%, transparent);
+}
+
+.provider-model-tuning-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.provider-model-tuning-temp {
+  flex: 1 1 150px;
 }
 
 .provider-model-tuning-name {
@@ -549,11 +560,47 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.provider-model-tuning-divider {
-  width: 1px;
-  height: 16px;
-  flex-shrink: 0;
-  background: var(--app-border-strong);
+.provider-model-strength-group {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-input-bg);
+  flex: 0 0 auto;
+}
+
+.provider-model-strength-option {
+  border: none;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  padding: 4px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  width: auto;
+  transition: background 0.15s, color 0.15s;
+}
+
+.provider-model-strength-option:hover:not(:disabled) {
+  color: var(--app-text);
+}
+
+.provider-model-strength-option.on {
+  background: var(--app-accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.provider-model-strength-option:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .provider-model-slider {

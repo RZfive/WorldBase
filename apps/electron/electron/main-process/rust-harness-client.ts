@@ -110,7 +110,7 @@ export interface RustChatOptions {
   allowedMcpServerIds?: string[]
   /** Match the Node providers: reasoning is sent only when thinking is enabled. */
   enableThinking?: boolean
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   temperature?: number
   /** Initialize Rust's per-run plan guard before the first provider call. */
   planModeActive?: boolean

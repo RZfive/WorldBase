@@ -611,10 +611,14 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
           <label>
             <span>{{ $t('settings.agentWorkspace.reasoningStrength') }}</span>
             <select v-model="draftAgent.reasoningStrength" class="input">
+              <option value="none">none</option>
+              <option value="minimal">minimal</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
               <option value="max">max</option>
+              <option value="ultra">ultra</option>
             </select>
           </label>
           <label>

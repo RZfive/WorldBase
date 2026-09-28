@@ -68,7 +68,7 @@ export interface ChatCompletionBody {
   stream?: boolean
   stream_options?: { include_usage: boolean }
   modalities?: string[]
-  reasoning_effort?: 'minimal' | 'low' | 'medium' | 'high'
+  reasoning_effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   tools?: { type: string; function: { name: string; description: string; parameters: Record<string, unknown> } }[]
   tool_choice?: string
 }
@@ -201,7 +201,7 @@ export interface StreamDelta {
 
 export type StreamReadResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>>
 
-export type ProviderReasoningEffort = 'low' | 'medium' | 'high' | 'max'
+export type ProviderReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
 /**
  * Wire protocol the provider speaks. Legacy `'openai'` and `'openai-chat'`

@@ -5,6 +5,7 @@ import type { AppUpdateAssetInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateNo
 import type { ProviderTemplateLinks } from '../../shared/provider-templates.js'
 import type { MemoryCompactionSettings, MemoryEmbeddingSettings, ProviderEmbeddingModel } from '../../shared/agent-workspace-types.js'
 import { CHAT_FONT_SIZE_MAX, CHAT_FONT_SIZE_MIN, DEFAULT_CHAT_FONT_SIZE } from '../../shared/chat-font-preferences.js'
+import { normalizeModelCapabilities, type ModelCapabilityEntry } from './model-capabilities.js'
 
 export interface AISettings {
   apiKey: string
@@ -43,7 +44,7 @@ export interface AIProvider {
   /** Context window per model name */
   modelContextWindows?: Record<string, number>
   /** Capability flags per model name. */
-  modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
+  modelCapabilities?: Record<string, ModelCapabilityEntry>
   /** Currently selected model for this provider */
   activeModel: string
   /** Embedding model catalog for this provider; separate from chat `models`. */
@@ -210,26 +211,6 @@ function normalizeBaseUrl (value: unknown): string {
   const trimmed = value.trim()
   if (!trimmed) return ''
   return trimmed.replace(/\/+$/, '')
-}
-
-function normalizeModelCapabilities (
-  value: unknown,
-  models: string[]
-): Record<string, { imageGeneration?: boolean; imageEditing?: boolean }> {
-  const input = (value && typeof value === 'object') ? value as Record<string, unknown> : {}
-  const normalized: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }> = {}
-
-  for (const model of models) {
-    const raw = (input[model] && typeof input[model] === 'object')
-      ? input[model] as Record<string, unknown>
-      : {}
-    normalized[model] = {
-      imageGeneration: raw.imageGeneration === true,
-      imageEditing: raw.imageEditing === true
-    }
-  }
-
-  return normalized
 }
 
 /**

@@ -42,7 +42,7 @@ import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAut
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AgentDefinition, AgentGroupDefinition } from '../../src/shared/agent-workspace-types.js'
 import { mainState } from './state.js'
-import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, resolveProviderConfig } from './ai/agent-context.js'
+import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, refreshProviderReasoningMetadata, resolveProviderConfig } from './ai/agent-context.js'
 import { getSelectedExecutionEngine, startSelectedRustHarness } from './ai/selected-execution-engine.js'
 
 import { enqueueStudioImageTasks } from './media/image-studio-queue.js'
@@ -807,6 +807,14 @@ export async function initializeServices (): Promise<void> {
   } catch (error) {
     console.error('[main] Rust harness is unavailable; project recovery is disabled:', error)
   }
+
+  // Backfill the per-model gateway metadata (declared reasoning levels,
+  // context windows) on startup, not only after a providers save: a settings
+  // save from a stale panel can overwrite them, and the reasoning UI reads
+  // these declarations. Fire-and-forget; failures only mean missing badges.
+  void refreshProviderReasoningMetadata().catch(error => {
+    console.warn('[main] Provider metadata backfill failed:', error)
+  })
 
   mainState.systemService = new SystemService(
     mainState.runtimeManager,

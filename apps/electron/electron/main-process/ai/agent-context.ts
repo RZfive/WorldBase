@@ -1,7 +1,8 @@
-import type { AIExecutionPreferences, AIProvidersConfig } from '../../../src/main/settings/settings-store.js'
+import type { AIExecutionPreferences, AIProvidersConfig, AIProvider } from '../../../src/main/settings/settings-store.js'
 import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, MemoryEmbeddingRuntimeConfig } from '../../../src/shared/agent-workspace-types.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
+import { clampReasoningEffort, fetchProviderCatalog, type ProviderModelMetadata } from '../../../src/main/settings/provider-model-service.js'
 import { mainState } from '../state.js'
 import { broadcastToAppWindows } from '../windows.js'
 import { focusMainWindow, isNotificationSupported, showAppNotification } from '../../../src/main/notifications.js'
@@ -208,7 +209,7 @@ export function applyActiveProviderToAiEngine (): AIProvidersConfig {
     imageGeneration: active?.activeModel ? active.modelCapabilities?.[active.activeModel]?.imageGeneration === true : false,
     imageEditing: active?.activeModel ? active.modelCapabilities?.[active.activeModel]?.imageEditing === true : false,
     enableThinking: active?.enableThinking ?? false,
-    reasoningEffort: 'medium' as const,
+    reasoningEffort: active?.modelCapabilities?.[active.activeModel]?.reasoningEffort ?? 'medium',
     temperature: active?.temperature,
     contextWindow: active?.activeModel ? active.modelContextWindows?.[active.activeModel] : undefined
   }
@@ -218,7 +219,100 @@ export function applyActiveProviderToAiEngine (): AIProvidersConfig {
   return normalizedConfig
 }
 
-export function resolveProviderConfig (requestedProviderId?: string, requestedModelId?: string, reasoningEffort: 'low' | 'medium' | 'high' | 'max' = 'medium', requestedTemperature?: number) {
+/**
+ * Backfill each provider's per-model metadata from its /models catalog —
+ * reasoning-effort levels (zhipu declares glm-5.3 only accepts low/high/max)
+ * and the context window. Best effort: catalog failures leave existing
+ * capabilities untouched. Runs after a providers save so the effort clamp in
+ * resolveProviderConfig always has declared data to work with.
+ */
+export async function refreshProviderReasoningMetadata (): Promise<void> {
+  const providersConfig = mainState.settingsStore!.getProviders()
+  let changed = false
+  for (const provider of providersConfig.providers) {
+    if (!provider.apiKey || !provider.baseUrl || provider.models.length === 0) continue
+    // Anthropic-style catalogs carry no model metadata.
+    if ((provider.apiProtocol || provider.detectedApiProtocol) === 'anthropic') continue
+    let modelMetadata: Record<string, ProviderModelMetadata>
+    try {
+      ;({ modelMetadata } = await fetchProviderCatalog({
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || ''
+      }))
+    } catch {
+      continue
+    }
+    for (const [model, metadata] of Object.entries(modelMetadata)) {
+      if (!provider.models.includes(model)) continue
+      if (providerModelMetadataMatches(provider, model, metadata)) continue
+      if (metadata.supportedReasoningEfforts.length > 0) {
+        if (!provider.modelCapabilities) provider.modelCapabilities = {}
+        const caps = provider.modelCapabilities[model] || (provider.modelCapabilities[model] = {})
+        caps.reasoningEfforts = metadata.supportedReasoningEfforts
+        if (metadata.defaultReasoningEffort) caps.defaultReasoningEffort = metadata.defaultReasoningEffort
+        // cc-switch behaviour: a model without a user-chosen strength starts
+        // on the gateway's declared default level.
+        if (!caps.reasoningEffort && metadata.defaultReasoningEffort &&
+          metadata.supportedReasoningEfforts.includes(metadata.defaultReasoningEffort)) {
+          caps.reasoningEffort = metadata.defaultReasoningEffort as NonNullable<AIProvider['modelCapabilities']>[string]['reasoningEffort']
+        }
+      }
+      if (metadata.contextWindow !== undefined) {
+        if (!provider.modelContextWindows) provider.modelContextWindows = {}
+        provider.modelContextWindows[model] = metadata.contextWindow
+      }
+      changed = true
+    }
+  }
+  if (!changed) return
+  mainState.settingsStore!.saveProviders(providersConfig)
+  applyActiveProviderToAiEngine()
+  if (mainState.rustHarness?.isAvailable()) {
+    try {
+      await mainState.rustHarness.syncProviders()
+    } catch (error) {
+      console.warn('[reasoning-metadata] Rust harness sync deferred:', error)
+    }
+  }
+  broadcastToAppWindows('settings:providersChanged', providersConfig)
+}
+
+function providerModelMetadataMatches (
+  provider: AIProvider,
+  model: string,
+  metadata: ProviderModelMetadata
+): boolean {
+  const caps = provider.modelCapabilities?.[model]
+  if (metadata.supportedReasoningEfforts.length > 0) {
+    const current = caps?.reasoningEfforts || []
+    if (current.length !== metadata.supportedReasoningEfforts.length ||
+      !current.every((effort, index) => effort === metadata.supportedReasoningEfforts[index])) return false
+    if (metadata.defaultReasoningEffort !== undefined &&
+      (caps?.defaultReasoningEffort || undefined) !== metadata.defaultReasoningEffort) return false
+  }
+  if (metadata.contextWindow !== undefined && provider.modelContextWindows?.[model] !== metadata.contextWindow) {
+    return false
+  }
+  return true
+}
+
+/**
+ * Clamp domain for a model's reasoning effort: the user's multi-picked allowed
+ * levels (settings UI) intersected with the gateway-declared set; absent picks
+ * fall back to the declared set. An empty intersection falls back to declared
+ * so requests never leave what the gateway accepts.
+ */
+function effortClampDomain (caps?: { reasoningEfforts?: string[]; allowedReasoningEfforts?: string[] }): string[] | undefined {
+  const declared = caps?.reasoningEfforts
+  const allowed = caps?.allowedReasoningEfforts
+  if (!allowed?.length) return declared
+  if (!declared?.length) return allowed
+  const intersected = allowed.filter(level => declared.includes(level))
+  return intersected.length > 0 ? intersected : declared
+}
+
+export function resolveProviderConfig (requestedProviderId?: string, requestedModelId?: string, reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', requestedTemperature?: number) {
   const providersConfig = mainState.settingsStore!.getProviders()
   const enabledProviderIds = new Set(providersConfig.enabledProviderIds)
   const enabledProviders = providersConfig.providers.filter(provider => enabledProviderIds.has(provider.id))
@@ -236,6 +330,10 @@ export function resolveProviderConfig (requestedProviderId?: string, requestedMo
   const resolvedModel = requestedModelId && provider.models.includes(requestedModelId)
     ? requestedModelId
     : provider.activeModel
+  // Callers without an explicit session/agent strength fall back to the
+  // model's own configured default, then the system default.
+  const effectiveReasoningEffort = reasoningEffort ??
+    provider.modelCapabilities?.[resolvedModel]?.reasoningEffort ?? 'medium'
 
   return {
     apiKey: provider.apiKey,
@@ -248,7 +346,10 @@ export function resolveProviderConfig (requestedProviderId?: string, requestedMo
     imageGeneration: provider.modelCapabilities?.[resolvedModel]?.imageGeneration === true,
     imageEditing: provider.modelCapabilities?.[resolvedModel]?.imageEditing === true,
     enableThinking: provider.enableThinking ?? false,
-    reasoningEffort,
+    reasoningEffort: clampReasoningEffort(
+      effectiveReasoningEffort,
+      effortClampDomain(provider.modelCapabilities?.[resolvedModel])
+    ) as NonNullable<typeof reasoningEffort>,
     temperature: requestedTemperature ?? provider.temperature,
     contextWindow: provider.modelContextWindows?.[resolvedModel]
   }
@@ -262,7 +363,7 @@ export async function resolveAgentRuntimeContext (input: {
   requestedProviderId?: string
   requestedModelId?: string
   requestedTargetProjectId?: string
-  requestedReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
+  requestedReasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   requestedTemperature?: number
   userId?: string
 }): Promise<ResolvedAgentRuntimeContext> {

@@ -47,7 +47,7 @@ export interface AIConfigInput {
   imageGeneration?: boolean
   imageEditing?: boolean
   enableThinking?: boolean
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   contextWindow?: number
   temperature?: number
 }

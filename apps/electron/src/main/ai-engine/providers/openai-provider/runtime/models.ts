@@ -41,20 +41,22 @@ export function resolveReasoningEffort (
   reasoningEffort: ProviderReasoningEffort
 ): ChatCompletionBody['reasoning_effort'] | undefined {
   if (!enableThinking) return undefined
+  // `none` means "do not request thinking" — expressed by omitting the field.
+  if (reasoningEffort === 'none') return undefined
 
   if (isOpenAIProvider(baseUrl, model) && model.toLowerCase().startsWith('gpt-5')) {
-    if (reasoningEffort === 'low') return 'minimal'
+    if (reasoningEffort === 'low' || reasoningEffort === 'minimal') return 'minimal'
     if (reasoningEffort === 'medium') return 'low'
     if (reasoningEffort === 'high') return 'medium'
     return 'high'
   }
 
   if (isDeepSeekProvider(baseUrl, model)) {
-    if (reasoningEffort === 'max') return 'high'
+    if (reasoningEffort === 'max' || reasoningEffort === 'xhigh' || reasoningEffort === 'ultra') return 'high'
     return reasoningEffort
   }
 
-  if (reasoningEffort === 'max') return 'high'
+  if (reasoningEffort === 'max' || reasoningEffort === 'ultra') return 'high'
   return reasoningEffort
 }
 

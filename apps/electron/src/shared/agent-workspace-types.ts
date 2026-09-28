@@ -1,4 +1,4 @@
-export type AgentReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+export type AgentReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
 export type AgentMemoryScope = 'user' | 'agent' | 'project' | 'group' | 'channel'
 

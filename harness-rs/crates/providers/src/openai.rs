@@ -274,16 +274,18 @@ pub(crate) fn resolve_reasoning_effort(
     let normalized =
         if is_openai_provider(base_url, model) && model.to_ascii_lowercase().starts_with("gpt-5") {
             match effort {
+                // gpt-5 has no `none`; "off" is expressed by omitting the field.
+                "none" => return None,
                 "low" => "minimal",
                 "medium" => "low",
                 "high" => "medium",
-                "max" => "high",
+                "xhigh" | "max" | "ultra" => "high",
                 "minimal" => "minimal",
                 _ => return None,
             }
         } else {
             match effort {
-                "minimal" | "low" | "medium" | "high" => effort,
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra" => effort,
                 "max" => "high",
                 _ => return None,
             }

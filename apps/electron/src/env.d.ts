@@ -94,7 +94,7 @@ interface ConversationSummary {
   authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string
-  reasoningStrength?: 'low' | 'medium' | 'high' | 'max'
+  reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   temperature?: number
   targetProjectId?: string
   agentId?: string
@@ -119,7 +119,7 @@ interface ConversationDocumentWorkspaceState {
   width?: number
 }
 
-type AgentReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+type AgentReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 type AgentMemoryScope = 'user' | 'agent' | 'project' | 'group' | 'channel'
 type MemoryType = 'user_trait' | 'agent_skill' | 'step' | 'knowledge'
 type ConnectorType = 'feishu' | 'wechat' | 'wecom' | 'slack' | 'discord' | 'telegram' | 'custom'
@@ -571,7 +571,17 @@ interface AIProviderConfig {
   detectedApiProtocol?: 'openai-chat' | 'openai-responses' | 'anthropic'
   models: string[]
   modelContextWindows?: Record<string, number>
-  modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
+  modelCapabilities?: Record<string, {
+    imageGeneration?: boolean
+    imageEditing?: boolean
+    /** Reasoning effort values the gateway declares this model accepts. */
+    reasoningEfforts?: string[]
+    defaultReasoningEffort?: string
+    /** User-chosen default reasoning strength for this model. */
+    reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+    /** Levels the user allows for this model (multi-pick in settings). */
+    allowedReasoningEfforts?: string[]
+  }>
   activeModel: string
   enableThinking?: boolean
   templateId?: string
@@ -1042,8 +1052,8 @@ interface DocumentSummaryDTO {
 
 interface ElectronAPI {
   // AI
-  chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => Promise<{ ok: boolean }>
+  chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<{ role: string; content: MessageContent }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -1112,7 +1122,7 @@ interface ElectronAPI {
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
   onImageLibraryChanged: (callback: (payload: { source?: string }) => void) => () => void
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
-  quickAsk: (req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string }) => Promise<{ ok: boolean; answer?: string; error?: string }>
+  quickAsk: (req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string; reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'; temperature?: number }) => Promise<{ ok: boolean; answer?: string; error?: string }>
   drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
   loadStudioImageTasks: () => Promise<ImageStudioTask[]>
   saveStudioImageTasks: (tasks: ImageStudioTask[]) => Promise<void>
@@ -1174,7 +1184,7 @@ interface ElectronAPI {
   getAISettings: () => Promise<{ apiKey: string; baseUrl: string; model: string }>
   saveAISettings: (config: { apiKey: string; baseUrl: string; model: string }) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
-  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => Promise<{ models: string[] }>
+  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => Promise<{ models: string[]; modelMetadata?: Record<string, { supportedReasoningEfforts: string[]; defaultReasoningEffort?: string; contextWindow?: number }> }>
   detectProviderProtocol: (input: { baseUrl: string; apiKey: string; model: string }) => Promise<{ protocol: 'openai-chat' | 'openai-responses' | 'anthropic' | null; probes: Array<{ protocol: string; ok: boolean; error?: string }> }>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
   testEmbeddingModel: (input: { providerId: string; modelId: string }) => Promise<{ ok: boolean; dimensions?: number; latencyMs?: number; error?: string }>

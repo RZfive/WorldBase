@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ModelPricing } from '../../../main/ai-engine/cost-tracker'
 import { resolveDefaultModelPricing } from '../../../main/ai-engine/cost-tracker'
@@ -11,7 +11,9 @@ import {
   type ProviderTemplate,
   type ProviderTemplateLinks
 } from '../../../shared/provider-templates'
+import { REASONING_EFFORT_ORDER as REASONING_CANONICAL_LEVELS } from '../../../shared/reasoning-effort'
 import MultiSelectDropdown from './MultiSelectDropdown.vue'
+import EffortLevelSelect from './EffortLevelSelect.vue'
 
 const props = defineProps<{
   /** Template id to open straight into "use this template"; consumed once. */
@@ -40,7 +42,19 @@ interface AIProvider {
   models: string[]
   modelContextWindows?: Record<string, number>
   modelPricing?: Record<string, ModelPricingEntry>
-  modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
+  modelCapabilities?: Record<string, {
+    imageGeneration?: boolean
+    imageEditing?: boolean
+    /** Reasoning effort values the gateway declares this model accepts. */
+    reasoningEfforts?: string[]
+    defaultReasoningEffort?: string
+    /** User-chosen default reasoning strength for this model. */
+    reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+    /** Levels the user allows for this model (multi-pick). Absent/empty = all
+     *  levels allowed; the request-time clamp then uses the gateway-declared
+     *  set. A partial pick narrows the clamp domain. */
+    allowedReasoningEfforts?: string[]
+  }>
   activeModel: string
   /** Embedding model catalog for semantic memory; separate from chat models. */
   embeddingModels?: ProviderEmbeddingModelRow[]
@@ -89,7 +103,6 @@ const budgetLimit = ref('')
 const saving = ref(false)
 const statusMsg = ref('')
 const showKey = ref<Record<string, boolean>>({})
-const newModelInput = ref('')
 const newEmbeddingModelInput = ref('')
 const newEmbeddingDimensionsInput = ref('')
 const embeddingTestState = ref<Record<string, { running: boolean; ok?: boolean; dimensions?: number; latencyMs?: number; error?: string }>>({})
@@ -98,6 +111,10 @@ const selectedProviderId = ref('')
 const editing = ref(false)
 const editDraft = ref<AIProvider | null>(null)
 const remoteModels = ref<string[]>([])
+// Per-model declarations from the last catalog fetch (reasoning effort
+// levels, context window); merged into the draft when models are added so
+// requests follow what the gateway declares.
+const remoteModelMetadata = ref<Record<string, { supportedReasoningEfforts: string[]; defaultReasoningEffort?: string; contextWindow?: number }>>({})
 const selectedRemoteModels = ref<string[]>([])
 const remoteModelsLoading = ref(false)
 const remoteModelsError = ref('')
@@ -198,14 +215,13 @@ function useTemplate (template: ProviderTemplate) {
     modelPricing,
     modelCapabilities,
     activeModel: template.defaultModel,
-    enableThinking: false,
+    enableThinking: true,
     templateId: template.id,
     links: { ...template.links }
   }
   selectedTemplateId.value = ''
   selectedProviderId.value = id
   editing.value = true
-  newModelInput.value = ''
   resetRemoteModels()
   window.setTimeout(() => keyInputRef.value?.focus(), 0)
 }
@@ -316,6 +332,173 @@ const remoteModelsPlaceholder = computed(() => {
   return t('settings.provider.remoteModelsPlaceholder')
 })
 
+// Per-model reasoning strength: a custom multi-select dropdown (cc-switch
+// style) where every level is picked by default and unchecking levels narrows
+// the request-time clamp domain. Level values stay as the raw gateway strings
+// (low/medium/high/max) — the English original matches what APIs accept.
+function declaredReasoningLevels (provider: AIProvider, model: string): string[] {
+  return provider.modelCapabilities?.[model]?.reasoningEfforts || []
+}
+
+function declaredReasoningLevelsLabel (provider: AIProvider, model: string): string {
+  return declaredReasoningLevels(provider, model).join('/')
+}
+
+/** Selectable universe per model: gateway-declared levels, or the full
+ *  canonical enum for gateways without metadata. */
+function modelEffortUniverse (provider: AIProvider, model: string): string[] {
+  const declared = provider.modelCapabilities?.[model]?.reasoningEfforts
+  return declared?.length ? [...declared] : [...REASONING_CANONICAL_LEVELS]
+}
+
+/** Read-only summary: "全部档位" when unrestricted, otherwise the picked list. */
+function formatAllowedEfforts (provider: AIProvider, model: string): string {
+  const universe = modelEffortUniverse(provider, model)
+  if (universe.length === 0) return t('settings.provider.effortNoLevels')
+  const allowed = provider.modelCapabilities?.[model]?.allowedReasoningEfforts
+  if (!allowed?.length) return t('settings.provider.effortAllLevels')
+  const picked = allowed.filter(level => universe.includes(level))
+  return picked.length > 0 ? picked.join('/') : t('settings.provider.effortAllLevels')
+}
+
+// Multi-select in the models table (cc-switch style): checked rows feed the
+// batch bar — set reasoning strength or remove every selected model at once.
+const selectedModelNames = ref<string[]>([])
+
+const allModelsSelected = computed(() => {
+  const models = editDraft.value?.models ?? []
+  return models.length > 0 && selectedModelNames.value.length === models.length
+})
+
+const someModelsSelected = computed(() => selectedModelNames.value.length > 0 && !allModelsSelected.value)
+
+function toggleAllModels (): void {
+  const models = editDraft.value?.models
+  if (!models || models.length === 0) return
+  selectedModelNames.value = allModelsSelected.value ? [] : [...models]
+}
+
+function clearModelSelection (): void {
+  selectedModelNames.value = []
+  batchEffortSelection.value = undefined
+}
+
+// Batch effort multi-pick: the dropdown universe is the union of the selected
+// models' level sets; applying writes the pick intersected with each model's
+// own universe (a level one gateway never declares stays unavailable there).
+const batchEffortSelection = ref<string[] | undefined>(undefined)
+
+const batchEffortUniverse = computed(() => {
+  const draft = editDraft.value
+  if (!draft) return []
+  const union = new Set<string>()
+  for (const model of selectedModelNames.value) {
+    for (const level of modelEffortUniverse(draft, model)) union.add(level)
+  }
+  return REASONING_CANONICAL_LEVELS.filter(level => union.has(level))
+})
+
+function applyBatchAllowedEfforts (): void {
+  const draft = editDraft.value
+  if (!draft || selectedModelNames.value.length === 0) return
+  const picked = batchEffortSelection.value?.length ? batchEffortSelection.value : undefined
+  let applied = 0
+  for (const model of selectedModelNames.value) {
+    if (!draft.models.includes(model)) continue
+    if (!draft.modelCapabilities) draft.modelCapabilities = {}
+    const caps = draft.modelCapabilities[model] ||
+      (draft.modelCapabilities[model] = { imageGeneration: false, imageEditing: false })
+    const universe = modelEffortUniverse(draft, model)
+    const next = picked ? picked.filter(level => universe.includes(level)) : undefined
+    // A pick covering the whole universe is stored as "no restriction".
+    caps.allowedReasoningEfforts = next && next.length < universe.length ? next : undefined
+    applied += 1
+  }
+  batchEffortSelection.value = undefined
+  if (applied > 0) statusMsg.value = t('settings.provider.batchEffortApplied', { count: applied })
+}
+
+function removeSelectedModels (): void {
+  const draft = editDraft.value
+  if (!draft || selectedModelNames.value.length === 0) return
+  const doomed = new Set(selectedModelNames.value)
+  const removed = draft.models.filter(model => doomed.has(model))
+  if (removed.length === 0) return
+  draft.models = draft.models.filter(model => !doomed.has(model))
+  if (draft.modelContextWindows) {
+    for (const model of removed) delete draft.modelContextWindows[model]
+  }
+  if (draft.modelPricing) {
+    for (const model of removed) delete draft.modelPricing[model]
+  }
+  if (draft.modelCapabilities) {
+    for (const model of removed) delete draft.modelCapabilities[model]
+  }
+  if (doomed.has(draft.activeModel)) draft.activeModel = draft.models[0] || ''
+  clearModelSelection()
+  statusMsg.value = t('settings.provider.batchModelsRemoved', { count: removed.length })
+}
+
+// Inline model rename: the name keys every per-model record, so a rename
+// migrates context windows, pricing, capabilities and the active-model
+// reference together with the list entry.
+const renamingModelIndex = ref(-1)
+const renamingModelName = ref('')
+const renameInputRef = ref<HTMLInputElement | null>(null)
+
+function startRenameModel (index: number): void {
+  const draft = editDraft.value
+  if (!draft || !draft.models[index]) return
+  renamingModelIndex.value = index
+  renamingModelName.value = draft.models[index]
+  void nextTick(() => {
+    renameInputRef.value?.focus()
+    renameInputRef.value?.select()
+  })
+}
+
+function cancelRenameModel (): void {
+  renamingModelIndex.value = -1
+  renamingModelName.value = ''
+}
+
+function confirmRenameModel (index: number): void {
+  if (renamingModelIndex.value !== index) return
+  const draft = editDraft.value
+  const oldName = draft?.models[index]
+  const newName = renamingModelName.value.trim()
+  if (draft && oldName && newName && newName !== oldName && !draft.models.includes(newName)) {
+    draft.models[index] = newName
+    if (draft.modelContextWindows && oldName in draft.modelContextWindows) {
+      draft.modelContextWindows[newName] = draft.modelContextWindows[oldName]
+      delete draft.modelContextWindows[oldName]
+    }
+    if (draft.modelPricing && oldName in draft.modelPricing) {
+      draft.modelPricing[newName] = draft.modelPricing[oldName]
+      delete draft.modelPricing[oldName]
+    }
+    if (draft.modelCapabilities && oldName in draft.modelCapabilities) {
+      draft.modelCapabilities[newName] = draft.modelCapabilities[oldName]
+      delete draft.modelCapabilities[oldName]
+    }
+    if (draft.activeModel === oldName) draft.activeModel = newName
+    const selectionIndex = selectedModelNames.value.indexOf(oldName)
+    if (selectionIndex >= 0) selectedModelNames.value.splice(selectionIndex, 1, newName)
+  }
+  renamingModelIndex.value = -1
+  renamingModelName.value = ''
+}
+
+/** v-model target for the per-model effort multi-select; undefined = all. */
+function updateModelAllowedEfforts (model: string, value: string[] | undefined): void {
+  const draft = editDraft.value
+  if (!draft || !draft.models.includes(model)) return
+  if (!draft.modelCapabilities) draft.modelCapabilities = {}
+  const caps = draft.modelCapabilities[model] ||
+    (draft.modelCapabilities[model] = { imageGeneration: false, imageEditing: false })
+  caps.allowedReasoningEfforts = value?.length ? [...value] : undefined
+}
+
 /** Select proxy with '' meaning "auto-detect via protocol probing". */
 const editApiProtocol = computed<'' | 'openai-chat' | 'openai-responses' | 'anthropic'>({
   get: () => editDraft.value?.apiProtocol ?? '',
@@ -342,13 +525,23 @@ function providerProtocolLabel (provider: AIProvider): string {
   return t('settings.provider.apiProtocolAuto')
 }
 
+// The main process backfills gateway metadata (declared reasoning levels,
+// context windows) asynchronously; picking up the broadcast keeps an open
+// panel from re-saving stale capabilities over the refreshed ones. An
+// in-progress edit draft is left alone — reopening hydrates fresh data.
+let providersChangedCleanup: (() => void) | null = null
+
 onMounted(async () => {
   window.addEventListener('focus', onWindowFocus)
+  providersChangedCleanup = window.electronAPI?.onProvidersChanged?.(() => {
+    if (!editing.value) void loadSettings()
+  }) || null
   await loadSettings()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('focus', onWindowFocus)
+  providersChangedCleanup?.()
   if (remoteModelsTimer !== undefined) window.clearTimeout(remoteModelsTimer)
   remoteModelsRequestId += 1
 })
@@ -359,6 +552,7 @@ watch(
     if (remoteModelsTimer !== undefined) window.clearTimeout(remoteModelsTimer)
     remoteModelsRequestId += 1
     remoteModels.value = []
+    remoteModelMetadata.value = {}
     selectedRemoteModels.value = []
     remoteModelsError.value = ''
     remoteModelsLoading.value = false
@@ -402,12 +596,14 @@ async function fetchRemoteModels () {
     })
     if (requestId !== remoteModelsRequestId) return
     remoteModels.value = result.models
+    remoteModelMetadata.value = result.modelMetadata || {}
     selectedRemoteModels.value = []
     // With models available the auto protocol can be probed and pinned.
     void runDetection('auto')
   } catch (err) {
     if (requestId !== remoteModelsRequestId) return
     remoteModels.value = []
+    remoteModelMetadata.value = {}
     selectedRemoteModels.value = []
     remoteModelsError.value = (err as Error).message
   } finally {
@@ -503,10 +699,7 @@ function hydrateProvider (provider: AIProvider, pricingMap: Record<string, Model
   const modelCapabilities: NonNullable<AIProvider['modelCapabilities']> = {}
   for (const model of provider.models) {
     modelPricing[model] = clonePricing(pricingMap[model] || provider.modelPricing?.[model] || getDefaultPricing(model))
-    modelCapabilities[model] = {
-      imageGeneration: provider.modelCapabilities?.[model]?.imageGeneration === true,
-      imageEditing: provider.modelCapabilities?.[model]?.imageEditing === true
-    }
+    modelCapabilities[model] = getModelCapabilities(provider, model)
   }
 
   return {
@@ -566,6 +759,7 @@ function selectProvider (id: string) {
 
 function startAdd () {
   const id = 'provider_' + Date.now().toString(36)
+  cancelRenameModel()
   editDraft.value = {
     id,
     name: '',
@@ -577,27 +771,28 @@ function startAdd () {
     modelCapabilities: {},
     embeddingModels: [],
     activeModel: '',
-    enableThinking: false
+    enableThinking: true
   }
   selectedTemplateId.value = ''
   selectedProviderId.value = id
   editing.value = true
-  newModelInput.value = ''
+  cancelRenameModel()
   resetRemoteModels()
 }
 
 function startEdit () {
   const provider = selectedProvider.value
   if (!provider) return
+  cancelRenameModel()
 
   const modelPricing: Record<string, ModelPricingEntry> = {}
   const modelCapabilities: NonNullable<AIProvider['modelCapabilities']> = {}
   for (const model of provider.models) {
     modelPricing[model] = clonePricing(provider.modelPricing?.[model] || getDefaultPricing(model))
-    modelCapabilities[model] = {
-      imageGeneration: provider.modelCapabilities?.[model]?.imageGeneration === true,
-      imageEditing: provider.modelCapabilities?.[model]?.imageEditing === true
-    }
+    // getModelCapabilities carries the reasoning-effort declarations and the
+    // per-model chosen strength; rebuilding them here would silently drop
+    // them on the next save.
+    modelCapabilities[model] = getModelCapabilities(provider, model)
   }
 
   editDraft.value = {
@@ -609,7 +804,6 @@ function startEdit () {
     embeddingModels: (provider.embeddingModels || []).map(row => ({ ...row }))
   }
   editing.value = true
-  newModelInput.value = ''
   newEmbeddingModelInput.value = ''
   resetRemoteModels()
 }
@@ -621,7 +815,6 @@ function cancelEdit () {
   }
   editDraft.value = null
   editing.value = false
-  newModelInput.value = ''
   awaitingKeyFromWeb.value = false
   clipboardKeyCandidate.value = ''
   resetRemoteModels()
@@ -637,22 +830,117 @@ function addModelByName (model: string): boolean {
   if (!editDraft.value.modelContextWindows) editDraft.value.modelContextWindows = {}
   if (!editDraft.value.modelPricing) editDraft.value.modelPricing = {}
   if (!editDraft.value.modelCapabilities) editDraft.value.modelCapabilities = {}
-  editDraft.value.modelContextWindows[model] = DEFAULT_CONTEXT_WINDOW
+  const metadata = remoteModelMetadata.value[model]
+  editDraft.value.modelContextWindows[model] = metadata?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
   editDraft.value.modelPricing[model] = getDefaultPricing(model)
-  editDraft.value.modelCapabilities[model] = { imageGeneration: false, imageEditing: false }
+  editDraft.value.modelCapabilities[model] = {
+    imageGeneration: false,
+    imageEditing: false,
+    ...(metadata?.supportedReasoningEfforts?.length ? { reasoningEfforts: [...metadata.supportedReasoningEfforts] } : {}),
+    ...(metadata?.defaultReasoningEffort ? { defaultReasoningEffort: metadata.defaultReasoningEffort } : {})
+  }
+  // When the gateway declares a default level, select it right away (cc-switch
+  // behaviour): the model starts with its own recommended strength.
+  const declaredDefault = metadata?.defaultReasoningEffort
+  if (declaredDefault && metadata?.supportedReasoningEfforts?.includes(declaredDefault)) {
+    editDraft.value.modelCapabilities[model].reasoningEffort = declaredDefault as NonNullable<AIProvider['modelCapabilities']>[string]['reasoningEffort']
+  }
   if (!editDraft.value.activeModel) editDraft.value.activeModel = model
   return true
 }
 
-function addModel () {
-  const model = newModelInput.value.trim()
-  if (!model) return
-  if (!addModelByName(model)) {
+// In-table draft row: one blank, fully editable model row appended to the
+// table. Enter/＋ commits it (and blanks the row for the next rapid add);
+// Esc or × dismisses it.
+const modelDraftActive = ref(false)
+const modelDraftNameInputRef = ref<HTMLInputElement | null>(null)
+const modelDraft = reactive({
+  name: '',
+  contextK: '',
+  inputPerMillion: '',
+  outputPerMillion: '',
+  cacheReadPerMillion: ''
+})
+
+// Effort multi-pick made while the draft card is open; carried into the
+// committed model. undefined = all levels allowed (default).
+const modelDraftAllowedEfforts = ref<string[] | undefined>(undefined)
+
+function blankModelDraft (): void {
+  modelDraft.name = ''
+  modelDraft.contextK = ''
+  modelDraft.inputPerMillion = ''
+  modelDraft.outputPerMillion = ''
+  modelDraft.cacheReadPerMillion = ''
+  modelDraftAllowedEfforts.value = undefined
+}
+
+/** Draft-card effort universe: remote metadata for the typed name, else canonical. */
+const draftEffortUniverse = computed(() => {
+  const name = modelDraft.name.trim()
+  const declared = name ? remoteModelMetadata.value[name]?.supportedReasoningEfforts : undefined
+  return declared?.length ? [...declared] : [...REASONING_CANONICAL_LEVELS]
+})
+
+function beginModelDraft (): void {
+  modelDraftActive.value = true
+  void nextTick(() => modelDraftNameInputRef.value?.focus())
+}
+
+function cancelModelDraft (): void {
+  modelDraftActive.value = false
+  blankModelDraft()
+}
+
+function parseDraftNumber (value: string): number | undefined {
+  const parsed = Number.parseFloat(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined
+}
+
+function confirmModelDraft (): void {
+  const draft = editDraft.value
+  const name = modelDraft.name.trim()
+  if (!draft || !name) return
+  if (draft.models.includes(name)) {
     statusMsg.value = t('settings.provider.modelExists')
     return
   }
-  newModelInput.value = ''
+  const metadata = remoteModelMetadata.value[name]
+  draft.models.push(name)
+  if (!draft.modelContextWindows) draft.modelContextWindows = {}
+  if (!draft.modelPricing) draft.modelPricing = {}
+  if (!draft.modelCapabilities) draft.modelCapabilities = {}
+  const contextK = parseDraftNumber(modelDraft.contextK)
+  draft.modelContextWindows[name] = contextK !== undefined && contextK > 0
+    ? Math.round(contextK * CONTEXT_WINDOW_UNIT)
+    : metadata?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+  const fallbackPricing = getDefaultPricing(name)
+  draft.modelPricing[name] = {
+    inputPerMillion: parseDraftNumber(modelDraft.inputPerMillion) ?? fallbackPricing.inputPerMillion,
+    outputPerMillion: parseDraftNumber(modelDraft.outputPerMillion) ?? fallbackPricing.outputPerMillion,
+    cacheReadPerMillion: parseDraftNumber(modelDraft.cacheReadPerMillion) ?? fallbackPricing.cacheReadPerMillion
+  }
+  const declaredDefault = metadata?.defaultReasoningEffort
+  const prePicked = modelDraftAllowedEfforts.value
+  draft.modelCapabilities[name] = {
+    imageGeneration: false,
+    imageEditing: false,
+    ...(metadata?.supportedReasoningEfforts?.length ? { reasoningEfforts: [...metadata.supportedReasoningEfforts] } : {}),
+    ...(declaredDefault ? { defaultReasoningEffort: declaredDefault } : {})
+  }
+  // Levels picked while the draft card was open carry into the committed
+  // model, intersected with what the gateway declares for it.
+  if (prePicked?.length) {
+    const universe = modelEffortUniverse(draft, name)
+    const next = prePicked.filter(level => universe.includes(level))
+    if (next.length > 0 && next.length < universe.length) {
+      draft.modelCapabilities[name].allowedReasoningEfforts = next
+    }
+  }
+  if (!draft.activeModel) draft.activeModel = name
   statusMsg.value = ''
+  blankModelDraft()
+  void nextTick(() => modelDraftNameInputRef.value?.focus())
 }
 
 function addSelectedRemoteModels () {
@@ -671,9 +959,12 @@ function resetRemoteModels () {
   }
   remoteModelsRequestId += 1
   remoteModels.value = []
+  remoteModelMetadata.value = {}
   selectedRemoteModels.value = []
   remoteModelsLoading.value = false
   remoteModelsError.value = ''
+  // Entering/leaving the edit form invalidates the models-table selection.
+  clearModelSelection()
 }
 
 function removeModel (index: number) {
@@ -686,6 +977,7 @@ function removeModel (index: number) {
   if (editDraft.value.activeModel === removed) {
     editDraft.value.activeModel = editDraft.value.models[0] || ''
   }
+  selectedModelNames.value = selectedModelNames.value.filter(model => model !== removed)
 }
 
 function getCtx (provider: AIProvider, model: string): number {
@@ -710,10 +1002,31 @@ function getPricing (provider: AIProvider, model: string): ModelPricingEntry {
   return clonePricing(provider.modelPricing?.[model] || getDefaultPricing(model))
 }
 
-function getModelCapabilities (provider: AIProvider, model: string): { imageGeneration: boolean; imageEditing: boolean } {
+function getModelCapabilities (provider: AIProvider, model: string): {
+  imageGeneration: boolean
+  imageEditing: boolean
+  reasoningEfforts?: string[]
+  defaultReasoningEffort?: string
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+  allowedReasoningEfforts?: string[]
+} {
   return {
     imageGeneration: provider.modelCapabilities?.[model]?.imageGeneration === true,
-    imageEditing: provider.modelCapabilities?.[model]?.imageEditing === true
+    imageEditing: provider.modelCapabilities?.[model]?.imageEditing === true,
+    // Declared reasoning-effort metadata must survive hydrate/save round-trips;
+    // it drives the reasoning-effort clamp on every request.
+    ...(provider.modelCapabilities?.[model]?.reasoningEfforts?.length
+      ? { reasoningEfforts: [...provider.modelCapabilities[model]!.reasoningEfforts!] }
+      : {}),
+    ...(provider.modelCapabilities?.[model]?.defaultReasoningEffort
+      ? { defaultReasoningEffort: provider.modelCapabilities[model]!.defaultReasoningEffort }
+      : {}),
+    ...(provider.modelCapabilities?.[model]?.reasoningEffort
+      ? { reasoningEffort: provider.modelCapabilities[model]!.reasoningEffort }
+      : {}),
+    ...(provider.modelCapabilities?.[model]?.allowedReasoningEfforts?.length
+      ? { allowedReasoningEfforts: [...provider.modelCapabilities[model]!.allowedReasoningEfforts!] }
+      : {})
   }
 }
 
@@ -964,7 +1277,6 @@ async function saveEdit () {
   selectedProviderId.value = normalizedProvider.id
   editDraft.value = null
   editing.value = false
-  newModelInput.value = ''
   awaitingKeyFromWeb.value = false
   clipboardKeyCandidate.value = ''
   resetRemoteModels()
@@ -1328,91 +1640,263 @@ function formatContextWindow (value: number): string {
           <div class="pp-separator" />
 
           <div class="pp-field">
-            <label>{{ $t('settings.provider.modelsAndPricing') }}</label>
-            <div v-if="editDraft.models.length > 0" class="pp-model-list">
-              <div v-for="(model, index) in editDraft.models" :key="model" class="pp-model-card">
-                <div class="pp-model-card-head">
-                  <span class="pp-model-name">{{ model }}</span>
-                  <button class="pp-model-rm" @click="removeModel(index)">×</button>
+            <div class="pp-models-head-row">
+              <label class="pp-models-select-all">
+                <input
+                  type="checkbox"
+                  class="pp-model-check"
+                  :checked="allModelsSelected"
+                  :indeterminate.prop="someModelsSelected"
+                  :disabled="editDraft.models.length === 0"
+                  :aria-label="$t('settings.provider.selectAllModels')"
+                  @change="toggleAllModels"
+                >
+                <span>{{ $t('settings.provider.modelsAndPricing') }}</span>
+                <small v-if="editDraft.models.length > 0">{{ editDraft.models.length }}</small>
+              </label>
+              <div class="pp-models-head-controls">
+                <span v-if="editDraft.models.length > 0" class="pp-models-default-pick">
+                  <span class="pp-thinking-label">{{ $t('settings.provider.defaultModel') }}</span>
+                  <select v-model="editDraft.activeModel" class="pp-select pp-models-default-select">
+                    <option v-for="model in editDraft.models" :key="model" :value="model">{{ model }}</option>
+                  </select>
+                </span>
+                <button
+                  v-if="!modelDraftActive"
+                  class="pp-btn-ghost pp-btn-small"
+                  type="button"
+                  @click="beginModelDraft"
+                >{{ $t('settings.provider.addModelAction') }}</button>
+              </div>
+            </div>
+            <div v-if="selectedModelNames.length > 0" class="pp-model-batch-bar">
+              <span class="pp-model-batch-count">{{ $t('settings.provider.selectedModelsCount', { count: selectedModelNames.length }) }}</span>
+              <div class="pp-model-batch-actions">
+                <div class="pp-model-batch-effort">
+                  <EffortLevelSelect
+                    :model-value="batchEffortSelection"
+                    :universe="batchEffortUniverse"
+                    :aria-label="$t('settings.provider.batchEffortLabel')"
+                    @update:model-value="batchEffortSelection = $event"
+                  />
                 </div>
-
-                <div class="pp-model-fields">
-                  <label class="pp-inline-field">
+                <button
+                  class="pp-btn-primary pp-btn-small"
+                  type="button"
+                  @click="applyBatchAllowedEfforts"
+                >{{ $t('settings.provider.batchEffortApply') }}</button>
+                <button class="pp-btn-danger pp-btn-small" type="button" @click="removeSelectedModels">{{ $t('settings.provider.batchDeleteModels') }}</button>
+                <button class="pp-btn-ghost pp-btn-small" type="button" @click="clearModelSelection">{{ $t('settings.provider.batchClearSelection') }}</button>
+              </div>
+            </div>
+            <div class="pp-model-table">
+              <div v-for="(model, index) in editDraft.models" :key="model" class="pp-model-row" :class="{ checked: selectedModelNames.includes(model) }">
+                <div class="pp-model-row-top">
+                  <input
+                    type="checkbox"
+                    class="pp-model-check"
+                    :value="model"
+                    :aria-label="$t('settings.provider.selectModelForBatch')"
+                    v-model="selectedModelNames"
+                  >
+                  <input
+                    v-if="renamingModelIndex === index"
+                    ref="renameInputRef"
+                    v-model="renamingModelName"
+                    class="pp-model-rename-input"
+                    :aria-label="$t('settings.provider.renameModelAction')"
+                    @keydown.enter.prevent="confirmRenameModel(index)"
+                    @keydown.esc.prevent="cancelRenameModel"
+                    @blur="confirmRenameModel(index)"
+                  >
+                  <span v-else class="pp-model-name" :title="model">{{ model }}</span>
+                  <span v-if="model === editDraft.activeModel" class="pp-default-badge">{{ $t('settings.provider.default') }}</span>
+                  <div class="pp-model-row-chips">
+                    <button class="pp-capability-chip" type="button" :class="{ on: getModelCapabilities(editDraft, model).imageGeneration }" @click="toggleModelCapability(model, 'imageGeneration')">
+                      <span>{{ $t('settings.provider.imageGeneration') }}</span>
+                    </button>
+                    <button
+                      class="pp-capability-chip"
+                      type="button"
+                      :class="{ on: getModelCapabilities(editDraft, model).imageEditing }"
+                      :disabled="!getModelCapabilities(editDraft, model).imageGeneration"
+                      @click="toggleModelCapability(model, 'imageEditing')"
+                    >
+                      <span>{{ $t('settings.provider.imageEditing') }}</span>
+                    </button>
+                  </div>
+                  <div class="pp-model-row-actions">
+                    <button
+                      class="pp-row-action"
+                      type="button"
+                      :title="$t('settings.provider.renameModelAction')"
+                      :aria-label="$t('settings.provider.renameModelAction')"
+                      :disabled="renamingModelIndex >= 0"
+                      @click="startRenameModel(index)"
+                    >✎</button>
+                    <button
+                      class="pp-row-action pp-row-action-danger"
+                      type="button"
+                      :title="$t('common.delete')"
+                      :aria-label="$t('common.delete')"
+                      @click="removeModel(index)"
+                    >×</button>
+                  </div>
+                </div>
+                <div class="pp-model-row-fields">
+                  <label class="pp-model-field pp-model-field-context">
                     <span>{{ $t('settings.provider.contextWindow') }}</span>
                     <input
                       :value="getCtxInK(editDraft, model)"
                       type="number"
                       min="1"
                       step="1"
-                      class="pp-inline-input"
+                      :aria-label="$t('settings.provider.contextWindow')"
                       @input="handleCtxInput(model, $event)"
                     >
                   </label>
-                  <label class="pp-inline-field">
+                  <label class="pp-model-field">
                     <span>{{ $t('settings.provider.inputPrice') }}</span>
                     <input
                       :value="getPricing(editDraft, model).inputPerMillion"
                       type="number"
                       min="0"
                       step="0.01"
-                      class="pp-inline-input"
+                      :aria-label="$t('settings.provider.inputPrice')"
                       @input="handlePricingInput(model, 'inputPerMillion', $event)"
                     >
                   </label>
-                  <label class="pp-inline-field">
+                  <label class="pp-model-field">
                     <span>{{ $t('settings.provider.outputPrice') }}</span>
                     <input
                       :value="getPricing(editDraft, model).outputPerMillion"
                       type="number"
                       min="0"
                       step="0.01"
-                      class="pp-inline-input"
+                      :aria-label="$t('settings.provider.outputPrice')"
                       @input="handlePricingInput(model, 'outputPerMillion', $event)"
                     >
                   </label>
-                  <label class="pp-inline-field">
+                  <label class="pp-model-field">
                     <span>{{ $t('settings.provider.cacheRead') }}</span>
                     <input
                       :value="getPricing(editDraft, model).cacheReadPerMillion"
                       type="number"
                       min="0"
                       step="0.01"
-                      class="pp-inline-input"
+                      :aria-label="$t('settings.provider.cacheRead')"
                       @input="handlePricingInput(model, 'cacheReadPerMillion', $event)"
                     >
                   </label>
+                  <div class="pp-model-field pp-model-field-effort">
+                    <span>{{ $t('settings.provider.reasoningLevelLabel') }}</span>
+                    <EffortLevelSelect
+                      :model-value="getModelCapabilities(editDraft, model).allowedReasoningEfforts"
+                      :universe="modelEffortUniverse(editDraft, model)"
+                      :default-level="getModelCapabilities(editDraft, model).defaultReasoningEffort"
+                      :aria-label="$t('settings.provider.reasoningLevelLabel')"
+                      @update:model-value="updateModelAllowedEfforts(model, $event)"
+                    />
+                  </div>
                 </div>
+              </div>
 
-                <div class="pp-model-capability-row">
-                  <button class="pp-capability-chip" type="button" :class="{ on: getModelCapabilities(editDraft, model).imageGeneration }" @click="toggleModelCapability(model, 'imageGeneration')">
-                    <span>{{ $t('settings.provider.imageGeneration') }}</span>
-                  </button>
-                  <button
-                    class="pp-capability-chip"
-                    type="button"
-                    :class="{ on: getModelCapabilities(editDraft, model).imageEditing }"
-                    :disabled="!getModelCapabilities(editDraft, model).imageGeneration"
-                    @click="toggleModelCapability(model, 'imageEditing')"
+              <!-- Full in-table draft card: every field editable before the
+                   model is committed; Enter or ＋ appends and keeps the card
+                   open for rapid consecutive adds. -->
+              <div v-if="modelDraftActive" class="pp-model-row pp-model-draft-row">
+                <div class="pp-model-row-top">
+                  <input
+                    ref="modelDraftNameInputRef"
+                    v-model="modelDraft.name"
+                    class="pp-model-rename-input"
+                    type="text"
+                    :placeholder="$t('settings.provider.modelPlaceholder')"
+                    :aria-label="$t('settings.provider.modelColumnLabel')"
+                    @keydown.enter.prevent="confirmModelDraft"
+                    @keydown.esc.prevent="cancelModelDraft"
                   >
-                    <span>{{ $t('settings.provider.imageEditing') }}</span>
-                  </button>
+                  <div class="pp-model-row-chips">
+                    <span
+                      v-if="declaredReasoningLevels(editDraft, modelDraft.name.trim()).length > 0"
+                      class="pp-capability-chip pp-effort-chip"
+                      :title="$t('settings.provider.reasoningLevelsSupported')"
+                    >
+                      {{ declaredReasoningLevelsLabel(editDraft, modelDraft.name.trim()) }}
+                    </span>
+                  </div>
+                  <div class="pp-model-row-actions">
+                    <button
+                      class="pp-row-action pp-row-action-add"
+                      type="button"
+                      :title="$t('settings.provider.addModelAction')"
+                      :aria-label="$t('settings.provider.addModelAction')"
+                      :disabled="!modelDraft.name.trim()"
+                      @click="confirmModelDraft"
+                    >＋</button>
+                    <button
+                      class="pp-row-action pp-row-action-danger"
+                      type="button"
+                      :title="$t('common.cancel')"
+                      :aria-label="$t('common.cancel')"
+                      @click="cancelModelDraft"
+                    >×</button>
+                  </div>
+                </div>
+                <div class="pp-model-row-fields">
+                  <label class="pp-model-field pp-model-field-context">
+                    <span>{{ $t('settings.provider.contextWindow') }}</span>
+                    <input
+                      v-model="modelDraft.contextK"
+                      type="number"
+                      min="1"
+                      step="1"
+                      :aria-label="$t('settings.provider.contextWindow')"
+                    >
+                  </label>
+                  <label class="pp-model-field">
+                    <span>{{ $t('settings.provider.inputPrice') }}</span>
+                    <input
+                      v-model="modelDraft.inputPerMillion"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      :aria-label="$t('settings.provider.inputPrice')"
+                    >
+                  </label>
+                  <label class="pp-model-field">
+                    <span>{{ $t('settings.provider.outputPrice') }}</span>
+                    <input
+                      v-model="modelDraft.outputPerMillion"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      :aria-label="$t('settings.provider.outputPrice')"
+                    >
+                  </label>
+                  <label class="pp-model-field">
+                    <span>{{ $t('settings.provider.cacheRead') }}</span>
+                    <input
+                      v-model="modelDraft.cacheReadPerMillion"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      :aria-label="$t('settings.provider.cacheRead')"
+                    >
+                  </label>
+                  <div class="pp-model-field pp-model-field-effort">
+                    <span>{{ $t('settings.provider.reasoningLevelLabel') }}</span>
+                    <EffortLevelSelect
+                      :model-value="modelDraftAllowedEfforts"
+                      :universe="draftEffortUniverse"
+                      :default-level="remoteModelMetadata[modelDraft.name.trim()]?.defaultReasoningEffort"
+                      :aria-label="$t('settings.provider.reasoningLevelLabel')"
+                      @update:model-value="modelDraftAllowedEfforts = $event"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
-
-            <div class="pp-model-add">
-              <input v-model="newModelInput" type="text" :placeholder="$t('settings.provider.modelPlaceholder')" @keydown.enter.prevent="addModel" />
-              <button @click="addModel">{{ $t('settings.provider.add') }}</button>
-            </div>
-          </div>
-
-          <div class="pp-separator" />
-
-          <div class="pp-field" v-if="editDraft.models.length > 0">
-            <label>{{ $t('settings.provider.defaultModel') }}</label>
-            <select v-model="editDraft.activeModel" class="pp-select">
-              <option v-for="model in editDraft.models" :key="model" :value="model">{{ model }}</option>
-            </select>
           </div>
 
           <div class="pp-separator" />
@@ -1485,11 +1969,18 @@ function formatContextWindow (value: number): string {
 
           <div class="pp-separator" />
 
-          <div class="pp-field pp-toggle-row" @click.prevent="editDraft.enableThinking = !editDraft.enableThinking">
-            <label>{{ $t('settings.provider.enableThinking') }}</label>
-            <span :class="['pp-toggle', { on: editDraft.enableThinking }]"><span class="pp-toggle-thumb" /></span>
+          <div class="pp-thinking-card">
+            <div class="pp-thinking-row">
+              <div
+                class="pp-thinking-cell pp-thinking-toggle-cell"
+                @click.prevent="editDraft.enableThinking = !editDraft.enableThinking"
+              >
+                <span class="pp-thinking-label">{{ $t('settings.provider.enableThinking') }}</span>
+                <span :class="['pp-toggle', { on: editDraft.enableThinking }]"><span class="pp-toggle-thumb" /></span>
+              </div>
+            </div>
+            <span class="pp-hint">{{ $t('settings.provider.thinkingHint') }}</span>
           </div>
-          <span class="pp-hint">{{ $t('settings.provider.thinkingHint') }}</span>
 
           <div class="pp-separator" />
 
@@ -1604,6 +2095,12 @@ function formatContextWindow (value: number): string {
                 <span>{{ $t('settings.provider.cacheMeta', { price: formatPricing(getPricing(selectedProvider, model).cacheReadPerMillion) }) }}</span>
                 <span v-if="getModelCapabilities(selectedProvider, model).imageGeneration">{{ $t('settings.provider.imageGeneration') }}</span>
                 <span v-if="getModelCapabilities(selectedProvider, model).imageEditing">{{ $t('settings.provider.imageEditing') }}</span>
+                <span v-if="declaredReasoningLevelsLabel(selectedProvider, model)">
+                  {{ $t('settings.provider.reasoningLevelsSupported') }} {{ declaredReasoningLevelsLabel(selectedProvider, model) }}
+                </span>
+                <span>
+                  {{ $t('settings.provider.reasoningLevelLabel') }} {{ formatAllowedEfforts(selectedProvider, model) }}
+                </span>
               </div>
             </div>
             <span v-if="model === selectedProvider.activeModel" class="pp-default-badge">{{ $t('settings.provider.default') }}</span>
@@ -1614,6 +2111,11 @@ function formatContextWindow (value: number): string {
           <div class="pp-row">
             <span class="pp-row-label">{{ $t('settings.provider.thinkingMode') }}</span>
             <span class="pp-row-value">{{ selectedProvider.enableThinking ? $t('settings.provider.enabled') : $t('settings.provider.notEnabled') }}</span>
+          </div>
+
+          <div class="pp-row">
+            <span class="pp-row-label">{{ $t('settings.provider.reasoningLevelLabel') }}</span>
+            <span class="pp-row-value">{{ selectedProvider.activeModel ? formatAllowedEfforts(selectedProvider, selectedProvider.activeModel) : t('settings.provider.effortAllLevels') }}</span>
           </div>
 
           <div class="pp-separator" />
@@ -1678,13 +2180,6 @@ function formatContextWindow (value: number): string {
 .pp-budget-input:focus,
 .pp-inline-input:focus {
   border-color: var(--app-accent);
-}
-
-.pp-model-capability-row {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-  flex-wrap: wrap;
 }
 
 .pp-remote-model-actions,
@@ -2028,6 +2523,8 @@ function formatContextWindow (value: number): string {
   border-radius: 8px;
   font-size: 0.84em;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .pp-add-btn {
@@ -2144,6 +2641,52 @@ function formatContextWindow (value: number): string {
   margin: 16px 0;
 }
 
+.pp-thinking-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-panel-subtle);
+  padding: 12px;
+}
+
+.pp-thinking-row {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+}
+
+.pp-thinking-cell {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+.pp-thinking-toggle-cell {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+}
+
+.pp-thinking-label {
+  font-size: 0.85em;
+  color: var(--app-text-muted);
+}
+
+.pp-effort-chip {
+  cursor: default;
+}
+
+.pp-effort-chip.declared-default {
+  border-color: var(--app-accent);
+  color: var(--app-accent);
+}
+
 .pp-field {
   display: flex;
   flex-direction: column;
@@ -2159,6 +2702,247 @@ function formatContextWindow (value: number): string {
   flex-direction: column;
   gap: 12px;
   margin-bottom: 10px;
+}
+
+/* Model cards: each model is a multi-line card (name line + labelled field
+   grid that wraps), so the layout never needs a horizontal scrollbar. */
+.pp-model-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pp-model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-panel-subtle);
+}
+
+.pp-model-row.checked {
+  border-color: color-mix(in srgb, var(--app-accent) 55%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 55%, var(--app-panel-subtle));
+}
+
+.pp-model-row-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pp-model-check {
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--app-accent);
+}
+
+.pp-model-row input:not([type='checkbox']),
+.pp-model-row .pp-select {
+  width: 100%;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-input-border);
+  border-radius: 7px;
+  color: var(--app-text);
+  padding: 5px 8px;
+  font-size: 0.8em;
+  outline: none;
+  min-width: 0;
+}
+
+.pp-model-row input:not([type='checkbox']):focus,
+.pp-model-row .pp-select:focus {
+  border-color: var(--app-accent);
+}
+
+.pp-model-row .pp-model-name {
+  font-size: 0.86em;
+  flex: 1 1 140px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pp-model-row-top .pp-model-rename-input {
+  flex: 1 1 140px;
+}
+
+/* Field row: flex with per-field bases so prices stay narrow and the effort
+   multi-select lines up on the same row; wraps only when truly narrow. */
+.pp-model-row-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pp-model-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 84px;
+  font-size: 0.7em;
+  color: var(--app-text-faint);
+}
+
+.pp-model-field-context {
+  flex: 1.25 1 106px;
+}
+
+.pp-model-field-effort {
+  flex: 1.9 1 172px;
+}
+
+.pp-model-field > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pp-model-row-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pp-model-row .pp-capability-chip {
+  padding: 2px 7px;
+  font-size: 0.7em;
+  white-space: nowrap;
+  flex: none;
+}
+
+.pp-model-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.pp-row-action {
+  border: 1px solid var(--app-input-border);
+  background: var(--app-panel);
+  color: var(--app-text-muted);
+  border-radius: 7px;
+  width: 24px;
+  height: 24px;
+  line-height: 1;
+  font-size: 0.85em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.pp-row-action:hover:not(:disabled) {
+  border-color: var(--app-accent);
+  color: var(--app-accent);
+}
+
+.pp-row-action-danger:hover:not(:disabled) {
+  border-color: #ff453a;
+  color: #ff453a;
+}
+
+.pp-row-action-add {
+  font-weight: 700;
+}
+
+.pp-model-rename-input {
+  width: 100%;
+  background: var(--app-input-bg);
+  border: 1px solid var(--app-accent);
+  border-radius: 7px;
+  color: var(--app-text);
+  padding: 5px 8px;
+  font-size: 0.84em;
+  outline: none;
+  min-width: 0;
+}
+
+.pp-models-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.pp-models-head-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pp-models-default-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.pp-models-default-select {
+  max-width: 220px;
+  padding: 4px 8px;
+  font-size: 0.8em;
+}
+
+.pp-models-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pp-models-select-all small {
+  color: var(--app-text-faint);
+  font-size: 0.78em;
+}
+
+/* cc-switch-style batch bar: appears once at least one model card is
+   checked; applies the reasoning strength or removes every selection. */
+.pp-model-batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 40%, var(--app-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-accent-soft) 45%, var(--app-panel));
+}
+
+.pp-model-batch-count {
+  font-size: 0.8em;
+  color: var(--app-text);
+}
+
+.pp-model-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Keep the batch effort multi-select compact inside the batch bar. */
+.pp-model-batch-effort {
+  min-width: 230px;
+  max-width: 340px;
+  flex: 1 1 230px;
 }
 
 .pp-model-card {

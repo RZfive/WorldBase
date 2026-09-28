@@ -31,17 +31,25 @@ export const DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
 
 /** Thinking budget per reasoning-effort level. */
 const THINKING_BUDGETS: Record<ProviderReasoningEffort, number> = {
+  none: 0,
+  minimal: 2048,
   low: 2048,
   medium: 4096,
   high: 16384,
-  max: 32000
+  xhigh: 24000,
+  max: 32000,
+  ultra: 40000
 }
 
 export function resolveAnthropicThinking (runtime: AnthropicRuntime): AnthropicThinkingConfig | undefined {
   if (!runtime.enableThinking) return undefined
+  const budgetTokens = THINKING_BUDGETS[runtime.reasoningEffort] ?? THINKING_BUDGETS.medium
+  // `none` means "do not request thinking"; Anthropic budgets must be >= 1024,
+  // so the block is omitted entirely.
+  if (budgetTokens <= 0) return undefined
   return {
     type: 'enabled',
-    budget_tokens: THINKING_BUDGETS[runtime.reasoningEffort] ?? THINKING_BUDGETS.medium
+    budget_tokens: budgetTokens
   }
 }
 

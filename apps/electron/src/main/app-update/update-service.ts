@@ -201,7 +201,7 @@ function describeUnexpectedUpdateApiResponse (response: Response, body: string):
   const looksLikeAccess = /cloudflareaccess\.com|Cloudflare Access|cdn-cgi\/access/i.test(`${location}\n${body}`)
 
   if (looksLikeAccess) {
-    return '更新接口被 Cloudflare Access 拦截，请放行 api.worldbase.world 的 /api/releases 公开路径。'
+    return '更新接口被 Cloudflare Access 拦截，请放行 api.worldbase.world 的 /api/app-update 与 /api/releases 公开路径。'
   }
 
   if (looksLikeHtml) {
@@ -980,11 +980,18 @@ export class UpdateService extends EventEmitter {
           signal: timeoutController.signal,
           headers: { Accept: 'application/json' }
         })
-        // 老版服务端还没有 /api/app-update/latest：退回 /api/releases 兼容判定。
-        if (response.status === 404 && apiPath === DEFAULT_UPDATE_API_PATH) {
+        const body = await response.text().catch(() => '')
+        const contentType = (response.headers.get('content-type') || '').toLowerCase()
+
+        // 新接口只要不是健康的 JSON 200——老版服务端没有该路由（404 JSON）、
+        // 被 Cloudflare Access 拦截（302 → HTML 登录页）、或网关 5xx——都退回
+        // /api/releases 兼容判定，保证基础更新能力不被新路径的问题拖垮。
+        if (apiPath === DEFAULT_UPDATE_API_PATH &&
+            !(response.ok && contentType.includes('application/json'))) {
+          this.log(`app-update endpoint unusable (status=${response.status} content-type=${contentType || 'n/a'}); falling back to ${LEGACY_UPDATE_API_BASE_PATH}`)
           return await fetchPayload(LEGACY_UPDATE_API_BASE_PATH)
         }
-        const body = await response.text().catch(() => '')
+
         if (!response.ok) {
           throw new Error(body || t('mainDialog.updateApiHttpStatus', { status: response.status }))
         }

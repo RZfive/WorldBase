@@ -6,7 +6,7 @@ import type { AgentGroupDirectReply, AgentGroupProgressSnapshot, AgentGroupTrans
 import type { ConversationFolderWorkspaceState } from '../../shared/folder-workspace-types.js'
 
 export type ChatMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
-export type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+export type ReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
 export interface ToolProgressEntry {
   stage: string

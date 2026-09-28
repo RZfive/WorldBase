@@ -182,6 +182,15 @@ const {
 // thread so the user can keep asking in 简略/详细 depth.
 const quickAskState = ref<QuickAskPopoverState | null>(null)
 
+// The strength control renders exactly the levels the active model declares
+// (from the provider's /models metadata); undeclared models get the standard
+// four. Switching models swaps the choices with the model.
+const activeModelReasoningEfforts = computed<string[]>(() => {
+  const provider = providersConfig.value.providers.find(item => item.id === activeProviderId.value)
+  const declared = provider?.modelCapabilities?.[selectedModel.value]?.reasoningEfforts || []
+  return declared.length > 0 ? declared : ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+})
+
 function handleAddSelectionToContext (text: string): void {
   addSelectionQuoteToInput(text)
 }
@@ -266,7 +275,12 @@ async function handleQuickAskFlight (payload: { question: string; mode: QuickAsk
         // selection the header shows, agent-synced included). Empty values let
         // main resolve its default.
         providerId: activeProviderId.value || undefined,
-        model: selectedModel.value || undefined
+        model: selectedModel.value || undefined,
+        // Keep this one-shot completion on the session's config header:
+        // models reject effort values outside their own set (glm-5.3-flash
+        // only accepts low/high/max).
+        reasoningStrength: reasoningStrength.value,
+        temperature: conversationTemperature.value ?? undefined
       })
     } catch (error) {
       result = { ok: false, error: error instanceof Error ? error.message : t('chatUi.quickAskFailed') }
@@ -914,6 +928,7 @@ watch(
             :selected-model="selectedModel"
             :show-provider-selector="shouldUseConversationProviderOverride"
             :reasoning-strength="reasoningStrength"
+            :reasoning-effort-options="activeModelReasoningEfforts"
             :temperature="conversationTemperature"
             :provider-default-temperature="providerDefaultTemperature"
             :is-group-conversation="isGroupConversation"

@@ -3,7 +3,7 @@ export interface ConversationMetadataPatch {
   authMode?: 'strict' | 'auto' | null
   providerId?: string | null
   selectedModel?: string | null
-  reasoningStrength?: 'low' | 'medium' | 'high' | 'max' | null
+  reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | null
   temperature?: number | null
   targetProjectId?: string | null
   agentId?: string | null
@@ -22,7 +22,7 @@ export function validateConversationMetadata (input: unknown): ConversationMetad
       : key === 'authMode'
         ? value === null || value === 'strict' || value === 'auto'
         : key === 'reasoningStrength'
-          ? value === null || ['low', 'medium', 'high', 'max'].includes(value as string)
+          ? value === null || ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value as string)
           : key === 'temperature'
             ? value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 2)
             : false

@@ -72,7 +72,7 @@ interface ConversationSummary {
   authMode?: AIExecutionAuthMode
   providerId?: string
   selectedModel?: string
-  reasoningStrength?: 'low' | 'medium' | 'high' | 'max'
+  reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   temperature?: number
   targetProjectId?: string
   agentId?: string
@@ -124,7 +124,14 @@ interface AIProvider {
   detectedApiProtocol?: 'openai-chat' | 'openai-responses' | 'anthropic'
   models: string[]
   modelContextWindows?: Record<string, number>
-  modelCapabilities?: Record<string, { imageGeneration?: boolean; imageEditing?: boolean }>
+  modelCapabilities?: Record<string, {
+    imageGeneration?: boolean
+    imageEditing?: boolean
+    reasoningEfforts?: string[]
+    defaultReasoningEffort?: string
+    reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+    allowedReasoningEfforts?: string[]
+  }>
   activeModel: string
   enableThinking?: boolean
   temperature?: number
@@ -505,8 +512,8 @@ interface SystemStatusSnapshot {
  */
 export interface ElectronAPI {
   // AI
-  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
+  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<ChatMessage>
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -574,7 +581,7 @@ export interface ElectronAPI {
   deleteImageLibraryFolder: (folderName: string) => Promise<{ updated: number }>
   onImageLibraryChanged: (callback: (payload: { source?: string }) => void) => () => void
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }) => Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }>
-  quickAsk: (req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string }) => Promise<{ ok: boolean; answer?: string; error?: string }>
+  quickAsk: (req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string; reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'; temperature?: number }) => Promise<{ ok: boolean; answer?: string; error?: string }>
   drainPendingStudioImageTasks: () => Promise<ImageStudioGenerateRequest[]>
   loadStudioImageTasks: () => Promise<ImageStudioTask[]>
   saveStudioImageTasks: (tasks: ImageStudioTask[]) => Promise<void>
@@ -643,7 +650,7 @@ export interface ElectronAPI {
   getAISettings: () => Promise<AISettings>
   saveAISettings: (config: AISettings) => Promise<{ success: boolean }>
   getProviders: () => Promise<AIProvidersConfig>
-  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => Promise<{ models: string[] }>
+  fetchProviderModels: (input: { baseUrl: string; apiKey: string; apiProtocol?: '' | 'openai-chat' | 'openai-responses' | 'anthropic' }) => Promise<{ models: string[]; modelMetadata?: Record<string, { supportedReasoningEfforts: string[]; defaultReasoningEffort?: string; contextWindow?: number }> }>
   detectProviderProtocol: (input: { baseUrl: string; apiKey: string; model: string }) => Promise<{ protocol: 'openai-chat' | 'openai-responses' | 'anthropic' | null; probes: Array<{ protocol: string; ok: boolean; error?: string }> }>
   saveProviders: (config: AIProvidersConfig) => Promise<{ success: boolean }>
   testEmbeddingModel: (input: { providerId: string; modelId: string }) => Promise<{ ok: boolean; dimensions?: number; latencyMs?: number; error?: string }>
@@ -777,8 +784,8 @@ export interface ElectronAPI {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
-  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext, folderWorkspaceRoot),
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'low' | 'medium' | 'high' | 'max', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot, computerUseEnabled),
+  chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext, folderWorkspaceRoot),
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot, computerUseEnabled),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => ipcRenderer.invoke('ai:groupInject', sessionId, groupId, content, targetAgentIds),
@@ -874,7 +881,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => { ipcRenderer.removeListener('image:library:changed', handler) }
   },
   optimizeImagePrompt: (req: { providerId: string; model: string; prompt: string; isNegative?: boolean }): Promise<{ ok: boolean; optimizedPrompt?: string; error?: string }> => ipcRenderer.invoke('image:prompt:optimize', req),
-  quickAsk: (req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string }): Promise<{ ok: boolean; answer?: string; error?: string }> => ipcRenderer.invoke('ai:quickAsk', req),
+  quickAsk: (req: { question: string; selection: string; mode?: 'quick' | 'detailed'; providerId?: string; model?: string; reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'; temperature?: number }): Promise<{ ok: boolean; answer?: string; error?: string }> => ipcRenderer.invoke('ai:quickAsk', req),
   drainPendingStudioImageTasks: (): Promise<ImageStudioGenerateRequest[]> => ipcRenderer.invoke('image:studio:drainPendingTasks'),
   loadStudioImageTasks: (): Promise<ImageStudioTask[]> => ipcRenderer.invoke('image:studio:loadTasks'),
   saveStudioImageTasks: (tasks: ImageStudioTask[]) => ipcRenderer.invoke('image:studio:saveTasks', tasks),

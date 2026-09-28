@@ -33,7 +33,7 @@ interface LongTermGoalServiceOptions {
   resolveAiEngine?: () => Promise<AIExecutionEngine>
   skillStore?: SkillStore
   projectFS?: { readFile: (projectId: string, relativePath: string) => Promise<string | null> }
-  resolveProviderConfig?: (providerId?: string | null, modelId?: string | null, reasoningEffort?: 'low' | 'medium' | 'high' | 'max', temperature?: number) => AIConfigInput | undefined
+  resolveProviderConfig?: (providerId?: string | null, modelId?: string | null, reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', temperature?: number) => AIConfigInput | undefined
   onGoalsChanged?: (goals: LongTermGoalDefinition[]) => void
   onSnapshotChanged?: (snapshot: LongTermGoalSnapshot) => void
   onInterventionRequested?: (goal: LongTermGoalDefinition, intervention: LongTermGoalIntervention) => void

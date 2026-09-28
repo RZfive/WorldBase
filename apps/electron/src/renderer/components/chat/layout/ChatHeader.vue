@@ -22,7 +22,7 @@ interface AgentOption {
   icon?: string
 }
 
-type ReasoningStrength = 'low' | 'medium' | 'high' | 'max'
+type ReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
 const props = defineProps<{
   contextLabel: string
@@ -34,6 +34,8 @@ const props = defineProps<{
   selectedModel?: string
   showProviderSelector?: boolean
   reasoningStrength?: ReasoningStrength
+  /** Levels the active model declares; rendered as the strength control's choices. */
+  reasoningEffortOptions?: string[]
   temperature?: number | null
   providerDefaultTemperature?: number
   isGroupConversation?: boolean
@@ -125,6 +127,7 @@ const showContextDetail = computed(() => Boolean(
           :title="$t('chatUi.providerModelTitle')"
           :show-tuning="true"
           :reasoning-strength="reasoningStrength"
+          :reasoning-effort-options="reasoningEffortOptions"
           :temperature="temperature"
           :provider-default-temperature="providerDefaultTemperature"
           :is-group-conversation="isGroupConversation"

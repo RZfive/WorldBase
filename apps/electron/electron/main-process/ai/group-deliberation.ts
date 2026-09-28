@@ -692,7 +692,7 @@ export async function buildGroupRoundCoordinatorPlan (input: {
   messages: Array<{ role: string; content: MessageContent }>
   channelBinding?: ChannelBinding | null
   targetProjectId?: string | null
-  fallbackReasoningStrength?: 'low' | 'medium' | 'high' | 'max'
+  fallbackReasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   candidateMemberIds: string[]
   priorNotes: GroupPlannerReview[]
   latestUserMessage: string
