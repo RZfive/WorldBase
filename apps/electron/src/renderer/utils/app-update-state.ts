@@ -2,8 +2,8 @@ import { computed, shallowRef } from 'vue'
 
 type UpdateAPI = Pick<NonNullable<Window['electronAPI']>, 'getAppUpdateState' | 'onAppUpdateStateChanged'>
 
-/** Statuses that mean a newer version exists: found remotely or already downloaded. */
-const UPDATE_PENDING_STATUSES: ReadonlySet<AppUpdateState['status']> = new Set(['update_available', 'downloaded'])
+/** Statuses that mean a newer version exists: found remotely, downloaded, or applied and waiting for a restart. */
+const UPDATE_PENDING_STATUSES: ReadonlySet<AppUpdateState['status']> = new Set(['update_available', 'downloaded', 'applied'])
 
 /**
  * Process-wide mirror of the main process update state. UpdateService checks on

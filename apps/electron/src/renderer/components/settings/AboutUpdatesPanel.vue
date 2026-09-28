@@ -38,6 +38,8 @@ const statusLabel = computed(() => {
     case 'update_available': return t('settings.about.statusUpdateAvailable', { version: updateState.value.latestVersion || '' }).trim()
     case 'downloading': return t('settings.about.statusDownloading')
     case 'downloaded': return t('settings.about.statusDownloaded')
+    case 'applying': return t('settings.about.statusApplying')
+    case 'applied': return t('settings.about.statusApplied')
     case 'installing': return t('settings.about.statusInstalling')
     case 'install_triggered': return t('settings.about.statusInstallTriggered')
     case 'failed': return t('settings.about.statusFailed')
@@ -52,6 +54,8 @@ const statusTone = computed(() => {
     case 'checking': return 'busy'
     case 'downloading': return 'busy'
     case 'downloaded': return 'ok'
+    case 'applying': return 'busy'
+    case 'applied': return 'ok'
     case 'installing': return 'busy'
     case 'install_triggered': return 'ok'
     case 'failed': return 'danger'
@@ -61,13 +65,21 @@ const statusTone = computed(() => {
 
 const resolvedError = computed(() => localError.value || updateState.value?.error || '')
 const isChecking = computed(() => checking.value || updateState.value?.status === 'checking')
-const isUpdating = computed(() => actionBusy.value || updateState.value?.status === 'downloading' || updateState.value?.status === 'installing')
+const isUpdating = computed(() => actionBusy.value || updateState.value?.status === 'downloading' || updateState.value?.status === 'installing' || updateState.value?.status === 'applying')
 const supportsInAppInstall = computed(() => {
   const platform = (aboutInfo.value?.platform || updateState.value?.platform || '').toLowerCase()
   return ['win32', 'windows', 'win', 'darwin', 'macos', 'mac os', 'mac', 'osx', 'linux'].includes(platform)
 })
 const canStartDownload = computed(() => updateState.value?.status === 'update_available' && Boolean(updateState.value.asset))
-const canInstall = computed(() => updateState.value?.status === 'downloaded' || updateState.value?.status === 'install_triggered')
+const canInstall = computed(() =>
+  updateState.value?.status === 'downloaded' ||
+  updateState.value?.status === 'install_triggered' ||
+  updateState.value?.status === 'applied'
+)
+// 热更新包已应用：安装动作变成"立即重启"
+const isHotApplied = computed(() =>
+  updateState.value?.status === 'applied' && updateState.value?.asset?.kind === 'hot_payload'
+)
 const progressLabel = computed(() => {
   const progress = updateState.value?.progress
   if (!progress) return ''
@@ -181,6 +193,7 @@ async function downloadAndInstallUpdate () {
   try {
     const downloadedState = await window.electronAPI.downloadAppUpdate()
     updateState.value = downloadedState
+    // 热更新包下载后自动应用（applied），安装动作变成"立即重启"按钮
     if (downloadedState.status === 'downloaded') {
       const result = await window.electronAPI.installAppUpdate()
       updateState.value = result.state
@@ -261,6 +274,15 @@ async function openDownloadsPage () {
         @click="downloadAndInstallUpdate"
       >
         {{ isUpdating ? $t('settings.about.updating') : $t('settings.about.downloadAndInstall') }}
+      </button>
+      <button
+        v-else-if="canInstall && supportsInAppInstall && isHotApplied"
+        class="au-primary"
+        type="button"
+        :disabled="isUpdating"
+        @click="installUpdate"
+      >
+        {{ isUpdating ? $t('settings.about.installing') : $t('settings.about.restartNow') }}
       </button>
       <button
         v-else-if="canInstall && supportsInAppInstall"

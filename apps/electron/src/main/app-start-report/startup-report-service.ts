@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { getEffectiveVersion } from '../app-update/hot-payload-store.js'
 import type { SettingsStore } from '../settings/settings-store.js'
 import type { SystemService, SystemStatusSnapshot } from '../system-capabilities/system-service.js'
 
@@ -170,10 +171,11 @@ export async function reportStartup (options: StartupReportOptions): Promise<voi
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        version: app.getVersion(),
+        // 热更新包生效时上报生效版本，运营口径与 About 页一致。
+        version: getEffectiveVersion(),
         platform: process.platform,
         arch: process.arch,
-        channel: inferChannelFromVersion(app.getVersion()),
+        channel: inferChannelFromVersion(getEffectiveVersion()),
         deviceId,
         deviceModel,
         osRelease: os.release(),

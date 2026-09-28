@@ -1,10 +1,11 @@
 import { app, shell } from 'electron'
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, createPublicKey, randomUUID, verify as cryptoVerify } from 'node:crypto'
 import { EventEmitter, once } from 'node:events'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
+import extract from 'extract-zip'
 import type {
   AppAboutInfo,
   AppUpdateAssetInfo,
@@ -19,11 +20,28 @@ import type {
 } from '../../shared/app-update-types.js'
 import { t } from '../i18n/main-i18n.js'
 import type { SettingsStore } from '../settings/settings-store.js'
+import {
+  HOT_PAYLOAD_PUBLIC_KEYS,
+  getHotRoot,
+  getInstalledVersion,
+  getEffectiveVersion,
+  isHotPayloadActive,
+  markHotBootOk,
+  readPendingEvents,
+  clearPendingEvents,
+  resetBootState,
+  writeCurrentPointer,
+  pruneHotVersions,
+  type HotPayloadManifest,
+  type HotPendingEvent
+} from './hot-payload-store.js'
 
 const APP_ID = 'com.theworld.app'
 const DEFAULT_UPDATE_WEBSITE_BASE_URL = 'https://worldbase.world'
 const DEFAULT_UPDATE_API_BASE_URL = 'https://api.worldbase.world'
-const DEFAULT_UPDATE_API_PATH = '/api/releases?latest=1'
+const DEFAULT_UPDATE_API_PATH = '/api/app-update/latest'
+const LEGACY_UPDATE_API_BASE_PATH = '/api/releases'
+const INSTALL_ID_FILE = 'install-id.json'
 const CHECK_TIMEOUT_MS = 15000
 const DOWNLOADS_SUBDIR = 'updates'
 const PROGRESS_EMIT_INTERVAL_MS = 120
@@ -34,6 +52,10 @@ const INSTALL_QUIT_CLEANUP_TIMEOUT_MS = 15_000
 const INSTALLER_SPAWN_CONFIRM_TIMEOUT_MS = 5_000
 const UPDATER_LOG_FILE = 'updater.log'
 const UPDATE_CONFIG_ERROR_KEY = 'mainDialog.updateConfigRequired'
+const HOT_STAGING_PREFIX = 'staging-'
+const UPDATE_EVENT_TIMEOUT_MS = 8000
+
+type UpdateEventPhase = 'downloaded' | 'verified' | 'applied' | 'boot_ok' | 'rolled_back' | 'failed'
 
 interface RemoteUpdateResponse {
   status?: string
@@ -47,6 +69,7 @@ interface RemoteUpdateResponse {
   assets?: unknown
   item?: unknown
   items?: unknown
+  hotPayload?: unknown
 }
 
 interface NormalizedRemoteUpdate {
@@ -55,6 +78,30 @@ interface NormalizedRemoteUpdate {
   publishedAt: string | null
   notes: AppUpdateNotes | null
   asset: AppUpdateAssetInfo | null
+  hotPayload: AppUpdateAssetInfo | null
+}
+
+interface NormalizedHotPayload {
+  manifest: Record<string, unknown>
+  manifestSig: string
+}
+
+/** manifest.sig 的签名原文是 CI 里写入的 manifest.json 字节。 */
+function verifyManifestSignature (manifestBytes: Buffer, signatureBase64: string): boolean {
+  const signature = Buffer.from(signatureBase64.trim().replace(/\s+/g, ''), 'base64')
+  for (const publicKeyBase64 of HOT_PAYLOAD_PUBLIC_KEYS) {
+    try {
+      const publicKey = createPublicKey({
+        key: Buffer.from(publicKeyBase64, 'base64'),
+        format: 'der',
+        type: 'spki'
+      })
+      if (cryptoVerify(null, manifestBytes, publicKey, signature)) return true
+    } catch {
+      // 尝试下一把公钥（密钥轮换期间新旧并存）
+    }
+  }
+  return false
 }
 
 interface VersionParts {
@@ -347,7 +394,8 @@ function resolveDownloadUrl (
 
 function normalizeAsset (
   value: unknown,
-  options: { website: AppUpdateWebsiteLinks; apiBaseUrl: string }
+  options: { website: AppUpdateWebsiteLinks; apiBaseUrl: string },
+  kind: 'installer' | 'hot_payload' = 'installer'
 ): AppUpdateAssetInfo | null {
   if (!isRecord(value)) return null
 
@@ -367,7 +415,10 @@ function normalizeAsset (
     downloadUrl,
     sha512: normalizeSha512(input.sha512),
     sha256: normalizeSha256(input.sha256) || normalizeSha256(input.checksum),
-    size: parseAssetSize(input.size)
+    size: parseAssetSize(input.size),
+    kind,
+    electronVersion: kind === 'hot_payload' ? (getTrimmedString(input.electronVersion) || undefined) : undefined,
+    minBaseVersion: kind === 'hot_payload' ? (getTrimmedString(input.minBaseVersion) || undefined) : undefined
   }
 }
 
@@ -590,7 +641,14 @@ function normalizeRuntimeAsset (value: unknown, options: AssetSelectionOptions):
   return normalizeAsset(value, options)
 }
 
+/** 热更新包不是安装器格式，平台匹配已由服务端完成，这里只做字段规范化。 */
+function normalizeHotPayloadAsset (value: unknown, options: AssetSelectionOptions): AppUpdateAssetInfo | null {
+  if (!isRecord(value)) return null
+  return normalizeAsset(value, options, 'hot_payload')
+}
+
 function isRuntimeAssetInfoSupportedForPlatform (asset: AppUpdateAssetInfo, platform: string): boolean {
+  if (asset.kind === 'hot_payload') return true
   const assetRecord = asset as unknown as Record<string, unknown>
   return isInstallableAsset(assetRecord, platform) && assetMatchesOrOmitsPlatform(assetRecord, platform)
 }
@@ -638,23 +696,28 @@ function normalizeRemoteUpdatePayload (
   const asset = normalizeRuntimeAsset(response.asset, options) ||
     selectReleaseAsset(response.assets, options) ||
     (releaseItem ? selectReleaseAsset(releaseItem.assets, options) : null)
+  const hotPayload = normalizeHotPayloadAsset(response.hotPayload, options)
 
   if (explicitStatus) {
+    const hasUpdate = explicitStatus === 'update_available'
     return {
       status: explicitStatus,
       latestVersion: latestVersion || null,
       publishedAt,
       notes,
-      asset: explicitStatus === 'update_available' ? asset : null
+      asset: hasUpdate ? asset : null,
+      hotPayload: hasUpdate ? hotPayload : null
     }
   }
 
+  const isUpdateAvailable = compareVersions(latestVersion, options.currentVersion) > 0
   return {
-    status: compareVersions(latestVersion, options.currentVersion) > 0 ? 'update_available' : 'up_to_date',
+    status: isUpdateAvailable ? 'update_available' : 'up_to_date',
     latestVersion,
     publishedAt,
     notes,
-    asset
+    asset: isUpdateAvailable ? asset : null,
+    hotPayload: isUpdateAvailable ? hotPayload : null
   }
 }
 
@@ -669,6 +732,7 @@ function cloneState (state: AppUpdateState): AppUpdateState {
         }
       : null,
     asset: state.asset ? { ...state.asset } : null,
+    installerAsset: state.installerAsset ? { ...state.installerAsset } : null,
     website: { ...state.website }
   }
 }
@@ -701,6 +765,20 @@ async function ensureDeleted (targetPath: string): Promise<void> {
   } catch {
     // ignore missing temp files
   }
+}
+
+async function listFilesRecursive (rootDir: string, relDir = ''): Promise<string[]> {
+  const entries = await fsp.readdir(path.join(rootDir, relDir), { withFileTypes: true })
+  const files: string[] = []
+  for (const entry of entries) {
+    const relPath = relDir ? `${relDir}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      files.push(...await listFilesRecursive(rootDir, relPath))
+    } else if (entry.isFile()) {
+      files.push(relPath)
+    }
+  }
+  return files.sort()
 }
 
 /**
@@ -836,11 +914,11 @@ export class UpdateService extends EventEmitter {
   getAboutInfo (): AppAboutInfo {
     return {
       productName: app.getName(),
-      version: app.getVersion(),
+      version: getEffectiveVersion(),
       appId: APP_ID,
       platform: process.platform,
       arch: process.arch,
-      channel: inferChannelFromVersion(app.getVersion()),
+      channel: inferChannelFromVersion(getEffectiveVersion()),
       website: { ...this.website }
     }
   }
@@ -849,12 +927,12 @@ export class UpdateService extends EventEmitter {
     return cloneState(this.state)
   }
 
-  async checkForUpdates (channel = inferChannelFromVersion(app.getVersion())): Promise<AppUpdateState> {
+  async checkForUpdates (channel = inferChannelFromVersion(getEffectiveVersion())): Promise<AppUpdateState> {
     if (this.disposed) return this.getState()
     if (!isValidHttpUrl(this.updateApiUrl)) {
       return this.fail(t(UPDATE_CONFIG_ERROR_KEY))
     }
-    if (this.state.status === 'checking' || this.state.status === 'downloading') {
+    if (this.state.status === 'checking' || this.state.status === 'downloading' || this.state.status === 'applying') {
       return this.getState()
     }
 
@@ -865,38 +943,58 @@ export class UpdateService extends EventEmitter {
       progress: null
     })
 
+    // bootstrap 里记下的回滚事件（网络栈没起来时写盘的）在这里补发。
+    void this.flushPendingRollbackEvents()
+
     const timeoutController = new AbortController()
     const timeout = setTimeout(() => {
       timeoutController.abort()
     }, CHECK_TIMEOUT_MS)
 
-    try {
+    const buildUrl = async (apiPath: string): Promise<URL> => {
+      const legacy = apiPath !== DEFAULT_UPDATE_API_PATH
       const url = new URL(this.updateApiUrl)
-      if (url.pathname.endsWith('/api/releases') && !url.searchParams.has('latest')) {
-        url.searchParams.set('latest', '1')
-      }
+      url.pathname = apiPath
+      url.search = ''
       url.searchParams.set('channel', channel)
       url.searchParams.set('platform', process.platform)
       url.searchParams.set('arch', process.arch)
-      url.searchParams.set('current', app.getVersion())
+      // current 是生效版本（可能已是热更新版本），installed 是安装器版本。
+      url.searchParams.set('current', getEffectiveVersion())
+      if (legacy) {
+        // /api/releases 只认 latest=1；installed/electron/device 是新接口的参数
+        url.searchParams.set('latest', '1')
+      } else {
+        url.searchParams.set('installed', getInstalledVersion())
+        url.searchParams.set('electron', process.versions.electron)
+        const deviceId = await this.getInstallId()
+        if (deviceId) url.searchParams.set('device', deviceId)
+      }
+      return url
+    }
 
-      const response = await fetch(url, {
-        signal: timeoutController.signal,
-        headers: {
-          Accept: 'application/json'
+    try {
+      const fetchPayload = async (apiPath: string): Promise<unknown> => {
+        const url = await buildUrl(apiPath)
+        const response = await fetch(url, {
+          signal: timeoutController.signal,
+          headers: { Accept: 'application/json' }
+        })
+        // 老版服务端还没有 /api/app-update/latest：退回 /api/releases 兼容判定。
+        if (response.status === 404 && apiPath === DEFAULT_UPDATE_API_PATH) {
+          return await fetchPayload(LEGACY_UPDATE_API_BASE_PATH)
         }
-      })
-
-      const body = await response.text().catch(() => '')
-
-      if (!response.ok) {
-        throw new Error(body || t('mainDialog.updateApiHttpStatus', { status: response.status }))
+        const body = await response.text().catch(() => '')
+        if (!response.ok) {
+          throw new Error(body || t('mainDialog.updateApiHttpStatus', { status: response.status }))
+        }
+        return parseUpdateApiJsonResponse(response, body)
       }
 
-      const payload = parseUpdateApiJsonResponse(response, body)
+      const payload = await fetchPayload(DEFAULT_UPDATE_API_PATH)
       const remoteUpdate = normalizeRemoteUpdatePayload(payload, {
         channel,
-        currentVersion: app.getVersion(),
+        currentVersion: getEffectiveVersion(),
         platform: process.platform,
         arch: process.arch,
         website: this.website,
@@ -905,6 +1003,7 @@ export class UpdateService extends EventEmitter {
       const now = new Date().toISOString()
 
       if (remoteUpdate.status === 'update_available') {
+        const pendingAsset = remoteUpdate.hotPayload || remoteUpdate.asset
         const nextState: AppUpdateState = {
           ...this.createBaseState(),
           status: 'update_available',
@@ -915,7 +1014,8 @@ export class UpdateService extends EventEmitter {
           downloadedFilePath: this.state.downloadedFilePath,
           error: null,
           notes: remoteUpdate.notes,
-          asset: remoteUpdate.asset,
+          asset: pendingAsset,
+          installerAsset: remoteUpdate.asset,
           website: { ...this.website }
         }
 
@@ -935,6 +1035,7 @@ export class UpdateService extends EventEmitter {
           error: null,
           notes: remoteUpdate.notes,
           asset: null,
+          installerAsset: null,
           website: { ...this.website }
         })
         return this.getState()
@@ -942,7 +1043,7 @@ export class UpdateService extends EventEmitter {
 
       this.updateState({
         status: 'up_to_date',
-        latestVersion: remoteUpdate.latestVersion || app.getVersion(),
+        latestVersion: remoteUpdate.latestVersion || getEffectiveVersion(),
         lastCheckedAt: now,
         publishedAt: remoteUpdate.publishedAt,
         downloadedFilePath: null,
@@ -950,6 +1051,7 @@ export class UpdateService extends EventEmitter {
         error: null,
         notes: remoteUpdate.notes,
         asset: null,
+        installerAsset: null,
         website: { ...this.website }
       })
       return this.getState()
@@ -1091,6 +1193,14 @@ export class UpdateService extends EventEmitter {
         progress: this.createProgress(bytesDownloaded, totalBytes),
         error: null
       })
+
+      // 热更新包：校验过的 zip 直接进入应用阶段（解压/验签/逐文件校验），
+      // 成功后状态为 applied（重启生效），失败自动退回安装包流程。
+      if (asset.kind === 'hot_payload') {
+        void this.reportUpdateEvent('downloaded', version, 'hot_payload')
+        return await this.applyHotPayload()
+      }
+
       return this.getState()
     } catch (error) {
       await ensureDeleted(tempPath)
@@ -1100,7 +1210,135 @@ export class UpdateService extends EventEmitter {
     }
   }
 
+  /**
+   * 应用已下载的热更新包（docs/desktop-hot-update-design.md 5.5.3）：
+   * 解压到 staging → manifest ed25519 验签 → 逐文件 sha256/size 白名单校验
+   * → 原子 rename 生效 → 写 current.json → 重置 boot-state。
+   * 任何一步失败都删掉 staging、上报 failed，并把状态退回安装包流程。
+   */
+  async applyHotPayload (): Promise<AppUpdateState> {
+    const asset = this.state.asset
+    const version = this.state.latestVersion
+    const zipPath = this.state.downloadedFilePath
+    if (!asset || asset.kind !== 'hot_payload' || !version || !zipPath || !fs.existsSync(zipPath)) {
+      return this.getState()
+    }
+
+    this.updateState({ status: 'applying', progress: null, error: null })
+
+    const hotRoot = getHotRoot()
+    const stagingDir = path.join(hotRoot, `${HOT_STAGING_PREFIX}${version}`)
+    const targetDir = path.join(hotRoot, version)
+
+    try {
+      await fsp.rm(stagingDir, { recursive: true, force: true })
+      await fsp.mkdir(stagingDir, { recursive: true })
+      await extract(zipPath, { dir: stagingDir })
+
+      // 非 Windows：兜底保证 harness 可执行位（zip 的 unix 权限元数据可能丢失）。
+      if (process.platform !== 'win32') {
+        await fsp.chmod(path.join(stagingDir, 'harness', 'worldbase-app-server'), 0o755).catch(() => {})
+      }
+
+      // manifest 完整性：ed25519 签名对 manifest.json 原始字节验证
+      const manifestBytes = await fsp.readFile(path.join(stagingDir, 'manifest.json'))
+      const manifest = JSON.parse(manifestBytes.toString('utf8')) as HotPayloadManifest
+      const sigText = await fsp.readFile(path.join(stagingDir, 'manifest.sig'), 'utf8').catch(() => '')
+      if (!sigText || !verifyManifestSignature(manifestBytes, sigText)) {
+        throw new Error(t('mainDialog.hotSignatureFailed'))
+      }
+      if (manifest.kind !== 'hot_payload' || manifest.version !== version || !Array.isArray(manifest.files) || manifest.files.length === 0) {
+        throw new Error(t('mainDialog.hotManifestMismatch'))
+      }
+      if (manifest.electronVersion && manifest.electronVersion !== process.versions.electron) {
+        throw new Error(t('mainDialog.hotElectronMismatch'))
+      }
+      if (compareVersions(manifest.version, getEffectiveVersion()) <= 0) {
+        throw new Error(t('mainDialog.hotVersionNotNewer'))
+      }
+
+      await this.reportUpdateEvent('verified', version, 'hot_payload')
+
+      // 逐文件校验：路径白名单（拒绝绝对路径与 ..），sha256 与 size 必须一致
+      const listedFiles = new Set<string>(['manifest.json', 'manifest.sig'])
+      for (const file of manifest.files) {
+        if (!file || typeof file.path !== 'string' || typeof file.sha256 !== 'string') {
+          throw new Error(t('mainDialog.hotManifestMismatch'))
+        }
+        const relPath = file.path.replace(/\\/g, '/')
+        if (relPath.startsWith('/') || relPath.split('/').some(part => part === '..' || part.length === 0)) {
+          throw new Error(t('mainDialog.hotManifestMismatch'))
+        }
+        const filePath = path.join(stagingDir, ...relPath.split('/'))
+        const stat = await fsp.stat(filePath).catch(() => null)
+        if (!stat || !stat.isFile()) {
+          throw new Error(t('mainDialog.hotFileMissing', { file: relPath }))
+        }
+        if (typeof file.size === 'number' && stat.size !== file.size) {
+          throw new Error(t('mainDialog.hotHashFailed', { file: relPath }))
+        }
+        const actual = await hashFile(filePath, { fileName: relPath, downloadUrl: '', sha256: file.sha256, size: null })
+        if (actual.sha256 !== file.sha256.toLowerCase()) {
+          throw new Error(t('mainDialog.hotHashFailed', { file: relPath }))
+        }
+        listedFiles.add(relPath)
+      }
+
+      // staging 里出现清单外文件即整体失败
+      const actualFiles = await listFilesRecursive(stagingDir)
+      const extraFile = actualFiles.find(file => !listedFiles.has(file))
+      if (extraFile) {
+        throw new Error(t('mainDialog.hotExtraFile', { file: extraFile }))
+      }
+
+      // 原子生效：rename 同盘目录，写指针，重置启动计数，清理旧版本
+      await fsp.rm(targetDir, { recursive: true, force: true })
+      await fsp.rename(stagingDir, targetDir)
+      writeCurrentPointer(version)
+      resetBootState(version)
+      await pruneHotVersions()
+
+      this.updateState({
+        status: 'applied',
+        downloadedFilePath: zipPath,
+        progress: null,
+        error: null
+      })
+      this.log(`hot payload v${version} applied; restart to activate`)
+      void this.reportUpdateEvent('applied', version, 'hot_payload')
+      return this.getState()
+    } catch (error) {
+      await fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {})
+      const message = (error as Error).message || t('mainDialog.hotApplyFailed')
+      this.log(`hot payload apply failed: ${message}`)
+      void this.reportUpdateEvent('failed', version, 'hot_payload', message)
+      // 绝不能让用户卡住：退回安装包流程
+      this.updateState({
+        status: this.state.installerAsset ? 'update_available' : 'failed',
+        asset: this.state.installerAsset ? { ...this.state.installerAsset } : null,
+        downloadedFilePath: null,
+        progress: null,
+        error: t('mainDialog.hotApplyFailed')
+      })
+      return this.getState()
+    }
+  }
+
   async installDownloadedUpdate (): Promise<{ success: boolean; state: AppUpdateState; error?: string }> {
+    // 热更新包不走安装器：applied 状态下 relaunch，重启后 bootstrap 加载新包。
+    if (this.state.asset?.kind === 'hot_payload') {
+      if (this.state.status !== 'applied') {
+        return { success: false, state: this.getState(), error: t('mainDialog.hotApplyFailed') }
+      }
+      this.updateState({ status: 'install_triggered', progress: null, error: null })
+      this.log(`hot payload relaunch requested (v${this.state.latestVersion ?? '?'})`)
+      setTimeout(() => {
+        app.relaunch()
+        app.exit(0)
+      }, APP_QUIT_AFTER_INSTALL_TRIGGER_MS)
+      return { success: true, state: this.getState() }
+    }
+
     if (!isSupportedUpdatePlatform(process.platform)) {
       const state = this.fail(t('mainDialog.updateInstallUnsupportedPlatform'))
       return { success: false, state, error: state.error || undefined }
@@ -1214,6 +1452,88 @@ export class UpdateService extends EventEmitter {
   }
 
   /**
+   * 主窗口 ready 且 Rust harness 握手成功后由 main.ts 调用：
+   * 确认本次热包启动健康，归零 boot-state 计数并上报 boot_ok。
+   */
+  async confirmHotBoot (): Promise<void> {
+    if (!isHotPayloadActive()) return
+    const effectiveVersion = getEffectiveVersion()
+    markHotBootOk()
+    this.log(`hot payload v${effectiveVersion} boot confirmed ok`)
+    await this.reportUpdateEvent('boot_ok', effectiveVersion, 'hot_payload')
+  }
+
+  /** 安装-id 与 startup-report-service 共用；见 getInstallId 的灰度桶说明。 */
+  private async getInstallId (): Promise<string | null> {
+    const filePath = path.join(app.getPath('userData'), INSTALL_ID_FILE)
+    try {
+      const parsed = JSON.parse(await fsp.readFile(filePath, 'utf8')) as { id?: unknown }
+      if (typeof parsed.id === 'string' && parsed.id.trim()) return parsed.id.trim()
+    } catch {
+      // 首次启动没有该文件
+    }
+    try {
+      const id = randomUUID()
+      await fsp.mkdir(path.dirname(filePath), { recursive: true })
+      await fsp.writeFile(filePath, JSON.stringify({ id }, null, 2), 'utf8')
+      return id
+    } catch {
+      return null
+    }
+  }
+
+  private async reportUpdateEvent (
+    phase: UpdateEventPhase,
+    toVersion: string,
+    kind: 'installer' | 'hot_payload',
+    error?: string,
+    channel = this.state.channel
+  ): Promise<void> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), UPDATE_EVENT_TIMEOUT_MS)
+    try {
+      const deviceId = await this.getInstallId()
+      await fetch(`${resolveApiBaseUrl(this.updateApiUrl)}/api/app-update/events`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(deviceId ? { deviceId } : {}),
+          platform: process.platform,
+          arch: process.arch,
+          channel,
+          kind,
+          fromVersion: getInstalledVersion(),
+          toVersion,
+          phase,
+          ...(error ? { error: String(error).slice(0, 500) } : {})
+        })
+      })
+    } catch {
+      // 埋点失败不影响更新流程
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** bootstrap 回滚时网络栈还没起，事件落盘在 pending-events.json，这里补发。 */
+  private async flushPendingRollbackEvents (): Promise<void> {
+    const pending = await readPendingEvents()
+    if (pending.length === 0) return
+    for (const event of pending as HotPendingEvent[]) {
+      await this.reportUpdateEvent(
+        'rolled_back',
+        event.toVersion,
+        'hot_payload',
+        event.error,
+        inferChannelFromVersion(event.toVersion)
+      )
+    }
+    await clearPendingEvents()
+    this.log(`flushed ${pending.length} pending rollback event(s)`)
+  }
+
+  /**
    * The window is gone by the time a launch fails, so persist the failure;
    * `restorePersistedState` surfaces it in About & Updates on next start.
    */
@@ -1260,6 +1580,7 @@ export class UpdateService extends EventEmitter {
       error: null,
       notes: null,
       asset: null,
+      installerAsset: null,
       website: { ...this.website }
     }
   }
@@ -1301,9 +1622,30 @@ export class UpdateService extends EventEmitter {
       }
     }
 
+    // 热更新包已生效（重启后运行的就是 latestVersion）：视为已是最新。
+    if (restored.latestVersion && restored.latestVersion === getEffectiveVersion() && restored.asset?.kind === 'hot_payload') {
+      return {
+        ...restored,
+        status: 'up_to_date',
+        currentVersion: getEffectiveVersion(),
+        downloadedFilePath: null,
+        asset: null,
+        installerAsset: null,
+        error: null
+      }
+    }
+
+    // 应用中断（下载完没来得及 apply）：退回待下载状态，走安装包或重新检查。
+    if (restored.status === 'applying') {
+      restored.status = restored.installerAsset ? 'update_available' : 'idle'
+      restored.asset = restored.installerAsset ? { ...restored.installerAsset } : null
+      restored.downloadedFilePath = null
+      restored.error = null
+    }
+
     if (restored.downloadedFilePath && !fs.existsSync(restored.downloadedFilePath)) {
       restored.downloadedFilePath = null
-      if (restored.status === 'downloaded' || restored.status === 'install_triggered') {
+      if (restored.status === 'downloaded' || restored.status === 'install_triggered' || restored.status === 'applied') {
         restored.status = restored.asset ? 'update_available' : 'idle'
       }
     }
@@ -1328,9 +1670,7 @@ export class UpdateService extends EventEmitter {
     }
 
     return restored
-  }
-
-  private async reconcileRestoredDownload (state: AppUpdateState): Promise<AppUpdateState> {
+  }  private async reconcileRestoredDownload (state: AppUpdateState): Promise<AppUpdateState> {
     if (!state.asset || !state.downloadedFilePath || !fs.existsSync(state.downloadedFilePath)) {
       return state
     }

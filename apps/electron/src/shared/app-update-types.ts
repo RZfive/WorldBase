@@ -8,6 +8,8 @@ export type AppUpdateStatus =
   | 'update_available'
   | 'downloading'
   | 'downloaded'
+  | 'applying'
+  | 'applied'
   | 'installing'
   | 'install_triggered'
   | 'failed'
@@ -33,12 +35,18 @@ export interface AppUpdateNotes {
   en: string[]
 }
 
+export type AppUpdateAssetKind = 'installer' | 'hot_payload'
+
 export interface AppUpdateAssetInfo {
   fileName: string
   downloadUrl: string
   sha512?: string
   sha256?: string
   size: number | null
+  kind?: AppUpdateAssetKind
+  /** 热更新包专用：Electron 版本必须与运行时严格相等才允许应用。 */
+  electronVersion?: string
+  minBaseVersion?: string
 }
 
 export interface AppUpdateProgress {
@@ -71,5 +79,7 @@ export interface AppUpdateState {
   error: string | null
   notes: AppUpdateNotes | null
   asset: AppUpdateAssetInfo | null
+  /** 热更新失败时回退用的完整安装包（/api/app-update/latest 的 asset 字段）。 */
+  installerAsset: AppUpdateAssetInfo | null
   website: AppUpdateWebsiteLinks
 }

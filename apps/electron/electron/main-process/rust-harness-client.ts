@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import readline from 'node:readline'
+import { resolveResourcesPath } from '../../src/main/app-update/hot-payload-store.js'
 import { USER_ABORT_MESSAGE } from '../../src/main/ai-engine/abort-utils.js'
 import { resolveModelPricing, type ModelPricing } from '../../src/main/ai-engine/cost-tracker.js'
 import type { MCPServerSnapshot, MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
@@ -1630,6 +1631,8 @@ function resolveBundledPnpmCli (): string | null {
 function resolveHarnessBinary (): string | null {
   const override = process.env.WORLDBASE_RUST_HARNESS
   const executable = process.platform === 'win32' ? 'worldbase-app-server.exe' : 'worldbase-app-server'
+  // 热更新包生效时 harness 必须与 JS 同源（WORLDBASE_HOT_RESOURCES 指向热包目录），
+  // 协议版本才能原子切换；未启用时 resolveResourcesPath 回退 process.resourcesPath。
   // `app.getAppPath()` remains the Electron package root after the main
   // process is compiled into dist-electron, so development lookup does not
   // depend on the bundled module's location or process cwd.
@@ -1637,7 +1640,7 @@ function resolveHarnessBinary (): string | null {
   const repoRoot = path.resolve(electronDir, '../..')
   const candidates = [
     override,
-    app.isPackaged ? path.join(process.resourcesPath, 'harness', executable) : undefined,
+    app.isPackaged ? path.join(resolveResourcesPath(), 'harness', executable) : undefined,
     path.join(electronDir, 'resources', 'harness', executable),
     path.join(repoRoot, 'harness-rs', 'target', 'release', executable),
     path.join(repoRoot, 'harness-rs', 'target', 'debug', executable),

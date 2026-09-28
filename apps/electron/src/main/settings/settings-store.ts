@@ -779,6 +779,8 @@ function normalizeAppUpdateStatus (value: unknown): AppUpdateStatus {
     case 'update_available':
     case 'downloading':
     case 'downloaded':
+    case 'applying':
+    case 'applied':
     case 'installing':
     case 'install_triggered':
     case 'failed':
@@ -812,12 +814,16 @@ function normalizeAppUpdateAssetInfo (value: unknown): AppUpdateAssetInfo | null
   if (!fileName || !downloadUrl) return null
 
   const size = Number(input.size)
+  const kind = input.kind === 'hot_payload' ? 'hot_payload' : input.kind === 'installer' ? 'installer' : undefined
   return {
     fileName,
     downloadUrl,
     sha512: typeof input.sha512 === 'string' && input.sha512.trim() ? input.sha512.trim() : undefined,
     sha256: typeof input.sha256 === 'string' && input.sha256.trim() ? input.sha256.trim().toLowerCase() : undefined,
-    size: Number.isFinite(size) && size >= 0 ? size : null
+    size: Number.isFinite(size) && size >= 0 ? size : null,
+    kind,
+    electronVersion: typeof input.electronVersion === 'string' && input.electronVersion.trim() ? input.electronVersion.trim() : undefined,
+    minBaseVersion: typeof input.minBaseVersion === 'string' && input.minBaseVersion.trim() ? input.minBaseVersion.trim() : undefined
   }
 }
 
@@ -868,6 +874,7 @@ function normalizeAppUpdateState (value: unknown): AppUpdateState | null {
     error: typeof input.error === 'string' && input.error.trim() ? input.error.trim() : null,
     notes: normalizeAppUpdateNotes(input.notes),
     asset: normalizeAppUpdateAssetInfo(input.asset),
+    installerAsset: normalizeAppUpdateAssetInfo(input.installerAsset),
     website: normalizeAppUpdateWebsiteLinks(input.website)
   }
 }

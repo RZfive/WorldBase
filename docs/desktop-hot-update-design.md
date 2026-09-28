@@ -1,7 +1,7 @@
 # WorldBase 桌面端热更新设计（the-world + worldbase-admin）
 
-更新时间：2026-09-23
-状态：设计稿，待双仓确认后拆任务
+更新时间：2026-09-28
+状态：已实施（Windows / macOS / Linux 三平台；见第 10 节实施记录与上线前清单）
 前置文档：`docs/desktop-update-dual-repo-contract.md`（安装包更新契约）
 
 ## 1. 目标与非目标
@@ -331,3 +331,52 @@ bootstrap 因连续失败回滚时，上报无法在 bootstrap 里发（还没�
 - 人为让热包主进程启动即崩：第三次启动自动回到 1.5.0，服务端收到 `rolled_back` 事件。
 - 管理台关闭热包启用开关：新检查的设备不再拿到 `hotPayload`。
 - 老版本 1.5.x 客户端与官网下载页行为完全不变。
+
+## 10. 实施记录与上线前清单（2026-09-28）
+
+### 10.1 已落地代码
+
+worldbase-admin：
+
+- `apps/api/migrations/0006_hot_payload.sql`：release_assets 加 kind/electron_version/min_base_version/manifest_json/manifest_sig/enabled/rollout_percent，新建 app_update_events 与 app_update_daily_stats。
+- `apps/api/src/routes/appUpdate.ts`：`GET /api/app-update/latest`（判定 + 灰度桶 + hotPayload 组装）、`POST /api/app-update/events`（埋点 + 日聚合）。两者已加入 auth 白名单。
+- `apps/api/src/routes/releases.ts`：zod 扩展、热包保存时 manifest 一致性校验、`PATCH /admin/releases/:version/:slug/control`（kill switch/灰度）、`/api/releases` 的 `?kinds=` 过滤（默认仅 installer，官网与老客户端不受影响）。
+- `apps/api/src/routes/downloads.ts`：官网下载列表过滤热包；热包仍走 `/api/download/:slug` 下发计数。
+- 管理台 Releases 页：产物类型选择、manifest.json/manifest.sig 上传（自动回填 Electron 版本）、每行热包的启用开关与灰度百分比；Dashboard 新增热更新统计块（applied/boot_ok/回滚率，超 10% 高亮）。
+
+the-world：
+
+- `apps/electron/scripts/build-hot-payload.mjs`：从 `release/win-unpacked/resources` 产出热包 zip + manifest.json + manifest.sig（ed25519，`HOT_PAYLOAD_PRIVATE_KEY`）+ 整包 sha256。
+- `scripts/build-main.mjs`：main.cjs 加载器加入 `tryActivateHotPayload`（存在性/版本/Electron 匹配检查、attempts 计数、连续 2 次失败回滚并落盘 pending-events）。测试：`pnpm test:hot-bootstrap`（6 场景）。
+- `src/main/app-update/hot-payload-store.ts`：hot 目录状态、`resolveResourcesPath`、`getEffectiveVersion`、公钥内置。
+- `src/main/app-update/update-service.ts`：checkForUpdates 切 `/api/app-update/latest`（404 自动回退旧接口）、热包下载后自动 apply（extract-zip → 验签 → 逐文件 sha256/size 白名单 → 原子 rename → current.json）、失败回退安装包流程、`installDownloadedUpdate` 对 applied 热包执行 relaunch、事件上报（install-id 与启动上报共用，保证灰度桶稳定）、pending 回滚事件补发。
+- `electron/main.ts`：ready-to-show + Rust harness 握手成功后 `confirmHotBoot()`（归零 boot-state、上报 boot_ok）。
+- `electron/main-process/rust-harness-client.ts`：harness 二进制改走 `resolveResourcesPath()`，与 JS 同源。
+- About 页：applying/applied 状态、"立即重启"按钮、更新徽标包含 applied。
+
+### 10.2 三平台支持（2026-09-28 扩展）
+
+热更新包覆盖 Windows / macOS / Linux，**同一对 ed25519 密钥三平台复用**（manifest 的 platform/arch 字段区分，服务端按 platform+arch+electronVersion 匹配）：
+
+- 热包根目录：win `%LOCALAPPDATA%\WorldBase\hot`；mac `~/Library/Application Support/WorldBase/hot`；linux `$XDG_DATA_HOME/WorldBase/hot`（默认 `~/.local/share`）。bootstrap 与 hot-payload-store 两处实现必须保持一致。
+- CI 三个 job 各自产出热包：win `release/win-unpacked/resources`（win32/x64）、mac `release/mac-arm64/WorldBase.app/Contents/Resources`（darwin/arm64）、linux `release/linux-unpacked/resources`（linux/x64）。
+- 非 Windows 应用热包时对 `harness/worldbase-app-server` 兜底 chmod 0755（zip 权限元数据可能丢失）。
+- 管理台发布热更新包时可同时或分别上传三个平台的 zip，各自一条 release_asset 记录；客户端只匹配自己平台的那条。
+
+**macOS 特别注意**：热包内的原生二进制（sharp/@img 的 .node、harness 可执行文件）随打包 bundle 被 electron-builder 签名，签名嵌入在 Mach-O 文件内、解压后仍然有效；但要求热包与客户端由**同一签名身份**构建（同 CI、同一证书）。开启 Hardened Runtime + library validation 时，跨团队签名的原生库会被拒绝——发 mac 热包前务必真机验证一次。harness 独立 spawn，非隔离文件 Gatekeeper 不拦。
+
+### 10.3 上线前必做（人工步骤）
+
+1. **生成正式签名密钥对**（不要用开发期生成的测试密钥；三平台复用同一对）：
+   ```bash
+   node -e "
+     const { generateKeyPairSync } = require('node:crypto');
+     const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+     console.log('PUB:', publicKey.export({ type: 'spki', format: 'der' }).toString('base64'));
+     console.log('PRIV:', privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'));
+   "
+   ```
+   - 私钥配置到 GitHub 仓库 secret `HOT_PAYLOAD_PRIVATE_KEY`（三个平台 job 的 Build hot payload 步骤都会读取）。
+   - 公钥替换 `apps/electron/src/main/app-update/hot-payload-store.ts` 的 `HOT_PAYLOAD_PUBLIC_KEYS` 并随客户端发版。
+2. **应用数据库迁移**：worldbase-admin 执行 `pnpm db:migrate`（生产 `pnpm db:migrate:prod`）。
+3. 真机联调按第 9 节验收标准在三个平台各走一遍（含签名篡改、Electron 版本不匹配、连续崩溃回滚、kill switch；mac 额外验证热包原生库随主程序加载不受 library validation 影响）。

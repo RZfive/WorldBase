@@ -90,6 +90,12 @@ jobs:
             throw "Packaged Rust harness not found: $harness"
           }
 
+      - name: Build hot payload
+        shell: pwsh
+        env:
+          HOT_PAYLOAD_PRIVATE_KEY: ${{ secrets.HOT_PAYLOAD_PRIVATE_KEY }}
+        run: node apps/electron/scripts/build-hot-payload.mjs
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -98,6 +104,8 @@ jobs:
             apps/electron/release/*.exe
             apps/electron/release/*.blockmap
             apps/electron/release/latest.yml
+            apps/electron/release/WorldBase-hot-*.zip
+            apps/electron/release/WorldBase-hot-*.zip.sha256
           compression-level: 0
           if-no-files-found: error
 
@@ -148,6 +156,15 @@ jobs:
           file "$harness"
           file "$harness" | grep -q 'arm64'
 
+      - name: Build hot payload
+        env:
+          HOT_PAYLOAD_PRIVATE_KEY: ${{ secrets.HOT_PAYLOAD_PRIVATE_KEY }}
+        run: |
+          node apps/electron/scripts/build-hot-payload.mjs \
+            --platform=darwin --arch=arm64 \
+            --source=apps/electron/release/mac-arm64/WorldBase.app/Contents/Resources \
+            --output=apps/electron/release
+
       - name: Upload macOS ARM artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -155,6 +172,8 @@ jobs:
           path: |
             apps/electron/release/*.dmg
             apps/electron/release/*.dmg.blockmap
+            apps/electron/release/WorldBase-hot-*.zip
+            apps/electron/release/WorldBase-hot-*.zip.sha256
           compression-level: 0
           if-no-files-found: error
 
@@ -205,6 +224,15 @@ jobs:
           file "$harness"
           file "$harness" | grep -q 'x86-64'
 
+      - name: Build hot payload
+        env:
+          HOT_PAYLOAD_PRIVATE_KEY: ${{ secrets.HOT_PAYLOAD_PRIVATE_KEY }}
+        run: |
+          node apps/electron/scripts/build-hot-payload.mjs \
+            --platform=linux --arch=x64 \
+            --source=apps/electron/release/linux-unpacked/resources \
+            --output=apps/electron/release
+
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -212,6 +240,8 @@ jobs:
           path: |
             apps/electron/release/*.AppImage
             apps/electron/release/latest-linux.yml
+            apps/electron/release/WorldBase-hot-*.zip
+            apps/electron/release/WorldBase-hot-*.zip.sha256
           compression-level: 0
           if-no-files-found: error
 

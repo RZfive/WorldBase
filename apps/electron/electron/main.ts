@@ -11,6 +11,7 @@ import { setMainLocale } from '../src/main/i18n/main-i18n.js'
 import { createWindow, setupEmbeddedAppCorsWorkaround } from './main-process/windows.js'
 import { reportStartup } from '../src/main/app-start-report/startup-report-service.js'
 import { ensureLoginShellPath } from '../src/main/system-capabilities/shell-path.js'
+import { isHotPayloadActive, markHotBootOk } from '../src/main/app-update/hot-payload-store.js'
 
 app.setName(APP_DISPLAY_NAME)
 app.setAppUserModelId('com.theworld.app')
@@ -79,18 +80,37 @@ app.whenReady().then(async () => {
   // exit before any window opens, so launching an internal app doesn't race
   // with a stale instance still holding its port / file locks — that race is
   // what caused the internal-app crash-on-open.
+  let rustHarnessHandshakeOk = false
   try {
     {
       const rustHarness = await startSelectedRustHarness()
       if (rustHarness && mainState.rustHarness) {
         await mainState.rustHarness.call('project.process.cleanupOrphans', {})
       }
+      rustHarnessHandshakeOk = true
     }
   } catch (err) {
     console.warn('[main] Orphan process cleanup failed on startup:', (err as Error).message)
   }
 
   createWindow()
+
+  // Hot payload boot health (design 5.6): the new version only counts as good
+  // once the window is ready AND the hot-payload Rust harness handshake
+  // succeeded; otherwise two failed startups roll the app back automatically.
+  if (isHotPayloadActive() && rustHarnessHandshakeOk) {
+    const mainWindow = BrowserWindow.getAllWindows()[0]
+    const confirmHotBoot = () => {
+      void mainState.updateService?.confirmHotBoot().catch((error) => {
+        console.warn('[main] Hot boot confirm failed:', (error as Error).message)
+      })
+    }
+    if (!mainWindow || !mainWindow.webContents.isLoading()) {
+      confirmHotBoot()
+    } else {
+      mainWindow.once('ready-to-show', confirmHotBoot)
+    }
+  }
 
   void reportStartup({
     settingsStore: mainState.settingsStore!,
