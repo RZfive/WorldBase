@@ -96,6 +96,15 @@ jobs:
           HOT_PAYLOAD_PRIVATE_KEY: ${{ secrets.HOT_PAYLOAD_PRIVATE_KEY }}
         run: node apps/electron/scripts/build-hot-payload.mjs
 
+      - name: Verify hot payload
+        shell: pwsh
+        run: |
+          $zip = @(Get-ChildItem 'apps/electron/release/WorldBase-hot-*.zip' -ErrorAction SilentlyContinue)
+          if ($zip.Count -eq 0) { throw 'Hot payload zip not found in apps/electron/release' }
+          if (@(Get-ChildItem 'apps/electron/release/WorldBase-hot-*.zip.sha256' -ErrorAction SilentlyContinue).Count -eq 0) {
+            throw 'Hot payload sha256 file not found in apps/electron/release'
+          }
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -165,6 +174,11 @@ jobs:
             --source=apps/electron/release/mac-arm64/WorldBase.app/Contents/Resources \
             --output=apps/electron/release
 
+      - name: Verify hot payload
+        run: |
+          test -n "$(ls apps/electron/release/WorldBase-hot-*.zip 2>/dev/null)" || { echo 'Hot payload zip not found'; exit 1; }
+          test -n "$(ls apps/electron/release/WorldBase-hot-*.zip.sha256 2>/dev/null)" || { echo 'Hot payload sha256 not found'; exit 1; }
+
       - name: Upload macOS ARM artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -232,6 +246,11 @@ jobs:
             --platform=linux --arch=x64 \
             --source=apps/electron/release/linux-unpacked/resources \
             --output=apps/electron/release
+
+      - name: Verify hot payload
+        run: |
+          test -n "$(ls apps/electron/release/WorldBase-hot-*.zip 2>/dev/null)" || { echo 'Hot payload zip not found'; exit 1; }
+          test -n "$(ls apps/electron/release/WorldBase-hot-*.zip.sha256 2>/dev/null)" || { echo 'Hot payload sha256 not found'; exit 1; }
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7

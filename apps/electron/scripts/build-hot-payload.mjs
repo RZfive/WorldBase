@@ -113,7 +113,9 @@ function loadSigningKey (raw) {
 async function main () {
   const options = parseArgs(process.argv.slice(2))
   const resourcesDir = options.source || defaultPackagedResources()
-  const outputDir = options.output || appDir
+  // 默认输出到 electron-builder 的 release 目录，与 .exe/latest.yml 并列，
+  // CI 的 artifact 上传 glob 只匹配 apps/electron/release/WorldBase-hot-*.zip。
+  const outputDir = options.output || path.join(appDir, 'release')
 
   if (!await pathExists(resourcesDir)) {
     throw new Error(`Packaged resources not found: ${resourcesDir}. Run the platform electron:build first.`)
