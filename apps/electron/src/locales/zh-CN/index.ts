@@ -304,6 +304,7 @@ const zhCN = {
     hotHashFailed: '热更新包文件校验失败：{file}',
     hotExtraFile: '热更新包包含清单外文件：{file}',
     hotApplyFailed: '热更新应用失败，已改用安装包更新流程。',
+    hotApplyTimeout: '热更新应用超时，已改用安装包更新流程。',
     updateInstallUnsupportedPlatform: '当前平台暂不支持应用内安装，请前往官网获取最新版本。',
     updateInstallerMissing: '尚未找到可安装的更新包，请先下载更新。',
     updateInstallerPlatformMismatch: '更新包与当前平台不匹配，请重新检查并下载更新。',

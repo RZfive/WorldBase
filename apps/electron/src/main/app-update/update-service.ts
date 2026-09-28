@@ -54,6 +54,8 @@ const UPDATER_LOG_FILE = 'updater.log'
 const UPDATE_CONFIG_ERROR_KEY = 'mainDialog.updateConfigRequired'
 const HOT_STAGING_PREFIX = 'staging-'
 const UPDATE_EVENT_TIMEOUT_MS = 8000
+// extract-zip 挂死兜底；100MB 级热包在慢盘上也远用不了这么久
+const HOT_EXTRACT_TIMEOUT_MS = 180_000
 
 type UpdateEventPhase = 'downloaded' | 'verified' | 'applied' | 'boot_ok' | 'rolled_back' | 'failed'
 
@@ -1237,83 +1239,14 @@ export class UpdateService extends EventEmitter {
     const stagingDir = path.join(hotRoot, `${HOT_STAGING_PREFIX}${version}`)
     const targetDir = path.join(hotRoot, version)
 
+    // Electron 的 asar 补丁会拦截一切 *.asar 路径的写入（"Invalid package"），
+    // 而热包必须原样解出 app.asar——extract-zip 对这个写入错误既不 reject 也不
+    // 完成，extract 会永久挂死（IPC 表现为 reply was never sent）。
+    // process.noAsar 是 Electron 官方的绕过开关，apply 全程绕过、结束后恢复。
+    const previousNoAsar = process.noAsar
+    process.noAsar = true
     try {
-      await fsp.rm(stagingDir, { recursive: true, force: true })
-      await fsp.mkdir(stagingDir, { recursive: true })
-      await extract(zipPath, { dir: stagingDir })
-
-      // 非 Windows：兜底保证 harness 可执行位（zip 的 unix 权限元数据可能丢失）。
-      if (process.platform !== 'win32') {
-        await fsp.chmod(path.join(stagingDir, 'harness', 'worldbase-app-server'), 0o755).catch(() => {})
-      }
-
-      // manifest 完整性：ed25519 签名对 manifest.json 原始字节验证
-      const manifestBytes = await fsp.readFile(path.join(stagingDir, 'manifest.json'))
-      const manifest = JSON.parse(manifestBytes.toString('utf8')) as HotPayloadManifest
-      const sigText = await fsp.readFile(path.join(stagingDir, 'manifest.sig'), 'utf8').catch(() => '')
-      if (!sigText || !verifyManifestSignature(manifestBytes, sigText)) {
-        throw new Error(t('mainDialog.hotSignatureFailed'))
-      }
-      if (manifest.kind !== 'hot_payload' || manifest.version !== version || !Array.isArray(manifest.files) || manifest.files.length === 0) {
-        throw new Error(t('mainDialog.hotManifestMismatch'))
-      }
-      if (manifest.electronVersion && manifest.electronVersion !== process.versions.electron) {
-        throw new Error(t('mainDialog.hotElectronMismatch'))
-      }
-      if (compareVersions(manifest.version, getEffectiveVersion()) <= 0) {
-        throw new Error(t('mainDialog.hotVersionNotNewer'))
-      }
-
-      await this.reportUpdateEvent('verified', version, 'hot_payload')
-
-      // 逐文件校验：路径白名单（拒绝绝对路径与 ..），sha256 与 size 必须一致
-      const listedFiles = new Set<string>(['manifest.json', 'manifest.sig'])
-      for (const file of manifest.files) {
-        if (!file || typeof file.path !== 'string' || typeof file.sha256 !== 'string') {
-          throw new Error(t('mainDialog.hotManifestMismatch'))
-        }
-        const relPath = file.path.replace(/\\/g, '/')
-        if (relPath.startsWith('/') || relPath.split('/').some(part => part === '..' || part.length === 0)) {
-          throw new Error(t('mainDialog.hotManifestMismatch'))
-        }
-        const filePath = path.join(stagingDir, ...relPath.split('/'))
-        const stat = await fsp.stat(filePath).catch(() => null)
-        if (!stat || !stat.isFile()) {
-          throw new Error(t('mainDialog.hotFileMissing', { file: relPath }))
-        }
-        if (typeof file.size === 'number' && stat.size !== file.size) {
-          throw new Error(t('mainDialog.hotHashFailed', { file: relPath }))
-        }
-        const actual = await hashFile(filePath, { fileName: relPath, downloadUrl: '', sha256: file.sha256, size: null })
-        if (actual.sha256 !== file.sha256.toLowerCase()) {
-          throw new Error(t('mainDialog.hotHashFailed', { file: relPath }))
-        }
-        listedFiles.add(relPath)
-      }
-
-      // staging 里出现清单外文件即整体失败
-      const actualFiles = await listFilesRecursive(stagingDir)
-      const extraFile = actualFiles.find(file => !listedFiles.has(file))
-      if (extraFile) {
-        throw new Error(t('mainDialog.hotExtraFile', { file: extraFile }))
-      }
-
-      // 原子生效：rename 同盘目录，写指针，重置启动计数，清理旧版本
-      await fsp.rm(targetDir, { recursive: true, force: true })
-      await fsp.rename(stagingDir, targetDir)
-      writeCurrentPointer(version)
-      resetBootState(version)
-      await pruneHotVersions()
-
-      this.updateState({
-        status: 'applied',
-        downloadedFilePath: zipPath,
-        progress: null,
-        error: null
-      })
-      this.log(`hot payload v${version} applied; restart to activate`)
-      void this.reportUpdateEvent('applied', version, 'hot_payload')
-      return this.getState()
+      await this.applyHotPayloadInner(asset, version, zipPath, stagingDir, targetDir)
     } catch (error) {
       await fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {})
       const message = (error as Error).message || t('mainDialog.hotApplyFailed')
@@ -1327,8 +1260,102 @@ export class UpdateService extends EventEmitter {
         progress: null,
         error: t('mainDialog.hotApplyFailed')
       })
-      return this.getState()
+    } finally {
+      process.noAsar = previousNoAsar
     }
+    return this.getState()
+  }
+
+  private async applyHotPayloadInner (
+    asset: AppUpdateAssetInfo,
+    version: string,
+    zipPath: string,
+    stagingDir: string,
+    targetDir: string
+  ): Promise<void> {
+    await fsp.rm(stagingDir, { recursive: true, force: true })
+    await fsp.mkdir(stagingDir, { recursive: true })
+    this.log(`hot payload v${version}: extracting ${asset.fileName}`)
+    // extract-zip 在个别环境下会挂死，兜底超时强制走失败回退。
+    await Promise.race([
+    extract(zipPath, { dir: stagingDir }),
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(t('mainDialog.hotApplyTimeout'))), HOT_EXTRACT_TIMEOUT_MS)
+    })
+    ])
+    this.log(`hot payload v${version}: extracted, verifying signature`)
+
+    // 非 Windows：兜底保证 harness 可执行位（zip 的 unix 权限元数据可能丢失）。
+    if (process.platform !== 'win32') {
+      await fsp.chmod(path.join(stagingDir, 'harness', 'worldbase-app-server'), 0o755).catch(() => {})
+    }
+
+    // manifest 完整性：ed25519 签名对 manifest.json 原始字节验证
+    const manifestBytes = await fsp.readFile(path.join(stagingDir, 'manifest.json'))
+    const manifest = JSON.parse(manifestBytes.toString('utf8')) as HotPayloadManifest
+    const sigText = await fsp.readFile(path.join(stagingDir, 'manifest.sig'), 'utf8').catch(() => '')
+    if (!sigText || !verifyManifestSignature(manifestBytes, sigText)) {
+      throw new Error(t('mainDialog.hotSignatureFailed'))
+    }
+    if (manifest.kind !== 'hot_payload' || manifest.version !== version || !Array.isArray(manifest.files) || manifest.files.length === 0) {
+      throw new Error(t('mainDialog.hotManifestMismatch'))
+    }
+    if (manifest.electronVersion && manifest.electronVersion !== process.versions.electron) {
+      throw new Error(t('mainDialog.hotElectronMismatch'))
+    }
+    if (compareVersions(manifest.version, getEffectiveVersion()) <= 0) {
+      throw new Error(t('mainDialog.hotVersionNotNewer'))
+    }
+
+    await this.reportUpdateEvent('verified', version, 'hot_payload')
+
+    // 逐文件校验：路径白名单（拒绝绝对路径与 ..），sha256 与 size 必须一致
+    const listedFiles = new Set<string>(['manifest.json', 'manifest.sig'])
+    for (const file of manifest.files) {
+      if (!file || typeof file.path !== 'string' || typeof file.sha256 !== 'string') {
+        throw new Error(t('mainDialog.hotManifestMismatch'))
+      }
+      const relPath = file.path.replace(/\\/g, '/')
+      if (relPath.startsWith('/') || relPath.split('/').some(part => part === '..' || part.length === 0)) {
+        throw new Error(t('mainDialog.hotManifestMismatch'))
+      }
+      const filePath = path.join(stagingDir, ...relPath.split('/'))
+      const stat = await fsp.stat(filePath).catch(() => null)
+      if (!stat || !stat.isFile()) {
+        throw new Error(t('mainDialog.hotFileMissing', { file: relPath }))
+      }
+      if (typeof file.size === 'number' && stat.size !== file.size) {
+        throw new Error(t('mainDialog.hotHashFailed', { file: relPath }))
+      }
+      const actual = await hashFile(filePath, { fileName: relPath, downloadUrl: '', sha256: file.sha256, size: null })
+      if (actual.sha256 !== file.sha256.toLowerCase()) {
+        throw new Error(t('mainDialog.hotHashFailed', { file: relPath }))
+      }
+      listedFiles.add(relPath)
+    }
+
+    // staging 里出现清单外文件即整体失败
+    const actualFiles = await listFilesRecursive(stagingDir)
+    const extraFile = actualFiles.find(file => !listedFiles.has(file))
+    if (extraFile) {
+      throw new Error(t('mainDialog.hotExtraFile', { file: extraFile }))
+    }
+
+    // 原子生效：rename 同盘目录，写指针，重置启动计数，清理旧版本
+    await fsp.rm(targetDir, { recursive: true, force: true })
+    await fsp.rename(stagingDir, targetDir)
+    writeCurrentPointer(version)
+    resetBootState(version)
+    await pruneHotVersions()
+
+    this.updateState({
+      status: 'applied',
+      downloadedFilePath: zipPath,
+      progress: null,
+      error: null
+    })
+    this.log(`hot payload v${version} applied; restart to activate`)
+    void this.reportUpdateEvent('applied', version, 'hot_payload')
   }
 
   async installDownloadedUpdate (): Promise<{ success: boolean; state: AppUpdateState; error?: string }> {

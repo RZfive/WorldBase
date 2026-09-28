@@ -303,6 +303,7 @@ const enUS: MessageSchema = {
     hotHashFailed: 'Hot update file verification failed: {file}',
     hotExtraFile: 'Hot update package contains an unlisted file: {file}',
     hotApplyFailed: 'Failed to apply the hot update; falling back to the installer flow.',
+    hotApplyTimeout: 'The hot update timed out; falling back to the installer flow.',
     updateInstallUnsupportedPlatform: 'In-app installation is not supported on this platform yet. Please get the latest version from the official website.',
     updateInstallerMissing: 'No installable update package was found. Please download the update first.',
     updateInstallerPlatformMismatch: 'The update package does not match this platform. Check for updates and download it again.',
