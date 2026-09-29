@@ -102,12 +102,13 @@ function buildMemoryCompactionMessages (entries: MemoryEntry[], index: number, t
     {
       role: 'system',
       content: [
-        '你是 WorldBase 的长期记忆整理器。你的任务是压缩整理用户、Agent、项目和频道记忆。',
+        '你是 WorldBase 的长期记忆整理器。你的任务是压缩整理 Agent、项目和频道记忆。',
         '只允许基于输入 JSON 中的记忆做判断，不得编造新事实，不得引用输入外的 ID。',
-        '删除标准：空壳内容、Markdown 标题/表格碎片、无复用价值碎片、明显过时或与软件工程/当前 Agent 工作无关的知识。',
+        '删除标准：空壳内容、Markdown 标题/表格碎片、无复用价值碎片。不要因为知识与软件工程无关、或当前任务用不上而删除它；低频或看起来无关的内容可能对用户长期重要。',
+        '用户个人事实（user scope）不会出现在输入中，也不得试图删除、合并或改写它们。',
         '合并标准：同一 scope 且同一 type 下语义重复或高度近似的记忆。跨 scope 或跨 type 不要合并。',
-        '置顶 pinned=true 的记忆不得放入 deleteIds；如果参与合并，优先作为 targetId。',
-        'updates 用来改写仍有价值但表达松散的记忆，让 title/summary 更短、更准确。',
+        '置顶 pinned=true 的记忆受保护：不得放入 deleteIds，也不要合并或改写它们。',
+        'updates 用来改写仍有价值但表达松散的记忆，让 title/summary 更短、更准确，不得改变原意。',
         '输出严格 JSON，不要 Markdown，不要解释。格式：',
         '{"deleteIds":["id"],"mergeGroups":[{"ids":["id1","id2"],"targetId":"id1","title":"短标题","summary":"合并后的完整事实","details":"可选详情","tags":["tag"]}],"updates":[{"id":"id","title":"短标题","summary":"整理后的事实","details":"可选详情","tags":["tag"],"importance":0.8,"confidence":0.8}]}'
       ].join('\n')
@@ -222,6 +223,11 @@ export async function runMemoryCompactionWithStatus (selection?: MemoryCompactio
     const rustClient = rustHarness ? mainState.rustHarness : null
     if (!rustClient) throw new Error('Rust harness is required for memory compaction.')
     const entries = await rustClient.listMemory({ limit: 50000 })
+    // Design §12 M2: user-scope facts never enter the AI compaction input;
+    // the Rust write-side guard is the boundary, this only reduces risk.
+    // Manual deletes and explicit forgetting use separate entry points and
+    // stay unaffected.
+    const planEntries = entries.filter(entry => entry.scopeType !== 'user')
     // The plan builder may still use the Rust harness as its analysis-model
     // backend; that is a chat-model role and independent of memory ownership.
     const analysisEngine = await startSelectedRustHarness()
@@ -235,7 +241,7 @@ export async function runMemoryCompactionWithStatus (selection?: MemoryCompactio
       completedChunks: 0
     })
 
-    const plan = await buildMemoryCompactionPlanWithAi(entries, (progress) => {
+    const plan = await buildMemoryCompactionPlanWithAi(planEntries, (progress) => {
       updateMemoryCompactionStatus({
         id: taskId,
         status: 'running',

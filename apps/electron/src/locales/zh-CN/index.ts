@@ -2271,7 +2271,7 @@ const zhCN = {
       keepUserTraits: '保留用户特征',
       keepAgentSkills: '保留 Agent 技能',
       keepImportantSteps: '保留重要步骤',
-      keepKnowledge: '保留知识点',
+      keepKnowledge: '保留知识点（自动提取项目知识已停用，等待可信来源后重开）',
       autoReply: '自动回复',
       enableAutoReply: '启用自动回复',
       requireMention: "需要 {'@'} 才回复",

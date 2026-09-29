@@ -2272,7 +2272,7 @@ const enUS: MessageSchema = {
       keepUserTraits: 'Keep user traits',
       keepAgentSkills: 'Keep Agent skills',
       keepImportantSteps: 'Keep important steps',
-      keepKnowledge: 'Keep knowledge',
+      keepKnowledge: 'Keep knowledge (automatic project-knowledge extraction is paused)',
       autoReply: 'Auto reply',
       enableAutoReply: 'Enable auto reply',
       requireMention: "Require {'@'} mention to reply",

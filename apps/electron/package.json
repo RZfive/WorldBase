@@ -1,7 +1,7 @@
 {
   "name": "the-world",
   "productName": "WorldBase",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "description": "AI-powered project generator and manager",
   "author": "RZfive",
   "type": "module",

@@ -22,7 +22,9 @@ mod embedding_store;
 mod ingest;
 mod search;
 mod vector;
-pub use search::{is_personal_memory_query, merge_memory_recall};
+pub use search::{
+    is_personal_memory_query, merge_memory_recall, personal_profile_category_terms,
+};
 
 pub use embedding::{
     EmbeddingProvider, FakeEmbeddingProvider, OpenAIEmbeddingProvider, EMBEDDING_PREPROCESS_VERSION,
@@ -1989,7 +1991,6 @@ impl Store {
         let user_scope = scope("user");
         let agent_scope = scope("agent");
         let project_scope = scope("project");
-        let group_scope = scope("group");
         let source_conversation_id = input
             .get("sourceConversationId")
             .and_then(serde_json::Value::as_str)
@@ -2009,19 +2010,6 @@ impl Store {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let assistant_text = input
-            .get("finalAssistantText")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        // Knowledge is generated in response to the latest user turn. Keep
-        // that exact text, not unrelated earlier messages or an AI excerpt.
-        // Bound its display in the UI, not the durable evidence itself.
-        let user_source_text = user_messages
-            .iter()
-            .rev()
-            .find(|message| !message.trim().is_empty())
-            .cloned();
         let tool_names = input
             .get("toolNames")
             .and_then(serde_json::Value::as_array)
@@ -2090,7 +2078,6 @@ impl Store {
                 source_message_ids: Vec::new(),
                 source_text: match memory_type {
                     "user_trait" => details.clone(),
-                    "knowledge" => user_source_text.clone(),
                     // Skills and steps are inferred from configuration/tool
                     // execution, not quoted assertions made by the user.
                     _ => None,
@@ -2199,44 +2186,14 @@ impl Store {
                 0.7,
             );
         }
-        // A failed retrieval is not new knowledge about the user. Otherwise
-        // "no food preference found" is fed back into later retrieval as fact.
-        let recalling_memory = tool_names.iter().any(|name| name == "memory_search")
-            || user_messages
-                .last()
-                .is_some_and(|text| is_personal_memory_query(text))
-            || ingest::is_recall_report(&assistant_text);
-        if allow("allowKnowledge") && !recalling_memory {
-            let knowledge_scope = project_scope
-                .clone()
-                .or(group_scope.clone())
-                .or(agent_scope.clone());
-            let signal = regex::Regex::new(r"(关键|注意|约束|坑|必须|不要|优先|应该|需要|避免|只能|不能|务必|建议|推荐|AI|API|Electron|SQLite|TypeScript|项目|文件|构建|测试|依赖|权限|命令|模型|工具|记忆)").unwrap();
-            for part in assistant_text
-                .split(|c| matches!(c, '\n' | '.' | '。' | '!' | '！' | '?' | '？'))
-                .map(str::trim)
-                .filter(|value| value.len() >= 8)
-                .take(3)
-            {
-                if signal.is_match(part) {
-                    let title = if part.chars().count() > 32 {
-                        format!("{}...", part.chars().take(32).collect::<String>())
-                    } else {
-                        part.to_string()
-                    };
-                    push_entry(
-                        knowledge_scope.clone(),
-                        "knowledge",
-                        title,
-                        part.to_string(),
-                        None,
-                        vec!["knowledge".into(), "insight".into()],
-                        0.75,
-                        0.62,
-                    );
-                }
-            }
-        }
+        // Design §12 M0: assistant replies no longer feed automatic
+        // `knowledge` extraction. Signal-word rules saved model restatements
+        // and generic advice as durable "facts". Explicit user preferences,
+        // manual saves and `memory_add` remain the write paths; project
+        // knowledge needs an explicit user request or a verified task result
+        // before automatic extraction returns. `allowKnowledge` deliberately
+        // does not mean "every technical sentence the assistant writes is a
+        // fact".
         let mut saved = Vec::new();
         let mut seen = HashSet::new();
         for entry in candidates {
@@ -2251,6 +2208,15 @@ impl Store {
         self.memory_compaction_status.lock().unwrap().clone()
     }
 
+    /// Execution-layer guard for the AI compaction entry (design §12 M2).
+    /// User-scope facts and pinned entries are never deleted, merged or
+    /// rewritten by a model-generated plan; this is the write-side boundary
+    /// behind any input filtering. It must not intercept manual deletes or
+    /// explicit forgetting, which go through `delete_workspace_memory`.
+    fn protected_from_model_compaction(entry: &WorkspaceMemoryEntry) -> bool {
+        entry.scope_type == "user" || entry.pinned
+    }
+
     fn remove_workspace_memory_for_compaction(
         &self,
         id: &str,
@@ -2261,7 +2227,7 @@ impl Store {
         let Some(entry) = by_id.get(id) else {
             return Ok(false);
         };
-        if entry.pinned || deleted_ids.contains(id) {
+        if Self::protected_from_model_compaction(entry) || deleted_ids.contains(id) {
             return Ok(false);
         }
         if !self.delete_workspace_memory(id)? {
@@ -2340,18 +2306,20 @@ impl Store {
                 }) {
                     continue;
                 }
+                // A model plan may not touch user-scope facts or pinned
+                // entries at all: skip the whole group rather than merging
+                // around the protected member.
+                if cluster
+                    .iter()
+                    .any(Self::protected_from_model_compaction)
+                {
+                    continue;
+                }
                 let target_id = group
                     .target_id
                     .as_deref()
                     .filter(|id| cluster.iter().any(|entry| entry.id == *id))
                     .map(str::to_string)
-                    .or_else(|| {
-                        cluster
-                            .iter()
-                            .find(|entry| entry.pinned)
-                            .or_else(|| cluster.first())
-                            .map(|entry| entry.id.clone())
-                    })
                     .unwrap_or_else(|| first.id.clone());
                 let target = cluster
                     .iter()
@@ -2427,7 +2395,9 @@ impl Store {
                 let Some(current) = by_id.get(&patch.id).cloned() else {
                     continue;
                 };
-                if deleted_ids.contains(&current.id) {
+                if deleted_ids.contains(&current.id)
+                    || Self::protected_from_model_compaction(&current)
+                {
                     continue;
                 }
                 let mut next = current;
@@ -2997,7 +2967,10 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
-    use worldbase_protocol::types::{MemorySearchScopeEntry, ToolCallRecord, ToolResultRecord};
+    use worldbase_protocol::types::{
+        MemoryMergeGroup, MemorySearchScopeEntry, MemoryUpdatePatch, ToolCallRecord,
+        ToolResultRecord,
+    };
 
     fn workspace_entry(id: &str, title: &str, summary: &str) -> WorkspaceMemoryEntry {
         WorkspaceMemoryEntry {
@@ -3084,6 +3057,8 @@ mod tests {
         assert_eq!(store.list_workspace_memories(1).unwrap().len(), 1);
 
         assert!(store.pin_workspace_memory("memory-two", true).unwrap());
+        // Design §12 M2: a model plan must not delete user-scope entries even
+        // when listed explicitly; manual deletes below remain available.
         let result = store
             .compact_workspace_memories(&MemoryCompactionPlan {
                 delete_ids: vec!["memory-one".into()],
@@ -3091,14 +3066,154 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.scanned, 2);
-        assert_eq!(result.deleted, 1);
-        assert_eq!(result.removed_useless, 1);
-        assert_eq!(result.retained, 1);
-        assert!(store.get_workspace_memory("memory-one").unwrap().is_none());
+        assert_eq!(result.deleted, 0);
+        assert_eq!(result.removed_useless, 0);
+        assert_eq!(result.retained, 2);
+        assert!(store.get_workspace_memory("memory-one").unwrap().is_some());
         assert_eq!(store.memory_compaction_status().status, "completed");
 
         assert!(store.delete_workspace_memory("memory-two").unwrap());
         assert!(store.get_workspace_memory("memory-two").unwrap().is_none());
+    }
+
+    #[test]
+    fn model_compaction_never_touches_user_scope_or_pinned_entries() {
+        let store = temp_store();
+        let mut user_fact = workspace_entry(
+            "user-fact",
+            "Diet preference",
+            "用户喜欢吃苹果",
+        );
+        user_fact.memory_type = "user_trait".into();
+        user_fact.source_text = Some("我喜欢吃苹果。".into());
+        store.save_workspace_memory(&user_fact).unwrap();
+
+        let mut pinned_agent = workspace_entry(
+            "pinned-agent",
+            "Pinned convention",
+            "部署前必须跑完整测试",
+        );
+        pinned_agent.scope_type = "agent".into();
+        pinned_agent.scope_id = "agent_default".into();
+        pinned_agent.pinned = true;
+        store.save_workspace_memory(&pinned_agent).unwrap();
+
+        let mut first = workspace_entry(
+            "agent-a",
+            "Build note",
+            "Rust services use cargo build",
+        );
+        first.scope_type = "agent".into();
+        first.scope_id = "agent_default".into();
+        store.save_workspace_memory(&first).unwrap();
+        let mut second = workspace_entry(
+            "agent-b",
+            "Build note duplicate",
+            "Rust services are built with cargo build",
+        );
+        second.scope_type = "agent".into();
+        second.scope_id = "agent_default".into();
+        store.save_workspace_memory(&second).unwrap();
+        let mut third = workspace_entry(
+            "agent-c",
+            "Stale fragment",
+            "leftover scratch",
+        );
+        third.scope_type = "agent".into();
+        third.scope_id = "agent_default".into();
+        store.save_workspace_memory(&third).unwrap();
+        let mut fourth = workspace_entry(
+            "agent-d",
+            "Deploy convention note",
+            "Deploy checks run before release",
+        );
+        fourth.scope_type = "agent".into();
+        fourth.scope_id = "agent_default".into();
+        store.save_workspace_memory(&fourth).unwrap();
+
+        let result = store
+            .compact_workspace_memories(&MemoryCompactionPlan {
+                delete_ids: vec![
+                    "user-fact".into(),
+                    "pinned-agent".into(),
+                    "agent-c".into(),
+                ],
+                merge_groups: vec![
+                    MemoryMergeGroup {
+                        ids: vec!["agent-a".into(), "agent-b".into()],
+                        target_id: Some("agent-a".into()),
+                        title: Some("Merged build notes".into()),
+                        summary: Some("Rust services use cargo build".into()),
+                        details: None,
+                        tags: None,
+                    },
+                    // A group containing a pinned member is skipped whole:
+                    // the model may not merge around the protected record.
+                    MemoryMergeGroup {
+                        ids: vec!["pinned-agent".into(), "agent-d".into()],
+                        target_id: Some("pinned-agent".into()),
+                        title: Some("Merged deploy notes".into()),
+                        summary: Some("Rewritten deploy convention".into()),
+                        details: None,
+                        tags: None,
+                    },
+                ],
+                updates: vec![
+                    MemoryUpdatePatch {
+                        id: "user-fact".into(),
+                        title: Some("Rewritten by model".into()),
+                        summary: Some("模型改写的用户事实".into()),
+                        details: None,
+                        tags: None,
+                        importance: None,
+                        confidence: None,
+                    },
+                    MemoryUpdatePatch {
+                        id: "pinned-agent".into(),
+                        title: Some("Rewritten pinned".into()),
+                        summary: Some("模型改写的置顶条目".into()),
+                        details: None,
+                        tags: None,
+                        importance: None,
+                        confidence: None,
+                    },
+                ],
+            })
+            .unwrap();
+
+        // User-scope and pinned targets stay byte-identical; only the plain
+        // agent delete and the protected-free merge proceed. `deleted`
+        // counts the explicit agent-c removal plus the merge-side agent-b
+        // removal; `removed_useless` only the explicit one.
+        assert_eq!(result.deleted, 2);
+        assert_eq!(result.removed_useless, 1);
+        assert_eq!(result.merged, 1);
+        // The merge itself re-saves its target once; no update patch applied.
+        assert_eq!(result.updated, 1);
+
+        let user_after = store.get_workspace_memory("user-fact").unwrap().unwrap();
+        assert_eq!(user_after.title, "Diet preference");
+        assert_eq!(user_after.summary, "用户喜欢吃苹果");
+        assert_eq!(user_after.source_text.as_deref(), Some("我喜欢吃苹果。"));
+        let pinned_after = store
+            .get_workspace_memory("pinned-agent")
+            .unwrap()
+            .unwrap();
+        assert_eq!(pinned_after.title, "Pinned convention");
+        assert_eq!(pinned_after.summary, "部署前必须跑完整测试");
+        assert!(pinned_after.pinned);
+
+        assert!(store.get_workspace_memory("agent-c").unwrap().is_none());
+        assert!(store.get_workspace_memory("agent-a").unwrap().is_some());
+        assert!(store.get_workspace_memory("agent-b").unwrap().is_none());
+        let untouched = store.get_workspace_memory("agent-d").unwrap().unwrap();
+        assert_eq!(untouched.title, "Deploy convention note");
+
+        // Manual deletion of a protected entry remains available: the guard
+        // covers the model compaction entry only.
+        assert!(store.delete_workspace_memory("pinned-agent").unwrap());
+        assert!(store.get_workspace_memory("pinned-agent").unwrap().is_none());
+        assert!(store.delete_workspace_memory("user-fact").unwrap());
     }
 
     #[test]

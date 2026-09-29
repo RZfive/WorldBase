@@ -1,5 +1,7 @@
 //! Conservative extraction of explicit user preference statements. Questions,
 //! examples, quotations and hypothetical instructions are not personal facts.
+//! Design §12 M0: assistant replies are not an extraction source at all, so
+//! there is deliberately no knowledge/recall-report channel here.
 
 pub(crate) fn explicit_preferences(message: &str) -> Vec<String> {
     if ["```", "比如", "例如", "假设", "如果", "假如", "引用"]
@@ -44,29 +46,4 @@ pub(crate) fn explicit_preferences(message: &str) -> Vec<String> {
             ))
         })
         .collect()
-}
-
-pub(crate) fn is_recall_report(text: &str) -> bool {
-    let text = text.to_lowercase();
-    text.contains("memory_search")
-        || ((text.contains("记忆") || text.contains("偏好"))
-            && [
-                "没有记录",
-                "没有任何",
-                "未找到",
-                "没有找到",
-                "无法确认",
-                "未保存",
-                "尚未记录",
-            ]
-            .iter()
-            .any(|word| text.contains(word)))
-        || [
-            "no memories",
-            "no stored",
-            "do not remember",
-            "don't remember",
-        ]
-        .iter()
-        .any(|word| text.contains(word))
 }

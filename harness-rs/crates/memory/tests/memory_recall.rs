@@ -1,5 +1,5 @@
 use serde_json::json;
-use worldbase_memory::Store;
+use worldbase_memory::{personal_profile_category_terms, Store};
 use worldbase_protocol::types::{
     MemorySearchScopeEntry, WorkspaceMemoryEntry, WorkspaceMemorySearchOptions,
 };
@@ -179,30 +179,49 @@ fn ingest_preserves_explicit_user_evidence_and_does_not_learn_a_failed_recall() 
 }
 
 #[test]
-fn generated_knowledge_keeps_user_source_but_not_the_full_assistant_transcript_in_details() {
+fn assistant_replies_no_longer_generate_knowledge_entries() {
     let f = Fixture::new();
+    // Design §12 M0: assistant restatements and generic advice must not become
+    // durable knowledge, even with signal words and a plausible user turn.
     let result = f.store.ingest_workspace_memories(&json!({
         "scopes": [{"scopeType":"user", "scopeId":"local-user"}, {"scopeType":"agent", "scopeId":"agent_default"}],
         "userMessages": ["请记住这个项目必须使用 SQLite。"],
         "finalAssistantText": "好的。\n\n```mermaid\nflowchart LR\n  A --> B\n```\n另外，项目必须使用 SQLite，部署时还要检查权限。"
     })).unwrap();
-    let knowledge = result
-        .iter()
-        .find(|entry| entry.memory_type == "knowledge")
-        .expect("knowledge memory");
     assert!(
-        knowledge.details.is_none(),
-        "generated knowledge should not copy the assistant transcript into the card details"
+        result.is_empty(),
+        "assistant replies are not an extraction source: {result:?}"
     );
-    assert_eq!(
-        knowledge.source_text.as_deref(),
-        Some("请记住这个项目必须使用 SQLite。")
-    );
-    assert!(!knowledge
-        .source_text
-        .as_deref()
-        .unwrap()
-        .contains("mermaid"));
+
+    let without_source = f
+        .store
+        .ingest_workspace_memories(&json!({
+            "scopes": [{"scopeType":"agent", "scopeId":"agent_default"}],
+            "userMessages": [],
+            "finalAssistantText": "Electron 项目应该进行构建测试。"
+        }))
+        .unwrap();
+    assert!(without_source.is_empty());
+
+    // A failed retrieval must not feed back as fact either; the whole session
+    // stays write-free because assistant text is no longer ingested.
+    assert!(f.store.ingest_workspace_memories(&json!({
+        "scopes": [{"scopeType":"user", "scopeId":"local-user"}, {"scopeType":"agent", "scopeId":"agent_default"}],
+        "userMessages": ["我喜欢吃什么"], "toolNames": ["memory_search"],
+        "finalAssistantText": "通过 memory_search 检索记忆，确认没有任何饮食喜好记录。"
+    })).unwrap().is_empty());
+
+    // The explicit user-preference path keeps working unchanged, including
+    // verbatim evidence; manual saves and memory_add are separate paths.
+    let evidence = "我喜欢吃苹果。";
+    let traits = f.store.ingest_workspace_memories(&json!({
+        "scopes": [{"scopeType":"user", "scopeId":"local-user"}],
+        "userMessages": [evidence],
+        "finalAssistantText": "好的，已保存你的偏好。"
+    })).unwrap();
+    assert_eq!(traits.len(), 1);
+    assert_eq!(traits[0].memory_type, "user_trait");
+    assert_eq!(traits[0].source_text.as_deref(), Some(evidence));
 }
 
 #[test]
@@ -220,36 +239,7 @@ fn source_text_is_not_truncated_or_rewritten_when_saving_an_existing_memory() {
 }
 
 #[test]
-fn knowledge_sources_use_only_the_current_user_turn_and_never_an_assistant_fallback() {
-    let f = Fixture::new();
-    let current = "  请解释这个项目的部署约束。\n保留换行。  ";
-    let input = json!({
-        "scopes": [{"scopeType":"agent", "scopeId":"agent_default"}],
-        "userMessages": ["之前讨论的是另外一个项目", current, "   "],
-        "finalAssistantText": "项目必须使用 SQLite 并检查文件权限。"
-    });
-    let entries = f.store.ingest_workspace_memories(&input).unwrap();
-    assert!(!entries.is_empty());
-    assert!(entries
-        .iter()
-        .all(|entry| entry.source_text.as_deref() == Some(current) && entry.details.is_none()));
-
-    let without_source = f
-        .store
-        .ingest_workspace_memories(&json!({
-            "scopes": [{"scopeType":"agent", "scopeId":"agent_default"}],
-            "userMessages": [],
-            "finalAssistantText": "Electron 项目应该进行构建测试。"
-        }))
-        .unwrap();
-    assert!(!without_source.is_empty());
-    assert!(without_source
-        .iter()
-        .all(|entry| entry.source_text.is_none()));
-}
-
-#[test]
-fn configuration_and_tool_derived_memories_are_not_labeled_as_user_quotes() {
+fn tool_derived_memories_are_not_labeled_as_user_quotes() {
     let f = Fixture::new();
     let entries = f
         .store
@@ -262,4 +252,121 @@ fn configuration_and_tool_derived_memories_are_not_labeled_as_user_quotes() {
         .unwrap();
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().all(|entry| entry.source_text.is_none()));
+    assert!(entries
+        .iter()
+        .all(|entry| matches!(entry.memory_type.as_str(), "agent_skill" | "step")));
+}
+
+fn user_scope() -> Vec<MemorySearchScopeEntry> {
+    vec![MemorySearchScopeEntry {
+        scope_type: "user".into(),
+        scope_id: "local-user".into(),
+    }]
+}
+
+#[test]
+fn personal_profile_categories_map_personal_questions_to_fact_terms() {
+    let diet = personal_profile_category_terms("我喜欢吃什么").expect("diet category");
+    assert!(diet.contains(&"喜欢吃"));
+    assert!(personal_profile_category_terms("我对花生过敏吗").is_some());
+    assert!(personal_profile_category_terms("帮我修复这个构建失败").is_none());
+    assert!(personal_profile_category_terms("").is_none());
+}
+
+#[test]
+fn user_fact_channel_reads_pinned_and_category_facts_for_the_exact_scope() {
+    let f = Fixture::new();
+    let apple = json!({
+        "id": "apple", "title": "用户喜欢吃苹果", "summary": "用户喜欢吃苹果",
+        "scopeType": "user", "scopeId": "local-user", "memoryType": "user_trait",
+        "sourceText": "我喜欢吃苹果。"
+    });
+    f.store
+        .save_workspace_memory(&serde_json::from_value(apple).unwrap())
+        .unwrap();
+    let mut routine = f.save("routine", "用户习惯早上九点开始工作", "user");
+    routine.memory_type = "user_trait".into();
+    routine.pinned = true;
+    f.store.save_workspace_memory(&routine).unwrap();
+    // Same text but a different user scope: never visible through this run's
+    // channel.
+    let mut foreign = f.save("foreign", "用户喜欢吃苹果", "user");
+    foreign.scope_id = "someone-else".into();
+    f.store.save_workspace_memory(&foreign).unwrap();
+
+    let pinned = f
+        .store
+        .recall_user_scope_facts(&user_scope(), &[], true, 4)
+        .unwrap();
+    assert_eq!(
+        pinned.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        vec!["routine"],
+        "only pinned facts occupy the resident slot"
+    );
+
+    let diet = personal_profile_category_terms("我喜欢吃什么").unwrap();
+    let categorized = f
+        .store
+        .recall_user_scope_facts(&user_scope(), diet, false, 8)
+        .unwrap();
+    assert_eq!(categorized.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["apple"]);
+    assert_eq!(categorized[0].source_text.as_deref(), Some("我喜欢吃苹果。"));
+
+    // Unrelated query categories must not pull the fact in.
+    let schedule = personal_profile_category_terms("我的作息是什么").unwrap();
+    let by_schedule = f
+        .store
+        .recall_user_scope_facts(&user_scope(), schedule, false, 8)
+        .unwrap();
+    assert_eq!(
+        by_schedule.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        vec!["routine"],
+        "category terms must not leak between categories"
+    );
+}
+
+#[test]
+fn user_fact_channel_filters_lifecycle_and_keeps_multiple_preferences() {
+    let f = Fixture::new();
+    let save = |id: &str, summary: &str| {
+        f.store
+            .save_workspace_memory(&serde_json::from_value(json!({
+                "id": id, "title": summary, "summary": summary,
+                "scopeType": "user", "scopeId": "local-user", "memoryType": "user_trait"
+            })).unwrap())
+            .unwrap()
+    };
+    save("apple", "用户喜欢吃苹果");
+    save("banana", "用户也喜欢吃香蕉");
+    let mut superseded = save("superseded", "用户喜欢吃梨");
+    let mut expired = save("expired", "用户喜欢吃西瓜");
+    f.store.save_workspace_memory(&superseded).unwrap();
+    f.store.save_workspace_memory(&expired).unwrap();
+    let conn = rusqlite::Connection::open(f.store.memory_database_file()).unwrap();
+    conn.execute(
+        "UPDATE memory_entries SET status = 'superseded' WHERE id = 'superseded'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE memory_entries SET expires_at = '2000-01-01T00:00:00Z' WHERE id = 'expired'",
+        [],
+    )
+    .unwrap();
+    superseded.id = "superseded".into();
+    expired.id = "expired".into();
+    let mut foreign = save("foreign", "用户喜欢吃苹果");
+    foreign.scope_id = "someone-else".into();
+    f.store.save_workspace_memory(&foreign).unwrap();
+    save("deleted", "用户喜欢吃橘子");
+    f.store.delete_workspace_memory("deleted").unwrap();
+
+    let diet = personal_profile_category_terms("我喜欢吃什么").unwrap();
+    let hits = f
+        .store
+        .recall_user_scope_facts(&user_scope(), diet, false, 10)
+        .unwrap();
+    let ids = hits.iter().map(|e| e.id.as_str()).collect::<Vec<_>>();
+    assert!(ids.contains(&"apple") && ids.contains(&"banana"), "multiple independent preferences stay: {ids:?}");
+    assert_eq!(ids.len(), 2, "wrong scope, inactive, expired and deleted entries are excluded: {ids:?}");
 }
