@@ -130,7 +130,8 @@ async function listFilesRecursive (rootDir, relDir = '') {
  * manifest 与包内容漂移 = 客户端 apply 必败，必须在 CI 就拦下。
  */
 async function verifyZipMatchesManifest (zipPath, manifest, signed) {
-  const checkDir = `${zipPath}.verify`
+  // extract-zip 要求解压目录必须是绝对路径；CI 的 --output 是相对路径
+  const checkDir = path.resolve(`${zipPath}.verify`)
   await fsp.rm(checkDir, { recursive: true, force: true })
   try {
     await extractZip(zipPath, { dir: checkDir })
