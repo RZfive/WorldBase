@@ -19,11 +19,13 @@ use worldbase_protocol::types::{
 mod embedding;
 mod embedding_service;
 mod embedding_store;
+mod ingest;
+mod search;
 mod vector;
+pub use search::{is_personal_memory_query, merge_memory_recall};
 
 pub use embedding::{
-    EMBEDDING_PREPROCESS_VERSION, EmbeddingProvider, FakeEmbeddingProvider,
-    OpenAIEmbeddingProvider,
+    EmbeddingProvider, FakeEmbeddingProvider, OpenAIEmbeddingProvider, EMBEDDING_PREPROCESS_VERSION,
 };
 pub use embedding_service::MemoryEmbeddingQueue;
 pub use vector::VectorIndex;
@@ -181,15 +183,6 @@ fn clean_memory_value(value: &str) -> String {
         .trim()
         .trim_matches('`')
         .trim()
-        .to_string()
-}
-
-fn first_memory_line(value: &str) -> String {
-    value
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
         .to_string()
 }
 
@@ -490,6 +483,7 @@ impl Store {
             "ALTER TABLE memory_entries ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE memory_entries ADD COLUMN last_confirmed_at TEXT",
             "ALTER TABLE memory_entries ADD COLUMN expires_at TEXT",
+            "ALTER TABLE memory_entries ADD COLUMN source_text TEXT",
         ] {
             let _ = conn.execute(statement, []);
         }
@@ -561,6 +555,7 @@ impl Store {
             "#,
         )
         .context("create shared-memory embedding tables")?;
+        let _ = conn.execute("ALTER TABLE embedding_generations ADD COLUMN config_fingerprint TEXT NOT NULL DEFAULT ''", []);
         Ok(())
     }
 
@@ -1775,6 +1770,7 @@ impl Store {
             title: row.get("title")?,
             summary: row.get("summary")?,
             details: row.get("details")?,
+            source_text: row.get("source_text")?,
             tags: parse_strings(&tags_json),
             source_conversation_id: row.get("source_conversation_id")?,
             source_session_id: row.get("source_session_id")?,
@@ -1816,8 +1812,8 @@ impl Store {
                 id, scope_type, scope_id, memory_type, title, summary, details,
                 tags_json, source_conversation_id, source_session_id,
                 source_message_ids_json, importance, confidence, pinned,
-                last_used_at, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                last_used_at, created_at, updated_at, source_text
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             ON CONFLICT(id) DO UPDATE SET
                 scope_type = excluded.scope_type,
                 scope_id = excluded.scope_id,
@@ -1829,6 +1825,7 @@ impl Store {
                 source_conversation_id = excluded.source_conversation_id,
                 source_session_id = excluded.source_session_id,
                 source_message_ids_json = excluded.source_message_ids_json,
+                source_text = excluded.source_text,
                 importance = excluded.importance,
                 confidence = excluded.confidence,
                 pinned = excluded.pinned,
@@ -1852,6 +1849,7 @@ impl Store {
                 normalized.last_used_at,
                 normalized.created_at,
                 normalized.updated_at,
+                normalized.source_text,
             ],
         )?;
         // This FTS table is intentionally contentless/manual, matching the
@@ -1877,126 +1875,26 @@ impl Store {
         let embedding_text = Self::build_embedding_text(
             &normalized.title,
             &normalized.summary,
-            normalized.details.as_deref(),
+            // Raw user evidence remains local/searchable. For extracted
+            // preferences, embed the short fact, not the entire source message.
+            if normalized.memory_type == "user_trait" && normalized.source_text.is_some() {
+                None
+            } else {
+                normalized.details.as_deref()
+            },
             &normalized.tags,
             None,
         );
-        let _ = Self::sync_embedding_document_in_tx(
+        Self::sync_embedding_document_in_tx(
             &tx,
             embedding_store::EMBEDDING_SOURCE_MEMORY,
             &normalized.id,
             &normalized.scope_type,
             &normalized.scope_id,
             &embedding_text,
-        );
+        )?;
         tx.commit()?;
         Ok(normalized)
-    }
-
-    pub fn search_workspace_memories(
-        &self,
-        options: &WorkspaceMemorySearchOptions,
-    ) -> Result<Vec<WorkspaceMemoryEntry>> {
-        let limit = options.limit.unwrap_or(20).clamp(1, 50_000);
-        let query = options.query.as_deref().unwrap_or("").trim().to_string();
-        let mut filters = Vec::new();
-        let mut values: Vec<String> = Vec::new();
-        if !options.scopes.is_empty() {
-            let mut scope_filters = Vec::new();
-            for scope in &options.scopes {
-                let scope_type = scope.scope_type.trim();
-                let scope_id = scope.scope_id.trim();
-                if scope_type.is_empty() || scope_id.is_empty() {
-                    continue;
-                }
-                scope_filters.push("(e.scope_type = ? AND e.scope_id = ?)".to_string());
-                values.push(scope_type.to_string());
-                values.push(scope_id.to_string());
-            }
-            if !scope_filters.is_empty() {
-                filters.push(format!("({})", scope_filters.join(" OR ")));
-            }
-        }
-        if !options.memory_types.is_empty() {
-            let types: Vec<String> = options
-                .memory_types
-                .iter()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .collect();
-            if !types.is_empty() {
-                filters.push(format!(
-                    "e.memory_type IN ({})",
-                    std::iter::repeat("?")
-                        .take(types.len())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                values.extend(types);
-            }
-        }
-
-        let fetch = |use_fts: bool| -> Result<Vec<WorkspaceMemoryEntry>> {
-            let mut sql = if use_fts {
-                "SELECT DISTINCT e.* FROM memory_entries e
-                 JOIN memory_entries_fts f ON e.id = f.id"
-                    .to_string()
-            } else {
-                "SELECT e.* FROM memory_entries e".to_string()
-            };
-            let mut local_values = values.clone();
-            let mut local_filters = filters.clone();
-            if use_fts {
-                let terms: Vec<String> = query
-                    .split_whitespace()
-                    .map(|term| {
-                        term.trim_matches(|character: char| {
-                            !character.is_alphanumeric() && character != '_' && character != '-'
-                        })
-                        .replace('"', "\"\"")
-                    })
-                    .filter(|term| !term.is_empty())
-                    .take(8)
-                    .map(|term| format!("\"{term}\""))
-                    .collect();
-                if terms.is_empty() {
-                    return Ok(Vec::new());
-                }
-                local_filters.push("f MATCH ?".into());
-                local_values.push(terms.join(" AND "));
-            } else if !query.is_empty() {
-                local_filters.push(
-                    "(e.title LIKE '%' || ? || '%' OR e.summary LIKE '%' || ? || '%' OR
-                     COALESCE(e.details, '') LIKE '%' || ? || '%' OR e.tags_json LIKE '%' || ? || '%')"
-                        .replace('\n', " "),
-                );
-                local_values.extend(std::iter::repeat(query.clone()).take(4));
-            }
-            if !local_filters.is_empty() {
-                sql.push_str(" WHERE ");
-                sql.push_str(&local_filters.join(" AND "));
-            }
-            sql.push_str(&format!(
-                " ORDER BY e.pinned DESC, e.importance DESC, e.confidence DESC,
-                          COALESCE(e.last_used_at, e.updated_at) DESC LIMIT {limit}"
-            ));
-            let conn = self.memory_conn.lock().unwrap();
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(
-                params_from_iter(local_values.iter()),
-                Self::row_to_workspace_memory,
-            )?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-        };
-
-        if !query.is_empty() {
-            if let Ok(hits) = fetch(true) {
-                if !hits.is_empty() {
-                    return Ok(hits);
-                }
-            }
-        }
-        fetch(false)
     }
 
     pub fn list_workspace_memories(&self, limit: u32) -> Result<Vec<WorkspaceMemoryEntry>> {
@@ -2035,11 +1933,17 @@ impl Store {
             // tombstone so forgotten memory cannot resurface).
             let _ = tx.execute(
                 "DELETE FROM embedding_jobs WHERE document_id = ?1",
-                params![embedding_store::document_id_for(embedding_store::EMBEDDING_SOURCE_MEMORY, id)],
+                params![embedding_store::document_id_for(
+                    embedding_store::EMBEDDING_SOURCE_MEMORY,
+                    id
+                )],
             )?;
             let _ = tx.execute(
                 "DELETE FROM embedding_documents WHERE id = ?1",
-                params![embedding_store::document_id_for(embedding_store::EMBEDDING_SOURCE_MEMORY, id)],
+                params![embedding_store::document_id_for(
+                    embedding_store::EMBEDDING_SOURCE_MEMORY,
+                    id
+                )],
             )?;
         }
         tx.commit()?;
@@ -2110,6 +2014,14 @@ impl Store {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string();
+        // Knowledge is generated in response to the latest user turn. Keep
+        // that exact text, not unrelated earlier messages or an AI excerpt.
+        // Bound its display in the UI, not the durable evidence itself.
+        let user_source_text = user_messages
+            .iter()
+            .rev()
+            .find(|message| !message.trim().is_empty())
+            .cloned();
         let tool_names = input
             .get("toolNames")
             .and_then(serde_json::Value::as_array)
@@ -2159,13 +2071,30 @@ impl Store {
                 memory_type: memory_type.to_string(),
                 title,
                 summary,
-                details: details
-                    .map(|value| clean_memory_value(&value))
-                    .filter(|value| !value.is_empty()),
+                // User traits already have their evidence in source_text, so
+                // do not duplicate it in the generic details field. For
+                // knowledge, the old implementation stored the first 600
+                // characters of the entire assistant answer here; that made
+                // cards look like raw transcripts and polluted embeddings.
+                details: if memory_type == "user_trait" || memory_type == "knowledge" {
+                    None
+                } else {
+                    details
+                        .clone()
+                        .map(|value| clean_memory_value(&value))
+                        .filter(|value| !value.is_empty())
+                },
                 tags: normalize_memory_strings(&tags),
                 source_conversation_id: source_conversation_id.clone(),
                 source_session_id: source_session_id.clone(),
                 source_message_ids: Vec::new(),
+                source_text: match memory_type {
+                    "user_trait" => details.clone(),
+                    "knowledge" => user_source_text.clone(),
+                    // Skills and steps are inferred from configuration/tool
+                    // execution, not quoted assertions made by the user.
+                    _ => None,
+                },
                 importance,
                 confidence,
                 pinned: false,
@@ -2177,6 +2106,18 @@ impl Store {
 
         if allow("allowUserTraits") {
             for message in &user_messages {
+                for fact in ingest::explicit_preferences(message) {
+                    push_entry(
+                        user_scope.clone(),
+                        "user_trait",
+                        fact.chars().take(60).collect(),
+                        fact,
+                        Some(message.clone()),
+                        vec!["preference".into(), "user-stated".into()],
+                        0.85,
+                        0.95,
+                    );
+                }
                 if regex::Regex::new(r"(?i)(以后|今后|默认|始终).{0,12}(中文|Chinese)")
                     .unwrap()
                     .is_match(message)
@@ -2186,7 +2127,7 @@ impl Store {
                         "user_trait",
                         "偏好使用中文".into(),
                         "用户偏好默认使用中文沟通和输出。".into(),
-                        Some(first_memory_line(message)),
+                        Some(message.clone()),
                         vec!["language".into(), "preference".into()],
                         0.85,
                         0.85,
@@ -2201,7 +2142,7 @@ impl Store {
                         "user_trait",
                         "偏好先方案后执行".into(),
                         "用户偏好先看方案或规划，再进入实现。".into(),
-                        Some(first_memory_line(message)),
+                        Some(message.clone()),
                         vec!["workflow".into(), "planning".into()],
                         0.85,
                         0.85,
@@ -2258,7 +2199,14 @@ impl Store {
                 0.7,
             );
         }
-        if allow("allowKnowledge") {
+        // A failed retrieval is not new knowledge about the user. Otherwise
+        // "no food preference found" is fed back into later retrieval as fact.
+        let recalling_memory = tool_names.iter().any(|name| name == "memory_search")
+            || user_messages
+                .last()
+                .is_some_and(|text| is_personal_memory_query(text))
+            || ingest::is_recall_report(&assistant_text);
+        if allow("allowKnowledge") && !recalling_memory {
             let knowledge_scope = project_scope
                 .clone()
                 .or(group_scope.clone())
@@ -2281,7 +2229,7 @@ impl Store {
                         "knowledge",
                         title,
                         part.to_string(),
-                        Some(assistant_text.chars().take(600).collect()),
+                        None,
                         vec!["knowledge".into(), "insight".into()],
                         0.75,
                         0.62,
@@ -3064,6 +3012,7 @@ mod tests {
             source_conversation_id: None,
             source_session_id: None,
             source_message_ids: vec![],
+            source_text: None,
             importance: 1.5,
             confidence: -1.0,
             pinned: false,

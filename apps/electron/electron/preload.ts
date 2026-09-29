@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-permissions.js'
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../src/shared/image-studio-types.js'
@@ -557,6 +557,8 @@ export interface ElectronAPI {
   saveMemory: (entry: Partial<MemoryEntry>) => Promise<MemoryEntry>
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
+  retryMemoryIndex: () => Promise<MemoryIndexStatus>
+  getMemoryIndexStatus: () => Promise<MemoryIndexStatus>
   getMemoryEmbeddingSettings: () => Promise<MemoryEmbeddingSettings>
   saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => Promise<MemoryEmbeddingSettings>
   getMemoryCompactionSettings: () => Promise<MemoryCompactionSettings>
@@ -849,6 +851,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveMemory: (entry: Partial<MemoryEntry>) => ipcRenderer.invoke('memory:save', entry),
   pinMemory: (id: string, pinned: boolean) => ipcRenderer.invoke('memory:pin', id, pinned),
   deleteMemory: (id: string) => ipcRenderer.invoke('memory:delete', id),
+  retryMemoryIndex: () => ipcRenderer.invoke('memory:retryIndex'),
+  getMemoryIndexStatus: () => ipcRenderer.invoke('memory:indexStatus'),
   getMemoryEmbeddingSettings: () => ipcRenderer.invoke('memory:getEmbeddingSettings'),
   saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => ipcRenderer.invoke('memory:setEmbeddingSettings', settings),
   getMemoryCompactionSettings: () => ipcRenderer.invoke('memory:getCompactionSettings'),

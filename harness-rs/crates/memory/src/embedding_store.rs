@@ -65,6 +65,33 @@ pub struct EmbeddingGenerationRow {
     pub failed_documents: i64,
     pub created_at: String,
     pub activated_at: Option<String>,
+    pub config_fingerprint: String,
+}
+
+impl EmbeddingGenerationRow {
+    pub fn matches_config(
+        &self,
+        config: &worldbase_protocol::types::MemoryEmbeddingRuntimeConfig,
+    ) -> bool {
+        self.config_fingerprint == embedding_config_fingerprint(config, self.dimensions as u32)
+    }
+}
+
+pub(crate) fn embedding_config_fingerprint(
+    config: &worldbase_protocol::types::MemoryEmbeddingRuntimeConfig,
+    dimensions: u32,
+) -> String {
+    // Credentials can rotate without changing the vector space. Endpoints,
+    // model, dimensions and preprocessing cannot.
+    content_hash_of(&serde_json::json!({
+        "provider": config.provider_id, "endpoint": config.base_url.trim().trim_end_matches('/'),
+        "model": config.model_id, "dimensions": config.dimensions.unwrap_or(dimensions),
+        "distance": config.distance.as_deref().unwrap_or("cosine"),
+        "normalized": config.normalized.unwrap_or(false),
+        "queryPrefix": config.query_prefix.as_deref().unwrap_or(""),
+        "documentPrefix": config.document_prefix.as_deref().unwrap_or(""),
+        "preprocess": super::EMBEDDING_PREPROCESS_VERSION,
+    }).to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -150,12 +177,12 @@ impl Store {
         embedding_text: &str,
     ) -> Result<EmbeddingSyncOutcome> {
         let hash = content_hash_of(embedding_text);
-        let existing: Option<(String, String, Option<String>, String)> = conn
+        let existing: Option<(String, String, Option<String>, String, String, String)> = conn
             .query_row(
-                "SELECT id, content_hash, active_generation_id, status
+                "SELECT id, content_hash, active_generation_id, status, scope_type, scope_id
                  FROM embedding_documents WHERE source_type = ?1 AND source_id = ?2",
                 params![source_type, source_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .ok();
 
@@ -177,9 +204,11 @@ impl Store {
                 .ok()
             });
 
-        if let Some((id, existing_hash, active_generation, status)) = &existing {
+        if let Some((_, existing_hash, active_generation, status, old_scope_type, old_scope_id)) = &existing {
             if *existing_hash == hash
                 && status == "indexed"
+                && old_scope_type == scope_type
+                && old_scope_id == scope_id
                 && generation
                     .as_deref()
                     .map(|target| Some(target) == active_generation.as_deref())
@@ -187,12 +216,11 @@ impl Store {
             {
                 return Ok(EmbeddingSyncOutcome::AlreadyIndexed);
             }
-            let _ = id;
         }
 
         let document_id = existing
             .as_ref()
-            .map(|(id, _, _, _)| id.clone())
+            .map(|(id, _, _, _, _, _)| id.clone())
             .unwrap_or_else(|| document_id_for(source_type, source_id));
         let now = now_iso();
         conn.execute(
@@ -220,7 +248,7 @@ impl Store {
                 scope_id,
                 embedding_text,
                 hash,
-                existing.as_ref().and_then(|(_, _, active, _)| active.clone()),
+                existing.as_ref().and_then(|(_, _, active, _, _, _)| active.clone()),
                 now,
                 now
             ],
@@ -263,8 +291,8 @@ impl Store {
             INSERT INTO embedding_generations (
                 id, provider_id, model_id, model_revision, dimensions, distance_metric,
                 normalized, preprocess_version, index_path, status, total_documents,
-                indexed_documents, failed_documents, created_at, activated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, 0, 0, ?11, ?12)
+                indexed_documents, failed_documents, created_at, activated_at, config_fingerprint
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, 0, 0, ?11, ?12, ?13)
             "#,
             params![
                 generation.id,
@@ -279,6 +307,7 @@ impl Store {
                 generation.status,
                 generation.created_at,
                 generation.activated_at,
+                generation.config_fingerprint,
             ],
         )?;
         Ok(())
@@ -346,11 +375,9 @@ impl Store {
     /// 后台任务结束后重算 generation 进度计数。
     pub fn refresh_embedding_generation_totals(&self, generation_id: &str) -> Result<()> {
         let conn = self.memory_conn.lock().unwrap();
-        let total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM embedding_documents",
-            [],
-            |row| row.get(0),
-        )?;
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM embedding_documents", [], |row| {
+            row.get(0)
+        })?;
         let indexed: i64 = conn.query_row(
             "SELECT COUNT(*) FROM embedding_documents
              WHERE status = 'indexed' AND active_generation_id = ?1",
@@ -373,7 +400,11 @@ impl Store {
 
     // ---------- document/job reads ----------
 
-    pub fn get_embedding_document(&self, source_type: &str, source_id: &str) -> Result<Option<EmbeddingDocumentRow>> {
+    pub fn get_embedding_document(
+        &self,
+        source_type: &str,
+        source_id: &str,
+    ) -> Result<Option<EmbeddingDocumentRow>> {
         let conn = self.memory_conn.lock().unwrap();
         let mut statement = conn.prepare(
             "SELECT * FROM embedding_documents WHERE source_type = ?1 AND source_id = ?2",
@@ -393,7 +424,10 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn get_embedding_documents_by_ids(&self, ids: &[String]) -> Result<Vec<EmbeddingDocumentRow>> {
+    pub fn get_embedding_documents_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<EmbeddingDocumentRow>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -449,24 +483,34 @@ impl Store {
 
     pub fn delete_embedding_document(&self, id: &str) -> Result<()> {
         let conn = self.memory_conn.lock().unwrap();
-        conn.execute("DELETE FROM embedding_jobs WHERE document_id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM embedding_jobs WHERE document_id = ?1",
+            params![id],
+        )?;
         conn.execute("DELETE FROM embedding_documents WHERE id = ?1", params![id])?;
         Ok(())
     }
 
     /// 即时事务认领到期任务；跨进程（Electron/CLI 并存）时同一任务只会被
     /// 一个消费者取走。
-    pub fn claim_due_embedding_jobs(&self, limit: u32) -> Result<Vec<EmbeddingJobRow>> {
+    pub fn claim_due_embedding_jobs(
+        &self,
+        generation_id: &str,
+        limit: u32,
+    ) -> Result<Vec<EmbeddingJobRow>> {
         let mut conn = self.memory_conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let now = now_iso();
+        // Recover claims abandoned by a crashed worker. The provider timeout
+        // is 30s, shorter than this lease; another live batch is not stolen.
+        tx.execute("UPDATE embedding_jobs SET status = 'retry' WHERE generation_id = ?1 AND status = 'running' AND julianday(updated_at) < julianday(?2, '-2 minutes')", params![generation_id, now])?;
         let mut statement = tx.prepare(
             "SELECT * FROM embedding_jobs
-             WHERE status IN ('queued', 'retry') AND (next_retry_at IS NULL OR next_retry_at <= ?1)
+             WHERE generation_id = ?3 AND status IN ('queued', 'retry') AND (next_retry_at IS NULL OR next_retry_at <= ?1)
              ORDER BY id ASC LIMIT ?2",
         )?;
         let rows = statement
-            .query_map(params![now, limit], row_to_job)?
+            .query_map(params![now, limit, generation_id], row_to_job)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         for job in &rows {
@@ -515,7 +559,9 @@ impl Store {
             let mut statement =
                 tx.prepare("SELECT id, status FROM embedding_documents")?;
             let rows = statement
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
@@ -538,7 +584,7 @@ impl Store {
             let pending: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM embedding_jobs
                  WHERE document_id = ?1 AND generation_id = ?2
-                   AND status IN ('queued', 'running', 'retry', 'succeeded')",
+                   AND status IN ('queued', 'running', 'retry', 'failed')",
                 params![document_id, generation_id],
                 |row| row.get(0),
             )?;
@@ -554,6 +600,116 @@ impl Store {
         }
         tx.commit()?;
         Ok(enqueued)
+    }
+
+    pub(crate) fn embedding_job_counts(
+        &self,
+        generation_id: Option<&str>,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        let conn = self.memory_conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT status, COUNT(*) FROM embedding_jobs WHERE generation_id = ?1 GROUP BY status",
+        )?;
+        let rows = stmt.query_map(params![generation_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn embedding_document_counts(
+        &self,
+        generation_id: Option<&str>,
+    ) -> Result<(usize, usize, usize, Option<String>)> {
+        let conn = self.memory_conn.lock().unwrap();
+        let (total, indexed, failed) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(status = 'indexed' AND active_generation_id = ?1), 0), COALESCE(SUM(status = 'failed'), 0) FROM embedding_documents",
+            params![generation_id], |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize, row.get::<_, i64>(2)? as usize)),
+        )?;
+        let error = conn.query_row("SELECT last_error FROM embedding_documents WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1", [], |row| row.get::<_, String>(0)).ok();
+        Ok((total, indexed, failed, error))
+    }
+
+    pub fn retry_failed_embedding_jobs(&self) -> Result<()> {
+        let mut conn = self.memory_conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE embedding_jobs SET status = 'queued', attempts = 0, next_retry_at = NULL, error_message = NULL WHERE status = 'failed' AND generation_id IN (SELECT id FROM embedding_generations WHERE status IN ('active', 'building'))", [])?;
+        tx.execute("UPDATE embedding_documents SET status = 'queued', retry_count = 0, last_error = NULL WHERE status = 'failed'", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn cancel_other_embedding_jobs(&self, generation_id: &str) -> Result<()> {
+        let conn = self.memory_conn.lock().unwrap();
+        conn.execute("UPDATE embedding_jobs SET status = 'canceled', updated_at = ?2 WHERE generation_id != ?1 AND status IN ('queued', 'retry', 'running')", params![generation_id, now_iso()])?;
+        conn.execute("UPDATE embedding_generations SET status = 'retired' WHERE id != ?1 AND status = 'building'", params![generation_id])?;
+        Ok(())
+    }
+
+    pub fn complete_embedding_job(
+        &self,
+        job: &EmbeddingJobRow,
+        document: &EmbeddingDocumentRow,
+    ) -> Result<bool> {
+        let mut conn = self.memory_conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // An in-flight response must not resurrect a forgotten record or mark
+        // a concurrently edited document as indexed using a stale vector.
+        let updated = tx.execute("UPDATE embedding_documents SET status = 'indexed', active_generation_id = ?2, last_error = NULL, retry_count = 0, updated_at = ?3 WHERE id = ?1 AND content_hash = ?4 AND scope_type = ?5 AND scope_id = ?6", params![document.id, job.generation_id, now_iso(), document.content_hash, document.scope_type, document.scope_id])?;
+        tx.execute("UPDATE embedding_jobs SET status = ?2, attempts = attempts + 1, updated_at = ?3 WHERE id = ?1", params![job.id, if updated > 0 { "succeeded" } else { "canceled" }, now_iso()])?;
+        tx.commit()?;
+        Ok(updated > 0)
+    }
+
+    pub fn fail_embedding_job(
+        &self,
+        job: &EmbeddingJobRow,
+        error: &str,
+        terminal: bool,
+        retry_at: Option<&str>,
+    ) -> Result<()> {
+        let mut conn = self.memory_conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE embedding_jobs SET status = ?2, attempts = ?3, next_retry_at = ?4, error_message = ?5, updated_at = ?6 WHERE id = ?1", params![job.id, if terminal { "failed" } else { "retry" }, job.attempts + 1, retry_at, error, now_iso()])?;
+        tx.execute("UPDATE embedding_documents SET status = ?2, retry_count = ?3, last_error = ?4, updated_at = ?5 WHERE id = ?1", params![job.document_id, if terminal { "failed" } else { "queued" }, job.attempts + 1, error, now_iso()])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Upgrade pre-embedding memories without rewriting their original text or
+    /// timestamps. Jobs will be backfilled once a model generation exists.
+    pub fn backfill_embedding_documents(&self) -> Result<()> {
+        let mut conn = self.memory_conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let missing = {
+            let mut stmt = tx.prepare("SELECT e.* FROM memory_entries e WHERE NOT EXISTS (SELECT 1 FROM embedding_documents d WHERE d.source_type = 'memory' AND d.source_id = e.id)")?;
+            let rows = stmt
+                .query_map([], Self::row_to_workspace_memory)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for entry in missing {
+            let text = Self::build_embedding_text(
+                &entry.title,
+                &entry.summary,
+                if entry.memory_type == "user_trait" && entry.source_text.is_some() {
+                    None
+                } else {
+                    entry.details.as_deref()
+                },
+                &entry.tags,
+                None,
+            );
+            Self::sync_embedding_document_in_tx(
+                &tx,
+                EMBEDDING_SOURCE_MEMORY,
+                &entry.id,
+                &entry.scope_type,
+                &entry.scope_id,
+                &text,
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     // ---------- vector index ----------
@@ -577,9 +733,10 @@ impl Store {
             return;
         };
         for generation in &generations {
-            if let Err(error) =
-                index.delete_documents(&generation.id, std::slice::from_ref(&document_id.to_string()))
-            {
+            if let Err(error) = index.delete_documents(
+                &generation.id,
+                std::slice::from_ref(&document_id.to_string()),
+            ) {
                 tracing::warn!(document_id, %error, "vector delete failed");
             }
         }
@@ -596,6 +753,16 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<worldbase_protocol::types::WorkspaceMemoryEntry>> {
         let vector = provider.embed_query(query).await?;
+        self.recall_semantic_entries_with_vector(generation_id, &vector, scope_keys, limit)
+    }
+
+    pub fn recall_semantic_entries_with_vector(
+        &self,
+        generation_id: &str,
+        vector: &[f32],
+        scope_keys: &[String],
+        limit: usize,
+    ) -> Result<Vec<worldbase_protocol::types::WorkspaceMemoryEntry>> {
         let index = self
             .open_vector_index()
             .ok_or_else(|| anyhow!("vector index unavailable"))?;
@@ -603,7 +770,7 @@ impl Store {
         let hits = index.query(
             generation_id,
             &super::vector::VectorKnnQuery {
-                vector: &vector,
+                vector,
                 scope_keys,
                 document_kinds: &kinds,
                 limit,
@@ -622,11 +789,12 @@ impl Store {
             let recallable: Option<i64> = {
                 let conn = self.memory_conn.lock().unwrap();
                 conn.query_row(
-                    "SELECT 1 FROM memory_entries
-                     WHERE id = ?1
-                       AND COALESCE(status, 'active') = 'active'
-                       AND (expires_at IS NULL OR expires_at > ?2)",
-                    rusqlite::params![source_id, now_iso()],
+                    "SELECT 1 FROM memory_entries e JOIN embedding_documents d ON d.source_id = e.id AND d.source_type = 'memory'
+                     WHERE e.id = ?1
+                       AND COALESCE(e.status, 'active') = 'active'
+                       AND (e.expires_at IS NULL OR julianday(e.expires_at) > julianday(?2))
+                       AND d.status = 'indexed' AND d.active_generation_id = ?3",
+                    rusqlite::params![source_id, now_iso(), generation_id],
                     |row| row.get(0),
                 )
                 .ok()
@@ -635,7 +803,10 @@ impl Store {
                 continue;
             }
             if let Some(entry) = self.get_workspace_memory(source_id)? {
-                entries.push(entry);
+                // Scope may have changed since this vector was indexed.
+                if scope_keys.contains(&format!("{}:{}", entry.scope_type, entry.scope_id)) {
+                    entries.push(entry);
+                }
             }
         }
         Ok(entries)
@@ -701,5 +872,6 @@ fn row_to_generation(row: &rusqlite::Row<'_>) -> rusqlite::Result<EmbeddingGener
         failed_documents: row.get::<_, Option<i64>>("failed_documents")?.unwrap_or(0),
         created_at: row.get("created_at")?,
         activated_at: row.get("activated_at")?,
+        config_fingerprint: row.get("config_fingerprint")?,
     })
 }

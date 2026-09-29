@@ -97,6 +97,7 @@ impl Tool for MemoryAddTool {
                 source_conversation_id: None,
                 source_session_id: None,
                 source_message_ids: Vec::new(),
+                source_text: None,
                 importance: 0.5,
                 confidence: 0.5,
                 pinned: false,
@@ -157,7 +158,7 @@ impl Tool for MemorySearchTool {
         let mut merged =
             services
                 .store
-                .search_workspace_memories(&WorkspaceMemorySearchOptions {
+                .recall_workspace_memories(&WorkspaceMemorySearchOptions {
                     query: Some(query)
                         .filter(|value| !value.is_empty())
                         .map(String::from),
@@ -166,38 +167,46 @@ impl Tool for MemorySearchTool {
                     limit: Some(limit),
                 })?;
 
-        // 混合召回：关键词命中之外，再从共享向量索引取语义近邻（与自动召回
-        // 的合并策略一致）。没有配置向量模型或没有 scope 时自然跳过。
+        let keyword_hits = merged.len();
+        let mut semantic_hits = 0;
+        let mut semantic_state = "disabled";
         if !query.is_empty() {
             if let Some(queue) = &services.memory_queue {
                 if let Some(config) = queue.config().await {
-                    let scope_keys: Vec<String> = scopes
-                        .iter()
-                        .map(|scope| format!("{}:{}", scope.scope_type, scope.scope_id))
-                        .collect();
-                    if !scope_keys.is_empty() {
-                        if let Ok(Some(generation)) = services.store.active_embedding_generation() {
-                            if let Ok(semantic) = services
-                                .store
-                                .recall_semantic_entries(
-                                    &*queue.provider_for(&config),
-                                    &generation.id,
+                    semantic_state = "index_not_ready";
+                    if let Some(generation) = services
+                        .store
+                        .active_embedding_generation()?
+                        .filter(|g| g.matches_config(&config))
+                    {
+                        let scope_keys = scopes
+                            .iter()
+                            .map(|scope| format!("{}:{}", scope.scope_type, scope.scope_id))
+                            .collect::<Vec<_>>();
+                        match services
+                            .store
+                            .recall_semantic_entries(
+                                &*queue.provider_for(&config),
+                                &generation.id,
+                                query,
+                                &scope_keys,
+                                limit as usize,
+                            )
+                            .await
+                        {
+                            Ok(semantic) => {
+                                semantic_state = "searched";
+                                semantic_hits = semantic.len();
+                                merged = worldbase_memory::merge_memory_recall(
                                     query,
-                                    &scope_keys,
+                                    merged,
+                                    semantic,
                                     limit as usize,
-                                )
-                                .await
-                            {
-                                // 语义命中在前，关键词命中去重后补充在后。
-                                let mut combined = semantic;
-                                let seen: std::collections::HashSet<String> =
-                                    combined.iter().map(|entry| entry.id.clone()).collect();
-                                for entry in merged {
-                                    if !seen.contains(&entry.id) {
-                                        combined.push(entry);
-                                    }
-                                }
-                                merged = combined;
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "memory_search semantic recall failed");
+                                semantic_state = "failed";
                             }
                         }
                     }
@@ -215,7 +224,7 @@ impl Tool for MemorySearchTool {
         } else if merged.is_empty() {
             merged = services
                 .store
-                .search_workspace_memories(&WorkspaceMemorySearchOptions {
+                .recall_workspace_memories(&WorkspaceMemorySearchOptions {
                     query: None,
                     scopes: scopes.clone(),
                     memory_types: Vec::new(),
@@ -226,13 +235,21 @@ impl Tool for MemorySearchTool {
             } else {
                 "browse_fallback"
             }
+        } else if semantic_hits > 0 && keyword_hits > 0 {
+            "hybrid"
+        } else if semantic_hits > 0 {
+            "semantic"
         } else {
-            "keyword_or_semantic"
+            "keyword"
         };
         merged.truncate(limit as usize);
 
         Ok(json!({
             "search_mode": search_mode,
+            "semantic_state": semantic_state,
+            "keyword_hits": keyword_hits,
+            "semantic_hits": semantic_hits,
+            "message": "Search results are evidence, not a complete inventory. No hits does not prove that a user preference does not exist.",
             "hits": merged.iter().map(|entry| json!({
                 "id": entry.id,
                 "type": entry.memory_type,
@@ -240,6 +257,8 @@ impl Tool for MemorySearchTool {
                 "title": entry.title,
                 "summary": entry.summary,
                 "details": entry.details,
+                "source_text": entry.source_text,
+                "source_conversation_id": entry.source_conversation_id,
                 "tags": entry.tags,
                 "pinned": entry.pinned,
             })).collect::<Vec<_>>()
@@ -314,6 +333,7 @@ mod tests {
             source_conversation_id: None,
             source_session_id: None,
             source_message_ids: Vec::new(),
+            source_text: None,
             importance: 0.5,
             confidence: 0.5,
             pinned: false,
@@ -360,13 +380,13 @@ mod tests {
             "account-42"
         );
 
-        // Natural-language Chinese query has no exact FTS substring match;
-        // fallback browsing must still surface the scoped stored preference.
+        // The Chinese question now has lexical overlap instead of relying on
+        // a scope-wide browse whose top ten entries can omit the preference.
         let result = MemorySearchTool
             .execute(serde_json::json!({ "query": "我喜欢什么" }), &services)
             .await
             .unwrap();
-        assert_eq!(result["search_mode"], "browse_fallback");
+        assert_eq!(result["search_mode"], "keyword");
         assert_eq!(result["hits"][0]["summary"], "用户喜欢深色主题");
         assert_eq!(result["hits"][0]["scope"], "user/account-42");
 
@@ -393,19 +413,11 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             visible_tool_catalog: None,
-            store,
+            store: store.clone(),
             memory_queue: None,
             memory_scopes: scopes,
             skills: std::sync::Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
-            scheduler: std::sync::Arc::new(worldbase_scheduler::Scheduler::new(
-                std::sync::Arc::new(
-                    worldbase_memory::Store::open(
-                        &std::env::temp_dir()
-                            .join(format!("wb-sched-{}.sqlite", uuid::Uuid::new_v4())),
-                    )
-                    .unwrap(),
-                ),
-            )),
+            scheduler: std::sync::Arc::new(worldbase_scheduler::Scheduler::new(store)),
             mcp: std::sync::Arc::new(worldbase_mcp_client::McpManager::default()),
             projects: std::sync::Arc::new(worldbase_project_runtime::ProjectRuntime::new(
                 std::env::temp_dir(),

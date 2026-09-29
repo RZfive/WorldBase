@@ -11,6 +11,62 @@ use serde_json::json;
 /// 当前文本预处理契约；变更必须建立新 generation（design §7.5）。
 pub const EMBEDDING_PREPROCESS_VERSION: &str = "pp-v1";
 
+// Queue claims are not API batches. Some compatible embedding endpoints accept
+// only ten inputs per HTTP request, regardless of their per-text token limit.
+const DEFAULT_REQUEST_BATCH_SIZE: usize = 10;
+
+#[derive(Debug)]
+struct EmbeddingHttpError {
+    status: reqwest::StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for EmbeddingHttpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "embedding request failed ({}): {}",
+            self.status,
+            self.body.chars().take(300).collect::<String>()
+        )
+    }
+}
+
+impl std::error::Error for EmbeddingHttpError {}
+
+impl EmbeddingHttpError {
+    fn smaller_batch_size(&self, attempted: usize) -> Option<usize> {
+        if attempted <= 1 {
+            return None;
+        }
+        if self.status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+            return Some(attempted / 2);
+        }
+        if self.status != reqwest::StatusCode::BAD_REQUEST {
+            return None;
+        }
+        // Only adapt to an explicit *input count* limit. Token/context limits,
+        // invalid models, authentication failures and rate limits must keep
+        // their original error instead of multiplying billable requests.
+        let payload = serde_json::from_str::<serde_json::Value>(&self.body).ok();
+        let message = payload
+            .as_ref()
+            .and_then(|value| value.pointer("/error/message"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(&self.body);
+        static LIMIT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let captures = LIMIT
+            .get_or_init(|| {
+                regex::Regex::new(r"(?i)\binput limit exceeded:\s*max\s+(\d+),\s*got\s+(\d+)")
+                    .expect("embedding input-count limit pattern")
+            })
+            .captures(message)?;
+        let max = captures[1].parse::<usize>().ok()?;
+        let got = captures[2].parse::<usize>().ok()?;
+        (got == attempted && max > 0 && max < attempted).then_some(max)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingModelDescriptor {
     pub provider_id: String,
@@ -27,12 +83,20 @@ pub trait EmbeddingProvider: Send + Sync {
     fn descriptor(&self) -> EmbeddingModelDescriptor;
     async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        let vectors = self.embed_documents(std::slice::from_ref(&text.to_string())).await?;
-        vectors.into_iter().next().ok_or_else(|| anyhow!("empty embedding response"))
+        let vectors = self
+            .embed_documents(std::slice::from_ref(&text.to_string()))
+            .await?;
+        vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("empty embedding response"))
     }
     async fn health(&self) -> Result<u32> {
         let vectors = self.embed_documents(&["health check".to_string()]).await?;
-        let length = vectors.first().map(|vector| vector.len() as u32).unwrap_or(0);
+        let length = vectors
+            .first()
+            .map(|vector| vector.len() as u32)
+            .unwrap_or(0);
         Ok(length)
     }
 }
@@ -54,7 +118,9 @@ pub struct FakeEmbeddingProvider {
 
 impl FakeEmbeddingProvider {
     pub fn new(dimensions: u32) -> Self {
-        Self { dimensions: dimensions.max(1) }
+        Self {
+            dimensions: dimensions.max(1),
+        }
     }
 
     fn embed(&self, text: &str) -> Vec<f32> {
@@ -73,7 +139,10 @@ impl FakeEmbeddingProvider {
             .filter(|character| character.is_alphanumeric())
             .collect();
         let characters: Vec<char> = compact.chars().collect();
-        if characters.iter().any(|c| ('\u{4e00}'..='\u{9fff}').contains(c)) {
+        if characters
+            .iter()
+            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+        {
             for window in characters.windows(2) {
                 tokens.push(window.iter().collect());
             }
@@ -166,11 +235,52 @@ impl OpenAIEmbeddingProvider {
             normalized,
             query_prefix: query_prefix.map(str::to_string),
             document_prefix: document_prefix.map(str::to_string),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("embedding HTTP client"),
         }
     }
 
     async fn request_embeddings(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut vectors = Vec::with_capacity(inputs.len());
+        let mut offset = 0;
+        let mut batch_size = DEFAULT_REQUEST_BATCH_SIZE;
+        while offset < inputs.len() {
+            let count = batch_size.min(inputs.len() - offset);
+            match self
+                .request_embedding_batch(&inputs[offset..offset + count])
+                .await
+            {
+                Ok(batch) => {
+                    // Each response uses request-local indices; append only
+                    // after validating/sorting that batch against its inputs.
+                    vectors.extend(batch);
+                    offset += count;
+                }
+                Err(error) => {
+                    let smaller = error
+                        .downcast_ref::<EmbeddingHttpError>()
+                        .and_then(|error| error.smaller_batch_size(count));
+                    let Some(smaller) = smaller else {
+                        return Err(error);
+                    };
+                    tracing::warn!(
+                        attempted = count,
+                        batch_size = smaller,
+                        "embedding batch too large; retrying with fewer inputs"
+                    );
+                    // Retry only the failed range. The limit strictly shrinks,
+                    // so even a single oversized text cannot cause a loop.
+                    batch_size = smaller;
+                }
+            }
+        }
+        Ok(vectors)
+    }
+
+    async fn request_embedding_batch(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         let url = normalize_embeddings_base_url(&self.base_url);
         if url.is_empty() {
             return Err(anyhow!("embedding base url is empty"));
@@ -186,13 +296,12 @@ impl OpenAIEmbeddingProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "embedding request failed ({}): {}",
-                status,
-                body.chars().take(300).collect::<String>()
-            ));
+            return Err(EmbeddingHttpError { status, body }.into());
         }
-        let payload: serde_json::Value = response.json().await.context("embedding response is not JSON")?;
+        let payload: serde_json::Value = response
+            .json()
+            .await
+            .context("embedding response is not JSON")?;
         let data = payload
             .get("data")
             .and_then(|value| value.as_array())
@@ -216,14 +325,33 @@ impl OpenAIEmbeddingProvider {
                     .get("embedding")
                     .and_then(|value| value.as_array())
                     .ok_or_else(|| anyhow!("embedding entry {index} has no array"))?;
+                if values.is_empty() {
+                    return Err(anyhow!("embedding entry {index} is empty"));
+                }
                 let mut vector = vec![0f32; values.len()];
                 for (slot, value) in vector.iter_mut().zip(values) {
-                    *slot = value.as_f64().unwrap_or(0.0) as f32;
+                    *slot = value
+                        .as_f64()
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| anyhow!("embedding entry {index} has a non-numeric value"))?
+                        as f32;
+                    if !slot.is_finite() {
+                        return Err(anyhow!("embedding entry {index} has a non-finite value"));
+                    }
                 }
                 Ok((index, vector))
             })
             .collect::<Result<Vec<_>>>()?;
         indexed.sort_by_key(|(index, _)| *index);
+        if indexed
+            .iter()
+            .enumerate()
+            .any(|(expected, (actual, _))| expected != *actual)
+        {
+            return Err(anyhow!(
+                "embedding response indices must cover each input exactly once"
+            ));
+        }
         Ok(indexed.into_iter().map(|(_, vector)| vector).collect())
     }
 }
@@ -239,6 +367,15 @@ impl EmbeddingProvider for OpenAIEmbeddingProvider {
             normalized: self.normalized,
             preprocess_version: EMBEDDING_PREPROCESS_VERSION.into(),
         }
+    }
+
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        let inputs = vec![apply_prefix(text, self.query_prefix.as_deref())];
+        self.request_embeddings(&inputs)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("empty query embedding response"))
     }
 
     async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -282,7 +419,11 @@ mod tests {
     async fn fake_embeddings_are_deterministic_and_normalized() {
         let provider = FakeEmbeddingProvider::new(64);
         let vectors = provider
-            .embed_documents(&["用户喜欢先看到结论".into(), "用户喜欢先看到结论".into(), "SQLite 存储项目数据".into()])
+            .embed_documents(&[
+                "用户喜欢先看到结论".into(),
+                "用户喜欢先看到结论".into(),
+                "SQLite 存储项目数据".into(),
+            ])
             .await
             .unwrap();
         assert_eq!(vectors[0], vectors[1]);
@@ -291,6 +432,9 @@ mod tests {
         let query = provider.embed_query("用户喜欢先看到结论").await.unwrap();
         let same: f32 = query.iter().zip(&vectors[0]).map(|(a, b)| a * b).sum();
         let other: f32 = query.iter().zip(&vectors[2]).map(|(a, b)| a * b).sum();
-        assert!(same > other, "similar text must score higher than unrelated text");
+        assert!(
+            same > other,
+            "similar text must score higher than unrelated text"
+        );
     }
 }

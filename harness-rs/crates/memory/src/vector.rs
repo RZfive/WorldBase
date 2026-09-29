@@ -100,14 +100,25 @@ impl VectorIndex {
     fn table_name(generation_id: &str) -> String {
         let sanitized: String = generation_id
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         format!("vec_documents_{sanitized}")
     }
 
     /// 确保 generation 对应的 vec0 虚表与映射表存在。维度/距离与
     /// generation 指纹一一对应，不允许混用向量空间（design §6.5）。
-    pub fn ensure_generation(&mut self, generation_id: &str, dimensions: u32, distance_metric: &str) -> Result<()> {
+    pub fn ensure_generation(
+        &mut self,
+        generation_id: &str,
+        dimensions: u32,
+        distance_metric: &str,
+    ) -> Result<()> {
         if self.ready_generations.iter().any(|id| id == generation_id) {
             return Ok(());
         }
@@ -137,7 +148,12 @@ impl VectorIndex {
     }
 
     /// 插入/刷新一条向量；先删除旧行，内容更新不会留下陈旧向量。
-    pub fn upsert(&self, generation_id: &str, item: &VectorUpsertItem<'_>, content_hash: &str) -> Result<()> {
+    pub fn upsert(
+        &self,
+        generation_id: &str,
+        item: &VectorUpsertItem<'_>,
+        content_hash: &str,
+    ) -> Result<()> {
         let table = Self::table_name(generation_id);
         self.delete_row(generation_id, item.document_id)?;
         self.conn.execute(
@@ -185,7 +201,11 @@ impl VectorIndex {
     /// 分区范围内的 KNN 检索；墓碑与其他 generation 的行会被过滤。
     /// 绑定顺序必须与 SQL 中占位符出现顺序一致：
     /// scope keys → document kinds → 向量 → limit。
-    pub fn query(&self, generation_id: &str, query: &VectorKnnQuery<'_>) -> Result<Vec<VectorKnnHit>> {
+    pub fn query(
+        &self,
+        generation_id: &str,
+        query: &VectorKnnQuery<'_>,
+    ) -> Result<Vec<VectorKnnHit>> {
         if query.limit == 0 || query.scope_keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -234,7 +254,11 @@ impl VectorIndex {
     }
 
     /// 删除向量。删除失败时保留墓碑，防止被遗忘的记忆继续被召回。
-    pub fn delete_documents(&self, generation_id: &str, document_ids: &[String]) -> Result<DeleteOutcome> {
+    pub fn delete_documents(
+        &self,
+        generation_id: &str,
+        document_ids: &[String],
+    ) -> Result<DeleteOutcome> {
         let mut deleted = 0u32;
         let mut tombstoned = 0u32;
         for document_id in document_ids {
@@ -248,7 +272,10 @@ impl VectorIndex {
                 }
             }
         }
-        Ok(DeleteOutcome { deleted, tombstoned })
+        Ok(DeleteOutcome {
+            deleted,
+            tombstoned,
+        })
     }
 
     /// generation 切换完成后彻底删除其派生行（design §9.3）。
@@ -266,22 +293,26 @@ impl VectorIndex {
         let rowid: Option<i64> = self
             .conn
             .query_row(
-                "SELECT vector_rowid FROM vector_row_map WHERE document_id = ?1",
-                params![document_id],
+                "SELECT vector_rowid FROM vector_row_map WHERE document_id = ?1 AND generation_id = ?2",
+                params![document_id, generation_id],
                 |row| row.get(0),
             )
             .ok()
             .flatten();
         let changed = match rowid {
-            Some(rowid) => self
-                .conn
-                .execute(&format!("DELETE FROM {table} WHERE rowid = ?1"), params![rowid])?,
-            None => self
-                .conn
-                .execute(&format!("DELETE FROM {table} WHERE document_id = ?1"), params![document_id])?,
+            Some(rowid) => self.conn.execute(
+                &format!("DELETE FROM {table} WHERE rowid = ?1"),
+                params![rowid],
+            )?,
+            None => self.conn.execute(
+                &format!("DELETE FROM {table} WHERE document_id = ?1"),
+                params![document_id],
+            )?,
         };
-        self.conn
-            .execute("DELETE FROM vector_row_map WHERE document_id = ?1", params![document_id])?;
+        self.conn.execute(
+            "DELETE FROM vector_row_map WHERE document_id = ?1 AND generation_id = ?2",
+            params![document_id, generation_id],
+        )?;
         Ok(changed > 0)
     }
 

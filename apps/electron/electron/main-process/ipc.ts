@@ -41,10 +41,10 @@ import { mainState, activeChatSessions, pendingPageAutomationRequests, projectWi
 import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH } from './constants.js'
 import { readUploadedAttachmentFromBuffer, readUploadedAttachmentFromPath, type UploadedAttachmentBufferPayload } from './media/attachments.js'
 import { ensureDocumentRenderPreview } from './media/document-preview.js'
-import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, notifyAiTaskStatus, refreshProviderReasoningMetadata, resolveAgentRuntimeContext, resolveProviderConfig } from './ai/agent-context.js'
+import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, notifyAiTaskStatus, refreshProviderReasoningMetadata, resolveAgentRuntimeContext, resolveMemoryEmbeddingRuntimeConfig, resolveProviderConfig } from './ai/agent-context.js'
 import { startSelectedRustHarness } from './ai/selected-execution-engine.js'
 import type { JsonRpcResult } from './rust-harness-client.js'
-import { getAllUserMessageTexts, getConversationTitleFromMessages, getLastUserMessageText, getMessageText } from './chat-message-utils.js'
+import { getConversationTitleFromMessages, getLastUserMessageText, getMessageText } from './chat-message-utils.js'
 import { buildDirectGroupReplyPromptSection, parseGroupRouting, resolveDirectGroupReplyRoute, type GroupDeliberationProgressCallback, type GroupDeliberationResult } from './ai/group-deliberation.js'
 import { buildNativeRustGroupDeliberation, hasNativeRustGroupSession, injectNativeRustGroup } from './ai/native-rust-group-deliberation.js'
 import { cloneMemoryCompactionStatus, runMemoryCompactionWithStatus } from './ai/memory-compaction.js'
@@ -734,7 +734,7 @@ export function setupIPC (): void {
                 await mainState.rustHarness.ingestMemory({
                   agent: runtimeContext.agent,
                   scopes: runtimeContext.memoryScopes,
-                  userMessages: getAllUserMessageTexts(messages),
+                  userMessages: [getLastUserMessageText(messages)],
                   finalAssistantText: getMessageText(streamEvent.message.content),
                   toolNames: executedToolNames,
                   targetProjectId: runtimeContext.effectiveTargetProjectId,
@@ -1052,6 +1052,7 @@ export function setupIPC (): void {
       summary,
       details: typeof entry.details === 'string' && entry.details.trim() ? entry.details.trim() : undefined,
       tags: Array.isArray(entry.tags) ? entry.tags : [],
+      sourceText: typeof entry.sourceText === 'string' ? entry.sourceText : undefined,
       sourceConversationId: entry.sourceConversationId,
       sourceSessionId: entry.sourceSessionId,
       sourceMessageIds: Array.isArray(entry.sourceMessageIds) ? entry.sourceMessageIds : [],
@@ -1079,6 +1080,19 @@ export function setupIPC (): void {
     return await rustClient.deleteWorkspaceMemory(id)
   })
 
+  ipcMain.handle('memory:indexStatus', async () => {
+    const rustClient = await selectedRustProjectClient()
+    if (!rustClient) throw new Error('Rust harness is required for memory access.')
+    return await rustClient.getMemoryIndexStatus()
+  })
+
+  ipcMain.handle('memory:retryIndex', async () => {
+    const rustClient = await selectedRustProjectClient()
+    if (!rustClient) throw new Error('Rust harness is required for memory access.')
+    await rustClient.configureMemoryEmbedding(resolveMemoryEmbeddingRuntimeConfig(), true)
+    return await rustClient.getMemoryIndexStatus()
+  })
+
   ipcMain.handle('memory:getEmbeddingSettings', async () => {
     return settingsStore!.getMemoryEmbeddingSettings()
   })
@@ -1089,6 +1103,9 @@ export function setupIPC (): void {
       providerId: typeof settings?.providerId === 'string' ? settings.providerId : undefined,
       modelId: typeof settings?.modelId === 'string' ? settings.modelId : undefined
     })
+    const rustClient = await selectedRustProjectClient()
+    if (!rustClient) throw new Error('Rust harness is required for memory access.')
+    await rustClient.configureMemoryEmbedding(resolveMemoryEmbeddingRuntimeConfig())
     return settingsStore!.getMemoryEmbeddingSettings()
   })
 

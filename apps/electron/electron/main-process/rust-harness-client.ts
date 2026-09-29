@@ -9,7 +9,7 @@ import { USER_ABORT_MESSAGE } from '../../src/main/ai-engine/abort-utils.js'
 import { resolveModelPricing, type ModelPricing } from '../../src/main/ai-engine/cost-tracker.js'
 import type { MCPServerSnapshot, MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
 import type { AIProvidersConfig, MCPServerConfig } from '../../src/main/settings/settings-store.js'
-import type { AgentDefinition, AgentGroupDefinition, MemoryEmbeddingRuntimeConfig, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, MemoryEmbeddingRuntimeConfig, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
 import type { ImageStudioGenerateRequest, ImageStudioTask } from '../../src/shared/image-studio-types.js'
 import type { ToolDefinition } from '../../src/main/ai-harness/contracts.js'
 
@@ -164,6 +164,8 @@ export interface RustHarnessClientOptions {
   dataDir: string
   /** Read the Electron provider catalog used to configure the Rust process. */
   getProviders?: () => AIProvidersConfig
+  /** Resolve the saved semantic-memory selection; absence disables remote indexing. */
+  getMemoryEmbedding?: () => MemoryEmbeddingRuntimeConfig | undefined
   /** Read the Electron agent catalog used to configure the Rust process. */
   getAgents?: () => AgentDefinition[]
   /** Persist the Rust agent catalog into Electron's migration mirror. */
@@ -228,6 +230,7 @@ export class RustHarnessClient {
   private agentGroupSyncFingerprint: string | null = null
   private mcpSyncFingerprint: string | null = null
   private settingsSync: Promise<void> | null = null
+  private memoryEmbeddingSyncFingerprint: string | null = null
 
   constructor (options: RustHarnessClientOptions) {
     this.options = options
@@ -799,6 +802,11 @@ export class RustHarnessClient {
       if (this.stopRequested.delete(sessionId)) {
         throw new Error(USER_ABORT_MESSAGE)
       }
+      // Settings may change while MCP/history preparation is awaiting. The
+      // live host selection wins over an earlier per-request snapshot.
+      const memoryEmbedding = this.options.getMemoryEmbedding
+        ? this.options.getMemoryEmbedding()
+        : options?.memoryEmbedding
       const enableThinking = options?.enableThinking
       const reasoningEffort = enableThinking === false ? undefined : options?.reasoningEffort
       const result = await this.request<{ streamId?: string; stream_id?: string }>('chat.send', {
@@ -826,7 +834,7 @@ export class RustHarnessClient {
         budgetLimit: normalizeBudgetLimit(options?.budgetLimit),
         memoryScopes: Array.isArray(options?.memoryScopes) ? options.memoryScopes : [],
         memoryQuery: normalizeOptionalString(options?.memoryQuery || text),
-        ...(options?.memoryEmbedding ? { memoryEmbedding: options.memoryEmbedding } : {}),
+        ...(memoryEmbedding ? { memoryEmbedding } : {}),
         computerUseEnabled: options?.computerUseEnabled === true
       })
       const streamId = result.streamId || result.stream_id
@@ -950,6 +958,26 @@ export class RustHarnessClient {
     return await this.request('mcp.disconnect', { serverId }) as unknown as MCPServerSnapshot
   }
 
+  async configureMemoryEmbedding (config?: MemoryEmbeddingRuntimeConfig, retryFailed = false): Promise<void> {
+    await this.call('memory.configureEmbedding', { config: config || null, retryFailed })
+    this.memoryEmbeddingSyncFingerprint = JSON.stringify(config || null)
+  }
+
+  private async syncMemoryEmbeddingSettings (): Promise<void> {
+    if (!this.options.getMemoryEmbedding) return
+    const config = this.options.getMemoryEmbedding()
+    const fingerprint = JSON.stringify(config || null)
+    if (fingerprint === this.memoryEmbeddingSyncFingerprint) return
+    await this.request('memory.configureEmbedding', { config: config || null })
+    this.memoryEmbeddingSyncFingerprint = fingerprint
+  }
+
+  async getMemoryIndexStatus (): Promise<MemoryIndexStatus> {
+    await this.start()
+    await this.syncMemoryEmbeddingSettings()
+    return await this.request('memory.indexStatus', {}) as unknown as MemoryIndexStatus
+  }
+
   async listMemory (options: { query?: string; scopes?: MemorySearchScope[]; memoryTypes?: MemoryType[]; limit?: number } = {}): Promise<MemoryEntry[]> {
     const result = await this.call<{ entries?: unknown[] }>('memory.list', {
       query: options.query,
@@ -1010,6 +1038,7 @@ export class RustHarnessClient {
       await this.syncAgentSettings()
       await this.syncAgentGroupSettings()
       await this.syncMcpSettings()
+      await this.syncMemoryEmbeddingSettings()
     })()
     this.settingsSync = sync
     try {
@@ -1076,6 +1105,7 @@ export class RustHarnessClient {
     this.agentSyncFingerprint = null
     this.agentGroupSyncFingerprint = null
     this.mcpSyncFingerprint = null
+    this.memoryEmbeddingSyncFingerprint = null
     this.settingsSync = null
   }
 
@@ -1586,6 +1616,7 @@ export class RustHarnessClient {
     this.agentSyncFingerprint = null
     this.agentGroupSyncFingerprint = null
     this.mcpSyncFingerprint = null
+    this.memoryEmbeddingSyncFingerprint = null
     this.settingsSync = null
   }
 

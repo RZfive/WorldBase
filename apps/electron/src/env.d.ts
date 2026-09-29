@@ -21,6 +21,8 @@ type ImageLibraryPage = import('./shared/image-studio-types.js').ImageLibraryPag
 type ImageLibraryQuery = import('./shared/image-studio-types.js').ImageLibraryQuery
 type ImageLibraryData = import('./shared/image-studio-types.js').ImageLibraryData
 type ImageLibraryFolderCard = import('./shared/image-studio-types.js').ImageLibraryFolderCard
+type MemoryIndexStatus = import('./shared/agent-workspace-types.js').MemoryIndexStatus
+
 type MemoryCompactionResult = import('./shared/agent-workspace-types.js').MemoryCompactionResult
 type MemoryCompactionStatus = import('./shared/agent-workspace-types.js').MemoryCompactionStatus
 type ConversationFolderWorkspaceState = import('./shared/folder-workspace-types.js').ConversationFolderWorkspaceState
@@ -365,6 +367,7 @@ interface MemoryEntry {
   memoryType: MemoryType
   title: string
   summary: string
+  sourceText?: string
   details?: string
   tags: string[]
   sourceConversationId?: string
@@ -429,17 +432,6 @@ interface EmbeddingGenerationInfo {
   activatedAt?: string
 }
 
-interface MemoryIndexStatus {
-  embeddingEnabled: boolean
-  configured: boolean
-  vectorAvailable: boolean
-  providerId?: string
-  modelId?: string
-  dimensions?: number
-  generation: EmbeddingGenerationInfo | null
-  queue: { queued: number; running: number; failed: number }
-  vectorDbPath: string | null
-}
 
 interface ConnectorDefinition {
   id: ConnectorType
@@ -1098,6 +1090,8 @@ interface ElectronAPI {
   saveMemory: (entry: Partial<MemoryEntry>) => Promise<MemoryEntry>
   pinMemory: (id: string, pinned: boolean) => Promise<boolean>
   deleteMemory: (id: string) => Promise<boolean>
+  retryMemoryIndex: () => Promise<MemoryIndexStatus>
+  getMemoryIndexStatus: () => Promise<MemoryIndexStatus>
   getMemoryEmbeddingSettings: () => Promise<MemoryEmbeddingSettings>
   saveMemoryEmbeddingSettings: (settings: MemoryEmbeddingSettings) => Promise<MemoryEmbeddingSettings>
   getMemoryCompactionSettings: () => Promise<MemoryCompactionSettings>

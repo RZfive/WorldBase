@@ -22,6 +22,7 @@
     "build:electron:bytecode": "pnpm build:main:bytecode && pnpm build:preload:bytecode",
     "rebuild:native": "pnpm exec electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps",
+    "test:memory-recall": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/memory-index-state.test.mjs tests/memory-card-content.test.mjs tests/rust-harness-host-callbacks.test.mjs",
     "test:group-rust-routing": "node --test tests/group-rust-routing.test.mjs",
     "test:hot-bootstrap": "node scripts/build-main.mjs && node --test tests/hot-bootstrap.test.mjs",
     "test:im-rust-group-routing": "node --test tests/im-rust-group-routing.test.mjs",

@@ -273,6 +273,8 @@ export interface MemoryEntry {
   summary: string
   details?: string
   tags: string[]
+  /** Verbatim user evidence, only when captured; not reconstructed from summaries. */
+  sourceText?: string
   sourceConversationId?: string
   sourceSessionId?: string
   sourceMessageIds?: string[]
@@ -398,6 +400,9 @@ export interface EmbeddingGenerationInfo {
 
 /** Renderer-facing snapshot of the semantic index pipeline. */
 export interface MemoryIndexStatus {
+  state: 'disabled' | 'waiting' | 'empty' | 'indexing' | 'ready' | 'failed'
+  documents: { total: number; indexed: number; queued: number; failed: number }
+  lastError?: string | null
   /** Master switch from Memory Settings. */
   embeddingEnabled: boolean
   /** True when provider+model resolve to a usable remote embedding service. */

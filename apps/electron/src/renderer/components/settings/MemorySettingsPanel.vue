@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { renderMarkdown } from '../chat/markdown'
+import { semanticMemoryPhase } from '../../utils/memory-index-state.js'
+import { hasAdditionalMemoryDetails } from '../../utils/memory-card-content.js'
+import type { MemoryEmbeddingSettings, MemoryIndexStatus } from '../../../shared/agent-workspace-types.js'
 
 /**
  * User-level shared memory is owned by the Rust harness. This panel keeps the
@@ -44,6 +48,13 @@ const selectedModelId = ref('')
 const loadingEmbedding = ref(false)
 const savingEmbedding = ref(false)
 const embeddingTestState = ref<{ running: boolean; ok?: boolean; dimensions?: number; latencyMs?: number; error?: string } | null>(null)
+const savedEmbeddingSettings = ref<MemoryEmbeddingSettings | null>(null)
+const memoryIndexStatus = ref<MemoryIndexStatus | null>(null)
+const memoryIndexError = ref('')
+const retryingIndex = ref(false)
+let unmounted = false
+let indexStatusLoading = false
+let indexStatusTimer: ReturnType<typeof setInterval> | null = null
 const providers = ref<AIProviderLite[]>([])
 const statusMessage = ref('')
 
@@ -59,18 +70,49 @@ const selectedProvider = computed(() => providers.value.find(provider => provide
 const selectedEmbeddingModels = computed(() => selectedProvider.value?.embeddingModels || [])
 const selectedModelMeta = computed(() => selectedEmbeddingModels.value.find(model => model.id === selectedModelId.value))
 const semanticMemoryState = computed(() => {
-  if (!embeddingEnabled.value) {
-    return { label: t('settings.memory.semanticDisabled'), detail: '', tone: 'muted' }
-  }
-  if (!selectedProviderId.value || !selectedModelId.value) {
-    return { label: t('settings.memory.semanticSetupNeeded'), detail: '', tone: 'warning' }
+  const phase = semanticMemoryPhase({
+    enabled: embeddingEnabled.value,
+    providerId: selectedProviderId.value || undefined,
+    modelId: selectedModelId.value || undefined
+  }, savedEmbeddingSettings.value, memoryIndexStatus.value)
+  const labels = {
+    disabled: 'semanticDisabled', unconfigured: 'semanticSetupNeeded', ready: 'semanticReady',
+    unsaved: 'semanticUnsaved', unknown: 'semanticUnknown', waiting: 'semanticWaiting',
+    indexing: 'semanticIndexing', failed: 'semanticFailed', empty: 'semanticEmpty'
   }
   return {
-    label: t('settings.memory.semanticReady'),
-    detail: `${selectedProvider.value?.name || selectedProviderId.value} · ${selectedModelId.value}`,
-    tone: 'success'
+    label: t(`settings.memory.${labels[phase]}`),
+    detail: selectedModelId.value ? `${selectedProvider.value?.name || selectedProviderId.value} · ${selectedModelId.value}` : '',
+    tone: phase === 'ready' ? 'success' : phase === 'disabled' ? 'muted' : 'warning'
   }
 })
+
+async function loadMemoryIndexStatus () {
+  if (!window.electronAPI?.getMemoryIndexStatus || indexStatusLoading) return
+  indexStatusLoading = true
+  try {
+    memoryIndexStatus.value = await window.electronAPI.getMemoryIndexStatus()
+    memoryIndexError.value = ''
+  } catch (error) {
+    memoryIndexStatus.value = null
+    memoryIndexError.value = (error as Error).message
+  } finally {
+    indexStatusLoading = false
+  }
+}
+
+async function retryMemoryIndex () {
+  if (!window.electronAPI?.retryMemoryIndex || retryingIndex.value) return
+  retryingIndex.value = true
+  try {
+    memoryIndexStatus.value = await window.electronAPI.retryMemoryIndex()
+    memoryIndexError.value = ''
+  } catch (error) {
+    memoryIndexError.value = (error as Error).message
+  } finally {
+    retryingIndex.value = false
+  }
+}
 
 // ---------- memory entries ----------
 const memoryScopeOptions: Array<{ value: AgentMemoryScope; labelKey: string }> = [
@@ -261,6 +303,14 @@ async function removeMemory (entry: MemoryEntry) {
   }
 }
 
+// Markdown for details is parsed only after the disclosure is opened, so a
+// long list does not pay the marked/KaTeX cost for every collapsed card.
+const expandedMemoryDetails = reactive<Record<string, boolean>>({})
+
+function onMemoryDetailsToggle (entry: MemoryEntry, event: Event) {
+  expandedMemoryDetails[entry.id] = (event.target as HTMLDetailsElement).open
+}
+
 // ---------- memory entries: compaction ----------
 function formatMemoryCompactionResult (result: { scanned: number; removedUseless: number; merged: number; updated: number; retained: number }): string {
   return t('settings.memory.compactCompleted', {
@@ -339,6 +389,7 @@ async function loadEmbeddingSettings () {
   loadingEmbedding.value = true
   try {
     const settings = await window.electronAPI.getMemoryEmbeddingSettings()
+    savedEmbeddingSettings.value = settings
     embeddingEnabled.value = settings.enabled === true
     selectedProviderId.value = settings.providerId || ''
     selectedModelId.value = settings.modelId || ''
@@ -402,6 +453,8 @@ async function saveEmbeddingSettings () {
       modelId: selectedModelId.value || undefined
     })
     embeddingEnabled.value = saved.enabled === true
+    savedEmbeddingSettings.value = saved
+    await loadMemoryIndexStatus()
     setStatus(t('common.saved'))
   } catch (error) {
     setStatus(t('settings.memory.embeddingSaveFailed', { message: (error as Error).message }))
@@ -426,6 +479,10 @@ async function testEmbeddingConnection () {
 
 onMounted(async () => {
   await Promise.all([loadEmbeddingSettings(), loadProviders(), loadMemory(), loadCompactionModelSettings(), syncMemoryCompactionStatus()])
+  if (unmounted) return
+  await loadMemoryIndexStatus()
+  if (unmounted) return
+  indexStatusTimer = setInterval(() => { void loadMemoryIndexStatus() }, 3000)
   if (window.electronAPI?.onMemoryCompactionStatusChanged) {
     memoryCompactionCleanup = window.electronAPI.onMemoryCompactionStatusChanged((status) => {
       memoryCompactionStatus.value = status
@@ -434,6 +491,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  unmounted = true
+  if (indexStatusTimer) clearInterval(indexStatusTimer)
   memoryCompactionCleanup?.()
   memoryCompactionCleanup = null
 })
@@ -508,80 +567,84 @@ onUnmounted(() => {
         <span :class="['section-state', `state-${semanticMemoryState.tone}`]">{{ semanticMemoryState.label }}</span>
       </div>
 
-      <div class="semantic-layout">
-        <div class="semantic-controls">
-          <button
-            :class="['semantic-toggle', { on: embeddingEnabled }]"
-            type="button"
-            role="switch"
-            :aria-checked="embeddingEnabled"
-            @click="embeddingEnabled = !embeddingEnabled"
-          >
-            <span class="semantic-toggle-copy">
-              <strong>{{ $t('settings.memory.embeddingToggle') }}</strong>
-              <small>{{ $t('settings.memory.embeddingToggleHint') }}</small>
-            </span>
-            <span class="toggle-track" aria-hidden="true"><span /></span>
-          </button>
+      <div class="semantic-controls">
+        <button
+          :class="['semantic-toggle', { on: embeddingEnabled }]"
+          type="button"
+          role="switch"
+          :aria-checked="embeddingEnabled"
+          @click="embeddingEnabled = !embeddingEnabled"
+        >
+          <span class="semantic-toggle-copy">
+            <strong>{{ $t('settings.memory.embeddingToggle') }}</strong>
+            <small>{{ $t('settings.memory.embeddingToggleHint') }}</small>
+          </span>
+          <span class="toggle-track" aria-hidden="true"><span /></span>
+        </button>
 
-          <template v-if="embeddingEnabled">
-            <div class="embedding-grid">
-              <label>
-                <span>{{ $t('settings.memory.embeddingProvider') }}</span>
-                <select v-model="selectedProviderId" class="input" :disabled="loadingEmbedding" @change="onProviderChanged">
-                  <option value="" disabled>{{ $t('settings.memory.embeddingProviderPlaceholder') }}</option>
-                  <option v-for="provider in embeddingProviders" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
-                </select>
-              </label>
-              <label>
-                <span>{{ $t('settings.memory.embeddingModel') }}</span>
-                <select v-model="selectedModelId" class="input" :disabled="loadingEmbedding || !selectedProviderId">
-                  <option value="" disabled>{{ selectedProviderId ? $t('settings.memory.embeddingModelEmpty') : $t('settings.memory.embeddingModelPlaceholder') }}</option>
-                  <option v-for="model in selectedEmbeddingModels" :key="model.id" :value="model.id">{{ model.id }}</option>
-                </select>
-              </label>
-            </div>
-
-            <div v-if="selectedModelMeta" class="model-meta">
-              <span>{{ $t('settings.memory.embeddingModelMeta', { dimensions: selectedModelMeta.dimensions ?? '—', distance: selectedModelMeta.distance || 'cosine' }) }}</span>
-            </div>
-
-            <div class="embedding-test-row">
-              <button
-                class="ghost-btn"
-                type="button"
-                :disabled="!selectedProviderId || !selectedModelId || embeddingTestState?.running"
-                @click="testEmbeddingConnection"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 12.5 10 15l7-7" /><circle cx="12" cy="12" r="9" /></svg>
-                {{ embeddingTestState?.running ? $t('settings.memory.embeddingTesting') : $t('settings.memory.embeddingTestButton') }}
-              </button>
-              <span
-                v-if="embeddingTestState && !embeddingTestState.running"
-                :class="['embedding-test-result', embeddingTestState.ok ? 'ok' : 'error']"
-              >
-                {{ embeddingTestState.ok
-                  ? $t('settings.memory.embeddingTestOk', { dimensions: embeddingTestState.dimensions, latency: embeddingTestState.latencyMs })
-                  : $t('settings.memory.embeddingTestFailed', { message: embeddingTestState.error || '' }) }}
-              </span>
-            </div>
-          </template>
-
-          <div class="action-row semantic-save-row">
-            <button class="primary-btn" type="button" :disabled="savingEmbedding || loadingEmbedding" @click="saveEmbeddingSettings">
-              {{ savingEmbedding ? $t('common.saving') : $t('common.save') }}
-            </button>
+        <template v-if="embeddingEnabled">
+          <div class="embedding-grid">
+            <label>
+              <span>{{ $t('settings.memory.embeddingProvider') }}</span>
+              <select v-model="selectedProviderId" class="input" :disabled="loadingEmbedding" @change="onProviderChanged">
+                <option value="" disabled>{{ $t('settings.memory.embeddingProviderPlaceholder') }}</option>
+                <option v-for="provider in embeddingProviders" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
+              </select>
+            </label>
+            <label>
+              <span>{{ $t('settings.memory.embeddingModel') }}</span>
+              <select v-model="selectedModelId" class="input" :disabled="loadingEmbedding || !selectedProviderId">
+                <option value="" disabled>{{ selectedProviderId ? $t('settings.memory.embeddingModelEmpty') : $t('settings.memory.embeddingModelPlaceholder') }}</option>
+                <option v-for="model in selectedEmbeddingModels" :key="model.id" :value="model.id">{{ model.id }}</option>
+              </select>
+            </label>
           </div>
+
+          <div class="embedding-options-row">
+            <span v-if="selectedModelMeta" class="model-meta">
+              {{ $t('settings.memory.embeddingModelMeta', { dimensions: selectedModelMeta.dimensions ?? '—', distance: selectedModelMeta.distance || 'cosine' }) }}
+            </span>
+            <button
+              class="ghost-btn"
+              type="button"
+              :disabled="!selectedProviderId || !selectedModelId || embeddingTestState?.running"
+              @click="testEmbeddingConnection"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 12.5 10 15l7-7" /><circle cx="12" cy="12" r="9" /></svg>
+              {{ embeddingTestState?.running ? $t('settings.memory.embeddingTesting') : $t('settings.memory.embeddingTestButton') }}
+            </button>
+            <span
+              v-if="embeddingTestState && !embeddingTestState.running"
+              :class="['embedding-test-result', embeddingTestState.ok ? 'ok' : 'error']"
+            >
+              {{ embeddingTestState.ok
+                ? $t('settings.memory.embeddingTestOk', { dimensions: embeddingTestState.dimensions, latency: embeddingTestState.latencyMs })
+                : $t('settings.memory.embeddingTestFailed', { message: embeddingTestState.error || '' }) }}
+            </span>
+          </div>
+        </template>
+
+        <div class="semantic-footer-row">
+          <div class="semantic-index-summary" aria-live="polite">
+            <p v-if="memoryIndexStatus">{{ $t('settings.memory.indexProgress', {
+              indexed: memoryIndexStatus.documents.indexed,
+              total: memoryIndexStatus.documents.total,
+              queued: memoryIndexStatus.documents.queued,
+              failed: memoryIndexStatus.documents.failed
+            }) }}</p>
+            <p v-if="memoryIndexError || memoryIndexStatus?.lastError" class="embedding-test-result error">{{ memoryIndexError || memoryIndexStatus?.lastError }}</p>
+            <button v-if="memoryIndexStatus?.state === 'failed'" class="ghost-btn" type="button" :disabled="retryingIndex" @click="retryMemoryIndex">{{ $t('settings.memory.retryIndex') }}</button>
+          </div>
+          <button class="primary-btn" type="button" :disabled="savingEmbedding || loadingEmbedding" @click="saveEmbeddingSettings">
+            {{ savingEmbedding ? $t('common.saving') : $t('common.save') }}
+          </button>
         </div>
 
         <aside class="privacy-note">
           <span class="privacy-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="M12 3 20 6v5c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V6z" /><path d="M12 9v3" /><path d="M12 16h.01" /></svg>
           </span>
-          <div>
-            <strong>{{ $t('settings.memory.embeddingPrivacyTitle') }}</strong>
-            <p>{{ $t('settings.memory.embeddingPrivacy') }}</p>
-          </div>
+          <p>{{ $t('settings.memory.embeddingPrivacy') }}</p>
         </aside>
       </div>
     </section>
@@ -798,7 +861,21 @@ onUnmounted(() => {
             </div>
           </div>
           <p class="memory-summary">{{ entry.summary }}</p>
-          <p v-if="entry.details" class="memory-details">{{ entry.details }}</p>
+          <details v-if="hasAdditionalMemoryDetails(entry)" class="memory-details" @toggle="onMemoryDetailsToggle(entry, $event)">
+            <summary>{{ $t('settings.memory.detailsLabel') }}</summary>
+            <div
+              v-if="expandedMemoryDetails[entry.id]"
+              class="markdown-body memory-details-body"
+              tabindex="0"
+              v-html="renderMarkdown(entry.details || '')"
+            ></div>
+          </details>
+          <details v-if="entry.sourceText?.trim() || entry.sourceConversationId" class="memory-source">
+            <summary>{{ $t(entry.sourceText?.trim() ? 'settings.memory.sourceText' : 'settings.memory.sourceInfo') }}</summary>
+            <pre v-if="entry.sourceText?.trim()" tabindex="0">{{ entry.sourceText }}</pre>
+            <small v-else class="memory-source-missing">{{ $t('settings.memory.sourceUnavailable') }}</small>
+            <small v-if="entry.sourceConversationId">{{ $t('settings.memory.sourceConversation') }}: {{ entry.sourceConversationId }}</small>
+          </details>
           <div v-if="entry.tags.length" class="memory-tags">
             <span v-for="tag in entry.tags" :key="tag"># {{ tag }}</span>
           </div>
@@ -809,13 +886,75 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* Source excerpts stay plain escaped text. Details go through the shared
+   renderMarkdown pipeline (tag/attr whitelist, no script or mermaid execution),
+   so legacy Markdown in stored details renders instead of leaking as syntax. */
+.memory-source,
+.memory-details {
+  margin: 0;
+  color: var(--app-text-muted);
+  font-size: 0.76rem;
+  line-height: 1.52;
+}
+
+.memory-source summary,
+.memory-details summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.memory-source summary:focus-visible,
+.memory-details summary:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.memory-source pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+}
+
+.memory-details-body {
+  max-height: 300px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  color: var(--app-text);
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+
+.memory-details-body :deep(pre) {
+  max-width: 100%;
+}
+
+.memory-source small {
+  display: block;
+  margin: 4px 0;
+  opacity: 0.8;
+  overflow-wrap: anywhere;
+}
+.semantic-index-summary p { margin: 0; }
+.semantic-index-summary { font-size: 12px; overflow-wrap: anywhere; }
+
 .memory-settings {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 12px;
   height: 100%;
   min-height: 0;
-  padding: 28px clamp(20px, 3vw, 40px) 36px;
+  padding: 20px clamp(16px, 2.5vw, 32px) 28px;
   overflow-y: auto;
   color: var(--app-text);
   background:
@@ -836,7 +975,7 @@ onUnmounted(() => {
 
 .memory-eyebrow {
   display: block;
-  margin-bottom: 5px;
+  margin-bottom: 3px;
   color: var(--app-accent);
   font-size: 0.68rem;
   font-weight: 760;
@@ -847,16 +986,16 @@ onUnmounted(() => {
 .memory-header h2 {
   margin: 0;
   color: var(--app-text-strong);
-  font-size: clamp(1.35rem, 1.8vw, 1.65rem);
+  font-size: clamp(1.18rem, 1.6vw, 1.4rem);
   letter-spacing: -0.025em;
 }
 
 .memory-header p {
   max-width: 680px;
-  margin: 8px 0 0;
+  margin: 4px 0 0;
   color: var(--app-text-muted);
-  font-size: 0.88rem;
-  line-height: 1.6;
+  font-size: 0.82rem;
+  line-height: 1.55;
 }
 
 .icon-btn,
@@ -959,29 +1098,28 @@ onUnmounted(() => {
 .memory-overview {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
 
 .overview-card {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
-  min-height: 84px;
-  padding: 14px;
+  padding: 9px 12px;
   border: 1px solid var(--app-border);
-  border-radius: 15px;
+  border-radius: 13px;
   background: linear-gradient(145deg, color-mix(in srgb, var(--app-panel) 96%, transparent), var(--app-panel-subtle));
   box-shadow: var(--shadow-1);
 }
 
 .overview-icon {
   display: grid;
-  width: 38px;
-  height: 38px;
+  width: 30px;
+  height: 30px;
   place-items: center;
   flex: 0 0 auto;
-  border-radius: 12px;
+  border-radius: 10px;
 }
 
 .overview-icon.entries {
@@ -1013,7 +1151,7 @@ onUnmounted(() => {
 .overview-card strong {
   overflow: hidden;
   color: var(--app-text-strong);
-  font-size: 1.15rem;
+  font-size: 1.02rem;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1028,7 +1166,7 @@ onUnmounted(() => {
 }
 
 .overview-card--semantic strong {
-  font-size: 0.92rem;
+  font-size: 0.85rem;
 }
 
 .state-success { color: var(--app-success) !important; }
@@ -1038,10 +1176,10 @@ onUnmounted(() => {
 .memory-section {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: clamp(16px, 2vw, 22px);
+  gap: 12px;
+  padding: clamp(12px, 1.5vw, 16px);
   border: 1px solid var(--app-border);
-  border-radius: 18px;
+  border-radius: 16px;
   background: linear-gradient(145deg, var(--app-panel), color-mix(in srgb, var(--app-panel-subtle) 70%, var(--app-panel)));
   box-shadow: var(--shadow-1);
 }
@@ -1074,8 +1212,8 @@ onUnmounted(() => {
 
 .section-icon {
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   place-items: center;
   flex: 0 0 auto;
   border: 1px solid var(--app-border);
@@ -1103,16 +1241,10 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.semantic-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(220px, 0.85fr);
-  gap: 16px;
-}
-
 .semantic-controls {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -1122,9 +1254,9 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 16px;
   width: 100%;
-  padding: 13px 14px;
+  padding: 10px 12px;
   border: 1px solid var(--app-border);
-  border-radius: 13px;
+  border-radius: 12px;
   background: var(--app-panel-subtle);
   color: var(--app-text);
   cursor: pointer;
@@ -1247,23 +1379,37 @@ onUnmounted(() => {
   box-shadow: 0 0 0 3px var(--app-accent-glow);
 }
 
+.embedding-options-row,
+.semantic-footer-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .model-meta {
   display: inline-flex;
   width: fit-content;
   max-width: 100%;
-  padding: 6px 9px;
+  padding: 5px 9px;
   border: 1px solid var(--app-border);
   border-radius: var(--radius-pill);
   background: var(--app-panel-subtle);
   color: var(--app-text-muted);
   font-size: 0.74rem;
+  white-space: nowrap;
 }
 
-.embedding-test-row {
+.semantic-footer-row {
+  justify-content: space-between;
+}
+
+.semantic-index-summary {
   display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 4px 12px;
 }
 
 .embedding-test-result {
@@ -1277,45 +1423,40 @@ onUnmounted(() => {
 .privacy-note {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid color-mix(in srgb, var(--app-warning) 28%, var(--app-border));
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--app-warning-soft) 65%, var(--app-panel-subtle));
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--app-warning) 24%, var(--app-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-warning-soft) 45%, var(--app-panel-subtle));
 }
 
 .privacy-icon {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 20px;
+  height: 20px;
   place-items: center;
   flex: 0 0 auto;
-  border-radius: 9px;
+  border-radius: 7px;
   background: color-mix(in srgb, var(--app-warning) 15%, transparent);
   color: var(--app-warning);
 }
 
-.privacy-note strong {
-  display: block;
-  color: var(--app-text);
-  font-size: 0.79rem;
+.privacy-icon svg {
+  width: 13px;
+  height: 13px;
 }
 
 .privacy-note p {
-  margin: 5px 0 0;
+  margin: 0;
   color: var(--app-text-muted);
-  font-size: 0.74rem;
-  line-height: 1.58;
+  font-size: 0.72rem;
+  line-height: 1.5;
 }
 
 .action-row {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-
-.semantic-save-row {
-  margin-top: auto;
 }
 
 .ghost-btn,
@@ -1400,10 +1541,10 @@ onUnmounted(() => {
 .compact-model-bar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding: 9px 12px;
   border: 1px solid var(--app-border);
-  border-radius: 13px;
+  border-radius: 12px;
   background: var(--app-panel-subtle);
 }
 
@@ -1415,14 +1556,14 @@ onUnmounted(() => {
 .compact-model-copy strong {
   display: block;
   color: var(--app-text-strong);
-  font-size: 0.84rem;
+  font-size: 0.8rem;
 }
 
 .compact-model-copy p {
-  margin: 3px 0 0;
+  margin: 2px 0 0;
   color: var(--app-text-muted);
-  font-size: 0.74rem;
-  line-height: 1.5;
+  font-size: 0.72rem;
+  line-height: 1.45;
 }
 
 .compact-model-controls {
@@ -1502,9 +1643,9 @@ onUnmounted(() => {
   grid-template-columns: minmax(140px, 0.6fr) minmax(220px, 1.25fr) auto;
   align-items: end;
   gap: 12px;
-  padding: 14px;
+  padding: 10px 12px;
   border: 1px solid var(--app-border);
-  border-radius: 13px;
+  border-radius: 12px;
   background: var(--app-panel-subtle);
 }
 
@@ -1677,17 +1818,17 @@ onUnmounted(() => {
 .memory-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
 
 .memory-card {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 12px;
-  padding: 15px;
+  gap: 10px;
+  padding: 12px;
   border: 1px solid var(--app-border);
-  border-radius: 15px;
+  border-radius: 14px;
   background: var(--app-panel-subtle);
   transition: border-color var(--duration-base), background var(--duration-base), transform var(--duration-base), box-shadow var(--duration-base);
 }
@@ -1838,8 +1979,7 @@ onUnmounted(() => {
   color: var(--app-danger);
 }
 
-.memory-summary,
-.memory-details {
+.memory-summary {
   margin: 0;
   overflow-wrap: anywhere;
 }
@@ -1848,13 +1988,6 @@ onUnmounted(() => {
   color: var(--app-text);
   font-size: 0.82rem;
   line-height: 1.58;
-}
-
-.memory-details {
-  color: var(--app-text-muted);
-  font-size: 0.76rem;
-  line-height: 1.52;
-  white-space: pre-wrap;
 }
 
 .memory-tags {
@@ -1880,10 +2013,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1100px) {
-  .semantic-layout {
-    grid-template-columns: 1fr;
-  }
-
   .memory-create-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

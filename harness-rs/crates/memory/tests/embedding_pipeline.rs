@@ -32,6 +32,7 @@ fn workspace_entry(id: &str, title: &str, summary: &str) -> WorkspaceMemoryEntry
         source_conversation_id: None,
         source_session_id: None,
         source_message_ids: vec![],
+        source_text: None,
         importance: 0.8,
         confidence: 0.8,
         pinned: false,
@@ -93,7 +94,13 @@ async fn pipeline_indexes_saves_and_recalls_semantically() {
     let scope_keys = vec!["user:local-user".to_string()];
     let provider = FakeEmbeddingProvider::new(64);
     let recalled = store
-        .recall_semantic_entries(&provider, &generation.id, "用户喜欢先看到结论", &scope_keys, 5)
+        .recall_semantic_entries(
+            &provider,
+            &generation.id,
+            "用户喜欢先看到结论",
+            &scope_keys,
+            5,
+        )
         .await
         .unwrap();
     assert!(recalled.iter().any(|item| item.id == "m_pref"));
@@ -103,7 +110,13 @@ async fn pipeline_indexes_saves_and_recalls_semantically() {
     assert!(store.get_workspace_memory("m_pref").unwrap().is_none());
     assert!(store.get_embedding_document("memory", "m_pref").unwrap().is_none());
     let recalled = store
-        .recall_semantic_entries(&provider, &generation.id, "用户喜欢先看到结论", &scope_keys, 5)
+        .recall_semantic_entries(
+            &provider,
+            &generation.id,
+            "用户喜欢先看到结论",
+            &scope_keys,
+            5,
+        )
         .await
         .unwrap();
     assert!(recalled.iter().all(|item| item.id != "m_pref"));
@@ -168,4 +181,187 @@ fn governance_migration_adds_columns_to_legacy_database() {
 
 fn rusqlite_connection(path: &std::path::Path) -> rusqlite::Connection {
     rusqlite::Connection::open(path).unwrap()
+}
+
+#[tokio::test]
+async fn index_status_distinguishes_configuration_from_index_readiness_and_model_switches() {
+    std::env::set_var("WORLDBASE_FAKE_EMBEDDING", "1");
+    let dir = temp_dir();
+    let store = Arc::new(Store::open(&dir.join("app.sqlite")).unwrap());
+    store
+        .save_workspace_memory(&workspace_entry("apple", "饮食偏好", "用户喜欢吃苹果"))
+        .unwrap();
+    let queue = MemoryEmbeddingQueue::new(store.clone());
+    assert_eq!(queue.index_status().await.unwrap()["state"], "disabled");
+    assert!(!dir.join("agent-memory/memory-vector.sqlite").exists());
+    let mut config = fake_config();
+    queue.set_config(Some(config.clone())).await;
+    let waiting = queue.index_status().await.unwrap();
+    assert_eq!(waiting["state"], "waiting");
+    assert_eq!(waiting["documents"]["queued"], 1);
+    assert_eq!(
+        waiting["queue"]["queued"], 0,
+        "saved docs can precede job creation"
+    );
+    assert!(!waiting.to_string().contains("sk-test"));
+    assert!(!waiting.to_string().contains("苹果"));
+    queue.drain_once().await;
+    let first = store.active_embedding_generation().unwrap().unwrap();
+    assert_eq!(queue.index_status().await.unwrap()["state"], "ready");
+    assert!(first.matches_config(&config));
+
+    config.model_id = "new-model".into();
+    config.dimensions = Some(32);
+    queue.set_config(Some(config.clone())).await;
+    assert!(!first.matches_config(&config));
+    assert_eq!(queue.index_status().await.unwrap()["state"], "waiting");
+    queue.drain_once().await;
+    let second = store.active_embedding_generation().unwrap().unwrap();
+    assert_ne!(second.id, first.id);
+    assert_eq!(second.dimensions, 32);
+    assert_eq!(queue.index_status().await.unwrap()["state"], "ready");
+    assert_eq!(
+        store
+            .get_embedding_generation(&first.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "retired"
+    );
+    let hits = store
+        .recall_semantic_entries(
+            &FakeEmbeddingProvider::new(32),
+            &second.id,
+            "我喜欢吃什么",
+            &["user:local-user".into()],
+            5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits[0].summary, "用户喜欢吃苹果");
+
+    // Changing only the input template also creates a different vector space.
+    config.query_prefix = Some("query: ".into());
+    queue.set_config(Some(config.clone())).await;
+    assert!(!second.matches_config(&config));
+    queue.drain_once().await;
+    assert_eq!(queue.index_status().await.unwrap()["state"], "ready");
+
+    queue.set_config(None).await;
+    store
+        .save_workspace_memory(&workspace_entry("new", "新偏好", "用户喜欢喝茶"))
+        .unwrap();
+    assert_eq!(queue.drain_once().await, 0);
+    assert_eq!(queue.index_status().await.unwrap()["state"], "disabled");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn failed_jobs_stop_at_retry_limit_and_can_be_explicitly_retried() {
+    std::env::set_var("WORLDBASE_FAKE_EMBEDDING", "1");
+    let dir = temp_dir();
+    let store = Arc::new(Store::open(&dir.join("app.sqlite")).unwrap());
+    store
+        .save_workspace_memory(&workspace_entry("bad", "偏好", "用户喜欢吃苹果"))
+        .unwrap();
+    let queue = MemoryEmbeddingQueue::new(store.clone());
+    let mut config = fake_config();
+    // Force an offline sqlite-vec failure, not an external HTTP request.
+    config.distance = Some("invalid_metric".into());
+    queue.set_config(Some(config)).await;
+    let conn = rusqlite::Connection::open(store.memory_database_file()).unwrap();
+    for _ in 0..5 {
+        assert_eq!(queue.drain_once().await, 1);
+        conn.execute("UPDATE embedding_jobs SET next_retry_at = NULL", [])
+            .unwrap();
+    }
+    assert_eq!(
+        queue.drain_once().await,
+        0,
+        "backfill must not restart failed jobs forever"
+    );
+    let failed = queue.index_status().await.unwrap();
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(failed["documents"]["failed"], 1);
+    assert!(failed["lastError"].is_string());
+    assert_eq!(
+        store
+            .count_embedding_jobs_by_status()
+            .unwrap()
+            .get("failed"),
+        Some(&1)
+    );
+    queue.retry_failed().await.unwrap();
+    assert_eq!(
+        store
+            .count_embedding_jobs_by_status()
+            .unwrap()
+            .get("queued"),
+        Some(&1)
+    );
+    queue.set_config(Some(fake_config())).await;
+    queue.drain_once().await;
+    assert_eq!(queue.index_status().await.unwrap()["state"], "ready");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn edited_or_rescoped_memories_do_not_recall_stale_vectors() {
+    std::env::set_var("WORLDBASE_FAKE_EMBEDDING", "1");
+    let dir = temp_dir();
+    let store = Arc::new(Store::open(&dir.join("app.sqlite")).unwrap());
+    let mut entry = store
+        .save_workspace_memory(&workspace_entry("edited", "偏好", "用户喜欢吃苹果"))
+        .unwrap();
+    let queue = MemoryEmbeddingQueue::new(store.clone());
+    queue.set_config(Some(fake_config())).await;
+    queue.drain_once().await;
+    let generation = store.active_embedding_generation().unwrap().unwrap();
+    entry.scope_id = "another-user".into();
+    entry.summary = "用户喜欢吃香蕉".into();
+    store.save_workspace_memory(&entry).unwrap();
+    let provider = FakeEmbeddingProvider::new(64);
+    assert!(store
+        .recall_semantic_entries(
+            &provider,
+            &generation.id,
+            "苹果",
+            &["user:local-user".into()],
+            5
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    queue.drain_once().await;
+    assert!(store
+        .recall_semantic_entries(
+            &provider,
+            &generation.id,
+            "香蕉",
+            &["user:local-user".into()],
+            5
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .recall_semantic_entries(
+                &provider,
+                &generation.id,
+                "香蕉",
+                &["user:another-user".into()],
+                5
+            )
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    entry.scope_id = "third-user".into();
+    store.save_workspace_memory(&entry).unwrap();
+    assert_eq!(store.get_embedding_document("memory", "edited").unwrap().unwrap().status, "queued");
+    queue.drain_once().await;
+    assert_eq!(store.recall_semantic_entries(&provider, &generation.id, "香蕉", &["user:third-user".into()], 5).await.unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -972,6 +972,9 @@ pub struct WorkspaceMemoryEntry {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    /// Verbatim user evidence when available; never fabricated from a summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_text: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

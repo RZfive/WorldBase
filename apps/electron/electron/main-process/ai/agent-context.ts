@@ -84,17 +84,17 @@ export function resolveMemoryEmbeddingRuntimeConfig (): MemoryEmbeddingRuntimeCo
   if (!providerId || !modelId) return undefined
   const provider = mainState.settingsStore?.getProviders().providers.find(item => item.id === providerId)
   const model = (provider?.embeddingModels || []).find(item => item.id === modelId && item.enabled !== false)
-  if (!provider?.baseUrl?.trim()) return undefined
+  if (!provider?.baseUrl?.trim() || !model) return undefined
   return {
     providerId: provider.id,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
-    modelId: model?.id || modelId,
+    modelId: model.id,
     ...(model?.dimensions ? { dimensions: model.dimensions } : {}),
     ...(model?.distance ? { distance: model.distance } : {}),
     ...(model?.normalized != null ? { normalized: model.normalized } : {}),
-    ...(model?.queryPrefix ? { queryPrefix: model.queryPrefix } : {}),
-    ...(model?.documentPrefix ? { documentPrefix: model.documentPrefix } : {})
+    ...(model?.queryPrefix !== undefined ? { queryPrefix: model.queryPrefix } : {}),
+    ...(model?.documentPrefix !== undefined ? { documentPrefix: model.documentPrefix } : {})
   }
 }
 

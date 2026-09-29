@@ -283,6 +283,7 @@ export class RustHarnessEngine implements AIHarness {
         targetProjectId: options?.targetProjectId ?? this.defaultTargetProjectId,
         memoryScopes: options?.memoryScopes,
         memoryQuery: textFromContent(pending.content),
+        memoryEmbedding: options?.memoryEmbedding,
         allowedMcpServerIds: options?.allowedMcpServerIds,
         enableThinking: effectiveConfig.enableThinking,
         reasoningEffort: effectiveConfig.reasoningEffort,

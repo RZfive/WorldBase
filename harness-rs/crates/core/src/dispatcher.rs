@@ -123,7 +123,7 @@ pub async fn dispatch(
         CONVERSATION_DELETE => conv_delete(hub, params),
         CONVERSATION_RENAME => conv_rename(hub, params),
 
-        CHAT_SEND => chat_send(hub, ctx, params),
+        CHAT_SEND => chat_send(hub, ctx, params).await,
         CHAT_RESUME => chat_resume(hub, params).await,
         CHAT_ABORT => chat_abort(hub, params),
         CHAT_RESPOND => chat_respond(hub, params),
@@ -146,6 +146,8 @@ pub async fn dispatch(
         MEMORY_PIN => memory_pin(hub, params),
         MEMORY_COMPACT => memory_compact(hub, params),
         MEMORY_COMPACT_STATUS => memory_compact_status(hub),
+        MEMORY_CONFIGURE_EMBEDDING => memory_configure_embedding(hub, params).await,
+        MEMORY_INDEX_STATUS => hub.memory_queue.index_status().await.map_err(internal),
 
         SKILL_LIST => skill_list(hub),
         SKILL_RUN => skill_run(hub, params),
@@ -892,19 +894,13 @@ fn conv_rename(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 
 // ---------- chat ----------
 
-fn chat_send(hub: &Arc<Hub>, ctx: &ConnectionContext, params: Value) -> Result<Value, ErrorObject> {
+async fn chat_send(
+    hub: &Arc<Hub>,
+    ctx: &ConnectionContext,
+    params: Value,
+) -> Result<Value, ErrorObject> {
     let p: ChatSendParams =
         serde_json::from_value(params).map_err(|e| params_err(e.to_string()))?;
-    // 共享记忆 embedding 配置由宿主随请求下发（design §12：模型选择归
-    // Memory Settings，harness 只做 provider API 适配）。写入队列配置并
-    // 确保后台消费循环在运行。
-    if let Some(embedding) = p.context.memory_embedding.clone() {
-        let queue = hub.memory_queue.clone();
-        tokio::spawn(async move {
-            queue.set_config(Some(embedding)).await;
-            queue.start().await;
-        });
-    }
     if hub
         .store
         .get_conversation(&p.conversation_id)
@@ -912,6 +908,11 @@ fn chat_send(hub: &Arc<Hub>, ctx: &ConnectionContext, params: Value) -> Result<V
         .is_none()
     {
         return Err(params_err("conversation not found"));
+    }
+    if let Some(embedding) = p.context.memory_embedding.clone() {
+        validate_embedding_config(&embedding)?;
+        hub.memory_queue.set_config(Some(embedding)).await;
+        hub.memory_queue.start().await;
     }
     let run = crate::agent::start_chat(
         hub.clone(),
@@ -1049,6 +1050,47 @@ fn settings_set(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 }
 
 // ---------- memory ----------
+
+fn validate_embedding_config(config: &MemoryEmbeddingRuntimeConfig) -> Result<(), ErrorObject> {
+    if config.provider_id.trim().is_empty()
+        || config.model_id.trim().is_empty()
+        || config.base_url.trim().is_empty()
+    {
+        return Err(params_err(
+            "embedding provider, model and base URL are required",
+        ));
+    }
+    if config.dimensions == Some(0) {
+        return Err(params_err("embedding dimensions must be positive"));
+    }
+    if !matches!(
+        config.distance.as_deref().unwrap_or("cosine"),
+        "cosine" | "l2" | "dot"
+    ) {
+        return Err(params_err("invalid embedding distance metric"));
+    }
+    Ok(())
+}
+
+async fn memory_configure_embedding(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let raw = params
+        .get("config")
+        .ok_or_else(|| params_err("config is required (null disables embedding)"))?;
+    let config: Option<MemoryEmbeddingRuntimeConfig> =
+        serde_json::from_value(raw.clone()).map_err(|error| params_err(error.to_string()))?;
+    if let Some(config) = &config {
+        validate_embedding_config(config)?;
+    }
+    let enabled = config.is_some();
+    hub.memory_queue.set_config(config).await;
+    if enabled && params.get("retryFailed").and_then(Value::as_bool) == Some(true) {
+        hub.memory_queue.retry_failed().await.map_err(internal)?;
+    }
+    if enabled {
+        hub.memory_queue.start().await;
+    }
+    Ok(json!({"configured": enabled}))
+}
 
 fn memory_search(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let query = required_string_param(&params, &["query"], "query")?;

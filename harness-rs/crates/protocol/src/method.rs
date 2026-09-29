@@ -39,6 +39,8 @@ pub const MEMORY_SAVE: &str = "memory.save";
 pub const MEMORY_PIN: &str = "memory.pin";
 pub const MEMORY_COMPACT: &str = "memory.compact";
 pub const MEMORY_COMPACT_STATUS: &str = "memory.compactStatus";
+pub const MEMORY_CONFIGURE_EMBEDDING: &str = "memory.configureEmbedding";
+pub const MEMORY_INDEX_STATUS: &str = "memory.indexStatus";
 
 pub const SKILL_LIST: &str = "skill.list";
 pub const SKILL_RUN: &str = "skill.run";

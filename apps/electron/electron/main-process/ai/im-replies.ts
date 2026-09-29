@@ -68,7 +68,9 @@ export async function generateImGatewayReply (binding: ChannelBinding, event: Ch
       ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
     ],
     allowedToolNames: runtimeContext.allowedToolNames,
-    deniedToolNames: runtimeContext.deniedToolNames
+    deniedToolNames: runtimeContext.deniedToolNames,
+    memoryScopes: runtimeContext.memoryScopes,
+    memoryEmbedding: runtimeContext.memoryEmbedding
   }
   const response = await rustHarness.chat(messages, requestOptions)
   const reply = getMessageText(response.content).trim()

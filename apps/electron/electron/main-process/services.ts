@@ -42,7 +42,7 @@ import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAut
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AgentDefinition, AgentGroupDefinition } from '../../src/shared/agent-workspace-types.js'
 import { mainState } from './state.js'
-import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, refreshProviderReasoningMetadata, resolveProviderConfig } from './ai/agent-context.js'
+import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, refreshProviderReasoningMetadata, resolveMemoryEmbeddingRuntimeConfig, resolveProviderConfig } from './ai/agent-context.js'
 import { getSelectedExecutionEngine, startSelectedRustHarness } from './ai/selected-execution-engine.js'
 
 import { enqueueStudioImageTasks } from './media/image-studio-queue.js'
@@ -627,6 +627,7 @@ export async function initializeServices (): Promise<void> {
     workspace: projectsDir,
     dataDir: userDataPath,
     getProviders: () => mainState.settingsStore!.getProviders(),
+    getMemoryEmbedding: () => resolveMemoryEmbeddingRuntimeConfig(),
     getAgents: () => mainState.agentStore!.list(),
     onAgentsHandoff: agents => mirrorRustAgentsOnHandoff(agents),
     getAgentGroups: () => mainState.agentGroupStore!.list(),

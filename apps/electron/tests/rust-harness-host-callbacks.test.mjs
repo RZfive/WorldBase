@@ -1377,6 +1377,41 @@ test('Rust chat preserves provider thinking defaults and omits reasoning only wh
   assert.equal(captured[2].reasoningEffort, 'high')
 })
 
+test('Rust facade forwards scoped semantic-memory settings to chat.send', async () => {
+  const captured = []
+  const client = {
+    ...createNativeToolClient(),
+    async start () {},
+    async chatStream (sessionId, conversationId, text, options, onFrame) {
+      captured.push({ sessionId, conversationId, text, options })
+      onFrame({ kind: 'assistant_message', content: '苹果' })
+      onFrame({ kind: 'done' })
+      return { streamId: 'memory-recall-stream' }
+    }
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  const memoryEmbedding = {
+    providerId: 'provider-memory',
+    baseUrl: 'https://embedding.example/v1',
+    apiKey: 'test-key',
+    modelId: 'embedding-model',
+    dimensions: 1024,
+    distance: 'cosine'
+  }
+
+  for await (const _event of engine.chatStream([
+    { role: 'user', content: '我喜欢吃什么' }
+  ], undefined, {
+    memoryScopes: [{ scopeType: 'user', scopeId: 'local-user' }],
+    memoryEmbedding
+  })) {}
+
+  assert.equal(captured.length, 1)
+  assert.deepEqual(captured[0].options.memoryScopes, [{ scopeType: 'user', scopeId: 'local-user' }])
+  assert.equal(captured[0].options.memoryQuery, '我喜欢吃什么')
+  assert.deepEqual(captured[0].options.memoryEmbedding, memoryEmbedding)
+})
+
 test('Electron provider sync preserves saved temperature and thinking defaults', async () => {
   const calls = []
   const client = new RustHarnessClient({
@@ -1622,4 +1657,66 @@ test('Rust history sync sends an explicit authoritative empty reset', async () =
       messages: []
     }
   }])
+})
+
+test('memory selection synchronizes once, propagates disable, and exposes real index status', async () => {
+  const calls = []
+  let config = { providerId: 'memory-p', modelId: 'embedding', baseUrl: 'https://example.invalid/v1', apiKey: 'test' }
+  const client = new RustHarnessClient({ workspace: process.cwd(), dataDir: path.join(os.tmpdir(), 'memory-settings-test'), onEvent () {}, getMemoryEmbedding: () => config })
+  client.start = async () => {}
+  client.request = async (method, params) => {
+    calls.push({ method, params })
+    return method === 'memory.indexStatus' ? { state: 'waiting', documents: { total: 140, indexed: 0, queued: 140, failed: 0 } } : { configured: !!params.config }
+  }
+  await client.syncMemoryEmbeddingSettings()
+  await client.syncMemoryEmbeddingSettings()
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0], { method: 'memory.configureEmbedding', params: { config } })
+  const status = await client.getMemoryIndexStatus()
+  assert.equal(status.state, 'waiting')
+  assert.equal(status.documents.indexed, 0)
+  config = undefined
+  await client.syncMemoryEmbeddingSettings()
+  assert.deepEqual(calls.at(-1), { method: 'memory.configureEmbedding', params: { config: null } })
+})
+
+test('memory embedding config survives both facade and actual chat.send serialization', async () => {
+  const captured = []
+  const client = new RustHarnessClient({ workspace: process.cwd(), dataDir: path.join(os.tmpdir(), 'memory-wire-test'), onEvent () {} })
+  client.start = async () => {}
+  client.syncSettings = async () => {}
+  client.ensureConversation = async () => {}
+  client.syncConversationHistory = async () => {}
+  client.request = async (method, params) => {
+    assert.equal(method, 'chat.send')
+    captured.push(params)
+    return { streamId: `memory-wire-${captured.length}` }
+  }
+  const send = client.chatStream.bind(client)
+  client.chatStream = async (...args) => {
+    const result = await send(...args)
+    client.handleEvent({ streamId: result.streamId, kind: 'assistant_message', content: '苹果', seq: 1 })
+    client.handleEvent({ streamId: result.streamId, kind: 'done', seq: 2 })
+    return result
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  const memoryEmbedding = { providerId: 'memory-p', modelId: 'embedding', baseUrl: 'https://example.invalid/v1', apiKey: 'test', queryPrefix: 'query: ', documentPrefix: '' }
+  await engine.chat([{ role: 'user', content: '我喜欢吃什么？' }], { memoryScopes: [{ scopeType: 'user', scopeId: 'local-user' }], memoryEmbedding })
+  assert.deepEqual(captured[0].memoryEmbedding, memoryEmbedding)
+  assert.equal(captured[0].memoryQuery, '我喜欢吃什么？')
+  assert.deepEqual(captured[0].memoryScopes, [{ scopeType: 'user', scopeId: 'local-user' }])
+  await engine.chat([{ role: 'user', content: 'hi' }], {})
+  assert.equal(Object.hasOwn(captured[1], 'memoryEmbedding'), false)
+})
+
+test('disabling memory while a chat is preparing cannot re-enable a stale embedding snapshot', async () => {
+  let payload
+  const stale = { providerId: 'old', modelId: 'embedding', baseUrl: 'https://example.invalid', apiKey: 'test' }
+  const client = new RustHarnessClient({ workspace: process.cwd(), dataDir: os.tmpdir(), onEvent () {}, getMemoryEmbedding: () => undefined })
+  client.start = async () => {}
+  client.syncSettings = async () => {}
+  client.ensureConversation = async () => {}
+  client.request = async (_method, params) => { payload = params; return { streamId: 'disabled-memory' } }
+  await client.chatStream('disabled-session', 'disabled-conversation', 'hello', { memoryEmbedding: stale })
+  assert.equal(Object.hasOwn(payload, 'memoryEmbedding'), false)
 })
