@@ -10,6 +10,8 @@ import { createRequire } from 'node:module'
 // archiver v8 是 ESM，命名导出 ZipArchive 类（Node 22 的 require(esm) 可直接加载）。
 const require = createRequire(import.meta.url)
 const { ZipArchive } = require('archiver')
+// 自检复用客户端同一把 extract-zip：解包结果与用户机器上 apply 看到的完全一致。
+const extractZip = require('extract-zip')
 
 // 产出 docs/desktop-hot-update-design.md 第 3 节定义的 Hot Payload：
 // release/win-unpacked/resources 里的 app.asar、app.asar.unpacked、harness，
@@ -24,6 +26,13 @@ const MANIFEST_SCHEMA_VERSION = 1
 // 都在 win-unpacked 根下，本就不在这个目录里；resources 下仅排除安装器辅助文件。
 const HOT_PAYLOAD_ENTRIES = ['app.asar', 'app.asar.unpacked', 'harness']
 const EXCLUDED_NAMES = new Set(['.DS_Store', 'elevate.exe', 'LICENSE', 'LICENSE.electron.txt', 'LICENSES.chromium.html'])
+
+// manifest（collectFiles）与 zip 内容（fsp.cp）必须用同一套排除规则：
+// 两者一旦漂移，客户端 apply 的"清单外文件"白名单校验会拒绝整个热包。
+// 名单是按 basename 匹配的，node_modules 深处的 LICENSE 同样被两侧一致地排除。
+function isExcludedName (target) {
+  return EXCLUDED_NAMES.has(path.basename(target))
+}
 
 // 三平台打包布局不同：win = release/win-unpacked/resources，
 // mac = release/mac-arm64/WorldBase.app/Contents/Resources，
@@ -79,7 +88,7 @@ async function collectFiles (rootDir, relDir = '') {
   const entries = await fsp.readdir(path.join(rootDir, relDir), { withFileTypes: true })
   const files = []
   for (const entry of entries) {
-    if (EXCLUDED_NAMES.has(entry.name)) continue
+    if (isExcludedName(entry.name)) continue
     const relPath = relDir ? `${relDir}/${entry.name}` : entry.name
     if (entry.isDirectory()) {
       files.push(...await collectFiles(rootDir, relPath))
@@ -99,6 +108,46 @@ async function hashFile (filePath) {
     stream.once('end', resolve)
   })
   return hash.digest('hex')
+}
+
+async function listFilesRecursive (rootDir, relDir = '') {
+  const entries = await fsp.readdir(path.join(rootDir, relDir), { withFileTypes: true })
+  const files = []
+  for (const entry of entries) {
+    const relPath = relDir ? `${relDir}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      files.push(...await listFilesRecursive(rootDir, relPath))
+    } else if (entry.isFile()) {
+      files.push(relPath)
+    }
+  }
+  return files.sort()
+}
+
+/**
+ * 打包自检：重新解包产出的 zip，内容必须与 manifest 严格一致
+ * （manifest.files + manifest.json [+ manifest.sig]，多一个或少一个都算失败）。
+ * manifest 与包内容漂移 = 客户端 apply 必败，必须在 CI 就拦下。
+ */
+async function verifyZipMatchesManifest (zipPath, manifest, signed) {
+  const checkDir = `${zipPath}.verify`
+  await fsp.rm(checkDir, { recursive: true, force: true })
+  try {
+    await extractZip(zipPath, { dir: checkDir })
+    const actual = await listFilesRecursive(checkDir)
+    const expected = new Set(['manifest.json', ...manifest.files.map(file => file.path)])
+    if (signed) expected.add('manifest.sig')
+    const missing = [...expected].filter(relPath => !actual.includes(relPath))
+    const extra = actual.filter(relPath => !expected.has(relPath))
+    if (missing.length > 0 || extra.length > 0) {
+      throw new Error(
+        `zip content does not match manifest: ${missing.length} missing, ${extra.length} extra; ` +
+        `missingSample=${JSON.stringify(missing.slice(0, 3))} extraSample=${JSON.stringify(extra.slice(0, 3))}`
+      )
+    }
+  } finally {
+    await fsp.rm(checkDir, { recursive: true, force: true })
+  }
 }
 
 function loadSigningKey (raw) {
@@ -177,7 +226,8 @@ async function main () {
   await fsp.rm(staging, { recursive: true, force: true })
   await fsp.mkdir(staging, { recursive: true })
   for (const entry of HOT_PAYLOAD_ENTRIES) {
-    await fsp.cp(path.join(resourcesDir, entry), path.join(staging, entry), { recursive: true })
+    // filter 返回 true 表示复制；与 collectFiles 的排除规则同源，保证 zip 内容与 manifest 永远一致
+    await fsp.cp(path.join(resourcesDir, entry), path.join(staging, entry), { recursive: true, filter: src => !isExcludedName(src) })
   }
   await fsp.writeFile(path.join(staging, 'manifest.json'), manifestBytes)
   if (signature) {
@@ -196,6 +246,8 @@ async function main () {
   await archive.finalize()
   await done
   await fsp.rm(staging, { recursive: true, force: true })
+
+  await verifyZipMatchesManifest(zipPath, manifest, Boolean(signature))
 
   const zipSha256 = await hashFile(zipPath)
   const zipStat = await fsp.stat(zipPath)
