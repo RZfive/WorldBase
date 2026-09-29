@@ -89,6 +89,9 @@ test('valid payload activates and counts boot attempts (win32)', async () => {
     if (typeof entry !== 'string' || !entry.endsWith('main.cjs')) throw new Error(`unexpected entry: ${entry}`)
     const first = JSON.parse(await fsp.readFile(path.join(env.root, 'boot-state.json'), 'utf8'))
     if (first.attempts !== 1) throw new Error(`expected attempts=1, got ${first.attempts}`)
+    // 模拟下一次启动：全新进程不带 WORLDBASE_HOT_RESOURCES（沙箱 env 是共享对象，
+    // 外层激活会写入该变量），同进程内的再次调用属于嵌套 bootstrap 短路场景。
+    delete env.env.WORLDBASE_HOT_RESOURCES
     activate(packagedApp)
     const second = JSON.parse(await fsp.readFile(path.join(env.root, 'boot-state.json'), 'utf8'))
     if (second.attempts !== 2) throw new Error(`expected attempts=2, got ${second.attempts}`)
@@ -176,5 +179,34 @@ test('unpackaged (dev) runs never activate the hot payload', async () => {
     await fsp.writeFile(path.join(env.root, 'current.json'), JSON.stringify({ version: '1.5.2', dir: '1.5.2' }))
     const devApp = { isPackaged: false, getVersion: () => '1.5.0' }
     if (buildActivator(env)(devApp) !== null) throw new Error('expected null in dev mode')
+  })
+})
+
+// 回归：热包 app.asar 的入口 main.cjs 也是同一份 bootstrap。外层激活后 require
+// 进来时 WORLDBASE_HOT_RESOURCES 已设置，必须短路去加载热包自己的 main.js，
+// 否则单次启动被计成 attempts=2 直接回滚，且真正的 main.js 永远不会被加载。
+test('hot payload entry bootstrap short-circuits instead of re-activating', async () => {
+  await withEnv('win32', async (env) => {
+    await fsp.writeFile(path.join(env.root, 'current.json'), JSON.stringify({ version: '1.5.2', dir: '1.5.2' }))
+    // 外层激活：计数 +1 并设置环境变量
+    const outer = buildActivator(env)(packagedApp)
+    if (typeof outer !== 'string' || !outer.endsWith('main.cjs')) throw new Error(`outer activation failed: ${outer}`)
+    const outerState = JSON.parse(await fsp.readFile(path.join(env.root, 'boot-state.json'), 'utf8'))
+    if (outerState.attempts !== 1) throw new Error(`expected outer attempts=1, got ${outerState.attempts}`)
+
+    // 内层（热包入口里的同一份 bootstrap）：环境变量已设置 → 必须返回 null，
+    // 且不得再次累加 boot-state 或触发回滚
+    const inner = buildActivator(env, {
+      process: {
+        platform: 'win32',
+        env: { ...env.env, WORLDBASE_HOT_RESOURCES: env.versionDir },
+        versions: { electron: '40.8.0' }
+      }
+    })(packagedApp)
+    if (inner !== null) throw new Error(`expected inner short-circuit null, got ${inner}`)
+    const innerState = JSON.parse(await fsp.readFile(path.join(env.root, 'boot-state.json'), 'utf8'))
+    if (innerState.attempts !== 1) throw new Error(`inner must not bump attempts, got ${innerState.attempts}`)
+    if (!fs.existsSync(env.versionDir)) throw new Error('inner must not roll back the payload dir')
+    if (!fs.existsSync(path.join(env.root, 'current.json'))) throw new Error('inner must not clear current.json')
   })
 })

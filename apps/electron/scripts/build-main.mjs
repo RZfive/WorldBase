@@ -128,6 +128,13 @@ function resolveHotRoot () {
 function tryActivateHotPayload (app) {
   if (!app || !app.isPackaged) return null;
 
+  // 热包入口 main.cjs 本身也是这份 bootstrap 模板。外层（安装版）bootstrap
+  // 激活热包并 require 热包入口后，这里必须直接短路返回 null，让加载流程
+  // fall through 到热包自己的 main.js：否则会二次累加 boot-state（一次启动
+  // 计成两次，直接触发回滚），并且 require 自己只是模块缓存命中，真正的
+  // main.js 永远不会被加载，主进程变成无窗口空壳。
+  if (process.env.WORLDBASE_HOT_RESOURCES) return null;
+
   const hotRoot = resolveHotRoot();
   if (!hotRoot) return null;
   const currentPath = join(hotRoot, 'current.json');
