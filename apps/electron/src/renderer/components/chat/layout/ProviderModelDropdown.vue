@@ -211,11 +211,13 @@ function expandProvider (providerId: string) {
 function handleProviderClick (provider: ProviderItem) {
   expandedProviderId.value = provider.id
 
+  // Selecting a provider (or one of its models) keeps the panel open — it
+  // only closes on an outside click or Escape, so the reasoning-strength
+  // animation for the newly selected model stays visible.
   if (provider.models.length === 0) {
     emit('update:active-provider-id', provider.id)
     emit('update:selected-model', '')
     emit('select', { providerId: provider.id, model: '' })
-    open.value = false
   }
 }
 
@@ -223,7 +225,6 @@ function selectModel (providerId: string, model: string) {
   emit('update:active-provider-id', providerId)
   emit('update:selected-model', model)
   emit('select', { providerId, model })
-  open.value = false
 }
 
 function handlePanelKeydown (e: KeyboardEvent) {
@@ -256,6 +257,30 @@ function selectReasoningLevel (level: string): void {
   if (props.isGroupConversation) return
   emit('update:reasoning-strength', level as ReasoningStrength)
 }
+
+// The active level is painted by one shared pill that slides between the
+// buttons, so a model switch (which can also swap the level set) animates
+// instead of hard-cutting between button backgrounds.
+const strengthGroupRef = ref<HTMLElement | null>(null)
+const strengthThumbStyle = ref<{ width: string; height: string; transform: string } | null>(null)
+
+function updateStrengthThumb (): void {
+  const group = strengthGroupRef.value
+  const active = group?.querySelector<HTMLButtonElement>('.provider-model-strength-option.on')
+  if (!group || !active) {
+    strengthThumbStyle.value = null
+    return
+  }
+  strengthThumbStyle.value = {
+    width: `${active.offsetWidth}px`,
+    height: `${active.offsetHeight}px`,
+    transform: `translate(${active.offsetLeft}px, ${active.offsetTop}px)`
+  }
+}
+
+watch([tuningReasoningLevels, () => props.reasoningStrength, () => props.showTuning, open], () => {
+  nextTick(updateStrengthThumb)
+})
 
 function tuningSliderFill (ratio: number): string {
   const clamped = Math.min(Math.max(ratio, 0), 1)
@@ -411,7 +436,13 @@ onBeforeUnmount(() => {
       <div v-if="props.showTuning" class="provider-model-tuning">
         <div class="provider-model-tuning-cell" :title="props.isGroupConversation ? groupReasoningTitle : ''">
           <span class="provider-model-tuning-name">{{ $t('chatUi.reasoningStrength') }}</span>
-          <div class="provider-model-strength-group" role="group" :aria-label="$t('chatUi.reasoningStrength')">
+          <div ref="strengthGroupRef" class="provider-model-strength-group" role="group" :aria-label="$t('chatUi.reasoningStrength')">
+            <span
+              v-if="strengthThumbStyle"
+              class="provider-model-strength-thumb"
+              :style="strengthThumbStyle"
+              aria-hidden="true"
+            ></span>
             <button
               v-for="level in tuningReasoningLevels"
               :key="level"
@@ -561,6 +592,7 @@ onBeforeUnmount(() => {
 }
 
 .provider-model-strength-group {
+  position: relative;
   display: flex;
   flex-direction: row;
   flex-wrap: nowrap;
@@ -573,7 +605,22 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
 }
 
+.provider-model-strength-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 6px;
+  background: var(--app-accent);
+  pointer-events: none;
+  transition: transform 0.24s cubic-bezier(0.33, 1, 0.68, 1),
+    width 0.24s cubic-bezier(0.33, 1, 0.68, 1),
+    height 0.24s cubic-bezier(0.33, 1, 0.68, 1);
+  will-change: transform, width;
+}
+
 .provider-model-strength-option {
+  position: relative;
+  z-index: 1;
   border: none;
   background: transparent;
   color: var(--app-text-muted);
@@ -585,7 +632,7 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   flex: 0 0 auto;
   width: auto;
-  transition: background 0.15s, color 0.15s;
+  transition: color 0.18s ease;
 }
 
 .provider-model-strength-option:hover:not(:disabled) {
@@ -593,7 +640,6 @@ onBeforeUnmount(() => {
 }
 
 .provider-model-strength-option.on {
-  background: var(--app-accent);
   color: #fff;
   font-weight: 600;
 }

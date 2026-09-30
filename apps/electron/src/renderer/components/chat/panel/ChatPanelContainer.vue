@@ -30,6 +30,7 @@ import {
 } from './suggestion-state'
 import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
 import { getRecommendedProviderTemplate } from '../../../../shared/provider-templates.js'
+import { resolveModelStrength } from '../../../../shared/reasoning-effort'
 import type { ChatPanelEmit, ChatPanelProps } from './types'
 import type { AnnotationAnchor, MessageAnnotationLocator, QuickAskMode, QuickAskPopoverState } from '../types'
 
@@ -182,13 +183,15 @@ const {
 // thread so the user can keep asking in 简略/详细 depth.
 const quickAskState = ref<QuickAskPopoverState | null>(null)
 
-// The strength control renders exactly the levels the active model declares
-// (from the provider's /models metadata); undeclared models get the standard
-// four. Switching models swaps the choices with the model.
+// The strength control renders the shared resolver's view of the active
+// model: gateway-declared levels narrowed by the user's allowed multi-pick,
+// standard eight when undeclared. Switching models swaps the choices with
+// the model.
 const activeModelReasoningEfforts = computed<string[]>(() => {
   const provider = providersConfig.value.providers.find(item => item.id === activeProviderId.value)
-  const declared = provider?.modelCapabilities?.[selectedModel.value]?.reasoningEfforts || []
-  return declared.length > 0 ? declared : ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+  return resolveModelStrength(provider?.modelCapabilities?.[selectedModel.value], {
+    current: reasoningStrength.value
+  }).levels
 })
 
 function handleAddSelectionToContext (text: string): void {

@@ -1,5 +1,5 @@
 import { computed, nextTick, type ComputedRef, type Ref } from 'vue'
-import { clampReasoningEffort } from '../../../../shared/reasoning-effort'
+import { resolveModelStrength } from '../../../../shared/reasoning-effort'
 import { getEnabledProviders } from './provider-utils'
 import type {
   AIExecutionAuthMode,
@@ -57,34 +57,28 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
   let catalogVersion = 0
 
   /**
-   * Keep the session reasoning strength on values the selected model actually
-   * accepts. Models declare their supported levels (and default) through the
-   * provider's /models metadata; the user's allowed multi-pick (settings)
-   * narrows that set. An unsupported choice snaps to the model's default,
-   * else to the nearest allowed level. Undeclared models leave the choice
-   * untouched — the main-process clamp still guards the wire value.
+   * Last strength each provider+model pair was used with. Module-level so the
+   * memory outlives chat panel remounts, like the shared session refs.
+   */
+  const modelStrengthMemory = new Map<string, ReasoningStrength>()
+
+  const modelStrengthKey = (providerId: string, modelId: string): string => `${providerId}::${modelId}`
+
+  /**
+   * Make the session reasoning strength follow the selected model so the
+   * control switches in real time on every model change. All merging of the
+   * two declaration sources (gateway-declared metadata + user-declared
+   * settings) lives in the shared resolver; the user's last pick for this
+   * model is the only session-scoped input added here.
    */
   function adaptReasoningStrengthToModel (providerId: string, modelId: string): void {
     const provider = providersConfig.value.providers.find(item => item.id === providerId)
-    const capabilities = provider?.modelCapabilities?.[modelId]
-    const declared = capabilities?.reasoningEfforts
-    const allowed = capabilities?.allowedReasoningEfforts
-    let supported: string[] | undefined = declared
-    if (allowed?.length && declared?.length) {
-      const intersected = allowed.filter(level => declared.includes(level))
-      supported = intersected.length > 0 ? intersected : declared
-    } else if (allowed?.length) {
-      supported = allowed
-    }
-    if (!supported || supported.length === 0 || supported.includes(reasoningStrength.value)) return
-    // Snap target precedence: the model's user-chosen default strength, then
-    // the gateway-declared default, then the nearest allowed level.
-    const declaredDefault = capabilities?.reasoningEffort || capabilities?.defaultReasoningEffort
-    const next = declaredDefault && supported.includes(declaredDefault)
-      ? declaredDefault
-      : clampReasoningEffort(reasoningStrength.value, supported)
-    if ((['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const).includes(next as ReasoningStrength)) {
-      reasoningStrength.value = next as ReasoningStrength
+    const view = resolveModelStrength(provider?.modelCapabilities?.[modelId], {
+      remembered: modelStrengthMemory.get(modelStrengthKey(providerId, modelId)),
+      current: reasoningStrength.value
+    })
+    if (view.active !== reasoningStrength.value) {
+      reasoningStrength.value = view.active as ReasoningStrength
     }
   }
 
@@ -192,6 +186,10 @@ export function createChatProviderState (options: ChatProviderStateOptions) {
 
   async function handleReasoningStrengthChange (value: ReasoningStrength): Promise<void> {
     reasoningStrength.value = value
+    // Explicit user picks are what the model remembers; restoration paths
+    // (conversation switch, declared defaults) deliberately don't write here,
+    // so inherited values never masquerade as the model's own choice.
+    modelStrengthMemory.set(modelStrengthKey(activeProviderId.value, selectedModel.value), value)
     if (!syncingProviderOptions.value) await saveActiveConversationMeta()
   }
 

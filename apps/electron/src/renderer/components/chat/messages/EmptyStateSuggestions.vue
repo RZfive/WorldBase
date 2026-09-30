@@ -50,7 +50,10 @@ type HandCard =
   | { kind: 'enable'; id: 'enable' }
   | { kind: 'setup'; id: 'setup' }
 
-const hoveredId = ref<string | null>(null)
+// Hover is tracked by hand slot, not card id: the ↻ tool swaps a knowledge
+// card for a new id, and an id-keyed hover would drop the lift the moment the
+// snapshot lands (no mouseenter refires on a stationary cursor).
+const hoveredIndex = ref(-1)
 const seenTimer = ref<number | null>(null)
 const handRef = ref<HTMLElement | null>(null)
 const handWidth = ref(0)
@@ -90,8 +93,6 @@ const cards = computed<HandCard[]>(() => {
   if (!dailyEnabled.value && props.snapshot) list.push({ kind: 'enable', id: 'enable' })
   return list
 })
-
-const hoveredIndex = computed(() => cards.value.findIndex(card => card.id === hoveredId.value))
 
 /** Horizontal step between card origins so the whole hand, plus its hover spread, fits the strip. */
 const cardStep = computed(() => {
@@ -216,9 +217,9 @@ function pick (item: WorkSuggestion): void {
   })
 }
 
-function dismiss (event: Event, item: WorkSuggestion): void {
+function dismiss (event: Event, index: number, item: WorkSuggestion): void {
   event.stopPropagation()
-  if (hoveredId.value === item.id) hoveredId.value = null
+  if (hoveredIndex.value === index) hoveredIndex.value = -1
   emit('dismiss', item)
 }
 
@@ -239,8 +240,8 @@ function setupProvider (event: Event, mode: 'recommended' | 'browse'): void {
   emit('setupProvider', mode)
 }
 
-function leaveCard (id: string): void {
-  if (hoveredId.value === id) hoveredId.value = null
+function leaveCard (index: number): void {
+  if (hoveredIndex.value === index) hoveredIndex.value = -1
 }
 
 function scheduleSeen (): void {
@@ -317,19 +318,23 @@ onBeforeUnmount(() => {
 
     <p v-if="dailyStatusLine && !generating" class="ess-status-line">{{ dailyStatusLine }}</p>
 
-    <div ref="handRef" class="ess-hand-viewport" @mouseleave="hoveredId = null">
+    <div ref="handRef" class="ess-hand-viewport" @mouseleave="hoveredIndex = -1">
       <div class="ess-hand" :style="handStyle">
-        <template v-for="(card, index) in cards" :key="card.id">
+        <!-- Key by hand slot, not item id: the ↻ refresh swaps a card for a
+             new id, and an id-keyed node would unmount/remount — dropping the
+             hover chain (and any focus) so the card visibly collapsed back
+             into the fan. Slot keys patch the same node in place. -->
+        <template v-for="(card, index) in cards" :key="`${index}-${card.kind}`">
           <button
             v-if="card.kind === 'item'"
             type="button"
             class="ess-card"
-            :class="{ lifted: hoveredId === card.id, dimmed: hoveredId !== null && hoveredId !== card.id, fresh: card.item.fresh, daily: card.group === 'daily', knowledge: card.group === 'knowledge' }"
+            :class="{ lifted: hoveredIndex === index, fresh: card.item.fresh, daily: card.group === 'daily', knowledge: card.group === 'knowledge' }"
             :style="cardStyle(index)"
             :title="sceneSummary(card.item)"
-            @mouseenter="hoveredId = card.id"
-            @focus="hoveredId = card.id"
-            @blur="leaveCard(card.id)"
+            @mouseenter="hoveredIndex = index"
+            @focus="hoveredIndex = index"
+            @blur="leaveCard(index)"
             @click="pick(card.item)"
           >
             <span class="ess-card-top">
@@ -360,7 +365,7 @@ onBeforeUnmount(() => {
                 role="button"
                 :aria-label="$t('chatUi.suggestions.dismiss')"
                 :title="$t('chatUi.suggestions.dismiss')"
-                @click="dismiss($event, card.item)"
+                @click="dismiss($event, index, card.item)"
               >×</span>
             </span>
           </button>
@@ -369,11 +374,11 @@ onBeforeUnmount(() => {
             v-else-if="card.kind === 'setup'"
             type="button"
             class="ess-card ess-card-setup"
-            :class="{ lifted: hoveredId === card.id, dimmed: hoveredId !== null && hoveredId !== card.id }"
+            :class="{ lifted: hoveredIndex === index }"
             :style="cardStyle(index)"
-            @mouseenter="hoveredId = card.id"
-            @focus="hoveredId = card.id"
-            @blur="leaveCard(card.id)"
+            @mouseenter="hoveredIndex = index"
+            @focus="hoveredIndex = index"
+            @blur="leaveCard(index)"
             @click="setupProvider($event, 'recommended')"
           >
             <span class="ess-chip setup">{{ $t('chatUi.onboarding.noProvider.chip') }}</span>
@@ -389,11 +394,11 @@ onBeforeUnmount(() => {
             v-else
             type="button"
             class="ess-card ess-card-enable"
-            :class="{ lifted: hoveredId === card.id, dimmed: hoveredId !== null && hoveredId !== card.id }"
+            :class="{ lifted: hoveredIndex === index }"
             :style="cardStyle(index)"
-            @mouseenter="hoveredId = card.id"
-            @focus="hoveredId = card.id"
-            @blur="leaveCard(card.id)"
+            @mouseenter="hoveredIndex = index"
+            @focus="hoveredIndex = index"
+            @blur="leaveCard(index)"
             @click="emit('openSettings')"
           >
             <span class="ess-enable-glyph" aria-hidden="true">＋</span>
@@ -564,8 +569,7 @@ onBeforeUnmount(() => {
   transition:
     transform 0.26s cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 0.26s ease,
-    border-color 0.2s ease,
-    opacity 0.2s ease;
+    border-color 0.2s ease;
   will-change: transform;
 }
 
@@ -583,12 +587,6 @@ onBeforeUnmount(() => {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.55),
     0 22px 40px rgba(15, 23, 42, 0.18);
-}
-
-/* Dim siblings with opacity (compositor) instead of a `filter` chain, which
-   re-rasterised every non-hovered card on each frame of the fan animation. */
-.ess-card.dimmed {
-  opacity: 0.86;
 }
 
 /* The app always stamps the resolved theme on <html>, so one dark selector suffices. */
