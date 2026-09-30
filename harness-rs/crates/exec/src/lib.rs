@@ -267,7 +267,7 @@ mod tests {
             program: "sh".into(),
             args: vec![
                 "-c".into(),
-                "echo x > /tmp/seatbelt-probe".into(),
+                "echo x > /Users/Shared/worldbase-seatbelt-blocked-probe".into(),
             ],
             cwd: None,
             env: Default::default(),
