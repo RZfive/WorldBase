@@ -2,6 +2,7 @@
 name = "worldbase-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "worldbase"

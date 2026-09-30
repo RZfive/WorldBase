@@ -233,4 +233,4 @@ macOS 本地打包仍可使用临时（ad-hoc）签名，但覆盖安装后系�
 
 ## 许可证
 
-MIT
+[Apache-2.0](LICENSE)

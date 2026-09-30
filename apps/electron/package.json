@@ -3,6 +3,7 @@
   "productName": "WorldBase",
   "version": "1.6.6",
   "description": "AI-powered project generator and manager",
+  "license": "Apache-2.0",
   "author": "RZfive",
   "type": "module",
   "main": "dist-electron/electron/main.cjs",
