@@ -50,6 +50,10 @@ apps/mobile/android/app/src/main/jniLibs/
 .tmp-vite-plugin-bytecode-inspect/
 .tmp/
 
+# Local AI tool configs & package stores
+.claude/
+.pnpm-store/
+
 # Runtime data (user projects)
 projects/
 snapshots/
