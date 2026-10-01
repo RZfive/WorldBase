@@ -4,6 +4,13 @@
   "version": "1.6.6",
   "description": "AI-powered project generator and manager",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RZfive/the-world.git",
+    "directory": "apps/electron"
+  },
+  "homepage": "https://github.com/RZfive/the-world#readme",
+  "bugs": "https://github.com/RZfive/the-world/issues",
   "author": "RZfive",
   "type": "module",
   "main": "dist-electron/electron/main.cjs",
