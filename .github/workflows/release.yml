@@ -1,0 +1,80 @@
+name: Release
+
+# 发布流程：推送 vX.Y.Z tag 触发。
+# 1. 校验 tag 与各 workspace 版本号一致
+# 2. 复用四端构建（Android versionCode 由版本号派生）
+# 3. 汇总产物创建 Draft Release——人工核对并补写 notes 后点 Publish 才对用户可见
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    outputs:
+      android_build_number: ${{ steps.ver.outputs.build_number }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Verify tag matches all workspace versions
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must look like vX.Y.Z, got: $TAG"
+            exit 1
+          fi
+          V="${TAG#v}"
+          ELECTRON="$(node -p "require('./apps/electron/package.json').version")"
+          ROOT="$(node -p "require('./package.json').version")"
+          CARGO="$(awk '/^version = /{sub(/^version = "/,""); sub(/"$/,""); print; exit}' harness-rs/Cargo.toml)"
+          PUBSPEC_FULL="$(sed -n 's/^version: //p' apps/mobile/pubspec.yaml)"
+          PUBSPEC="${PUBSPEC_FULL%%+*}"
+          echo "tag=$V electron=$ELECTRON root=$ROOT cargo=$CARGO pubspec=$PUBSPEC"
+          ok=1
+          for pair in "electron:$ELECTRON" "root:$ROOT" "cargo:$CARGO" "pubspec:$PUBSPEC"; do
+            name="${pair%%:*}"; ver="${pair#*:}"
+            if [ "$ver" != "$V" ]; then
+              echo "::error::$name version is $ver but tag is $TAG"
+              ok=0
+            fi
+          done
+          [ "$ok" = 1 ] || exit 1
+          IFS='.' read -r MA MI PA <<< "$V"
+          echo "build_number=$((MA * 10000 + MI * 100 + PA))" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version-check
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      android_build_number: ${{ needs.version-check.outputs.android_build_number }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist-artifacts
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          files="$(find dist-artifacts -type f)"
+          count="$(echo "$files" | wc -l | tr -d ' ')"
+          echo "Attaching $count files to draft release $TAG"
+          gh release create "$TAG" \
+            --draft \
+            --generate-notes \
+            --title "WorldBase $TAG" \
+            $files

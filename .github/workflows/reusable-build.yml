@@ -1,0 +1,333 @@
+name: Reusable Build
+
+# 四端构建的公共步骤，供 build.yml（main 分支 CI）和 release.yml（tag 发布）复用。
+# Android build-number：调用方未传入时沿用 GITHUB_RUN_NUMBER（CI 行为）。
+
+on:
+  workflow_call:
+    inputs:
+      android_build_number:
+        description: 'Android versionCode（tag 发布时由版本号派生）'
+        type: string
+        required: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old artifacts (keep latest 5 per name)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const artifactNames = ['windows-build', 'mac-arm-build', 'linux-build', 'android-arm64-apk'];
+            const keepCount = 5;
+
+            for (const name of artifactNames) {
+              const artifacts = await github.paginate(
+                github.rest.actions.listArtifactsForRepo,
+                { owner: context.repo.owner, repo: context.repo.repo, name, per_page: 100 }
+              );
+              // newest first
+              artifacts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+              const toDelete = artifacts.slice(keepCount);
+              for (const artifact of toDelete) {
+                console.log(`Deleting artifact: ${artifact.name} (id=${artifact.id}, created=${artifact.created_at})`);
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id,
+                });
+              }
+            }
+
+  build-windows:
+    needs: cleanup
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/electron/pnpm-lock.yaml
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Restore Electron caches
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: ${{ runner.os }}-electron-${{ hashFiles('apps/electron/pnpm-lock.yaml', 'apps/electron/package.json', 'apps/electron/electron-builder.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install dependencies
+        run: pnpm --dir apps/electron install --frozen-lockfile
+
+      - name: Build Electron (Windows)
+        run: pnpm --dir apps/electron electron:build:win
+
+      - name: Verify packaged Rust harness
+        shell: pwsh
+        run: |
+          $harness = 'apps/electron/release/win-unpacked/resources/harness/worldbase-app-server.exe'
+          if (-not (Test-Path -Path $harness -PathType Leaf)) {
+            throw "Packaged Rust harness not found: $harness"
+          }
+
+      - name: Build hot payload
+        shell: pwsh
+        env:
+          HOT_PAYLOAD_PRIVATE_KEY: ${{ secrets.HOT_PAYLOAD_PRIVATE_KEY }}
+        run: node apps/electron/scripts/build-hot-payload.mjs
+
+      - name: Verify hot payload
+        shell: pwsh
+        run: |
+          $zip = @(Get-ChildItem 'apps/electron/release/WorldBase-hot-*.zip' -ErrorAction SilentlyContinue)
+          if ($zip.Count -eq 0) { throw 'Hot payload zip not found in apps/electron/release' }
+          if (@(Get-ChildItem 'apps/electron/release/WorldBase-hot-*.zip.sha256' -ErrorAction SilentlyContinue).Count -eq 0) {
+            throw 'Hot payload sha256 file not found in apps/electron/release'
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-build
+          path: |
+            apps/electron/release/*.exe
+            apps/electron/release/*.blockmap
+            apps/electron/release/latest.yml
+            apps/electron/release/WorldBase-hot-*.zip
+            apps/electron/release/WorldBase-hot-*.zip.sha256
+          compression-level: 0
+          if-no-files-found: error
+
+  build-mac-arm:
+    needs: cleanup
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/electron/pnpm-lock.yaml
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Restore Electron caches
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('apps/electron/pnpm-lock.yaml', 'apps/electron/package.json', 'apps/electron/electron-builder.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install dependencies
+        run: pnpm --dir apps/electron install --frozen-lockfile
+
+      - name: Build Electron (macOS ARM)
+        run: pnpm --dir apps/electron electron:build:mac:arm64
+
+      - name: Verify packaged Rust harness
+        run: |
+          harness='apps/electron/release/mac-arm64/WorldBase.app/Contents/Resources/harness/worldbase-app-server'
+          test -x "$harness"
+          file "$harness"
+          file "$harness" | grep -q 'arm64'
+
+      - name: Build hot payload
+        env:
+          HOT_PAYLOAD_PRIVATE_KEY: ${{ secrets.HOT_PAYLOAD_PRIVATE_KEY }}
+        run: |
+          node apps/electron/scripts/build-hot-payload.mjs \
+            --platform=darwin --arch=arm64 \
+            --source=apps/electron/release/mac-arm64/WorldBase.app/Contents/Resources \
+            --output=apps/electron/release
+
+      - name: Verify hot payload
+        run: |
+          test -n "$(ls apps/electron/release/WorldBase-hot-*.zip 2>/dev/null)" || { echo 'Hot payload zip not found'; exit 1; }
+          test -n "$(ls apps/electron/release/WorldBase-hot-*.zip.sha256 2>/dev/null)" || { echo 'Hot payload sha256 not found'; exit 1; }
+
+      - name: Upload macOS ARM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: mac-arm-build
+          path: |
+            apps/electron/release/*.dmg
+            apps/electron/release/*.dmg.blockmap
+            apps/electron/release/WorldBase-hot-*.zip
+            apps/electron/release/WorldBase-hot-*.zip.sha256
+          compression-level: 0
+          if-no-files-found: error
+
+  build-linux:
+    needs: cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/electron/pnpm-lock.yaml
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Restore Electron caches
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('apps/electron/pnpm-lock.yaml', 'apps/electron/package.json', 'apps/electron/electron-builder.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install dependencies
+        run: pnpm --dir apps/electron install --frozen-lockfile
+
+      - name: Build Electron (Linux)
+        run: pnpm --dir apps/electron electron:build:linux
+
+      - name: Verify packaged Rust harness
+        run: |
+          harness='apps/electron/release/linux-unpacked/resources/harness/worldbase-app-server'
+          test -x "$harness"
+          file "$harness"
+          file "$harness" | grep -q 'x86-64'
+
+      - name: Build hot payload
+        env:
+          HOT_PAYLOAD_PRIVATE_KEY: ${{ secrets.HOT_PAYLOAD_PRIVATE_KEY }}
+        run: |
+          node apps/electron/scripts/build-hot-payload.mjs \
+            --platform=linux --arch=x64 \
+            --source=apps/electron/release/linux-unpacked/resources \
+            --output=apps/electron/release
+
+      - name: Verify hot payload
+        run: |
+          test -n "$(ls apps/electron/release/WorldBase-hot-*.zip 2>/dev/null)" || { echo 'Hot payload zip not found'; exit 1; }
+          test -n "$(ls apps/electron/release/WorldBase-hot-*.zip.sha256 2>/dev/null)" || { echo 'Hot payload sha256 not found'; exit 1; }
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-build
+          path: |
+            apps/electron/release/*.AppImage
+            apps/electron/release/latest-linux.yml
+            apps/electron/release/WorldBase-hot-*.zip
+            apps/electron/release/WorldBase-hot-*.zip.sha256
+          compression-level: 0
+          if-no-files-found: error
+
+  build-android:
+    needs: cleanup
+    runs-on: ubuntu-latest
+    env:
+      FLUTTER_VERSION: '3.41.2'
+      ANDROID_NDK_VERSION: '28.2.13676358'
+      ANDROID_TARGET: aarch64-linux-android
+      ANDROID_API: '21'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Setup Rust Android target
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add "$ANDROID_TARGET"
+
+      - name: Install Android NDK
+        run: |
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          "$sdk_root/cmdline-tools/latest/bin/sdkmanager" "ndk;$ANDROID_NDK_VERSION"
+
+      - name: Build Rust mobile FFI
+        run: |
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          export ANDROID_NDK_HOME="$sdk_root/ndk/$ANDROID_NDK_VERSION"
+          bash scripts/build_rust_android.sh
+          install -D -m 755 \
+            harness-rs/target/aarch64-linux-android/release/libworldbase_mobile_ffi.so \
+            apps/mobile/android/app/src/main/jniLibs/arm64-v8a/libworldbase_mobile_ffi.so
+
+      - name: Build Android ARM64 APK
+        working-directory: apps/mobile
+        run: flutter build apk --release --target-platform android-arm64 --split-per-abi --build-number "${{ inputs.android_build_number || github.run_number }}"
+
+      - name: Verify Android package
+        run: |
+          apk='apps/mobile/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk'
+          test -f "$apk"
+          unzip -Z1 "$apk" | grep -Fx 'lib/arm64-v8a/libworldbase_mobile_ffi.so'
+          sha256sum "$apk" > "$apk.sha256"
+
+      - name: Upload Android ARM64 APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-arm64-apk
+          path: |
+            apps/mobile/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            apps/mobile/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk.sha256
+          compression-level: 0
+          if-no-files-found: error
