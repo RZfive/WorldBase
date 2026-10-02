@@ -1,6 +1,6 @@
 # 🌍 WorldBase
 
-[![Build](https://github.com/RZfive/the-world/actions/workflows/build.yml/badge.svg)](https://github.com/RZfive/the-world/actions/workflows/build.yml)
+[![Build](https://github.com/RZfive/WorldBase/actions/workflows/build.yml/badge.svg)](https://github.com/RZfive/WorldBase/actions/workflows/build.yml)
 
 **English** | [简体中文](README.md)
 

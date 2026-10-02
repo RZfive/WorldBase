@@ -6,10 +6,10 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RZfive/the-world.git"
+    "url": "git+https://github.com/RZfive/WorldBase.git"
   },
-  "homepage": "https://github.com/RZfive/the-world#readme",
-  "bugs": "https://github.com/RZfive/the-world/issues",
+  "homepage": "https://github.com/RZfive/WorldBase#readme",
+  "bugs": "https://github.com/RZfive/WorldBase/issues",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "electron:install": "pnpm --dir apps/electron install --frozen-lockfile",

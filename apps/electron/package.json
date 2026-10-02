@@ -6,11 +6,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RZfive/the-world.git",
+    "url": "git+https://github.com/RZfive/WorldBase.git",
     "directory": "apps/electron"
   },
-  "homepage": "https://github.com/RZfive/the-world#readme",
-  "bugs": "https://github.com/RZfive/the-world/issues",
+  "homepage": "https://github.com/RZfive/WorldBase#readme",
+  "bugs": "https://github.com/RZfive/WorldBase/issues",
   "author": "RZfive",
   "type": "module",
   "main": "dist-electron/electron/main.cjs",

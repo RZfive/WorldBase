@@ -8,7 +8,7 @@
 请使用 GitHub 私密漏洞报告：
 Please use GitHub's private vulnerability reporting:
 
-**https://github.com/RZfive/the-world/security/advisories/new**
+**https://github.com/RZfive/WorldBase/security/advisories/new**
 
 或在仓库页面的 **Security** 标签页点击 **Report a vulnerability**。
 Or open the repo's **Security** tab and click **Report a vulnerability**.
@@ -36,4 +36,4 @@ Or open the repo's **Security** tab and click **Report a vulnerability**.
 - Rust Agent Loop 与 app-server / mobile-ffi 的进程间通信（stdio JSON-RPC / loopback WS）
 - 热更新 payload 的签名校验与分发
 
-一般性使用问题请改用 [GitHub Issues](https://github.com/RZfive/the-world/issues)。
+一般性使用问题请改用 [GitHub Issues](https://github.com/RZfive/WorldBase/issues)。
