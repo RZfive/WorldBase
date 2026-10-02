@@ -6,6 +6,15 @@
 
 AI-powered project generator and manager. Describe what you want in natural language and WorldBase builds a complete, runnable web app — then keeps managing it: the agent can read and write your project's code directly, call its APIs to verify changes, and query its database for analysis.
 
+## Why WorldBase
+
+Most agent products compete on cloud-side capability ceilings. WorldBase takes a different position: a **personalized, personal, general-purpose agent** — deliberately not chasing the route of cloud products like Codex or WorkBuddy.
+
+- **General-purpose, not just coding** — generate apps, edit code, verify changes via APIs, query databases for analysis: the agent works with your whole project, and writing code is only one part of the job
+- **Fully local data** — sessions, memory, child-project code, and databases all live in local SQLite you can inspect, back up, or delete at any time; your data only goes to the model API you configure — point it at a local OpenAI-compatible endpoint and nothing ever leaves your machine
+- **Personalization that compounds** — memory and the user model accumulate around you, so the agent knows your projects and habits better the longer you use it
+- **Trust through verifiability** — desktop, mobile, and CLI all run on your machine with no cloud service required beyond the model API; trust comes from holding your own data, not from promises
+
 ## Highlights
 
 - 🗣️ **Chat-driven development** — describe the app, get a full front-end / full-stack web project
@@ -99,6 +108,10 @@ pnpm run test:e2e:macos   # end-to-end GUI test on macOS
 - [User manual](docs/user-manual.md)
 - [Harness architecture](HARNESS.md) · [Rust harness architecture](docs/rust-harness-architecture.md) · [Development guide](docs/rust-harness-development.md)
 - More design docs in [docs/](docs/)
+
+## Contributing
+
+Issues and PRs are welcome — see [CONTRIBUTING.en.md](CONTRIBUTING.en.md) (中文版 [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Security
 

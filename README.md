@@ -6,6 +6,15 @@
 
 AI 驱动的项目生成器与管理平台。用自然语言描述需求，WorldBase 就能生成完整可运行的 Web 应用，并持续管理它：Agent 可以直接读写子项目的代码、调用其 API 验证修改效果、查询其数据库做分析。
 
+## 为什么是 WorldBase
+
+大多数 AI Agent 产品在比拼云端的能力上限。WorldBase 的定位不同：一个**个性化的个人通用 Agent**，不追逐 Codex、WorkBuddy 这类云端产品的路线。
+
+- **通用而不只是编码** — 生成应用、修改代码、调 API 验证、查数据库做分析：Agent 面对的是你的整个项目，写代码只是其中一环
+- **数据完全本地** — 会话、记忆、子项目代码与数据库全部存储在本机 SQLite，随时可查看、备份、删除；数据只发往你配置的模型 API，接 OpenAI 兼容的本地端点即可做到完全不出本机
+- **个性化长期沉淀** — 记忆与用户模型围绕你持续积累，越用越懂你的项目和习惯
+- **可信来自可验证** — 桌面、移动、CLI 全部在本机运行，除模型 API 外不依赖任何云端服务；信任建立在"数据就在你手里"，而不是承诺
+
 ## 核心特性
 
 - 🗣️ **对话即开发** — 描述应用，得到完整的前端 / 全栈 Web 项目
@@ -99,6 +108,10 @@ pnpm run test:e2e:macos   # macOS GUI 端到端测试
 - [用户手册](docs/user-manual.md)
 - [Harness 架构](HARNESS.md) · [Rust Harness 架构](docs/rust-harness-architecture.md) · [开发指南](docs/rust-harness-development.md)
 - 更多设计文档见 [docs/](docs/)
+
+## 贡献
+
+欢迎 issue 与 PR，见 [CONTRIBUTING.md](CONTRIBUTING.md)（英文版 [CONTRIBUTING.en.md](CONTRIBUTING.en.md)）。
 
 ## 安全
 
