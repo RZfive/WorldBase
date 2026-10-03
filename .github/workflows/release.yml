@@ -70,11 +70,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          files="$(find dist-artifacts -type f)"
-          count="$(echo "$files" | wc -l | tr -d ' ')"
-          echo "Attaching $count files to draft release $TAG"
+          mapfile -d '' files < <(find dist-artifacts -type f -print0 | sort -z)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no artifacts found under dist-artifacts"
+            exit 1
+          fi
+          echo "Attaching ${#files[@]} files to draft release $TAG"
+          # 之前失败的 run 可能残留同名 draft，先清掉保证 tag 可重推重跑
+          gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes
           gh release create "$TAG" \
             --draft \
             --generate-notes \
             --title "WorldBase $TAG" \
-            $files
+            "${files[@]}"
