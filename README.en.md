@@ -1,6 +1,14 @@
 # 🌍 WorldBase
 
 [![Build](https://github.com/RZfive/WorldBase/actions/workflows/build.yml/badge.svg)](https://github.com/RZfive/WorldBase/actions/workflows/build.yml)
+[![License](https://img.shields.io/github/license/RZfive/WorldBase)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/RZfive/WorldBase)](https://github.com/RZfive/WorldBase/releases)
+[![Stars](https://img.shields.io/github/stars/RZfive/WorldBase?style=social)](https://github.com/RZfive/WorldBase/stargazers)
+
+![Rust](https://img.shields.io/badge/Rust-1.80+-DEA584?logo=rust&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-Desktop-47848F?logo=electron&logoColor=white)
+![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
+![Flutter](https://img.shields.io/badge/Flutter-Mobile-02569B?logo=flutter&logoColor=white)
 
 **English** | [简体中文](README.md)
 
@@ -112,6 +120,10 @@ pnpm run test:e2e:macos   # end-to-end GUI test on macOS
 ## Contributing
 
 Issues and PRs are welcome — see [CONTRIBUTING.en.md](CONTRIBUTING.en.md) (中文版 [CONTRIBUTING.md](CONTRIBUTING.md)).
+
+## Community
+
+This project endorses the [LINUX DO](https://linux.do) community.
 
 ## Security
 
