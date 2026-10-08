@@ -1439,8 +1439,10 @@ const zhCN = {
       installing: '安装中…',
       openDownloads: '前往官网下载',
       openDownloadsFailed: '打开下载页失败',
-      releaseNotes: '更新内容',
-      releasedAt: '发布于 {date}'
+      openSourceTitle: '开源项目',
+      openSourceDesc: 'WorldBase 基于 Apache-2.0 许可证在 GitHub 开放源代码，欢迎 Star、提 Issue、参与共建。',
+      openRepoFailed: '打开开源仓库失败',
+      releaseNotes: '更新内容'
     },
     skills: {
       title: 'Skill 管理',

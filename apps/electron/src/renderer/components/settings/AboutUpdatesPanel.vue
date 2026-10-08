@@ -8,6 +8,8 @@ const props = defineProps<{
 
 const { locale, t } = useI18n()
 
+const OPEN_SOURCE_REPO_URL = 'https://github.com/RZfive/WorldBase'
+
 const aboutInfo = ref<AppAboutInfo | null>(null)
 const updateState = ref<AppUpdateState | null>(null)
 const loading = ref(false)
@@ -106,6 +108,11 @@ const releaseNotes = computed(() => {
   return notes[primaryLanguage].length > 0 ? notes[primaryLanguage] : notes[fallbackLanguage]
 })
 
+const notesMeta = computed(() => {
+  const version = updateState.value?.latestVersion ? `v${updateState.value.latestVersion}` : ''
+  return [version, publishedAtLabel.value].filter(Boolean).join(' · ')
+})
+
 const publishedAtLabel = computed(() => {
   const publishedAt = updateState.value?.publishedAt
   if (!publishedAt) return ''
@@ -151,6 +158,8 @@ async function loadPanelData () {
     aboutInfo.value = info
     if (updateStateRevision === revisionAtStart) {
       updateState.value = state
+      // 后端还没返回更新内容时静默补一次检查，取到当前版本的更新摘要
+      if (!state.notes) void refreshUpdateState(revisionAtStart)
     }
   } catch (error) {
     localError.value = (error as Error).message
@@ -234,10 +243,50 @@ async function openDownloadsPage () {
     localError.value = result.error || t('settings.about.openDownloadsFailed')
   }
 }
+
+async function openRepoPage () {
+  if (!window.electronAPI?.openExternalUrl) return
+  localError.value = null
+  const result = await window.electronAPI.openExternalUrl(OPEN_SOURCE_REPO_URL)
+  if (!result.ok) {
+    localError.value = t('settings.about.openRepoFailed')
+  }
+}
+
+async function refreshUpdateState (revision: number) {
+  if (!window.electronAPI) return
+  try {
+    const state = await window.electronAPI.checkAppUpdate()
+    if (updateStateRevision === revision) {
+      updateState.value = state
+    }
+  } catch {
+    /* 静默失败：保留现有状态 */
+  }
+}
 </script>
 
 <template>
   <section class="au-root">
+    <section class="au-opensource">
+      <span class="au-opensource-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" /></svg>
+      </span>
+      <div class="au-opensource-copy">
+        <strong>{{ $t('settings.about.openSourceTitle') }}</strong>
+        <p>{{ $t('settings.about.openSourceDesc') }}</p>
+        <a
+          class="au-repo"
+          :href="OPEN_SOURCE_REPO_URL"
+          :title="OPEN_SOURCE_REPO_URL"
+          @click.prevent="openRepoPage"
+        >
+          <span>{{ OPEN_SOURCE_REPO_URL }}</span>
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7" /><path d="M8 7h9v9" /></svg>
+        </a>
+      </div>
+    </section>
+
     <div class="au-hero">
       <div class="au-product">
         <span class="au-mark">🌍</span>
@@ -303,12 +352,12 @@ async function openDownloadsPage () {
       </button>
     </div>
 
-    <section v-if="releaseNotes.length > 0 || publishedAtLabel" class="au-release">
+    <section v-if="releaseNotes.length > 0" class="au-release">
       <div class="au-release-head">
         <strong>{{ $t('settings.about.releaseNotes') }}</strong>
-        <span v-if="publishedAtLabel">{{ $t('settings.about.releasedAt', { date: publishedAtLabel }) }}</span>
+        <span v-if="notesMeta">{{ notesMeta }}</span>
       </div>
-      <ul v-if="releaseNotes.length > 0" class="au-release-list">
+      <ul class="au-release-list">
         <li v-for="note in releaseNotes" :key="note">{{ note }}</li>
       </ul>
     </section>
@@ -368,6 +417,67 @@ async function openDownloadsPage () {
 .au-version {
   color: var(--app-text-muted);
   font-size: 0.86em;
+}
+
+.au-opensource {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-panel);
+}
+
+.au-opensource-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
+}
+
+.au-opensource-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.au-opensource-copy strong {
+  color: var(--app-text-strong);
+  font-size: 0.96em;
+}
+
+.au-opensource-copy p {
+  margin: 0;
+  color: var(--app-text-muted);
+  font-size: 0.86em;
+  line-height: 1.55;
+}
+
+.au-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  color: var(--app-accent-strong);
+  font-size: 0.84em;
+  text-decoration: none;
+}
+
+.au-repo span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.au-repo:hover {
+  text-decoration: underline;
 }
 
 .au-check {

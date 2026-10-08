@@ -1439,8 +1439,10 @@ const enUS: MessageSchema = {
       installing: 'Installing…',
       openDownloads: 'Download from website',
       openDownloadsFailed: 'Failed to open downloads page',
-      releaseNotes: 'Release notes',
-      releasedAt: 'Released {date}'
+      openSourceTitle: 'Open Source',
+      openSourceDesc: 'WorldBase is open source on GitHub under the Apache-2.0 license. Stars, issues and PRs are welcome.',
+      openRepoFailed: 'Failed to open the repository',
+      releaseNotes: 'Release notes'
     },
     skills: {
       title: 'Skill Management',

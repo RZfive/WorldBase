@@ -2814,11 +2814,13 @@ export function setupIPC (): void {
   })
 
   // Generic "open in the system browser", restricted to https hosts that a
-  // built-in provider template links to. The renderer cannot use it as an
-  // arbitrary open-URL primitive.
+  // built-in provider template links to, plus the project's own public hosts
+  // (开源仓库所在 GitHub)。The renderer cannot use it as an arbitrary
+  // open-URL primitive.
+  const openExternalHosts = ['github.com', 'www.github.com']
   ipcMain.handle('shell:openExternal', async (_event: IpcMainInvokeEvent, url: unknown) => {
     const target = typeof url === 'string' ? url.trim() : ''
-    if (!target || !isAllowedExternalUrl(target)) {
+    if (!target || !isAllowedExternalUrl(target, openExternalHosts)) {
       return { ok: false, error: 'url-not-allowed' }
     }
     try {
