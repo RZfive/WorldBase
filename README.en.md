@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Build](https://github.com/RZfive/WorldBase/actions/workflows/build.yml/badge.svg)](https://github.com/RZfive/WorldBase/actions/workflows/build.yml) [![License](https://img.shields.io/github/license/RZfive/WorldBase)](LICENSE) [![Release](https://img.shields.io/github/v/release/RZfive/WorldBase)](https://github.com/RZfive/WorldBase/releases) [![Stars](https://img.shields.io/github/stars/RZfive/WorldBase?style=social)](https://github.com/RZfive/WorldBase/stargazers) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/RZfive/WorldBase)
+[![Build](https://github.com/RZfive/WorldBase/actions/workflows/build.yml/badge.svg)](https://github.com/RZfive/WorldBase/actions/workflows/build.yml) [![License](https://img.shields.io/github/license/RZfive/WorldBase)](LICENSE) [![Release](https://img.shields.io/github/v/release/RZfive/WorldBase)](https://github.com/RZfive/WorldBase/releases) [![Stars](https://img.shields.io/github/stars/RZfive/WorldBase?style=social)](https://github.com/RZfive/WorldBase/stargazers) [![Ask DeepWiki](https://img.shields.io/badge/Ask_DeepWiki-RZfive%2FWorldBase-blue)](https://deepwiki.com/RZfive/WorldBase)
 
 ![Rust](https://img.shields.io/badge/Rust-1.80%2B-DEA584?logo=rust&logoColor=white) ![Electron](https://img.shields.io/badge/Electron-Desktop-47848F?logo=electron&logoColor=white) ![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white) ![Flutter](https://img.shields.io/badge/Flutter-Mobile-02569B?logo=flutter&logoColor=white)
 
