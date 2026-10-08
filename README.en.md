@@ -12,6 +12,10 @@
 
 AI-powered project generator and manager. Describe what you want in natural language and WorldBase builds a complete, runnable web app — then keeps managing it: the agent can read and write your project's code directly, call its APIs to verify changes, and query its database for analysis.
 
+<div align="center">
+  <img src="docs/assets/demo.gif" width="880" alt="WorldBase demo: chat with the agent to build and manage apps" />
+</div>
+
 ## Why WorldBase
 
 Most agent products compete on cloud-side capability ceilings. WorldBase takes a different position: a **personalized, personal, general-purpose agent** — deliberately not chasing the route of cloud products like Codex or WorkBuddy.

@@ -12,6 +12,10 @@
 
 AI 驱动的项目生成器与管理平台。用自然语言描述需求，WorldBase 就能生成完整可运行的 Web 应用，并持续管理它：Agent 可以直接读写子项目的代码、调用其 API 验证修改效果、查询其数据库做分析。
 
+<div align="center">
+  <img src="docs/assets/demo.gif" width="880" alt="WorldBase 演示：与 Agent 对话生成并管理应用" />
+</div>
+
 ## 为什么是 WorldBase
 
 大多数 AI Agent 产品在比拼云端的能力上限。WorldBase 的定位不同：一个**个性化的个人通用 Agent**，不追逐 Codex、WorkBuddy 这类云端产品的路线。
