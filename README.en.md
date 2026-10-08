@@ -125,6 +125,12 @@ Issues and PRs are welcome — see [CONTRIBUTING.en.md](CONTRIBUTING.en.md) (中
 
 This project endorses the [LINUX DO](https://linux.do) community.
 
+## Contributors
+
+<a href="https://github.com/RZfive/WorldBase/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=RZfive/WorldBase" alt="WorldBase contributors" />
+</a>
+
 ## Security
 
 Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
@@ -132,3 +138,13 @@ Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
 ## License
 
 [Apache-2.0](LICENSE). Third-party license notices: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+## Star History
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=RZfive/WorldBase&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=RZfive/WorldBase&type=Date" />
+  <a href="https://star-history.com/#RZfive/WorldBase&Date">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=RZfive/WorldBase&type=Date" />
+  </a>
+</picture>

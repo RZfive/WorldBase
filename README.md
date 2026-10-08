@@ -125,6 +125,12 @@ pnpm run test:e2e:macos   # macOS GUI 端到端测试
 
 本项目认可 [LINUX DO](https://linux.do) 社区。
 
+## 贡献者
+
+<a href="https://github.com/RZfive/WorldBase/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=RZfive/WorldBase" alt="WorldBase 贡献者" />
+</a>
+
 ## 安全
 
 请通过私密渠道报告漏洞，见 [SECURITY.md](SECURITY.md)。
@@ -132,3 +138,13 @@ pnpm run test:e2e:macos   # macOS GUI 端到端测试
 ## 许可证
 
 [Apache-2.0](LICENSE)。第三方许可证声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
+## Star History
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=RZfive/WorldBase&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=RZfive/WorldBase&type=Date" />
+  <a href="https://star-history.com/#RZfive/WorldBase&Date">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=RZfive/WorldBase&type=Date" />
+  </a>
+</picture>
