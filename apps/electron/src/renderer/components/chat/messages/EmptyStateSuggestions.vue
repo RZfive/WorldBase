@@ -67,8 +67,10 @@ const knowledgeModelOn = computed(() => {
   const sources = preferences.value?.knowledge?.sources ?? []
   return knowledgeEnabled.value && sources.some(source => source !== 'random')
 })
-const dailyItems = computed(() => (props.snapshot?.daily ?? []).slice(0, MAX_DAILY_CARDS))
-const knowledgeItems = computed(() => (props.snapshot?.knowledge ?? []).slice(0, MAX_KNOWLEDGE_CARDS))
+const allDailyItems = computed(() => props.snapshot?.daily ?? [])
+const allKnowledgeItems = computed(() => props.snapshot?.knowledge ?? [])
+const dailyItems = computed(() => allDailyItems.value.slice(0, MAX_DAILY_CARDS))
+const knowledgeItems = computed(() => allKnowledgeItems.value.slice(0, MAX_KNOWLEDGE_CARDS))
 const exploreItems = computed(() => props.snapshot?.explore ?? [])
 const hasFreshDaily = computed(() => dailyItems.value.some(item => item.fresh) || knowledgeItems.value.some(item => item.fresh))
 const generating = computed(() => props.snapshot?.generating === true || props.refreshing === true)
@@ -79,6 +81,11 @@ const todayDiscipline = computed(() => {
   const random = knowledgeItems.value.find(item => item.knowledge?.source === 'random')
   return random ? disciplineLabel(random) : ''
 })
+const allSuggestionGroups = computed(() => [
+  { key: 'daily' as const, items: allDailyItems.value },
+  { key: 'knowledge' as const, items: allKnowledgeItems.value },
+  { key: 'explore' as const, items: exploreItems.value }
+].filter(group => group.items.length > 0))
 
 /** Setup card first (when no provider), then daily picks, knowledge hooks, weekly tips, then (when opted out) a ghost card that opens Settings. */
 const cards = computed<HandCard[]>(() => {
@@ -93,6 +100,17 @@ const cards = computed<HandCard[]>(() => {
   if (!dailyEnabled.value && props.snapshot) list.push({ kind: 'enable', id: 'enable' })
   return list
 })
+const visibleSuggestionIds = computed(() => new Set(
+  cards.value.filter(card => card.kind === 'item').map(card => card.id)
+))
+const hiddenSuggestionGroups = computed(() => allSuggestionGroups.value
+  .map(group => ({ ...group, items: group.items.filter(item => !visibleSuggestionIds.value.has(item.id)) }))
+  .filter(group => group.items.length > 0))
+const allSuggestionCount = computed(() => hiddenSuggestionGroups.value.reduce((count, group) => count + group.items.length, 0))
+const hiddenSuggestionCount = computed(() => {
+  return allSuggestionCount.value
+})
+const allSuggestionsOpen = ref(false)
 
 /** Horizontal step between card origins so the whole hand, plus its hover spread, fits the strip. */
 const cardStep = computed(() => {
@@ -211,6 +229,7 @@ function sceneSummary (item: WorkSuggestion): string {
 }
 
 function pick (item: WorkSuggestion): void {
+  allSuggestionsOpen.value = false
   emit('pick', item, {
     prompt: resolveText(item, 'prompt'),
     projectName: projectName(item.scene?.targetProjectId)
@@ -238,6 +257,18 @@ function refreshCard (event: Event, item: WorkSuggestion): void {
 function setupProvider (event: Event, mode: 'recommended' | 'browse'): void {
   event.stopPropagation()
   emit('setupProvider', mode)
+}
+
+function dismissAll (event: Event, item: WorkSuggestion): void {
+  event.stopPropagation()
+  emit('dismiss', item)
+}
+
+function refreshAllCard (event: Event, item: WorkSuggestion): void {
+  event.stopPropagation()
+  if (shuffleDisabled.value) return
+  if (item.knowledge?.source === 'random') emit('shuffle')
+  else emit('refreshCard', item)
 }
 
 function leaveCard (index: number): void {
@@ -408,6 +439,76 @@ onBeforeUnmount(() => {
         </template>
       </div>
     </div>
+
+    <button
+      v-if="hiddenSuggestionCount > 0"
+      type="button"
+      class="ess-view-all"
+      @click="allSuggestionsOpen = true"
+    >
+      {{ $t('chatUi.suggestions.viewAll', { count: hiddenSuggestionCount }) }}
+    </button>
+
+    <div v-if="allSuggestionsOpen" class="ess-all-backdrop" @click.self="allSuggestionsOpen = false">
+        <section class="ess-all-panel" role="dialog" aria-modal="true" :aria-label="$t('chatUi.suggestions.allTitle')">
+          <div class="ess-all-head">
+            <div>
+              <h2>{{ $t('chatUi.suggestions.allTitle') }}</h2>
+              <p>{{ $t('chatUi.suggestions.allCount', { count: allSuggestionCount }) }}</p>
+            </div>
+            <button type="button" class="ess-all-close" :aria-label="$t('chatUi.suggestions.closeAll')" @click="allSuggestionsOpen = false">×</button>
+          </div>
+          <div class="ess-all-groups">
+            <section v-for="group in hiddenSuggestionGroups" :key="group.key" class="ess-all-group">
+              <h3>
+                {{ group.key === 'daily' ? $t('chatUi.suggestions.dailyTitle') : group.key === 'knowledge' ? $t('chatUi.suggestions.knowledgeTitle') : $t('chatUi.suggestions.exploreTitle') }}
+                <span>{{ group.items.length }}</span>
+              </h3>
+              <div class="ess-all-grid">
+                <button
+                  v-for="item in group.items"
+                  :key="item.id"
+                  type="button"
+                  class="ess-all-card"
+                  :class="{ daily: group.key === 'daily', knowledge: group.key === 'knowledge', fresh: item.fresh }"
+                  @click="pick(item)"
+                >
+                  <span class="ess-card-tools ess-all-tools">
+                    <span
+                      v-if="group.key === 'knowledge'"
+                      class="ess-tool"
+                      :class="{ disabled: shuffleDisabled }"
+                      role="button"
+                      :aria-disabled="shuffleDisabled"
+                      :aria-label="$t('chatUi.suggestions.shuffle')"
+                      :title="$t('chatUi.suggestions.shuffleHint')"
+                      @click="refreshAllCard($event, item)"
+                    >↻</span>
+                    <span
+                      class="ess-tool"
+                      role="button"
+                      :aria-label="$t('chatUi.suggestions.dismiss')"
+                      :title="$t('chatUi.suggestions.dismiss')"
+                      @click="dismissAll($event, item)"
+                    >×</span>
+                  </span>
+                  <span class="ess-card-top">
+                    <span class="ess-chip" :class="group.key">{{ group.key === 'daily' ? typeLabel(item) : group.key === 'knowledge' ? knowledgeSourceLabel(item) : (featureLabel(item) || $t('chatUi.suggestions.exploreTitle')) }}</span>
+                    <span v-if="group.key === 'daily' && item.source === 'static'" class="ess-chip muted">{{ $t('chatUi.suggestions.staticFallback') }}</span>
+                  </span>
+                  <span class="ess-card-title">{{ resolveText(item, 'title') }}</span>
+                  <span class="ess-card-desc">{{ resolveText(item, 'description') }}</span>
+                  <span class="ess-card-foot">
+                    <span v-if="group.key === 'knowledge' && disciplineLabel(item)" class="ess-foot-tag knowledge">{{ disciplineLabel(item) }}</span>
+                    <span v-else-if="group.key === 'daily' && featureLabel(item)" class="ess-foot-tag">{{ featureLabel(item) }}</span>
+                    <span v-if="sceneSummary(item)" class="ess-scene always-visible">{{ sceneSummary(item) }}</span>
+                  </span>
+                </button>
+              </div>
+            </section>
+          </div>
+        </section>
+    </div>
   </div>
 </template>
 
@@ -534,6 +635,174 @@ onBeforeUnmount(() => {
 .ess-hand {
   position: relative;
   max-width: 100%;
+}
+
+.ess-view-all {
+  align-self: center;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.ess-view-all:hover {
+  background: var(--app-panel-subtle);
+  color: var(--app-text);
+}
+
+.ess-all-backdrop {
+  position: relative;
+  display: block;
+  padding: 8px 0 0;
+}
+
+.ess-all-panel {
+  width: min(760px, 100%);
+  max-height: 430px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 12px;
+  background: var(--app-panel);
+  color: var(--app-text);
+  box-shadow: 0 16px 42px rgba(15, 23, 42, 0.2);
+}
+
+.ess-all-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.ess-all-head h2,
+.ess-all-head p {
+  margin: 0;
+}
+
+.ess-all-head h2 {
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.ess-all-head p {
+  margin-top: 4px;
+  color: var(--app-text-muted);
+  font-size: 0.72rem;
+}
+
+.ess-all-close {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ess-all-close:hover {
+  background: var(--app-panel-subtle);
+  color: var(--app-text);
+}
+
+.ess-all-groups {
+  overflow: auto;
+  padding: 6px 16px 14px;
+}
+
+.ess-all-group + .ess-all-group {
+  margin-top: 12px;
+}
+
+.ess-all-group h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 6px;
+  color: var(--app-text-soft);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.ess-all-group h3 span {
+  color: var(--app-text-faint);
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.ess-all-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px;
+}
+
+.ess-all-card {
+  position: relative;
+  min-height: 122px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 11px 9px;
+  border: 1px solid color-mix(in srgb, var(--app-border-strong) 70%, transparent);
+  border-radius: 12px;
+  background: var(--app-panel-subtle);
+  color: var(--app-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ess-all-card:hover,
+.ess-all-card:focus-visible {
+  border-color: color-mix(in srgb, var(--app-accent) 60%, var(--app-border-strong));
+  outline: none;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.1);
+}
+
+.ess-all-card.daily {
+  background: color-mix(in srgb, var(--app-accent-soft) 32%, var(--app-panel));
+}
+
+.ess-all-card.knowledge {
+  background: color-mix(in srgb, #f59e0b 10%, var(--app-panel));
+}
+
+.ess-all-card.fresh::before {
+  content: '';
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--app-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 22%, transparent);
+}
+
+.ess-all-tools {
+  top: 7px;
+  right: 7px;
+  opacity: 0;
+}
+
+.ess-all-card:hover .ess-all-tools,
+.ess-all-card:focus-visible .ess-all-tools {
+  opacity: 1;
+}
+
+.ess-scene.always-visible {
+  max-height: 16px;
+  opacity: 1;
 }
 
 .ess-card {

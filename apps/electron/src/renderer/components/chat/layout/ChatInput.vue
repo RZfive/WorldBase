@@ -265,19 +265,6 @@ async function submitGroupInjection (): Promise<void> {
     isInjecting.value = false
   }
 }
-const runtimeStatusLabel = computed(() => {
-  if (!props.isLoading) {
-    return ''
-  }
-
-  if ((props.pendingAuthCount || 0) > 0) {
-    return props.pendingAuthCount === 1
-      ? t('chatUi.waitingSingleAuth')
-      : t('chatUi.waitingMultipleAuth', { count: props.pendingAuthCount })
-  }
-
-  return t('chatUi.runningWait')
-})
 const mentionOptions = computed<GroupMentionHint[]>(() => {
   const mention = activeMention.value
   const hints = props.groupMentionHints || []
@@ -906,9 +893,10 @@ onUnmounted(() => {
       @dragleave="handleDragLeave"
       @drop="handleDrop"
     >
-      <!-- Busy ring: a masked wrapper whose rotating child carries the gradient.
-           Rotation is a pure transform, so the ring animates on the compositor
-           instead of repainting a conic-gradient every frame. -->
+      <!-- Busy ring: a masked border ring whose rotating child carries the
+           comet arc of the theme accent — the website demo's flowing effect,
+           driven by a pure `transform` rotation so it animates on the
+           compositor instead of repainting a conic-gradient every frame. -->
       <span class="input-ring" aria-hidden="true"></span>
       <!-- Image preview inside input -->
       <div v-if="props.pendingFiles.length > 0" class="file-preview-bar">
@@ -987,10 +975,6 @@ onUnmounted(() => {
             <span class="mention-option-token">{{ hint.token }}</span>
           </button>
         </div>
-      </div>
-      <div v-if="props.isLoading" class="runtime-status-bar" :class="{ waitingAuth: (props.pendingAuthCount || 0) > 0 }" role="status" aria-live="polite">
-        <span class="runtime-status-indicator"></span>
-        <span class="runtime-status-copy">{{ runtimeStatusLabel }}</span>
       </div>
       <div class="input-actions">
         <!-- design v1.7: high-frequency actions stay icons and lead the row —
@@ -1200,24 +1184,27 @@ onUnmounted(() => {
   --chat-input-busy-shadow: 0 0 0 1px rgba(91, 140, 255, 0.08), 0 18px 36px rgba(91, 140, 255, 0.08);
   --chat-input-waiting-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12), 0 18px 36px rgba(245, 158, 11, 0.12);
   --chat-input-popover-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
+  --chat-input-radius: 15px;
   position: relative;
   box-sizing: border-box;
   background: var(--chat-input-surface);
   backdrop-filter: blur(18px) saturate(150%);
   border: 1px solid var(--chat-input-border);
-  border-radius: 15px;
+  border-radius: var(--chat-input-radius);
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
   overflow: visible;
   box-shadow: var(--chat-input-shadow);
 }
 
-/* --- design v1.7 motion: the signature gradient flows around the composer
-   while the agent works (thinking / executing). ---
-   Energy note: the ring used to animate a registered custom property feeding a
-   conic-gradient, which forced Chromium to repaint the whole composer border
-   (and re-run the backdrop blur) on every frame. It now rotates a static
-   gradient sheet with `transform`, so the animation runs on the compositor
-   and the ring's raster is painted once. */
+/* --- design v1.7 motion: while the agent works, a comet arc of the accent
+   flows around the composer's border — the website demo's flowing effect
+   (conic: 68% dark, then the accent rising into a bright head at 100%).
+   The demo drives it by animating a registered custom property into
+   `conic-gradient(from var(…))`, which repaints the whole border (and re-runs
+   the backdrop blur) every frame; here the same arc lives on a static sheet
+   rotated with `transform`, so the animation runs on the compositor and the
+   ring's raster is painted once. The masked band sits on the border line
+   (inset/padding 1px) and follows the card's rounded corners. */
 .input-ring {
   position: absolute;
   inset: -1px;
@@ -1242,13 +1229,15 @@ onUnmounted(() => {
   /* A square wider than the composer's diagonal so rotation never exposes a corner. */
   width: 240%;
   aspect-ratio: 1 / 1;
+  /* The demo's comet: 68% of the lap dark, the accent rising over the last
+     third into a bright head at the leading edge; the tail trails
+     counter-clockwise of the head because the sheet spins clockwise. */
   background: conic-gradient(
     from 0deg,
-    var(--app-accent),
-    var(--app-accent-strong) 25%,
-    var(--app-accent) 50%,
-    var(--app-accent-strong) 75%,
-    var(--app-accent)
+    transparent 0%,
+    transparent 68%,
+    var(--app-accent) 84%,
+    var(--app-accent-strong) 100%
   );
   transform: translate(-50%, -50%) rotate(0deg);
 }
@@ -1265,11 +1254,10 @@ onUnmounted(() => {
 .input-container.busy.waitingAuth .input-ring::before {
   background: conic-gradient(
     from 0deg,
-    var(--app-warning),
-    var(--app-warning-strong) 25%,
-    var(--app-warning) 50%,
-    var(--app-warning-strong) 75%,
-    var(--app-warning)
+    transparent 0%,
+    transparent 68%,
+    var(--app-warning-strong) 84%,
+    var(--app-warning) 100%
   );
 }
 
@@ -1305,7 +1293,7 @@ onUnmounted(() => {
 
 .input-container.busy {
   border-color: color-mix(in srgb, var(--app-accent-glow) 72%, transparent);
-  box-shadow: var(--chat-input-busy-shadow);
+  box-shadow: var(--chat-input-busy-shadow), 0 0 28px color-mix(in srgb, var(--app-accent) 18%, transparent);
 }
 
 .input-container.waitingAuth {
@@ -1748,35 +1736,6 @@ onUnmounted(() => {
 .chat-input-context-action:disabled {
   cursor: not-allowed;
   color: var(--app-text-faint);
-}
-
-.runtime-status-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 12px 4px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--app-accent-soft) 72%, transparent);
-  color: var(--app-accent-strong);
-}
-
-.runtime-status-bar.waitingAuth {
-  background: var(--app-warning-soft);
-  color: var(--app-warning-strong);
-}
-
-.runtime-status-indicator {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: runtime-pulse 1.2s ease-in-out infinite;
-}
-
-.runtime-status-copy {
-  font-size: 0.8rem;
-  font-weight: 600;
 }
 
 /* design v1.7: one left-flowing toolbar — high-frequency icons lead,
@@ -2261,8 +2220,29 @@ onUnmounted(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* Reduced motion: freeze the comet into a static faint full ring so the
+     busy state still reads without anything flowing. */
   .input-container.busy .input-ring::before {
     animation: none;
+    background: conic-gradient(
+      from 0deg,
+      var(--app-accent),
+      var(--app-accent-strong) 25%,
+      var(--app-accent) 50%,
+      var(--app-accent-strong) 75%,
+      var(--app-accent)
+    );
+  }
+
+  .input-container.busy.waitingAuth .input-ring::before {
+    background: conic-gradient(
+      from 0deg,
+      var(--app-warning),
+      var(--app-warning-strong) 25%,
+      var(--app-warning) 50%,
+      var(--app-warning-strong) 75%,
+      var(--app-warning)
+    );
   }
 
   .action-btn.send-btn.stopping::before,

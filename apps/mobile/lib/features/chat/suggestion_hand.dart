@@ -31,7 +31,8 @@ class SuggestionHand extends ConsumerStatefulWidget {
 enum _CardGroup { daily, knowledge, explore }
 
 class _HandCard {
-  const _HandCard.item(WorkSuggestion this.item, _CardGroup this.group) : isEnableCta = false;
+  const _HandCard.item(WorkSuggestion this.item, _CardGroup this.group)
+    : isEnableCta = false;
   const _HandCard.enable() : item = null, group = null, isEnableCta = true;
 
   final WorkSuggestion? item;
@@ -41,7 +42,8 @@ class _HandCard {
   String get id => item?.id ?? 'enable';
 }
 
-class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProviderStateMixin {
+class _SuggestionHandState extends ConsumerState<SuggestionHand>
+    with TickerProviderStateMixin {
   static const _maxCards = 9;
   static const _maxDailyCards = 5;
   static const _maxKnowledgeCards = 3;
@@ -63,7 +65,9 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
   static const _cutTiltDegrees = 9.0;
 
   /// 页码是连续值:整数处停在某张牌上,小数是切牌进行到一半。
-  late final AnimationController _pageCtrl = AnimationController.unbounded(vsync: this);
+  late final AnimationController _pageCtrl = AnimationController.unbounded(
+    vsync: this,
+  );
   late final AnimationController _dealCtrl = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 640),
@@ -72,7 +76,11 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     vsync: this,
     duration: const Duration(milliseconds: 460),
   );
-  late final Listenable _repaint = Listenable.merge([_pageCtrl, _dealCtrl, _swapCtrl]);
+  late final Listenable _repaint = Listenable.merge([
+    _pageCtrl,
+    _dealCtrl,
+    _swapCtrl,
+  ]);
 
   /// 正在被抽出、塞回牌底的那张牌。
   int? _cutting;
@@ -118,17 +126,29 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
   }
 
   void _onPageStatus(AnimationStatus status) {
-    if (status != AnimationStatus.completed && status != AnimationStatus.dismissed) return;
+    if (status != AnimationStatus.completed &&
+        status != AnimationStatus.dismissed) {
+      return;
+    }
     if (_dragging || _cutting == null) return;
     setState(() => _cutting = null);
   }
 
   // ------------------------------------------------------------------ cards
 
+  List<_HandCard> _allSuggestionCards(DailySuggestionState state) => [
+    for (final item in state.daily) _HandCard.item(item, _CardGroup.daily),
+    for (final item in state.knowledge)
+      _HandCard.item(item, _CardGroup.knowledge),
+    for (final item in state.explore) _HandCard.item(item, _CardGroup.explore),
+  ];
+
   List<_HandCard> _cards(DailySuggestionState state) {
     final cards = <_HandCard>[
-      for (final item in state.daily.take(_maxDailyCards)) _HandCard.item(item, _CardGroup.daily),
-      for (final item in state.knowledge.take(_maxKnowledgeCards)) _HandCard.item(item, _CardGroup.knowledge),
+      for (final item in state.daily.take(_maxDailyCards))
+        _HandCard.item(item, _CardGroup.daily),
+      for (final item in state.knowledge.take(_maxKnowledgeCards))
+        _HandCard.item(item, _CardGroup.knowledge),
     ];
     final enabled = state.preferences.enabled;
     var exploreBudget = _maxCards - cards.length - (enabled ? 0 : 1);
@@ -140,12 +160,42 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     return cards;
   }
 
+  int _hiddenCount(DailySuggestionState state, List<_HandCard> visible) {
+    final visibleIds = visible
+        .where((card) => !card.isEnableCta)
+        .map((card) => card.id)
+        .toSet();
+    return _allSuggestionCards(
+      state,
+    ).where((card) => !visibleIds.contains(card.id)).length;
+  }
+
+  void _showAllSuggestions(DailySuggestionState state) {
+    if (_hiddenCount(state, _cards(state)) == 0) return;
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (sheetContext) => _AllSuggestionsSheet(
+        onPick: (item) {
+          Navigator.of(sheetContext).pop();
+          widget.onPick(item);
+        },
+        onDismiss: (item) => unawaited(
+          ref.read(dailySuggestionsProvider.notifier).dismiss(item),
+        ),
+        onShuffle: _shuffle,
+        shuffling: _shuffling,
+      ),
+    );
+  }
+
   void _scheduleSeen(DailySuggestionState state) {
     if (!state.hasFreshDaily || _seenTimer != null) return;
     // 「新」角标在首次露出的这次访问里保留几秒,然后清掉。
     _seenTimer = Timer(const Duration(seconds: 4), () {
       _seenTimer = null;
-      if (mounted) unawaited(ref.read(dailySuggestionsProvider.notifier).markSeen());
+      if (mounted) {
+        unawaited(ref.read(dailySuggestionsProvider.notifier).markSeen());
+      }
     });
   }
 
@@ -167,9 +217,15 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
       return;
     }
     _cutting ??= from.round();
-    final spring = SpringDescription.withDampingRatio(mass: 1, stiffness: 340, ratio: 0.88);
+    final spring = SpringDescription.withDampingRatio(
+      mass: 1,
+      stiffness: 340,
+      ratio: 0.88,
+    );
     // A hard fling still lands on the next card; cap the carry-over so it does not overshoot past it.
-    _pageCtrl.animateWith(SpringSimulation(spring, from, to, velocity.clamp(-6.0, 6.0).toDouble()));
+    _pageCtrl.animateWith(
+      SpringSimulation(spring, from, to, velocity.clamp(-6.0, 6.0).toDouble()),
+    );
   }
 
   void _onDragStart(DragStartDetails details) {
@@ -182,8 +238,11 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     final current = _pageCtrl.value;
     // 拖过两端时加阻尼,像牌被手指按住。
     final beyond = current < 0 || current > _maxPage;
-    final delta = -(details.primaryDelta ?? 0) / _dragWidth * (beyond ? 0.3 : 1);
-    _pageCtrl.value = (current + delta).clamp(-0.45, _maxPage + 0.45).toDouble();
+    final delta =
+        -(details.primaryDelta ?? 0) / _dragWidth * (beyond ? 0.3 : 1);
+    _pageCtrl.value = (current + delta)
+        .clamp(-0.45, _maxPage + 0.45)
+        .toDouble();
   }
 
   void _onDragEnd(DragEndDetails details) {
@@ -225,13 +284,21 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     if (_shuffling) return;
     setState(() => _shuffling = true);
     try {
-      await _swapCtrl.animateTo(0.5, duration: const Duration(milliseconds: 220), curve: Curves.easeIn);
+      await _swapCtrl.animateTo(
+        0.5,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeIn,
+      );
       await ref.read(dailySuggestionsProvider.notifier).shuffleKnowledge();
     } catch (_) {
       // 次数用尽或来源已关闭:按钮态与提示会说明。
     } finally {
       if (mounted) {
-        await _swapCtrl.animateTo(1, duration: const Duration(milliseconds: 260), curve: Curves.easeOut);
+        await _swapCtrl.animateTo(
+          1,
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOut,
+        );
         if (mounted) {
           _swapCtrl.value = 0;
           setState(() => _shuffling = false);
@@ -248,9 +315,12 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     final dist = delta.abs();
     final sign = delta == 0 ? 1.0 : delta.sign;
     final near = math.min(dist, 1.0);
-    var x = dist <= 1 ? delta * _nearStep : sign * (_nearStep + (dist - 1) * _farStep);
+    var x = dist <= 1
+        ? delta * _nearStep
+        : sign * (_nearStep + (dist - 1) * _farStep);
     var y = -_lift * (1 - near) + math.min(dist, 3.0) * _sinkStep;
-    var tilt = delta.clamp(-_maxTiltSteps, _maxTiltSteps).toDouble() * _tiltDegrees;
+    var tilt =
+        delta.clamp(-_maxTiltSteps, _maxTiltSteps).toDouble() * _tiltDegrees;
     final scale = 1 - near * 0.05;
     if (index == _cutting) {
       // 切牌弧线:抽出时抬起、向外甩,过了一半塞到下一张后面。
@@ -296,7 +366,9 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
                 // 离当前牌越远画得越早,当前这张永远在最上面;切牌到一半时两张交换层级。
                 final order = List<int>.generate(cards.length, (index) => index)
                   ..sort((a, b) {
-                    final byDistance = (b - page).abs().compareTo((a - page).abs());
+                    final byDistance = (b - page).abs().compareTo(
+                      (a - page).abs(),
+                    );
                     return byDistance != 0 ? byDistance : a.compareTo(b);
                   });
                 return Stack(
@@ -310,7 +382,11 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
                         height: _cardHeight,
                         child: Transform(
                           alignment: Alignment.bottomCenter,
-                          transform: _cardTransform(index, _pageCtrl.value, deal),
+                          transform: _cardTransform(
+                            index,
+                            _pageCtrl.value,
+                            deal,
+                          ),
                           // 边界在 Transform 内侧:矩阵每帧变化只重画这一层的合成,
                           // 牌面(连同 40px 投影)的位图被缓存,拖动不再整片重绘。
                           child: RepaintBoundary(
@@ -318,7 +394,12 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
                             // wrapper avoids re-parenting the card when the deal ends.
                             child: Opacity(
                               opacity: deal,
-                              child: _cardFace(index, cards[index], index == active, state),
+                              child: _cardFace(
+                                index,
+                                cards[index],
+                                index == active,
+                                state,
+                              ),
                             ),
                           ),
                         ),
@@ -336,7 +417,12 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
   /// 取(或建)一张牌的牌面。只在离散状态变化时重建;动画帧之间返回同一个
   /// widget 实例,Flutter 检测到 identical 后整棵子树都不重建、不重排版。
   /// 索引参与键:移除一张牌后其余牌会前移,闭包里的旧索引不能复用。
-  Widget _cardFace(int index, _HandCard card, bool active, DailySuggestionState state) {
+  Widget _cardFace(
+    int index,
+    _HandCard card,
+    bool active,
+    DailySuggestionState state,
+  ) {
     final key = Object.hash(
       index,
       identityHashCode(card.item),
@@ -353,7 +439,12 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     return face;
   }
 
-  Widget _buildCard(int index, _HandCard card, bool active, DailySuggestionState state) {
+  Widget _buildCard(
+    int index,
+    _HandCard card,
+    bool active,
+    DailySuggestionState state,
+  ) {
     if (card.isEnableCta) {
       return _EnableCard(
         key: ValueKey(card.id),
@@ -386,7 +477,9 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     if (state.generating || _refreshing) return '正在生成今日推荐…';
     if (state.daily.isNotEmpty) return '';
     if (state.providerMissing) return '还没有配置可用的模型服务,请先到「模型供应商」中添加。';
-    if (state.lastGeneration?.status == 'failed') return '今日推荐生成失败,可以稍后「换一批」或到设置中查看原因。';
+    if (state.lastGeneration?.status == 'failed') {
+      return '今日推荐生成失败,可以稍后「换一批」或到设置中查看原因。';
+    }
     return '今天还没有推荐,点「换一批」立即生成。';
   }
 
@@ -413,7 +506,9 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     // 牌被「不感兴趣」后可能少于当前页码;下一帧把页码收回牌堆内。
     if (!_dragging && !_pageCtrl.isAnimating && _pageCtrl.value > _maxPage) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_dragging && !_pageCtrl.isAnimating) _pageCtrl.value = _maxPage;
+        if (mounted && !_dragging && !_pageCtrl.isAnimating) {
+          _pageCtrl.value = _maxPage;
+        }
       });
     }
 
@@ -422,8 +517,11 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
     final remaining = state.lastGeneration?.manualRefreshRemaining;
     final refreshDisabled = generating || remaining == 0;
     final status = _statusLine(state);
-    final knowledgeEnabled = prefs.knowledge.enabled && state.knowledge.isNotEmpty;
-    final todayDiscipline = state.randomKnowledge?.knowledge?.disciplineLabel ?? '';
+    final knowledgeEnabled =
+        prefs.knowledge.enabled && state.knowledge.isNotEmpty;
+    final todayDiscipline =
+        state.randomKnowledge?.knowledge?.disciplineLabel ?? '';
+    final hiddenCount = _hiddenCount(state, cards);
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -442,18 +540,29 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
                     if (prefs.enabled) ...[
                       Text(
                         '今日推荐',
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: p.ink2),
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: p.ink2,
+                        ),
                       ),
                       if (state.hasFreshDaily)
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 1,
+                          ),
                           decoration: BoxDecoration(
                             color: p.indigo,
                             borderRadius: BorderRadius.circular(99),
                           ),
                           child: const Text(
                             '新',
-                            style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700, color: Color(0xFFFFFFFF)),
+                            style: TextStyle(
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFFFFFFFF),
+                            ),
                           ),
                         ),
                       Text('·', style: TextStyle(fontSize: 12, color: p.ink3)),
@@ -462,17 +571,32 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
                       '能力探索',
                       style: TextStyle(
                         fontSize: 12,
-                        fontWeight: prefs.enabled ? FontWeight.w500 : FontWeight.w600,
+                        fontWeight: prefs.enabled
+                            ? FontWeight.w500
+                            : FontWeight.w600,
                         color: p.ink2,
                       ),
                     ),
                     if (state.weekTheme.isNotEmpty)
-                      Text('本周:${state.weekTheme}', style: TextStyle(fontSize: 11, color: p.ink3)),
+                      Text(
+                        '本周:${state.weekTheme}',
+                        style: TextStyle(fontSize: 11, color: p.ink3),
+                      ),
                     if (knowledgeEnabled) ...[
                       Text('·', style: TextStyle(fontSize: 12, color: p.ink3)),
-                      Text('知识探索', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: p.ink2)),
+                      Text(
+                        '知识探索',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: p.ink2,
+                        ),
+                      ),
                       if (todayDiscipline.isNotEmpty)
-                        Text('今日:$todayDiscipline', style: TextStyle(fontSize: 11, color: p.ink3)),
+                        Text(
+                          '今日:$todayDiscipline',
+                          style: TextStyle(fontSize: 11, color: p.ink3),
+                        ),
                     ],
                   ],
                 ),
@@ -489,14 +613,21 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
                     enabled: !refreshDisabled,
                     onTap: _refresh,
                   ),
-              _LinkButton(label: '设置', enabled: true, onTap: widget.onOpenSettings),
+              _LinkButton(
+                label: '设置',
+                enabled: true,
+                onTap: widget.onOpenSettings,
+              ),
             ],
           ),
         ),
         if (status.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(22, 0, 22, 2),
-            child: Text(status, style: TextStyle(fontSize: 11.5, color: p.ink2)),
+            child: Text(
+              status,
+              style: TextStyle(fontSize: 11.5, color: p.ink2),
+            ),
           ),
         if (cards.isEmpty)
           const SizedBox(height: 24)
@@ -505,16 +636,182 @@ class _SuggestionHandState extends ConsumerState<SuggestionHand> with TickerProv
           const SizedBox(height: 4),
           AnimatedBuilder(
             animation: _pageCtrl,
-            builder: (context, _) => _PageDots(count: cards.length, page: _clampedPage),
+            builder: (context, _) =>
+                _PageDots(count: cards.length, page: _clampedPage),
           ),
+          if (hiddenCount > 0)
+            _ViewAllButton(
+              count: hiddenCount,
+              onTap: () => _showAllSuggestions(state),
+            ),
         ],
       ],
     );
   }
 }
 
+class _ViewAllButton extends StatelessWidget {
+  const _ViewAllButton({required this.count, required this.onTap});
+
+  final int count;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = DawnPalette.of(context);
+    return CupertinoButton(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      minimumSize: const Size(0, 0),
+      onPressed: onTap,
+      child: Text(
+        '查看全部 · 还有 $count 张',
+        style: TextStyle(fontSize: 11.5, color: p.ink2),
+      ),
+    );
+  }
+}
+
+class _AllSuggestionsSheet extends ConsumerWidget {
+  const _AllSuggestionsSheet({
+    required this.onPick,
+    required this.onDismiss,
+    required this.onShuffle,
+    required this.shuffling,
+  });
+
+  final void Function(WorkSuggestion suggestion) onPick;
+  final void Function(WorkSuggestion suggestion) onDismiss;
+  final Future<void> Function() onShuffle;
+  final bool shuffling;
+
+  String _groupTitle(_CardGroup group) => switch (group) {
+    _CardGroup.daily => '今日推荐',
+    _CardGroup.knowledge => '知识探索',
+    _CardGroup.explore => '能力探索',
+  };
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final p = DawnPalette.of(context);
+    final state = ref.watch(dailySuggestionsProvider);
+    final visibleIds = {
+      for (final item in state.daily.take(_SuggestionHandState._maxDailyCards))
+        item.id,
+      for (final item in state.knowledge.take(
+        _SuggestionHandState._maxKnowledgeCards,
+      ))
+        item.id,
+    };
+    final visibleExploreBudget = math.max(
+      0,
+      _SuggestionHandState._maxCards -
+          state.daily.take(_SuggestionHandState._maxDailyCards).length -
+          state.knowledge.take(_SuggestionHandState._maxKnowledgeCards).length -
+          (state.preferences.enabled ? 0 : 1),
+    );
+    visibleIds.addAll(
+      state.explore.take(visibleExploreBudget).map((item) => item.id),
+    );
+    final groups = <(_CardGroup, List<WorkSuggestion>)>[
+      (
+        _CardGroup.daily,
+        state.daily.where((item) => !visibleIds.contains(item.id)).toList(),
+      ),
+      (
+        _CardGroup.knowledge,
+        state.knowledge.where((item) => !visibleIds.contains(item.id)).toList(),
+      ),
+      (
+        _CardGroup.explore,
+        state.explore.where((item) => !visibleIds.contains(item.id)).toList(),
+      ),
+    ].where((entry) => entry.$2.isNotEmpty).toList();
+
+    return SafeArea(
+      child: Container(
+        height: MediaQuery.sizeOf(context).height * 0.86,
+        decoration: BoxDecoration(
+          color: p.isDark ? const Color(0xFF171925) : const Color(0xFFF7F7FB),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 12, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '全部建议',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: p.ink,
+                      ),
+                    ),
+                  ),
+                  CupertinoButton(
+                    padding: const EdgeInsets.all(8),
+                    minimumSize: const Size(0, 0),
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: Icon(CupertinoIcons.xmark, size: 16, color: p.ink2),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                children: [
+                  for (final (group, items) in groups) ...[
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(4, 10, 4, 8),
+                      child: Text(
+                        '${_groupTitle(group)}  ${items.length}',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: p.ink2,
+                        ),
+                      ),
+                    ),
+                    for (final item in items)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: SizedBox(
+                          height: _SuggestionHandState._cardHeight,
+                          child: _SuggestionCard(
+                            item: item,
+                            group: group,
+                            lifted: true,
+                            blur: false,
+                            shuffleRemaining: state.knowledgeShuffleRemaining,
+                            shuffling: shuffling,
+                            onTap: () => onPick(item),
+                            onDismiss: () => onDismiss(item),
+                            onShuffle: item.isRandomKnowledge
+                                ? onShuffle
+                                : null,
+                          ),
+                        ),
+                      ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _LinkButton extends StatelessWidget {
-  const _LinkButton({required this.label, required this.enabled, required this.onTap});
+  const _LinkButton({
+    required this.label,
+    required this.enabled,
+    required this.onTap,
+  });
 
   final String label;
   final bool enabled;
@@ -559,7 +856,11 @@ class _PageDots extends StatelessWidget {
                 margin: const EdgeInsets.symmetric(horizontal: 2),
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(2),
-                  color: Color.lerp(p.ink3.withValues(alpha: 0.35), p.indigo, near),
+                  color: Color.lerp(
+                    p.ink3.withValues(alpha: 0.35),
+                    p.indigo,
+                    near,
+                  ),
                 ),
               );
             },
@@ -609,18 +910,25 @@ class _FrostedCard extends StatelessWidget {
     final p = DawnPalette.of(context);
     final dark = p.isDark;
     final base = dark ? const Color(0xFF181A26) : const Color(0xFFFFFFFF);
-    final body = tint == null ? base : Color.alphaBlend(tint!.withValues(alpha: dark ? 0.16 : 0.10), base);
+    final body = tint == null
+        ? base
+        : Color.alphaBlend(tint!.withValues(alpha: dark ? 0.16 : 0.10), base);
     final fillAlpha = dark ? (lifted ? 0.88 : 0.78) : (lifted ? 0.84 : 0.72);
     final borderColor = dashed
         ? p.indigo.withValues(alpha: 0.5)
         : dark
-            ? const Color(0xFFFFFFFF).withValues(alpha: lifted ? 0.2 : 0.14)
-            : const Color(0xFF6068B4).withValues(alpha: lifted ? 0.28 : 0.18);
-    final shadowColor = dark ? const Color(0xFF000000) : const Color(0xFF0F172A);
+        ? const Color(0xFFFFFFFF).withValues(alpha: lifted ? 0.2 : 0.14)
+        : const Color(0xFF6068B4).withValues(alpha: lifted ? 0.28 : 0.18);
+    final shadowColor = dark
+        ? const Color(0xFF000000)
+        : const Color(0xFF0F172A);
     final border = BorderRadius.circular(radius);
 
     Widget face = DecoratedBox(
-      decoration: BoxDecoration(color: body.withValues(alpha: fillAlpha), borderRadius: border),
+      decoration: BoxDecoration(
+        color: body.withValues(alpha: fillAlpha),
+        borderRadius: border,
+      ),
       child: DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: border,
@@ -639,7 +947,12 @@ class _FrostedCard extends StatelessWidget {
             if (dashed)
               Positioned.fill(
                 child: IgnorePointer(
-                  child: CustomPaint(painter: _DashedBorderPainter(color: borderColor, radius: radius)),
+                  child: CustomPaint(
+                    painter: _DashedBorderPainter(
+                      color: borderColor,
+                      radius: radius,
+                    ),
+                  ),
                 ),
               ),
             // 顶部一条 1px 内高光:透镜边缘感,而不是一片白雾。
@@ -654,7 +967,9 @@ class _FrostedCard extends StatelessWidget {
                     gradient: LinearGradient(
                       colors: [
                         const Color(0x00FFFFFF),
-                        const Color(0xFFFFFFFF).withValues(alpha: dark ? 0.16 : 0.6),
+                        const Color(
+                          0xFFFFFFFF,
+                        ).withValues(alpha: dark ? 0.16 : 0.6),
                         const Color(0x00FFFFFF),
                       ],
                     ),
@@ -668,7 +983,10 @@ class _FrostedCard extends StatelessWidget {
       ),
     );
     if (blur) {
-      face = BackdropFilter(filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22), child: face);
+      face = BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+        child: face,
+      );
     }
 
     return DecoratedBox(
@@ -676,7 +994,9 @@ class _FrostedCard extends StatelessWidget {
         borderRadius: border,
         boxShadow: [
           BoxShadow(
-            color: shadowColor.withValues(alpha: dark ? (lifted ? 0.45 : 0.28) : (lifted ? 0.18 : 0.08)),
+            color: shadowColor.withValues(
+              alpha: dark ? (lifted ? 0.45 : 0.28) : (lifted ? 0.18 : 0.08),
+            ),
             blurRadius: lifted ? 40 : 18,
             offset: Offset(0, lifted ? 22 : 6),
           ),
@@ -747,26 +1067,40 @@ class _SuggestionCard extends StatelessWidget {
   final Future<void> Function()? onShuffle;
 
   String get _chip => switch (group) {
-        _CardGroup.daily => SuggestionType.fromKey(item.type) == null
-            ? item.type
-            : suggestionTypeCopy[SuggestionType.fromKey(item.type)!]!.label,
-        _CardGroup.knowledge => item.knowledge?.source.label ?? '知识探索',
-        _CardGroup.explore => suggestionFeatureLabels[item.featureTag] ?? '能力探索',
-      };
+    _CardGroup.daily =>
+      SuggestionType.fromKey(item.type) == null
+          ? item.type
+          : suggestionTypeCopy[SuggestionType.fromKey(item.type)!]!.label,
+    _CardGroup.knowledge => item.knowledge?.source.label ?? '知识探索',
+    _CardGroup.explore => suggestionFeatureLabels[item.featureTag] ?? '能力探索',
+  };
 
   @override
   Widget build(BuildContext context) {
     final p = DawnPalette.of(context);
     final amberInk = p.isDark ? _amberInkDark : _amberInkLight;
     final (chipBg, chipFg, tint) = switch (group) {
-      _CardGroup.daily => (p.indigo.withValues(alpha: 0.14), p.indigo, p.indigo),
-      _CardGroup.knowledge => (_amber.withValues(alpha: 0.18), amberInk, _amber),
-      _CardGroup.explore => (p.ink.withValues(alpha: p.isDark ? 0.12 : 0.07), p.ink2, null),
+      _CardGroup.daily => (
+        p.indigo.withValues(alpha: 0.14),
+        p.indigo,
+        p.indigo,
+      ),
+      _CardGroup.knowledge => (
+        _amber.withValues(alpha: 0.18),
+        amberInk,
+        _amber,
+      ),
+      _CardGroup.explore => (
+        p.ink.withValues(alpha: p.isDark ? 0.12 : 0.07),
+        p.ink2,
+        null,
+      ),
     };
     final isKnowledge = group == _CardGroup.knowledge;
     final discipline = item.knowledge?.disciplineLabel ?? '';
     final featureLabel = suggestionFeatureLabels[item.featureTag];
-    final shuffleEnabled = onShuffle != null && shuffleRemaining > 0 && !shuffling;
+    final shuffleEnabled =
+        onShuffle != null && shuffleRemaining > 0 && !shuffling;
 
     final String foot;
     if (isKnowledge && discipline.isNotEmpty) {
@@ -778,7 +1112,9 @@ class _SuggestionCard extends StatelessWidget {
     }
     final String hint;
     if (item.isRandomKnowledge) {
-      hint = shuffleRemaining > 0 ? '今天还能换 $shuffleRemaining 次' : '今天的次数用完了,明天见';
+      hint = shuffleRemaining > 0
+          ? '今天还能换 $shuffleRemaining 次'
+          : '今天的次数用完了,明天见';
     } else if (item.scene?.enableThinking == true) {
       hint = '点击后将开启深度思考';
     } else {
@@ -804,19 +1140,33 @@ class _SuggestionCard extends StatelessWidget {
                     children: [
                       Flexible(
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(color: chipBg, borderRadius: BorderRadius.circular(99)),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: chipBg,
+                            borderRadius: BorderRadius.circular(99),
+                          ),
                           child: Text(
                             _chip,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: chipFg),
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: chipFg,
+                            ),
                           ),
                         ),
                       ),
-                      if (group == _CardGroup.daily && item.source == 'static') ...[
+                      if (group == _CardGroup.daily &&
+                          item.source == 'static') ...[
                         const SizedBox(width: 5),
-                        Text('内置', style: TextStyle(fontSize: 10, color: p.ink3)),
+                        Text(
+                          '内置',
+                          style: TextStyle(fontSize: 10, color: p.ink3),
+                        ),
                       ],
                       if (item.fresh) ...[
                         const SizedBox(width: 6),
@@ -826,7 +1176,12 @@ class _SuggestionCard extends StatelessWidget {
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: p.indigo,
-                            boxShadow: [BoxShadow(color: p.indigo.withValues(alpha: 0.22), spreadRadius: 3)],
+                            boxShadow: [
+                              BoxShadow(
+                                color: p.indigo.withValues(alpha: 0.22),
+                                spreadRadius: 3,
+                              ),
+                            ],
                           ),
                         ),
                       ],
@@ -851,7 +1206,11 @@ class _SuggestionCard extends StatelessWidget {
                     item.description,
                     maxLines: 3,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11.5, height: 1.4, color: p.ink2),
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.4,
+                      color: p.ink2,
+                    ),
                   ),
                 ),
                 if (foot.isNotEmpty || (lifted && hint.isNotEmpty))
@@ -870,7 +1229,8 @@ class _SuggestionCard extends StatelessWidget {
                             ),
                           ),
                         ),
-                      if (foot.isNotEmpty && lifted && hint.isNotEmpty) const SizedBox(width: 8),
+                      if (foot.isNotEmpty && lifted && hint.isNotEmpty)
+                        const SizedBox(width: 8),
                       if (lifted && hint.isNotEmpty)
                         Flexible(
                           child: Text(
@@ -897,7 +1257,11 @@ class _SuggestionCard extends StatelessWidget {
                         enabled: shuffleEnabled,
                         onTap: () => unawaited(onShuffle!()),
                       ),
-                    _ToolButton(icon: CupertinoIcons.xmark, enabled: true, onTap: onDismiss),
+                    _ToolButton(
+                      icon: CupertinoIcons.xmark,
+                      enabled: true,
+                      onTap: onDismiss,
+                    ),
                   ],
                 ),
               ),
@@ -910,7 +1274,11 @@ class _SuggestionCard extends StatelessWidget {
 
 /// 牌右上角的小工具(换一个 / 不感兴趣),只在抬起的牌上出现。
 class _ToolButton extends StatelessWidget {
-  const _ToolButton({required this.icon, required this.enabled, required this.onTap});
+  const _ToolButton({
+    required this.icon,
+    required this.enabled,
+    required this.onTap,
+  });
 
   final IconData icon;
   final bool enabled;
@@ -923,14 +1291,23 @@ class _ToolButton extends StatelessWidget {
       padding: const EdgeInsets.all(7),
       minimumSize: const Size(0, 0),
       onPressed: enabled ? onTap : null,
-      child: Icon(icon, size: 14, color: enabled ? p.ink3 : p.ink3.withValues(alpha: 0.4)),
+      child: Icon(
+        icon,
+        size: 14,
+        color: enabled ? p.ink3 : p.ink3.withValues(alpha: 0.4),
+      ),
     );
   }
 }
 
 /// 未开启每日推荐时,牌堆末尾的入口牌。
 class _EnableCard extends StatelessWidget {
-  const _EnableCard({required this.lifted, required this.blur, required this.onTap, super.key});
+  const _EnableCard({
+    required this.lifted,
+    required this.blur,
+    required this.onTap,
+    super.key,
+  });
 
   final bool lifted;
   final bool blur;
@@ -955,14 +1332,25 @@ class _EnableCard extends StatelessWidget {
             Container(
               width: 28,
               height: 28,
-              decoration: BoxDecoration(shape: BoxShape.circle, color: p.indigo),
-              child: const Icon(CupertinoIcons.add, size: 16, color: Color(0xFFFFFFFF)),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: p.indigo,
+              ),
+              child: const Icon(
+                CupertinoIcons.add,
+                size: 16,
+                color: Color(0xFFFFFFFF),
+              ),
             ),
             const SizedBox(height: 10),
             Text(
               '开启每日推荐',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: p.indigo),
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: p.indigo,
+              ),
             ),
             const SizedBox(height: 4),
             Text(

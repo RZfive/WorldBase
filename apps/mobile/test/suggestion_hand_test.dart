@@ -156,4 +156,16 @@ void main() {
     expect(find.byIcon(CupertinoIcons.xmark), findsOneWidget);
     expect(picked, isEmpty);
   });
+
+  testWidgets('view all opens the complete suggestion list when the hand is capped', (tester) async {
+    final picked = <WorkSuggestion>[];
+    await pumpHand(tester, picked: picked);
+
+    expect(find.textContaining('查看全部 · 还有'), findsOneWidget);
+    await tester.tap(find.textContaining('查看全部 · 还有'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('全部建议'), findsOneWidget);
+    expect(find.text('能力探索'), findsWidgets);
+  });
 }
