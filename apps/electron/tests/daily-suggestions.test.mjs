@@ -612,6 +612,119 @@ test('a single knowledge card can be swapped for the next pool entry, unlimited'
   await assert.rejects(() => service.refreshKnowledgeCard('kcard:2026-09-19:kc-missing'), /KNOWLEDGE_CARD_NOT_FOUND/)
 })
 
+// Regression: the displayed hand can be a stale fallback batch (today's batch
+// failed or never generated). Rebuilding today's batch from just the swapped
+// card used to wipe every daily pick off the screen.
+
+test('refreshing one knowledge card on a stale fallback day keeps the daily picks', async t => {
+  let clock = new Date('2026-09-19T10:00:00')
+  const knowledgeReply = JSON.stringify([
+    { source: 'work-domain', discipline: 'backend', title: '为什么幂等键会失效？', description: 'd', prompt: '我想聊聊幂等键。' }
+  ])
+  const { service, store, calls } = createService(t, {
+    reply: (_call, content) => (/curiosity hooks/.test(content) ? knowledgeReply : JSON.stringify([llmItem('new-idea')])),
+    preferences: {
+      enabled: true,
+      types: ['new-idea'],
+      knowledge: { enabled: true, sources: ['random', 'work-domain'], interests: [], profession: '', countPerSource: 1 }
+    },
+    now: () => clock
+  })
+  // Day one: both groups generate, and the model's knowledge card is banked
+  // into the pool for future draws.
+  const firstDay = await service.generateNow()
+  assert.equal(calls.length, 2)
+  const dayOneDailyIds = firstDay.daily.map(item => item.id)
+  assert.ok(dayOneDailyIds.length > 0)
+  const dayOneCard = firstDay.knowledge.find(item => item.source === 'llm')
+  assert.ok(dayOneCard, 'day one shows one model knowledge card')
+
+  // Day two: no batch yet, so the hand falls back to yesterday's batch.
+  clock = new Date('2026-09-20T10:00:00')
+  store.setKnowledgeReplenish({ lastAttemptDate: '2026-09-20' })
+  const fallback = service.getSnapshot()
+  assert.deepEqual(fallback.daily.map(item => item.id), dayOneDailyIds, 'the stale fallback still shows the daily picks')
+  assert.ok(fallback.knowledge.some(item => item.id === dayOneCard.id))
+
+  // Swapping the stale knowledge card must not drop the daily picks.
+  const next = await service.refreshKnowledgeCard(dayOneCard.id)
+  assert.equal(calls.length, 2, 'the swap draws from the local pool, no completion')
+  assert.deepEqual(next.daily.map(item => item.id), dayOneDailyIds, 'the daily picks survive the single-card refresh')
+  assert.ok(!next.knowledge.some(item => item.id === dayOneCard.id), 'the refreshed card is replaced')
+  const swapped = next.knowledge.find(item => item.source === 'llm')
+  assert.ok(swapped && swapped.id.startsWith('kcard:2026-09-20:'), 'the replacement comes from the pool')
+  // The swap persists: a fresh snapshot reads back the same hand.
+  assert.deepEqual(service.getSnapshot().daily.map(item => item.id), dayOneDailyIds)
+})
+
+test('refreshing a date-scoped pool card from a stale batch swaps it in place', async t => {
+  let clock = new Date('2026-09-19T10:00:00')
+  const { service, store, calls } = createService(t, {
+    reply: (_call, content) => (/curiosity hooks/.test(content) ? '[]' : JSON.stringify([llmItem('new-idea')])),
+    preferences: {
+      enabled: true,
+      types: ['new-idea'],
+      knowledge: { enabled: true, sources: ['random', 'cross-discipline'], interests: [], profession: '', countPerSource: 1 }
+    },
+    now: () => clock
+  })
+  // A stocked pool covers day one's knowledge hand without a model call, so
+  // the batch holds a date-scoped `kcard:` item.
+  store.appendKnowledgeCards(Array.from({ length: 4 }, (_, index) => ({
+    id: `kc-stale-${index}`,
+    source: 'cross-discipline',
+    discipline: `领域${index}`,
+    copy: { locale: 'zh-CN', title: `为什么冷知识${index}没传开？`, description: 'd', prompt: `我对「冷知识${index}」有点好奇。`, createdAt: '2026-09-01T00:00:00.000Z' }
+  })))
+  const firstDay = await service.generateNow()
+  assert.equal(calls.length, 1, 'the pool covered the knowledge request')
+  const dayOneDailyIds = firstDay.daily.map(item => item.id)
+  const dayOneCard = firstDay.knowledge.find(item => item.id.startsWith('kcard:2026-09-19:'))
+  assert.ok(dayOneCard, 'day one hand contains a pool card')
+
+  // Day two shows the stale fallback; `findSuggestion` rebuilds the card with
+  // today's date, so the swap must also match the id the UI clicked.
+  clock = new Date('2026-09-20T10:00:00')
+  store.setKnowledgeReplenish({ lastAttemptDate: '2026-09-20' })
+  const next = await service.refreshKnowledgeCard(dayOneCard.id)
+  assert.deepEqual(next.daily.map(item => item.id), dayOneDailyIds, 'the daily picks survive')
+  assert.ok(!next.knowledge.some(item => item.id === dayOneCard.id), 'the stale card is swapped out, not kept alongside')
+  const swapped = next.knowledge.find(item => item.id.startsWith('kcard:2026-09-20:'))
+  assert.ok(swapped && swapped.knowledge.seedId !== dayOneCard.knowledge.seedId)
+  assert.equal(next.knowledge.filter(item => item.source === 'llm').length, 1, 'exactly one pool card in the hand')
+})
+
+test('a failed daily regeneration on a stale day keeps yesterday\'s picks on screen', async t => {
+  let clock = new Date('2026-09-19T10:00:00')
+  const knowledgeReply = JSON.stringify([
+    { source: 'work-domain', discipline: 'backend', title: '为什么连接池会耗尽？', description: 'd', prompt: '我想聊聊连接池。' }
+  ])
+  const { service, store, calls } = createService(t, {
+    reply: (call, content) => {
+      if (call <= 2) return /curiosity hooks/.test(content) ? knowledgeReply : JSON.stringify([llmItem('new-idea')])
+      throw new Error('daily boom')
+    },
+    preferences: {
+      enabled: true,
+      types: ['new-idea'],
+      knowledge: { enabled: true, sources: ['random', 'work-domain'], interests: [], profession: '', countPerSource: 1 }
+    },
+    now: () => clock
+  })
+  const firstDay = await service.generateNow()
+  const dayOneDailyIds = firstDay.daily.map(item => item.id)
+
+  // Day two: the daily request fails and the knowledge hand is served from the
+  // pool banked on day one. Yesterday's daily picks must stay visible.
+  clock = new Date('2026-09-20T10:00:00')
+  store.setKnowledgeReplenish({ lastAttemptDate: '2026-09-20' })
+  const secondDay = await service.generateNow()
+  assert.equal(calls.length, 3, 'only the daily request hit the model')
+  assert.equal(secondDay.lastGeneration.status, 'partial')
+  assert.deepEqual(secondDay.daily.map(item => item.id), dayOneDailyIds, "yesterday's daily picks are carried over")
+  assert.ok(secondDay.knowledge.some(item => item.source === 'llm'))
+})
+
 test('an 80% consumed pool triggers the next batch; a failed attempt backs off until tomorrow', async t => {
   let clock = new Date('2026-09-19T10:00:00')
   const { service, store, calls } = createService(t, {

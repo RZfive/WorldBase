@@ -81,6 +81,13 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     }
   }
   const backgroundContexts = new Map<string, ReturnType<typeof captureContext>>()
+  // A stream writes the same conversation twice: once after the user turn is
+  // accepted and once after the assistant turn finishes. Keep those writes in
+  // order so a slow first save cannot overwrite the completed conversation.
+  const saveQueues = new Map<string, Promise<void>>()
+  // A startup list read can race the first optimistic save. Preserve rows that
+  // have not yet been confirmed by the catalog.
+  const pendingSummaries = new Map<string, ConversationSummary>()
   function rememberConversationContext (id: string): void {
     backgroundContexts.set(id, captureContext())
   }
@@ -132,7 +139,11 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     }
 
     try {
-      conversations.value = await window.electronAPI.listConversations()
+      const loaded = await window.electronAPI.listConversations()
+      const confirmed = new Set(loaded.map(conversation => conversation.id))
+      for (const id of confirmed) pendingSummaries.delete(id)
+      conversations.value = [...loaded, ...Array.from(pendingSummaries.values()).filter(summary => !confirmed.has(summary.id))]
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     } catch {
       /* ignore */
     } finally {
@@ -140,7 +151,7 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     }
   }
 
-  async function saveConversation (
+  async function saveConversationNow (
     conversationId: string,
     messages: ChatMessage[],
     saveOptions?: SaveConversationOptions
@@ -169,6 +180,28 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     setConversationTarget(conversationId, resolvedTargetProjectId)
 
     const metadata: ConversationMetadataPatch = context || existingConversation || {}
+    const optimisticSummary: ConversationSummary = {
+      id: conversationId,
+      title: resolvedTitle,
+      createdAt: getConversationCreatedAt(conversationId),
+      updatedAt: new Date().toISOString(),
+      ...(titleText ? { previewText: titleText.length > 96 ? `${titleText.slice(0, 96)}...` : titleText } : {}),
+      ...(shouldKeepManualTitle ? { manualTitle: true } : {}),
+      ...(metadata.authMode ? { authMode: metadata.authMode } : {}),
+      ...(metadata.providerId ? { providerId: metadata.providerId } : {}),
+      ...(metadata.selectedModel ? { selectedModel: metadata.selectedModel } : {}),
+      ...(metadata.reasoningStrength ? { reasoningStrength: metadata.reasoningStrength } : {}),
+      ...(typeof metadata.temperature === 'number' ? { temperature: metadata.temperature } : {}),
+      ...(resolvedTargetProjectId ? { targetProjectId: resolvedTargetProjectId } : {}),
+      ...(metadata.agentId ? { agentId: metadata.agentId } : {}),
+      ...(metadata.groupId ? { groupId: metadata.groupId } : {}),
+      ...(metadata.channelBindingId ? { channelBindingId: metadata.channelBindingId } : {})
+    }
+    // Update the renderer catalog before the IPC round trip completes. This is
+    // what makes a just-submitted first turn visible while its response runs.
+    applySummary(optimisticSummary)
+    pendingSummaries.set(conversationId, optimisticSummary)
+
     const result = await window.electronAPI.saveConversation(JSON.parse(JSON.stringify({
       id: conversationId,
       title: resolvedTitle,
@@ -189,8 +222,31 @@ export function createChatConversationStorage (options: ChatConversationStorageO
       folderWorkspace: context?.folderWorkspace
     })))
 
-    if (result.summary) applySummary(result.summary)
+    if (result.summary) {
+      pendingSummaries.delete(conversationId)
+      applySummary(result.summary)
+    }
     else await loadConversations() // Older preload compatibility only.
+  }
+
+  function saveConversation (
+    conversationId: string,
+    messages: ChatMessage[],
+    saveOptions?: SaveConversationOptions
+  ): Promise<void> {
+    const previous = saveQueues.get(conversationId)
+    // Start the first save synchronously. `saveConversationNow` applies the
+    // optimistic catalog row before its first IPC await, so the caller sees a
+    // new conversation in the same turn as the submitted message.
+    const next = previous
+      ? previous.catch(() => {}).then(() => saveConversationNow(conversationId, messages, saveOptions))
+      : saveConversationNow(conversationId, messages, saveOptions)
+    saveQueues.set(conversationId, next)
+    void next.then(
+      () => { if (saveQueues.get(conversationId) === next) saveQueues.delete(conversationId) },
+      () => { if (saveQueues.get(conversationId) === next) saveQueues.delete(conversationId) }
+    )
+    return next
   }
 
   async function renameConversation (conversationId: string, title: string): Promise<boolean> {

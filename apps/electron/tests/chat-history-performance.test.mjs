@@ -88,6 +88,33 @@ test('history saves update one summary instead of reloading the complete sidebar
   assert.equal(fixture.conversations.value.length, 3)
 })
 
+test('a first user turn appears in the sidebar before the history write finishes', async t => {
+  let release
+  const fixture = chatFixture(t, {
+    saveConversation: () => new Promise(resolve => { release = resolve })
+  })
+  const conversationId = 'brand-new'
+  const saving = fixture.storage.saveConversation(conversationId, [
+    { id: 'user-1', role: 'user', content: '先显示这条会话' }
+  ])
+
+  assert.ok(fixture.conversations.value.some(conversation => conversation.id === conversationId))
+  assert.equal(fixture.conversations.value.find(conversation => conversation.id === conversationId).title, '先显示这条会话')
+
+  release({
+    success: true,
+    summary: {
+      id: conversationId,
+      title: '先显示这条会话',
+      createdAt: fixture.conversations.value.find(conversation => conversation.id === conversationId).createdAt,
+      updatedAt: fixture.conversations.value.find(conversation => conversation.id === conversationId).updatedAt,
+      previewText: '先显示这条会话'
+    }
+  })
+  await saving
+  assert.equal(fixture.conversations.value[0].previewText, '先显示这条会话')
+})
+
 test('rapid conversation switches discard stale loads and only select cached providers', async t => {
   const pending = new Map()
   let catalogReads = 0

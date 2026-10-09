@@ -413,6 +413,12 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     streamingConvIds.add(convId)
     activeStreamSessionIds.set(convId, sessionId)
 
+    // Persist the user message right away so a brand-new conversation shows up
+    // in the sidebar while the response is still streaming, not only after the
+    // run finishes. The empty assistant placeholder is excluded from this save;
+    // the stream's final save owns the assistant turn.
+    void doSaveConversation(convId, targetMessages.slice(0, -1))
+
     try {
       if (window.electronAPI) {
         const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {

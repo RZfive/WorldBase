@@ -625,6 +625,45 @@ void main() {
     expect(backend.prompts.last, isNot(contains('recently dismissed several items from this source')));
   });
 
+  test('a regeneration where only the daily group fails keeps the stale day\'s picks visible', () async {
+    var clock = DateTime(2026, 9, 19, 10);
+    const knowledgeReply =
+        '[{"source":"cross-discipline","discipline":"biology","title":"Why hexagons?","description":"d","prompt":"p1"}]';
+    final backend = FakeBackend(
+      reply: (call) => call == 1
+          ? '[${item('new-idea', 1)},${item('new-idea', 2)}]'
+          : call == 3
+              ? Exception('daily boom')
+              : knowledgeReply,
+    );
+    final container = makeContainer(backend, now: () => clock);
+    await settle();
+    final notifier = container.read(dailySuggestionsProvider.notifier);
+    await notifier.setPreferences(
+      const DailySuggestionPreferences(
+        enabled: true,
+        types: [SuggestionType.newIdea],
+        countPerType: 2,
+        knowledge: KnowledgePreferences(sources: [KnowledgeSource.random, KnowledgeSource.crossDiscipline]),
+      ),
+    );
+    await settle();
+    final dayOne = container.read(dailySuggestionsProvider);
+    expect(dayOne.daily, hasLength(2));
+    final dayOneIds = dayOne.daily.map((entry) => entry.id).toList();
+
+    // 第二天还没有批次,手牌回落到昨天的成功批次;此时「换一批」若每日请求
+    // 失败而知识请求成功,今天的批次不能只剩知识卡——每日卡片必须沿用。
+    clock = DateTime(2026, 9, 20, 10);
+    await notifier.generateNow();
+    await settle();
+    final secondDay = container.read(dailySuggestionsProvider);
+    expect(backend.prompts, hasLength(4), reason: 'day two ran one daily and one knowledge request');
+    expect(secondDay.lastGeneration?.status, 'partial');
+    expect(secondDay.daily.map((entry) => entry.id), dayOneIds, reason: 'the stale day\'s daily picks are carried over');
+    expect(secondDay.knowledge.where((entry) => entry.source == 'llm'), isNotEmpty);
+  });
+
   test('knowledge-only model sources generate without the daily group and gate generateNow', () async {
     const knowledgeReply =
         '[{"source":"work-domain","discipline":"databases","title":"Why B-trees?","description":"d","prompt":"p"}]';

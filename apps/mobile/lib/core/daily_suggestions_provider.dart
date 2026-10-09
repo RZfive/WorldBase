@@ -918,8 +918,12 @@ class DailySuggestionsNotifier extends Notifier<DailySuggestionState> {
     final now = _now();
     final today = formatLocalDate(now);
     final preferences = _store.preferences;
-    final previous = _batchFor(today);
-    final manualRefreshCount = (previous?.manualRefreshCount ?? 0) + (manual && previous != null ? 1 : 0);
+    // 沿用用户正在看的批次(今天失败或还没生成时,那是最近几天内的旧批次),
+    // 这样一次失败的重新生成不会把屏幕上还显示着的每日卡片清掉。
+    // 手动刷新计数仍只属于今天已存的批次。
+    final todays = _batchFor(today);
+    final previous = _displayBatch(today);
+    final manualRefreshCount = (todays?.manualRefreshCount ?? 0) + (manual && todays != null ? 1 : 0);
     final backend = _backend;
     final wantDaily = preferences.enabled;
     final wantKnowledge = preferences.knowledge.needsModel;

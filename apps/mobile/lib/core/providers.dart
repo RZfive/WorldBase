@@ -99,14 +99,52 @@ final currentConversationProvider =
 
 /// 会话列表。
 class ConversationsNotifier extends AsyncNotifier<List<ConversationMeta>> {
+  final Map<String, ConversationMeta> _optimistic = {};
+
   @override
-  Future<List<ConversationMeta>> build() =>
-      HarnessClient.instance.listConversations();
+  Future<List<ConversationMeta>> build() async {
+    final remote = await HarnessClient.instance.listConversations();
+    return _mergeOptimistic(remote);
+  }
+
+  List<ConversationMeta> _current() => state.maybeWhen(
+    data: (value) => value,
+    orElse: () => const <ConversationMeta>[],
+  );
+
+  void upsert(ConversationMeta conversation) {
+    _optimistic[conversation.id] = conversation;
+    state = AsyncData(_mergeOptimistic(_current()));
+  }
+
+  void remove(String conversationId) {
+    _optimistic.remove(conversationId);
+    final current = _current();
+    state = AsyncData(current.where((conversation) => conversation.id != conversationId).toList());
+  }
 
   Future<void> refresh() async {
-    state = await AsyncValue.guard(
+    final result = await AsyncValue.guard(
       () => HarnessClient.instance.listConversations(),
     );
+    if (result.hasValue) {
+      final remote = result.value ?? const <ConversationMeta>[];
+      for (final conversation in remote) {
+        _optimistic.remove(conversation.id);
+      }
+      state = AsyncData(_mergeOptimistic(remote));
+    } else {
+      state = result;
+    }
+  }
+
+  List<ConversationMeta> _mergeOptimistic(List<ConversationMeta> remote) {
+    final merged = <String, ConversationMeta>{
+      for (final conversation in remote) conversation.id: conversation,
+      ..._optimistic,
+    }.values.toList();
+    merged.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return merged;
   }
 }
 
@@ -590,6 +628,7 @@ class ChatController extends Notifier<List<UiMessage>> {
         }
       }
       await deleteRemote(conversationId);
+      ref.read(conversationsProvider.notifier).remove(conversationId);
       _removeConversationCache(conversationId);
     } catch (_) {
       _deletedConversationIds.remove(conversationId);
@@ -763,6 +802,10 @@ class ChatController extends Notifier<List<UiMessage>> {
         if (ref.read(currentConversationProvider) == null) {
           ref.read(currentConversationProvider.notifier).set(conversation);
         }
+        // The native list can lag behind conversation.create. Insert the row
+        // locally first so the drawer shows the running chat immediately;
+        // refresh() will replace it with the authoritative row when ready.
+        ref.read(conversationsProvider.notifier).upsert(conversation);
         unawaited(ref.read(conversationsProvider.notifier).refresh());
       }
 

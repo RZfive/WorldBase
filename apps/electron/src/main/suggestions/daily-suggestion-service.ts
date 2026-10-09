@@ -638,16 +638,30 @@ export class DailySuggestionService {
     this.options.store.recordKnowledgeShown(today, [replacement.id])
     this.options.store.bumpKnowledgeCardCursor()
     const nextItem = buildKnowledgeCardSuggestion(replacement, now)
-    const batch = this.options.store.getBatch(today)
+    // The card may be displayed from the most recent successful batch when
+    // today's generation is missing or failed. Locate the actual source row,
+    // rather than creating a new today-only batch that drops the other cards.
+    const matchesCard = (existing: WorkSuggestion): boolean =>
+      existing.id === item.id || (
+        existing.layer === 'knowledge' &&
+        existing.knowledge?.source === item.knowledge?.source &&
+        existing.knowledge?.seedId === item.knowledge?.seedId
+      )
+    const batch = this.options.store.getBatches().find(candidate =>
+      candidate.status !== 'failed' && candidate.items.some(matchesCard)
+    ) || this.options.store.getBatches().find(candidate => candidate.items.some(matchesCard))
     const batchItems = batch?.items || []
     this.options.store.saveBatch({
-      date: today,
-      status: batch && batch.status !== 'failed' ? batch.status : 'ok',
-      items: batchItems.some(existing => existing.id === item.id)
-        ? batchItems.map(existing => existing.id === item.id ? nextItem : existing)
+      date: batch?.date || today,
+      status: batch?.status || 'ok',
+      items: batchItems.some(matchesCard)
+        ? batchItems.map(existing => matchesCard(existing) ? nextItem : existing)
         : [...batchItems, nextItem],
       generatedAt: batch?.generatedAt || now.toISOString(),
-      manualRefreshCount: batch?.manualRefreshCount || 0
+      error: batch?.error,
+      manualRefreshCount: batch?.manualRefreshCount || 0,
+      providerId: batch?.providerId,
+      modelId: batch?.modelId
     })
     const snapshot = this.getSnapshot()
     this.options.onChanged?.(snapshot)
@@ -1106,8 +1120,11 @@ export class DailySuggestionService {
     const now = this.now()
     const today = formatLocalDate(now)
     const preferences = this.options.store.getPreferences()
-    const previous = this.options.store.getBatch(today)
-    const manualRefreshCount = (previous?.manualRefreshCount || 0) + (context.manual && previous ? 1 : 0)
+    const todays = this.options.store.getBatch(today)
+    // Keep using the hand currently shown in the empty state when today has
+    // not produced a successful batch yet.
+    const previous = this.resolveDisplayBatch(preferences, now)
+    const manualRefreshCount = (todays?.manualRefreshCount || 0) + (context.manual && todays ? 1 : 0)
     const wantDaily = preferences.enabled
     const wantKnowledge = knowledgeNeedsModel(preferences)
 

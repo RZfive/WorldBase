@@ -1,7 +1,7 @@
 name: Build (main)
 
 # main 分支 CI：每次合并构建四端产物并上传 artifact（不发布）。
-# 正式发布走 release.yml（推送 vX.Y.Z tag 触发 Draft Release）。
+# 正式发布走 release.yml（推送 v* tag 触发 Draft Release）。
 
 on:
   push:

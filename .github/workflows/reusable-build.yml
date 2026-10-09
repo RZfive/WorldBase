@@ -1,15 +1,10 @@
 name: Reusable Build
 
 # 四端构建的公共步骤，供 build.yml（main 分支 CI）和 release.yml（tag 发布）复用。
-# Android build-number：调用方未传入时沿用 GITHUB_RUN_NUMBER（CI 行为）。
+# Android build-number 沿用 GITHUB_RUN_NUMBER（随每次运行单调递增）。
 
 on:
-  workflow_call:
-    inputs:
-      android_build_number:
-        description: 'Android versionCode（tag 发布时由版本号派生）'
-        type: string
-        required: false
+  workflow_call: {}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -313,7 +308,7 @@ jobs:
 
       - name: Build Android ARM64 APK
         working-directory: apps/mobile
-        run: flutter build apk --release --target-platform android-arm64 --split-per-abi --build-number "${{ inputs.android_build_number || github.run_number }}"
+        run: flutter build apk --release --target-platform android-arm64 --split-per-abi --build-number "${{ github.run_number }}"
 
       - name: Verify Android package
         run: |
