@@ -29,6 +29,8 @@ jobs:
       - name: Create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # job 未 checkout 仓库，gh 靠该变量解析 owner/repo，否则会报 "not a git repository"
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="${GITHUB_REF_NAME}"
           mapfile -d '' files < <(find dist-artifacts -type f -print0 | sort -z)
