@@ -17,6 +17,8 @@ permissions:
 jobs:
   build:
     uses: ./.github/workflows/reusable-build.yml
+    # reusable workflow 默认不继承 secrets；缺失会导致热更包缺 manifest.sig
+    secrets: inherit
 
   release:
     needs: build

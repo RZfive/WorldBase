@@ -20,3 +20,5 @@ jobs:
     # 仅真正合并的 PR 触发；手动关闭（未合并）的 PR 不构建
     if: github.event.pull_request.merged == true
     uses: ./.github/workflows/reusable-build.yml
+    # reusable workflow 默认不继承 secrets；缺失会导致热更包缺 manifest.sig
+    secrets: inherit
