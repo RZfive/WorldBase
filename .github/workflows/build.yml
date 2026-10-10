@@ -1,10 +1,12 @@
 name: Build (main)
 
-# main 分支 CI：每次合并构建四端产物并上传 artifact（不发布）。
+# main 分支 CI：PR 合并进 main 时构建四端产物并上传 artifact（不发布）；直推 main 不触发。
 # 正式发布走 release.yml（推送 v* tag 触发 Draft Release）。
 
 on:
-  push:
+  pull_request:
+    types:
+      - closed
     branches:
       - main
   workflow_dispatch:
@@ -15,4 +17,6 @@ permissions:
 
 jobs:
   build:
+    # 仅真正合并的 PR 触发；手动关闭（未合并）的 PR 不构建
+    if: github.event.pull_request.merged == true
     uses: ./.github/workflows/reusable-build.yml
