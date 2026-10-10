@@ -3,6 +3,7 @@ name: Release
 # 发布流程：推送 v* tag 触发。
 # 1. 复用四端构建（Android versionCode 沿用 run number）
 # 2. 汇总产物创建 Draft Release——人工核对并补写 notes 后点 Publish 才对用户可见
+#    Release 只挂四端安装包（exe/dmg/AppImage/apk）；热更包仅留在 workflow artifacts，供官网发布
 
 on:
   push:
@@ -33,11 +34,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          mapfile -d '' files < <(find dist-artifacts -type f -print0 | sort -z)
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::no artifacts found under dist-artifacts"
-            exit 1
-          fi
+          # Release 只挂四端安装包；热更包（WorldBase-hot-*.zip）走官网发布，
+          # 从本次 workflow run 的 artifacts（windows-build / mac-arm-build / linux-build）下载
+          mapfile -d '' files < <(find dist-artifacts -type f \( \
+            -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.apk' \) -print0 | sort -z)
+          # 四端各至少一个安装包，缺了直接报错而不是发出残缺 release
+          for pat in '*.exe' '*.dmg' '*.AppImage' '*.apk'; do
+            if [ -z "$(find dist-artifacts -type f -name "$pat" -print -quit)" ]; then
+              echo "::error::no $pat installer found under dist-artifacts"
+              exit 1
+            fi
+          done
           echo "Attaching ${#files[@]} files to draft release $TAG"
           # 之前失败的 run 可能残留同名 draft，先清掉保证 tag 可重推重跑
           gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes
