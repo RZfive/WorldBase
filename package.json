@@ -1,7 +1,7 @@
 {
   "name": "the-world-monorepo",
   "private": true,
-  "version": "1.6.6",
+  "version": "1.6.7",
   "description": "WorldBase monorepo workspace orchestrator",
   "license": "Apache-2.0",
   "repository": {
@@ -12,6 +12,8 @@
   "bugs": "https://github.com/RZfive/WorldBase/issues",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
+    "bump": "node scripts/bump-version.mjs",
+    "version:check": "node scripts/bump-version.mjs --check",
     "electron:install": "pnpm --dir apps/electron install --frozen-lockfile",
     "electron:dev": "pnpm --dir apps/electron electron:dev",
     "electron:typecheck": "pnpm --dir apps/electron typecheck",

@@ -38,8 +38,23 @@ jobs:
               }
             }
 
+  # main 推送时要求四处版本一致，tag 发布时要求四处等于 tag；用仓库统一脚本校验
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Verify versions
+        run: |
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            node scripts/bump-version.mjs --check "$GITHUB_REF_NAME"
+          else
+            node scripts/bump-version.mjs --check
+          fi
+
   build-windows:
-    needs: cleanup
+    needs: [cleanup, version-check]
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -115,7 +130,7 @@ jobs:
           if-no-files-found: error
 
   build-mac-arm:
-    needs: cleanup
+    needs: [cleanup, version-check]
     runs-on: macos-15
     steps:
       - name: Checkout repository
@@ -188,7 +203,7 @@ jobs:
           if-no-files-found: error
 
   build-linux:
-    needs: cleanup
+    needs: [cleanup, version-check]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -261,7 +276,7 @@ jobs:
           if-no-files-found: error
 
   build-android:
-    needs: cleanup
+    needs: [cleanup, version-check]
     runs-on: ubuntu-latest
     env:
       FLUTTER_VERSION: '3.41.2'
