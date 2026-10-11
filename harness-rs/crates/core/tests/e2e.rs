@@ -2302,6 +2302,31 @@ async fn plan_mode_blocks_mutating_tool_calls_in_the_same_run() {
             stream_in_chunks: true,
         },
         MockTurn {
+            text: "规划完成，退出规划模式。".into(),
+            tool_calls: vec![(
+                "plan-exit-1".into(),
+                "exit_plan_mode".into(),
+                serde_json::json!({
+                    "plan_summary": "直接写入目标文件",
+                    "steps": [{ "title": "写入 src/app.ts" }]
+                }),
+            )],
+            stream_in_chunks: true,
+        },
+        MockTurn {
+            text: "退出规划模式后重试同一个写入。".into(),
+            tool_calls: vec![(
+                "write-2".into(),
+                "write_project_file".into(),
+                serde_json::json!({
+                    "project_id": "blocked-project",
+                    "file_path": "src/app.ts",
+                    "content": "export const changed = true"
+                }),
+            )],
+            stream_in_chunks: true,
+        },
+        MockTurn {
             text: "规划阶段已完成。".into(),
             tool_calls: vec![],
             stream_in_chunks: true,
@@ -2329,20 +2354,46 @@ async fn plan_mode_blocks_mutating_tool_calls_in_the_same_run() {
     let stream_id = sent["streamId"].as_str().unwrap().to_string();
 
     let mut blocked_content = None;
+    let mut write_after_exit_ok = false;
     loop {
         let frame = events.recv().await.unwrap();
         if frame.stream_id != stream_id {
             continue;
         }
         match &frame.kind {
+            EventKind::PermissionRequest {
+                request_id,
+                tool_name,
+                ..
+            } if tool_name == "write_project_file" => {
+                // The post-exit write reaches the normal permission layer; the
+                // e2e host must grant it like the desktop shell would.
+                let response = dispatch(
+                    &hub,
+                    &ctx,
+                    method::CHAT_RESPOND,
+                    serde_json::json!({ "requestId": request_id, "allow": true }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(response["delivered"], true);
+            }
             EventKind::ToolResult {
                 name,
+                call_id,
                 content,
                 is_error,
-                ..
             } if name == "write_project_file" => {
-                assert!(*is_error, "plan-mode write must be rejected");
-                blocked_content = Some(content.clone());
+                if call_id == "write-1" {
+                    assert!(*is_error, "plan-mode write must be rejected");
+                    blocked_content = Some(content.clone());
+                } else if call_id == "write-2" {
+                    assert!(
+                        !*is_error,
+                        "the same write must succeed once plan mode has been exited"
+                    );
+                    write_after_exit_ok = true;
+                }
             }
             EventKind::Done { .. } | EventKind::Error { .. } => break,
             _ => {}
@@ -2353,7 +2404,8 @@ async fn plan_mode_blocks_mutating_tool_calls_in_the_same_run() {
         .as_deref()
         .unwrap_or_default()
         .contains("规划模式"));
-    assert!(!hub.workspace.join("blocked-project/src/app.ts").exists());
+    assert!(write_after_exit_ok, "post-exit write must have run");
+    assert!(hub.workspace.join("blocked-project/src/app.ts").exists());
 }
 
 #[tokio::test]

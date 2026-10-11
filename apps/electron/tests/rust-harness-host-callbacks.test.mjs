@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
-import { RustHarnessEngine } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { RustHarnessEngine, planModeExitedAfterNativeResult } from '../src/main/ai-harness/rust-harness-engine.ts'
 import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-registry.ts'
 import { MCPService } from '../src/main/mcp/mcp-service.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
@@ -680,6 +680,75 @@ test('native Rust dynamic MCP results notify the Electron bridge', async () => {
   assert.deepEqual(nativeResults, [
     { name: 'mcp__docs__lookup__abc123', result: { ok: true, content: [{ type: 'text', text: 'done' }] } }
   ])
+})
+
+test('plan mode keeps mutating tools visible in the Rust run policy', async () => {
+  const captured = []
+  const client = {
+    ...createNativeToolClient(),
+    async start () {},
+    async chatStream (_sessionId, _conversationId, _text, options, onFrame) {
+      captured.push({ options })
+      onFrame({ kind: 'assistant_message', content: '已给出计划' })
+      onFrame({ kind: 'done' })
+      return { streamId: 'plan-visible-stream' }
+    }
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  engine.setPlanMode(true)
+
+  for await (const _event of engine.chatStream([
+    { role: 'user', content: '先规划再建项目' }
+  ])) {}
+
+  assert.equal(captured.length, 1)
+  // Blocking belongs to Rust's execution boundary. Filtering the visible
+  // catalog froze the tool list per run and made the model believe it lacked
+  // create_project, so it redirected the user to a manual UI flow.
+  assert.deepEqual(captured[0].options.deniedToolNames, [])
+  assert.equal(captured[0].options.planModeActive, true)
+})
+
+test('native exit_plan_mode result clears the engine plan default and notifies the shell', async () => {
+  const events = []
+  const client = {
+    ...createNativeToolClient(),
+    async start () {},
+    async chatStream (_sessionId, _conversationId, _text, _options, onFrame) {
+      onFrame({
+        kind: 'tool_result',
+        name: 'exit_plan_mode',
+        content: '{"success":true,"planning":false,"plan_summary":"7 步方案","steps":[]}'
+      })
+      onFrame({ kind: 'assistant_message', content: '开始执行' })
+      onFrame({ kind: 'done' })
+      return { streamId: 'plan-exit-stream' }
+    }
+  }
+  const engine = new RustHarnessEngine({
+    client,
+    services: createServices(),
+    onPlanModeChanged: (active) => events.push(active)
+  })
+  engine.setPlanMode(true)
+
+  for await (const _event of engine.chatStream([
+    { role: 'user', content: '按计划执行' }
+  ])) {}
+
+  assert.equal(engine.getPlanMode(), false)
+  assert.deepEqual(events, [false])
+})
+
+test('planModeExitedAfterNativeResult only accepts successful exits', () => {
+  assert.equal(planModeExitedAfterNativeResult('exit_plan_mode', { success: true, planning: false }), true)
+  assert.equal(
+    planModeExitedAfterNativeResult('exit_plan_mode', { success: false, planning: false, message: '当前不在规划模式中。' }),
+    false
+  )
+  assert.equal(planModeExitedAfterNativeResult('enter_plan_mode', { planning: true }), false)
+  assert.equal(planModeExitedAfterNativeResult('exit_plan_mode', null), false)
+  assert.equal(planModeExitedAfterNativeResult('exit_plan_mode', 'not-an-object'), false)
 })
 
 test('Rust Studio client replays image events published before its RPC response is mapped', async () => {

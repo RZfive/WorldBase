@@ -643,6 +643,7 @@ export interface ElectronAPI {
 
   // Plan Mode
   setPlanMode: (active: boolean) => Promise<{ success: boolean }>
+  onPlanModeChanged: (callback: (active: boolean) => void) => () => void
 
   // Cost Settings
   getCostSettings: () => Promise<CostSettings>
@@ -1074,6 +1075,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Plan Mode
   setPlanMode: (active: boolean) => ipcRenderer.invoke('ai:setPlanMode', active),
+  onPlanModeChanged: (callback: (active: boolean) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, active: boolean) => callback(active)
+    ipcRenderer.on('ai:planModeChanged', handler)
+    return () => { ipcRenderer.removeListener('ai:planModeChanged', handler) }
+  },
 
   // Cost Settings
   getCostSettings: () => ipcRenderer.invoke('settings:getCostSettings'),

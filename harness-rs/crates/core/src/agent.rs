@@ -1912,7 +1912,7 @@ async fn system_prompt(
             " Return the completed plan without attempting a mutation."
         };
         sections.push(format!(
-            "## Plan mode active\n- Use only visible read-only tools to inspect and reason. Mutations, commands, builds, and external side effects are blocked.\n- Produce a concrete ordered implementation plan.{exit_rule}"
+            "## Plan mode active\n- Read-only inspection is allowed. Mutating tools stay visible, but every mutating call is rejected with an error until plan mode ends — this is a temporary block, not a missing capability.{exit_rule}\n- Never tell the user to create or modify projects manually in the UI. After `exit_plan_mode` completes, execute the plan yourself with the visible tools (e.g. create_project / write_project_file)."
         ));
     }
 

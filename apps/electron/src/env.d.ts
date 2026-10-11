@@ -1062,6 +1062,7 @@ interface ElectronAPI {
   openAppUpdateWebsite: (kind: AppUpdateWebsiteKind) => Promise<{ success: boolean; error?: string }>
   onAppUpdateStateChanged: (callback: (state: AppUpdateState) => void) => () => void
   setPlanMode: (active: boolean) => Promise<{ success: boolean }>
+  onPlanModeChanged: (callback: (active: boolean) => void) => () => void
 
   // Conversations
   listConversations: () => Promise<ConversationSummary[]>

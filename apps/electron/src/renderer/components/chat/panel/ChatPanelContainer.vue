@@ -353,6 +353,7 @@ const chatInputRef = ref<{ $el?: HTMLElement } | null>(null)
 const chatInputCardHeight = ref(0)
 let inputCardResizeObserver: ResizeObserver | null = null
 let observedInputCard: HTMLElement | null = null
+let offPlanModeChanged: (() => void) | null = null
 
 function measureChatInputCard (): void {
   const card = chatInputRef.value?.$el?.querySelector<HTMLElement>('.input-container')
@@ -379,6 +380,11 @@ onMounted(() => {
   }
   measureChatInputCard()
   window.addEventListener('keydown', onSidebarShortcut)
+  // Plan mode can also end from the model side (native exit_plan_mode); keep
+  // the toggle truthful so the next turn does not silently re-enter planning.
+  offPlanModeChanged = window.electronAPI?.onPlanModeChanged?.((active) => {
+    planModeActive.value = active
+  }) ?? null
 })
 
 watch(chatInputRef, () => {
@@ -392,6 +398,8 @@ onBeforeUnmount(() => {
   inputCardResizeObserver = null
   observedInputCard = null
   window.removeEventListener('keydown', onSidebarShortcut)
+  offPlanModeChanged?.()
+  offPlanModeChanged = null
 })
 
 function loadConversationSidebarCollapsed (): boolean {

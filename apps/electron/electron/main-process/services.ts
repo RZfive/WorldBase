@@ -641,6 +641,12 @@ export async function initializeServices (): Promise<void> {
     client: mainState.rustHarness,
     services: aiEngineServices,
     usageStore: mainState.usageStore ?? undefined,
+    // The model ends plan mode via the native exit_plan_mode tool; mirror that
+    // into the renderer toggle so the next turn does not re-enter planning and
+    // the toggle the user sees stays truthful.
+    onPlanModeChanged: (active) => {
+      broadcastToAppWindows('ai:planModeChanged', active)
+    },
     onNativeToolResult: async (name, result, context) => {
       if (name === 'create_agent') {
         saveRustNativeAgent(result)

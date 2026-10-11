@@ -27,28 +27,6 @@ import type {
   StreamEvent
 } from './types.js'
 
-const PLAN_MODE_WRITE_TOOLS = new Set([
-  'create_project',
-  'write_project_file',
-  'patch_project_file',
-  'delete_project_file',
-  'run_project_command',
-  'write_workspace_file',
-  'edit_workspace_file',
-  'patch_workspace_file',
-  'delete_workspace_file',
-  'run_workspace_command',
-  'install_dependencies',
-  'install_skill',
-  'install_mcp_server',
-  'rebuild_project',
-  'start_project_server',
-  'restart_project_server',
-  'clear_project_build_flag',
-  'computer_observe',
-  'computer_action'
-])
-
 // Rust owns the model/tool loop and the two intrinsic plan-mode controls.
 // Electron remains the execution authority for its public domain tools so
 // Rust mode keeps the exact Node behavior: project backups/lifecycle,
@@ -70,6 +48,24 @@ export interface RustHarnessEngineOptions {
   usageStore?: UsageStore
   /** Notify Electron views after a Rust-native domain mutation completes. */
   onNativeToolResult?: (name: string, result: unknown, context: AIRequestOptions) => void | Promise<void>
+  /**
+   * Fired when the model ends plan mode through the native exit_plan_mode
+   * tool. The engine flag is cleared either way; the shell uses this to sync
+   * the renderer toggle so the next turn does not silently re-enter planning.
+   */
+  onPlanModeChanged?: (active: boolean) => void
+}
+
+/**
+ * A successful native `exit_plan_mode` result marks plan mode as durably over.
+ * The failure shape (`success: false`) is the "was not planning" no-op and
+ * must not clear the flag.
+ */
+export function planModeExitedAfterNativeResult (name: string, result: unknown): boolean {
+  if (name !== 'exit_plan_mode') return false
+  if (!result || typeof result !== 'object') return false
+  const record = result as Record<string, unknown>
+  return record.planning === false && record.success !== false
 }
 
 /**
@@ -84,6 +80,7 @@ export class RustHarnessEngine implements AIHarness {
   private readonly electronTools: ElectronToolRegistry
   private readonly usageStore?: UsageStore
   private readonly onNativeToolResult?: RustHarnessEngineOptions['onNativeToolResult']
+  private readonly onPlanModeChanged?: RustHarnessEngineOptions['onPlanModeChanged']
   private baseConfig: AIConfigInput = {}
   private activeSkillContents: string[] = []
   private defaultTargetProjectId: string | null = null
@@ -96,6 +93,7 @@ export class RustHarnessEngine implements AIHarness {
     this.services = options.services
     this.usageStore = options.usageStore
     this.onNativeToolResult = options.onNativeToolResult
+    this.onPlanModeChanged = options.onPlanModeChanged
     this.electronTools = new ElectronToolRegistry({
       services: options.services,
       getNativeToolDefinitions: () => this.client.getAvailableTools()
@@ -172,10 +170,12 @@ export class RustHarnessEngine implements AIHarness {
     if (requestedAllowedToolNames.length > 0 && allowedToolNames.length === 0) {
       allowedToolNames.push('__electron_policy_denied_all_tools__')
     }
-    const deniedToolNames = mergeStrings(
-      options?.deniedToolNames,
-      this.planModeDefault ? Array.from(PLAN_MODE_WRITE_TOOLS) : undefined
-    )
+    // Plan mode blocks mutating tools at the Rust execution boundary, not by
+    // hiding them from the visible catalog. Hiding froze the tool list per run
+    // (an exit_plan_mode mid-run could never restore them) and made the model
+    // believe it lacked the capability, so it redirected users to a manual UI
+    // flow that does not exist.
+    const deniedToolNames = mergeStrings(options?.deniedToolNames)
     const priorMessages = pendingIndex >= 0 ? messages.slice(0, pendingIndex) : messages.slice(0, -1)
     const historySystemPromptSections = priorMessages
       .filter(message => message.role === 'system' || message.role === 'developer')
@@ -185,7 +185,7 @@ export class RustHarnessEngine implements AIHarness {
       historySystemPromptSections,
       options?.systemPromptSections,
       this.planModeDefault
-        ? ['Plan mode is active. Do not perform mutations, installs, builds, process control, or MCP calls until exit_plan_mode has completed.']
+        ? ['Plan mode is active. Mutating tools (create/modify files, projects, installs, builds, process control, MCP calls) stay visible but every call is rejected until exit_plan_mode has completed — this is a temporary block, not a missing capability. Present the plan, call exit_plan_mode, then execute the plan yourself with those tools. Never tell the user to create or modify projects manually in the UI.']
         : undefined
     )
     const history = priorMessages
@@ -465,6 +465,13 @@ export class RustHarnessEngine implements AIHarness {
     const name = stringValue(frame.name)
     if (!name || frame.isError === true) return
     const result = parseToolResult(frame.content)
+    if (planModeExitedAfterNativeResult(name, result)) {
+      // Plan mode ends with the model's own exit_plan_mode, not only with the
+      // UI toggle. Clear the run default so later turns keep mutating tools
+      // unblocked, and let the shell update the toggle it renders.
+      this.setPlanMode(false)
+      this.onPlanModeChanged?.(false)
+    }
     // Rust image tools persist to the Rust-owned gallery. The Electron shell
     // only broadcasts the resulting UI invalidation through onNativeToolResult.
     await this.onNativeToolResult?.(name, result, context)
