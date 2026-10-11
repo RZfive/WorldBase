@@ -3,7 +3,7 @@ import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-per
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
-import type { ActivePageAutomationContext, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
+import type { ActivePageAutomationContext, BrowserPageContextMenuPayload, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../src/shared/image-studio-types.js'
 import type { UsageRecord, UsageSummary } from '../src/main/settings/usage-store.js'
 import type { ConversationFolderWorkspaceState, FolderWorkspaceChangeEvent, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
@@ -519,6 +519,7 @@ export interface ElectronAPI {
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
+  onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
   getAboutInfo: () => Promise<AppAboutInfo>
   getAppUpdateState: () => Promise<AppUpdateState>
@@ -619,6 +620,7 @@ export interface ElectronAPI {
   onProjectWindowClosed: (callback: (event: { projectId: string }) => void) => () => void
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
   onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
+  onWorkspaceOpenTab: (callback: (event: { kind: string; payload?: Record<string, unknown> }) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
   getComputerUsePermissions: () => Promise<{ platform: string; screen: string; accessibility: boolean; granted: boolean }>
   requestComputerUsePermissions: () => Promise<{ granted: boolean }>
@@ -804,6 +806,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('pageAutomation:request', handler)
     return () => { ipcRenderer.removeListener('pageAutomation:request', handler) }
   },
+  onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: BrowserPageContextMenuPayload) => callback(payload)
+    ipcRenderer.on('browserPage:contextMenu', handler)
+    return () => { ipcRenderer.removeListener('browserPage:contextMenu', handler) }
+  },
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => {
     ipcRenderer.send('pageAutomation:response', payload)
   },
@@ -941,6 +948,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_e: Electron.IpcRendererEvent, event: { url: string }) => callback(event)
     ipcRenderer.on('browser:openUrlInDock', handler)
     return () => { ipcRenderer.removeListener('browser:openUrlInDock', handler) }
+  },
+  onWorkspaceOpenTab: (callback: (event: { kind: string; payload?: Record<string, unknown> }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { kind: string; payload?: Record<string, unknown> }) => callback(event)
+    ipcRenderer.on('workspace:openTab', handler)
+    return () => { ipcRenderer.removeListener('workspace:openTab', handler) }
   },
   getSystemStatus: () => ipcRenderer.invoke('system:getStatus'),
   getComputerUsePermissions: () => ipcRenderer.invoke('permissions:getComputerUse'),

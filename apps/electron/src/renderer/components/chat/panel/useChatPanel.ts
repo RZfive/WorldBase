@@ -15,7 +15,6 @@ import { addSelectionQuote } from './selection-quote-state'
 import { sharedChatPanelState } from './shared-state'
 import { createChatSidebarState } from './sidebar-state'
 import { createChatWorkspaceOptionsState } from './workspace-options-state'
-import { createChatWorkspaceState } from './workspace-state'
 import type { ChatPanelProps } from './types'
 import type { MessageAnnotationLocator, MessageAnnotationTurn } from '../types'
 
@@ -64,16 +63,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     planModeActive,
     computerUseEnabled,
     computerUsePermissionGranted,
-    syncingProviderOptions,
-    documentDockVisible,
-    documentWorkspaceDocuments,
-    documentWorkspaceActiveFilePath,
-    documentWorkspaceWidth,
-    folderWorkspaceVisible,
-    folderWorkspaceRootPath,
-    folderWorkspaceRootName,
-    folderWorkspaceActiveFilePath,
-    folderWorkspaceWidth
+    syncingProviderOptions
   } = sharedChatPanelState
 
   const {
@@ -88,25 +78,6 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     activeGroupSessionIds,
     conversationTargets
   } = sharedChatPanelState
-  const {
-    applyDocumentWorkspaceState,
-    applyFolderWorkspaceState,
-    buildCurrentDocumentWorkspaceState,
-    buildCurrentFolderWorkspaceState,
-    buildOutgoingMessagesWithDocumentWorkspaceContext,
-    resetDocumentWorkspaceState,
-    resetFolderWorkspaceState
-  } = createChatWorkspaceState({
-    documentDockVisible,
-    documentWorkspaceDocuments,
-    documentWorkspaceActiveFilePath,
-    documentWorkspaceWidth,
-    folderWorkspaceRootPath,
-    folderWorkspaceRootName,
-    folderWorkspaceActiveFilePath,
-    folderWorkspaceWidth
-  })
-
   const isLoading = computed(() => {
     return currentConversationId.value ? streamingConvIds.has(currentConversationId.value) : false
   })
@@ -238,9 +209,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     selectedChannelBindingId,
     shouldUseConversationProviderOverride,
     conversationTargets,
-    getPinnedContextTitle,
-    buildCurrentDocumentWorkspaceState,
-    buildCurrentFolderWorkspaceState
+    getPinnedContextTitle
   })
 
   const {
@@ -388,8 +357,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     openGroupWorkspaceConversation,
     prepareLongTermGoalWorkspace,
     startOptimizationConversation,
-    updateDocumentWorkspaceState,
-    updateFolderWorkspaceState
+    updateFolderWorkspaceState,
+    updateWorkspaceTabState
   } = createChatConversationNavigation({
     t,
     messages,
@@ -425,12 +394,6 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     loadConversations,
     saveConversation: doSaveConversation,
     setConversationTarget,
-    applyDocumentWorkspaceState,
-    applyFolderWorkspaceState,
-    buildCurrentDocumentWorkspaceState,
-    buildCurrentFolderWorkspaceState,
-    resetDocumentWorkspaceState,
-    resetFolderWorkspaceState,
     resetTransientStreamState
   })
 
@@ -508,8 +471,6 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     unreadConversationIds,
     setConversationTarget,
     resolveAssistantSpeakerName,
-    buildOutgoingMessagesWithDocumentWorkspaceContext,
-    buildCurrentFolderWorkspaceState,
     saveConversation: (conversationId, chatMessages) => doSaveConversation(conversationId, chatMessages),
     resetTransientStreamState
   })
@@ -627,15 +588,6 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     deleteConversation,
     deleteLongTermGoal,
     cancelEditMessage,
-    documentDockVisible,
-    documentWorkspaceActiveFilePath,
-    documentWorkspaceDocuments,
-    documentWorkspaceWidth,
-    folderWorkspaceActiveFilePath,
-    folderWorkspaceRootName,
-    folderWorkspaceRootPath,
-    folderWorkspaceVisible,
-    folderWorkspaceWidth,
     editUserMessage: submitEdit,
     editingMessageId,
     filePreview,
@@ -719,8 +671,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     toggleComputerUse,
     toggleSkill,
     clearSkills,
-    updateDocumentWorkspaceState,
     updateFolderWorkspaceState,
+    updateWorkspaceTabState,
     uploadFeedback,
     addAttachments,
     addSelectionQuoteToInput,

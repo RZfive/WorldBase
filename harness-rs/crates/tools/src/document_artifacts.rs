@@ -895,6 +895,12 @@ pub fn ensure_render_preview(workspace: &Path, id: &str) -> Result<Option<Docume
             "status": "ready",
             "generatedAt": generated_at,
         }),
+        "md" | "markdown" => json!({
+            "kind": "structured",
+            "source": "generated",
+            "status": "ready",
+            "generatedAt": generated_at,
+        }),
         "docx" | "doc" => json!({
             "kind": "structured",
             "source": "fallback",

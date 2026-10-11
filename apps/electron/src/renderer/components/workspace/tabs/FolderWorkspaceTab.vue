@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
-import { renderMarkdown } from '../markdown'
+import { renderMarkdown } from '../../chat/markdown'
+import type { WorkspaceTabInstance } from '../tab-registry'
 
 type WorkspaceState = ConversationFolderWorkspaceState
 type WorkspaceEntry = FolderWorkspaceFileEntry
@@ -23,31 +24,27 @@ interface TemplateHighlightState {
 }
 
 const props = withDefaults(defineProps<{
-  visible: boolean
+  /** The owning workspace tab instance. */
+  tab: WorkspaceTabInstance
   rootPath?: string | null
   rootName?: string | null
   activeFilePath?: string | null
-  workspaceWidth?: number
 }>(), {
   rootPath: null,
   rootName: null,
-  activeFilePath: null,
-  workspaceWidth: 980
+  activeFilePath: null
 })
 
 const emit = defineEmits<{
-  (e: 'close'): void
   (e: 'insertSelectionTag', tag: string): void
   (e: 'updateWorkspace', state: WorkspaceState | null): void
 }>()
 
-const workspaceRoot = ref<HTMLElement | null>(null)
 const treeListRef = ref<HTMLElement | null>(null)
 const fileSearchInputRef = ref<HTMLInputElement | null>(null)
 const codePreviewRef = ref<HTMLElement | null>(null)
 const codeScrollRef = ref<HTMLElement | null>(null)
 const codeSelectionToolbarRef = ref<HTMLElement | null>(null)
-const workspaceWidth = ref(props.workspaceWidth)
 const currentRootPath = ref<string | null>(props.rootPath || null)
 const currentRootName = ref<string | null>(props.rootName || null)
 const currentActiveFilePath = ref<string | null>(props.activeFilePath || null)
@@ -65,20 +62,11 @@ const isLoadingFile = ref(false)
 const workspaceError = ref('')
 const fileError = ref('')
 const promptedForOpen = ref(false)
+/** Mirrors onActivated/onDeactivated so cached (KeepAlive) tabs stay passive. */
+const isActiveTab = ref(false)
 
-const CONVERSATION_SIDEBAR_WIDTH = 252
-const MIN_CHAT_MAIN_WIDTH = 640
-const WORKSPACE_RESIZE_HANDLE_WIDTH = 12
 const SIDEBAR_WIDTH = 280
-const PREVIEW_MIN_WIDTH = 420
-const DEFAULT_WORKSPACE_WIDTH = 980
-const MIN_WORKSPACE_WIDTH = SIDEBAR_WIDTH + PREVIEW_MIN_WIDTH + WORKSPACE_RESIZE_HANDLE_WIDTH
-const MAX_WORKSPACE_WIDTH = 1320
 
-let resizeStartX = 0
-let resizeStartWidth = 0
-let resizing = false
-let layoutObserver: ResizeObserver | null = null
 let workspaceShortcutsBound = false
 let toolbarPositionFrame: number | null = null
 let workspaceChangeCleanup: (() => void) | null = null
@@ -439,21 +427,6 @@ function handleWorkspaceKeydown (event: KeyboardEvent): void {
   }
 }
 
-function getChatPanelWidth (): number {
-  return workspaceRoot.value?.parentElement?.clientWidth || Math.max(0, window.innerWidth - CONVERSATION_SIDEBAR_WIDTH)
-}
-
-function getMaxWorkspaceWidth (): number {
-  const maxByParent = getChatPanelWidth() - MIN_CHAT_MAIN_WIDTH
-  return Math.max(SIDEBAR_WIDTH + 320, Math.min(MAX_WORKSPACE_WIDTH, Math.round(maxByParent)))
-}
-
-function clampWorkspaceWidth (value: number): number {
-  const maxWorkspaceWidth = getMaxWorkspaceWidth()
-  const minWorkspaceWidth = Math.min(MIN_WORKSPACE_WIDTH, maxWorkspaceWidth)
-  return Math.min(maxWorkspaceWidth, Math.max(minWorkspaceWidth, Math.round(value)))
-}
-
 function emitWorkspaceState (): void {
   if (!currentRootPath.value) {
     emit('updateWorkspace', null)
@@ -463,8 +436,7 @@ function emitWorkspaceState (): void {
   emit('updateWorkspace', {
     rootPath: currentRootPath.value,
     rootName: currentRootName.value || currentRootPath.value,
-    activeFilePath: currentActiveFilePath.value || undefined,
-    width: workspaceWidth.value
+    activeFilePath: currentActiveFilePath.value || undefined
   })
 }
 
@@ -498,7 +470,7 @@ function handleFolderWorkspaceChanged (event: FolderWorkspaceChangeEvent): void 
     ? currentActiveFilePath.value
     : (currentActiveFilePath.value && currentActiveFilePath.value !== event.filePath ? currentActiveFilePath.value : event.filePath)
 
-  if (!props.visible) {
+  if (!isActiveTab.value) {
     workspaceTreeDirty = true
     if (preferredFilePath) {
       pendingWorkspaceRefreshFilePath = preferredFilePath
@@ -555,11 +527,10 @@ function getLineNumberFromElement (element: Element | null): number | null {
 }
 
 function getCodeLineElementFromNode (node: Node | null): HTMLElement | null {
-  const preview = codePreviewRef.value
-  if (!node || !preview) return null
+  if (!node || !codePreviewRef.value) return null
   const element = node instanceof Element ? node : node.parentElement
   const lineElement = element?.closest<HTMLElement>('.code-line') || null
-  if (!lineElement || !preview.contains(lineElement)) return null
+  if (!lineElement || !codePreviewRef.value.contains(lineElement)) return null
   return lineElement
 }
 
@@ -658,53 +629,16 @@ function insertCodeSelectionTag (): void {
   emit('insertSelectionTag', tag)
 }
 
-function startResize (event: MouseEvent): void {
-  resizeStartX = event.clientX
-  resizeStartWidth = clampWorkspaceWidth(workspaceWidth.value)
-  resizing = true
-  document.addEventListener('mousemove', onResizeMove)
-  document.addEventListener('mouseup', stopResize)
-  document.body.style.cursor = 'ew-resize'
-  document.body.style.userSelect = 'none'
+function bindWorkspaceShortcuts (): void {
+  if (workspaceShortcutsBound) return
+  document.addEventListener('keydown', handleWorkspaceKeydown)
+  workspaceShortcutsBound = true
 }
 
-function onResizeMove (event: MouseEvent): void {
-  const delta = resizeStartX - event.clientX
-  workspaceWidth.value = clampWorkspaceWidth(resizeStartWidth + delta)
-}
-
-function stopResize (): void {
-  document.removeEventListener('mousemove', onResizeMove)
-  document.removeEventListener('mouseup', stopResize)
-  document.body.style.cursor = ''
-  document.body.style.userSelect = ''
-  if (!resizing) return
-  resizing = false
-  emitWorkspaceState()
-}
-
-function bindLayoutObserver (): void {
-  if (typeof ResizeObserver === 'undefined') return
-  const parent = workspaceRoot.value?.parentElement
-  if (!parent) return
-  layoutObserver?.disconnect()
-  layoutObserver = new ResizeObserver(() => {
-    if (resizing) return
-    workspaceWidth.value = clampWorkspaceWidth(workspaceWidth.value)
-  })
-  layoutObserver.observe(parent)
-}
-
-async function syncWorkspaceWidthToLayout (preferredWidth?: number): Promise<void> {
-  if (resizing || !props.visible) return
-  const desiredWidth = typeof preferredWidth === 'number' && Number.isFinite(preferredWidth)
-    ? preferredWidth
-    : workspaceWidth.value
-
-  await nextTick()
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-  if (resizing || !props.visible || !workspaceRoot.value?.parentElement) return
-  workspaceWidth.value = clampWorkspaceWidth(desiredWidth)
+function unbindWorkspaceShortcuts (): void {
+  if (!workspaceShortcutsBound) return
+  document.removeEventListener('keydown', handleWorkspaceKeydown)
+  workspaceShortcutsBound = false
 }
 
 async function loadWorkspaceTree (preferredFilePath?: string | null): Promise<void> {
@@ -792,76 +726,37 @@ async function openFile (item: WorkspaceEntry, options?: { persist?: boolean }):
   }
 }
 
-watch(
-  () => props.workspaceWidth,
-  (width) => {
-    if (typeof width !== 'number' || resizing) return
-    workspaceWidth.value = props.visible && workspaceRoot.value?.parentElement
-      ? clampWorkspaceWidth(width)
-      : Math.round(width)
-  },
-  { immediate: true }
-)
+/** Copies the conversation-bound folder state into the tab and reloads what changed. */
+async function syncFromExternalProps (): Promise<void> {
+  const rootPath = props.rootPath || null
+  const rootName = props.rootName || null
+  const activeFilePath = props.activeFilePath || null
+  const previousRootPath = currentRootPath.value
+  const previousActiveFilePath = currentActiveFilePath.value
 
-watch(
-  () => props.visible,
-  async (visible) => {
-    if (!visible) {
-      promptedForOpen.value = false
-      stopResize()
-      if (workspaceShortcutsBound) {
-        document.removeEventListener('keydown', handleWorkspaceKeydown)
-        workspaceShortcutsBound = false
-      }
-      layoutObserver?.disconnect()
-      layoutObserver = null
-      return
-    }
+  currentRootPath.value = rootPath
+  currentRootName.value = rootName
+  currentActiveFilePath.value = activeFilePath
 
-    if (!workspaceShortcutsBound) {
-      document.addEventListener('keydown', handleWorkspaceKeydown)
-      workspaceShortcutsBound = true
+  if (!isActiveTab.value || !rootPath) return
+  if (rootPath !== previousRootPath) {
+    expandedDirs.value = new Set()
+    await loadWorkspaceTree(activeFilePath)
+    return
+  }
+  if (activeFilePath && activeFilePath !== previousActiveFilePath && selectedFile.value?.filePath !== activeFilePath) {
+    const entry = findEntry(fileTree.value, activeFilePath)
+    if (entry?.type === 'file') {
+      await openFile(entry, { persist: false })
     }
-    await nextTick()
-    bindLayoutObserver()
-    bindWorkspaceChangeListener()
-    await syncWorkspaceWidthToLayout(props.workspaceWidth)
-    if (currentRootPath.value && (workspaceTreeDirty || fileTree.value.length === 0)) {
-      workspaceTreeDirty = false
-      await loadWorkspaceTree(pendingWorkspaceRefreshFilePath || currentActiveFilePath.value)
-      pendingWorkspaceRefreshFilePath = null
-      return
-    }
-    if (!currentRootPath.value && !promptedForOpen.value) {
-      promptedForOpen.value = true
-      await chooseFolder()
-    }
-  },
-  { immediate: true }
-)
+  }
+}
 
 watch(
   () => [props.rootPath, props.rootName, props.activeFilePath] as const,
-  async ([rootPath, rootName, activeFilePath], previous) => {
-    const previousRootPath = previous?.[0]
-    const previousActiveFilePath = previous?.[2]
-    currentRootPath.value = rootPath || null
-    currentRootName.value = rootName || null
-    currentActiveFilePath.value = activeFilePath || null
-    if (!props.visible || !currentRootPath.value) return
-    if (rootPath !== previousRootPath) {
-      expandedDirs.value = new Set()
-      await loadWorkspaceTree(activeFilePath || null)
-      return
-    }
-    if (activeFilePath && activeFilePath !== previousActiveFilePath && selectedFile.value?.filePath !== activeFilePath) {
-      const entry = findEntry(fileTree.value, activeFilePath)
-      if (entry?.type === 'file') {
-        await openFile(entry, { persist: false })
-      }
-    }
-  },
-  { immediate: true }
+  () => {
+    void syncFromExternalProps()
+  }
 )
 
 watch(searchResults, (results) => {
@@ -875,15 +770,54 @@ watch(normalizedCodeSelection, (selection) => {
   queueCodeSelectionToolbarPositionUpdate()
 }, { flush: 'post' })
 
+async function handleTabActivated (): Promise<void> {
+  if (isActiveTab.value) return
+  isActiveTab.value = true
+  bindWorkspaceShortcuts()
+  bindWorkspaceChangeListener()
+  await syncFromExternalProps()
+  if (currentRootPath.value && (workspaceTreeDirty || fileTree.value.length === 0)) {
+    workspaceTreeDirty = false
+    await loadWorkspaceTree(pendingWorkspaceRefreshFilePath || currentActiveFilePath.value)
+    pendingWorkspaceRefreshFilePath = null
+    return
+  }
+  if (!currentRootPath.value && !promptedForOpen.value) {
+    promptedForOpen.value = true
+    await chooseFolder()
+  }
+}
+
+function handleTabDeactivated (): void {
+  if (!isActiveTab.value) return
+  isActiveTab.value = false
+  promptedForOpen.value = false
+  unbindWorkspaceShortcuts()
+}
+
+async function copyRootPath (): Promise<void> {
+  if (!currentRootPath.value) return
+  try {
+    await navigator.clipboard.writeText(currentRootPath.value)
+  } catch {
+    // Clipboard writes can fail without permissions; the action is best-effort.
+  }
+}
+
+onActivated(() => {
+  void handleTabActivated()
+})
+
+onDeactivated(() => {
+  handleTabDeactivated()
+})
+
 onMounted(() => {
   bindWorkspaceChangeListener()
-  if (!props.visible) return
-  bindLayoutObserver()
-  void syncWorkspaceWidthToLayout(props.workspaceWidth)
 })
 
 onBeforeUnmount(() => {
-  stopResize()
+  handleTabDeactivated()
   if (workspaceRefreshTimer !== null) {
     window.clearTimeout(workspaceRefreshTimer)
     workspaceRefreshTimer = null
@@ -894,46 +828,22 @@ onBeforeUnmount(() => {
   }
   workspaceChangeCleanup?.()
   workspaceChangeCleanup = null
-  if (workspaceShortcutsBound) {
-    document.removeEventListener('keydown', handleWorkspaceKeydown)
-    workspaceShortcutsBound = false
-  }
-  layoutObserver?.disconnect()
-  layoutObserver = null
+})
+
+defineExpose({
+  chooseFolder,
+  refreshWorkspace,
+  copyRootPath
 })
 </script>
 
 <template>
-  <aside
-    v-if="visible"
-    ref="workspaceRoot"
-    class="folder-workspace"
-    :style="{ width: `${workspaceWidth}px`, flexBasis: `${workspaceWidth}px`, maxWidth: `${workspaceWidth}px` }"
-  >
-    <div class="workspace-resize-handle" @mousedown.prevent="startResize">
-      <div class="resize-grip"></div>
-    </div>
-
+  <div class="folder-workspace-tab">
     <div class="workspace-shell">
       <header class="workspace-header">
         <div class="workspace-heading">
-          <h3 class="workspace-title">{{ $t('chatUi.codeWorkspace') }}</h3>
+          <h3 class="workspace-title">{{ $t('chatUi.workspaceTabFolder') }}</h3>
           <p class="workspace-subtitle" :title="currentRootPath || undefined">{{ currentRootName || $t('chatUi.noFolderSelected') }}</p>
-        </div>
-        <div class="workspace-header-actions">
-          <button class="workspace-icon-btn" type="button" :title="$t('chatUi.chooseFolder')" @click="chooseFolder">
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M3.5 6.5A2.5 2.5 0 0 1 6 4h4l2 2h6A2.5 2.5 0 0 1 20.5 8.5v8A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5v-10Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-              <path d="M12 10v5M9.5 12.5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <button class="workspace-icon-btn" type="button" :title="$t('chatUi.refresh')" :disabled="!currentRootPath || isLoadingTree" @click="refreshWorkspace">
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M20 12a8 8 0 0 1-13.66 5.66M4 12A8 8 0 0 1 17.66 6.34" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-              <path d="M17 3.5h2.8V6.3M7 20.5H4.2V17.7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
-          <button class="workspace-close" type="button" :title="$t('chatUi.closeCodeWorkspace')" @click="emit('close')">×</button>
         </div>
       </header>
 
@@ -1061,57 +971,36 @@ onBeforeUnmount(() => {
         </main>
       </div>
     </div>
-  </aside>
+  </div>
 </template>
 
 <style scoped>
-.folder-workspace {
-  position: relative;
-  flex: 0 0 auto;
-  min-width: 0;
+.folder-workspace-tab {
   height: 100%;
-  border-left: 1px solid var(--app-border);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--app-bg);
   color: var(--app-text);
   overflow: hidden;
 }
 
-.workspace-resize-handle {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  z-index: 3;
-  width: 12px;
-  cursor: ew-resize;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.resize-grip {
-  width: 3px;
-  height: 44px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--app-border) 72%, transparent);
-}
-
 .workspace-shell {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  padding-left: 12px;
-  min-width: 0;
 }
 
 .workspace-header {
-  height: 62px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 14px 10px 16px;
+  padding: 9px 14px;
   border-bottom: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
 }
 
@@ -1142,8 +1031,7 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
 }
 
-.workspace-icon-btn,
-.workspace-close {
+.workspace-icon-btn {
   width: 32px;
   height: 32px;
   border-radius: 8px;
@@ -1156,8 +1044,7 @@ onBeforeUnmount(() => {
   justify-content: center;
 }
 
-.workspace-icon-btn:hover,
-.workspace-close:hover {
+.workspace-icon-btn:hover {
   color: var(--app-text-strong);
   border-color: color-mix(in srgb, var(--app-accent) 36%, var(--app-border));
   background: color-mix(in srgb, var(--app-accent-soft) 38%, var(--app-panel));
@@ -1171,11 +1058,6 @@ onBeforeUnmount(() => {
 .workspace-icon-btn svg {
   width: 17px;
   height: 17px;
-}
-
-.workspace-close {
-  font-size: 1.2rem;
-  line-height: 1;
 }
 
 .workspace-empty {

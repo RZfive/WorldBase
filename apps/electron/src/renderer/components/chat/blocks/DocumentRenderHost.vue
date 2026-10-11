@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DocumentHtmlPreview from './DocumentHtmlPreview.vue'
+import DocumentMarkdownPreview from './DocumentMarkdownPreview.vue'
 import DocumentPdfPreview from './DocumentPdfPreview.vue'
 import DocumentPreview from './DocumentPreview.vue'
 
@@ -16,7 +17,7 @@ interface DocumentNode {
 }
 
 interface DocumentRenderPreview {
-  kind: 'pdf' | 'html' | 'structured'
+  kind: 'pdf' | 'html' | 'markdown' | 'structured'
   source: 'original' | 'generated' | 'fallback'
   status: 'ready' | 'unavailable'
   mimeType?: string
@@ -63,6 +64,7 @@ const emit = defineEmits<{
 
 const renderAsset = ref<RenderAssetPayload | null>(null)
 const htmlContent = ref('')
+const markdownSource = ref('')
 const renderLoading = ref(false)
 const renderError = ref('')
 const { t } = useI18n()
@@ -71,6 +73,7 @@ async function loadRenderAsset () {
   const render = props.artifact.render
   renderAsset.value = null
   htmlContent.value = ''
+  markdownSource.value = ''
 
   if (!render || render.kind === 'structured' || render.status !== 'ready' || !window.electronAPI?.getDocumentRenderData) {
     renderError.value = render?.status === 'unavailable' ? (render.error || '') : ''
@@ -87,12 +90,18 @@ async function loadRenderAsset () {
       return
     }
 
-    if (render.kind === 'html') {
-      htmlContent.value = new TextDecoder().decode(renderAsset.value.bytes)
+    if (render.kind === 'html' || render.kind === 'markdown') {
+      const decoded = new TextDecoder().decode(renderAsset.value.bytes)
+      if (render.kind === 'html') {
+        htmlContent.value = decoded
+      } else {
+        markdownSource.value = decoded
+      }
     }
   } catch (error) {
     renderAsset.value = null
     htmlContent.value = ''
+    markdownSource.value = ''
     renderError.value = (error as Error).message
   } finally {
     renderLoading.value = false
@@ -119,6 +128,14 @@ watch(() => `${props.artifact.id}:${props.artifact.render?.generatedAt || ''}`, 
       <DocumentHtmlPreview
         :key="`${props.artifact.id}:${props.artifact.render?.generatedAt || ''}:html`"
         :html-content="htmlContent"
+        :selections="props.selections"
+        @highlight-selection="emit('highlightSelection', $event)"
+      />
+    </div>
+    <div v-else-if="markdownSource && props.artifact.render?.kind === 'markdown'" class="render-surface">
+      <DocumentMarkdownPreview
+        :key="`${props.artifact.id}:${props.artifact.render?.generatedAt || ''}:markdown`"
+        :markdown-source="markdownSource"
         :selections="props.selections"
         @highlight-selection="emit('highlightSelection', $event)"
       />

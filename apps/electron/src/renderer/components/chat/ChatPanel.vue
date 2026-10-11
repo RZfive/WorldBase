@@ -10,7 +10,10 @@ const emit = defineEmits<ChatPanelEmit>()
   <ChatPanelContainer
     :project-context="props.projectContext"
     :active-page-context="props.activePageContext"
+    :workspace-tab-request="props.workspaceTabRequest"
     @context-consumed="emit('contextConsumed')"
+    @workspace-tab-request-consumed="emit('workspaceTabRequestConsumed')"
+    @page-surface-change="surface => emit('pageSurfaceChange', surface)"
     @open-web-link="(url) => emit('openWebLink', url)"
     @status-change="(status) => emit('statusChange', status)"
     @open-settings="(category, options) => emit('openSettings', category, options)"

@@ -2971,18 +2971,29 @@ async fn doc_preview_ensure(hub: &Arc<Hub>, params: Value) -> Result<Value, Erro
         return Ok(Value::Null);
     };
 
-    // Match Electron's document preview service: once a render is already
-    // ready, return the persisted artifact directly instead of asking the
-    // host to regenerate a DOCX preview on every workbench refresh.
-    if matches!(
+    // Match Electron's document preview service: once a non-structured render
+    // is ready (DOCX/Excel/PPT HTML or the original PDF), return the persisted
+    // artifact directly instead of asking the host to regenerate a preview on
+    // every workbench refresh. Legacy `structured` records never short-circuit
+    // so they get upgraded to a host HTML preview on the next ensure.
+    let host_previewable = matches!(
         current.file_type.to_ascii_lowercase().as_str(),
-        "docx" | "doc"
-    ) && current
+        "docx" | "doc" | "xlsx" | "xls" | "pptx" | "ppt"
+    );
+    let render_kind = current
+        .render
+        .as_ref()
+        .and_then(|render| render.get("kind"))
+        .and_then(Value::as_str);
+    let render_ready = current
         .render
         .as_ref()
         .and_then(|render| render.get("status"))
         .and_then(Value::as_str)
-        == Some("ready")
+        == Some("ready");
+    if host_previewable
+        && render_ready
+        && render_kind != Some("structured")
     {
         // A legacy artifact can say `ready` while its cache file has been
         // removed (manual cleanup, workspace copy, or an interrupted write).
@@ -2999,10 +3010,7 @@ async fn doc_preview_ensure(hub: &Arc<Hub>, params: Value) -> Result<Value, Erro
         }
     }
 
-    let artifact = if matches!(
-        current.file_type.to_ascii_lowercase().as_str(),
-        "docx" | "doc"
-    ) {
+    let artifact = if host_previewable {
         let requested_stream_id = params
             .get("streamId")
             .or_else(|| params.get("stream_id"))

@@ -10,11 +10,13 @@ import ImageStudio from './renderer/components/studio/ImageStudio.vue'
 import SourceViewer from './renderer/components/viewer/SourceViewer.vue'
 import TitleBar from './renderer/components/app/TitleBar.vue'
 import DockBar from './renderer/components/app/DockBar.vue'
-import BrowserWebView from './renderer/components/app/BrowserWebView.vue'
+import BrowserWebView, { type BrowserContextAddPayload } from './renderer/components/app/BrowserWebView.vue'
 import FloatingTaskBubble from './renderer/components/app/FloatingTaskBubble.vue'
 import ProjectWindowShell from './renderer/components/app/ProjectWindowShell.vue'
 import ScheduledTaskReportDialog from './renderer/components/settings/ScheduledTaskReportDialog.vue'
-import type { ChatSurfaceStatusSummary } from './renderer/components/chat/panel/types'
+import type { ChatSurfaceStatusSummary, WorkspacePageSurfaceSummary } from './renderer/components/chat/panel/types'
+import { sharedChatPanelState } from './renderer/components/chat/panel/shared-state'
+import { addWebQuote } from './renderer/components/chat/panel/web-quote-state'
 import type {
   ActivePageAutomationContext,
   BrowserAutomationAction,
@@ -267,17 +269,33 @@ const shouldMountChatShell = computed(() => {
 })
 
 const activePageAutomationContext = computed<ActivePageAutomationContext | null>(() => {
-  if (currentView.value !== 'app') return null
-  if (!activeBrowserPageSurface.value) return null
-
-  return {
-    appId: activeBrowserPageSurface.value.appId,
-    kind: 'browser',
-    title: activeBrowserPageSurface.value.title,
-    url: activeBrowserPageSurface.value.url,
-    origin: activeBrowserPageSurface.value.origin
+  if (currentView.value === 'app' && activeBrowserPageSurface.value) {
+    const browserSurface = activeBrowserPageSurface.value
+    return {
+      appId: browserSurface.appId,
+      kind: 'browser',
+      title: browserSurface.title,
+      url: browserSurface.url,
+      origin: browserSurface.origin || browserSurface.url || null
+    }
   }
+  // No embedded app page: the active workspace browser tab becomes the page
+  // the AI can read and operate, regardless of the current view.
+  const workspaceSurface = workspacePageSurface.value
+  if (workspaceSurface) {
+    return {
+      appId: workspaceSurface.appId,
+      kind: 'browser',
+      title: workspaceSurface.title,
+      url: workspaceSurface.url,
+      origin: resolveUrlOrigin(workspaceSurface.url)
+    }
+  }
+  return null
 })
+
+/** Live surface of the active workspace browser tab, forwarded by the chat panel. */
+const workspacePageSurface = ref<WorkspacePageSurfaceSummary | null>(null)
 
 const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | null }>({
   visible: false,
@@ -290,8 +308,12 @@ let projectChangedCleanup: (() => void) | null = null
 let windowClosedCleanup: (() => void) | null = null
 let projectOpenInShellCleanup: (() => void) | null = null
 let browserOpenInDockCleanup: (() => void) | null = null
+let workspaceOpenTabCleanup: (() => void) | null = null
 let schedulerReportRequestedCleanup: (() => void) | null = null
 let pageAutomationRequestCleanup: (() => void) | null = null
+/** Bumped on every AI-originated workspace tab request; consumed by the chat shell once. */
+let workspaceTabRequestSeq = 0
+const workspaceTabRequest = ref<{ kind: string; payload?: Record<string, unknown>; seq: number } | null>(null)
 let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
 let runningAppsInterval: ReturnType<typeof setInterval> | null = null
@@ -336,13 +358,20 @@ function setBrowserAutomationHandle (appId: string, instance: unknown) {
 }
 
 function getActiveBrowserAutomationHandle (): BrowserAutomationViewHandle | null {
-  const appId = activeEmbeddedProjectId.value
-  if (!appId) return null
+  // Keep in sync with activePageAutomationContext: the embedded app page only
+  // owns the automation target while its view is actually on screen. In every
+  // other state the visible workspace browser tab is the page the tools hit.
+  if (currentView.value === 'app' && activeEmbeddedProjectId.value) {
+    const appState = embeddedApps.value.get(activeEmbeddedProjectId.value)
+    if (appState && appState.kind === 'browser') {
+      const embeddedHandle = browserAutomationHandles.get(activeEmbeddedProjectId.value)
+      if (embeddedHandle) return embeddedHandle
+    }
+  }
 
-  const appState = embeddedApps.value.get(appId)
-  if (!appState || appState.kind !== 'browser') return null
-
-  return browserAutomationHandles.get(appId) || null
+  const workspaceHandle = workspacePageSurface.value?.handle
+  if (workspaceHandle) return workspaceHandle as unknown as BrowserAutomationViewHandle
+  return null
 }
 
 async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelope) {
@@ -779,6 +808,29 @@ function showBrowserAppCtx (payload: { appId: string; x: number; y: number }) {
     y: payload.y,
     app: browserApp
   }
+}
+
+/** Parks page content captured from an embedded browser app and tags it into the composer. */
+function handleBrowserAppContextAdd (payload: BrowserContextAddPayload) {
+  const tag = addWebQuote({
+    url: payload.url,
+    title: payload.title,
+    kind: payload.kind,
+    text: payload.text,
+    selector: payload.selector,
+    tag: payload.tag
+  })
+  const inputText = sharedChatPanelState.inputText
+  const spacer = inputText.value.length > 0 && !/\s$/.test(inputText.value) ? ' ' : ''
+  inputText.value = `${inputText.value}${spacer}${tag} `
+}
+
+/** Reveals the page-operation chat and focuses the composer for AI page requests. */
+function handleBrowserAppAiOperate () {
+  openPageChatOverlay()
+  requestAnimationFrame(() => {
+    window.dispatchEvent(new CustomEvent('world:focus-composer'))
+  })
 }
 
 async function openProjectSource (project: Record<string, unknown>) {
@@ -1266,6 +1318,14 @@ onMounted(async () => {
     })
   }
 
+  if (window.electronAPI?.onWorkspaceOpenTab) {
+    workspaceOpenTabCleanup = window.electronAPI.onWorkspaceOpenTab(({ kind, payload }) => {
+      if (currentView.value !== 'chat') openChat()
+      workspaceTabRequestSeq += 1
+      workspaceTabRequest.value = { kind, payload, seq: workspaceTabRequestSeq }
+    })
+  }
+
   if (window.electronAPI?.onScheduledTaskReportRequested) {
     schedulerReportRequestedCleanup = window.electronAPI.onScheduledTaskReportRequested((report) => {
       scheduledTaskReport.value = report
@@ -1294,6 +1354,7 @@ onUnmounted(() => {
   windowClosedCleanup?.()
   projectOpenInShellCleanup?.()
   browserOpenInDockCleanup?.()
+  workspaceOpenTabCleanup?.()
   schedulerReportRequestedCleanup?.()
   pageAutomationRequestCleanup?.()
 })
@@ -1355,6 +1416,8 @@ onUnmounted(() => {
                   class="embedded-browser-view"
                   @state-change="handleBrowserAppStateChange"
                   @context-menu="showBrowserAppCtx"
+                  @context-add="handleBrowserAppContextAdd"
+                  @ai-operate-request="handleBrowserAppAiOperate"
                 />
                 <div v-else class="embedded-unavailable">
                   <p>{{ $t('appShell.embeddedAppStartFailed') }}</p>
@@ -1380,7 +1443,10 @@ onUnmounted(() => {
                 <ChatPanel
                   :projectContext="chatProjectContext"
                   :active-page-context="activePageAutomationContext"
+                  :workspace-tab-request="workspaceTabRequest"
                   @contextConsumed="chatProjectContext = null"
+                  @workspace-tab-request-consumed="workspaceTabRequest = null"
+                  @page-surface-change="workspacePageSurface = $event"
                   @open-web-link="openWebLinkInApp"
                   @status-change="handleChatSurfaceStatusChange"
                   @open-settings="(category, options) => openSettingsCategory(category, options)"

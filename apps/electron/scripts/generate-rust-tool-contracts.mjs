@@ -45,8 +45,8 @@ const names = tools.map(tool => tool.name)
 if (new Set(names).size !== names.length) {
   throw new Error('Electron tool registry produced duplicate public tool names')
 }
-if (tools.length !== 68) {
-  throw new Error(`Electron tool registry produced ${tools.length} public tools; expected exactly 68`)
+if (tools.length !== 69) {
+  throw new Error(`Electron tool registry produced ${tools.length} public tools; expected exactly 69`)
 }
 for (const tool of tools) {
   if (!tool.name || !tool.description || tool.parameters?.type !== 'object') {

@@ -1181,6 +1181,9 @@ fn project_editing_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
     if tools.has("open_project_app") {
         lines.push("- Use `open_project_app` to present a ready project inside the managed shell instead of launching an unmanaged preview.".into());
     }
+    if tools.has("open_workspace_tab") {
+        lines.push("- Use `open_workspace_tab` to open a folder, document, or browser tab beside the chat when the user wants to follow along with code, a document, or a web page; the browser tab can then be operated with the current-page tools.".into());
+    }
     Some(lines.join("\n"))
 }
 

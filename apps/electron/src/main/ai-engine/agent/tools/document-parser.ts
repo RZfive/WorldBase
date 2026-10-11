@@ -9,6 +9,7 @@ import { parseExcelToNodes } from './document-parser-excel.js'
 import { parseWordToNodes } from './document-parser-word.js'
 import { parsePptxToNodes } from './document-parser-pptx.js'
 import { parsePdfToNodes } from './document-parser-pdf.js'
+import { parseMarkdownToNodes } from './document-parser-markdown.js'
 
 interface ParseDocumentBufferOptions {
   fileName: string
@@ -23,7 +24,9 @@ const EXTENSION_TYPE_MAP: Record<string, DocumentFileType> = {
   '.docx': 'docx',
   '.doc': 'docx',
   '.pptx': 'pptx',
-  '.ppt': 'pptx'
+  '.ppt': 'pptx',
+  '.md': 'md',
+  '.markdown': 'md'
 }
 
 export function detectDocumentType (filePath: string): DocumentFileType {
@@ -63,6 +66,8 @@ async function parseDocumentNodes (fileType: DocumentFileType, buffer: Buffer, f
       return parsePptxToNodes(buffer)
     case 'pdf':
       return parsePdfToNodes(buffer)
+    case 'md':
+      return parseMarkdownToNodes(buffer)
     default:
       throw new Error(`未实现的解析器: ${fileType}`)
   }

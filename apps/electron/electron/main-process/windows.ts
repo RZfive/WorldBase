@@ -107,6 +107,24 @@ export function attachMainWindowWebviewHandlers (win: BrowserWindow): void {
       openWebviewPopupInDock(url)
       return { action: 'deny' }
     })
+
+    // Webview guests swallow the DOM contextmenu; forward the guest-side
+    // params to the host window so BrowserWebView can show its own menu.
+    guestContents.on('context-menu', (_menuEvent, params) => {
+      if (win.isDestroyed() || win.webContents.isDestroyed()) return
+      win.webContents.send('browserPage:contextMenu', {
+        webContentsId: guestContents.id,
+        params: {
+          x: params.x,
+          y: params.y,
+          selectionText: params.selectionText ?? '',
+          linkURL: params.linkURL ?? '',
+          mediaType: params.mediaType ?? 'none',
+          srcURL: params.srcURL ?? '',
+          isEditable: params.isEditable ?? false
+        }
+      })
+    })
   })
 }
 

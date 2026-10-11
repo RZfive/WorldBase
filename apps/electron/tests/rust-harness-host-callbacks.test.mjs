@@ -369,7 +369,7 @@ test('new electronNative tools need no frozen Node registry entry', async () => 
   assert.equal(registrations.some(tool => tool.definition.name === nativeTool.name), false)
 })
 
-test('all 68 canonical Electron tools have an explicit execution owner', async () => {
+test('all 69 canonical Electron tools have an explicit execution owner', async () => {
   const services = createServices({
     documentStore: {},
     skillStore: {},
@@ -396,8 +396,8 @@ test('all 68 canonical Electron tools have an explicit execution owner', async (
     runSubagents: async () => []
   }).getToolDefinitions()
   const canonicalNames = catalog.map(tool => tool.name).sort()
-  assert.equal(canonicalNames.length, 68)
-  assert.equal(new Set(canonicalNames).size, 68)
+  assert.equal(canonicalNames.length, 69)
+  assert.equal(new Set(canonicalNames).size, 69)
 
   const registrations = await collectHostTools(
     createHarnessEngine(services, canonicalNames),

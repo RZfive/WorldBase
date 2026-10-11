@@ -1679,7 +1679,7 @@ export function setupIPC (): void {
     const dialogOptions = {
       title: t('mainDialog.importDocumentTitle'),
       filters: [
-        { name: t('mainDialog.documentFilterName'), extensions: ['pdf', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'] }
+        { name: t('mainDialog.documentFilterName'), extensions: ['pdf', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt', 'md', 'markdown'] }
       ],
       properties: ['openFile' as const, 'multiSelections' as const]
     }

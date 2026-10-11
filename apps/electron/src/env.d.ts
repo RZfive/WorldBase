@@ -10,6 +10,7 @@ type AppUpdateState = import('./shared/app-update-types.js').AppUpdateState
 type AppUpdateWebsiteKind = import('./shared/app-update-types.js').AppUpdateWebsiteKind
 type PageAutomationRequestEnvelope = import('./shared/page-automation-types.js').PageAutomationRequestEnvelope
 type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js').PageAutomationResponseEnvelope
+type BrowserPageContextMenuPayload = import('./shared/page-automation-types.js').BrowserPageContextMenuPayload
 type ImageStudioGenerateRequest = import('./shared/image-studio-types.js').ImageStudioGenerateRequest
 type ImageStudioGenerateResponse = import('./shared/image-studio-types.js').ImageStudioGenerateResponse
 type ImageStudioTask = import('./shared/image-studio-types.js').ImageStudioTask
@@ -103,6 +104,7 @@ interface ConversationSummary {
   groupId?: string
   channelBindingId?: string
   folderWorkspace?: ConversationFolderWorkspaceState
+  workspace?: ConversationWorkspaceState
   forkedFromConversationId?: string
   forkedFromMessageId?: string
   rootConversationId?: string
@@ -119,6 +121,27 @@ interface ConversationDocumentWorkspaceState {
   documents?: ConversationDocumentReference[]
   activeFilePath?: string
   width?: number
+}
+
+/** Serialized form of one tab inside the conversation workspace snapshot. */
+interface ConversationWorkspaceTabState {
+  id?: string
+  kind: string
+  title?: string
+  state?: Record<string, unknown>
+}
+
+/** Conversation-scoped snapshot of the tabbed right-side workspace panel. */
+interface ConversationWorkspaceState {
+  tabs?: ConversationWorkspaceTabState[]
+  activeTabId?: string | null
+  width?: number
+}
+
+/** Sent by the main process (agent tool) to open a tab in the workspace panel. */
+interface WorkspaceOpenTabEvent {
+  kind: string
+  payload?: Record<string, unknown>
 }
 
 type AgentReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
@@ -552,6 +575,7 @@ interface ConversationData extends ConversationSummary {
   }>
   documentWorkspace?: ConversationDocumentWorkspaceState
   folderWorkspace?: ConversationFolderWorkspaceState
+  workspace?: ConversationWorkspaceState
 }
 
 interface AIProviderConfig {
@@ -987,10 +1011,10 @@ interface ScheduledTaskRunReport {
 }
 
 // Document types (renderer-side DTOs)
-type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'unknown'
+type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'md' | 'unknown'
 
 interface DocumentRenderPreviewDTO {
-  kind: 'pdf' | 'html' | 'structured'
+  kind: 'pdf' | 'html' | 'markdown' | 'structured'
   source: 'original' | 'generated' | 'fallback'
   status: 'ready' | 'unavailable'
   mimeType?: string
@@ -1051,6 +1075,7 @@ interface ElectronAPI {
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
   onStreamEvent: (sessionId: string, callback: (event: StreamEvent) => void) => () => void
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
+  onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
   getAboutInfo: () => Promise<AppAboutInfo>
   getAppUpdateState: () => Promise<AppUpdateState>
@@ -1153,6 +1178,7 @@ interface ElectronAPI {
   onProjectWindowClosed: (callback: (event: { projectId: string }) => void) => () => void
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
   onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
+  onWorkspaceOpenTab: (callback: (event: WorkspaceOpenTabEvent) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
   getComputerUsePermissions: () => Promise<import('./shared/computer-use-permissions').ComputerUsePermissionStatus>
   requestComputerUsePermissions: (target?: import('./shared/computer-use-permissions').ComputerUsePermissionTarget) => Promise<{ granted: boolean }>

@@ -83,6 +83,21 @@ export type PageAutomationRendererRequest =
 
 export type PageAutomationRendererResult = BrowserAutomationSnapshot | BrowserAutomationActionResult
 
+export interface BrowserPageContextMenuParams {
+  x: number
+  y: number
+  selectionText: string
+  linkURL: string
+  mediaType: 'none' | 'image' | 'audio' | 'video' | 'canvas' | 'file' | 'text'
+  srcURL: string
+  isEditable: boolean
+}
+
+export interface BrowserPageContextMenuPayload {
+  webContentsId: number
+  params: BrowserPageContextMenuParams
+}
+
 export interface PageAutomationRequestEnvelope {
   requestId: string
   request: PageAutomationRendererRequest

@@ -114,7 +114,7 @@ export class ChatHistoryStorage {
       return value
         .filter(item => item && typeof item.id === 'string' && typeof item.updatedAt === 'string')
         .map(item => {
-          const { searchText: _searchText, messages: _messages, documentWorkspace: _documents, folderWorkspace: _folder, ...catalogItem } = item
+          const { searchText: _searchText, messages: _messages, documentWorkspace: _documents, folderWorkspace: _folder, workspace: _workspace, ...catalogItem } = item
           return this.applyMetadata({ ...catalogItem }, this.readMetadata(item.id))
         })
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -125,12 +125,12 @@ export class ChatHistoryStorage {
     if (!this.summaries) return
     const rows = [...this.summaries.values()]
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-      .map(({ folderWorkspace: _folder, ...row }) => row)
+      .map(({ folderWorkspace: _folder, workspace: _workspace, ...row }) => row)
     this.writeAtomic(this.catalogPath, rows)
   }
 
   private summary (conversation: Conversation, index = buildConversationIndex(conversation.messages || [])): ConversationListEntry {
-    const { messages: _messages, documentWorkspace: _documents, folderWorkspace: _folder, ...metadata } = conversation
+    const { messages: _messages, documentWorkspace: _documents, folderWorkspace: _folder, workspace: _workspace, ...metadata } = conversation
     return { ...metadata, ...index }
   }
 

@@ -8,6 +8,11 @@ import type {
 } from '../../../../shared/agent-workspace-types.js'
 import type { ActivePageAutomationContext } from '../../../../shared/page-automation-types.js'
 import type {
+  BrowserAutomationAction,
+  BrowserAutomationActionResult,
+  BrowserAutomationSnapshot
+} from '../../../../shared/page-automation-types.js'
+import type {
   ChatMessage,
   ChatMessageBlock,
   FilePreviewState,
@@ -57,6 +62,8 @@ export interface ConversationSummary {
   groupId?: string
   channelBindingId?: string
   folderWorkspace?: ConversationFolderWorkspaceState
+  /** Tabbed right-side workspace snapshot (folder/document migrate into it). */
+  workspace?: ConversationWorkspaceState
   /** 直接父会话 id（fork / 编辑分叉时写入） */
   forkedFromConversationId?: string
   /** 分叉锚点：父会话中被复制前缀的最后一条消息 id */
@@ -75,6 +82,32 @@ export interface ChatPanelProps {
   computerUseEnabled?: boolean
   /** null until the first macOS permission query lands; false gates the toggle. */
   computerUsePermissionGranted?: boolean | null
+  /** Latest AI-originated workspace tab open request; consumed on first watch. */
+  workspaceTabRequest?: { kind: string; payload?: Record<string, unknown>; seq: number } | null
+}
+
+export interface ChatPanelEmit {
+  (e: 'contextConsumed'): void
+  (e: 'workspaceTabRequestConsumed'): void
+  (e: 'pageSurfaceChange', surface: WorkspacePageSurfaceSummary | null): void
+  (e: 'openWebLink', url: string): void
+  (e: 'statusChange', status: ChatSurfaceStatusSummary): void
+  (e: 'openSettings', category?: string, options?: OpenSettingsOptions): void
+}
+
+/**
+ * Live page state of the active workspace browser tab, forwarded to the app
+ * shell so page automation tools can target it when no embedded app page is
+ * active.
+ */
+export interface WorkspacePageSurfaceSummary {
+  appId: string
+  title: string
+  url: string
+  handle: {
+    captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
+    runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
+  } | null
 }
 
 export interface ChatSurfaceStatusSummary {
@@ -89,13 +122,6 @@ export interface ChatSurfaceStatusSummary {
 export interface OpenSettingsOptions {
   /** Open the provider panel straight into "use this template" for the given template id. */
   useProviderTemplate?: string
-}
-
-export interface ChatPanelEmit {
-  (e: 'contextConsumed'): void
-  (e: 'openWebLink', url: string): void
-  (e: 'statusChange', status: ChatSurfaceStatusSummary): void
-  (e: 'openSettings', category?: string, options?: OpenSettingsOptions): void
 }
 
 export interface SidebarAgentItem {
@@ -219,6 +245,7 @@ export interface BackgroundStreamState {
   channelBindingId: string | null
   documentWorkspace?: ConversationDocumentWorkspaceState
   folderWorkspace?: ConversationFolderWorkspaceState
+  workspace?: ConversationWorkspaceState
 }
 
 export interface UploadedAttachmentResult {

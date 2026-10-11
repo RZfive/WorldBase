@@ -12,6 +12,12 @@ import {
   SELECTION_QUOTE_TAG_PATTERN
 } from './selection-quote-state'
 import {
+  buildWebQuotesPrompt,
+  extractWebQuoteRefs,
+  pruneWebQuotes,
+  WEB_QUOTE_TAG_PATTERN
+} from './web-quote-state'
+import {
   appendFinalContentBlock,
   createAttachmentBlock,
   createContentBlock,
@@ -49,6 +55,10 @@ import {
   markAssistantMessageStopped,
   type AssistantStopCopy
 } from './message-runtime'
+import {
+  buildCurrentFolderWorkspaceState,
+  buildOutgoingMessagesWithDocumentWorkspaceContext
+} from '../../workspace/workspace-store'
 import type {
   AIExecutionAuthMode,
   BackgroundStreamState,
@@ -95,8 +105,6 @@ interface ChatMessageSenderOptions {
   unreadConversationIds: Set<string>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
   resolveAssistantSpeakerName: (sourceText: string) => string
-  buildOutgoingMessagesWithDocumentWorkspaceContext: (sourceMessages: ChatMessage[]) => Promise<Array<{ role: string; content: ChatMessage['content'] }>>
-  buildCurrentFolderWorkspaceState: () => ConversationFolderWorkspaceState | undefined
   saveConversation: (conversationId: string, messages: ChatMessage[]) => Promise<void>
   resetTransientStreamState: () => void
 }
@@ -177,8 +185,6 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     unreadConversationIds,
     setConversationTarget,
     resolveAssistantSpeakerName,
-    buildOutgoingMessagesWithDocumentWorkspaceContext,
-    buildCurrentFolderWorkspaceState,
     saveConversation: doSaveConversation,
     resetTransientStreamState
   } = options
@@ -264,7 +270,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       const { regionIds: referencedDocumentRegionIds, normalizedText: textAfterDocuments } = extractDocumentTagRefs(textAfterProject, DOCUMENT_TAG_PATTERN)
       const codeExtract = extractCodeTagRefs(textAfterDocuments, CODE_TAG_PATTERN)
       const quoteExtract = extractSelectionQuoteRefs(codeExtract.normalizedText, SELECTION_QUOTE_TAG_PATTERN)
-      const normalizedText = quoteExtract.normalizedText
+      const webQuoteExtract = extractWebQuoteRefs(quoteExtract.normalizedText, WEB_QUOTE_TAG_PATTERN)
+      const normalizedText = webQuoteExtract.normalizedText
 
       let docSelectionsPrompt = ''
       if (referencedDocumentRegionIds.length > 0 && window.electronAPI?.buildDocumentSelectionsPrompt) {
@@ -276,7 +283,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       const quotesPrompt = buildSelectionQuotesPrompt(quoteExtract.quoteIds)
       pruneSelectionQuotes([])
 
-      const combinedText = [quotesPrompt, normalizedText, filePrompt, docSelectionsPrompt].filter(Boolean).join('\n\n')
+      const webQuotesPrompt = buildWebQuotesPrompt(webQuoteExtract.quoteIds)
+      pruneWebQuotes([])
+
+      const combinedText = [quotesPrompt, webQuotesPrompt, normalizedText, filePrompt, docSelectionsPrompt].filter(Boolean).join('\n\n')
 
       if (normalizedText) {
         userBlocks.push(createContentBlock(normalizedText))

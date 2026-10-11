@@ -22,6 +22,7 @@ import { toolGetProjectStatus } from './tool-get-project-status.js'
 import { toolStartProjectServer } from './tool-start-server.js'
 import { toolRestartProjectServer } from './tool-restart-server.js'
 import { toolOpenProjectApp } from './tool-open-project-app.js'
+import { toolOpenWorkspaceTab } from './tool-open-workspace-tab.js'
 import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
 import { toolGlobSearch } from './tool-glob-search.js'
 import { toolGrepSearch } from './tool-grep-search.js'
@@ -130,6 +131,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolStartProjectServer(services),
     toolRestartProjectServer(services),
     toolOpenProjectApp(services),
+    toolOpenWorkspaceTab(services),
     toolAnalyzeData(services),
     toolCreateProject(services, getSessionState),
     toolRebuildProject(services),

@@ -4,12 +4,12 @@
  */
 
 /** Supported document file types. */
-export type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'unknown'
+export type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'md' | 'unknown'
 
 /** Real preview strategy attached to an imported document. */
 export interface DocumentRenderPreview {
-  /** Whether the renderer should use a PDF preview, generated HTML, or structured DOM. */
-  kind: 'pdf' | 'html' | 'structured'
+  /** Whether the renderer should use a PDF preview, generated HTML, the chat Markdown pipeline, or structured DOM. */
+  kind: 'pdf' | 'html' | 'markdown' | 'structured'
   /** How the preview asset was produced. */
   source: 'original' | 'generated' | 'fallback'
   /** Whether the preferred preview path is currently available. */

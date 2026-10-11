@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, type 
 import { useI18n } from 'vue-i18n'
 import { copyTextToClipboard } from '../export-utils'
 import { removeSelectionQuote, SELECTION_QUOTE_TAG_PATTERN } from '../panel/selection-quote-state'
+import { removeWebQuote, WEB_QUOTE_TAG_PATTERN } from '../panel/web-quote-state'
 
 interface PendingAttachment {
   id: string
@@ -35,6 +36,12 @@ interface SelectionQuoteChip {
   raw: string
 }
 
+interface WebQuoteChip {
+  id: string
+  label: string
+  raw: string
+}
+
 type AIExecutionAuthMode = 'strict' | 'auto'
 
 interface GroupMentionHint {
@@ -60,8 +67,7 @@ const props = defineProps<{
   pendingFiles: PendingAttachment[]
   isUploadingFiles: boolean
   uploadFeedback: string
-  documentDockVisible: boolean
-  folderWorkspaceVisible: boolean
+  workspaceVisible: boolean
   authMode: AIExecutionAuthMode
   planModeActive: boolean
   computerUseEnabled?: boolean
@@ -83,8 +89,7 @@ const emit = defineEmits<{
   (e: 'addAttachments', files: File[]): void
   (e: 'removeImage', index: number): void
   (e: 'removeFile', id: string): void
-  (e: 'toggleDocumentDock'): void
-  (e: 'toggleFolderWorkspace'): void
+  (e: 'toggleWorkspace'): void
   (e: 'update:auth-mode', value: AIExecutionAuthMode): void
   (e: 'togglePlanMode'): void
   (e: 'toggleComputerUse'): void
@@ -209,12 +214,30 @@ const quoteTags = computed<SelectionQuoteChip[]>(() => {
 
   return tags
 })
+const webQuoteTags = computed<WebQuoteChip[]>(() => {
+  const seenIds = new Set<string>()
+  const tags: WebQuoteChip[] = []
+
+  for (const match of props.modelValue.matchAll(WEB_QUOTE_TAG_PATTERN)) {
+    const quoteId = match[1]
+    if (!quoteId || seenIds.has(quoteId)) continue
+    seenIds.add(quoteId)
+    tags.push({
+      id: quoteId,
+      label: match[2]?.trim() || t('chatUi.webQuoteFallback'),
+      raw: match[0]
+    })
+  }
+
+  return tags
+})
 const plainDraftText = computed(() => {
   return props.modelValue
     .replace(PROJECT_TAG_PATTERN, '')
     .replace(DOCUMENT_TAG_PATTERN, '')
     .replace(CODE_TAG_PATTERN, '')
     .replace(SELECTION_QUOTE_TAG_PATTERN, '')
+    .replace(WEB_QUOTE_TAG_PATTERN, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n[ \t]+/g, '\n')
     .replace(/[ \t]{2,}/g, ' ')
@@ -412,7 +435,8 @@ function buildDraftValue (tags: DocumentTagChip[], text: string): string {
   const docSegment = tags.map(tag => tag.raw).join(' ')
   const codeSegment = codeTags.value.map(tag => tag.raw).join(' ')
   const quoteSegment = quoteTags.value.map(tag => tag.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment].filter(Boolean).join(' ')
+  const webSegment = webQuoteTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment, webSegment].filter(Boolean).join(' ')
   if (tagSegment && text) return `${tagSegment}\n${text}`
   return tagSegment || text
 }
@@ -422,7 +446,8 @@ function buildTaggedDraftValue (text: string): string {
   const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
   const codeSegment = codeTags.value.map(tag => tag.raw).join(' ')
   const quoteSegment = quoteTags.value.map(tag => tag.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment].filter(Boolean).join(' ')
+  const webSegment = webQuoteTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment, webSegment].filter(Boolean).join(' ')
   if (tagSegment && text) return `${tagSegment}\n${text}`
   return tagSegment || text
 }
@@ -569,7 +594,9 @@ function removeProjectTag (projectId: string) {
   const projectSegment = remaining.map(t => t.raw).join(' ')
   const docSegment = documentTags.value.map(t => t.raw).join(' ')
   const codeSegment = codeTags.value.map(t => t.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment, codeSegment].filter(Boolean).join(' ')
+  const quoteSegment = quoteTags.value.map(t => t.raw).join(' ')
+  const webSegment = webQuoteTags.value.map(t => t.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment, webSegment].filter(Boolean).join(' ')
   const text = plainDraftText.value
   if (tagSegment && text) { emit('update:modelValue', `${tagSegment}\n${text}`); return }
   emit('update:modelValue', tagSegment || text)
@@ -591,7 +618,8 @@ function removeCodeTag (id: string) {
   const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
   const codeSegment = codeTags.value.filter(tag => tag.id !== id).map(tag => tag.raw).join(' ')
   const quoteSegment = quoteTags.value.map(tag => tag.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment].filter(Boolean).join(' ')
+  const webSegment = webQuoteTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment, webSegment].filter(Boolean).join(' ')
   const text = plainDraftText.value
   if (tagSegment && text) { emit('update:modelValue', `${tagSegment}\n${text}`); return }
   emit('update:modelValue', tagSegment || text)
@@ -602,11 +630,25 @@ function removeQuoteTag (id: string) {
   const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
   const codeSegment = codeTags.value.map(tag => tag.raw).join(' ')
   const quoteSegment = quoteTags.value.filter(tag => tag.id !== id).map(tag => tag.raw).join(' ')
-  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment].filter(Boolean).join(' ')
+  const webSegment = webQuoteTags.value.map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment, webSegment].filter(Boolean).join(' ')
   const text = plainDraftText.value
   if (tagSegment && text) { emit('update:modelValue', `${tagSegment}\n${text}`); return }
   emit('update:modelValue', tagSegment || text)
   removeSelectionQuote(id)
+}
+
+function removeWebQuoteTag (id: string) {
+  const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
+  const docSegment = documentTags.value.map(tag => tag.raw).join(' ')
+  const codeSegment = codeTags.value.map(tag => tag.raw).join(' ')
+  const quoteSegment = quoteTags.value.map(tag => tag.raw).join(' ')
+  const webSegment = webQuoteTags.value.filter(tag => tag.id !== id).map(tag => tag.raw).join(' ')
+  const tagSegment = [projectSegment, docSegment, codeSegment, quoteSegment, webSegment].filter(Boolean).join(' ')
+  const text = plainDraftText.value
+  if (tagSegment && text) { emit('update:modelValue', `${tagSegment}\n${text}`); return }
+  emit('update:modelValue', tagSegment || text)
+  removeWebQuote(id)
 }
 
 function handleKeydown (e: KeyboardEvent) {
@@ -648,6 +690,11 @@ function handleKeydown (e: KeyboardEvent) {
     if (quoteTags.value.length > 0) {
       e.preventDefault()
       removeQuoteTag(quoteTags.value[quoteTags.value.length - 1].id)
+      return
+    }
+    if (webQuoteTags.value.length > 0) {
+      e.preventDefault()
+      removeWebQuoteTag(webQuoteTags.value[webQuoteTags.value.length - 1].id)
       return
     }
     if (projectTags.value.length > 0) {
@@ -869,14 +916,24 @@ function handleTextareaBlur () {
   activeMentionIndex.value = 0
 }
 
+// Workspace surfaces (browser tab "AI operate this page" entries) request
+// composer focus through a window event instead of prop-drilling layers.
+const FOCUS_COMPOSER_EVENT = 'world:focus-composer'
+
+function handleFocusComposerRequest (): void {
+  textareaRef.value?.focus()
+}
+
 onMounted(() => {
   document.addEventListener('click', hideInputContextMenu)
   window.addEventListener('blur', hideInputContextMenu)
+  window.addEventListener(FOCUS_COMPOSER_EVENT, handleFocusComposerRequest)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', hideInputContextMenu)
   window.removeEventListener('blur', hideInputContextMenu)
+  window.removeEventListener(FOCUS_COMPOSER_EVENT, handleFocusComposerRequest)
   hideInputContextMenu()
   clearInjectFeedbackTimer()
 })
@@ -943,6 +1000,13 @@ onUnmounted(() => {
           <button class="quote-tag-chip-remove" @click="removeQuoteTag(tag.id)" :title="$t('chatUi.removeSelectionQuote')">×</button>
         </div>
       </div>
+      <div v-if="webQuoteTags.length > 0" class="quote-tag-bar">
+        <div v-for="tag in webQuoteTags" :key="tag.id" class="quote-tag-chip">
+          <span class="quote-tag-chip-prefix">🌐</span>
+          <span class="quote-tag-chip-label">{{ tag.label }}</span>
+          <button class="quote-tag-chip-remove" @click="removeWebQuoteTag(tag.id)" :title="$t('chatUi.removeWebQuote')">×</button>
+        </div>
+      </div>
       <div class="textarea-shell">
         <textarea
           ref="textareaRef"
@@ -988,20 +1052,15 @@ onUnmounted(() => {
           <span class="tooltip-text">{{ $t('chatUi.addAttachment') }}</span>
         </div>
         <div class="tooltip-container">
-          <button class="action-btn folder-btn" :class="{ active: props.folderWorkspaceVisible }" type="button" @click="emit('toggleFolderWorkspace')">
+          <button class="action-btn workspace-btn" :class="{ active: props.workspaceVisible }" type="button" @click="emit('toggleWorkspace')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3.5 6.5A2.5 2.5 0 0 1 6 4h4l2 2h6A2.5 2.5 0 0 1 20.5 8.5v8A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5v-10Z"/>
-              <path d="m10 12-2 2 2 2"/>
-              <path d="m14 12 2 2-2 2"/>
+              <rect x="3" y="4" width="18" height="16" rx="2.5"/>
+              <path d="M14.5 4v16"/>
+              <path d="m11 9.5-2 2 2 2"/>
+              <path d="m17.5 12h-3"/>
             </svg>
           </button>
-          <span class="tooltip-text">{{ $t('chatUi.codeWorkspace') }}</span>
-        </div>
-        <div class="tooltip-container">
-          <button class="action-btn doc-btn" :class="{ active: props.documentDockVisible }" type="button" @click="emit('toggleDocumentDock')">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-          </button>
-          <span class="tooltip-text">{{ $t('chatUi.documentCenter') }}</span>
+          <span class="tooltip-text">{{ $t('chatUi.workspace') }}</span>
         </div>
         <!-- Readable state pills follow (design v1.7): 技能 / 计划 / 电脑使用 / 授权模式. -->
         <div v-if="props.availableSkills && props.availableSkills.length > 0" ref="composerSkillSelectorRef" class="composer-skill-selector">
@@ -2032,8 +2091,7 @@ onUnmounted(() => {
 }
 
 .action-btn:hover { background: var(--chat-input-hover-surface); color: var(--app-text); }
-.action-btn.doc-btn.active,
-.action-btn.folder-btn.active { color: var(--app-accent); background: var(--app-accent-soft); }
+.action-btn.workspace-btn.active { color: var(--app-accent); background: var(--app-accent-soft); }
 .action-btn.upload-btn { cursor: pointer; }
 
 /* Labeled state pills (design v1.7): plan / auth / computer-use read their

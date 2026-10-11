@@ -9,8 +9,7 @@ import ChatInput from '../layout/ChatInput.vue'
 import ChatHeader from '../layout/ChatHeader.vue'
 import QuickAskPopover from '../layout/QuickAskPopover.vue'
 import { generateId } from './message-blocks'
-import DocumentWorkspace from '../layout/DocumentWorkspace.vue'
-import FolderWorkspace from '../layout/FolderWorkspace.vue'
+import WorkspacePanel from '../../workspace/WorkspacePanel.vue'
 import PinnedTodoPanel from '../layout/PinnedTodoPanel.vue'
 import AskUserPanel from '../layout/AskUserPanel.vue'
 import AuthPermissionPanel from '../layout/AuthPermissionPanel.vue'
@@ -33,6 +32,15 @@ import { getRecommendedProviderTemplate } from '../../../../shared/provider-temp
 import { resolveModelStrength } from '../../../../shared/reasoning-effort'
 import type { ChatPanelEmit, ChatPanelProps } from './types'
 import type { AnnotationAnchor, MessageAnnotationLocator, QuickAskMode, QuickAskPopoverState } from '../types'
+import {
+  activateWorkspaceTab,
+  ensureWorkspaceTab,
+  getActiveWorkspaceTab,
+  removeWorkspaceTab,
+  workspaceBrowserSurfaces,
+  workspaceStore
+} from '../../workspace/workspace-store'
+import { getWorkspaceTabDefinition, type WorkspaceTabInstance } from '../../workspace/tab-registry'
 
 const props = defineProps<ChatPanelProps>()
 const emit = defineEmits<ChatPanelEmit>()
@@ -42,11 +50,9 @@ const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
 const CONVERSATION_SIDEBAR_WIDTH = 224
 const CONVERSATION_SIDEBAR_COLLAPSED_WIDTH = 0
 const MIN_CHAT_MAIN_WIDTH = 640
-const DOCUMENT_WORKSPACE_LIST_WIDTH = 260
-const DOCUMENT_WORKSPACE_PREVIEW_MIN_WIDTH = DOCUMENT_WORKSPACE_LIST_WIDTH * 2
-const DOCUMENT_WORKSPACE_RESIZE_HANDLE_WIDTH = 12
-const MIN_DOCUMENT_WORKSPACE_WIDTH = DOCUMENT_WORKSPACE_LIST_WIDTH + DOCUMENT_WORKSPACE_PREVIEW_MIN_WIDTH + DOCUMENT_WORKSPACE_RESIZE_HANDLE_WIDTH
-const MAX_DOCUMENT_WORKSPACE_WIDTH = 1280
+/** Fallbacks when the active tab kind defines no explicit bounds. */
+const MIN_WORKSPACE_WIDTH_FALLBACK = 792
+const MAX_WORKSPACE_WIDTH_FALLBACK = 1320
 const WORKSPACE_OPEN_ANIMATION_DURATION_MS = 240
 
 const {
@@ -78,15 +84,6 @@ const {
   currentSudoPasswordRequest,
   deleteConversation,
   deleteLongTermGoal,
-  documentDockVisible,
-  documentWorkspaceActiveFilePath,
-  documentWorkspaceDocuments,
-  documentWorkspaceWidth,
-  folderWorkspaceActiveFilePath,
-  folderWorkspaceRootName,
-  folderWorkspaceRootPath,
-  folderWorkspaceVisible,
-  folderWorkspaceWidth,
   filePreview,
   groupMentionHints,
   groupSidebarItems,
@@ -170,8 +167,8 @@ const {
   toggleComputerUse,
   toggleSkill,
   clearSkills,
-  updateDocumentWorkspaceState,
   updateFolderWorkspaceState,
+  updateWorkspaceTabState,
   uploadFeedback,
   addAttachments
 } = useChatPanel(props, {
@@ -324,10 +321,8 @@ const chatSurfaceStatus = computed(() => ({
   activeTodoCount: activeTodoItems.value.length,
   primaryTaskTitle: activeTodoItems.value[0]?.title || null
 }))
-const isOpeningDocumentWorkspace = ref(false)
-const isClosingDocumentWorkspace = ref(false)
-const isOpeningFolderWorkspace = ref(false)
-const isClosingFolderWorkspace = ref(false)
+const isOpeningWorkspace = ref(false)
+const isClosingWorkspace = ref(false)
 const chatWindowWidthBeforeWorkspace = ref<number | null>(null)
 const CONVERSATION_SIDEBAR_COLLAPSE_STORAGE_KEY = 'chat-conversation-sidebar-collapsed'
 
@@ -400,6 +395,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onSidebarShortcut)
   offPlanModeChanged?.()
   offPlanModeChanged = null
+  // The shell drops this component in pure-app view; stop advertising its
+  // browser tab as the active automation page.
+  emit('pageSurfaceChange', null)
 })
 
 function loadConversationSidebarCollapsed (): boolean {
@@ -590,22 +588,23 @@ function deleteLongTermGoalById (goalId: string): void {
   void deleteLongTermGoal(goal || goalId)
 }
 
-function getPreferredWorkspaceWidth (kind: 'document' | 'folder' = 'document'): number {
-  const preferredWidth = kind === 'folder' ? folderWorkspaceWidth.value : documentWorkspaceWidth.value
+function getActiveWorkspaceTabKind (): string | null {
+  return getActiveWorkspaceTab()?.kind ?? null
+}
+
+function getPreferredWorkspaceWidth (): number {
+  const kind = getActiveWorkspaceTabKind()
+  const definition = kind ? getWorkspaceTabDefinition(kind) : null
+  const minWidth = definition?.minWidth ?? MIN_WORKSPACE_WIDTH_FALLBACK
+  const maxWidth = definition?.maxWidth ?? MAX_WORKSPACE_WIDTH_FALLBACK
   return Math.max(
-    MIN_DOCUMENT_WORKSPACE_WIDTH,
-    Math.min(MAX_DOCUMENT_WORKSPACE_WIDTH, Math.round(preferredWidth || MIN_DOCUMENT_WORKSPACE_WIDTH))
+    minWidth,
+    Math.min(maxWidth, Math.round(workspaceStore.width.value || minWidth))
   )
 }
 
-function getActiveWorkspaceKind (): 'document' | 'folder' | null {
-  if (documentDockVisible.value) return 'document'
-  if (folderWorkspaceVisible.value) return 'folder'
-  return null
-}
-
-function getRequiredWindowWidthForWorkspace (kind: 'document' | 'folder' = getActiveWorkspaceKind() || 'document'): number {
-  return conversationSidebarWidth.value + MIN_CHAT_MAIN_WIDTH + getPreferredWorkspaceWidth(kind)
+function getRequiredWindowWidthForWorkspace (): number {
+  return conversationSidebarWidth.value + MIN_CHAT_MAIN_WIDTH + getPreferredWorkspaceWidth()
 }
 
 async function setWindowMinimumWidth (width: number): Promise<void> {
@@ -628,12 +627,12 @@ async function getCurrentWindowWidth (): Promise<number | null> {
   }
 }
 
-async function ensureWindowFitsWorkspace (kind: 'document' | 'folder', options?: { animate?: boolean }): Promise<void> {
+async function ensureWindowFitsWorkspace (options?: { animate?: boolean }): Promise<void> {
   if (!window.electronAPI?.ensureWindowWidth) return
 
   try {
     await window.electronAPI.ensureWindowWidth(
-      getRequiredWindowWidthForWorkspace(kind),
+      getRequiredWindowWidthForWorkspace(),
       options?.animate
         ? { animate: true, durationMs: WORKSPACE_OPEN_ANIMATION_DURATION_MS }
         : undefined
@@ -670,113 +669,228 @@ async function animateWindowWidthRecovery (targetWidth: number): Promise<void> {
   }
 }
 
-async function openDocumentWorkspace (): Promise<void> {
-  if (documentDockVisible.value || isOpeningDocumentWorkspace.value || isClosingDocumentWorkspace.value) return
+async function openWorkspace (): Promise<void> {
+  if (workspaceStore.visible.value || isOpeningWorkspace.value || isClosingWorkspace.value) return
 
-  isOpeningDocumentWorkspace.value = true
+  isOpeningWorkspace.value = true
 
   try {
-    folderWorkspaceVisible.value = false
     chatWindowWidthBeforeWorkspace.value = await getCurrentWindowWidth()
-    await ensureWindowFitsWorkspace('document', { animate: true })
-    await setWindowMinimumWidth(getRequiredWindowWidthForWorkspace('document'))
+    await ensureWindowFitsWorkspace({ animate: true })
+    await setWindowMinimumWidth(getRequiredWindowWidthForWorkspace())
   } finally {
-    documentDockVisible.value = true
-    isOpeningDocumentWorkspace.value = false
+    workspaceStore.visible.value = true
+    isOpeningWorkspace.value = false
   }
 }
 
-async function closeDocumentWorkspace (): Promise<void> {
-  if (!documentDockVisible.value || isClosingDocumentWorkspace.value) return
+async function closeWorkspace (): Promise<void> {
+  if (!workspaceStore.visible.value || isClosingWorkspace.value) return
 
-  isClosingDocumentWorkspace.value = true
+  isClosingWorkspace.value = true
   const currentWindowWidth = await getCurrentWindowWidth()
   const targetWindowWidth = resolveWorkspaceCloseTargetWidth(currentWindowWidth)
 
-  documentDockVisible.value = false
+  workspaceStore.visible.value = false
 
   try {
     await setWindowMinimumWidth(DEFAULT_APP_WINDOW_MIN_WIDTH)
     await animateWindowWidthRecovery(targetWindowWidth)
   } finally {
     chatWindowWidthBeforeWorkspace.value = null
-    isClosingDocumentWorkspace.value = false
+    isClosingWorkspace.value = false
   }
 }
 
-async function toggleDocumentWorkspace (): Promise<void> {
-  if (isOpeningDocumentWorkspace.value || isClosingDocumentWorkspace.value) return
+async function toggleWorkspace (): Promise<void> {
+  if (isOpeningWorkspace.value || isClosingWorkspace.value) return
 
-  if (documentDockVisible.value) {
-    await closeDocumentWorkspace()
+  if (workspaceStore.visible.value) {
+    await closeWorkspace()
     return
   }
 
-  await openDocumentWorkspace()
+  await openWorkspace()
 }
 
-async function openFolderWorkspace (): Promise<void> {
-  if (folderWorkspaceVisible.value || isOpeningFolderWorkspace.value || isClosingFolderWorkspace.value) return
+function getFileNameFromPath (filePath: string): string {
+  const segments = filePath.split(/[\\/]/).filter(Boolean)
+  return segments[segments.length - 1] || filePath
+}
 
-  isOpeningFolderWorkspace.value = true
-
-  try {
-    documentDockVisible.value = false
-    chatWindowWidthBeforeWorkspace.value = await getCurrentWindowWidth()
-    await ensureWindowFitsWorkspace('folder', { animate: true })
-    await setWindowMinimumWidth(getRequiredWindowWidthForWorkspace('folder'))
-  } finally {
-    folderWorkspaceVisible.value = true
-    isOpeningFolderWorkspace.value = false
+/** Applies the kind's default width to a newly created tab, then reveals the panel. */
+async function revealWorkspaceTab (result: ReturnType<typeof ensureWorkspaceTab>): Promise<void> {
+  if (!result) return
+  if (result.created) {
+    const definition = getWorkspaceTabDefinition(result.tab.kind)
+    const defaultWidth = definition?.defaultWidth
+    if (typeof defaultWidth === 'number') {
+      workspaceStore.width.value = Math.round(defaultWidth)
+    }
   }
+  await openWorkspace()
 }
 
-async function closeFolderWorkspace (): Promise<void> {
-  if (!folderWorkspaceVisible.value || isClosingFolderWorkspace.value) return
-
-  isClosingFolderWorkspace.value = true
-  const currentWindowWidth = await getCurrentWindowWidth()
-  const targetWindowWidth = resolveWorkspaceCloseTargetWidth(currentWindowWidth)
-
-  folderWorkspaceVisible.value = false
-
-  try {
-    await setWindowMinimumWidth(DEFAULT_APP_WINDOW_MIN_WIDTH)
-    await animateWindowWidthRecovery(targetWindowWidth)
-  } finally {
-    chatWindowWidthBeforeWorkspace.value = null
-    isClosingFolderWorkspace.value = false
-  }
-}
-
-async function toggleFolderWorkspace (): Promise<void> {
-  if (isOpeningFolderWorkspace.value || isClosingFolderWorkspace.value) return
-
-  if (folderWorkspaceVisible.value) {
-    await closeFolderWorkspace()
+/**
+ * Opens (or activates) a workspace tab of the given kind and reveals the
+ * panel. Payload carries kind-specific state: `{ rootPath }` for folder,
+ * `{ filePath }` for a single document tab, `{ url }` for a browser tab.
+ * Entry point for both the add-tab menu and AI `open_workspace_tab` calls;
+ * a payload-less document open routes through the file picker.
+ */
+async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>): Promise<void> {
+  if (kind === 'folder') {
+    if (payload && typeof payload.rootPath === 'string' && payload.rootPath.trim()) {
+      updateFolderWorkspaceState({
+        rootPath: payload.rootPath,
+        rootName: typeof payload.rootName === 'string' && payload.rootName.trim() ? payload.rootName : payload.rootPath,
+        activeFilePath: typeof payload.activeFilePath === 'string' ? payload.activeFilePath : undefined
+      })
+    }
+    await revealWorkspaceTab(ensureWorkspaceTab('folder'))
     return
   }
 
-  await openFolderWorkspace()
+  if (kind === 'document') {
+    const payloadFilePath = typeof payload?.filePath === 'string' ? payload.filePath.trim() : ''
+    if (payloadFilePath) {
+      const documentFileName = typeof payload?.fileName === 'string' && payload.fileName.trim()
+        ? payload.fileName
+        : getFileNameFromPath(payloadFilePath)
+      const result = ensureWorkspaceTab('document', {
+        filePath: payloadFilePath,
+        fileName: documentFileName
+      })
+      // The tab strip shows the document name, not the generic kind title.
+      if (result) result.tab.title = documentFileName
+      await revealWorkspaceTab(result)
+      return
+    }
+    if (!window.electronAPI?.pickDocumentFiles) return
+    const { canceled, filePaths } = await window.electronAPI.pickDocumentFiles()
+    if (canceled || filePaths.length === 0) return
+    let lastResult: ReturnType<typeof ensureWorkspaceTab> = null
+    for (const pickedPath of filePaths) {
+      const result = ensureWorkspaceTab('document', {
+        filePath: pickedPath,
+        fileName: getFileNameFromPath(pickedPath)
+      })
+      if (result) result.tab.title = getFileNameFromPath(pickedPath)
+      lastResult = result
+    }
+    await revealWorkspaceTab(lastResult)
+    return
+  }
+
+  if (kind === 'browser') {
+    const url = typeof payload?.url === 'string' && payload.url.trim() ? payload.url.trim() : 'about:blank'
+    await revealWorkspaceTab(ensureWorkspaceTab('browser', { url, title: '' }))
+    return
+  }
+
+  await revealWorkspaceTab(ensureWorkspaceTab(kind, payload))
 }
 
+function closeWorkspaceTab (tabId: string): void {
+  removeWorkspaceTab(tabId)
+  if (workspaceStore.tabs.value.length === 0) {
+    void closeWorkspace()
+  }
+}
+
+function handleWorkspaceTabStateUpdate (tab: WorkspaceTabInstance, state: unknown): void {
+  if (tab.kind === 'folder') {
+    updateFolderWorkspaceState((state || null) as ConversationFolderWorkspaceState | null)
+    return
+  }
+  tab.state = { ...(tab.state || {}), ...((state as Record<string, unknown> | null) || {}) }
+  updateWorkspaceTabState()
+}
+
+function handleWorkspaceWidthUpdate (width: number): void {
+  workspaceStore.width.value = width
+}
+
+function handleWorkspaceTabActivate (tabId: string): void {
+  activateWorkspaceTab(tabId)
+}
+
+// The active browser tab doubles as the AI's "current page": its surface is
+// forwarded to the app shell, which prefers embedded app pages over it.
+const workspaceBrowserSurface = computed(() => {
+  if (!workspaceStore.visible.value) return null
+  const tab = getActiveWorkspaceTab()
+  if (!tab || tab.kind !== 'browser') return null
+  return workspaceBrowserSurfaces.get(tab.id) || null
+})
+
+watch(workspaceBrowserSurface, (surface) => {
+  const tab = getActiveWorkspaceTab()
+  if (surface && tab) {
+    emit('pageSurfaceChange', {
+      appId: `wsb-${tab.id}`,
+      title: surface.title || surface.url,
+      url: surface.url,
+      handle: surface.handle
+    })
+    return
+  }
+  emit('pageSurfaceChange', null)
+}, { immediate: true })
+
+// AI page-operation shell banner: shown while the active workspace browser
+// tab is the AI-operable page. Dismissal is per page and resets on switch.
+const dismissedActivePageAppId = ref<string | null>(null)
+const activeWorkspacePageBanner = computed(() => {
+  const context = props.activePageContext
+  if (!context || context.kind !== 'browser') return null
+  if (!context.appId.startsWith('wsb-')) return null
+  if (dismissedActivePageAppId.value === context.appId) return null
+  return context
+})
+
+watch(() => props.activePageContext?.appId, () => {
+  dismissedActivePageAppId.value = null
+})
+
+function focusComposerForActivePage (): void {
+  window.dispatchEvent(new CustomEvent('world:focus-composer'))
+}
+
+function dismissActivePageBanner (): void {
+  const context = props.activePageContext
+  if (context) dismissedActivePageAppId.value = context.appId
+}
+
+// AI-originated requests arrive as a prop (seq-bumped) from the app shell and
+// are consumed exactly once; `immediate` covers requests that landed while the
+// chat shell was unmounted.
 watch(
-  chatSurfaceStatus,
-  (status) => {
-    emit('statusChange', status)
+  () => props.workspaceTabRequest,
+  (request) => {
+    if (!request || typeof request.kind !== 'string') return
+    void openWorkspaceTab(request.kind, request.payload)
+    emit('workspaceTabRequestConsumed')
   },
   { immediate: true }
 )
 
+// Window sizing follows the panel: the minimum width tracks the active tab
+// kind's bounds, and an opening (or activating) tab re-expands the window.
 watch(
-  [documentDockVisible, folderWorkspaceVisible, documentWorkspaceWidth, folderWorkspaceWidth, conversationSidebarCollapsed],
-  ([documentVisible, folderVisible], previousState) => {
-    const visible = documentVisible || folderVisible
-    const previousVisible = Boolean(previousState?.[0] || previousState?.[1])
-    const kind = documentVisible ? 'document' : 'folder'
-    void setWindowMinimumWidth(visible ? getRequiredWindowWidthForWorkspace(kind) : DEFAULT_APP_WINDOW_MIN_WIDTH)
-    if (visible && !previousVisible && !isOpeningDocumentWorkspace.value && !isOpeningFolderWorkspace.value) {
-      void ensureWindowFitsWorkspace(kind)
+  [
+    () => workspaceStore.visible.value,
+    () => workspaceStore.activeTabId.value,
+    () => workspaceStore.width.value,
+    conversationSidebarCollapsed
+  ],
+  ([visible], previous) => {
+    const wasVisible = Boolean(previous?.[0])
+    const previousActiveTabId = previous?.[1]
+    const activeTabId = workspaceStore.activeTabId.value
+    void setWindowMinimumWidth(visible ? getRequiredWindowWidthForWorkspace() : DEFAULT_APP_WINDOW_MIN_WIDTH)
+    if (visible && (!wasVisible || activeTabId !== previousActiveTabId) && !isOpeningWorkspace.value) {
+      void ensureWindowFitsWorkspace()
     }
   },
   { immediate: true }
@@ -879,7 +993,7 @@ watch(
     </aside>
 
     <div
-      :class="['chat-panel', { 'chat-panel-with-workspace': documentDockVisible || folderWorkspaceVisible }]"
+      :class="['chat-panel', { 'chat-panel-with-workspace': workspaceStore.visible.value }]"
       :style="{ '--chat-main-protected-min-width': `${MIN_CHAT_MAIN_WIDTH}px` }"
     >
       <div
@@ -1032,6 +1146,28 @@ watch(
             />
           </div>
 
+          <div
+            v-if="activeWorkspacePageBanner"
+            class="active-page-banner"
+            role="button"
+            tabindex="0"
+            :title="$t('chatUi.activePageBannerHint')"
+            @click="focusComposerForActivePage"
+            @keydown.enter.prevent="focusComposerForActivePage"
+          >
+            <div class="active-page-banner-copy">
+              <span class="active-page-banner-kicker">{{ $t('chatUi.activePageBannerTitle') }}</span>
+              <span class="active-page-banner-title">{{ activeWorkspacePageBanner.title }}</span>
+              <span class="active-page-banner-subtitle">{{ activeWorkspacePageBanner.origin || activeWorkspacePageBanner.url }}</span>
+            </div>
+            <button
+              class="active-page-banner-close"
+              type="button"
+              :title="$t('common.close')"
+              @click.stop="dismissActivePageBanner"
+            >×</button>
+          </div>
+
           <ChatInput
             ref="chatInputRef"
             v-model="inputText"
@@ -1041,8 +1177,7 @@ watch(
             :pending-files="pendingFiles"
             :is-uploading-files="isUploadingFiles"
             :upload-feedback="uploadFeedback"
-            :document-dock-visible="documentDockVisible"
-            :folder-workspace-visible="folderWorkspaceVisible"
+            :workspace-visible="workspaceStore.visible.value"
             :auth-mode="currentAuthMode"
             :plan-mode-active="planModeActive"
             :computer-use-enabled="computerUseEnabled"
@@ -1059,8 +1194,7 @@ watch(
             @add-attachments="addAttachments"
             @remove-image="removeImage"
             @remove-file="removeFile"
-            @toggle-document-dock="toggleDocumentWorkspace"
-            @toggle-folder-workspace="toggleFolderWorkspace"
+            @toggle-workspace="toggleWorkspace"
             @update:auth-mode="handleAuthModeChange"
             @toggle-plan-mode="togglePlanMode"
             @toggle-computer-use="toggleComputerUse"
@@ -1078,25 +1212,18 @@ watch(
         </template>
       </div>
 
-      <DocumentWorkspace
-        :visible="documentDockVisible"
-        :workspace-documents="documentWorkspaceDocuments"
-        :active-file-path="documentWorkspaceActiveFilePath"
-        :workspace-width="documentWorkspaceWidth"
-        @close="closeDocumentWorkspace"
+      <WorkspacePanel
+        :visible="workspaceStore.visible.value"
+        :tabs="workspaceStore.tabs.value"
+        :active-tab-id="workspaceStore.activeTabId.value"
+        :workspace-width="workspaceStore.width.value"
+        @close="closeWorkspace"
+        @close-tab="closeWorkspaceTab"
+        @activate-tab="handleWorkspaceTabActivate"
+        @add-tab="kind => openWorkspaceTab(kind)"
+        @update-width="handleWorkspaceWidthUpdate"
         @insert-selection-tag="insertDocumentTag"
-        @update-workspace="updateDocumentWorkspaceState"
-      />
-
-      <FolderWorkspace
-        :visible="folderWorkspaceVisible"
-        :root-path="folderWorkspaceRootPath"
-        :root-name="folderWorkspaceRootName"
-        :active-file-path="folderWorkspaceActiveFilePath"
-        :workspace-width="folderWorkspaceWidth"
-        @close="closeFolderWorkspace"
-        @insert-selection-tag="insertDocumentTag"
-        @update-workspace="updateFolderWorkspaceState"
+        @update-tab-state="handleWorkspaceTabStateUpdate"
       />
     </div>
   </div>
@@ -1555,5 +1682,81 @@ watch(
 .chat-main {
   min-width: var(--chat-main-protected-min-width, 640px);
   flex-shrink: 0;
+}
+
+/* Mirrors the app shell's chat-overlay banner (launchpad page-operation chat). */
+.active-page-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 14px 10px;
+  padding: 10px 12px 10px 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  cursor: pointer;
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--app-accent-soft) 92%, transparent),
+      color-mix(in srgb, var(--app-shell-tint-2, var(--app-panel)) 88%, transparent)
+    ),
+    var(--app-panel);
+}
+
+.active-page-banner-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.active-page-banner-kicker,
+.active-page-banner-title,
+.active-page-banner-subtitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-page-banner-kicker {
+  color: var(--app-accent-strong);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.active-page-banner-title {
+  color: var(--app-text-strong);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.active-page-banner-subtitle {
+  color: var(--app-text-muted);
+  font-size: 0.74rem;
+}
+
+.active-page-banner-close {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.active-page-banner-close:hover {
+  background: var(--app-panel-muted, rgba(148, 163, 184, 0.18));
+  color: var(--app-text-strong);
 }
 </style>

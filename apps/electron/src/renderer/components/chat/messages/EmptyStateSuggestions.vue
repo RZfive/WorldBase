@@ -116,8 +116,11 @@ const allSuggestionsOpen = ref(false)
 const cardStep = computed(() => {
   const count = cards.value.length
   if (count <= 1 || handWidth.value <= 0) return CARD_WIDTH
+  // When the chat panel runs at its protected minimum width (sidebar +
+  // workspace open) the strip may be narrower than count × 48px; let the fan
+  // compress (cards overlap more) instead of overflowing the message list.
   const fit = Math.floor((handWidth.value - CARD_WIDTH - SPREAD * 2) / (count - 1))
-  return Math.max(48, Math.min(CARD_WIDTH - MIN_OVERLAP, fit))
+  return Math.max(0, Math.min(CARD_WIDTH - MIN_OVERLAP, fit))
 })
 
 const handStyle = computed(() => {

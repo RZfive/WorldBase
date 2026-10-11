@@ -3897,6 +3897,85 @@ impl Tool for OpenProjectAppTool {
     }
 }
 
+pub struct OpenWorkspaceTabTool;
+#[async_trait]
+impl Tool for OpenWorkspaceTabTool {
+    fn name(&self) -> &str {
+        "open_workspace_tab"
+    }
+    fn description(&self) -> &str {
+        "Open a tab in the user's right-side workspace panel (folder / document / browser)."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["folder", "document", "browser"],
+                    "description": "Which workspace tab to open."
+                },
+                "root_path": {
+                    "type": "string",
+                    "description": "folder only: absolute directory path to bind as the code workspace root. Omit to let the user pick a folder interactively."
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "document only: absolute path of the document file to open as its own tab. Reopening a bound path just focuses its tab."
+                },
+                "url": {
+                    "type": "string",
+                    "description": "browser only: URL to load in the embedded browser tab."
+                },
+                "active_file_path": {
+                    "type": "string",
+                    "description": "Optional: file path (relative to root_path for folder tabs) to select after opening."
+                }
+            },
+            "required": ["kind"]
+        })
+    }
+    fn domain(&self) -> &str {
+        "electron_host"
+    }
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let kind = require_str(&input, "kind")?;
+        let optional_path = |key: &str| {
+            input
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        };
+        let root_path = optional_path("root_path");
+        let file_path = optional_path("file_path");
+        let url = optional_path("url");
+        let active_file_path = optional_path("active_file_path");
+        let stream = services.current_stream.lock().unwrap().clone();
+        let mut payload = json!({"kind": kind});
+        if let Some(root) = root_path {
+            payload["rootPath"] = Value::String(root.to_string());
+        }
+        if let Some(file) = file_path {
+            payload["filePath"] = Value::String(file.to_string());
+        }
+        if let Some(target) = url {
+            payload["url"] = Value::String(target.to_string());
+        }
+        if let Some(active) = active_file_path {
+            payload["activeFilePath"] = Value::String(active.to_string());
+        }
+        services
+            .host
+            .request(
+                &stream,
+                "open_workspace_tab",
+                payload,
+                Duration::from_secs(30),
+            )
+            .await
+    }
+}
+
 // -------------------------------------------------------------------------
 // Plan, todo, skills, MCP and Agent Workspace
 

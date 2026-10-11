@@ -2,6 +2,11 @@ import type { ComputedRef, Ref } from 'vue'
 import type { ConversationMetadataPatch } from '../../../../shared/conversation-metadata'
 import type { ComposerTranslation } from 'vue-i18n'
 import { getConversationTitleText } from './message-runtime'
+import {
+  buildCurrentDocumentWorkspaceState,
+  buildCurrentFolderWorkspaceState,
+  buildCurrentWorkspaceState
+} from '../../workspace/workspace-store'
 import type {
   AIExecutionAuthMode,
   ChatMessage,
@@ -32,8 +37,6 @@ interface ChatConversationStorageOptions {
   shouldUseConversationProviderOverride: ComputedRef<boolean>
   conversationTargets: Map<string, string | null>
   getPinnedContextTitle: () => string | null
-  buildCurrentDocumentWorkspaceState: () => ConversationDocumentWorkspaceState | undefined
-  buildCurrentFolderWorkspaceState: () => ConversationFolderWorkspaceState | undefined
 }
 
 export function createChatConversationStorage (options: ChatConversationStorageOptions) {
@@ -53,9 +56,7 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     selectedChannelBindingId,
     shouldUseConversationProviderOverride,
     conversationTargets,
-    getPinnedContextTitle,
-    buildCurrentDocumentWorkspaceState,
-    buildCurrentFolderWorkspaceState
+    getPinnedContextTitle
   } = options
 
   function currentMetadata (): ConversationMetadataPatch {
@@ -77,6 +78,7 @@ export function createChatConversationStorage (options: ChatConversationStorageO
       ...currentMetadata(),
       documentWorkspace: buildCurrentDocumentWorkspaceState(),
       folderWorkspace: buildCurrentFolderWorkspaceState(),
+      workspace: buildCurrentWorkspaceState(),
       pinnedTitle: getPinnedContextTitle()
     }
   }
@@ -219,7 +221,8 @@ export function createChatConversationStorage (options: ChatConversationStorageO
       groupId: metadata.groupId ?? undefined,
       channelBindingId: metadata.channelBindingId ?? undefined,
       documentWorkspace: context?.documentWorkspace,
-      folderWorkspace: context?.folderWorkspace
+      folderWorkspace: context?.folderWorkspace,
+      workspace: context?.workspace
     })))
 
     if (result.summary) {

@@ -438,6 +438,22 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
     return { success: true, project_id: projectId, mode, opened_via: 'shell_ui' }
   }
 
+  if (request.requestKind === 'open_workspace_tab') {
+    const win = getActiveAiRequestWindow()
+    if (!win || win.isDestroyed()) throw new Error('No active Electron window for open_workspace_tab')
+    const kind = typeof request.payload.kind === 'string' ? request.payload.kind : ''
+    if (kind !== 'folder' && kind !== 'document' && kind !== 'browser') throw new Error('open_workspace_tab requires kind "folder", "document" or "browser"')
+    const payload: Record<string, unknown> = {}
+    if (typeof request.payload.rootPath === 'string' && request.payload.rootPath.trim()) payload.rootPath = request.payload.rootPath
+    if (typeof request.payload.filePath === 'string' && request.payload.filePath.trim()) payload.filePath = request.payload.filePath
+    if (typeof request.payload.url === 'string' && request.payload.url.trim()) payload.url = request.payload.url
+    if (typeof request.payload.activeFilePath === 'string' && request.payload.activeFilePath.trim()) payload.activeFilePath = request.payload.activeFilePath
+    if (win.isMinimized()) win.restore()
+    win.focus()
+    win.webContents.send('workspace:openTab', { kind, ...(Object.keys(payload).length > 0 ? { payload } : {}) })
+    return { success: true, kind }
+  }
+
   if (request.requestKind === 'document.openOriginal') {
     const filePath = optionalString(request.payload, 'filePath') || optionalString(request.payload, 'file_path')
     if (!filePath) throw new Error('document.openOriginal requires filePath')
@@ -451,7 +467,9 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
     const filePath = optionalString(request.payload, 'filePath') || optionalString(request.payload, 'file_path')
     const fileType = optionalString(request.payload, 'fileType') || optionalString(request.payload, 'file_type')
     if (!filePath || !fileType) throw new Error('document.preview.ensure requires filePath and fileType')
-    const normalizedFileType = fileType.toLowerCase() === 'doc' ? 'docx' : fileType.toLowerCase()
+    const legacyAliases: Record<string, string> = { doc: 'docx', xls: 'xlsx', ppt: 'pptx' }
+    const lowerType = fileType.toLowerCase()
+    const normalizedFileType = legacyAliases[lowerType] ?? lowerType
     const render = await buildDocumentRenderPreview(filePath, normalizedFileType as DocumentFileType)
     const asset = await readDocumentRenderAsset(render)
     return {

@@ -115,6 +115,19 @@ export interface ConversationDocumentWorkspaceState {
   width?: number
 }
 
+export interface ConversationWorkspaceTabState {
+  id?: string
+  kind: string
+  title?: string
+  state?: Record<string, unknown>
+}
+
+export interface ConversationWorkspaceState {
+  tabs?: ConversationWorkspaceTabState[]
+  activeTabId?: string | null
+  width?: number
+}
+
 export interface Conversation {
   id: string
   title: string
@@ -145,6 +158,8 @@ export interface Conversation {
   documentWorkspace?: ConversationDocumentWorkspaceState
   /** Conversation-scoped folder/code workspace state. */
   folderWorkspace?: ConversationFolderWorkspaceState
+  /** Conversation-scoped tabbed workspace panel snapshot. */
+  workspace?: ConversationWorkspaceState
   /** 直接父会话 id（fork / 编辑分叉时写入） */
   forkedFromConversationId?: string
   /** 分叉锚点：父会话中被复制前缀的最后一条消息 id */

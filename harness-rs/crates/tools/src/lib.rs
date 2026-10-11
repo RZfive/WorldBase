@@ -42,7 +42,7 @@ pub use compat_tools::{
     GetWorkspaceCommandStatusTool, GlobSearchTool, GrepSearchTool, InstallMcpServerTool,
     InstallSkillTool, ListAgentWorkspaceCatalogTool, ListScheduledTasksTool, LocalCommandTool,
     LocalReadFileTool, LocalWriteFileTool, ManageTodoListTool, OpenProjectAppTool,
-    QueryProjectDatabaseTool, RebuildProjectTool, RunProjectCommandTool,
+    OpenWorkspaceTabTool, QueryProjectDatabaseTool, RebuildProjectTool, RunProjectCommandTool,
     SaveCurrentPageAsDocumentTool, SpawnSubagentsTool, StartAsyncTaskTool, WorkspaceCommandTool,
     WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool, WorkspaceGrepTool,
     WorkspaceListFilesTool, WorkspacePatchFileTool, WorkspaceReadFileTool, WorkspaceWriteFileTool,
@@ -653,6 +653,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(ClearProjectBuildFlagTool),
         Arc::new(GetProjectLogsTool),
         Arc::new(OpenProjectAppTool),
+        Arc::new(OpenWorkspaceTabTool),
         Arc::new(EnterPlanModeTool),
         Arc::new(ExitPlanModeTool),
         Arc::new(ManageTodoListTool),
@@ -914,6 +915,7 @@ mod tests {
             "local_write_file",
             "manage_todo_list",
             "open_project_app",
+            "open_workspace_tab",
             "patch_project_file",
             "patch_workspace_file",
             "query_project_database",
@@ -954,7 +956,7 @@ mod tests {
 
         assert_eq!(
             contracts.len(),
-            68,
+            69,
             "expected the exact Electron tool catalog"
         );
         let mut actual_by_name = std::collections::HashMap::new();

@@ -9,6 +9,7 @@ import type {
   BrowserAutomationSnapshot,
   BrowserAutomationSnapshotElement,
   BrowserAutomationSnapshotFormField,
+  BrowserPageContextMenuPayload,
 } from "../../../shared/page-automation-types.js";
 
 interface BrowserAppStatePayload {
@@ -24,10 +25,37 @@ interface BrowserContextMenuPayload {
   y: number;
 }
 
+interface BrowserContextElementInfo {
+  selector: string;
+  tag: string;
+  text: string;
+}
+
+export interface BrowserContextAddPayload {
+  kind: "selection" | "element";
+  url: string;
+  title: string;
+  text: string;
+  selector?: string;
+  tag?: string;
+}
+
+interface PageContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  hasSelection: boolean;
+  hasElement: boolean;
+  hasLink: boolean;
+  copied: boolean;
+}
+
 interface WebviewLikeElement extends HTMLElement {
   src: string;
   getURL: () => string;
   loadURL?: (url: string) => void;
+  reload?: () => void;
+  getWebContentsId?: () => number;
   executeJavaScript?: <T>(code: string, userGesture?: boolean) => Promise<T>;
 }
 
@@ -41,6 +69,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "stateChange", payload: BrowserAppStatePayload): void;
   (e: "contextMenu", payload: BrowserContextMenuPayload): void;
+  (e: "contextAdd", payload: BrowserContextAddPayload): void;
+  (e: "aiOperateRequest"): void;
 }>();
 
 const { t } = useI18n();
@@ -58,6 +88,24 @@ const addressContextMenu = reactive({
   copied: false,
 });
 let addressContextMenuResetTimer: number | null = null;
+
+const pageContextMenu = reactive<PageContextMenuState>({
+  visible: false,
+  x: 0,
+  y: 0,
+  hasSelection: false,
+  hasElement: false,
+  hasLink: false,
+  copied: false,
+});
+/** Snapshot of the page content under the most recent right-click. */
+let pageContextSnapshot: {
+  selectionText: string;
+  element: BrowserContextElementInfo | null;
+  linkURL: string;
+} | null = null;
+let pageContextMenuResetTimer: number | null = null;
+let browserPageContextMenuCleanup: (() => void) | null = null;
 
 const resolvedIcon = computed(() =>
   resolveProjectIcon("browser", currentIcon.value),
@@ -250,9 +298,10 @@ const SNAPSHOT_TEXT_PREVIEW_LIMIT = 12000;
 const SNAPSHOT_INTERACTIVE_ELEMENT_LIMIT = 64;
 const SNAPSHOT_FORM_FIELD_LIMIT = 64;
 const SNAPSHOT_ELEMENT_TEXT_LIMIT = 240;
+const PAGE_CONTEXT_TEXT_LIMIT = 20000;
 
-async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
-  return await executeInPage<BrowserAutomationSnapshot>(`
+/** In-page helpers shared by the snapshot and context-menu capture runners. */
+const PAGE_SCRIPT_HELPERS = `
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
 
     const buildSelector = (element) => {
@@ -295,6 +344,11 @@ async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
       }
       return path.join(' > ');
     };
+  `;
+
+async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
+  return await executeInPage<BrowserAutomationSnapshot>(`
+    ${PAGE_SCRIPT_HELPERS}
 
     const findLabel = (element) => {
       const id = element.id;
@@ -556,9 +610,216 @@ async function runAutomationAction(action: BrowserAutomationAction): Promise<Bro
   `, action);
 }
 
+function reloadPage() {
+  const webview = webviewRef.value;
+  if (!webview) return;
+  try {
+    if (typeof webview.reload === "function") {
+      webview.reload();
+      return;
+    }
+  } catch {
+    // Fall through to a URL reload when the webview is mid-navigation.
+  }
+  loadUrlInWebview(currentUrl.value);
+}
+
+const PAGE_CONTEXT_MENU_WIDTH = 200;
+const PAGE_CONTEXT_MENU_ITEM_HEIGHT = 32;
+
+/**
+ * Collects the live selection and the element under the right-click point.
+ * Falls back to the (possibly truncated) selectionText carried by the guest
+ * context-menu params when the page is mid-navigation.
+ */
+async function capturePageContextAtPoint(
+  x: number,
+  y: number,
+): Promise<{ selectionText: string; elementInfo: BrowserContextElementInfo | null }> {
+  return await executeInPage<{ selectionText: string; elementInfo: BrowserContextElementInfo | null }>(`
+    ${PAGE_SCRIPT_HELPERS}
+
+    let selectionText = '';
+    try {
+      selectionText = String(window.getSelection() || '');
+    } catch {
+      selectionText = '';
+    }
+
+    let pointElement = null;
+    try {
+      pointElement = document.elementFromPoint(payload.x, payload.y) || null;
+    } catch {
+      pointElement = null;
+    }
+
+    // Climb a few levels so a click on a short inline node picks up the
+    // surrounding text-bearing block instead of a one-word <span>.
+    let target = pointElement;
+    for (let i = 0; i < 3 && target && target.parentElement; i++) {
+      const tag = target.tagName ? target.tagName.toLowerCase() : '';
+      if (tag === 'body' || tag === 'html') break;
+      const textLength = normalizeText(target.innerText || '').length;
+      if (textLength >= 40) break;
+      const parent = target.parentElement;
+      if (normalizeText(parent.innerText || '').length <= textLength) break;
+      target = parent;
+    }
+
+    let elementInfo = null;
+    if (target && target instanceof Element) {
+      const tag = target.tagName ? target.tagName.toLowerCase() : '';
+      if (tag !== 'html' && tag !== 'body') {
+        elementInfo = {
+          selector: buildSelector(target) || '',
+          tag,
+          text: normalizeText(target.innerText || '').slice(0, ${PAGE_CONTEXT_TEXT_LIMIT}),
+        };
+      }
+    }
+
+    return {
+      selectionText: normalizeText(selectionText).slice(0, ${PAGE_CONTEXT_TEXT_LIMIT}),
+      elementInfo,
+    };
+  `, { x, y });
+}
+
+function estimatePageContextMenuHeight(): number {
+  let items = 1; // the fixed AI-operate entry
+  if (pageContextMenu.hasSelection) items += 2;
+  else if (pageContextMenu.hasElement) items += 1;
+  if (pageContextMenu.hasLink) items += 1;
+  return items * PAGE_CONTEXT_MENU_ITEM_HEIGHT + 12;
+}
+
+async function handleBrowserPageContextMenu(payload: BrowserPageContextMenuPayload): Promise<void> {
+  const webview = webviewRef.value;
+  if (!webview || typeof webview.getWebContentsId !== "function") return;
+
+  let ownGuestId: number | null = null;
+  try {
+    ownGuestId = webview.getWebContentsId();
+  } catch {
+    return;
+  }
+  if (ownGuestId !== payload.webContentsId) return;
+
+  const params = payload.params;
+  let selectionText = params.selectionText || "";
+  let element: BrowserContextElementInfo | null = null;
+  try {
+    const captured = await capturePageContextAtPoint(params.x, params.y);
+    if (captured.selectionText) selectionText = captured.selectionText;
+    element = captured.elementInfo;
+  } catch {
+    // The guest is navigating; keep whatever the params carried.
+  }
+
+  pageContextSnapshot = {
+    selectionText,
+    element,
+    linkURL: params.linkURL || "",
+  };
+
+  pageContextMenu.copied = false;
+  pageContextMenu.hasSelection = selectionText.trim().length > 0;
+  pageContextMenu.hasElement = !pageContextMenu.hasSelection && Boolean(element?.text);
+  pageContextMenu.hasLink = Boolean(params.linkURL);
+
+  const rect = webview.getBoundingClientRect();
+  const menuHeight = estimatePageContextMenuHeight();
+  pageContextMenu.x = Math.max(
+    8,
+    Math.min(rect.left + params.x, window.innerWidth - PAGE_CONTEXT_MENU_WIDTH - 8),
+  );
+  pageContextMenu.y = Math.max(
+    8,
+    Math.min(rect.top + params.y, window.innerHeight - menuHeight - 8),
+  );
+  pageContextMenu.visible = true;
+}
+
+function hidePageContextMenu() {
+  pageContextMenu.visible = false;
+  pageContextMenu.copied = false;
+  if (pageContextMenuResetTimer != null) {
+    window.clearTimeout(pageContextMenuResetTimer);
+    pageContextMenuResetTimer = null;
+  }
+}
+
+function runPageContextMenuAction(action: () => void | Promise<void>) {
+  void (async () => {
+    try {
+      await action();
+    } finally {
+      if (pageContextMenuResetTimer == null) hidePageContextMenu();
+    }
+  })();
+}
+
+function copyPageSelection() {
+  runPageContextMenuAction(async () => {
+    const text = pageContextSnapshot?.selectionText || "";
+    if (!text) return;
+    await writeTextToClipboard(text);
+    pageContextMenu.copied = true;
+    if (pageContextMenuResetTimer != null) window.clearTimeout(pageContextMenuResetTimer);
+    pageContextMenuResetTimer = window.setTimeout(() => {
+      hidePageContextMenu();
+    }, 650);
+  });
+}
+
+function copyPageLink() {
+  runPageContextMenuAction(async () => {
+    const url = pageContextSnapshot?.linkURL || "";
+    if (!url) return;
+    await writeTextToClipboard(url);
+    pageContextMenu.copied = true;
+    if (pageContextMenuResetTimer != null) window.clearTimeout(pageContextMenuResetTimer);
+    pageContextMenuResetTimer = window.setTimeout(() => {
+      hidePageContextMenu();
+    }, 650);
+  });
+}
+
+function addPageContentToContext() {
+  const snapshot = pageContextSnapshot;
+  if (!snapshot) return;
+  hidePageContextMenu();
+
+  if (snapshot.selectionText.trim()) {
+    emit("contextAdd", {
+      kind: "selection",
+      url: currentUrl.value,
+      title: currentTitle.value,
+      text: snapshot.selectionText,
+    });
+    return;
+  }
+  if (snapshot.element?.text) {
+    emit("contextAdd", {
+      kind: "element",
+      url: currentUrl.value,
+      title: currentTitle.value,
+      text: snapshot.element.text,
+      selector: snapshot.element.selector || undefined,
+      tag: snapshot.element.tag || undefined,
+    });
+  }
+}
+
+function requestAiOperate() {
+  hidePageContextMenu();
+  emit("aiOperateRequest");
+}
+
 defineExpose({
   captureAutomationSnapshot,
   runAutomationAction,
+  reload: reloadPage,
 });
 
 function emitStateChange() {
@@ -740,18 +1001,29 @@ watch(
   },
 );
 
+function hideAllContextMenus() {
+  hideAddressContextMenu();
+  hidePageContextMenu();
+}
+
 onMounted(async () => {
-  document.addEventListener("click", hideAddressContextMenu);
-  window.addEventListener("blur", hideAddressContextMenu);
+  document.addEventListener("click", hideAllContextMenus);
+  window.addEventListener("blur", hideAllContextMenus);
+  browserPageContextMenuCleanup = window.electronAPI?.onBrowserPageContextMenu?.((payload) => {
+    void handleBrowserPageContextMenu(payload);
+  }) || null;
   await nextTick();
   detachListeners = attachWebviewListeners();
   emitStateChange();
 });
 
 onUnmounted(() => {
-  document.removeEventListener("click", hideAddressContextMenu);
-  window.removeEventListener("blur", hideAddressContextMenu);
+  document.removeEventListener("click", hideAllContextMenus);
+  window.removeEventListener("blur", hideAllContextMenus);
+  browserPageContextMenuCleanup?.();
+  browserPageContextMenuCleanup = null;
   hideAddressContextMenu();
+  hidePageContextMenu();
   detachListeners?.();
 });
 </script>
@@ -822,6 +1094,51 @@ onUnmounted(() => {
         </button>
         <button class="browser-address-context-action" type="button" @click.stop="selectAddressInputText">
           {{ t('common.selectAll') }}
+        </button>
+      </div>
+      <div
+        v-if="pageContextMenu.visible"
+        class="browser-page-context-menu"
+        :style="{ left: `${pageContextMenu.x}px`, top: `${pageContextMenu.y}px`, minWidth: `${PAGE_CONTEXT_MENU_WIDTH}px` }"
+        @mousedown.prevent.stop
+        @click.stop
+        @contextmenu.prevent
+      >
+        <button
+          v-if="pageContextMenu.hasSelection"
+          class="browser-address-context-action"
+          type="button"
+          @click.stop="copyPageSelection"
+        >
+          {{ pageContextMenu.copied ? t('chatUi.copied') : t('common.copy') }}
+        </button>
+        <button
+          v-if="pageContextMenu.hasSelection"
+          class="browser-address-context-action"
+          type="button"
+          @click.stop="addPageContentToContext"
+        >
+          {{ t('chatUi.addToContext') }}
+        </button>
+        <button
+          v-else-if="pageContextMenu.hasElement"
+          class="browser-address-context-action"
+          type="button"
+          @click.stop="addPageContentToContext"
+        >
+          {{ t('chatUi.addElementToContext') }}
+        </button>
+        <button
+          v-if="pageContextMenu.hasLink"
+          class="browser-address-context-action"
+          type="button"
+          @click.stop="copyPageLink"
+        >
+          {{ pageContextMenu.copied ? t('chatUi.copied') : t('chatUi.copyLink') }}
+        </button>
+        <div class="browser-page-context-divider"></div>
+        <button class="browser-address-context-action" type="button" @click.stop="requestAiOperate">
+          ✨ {{ t('chatUi.letAiOperatePage') }}
         </button>
       </div>
     </Teleport>
@@ -951,6 +1268,23 @@ onUnmounted(() => {
 
 .browser-address-context-action:hover {
   background: rgba(241, 245, 249, 0.95);
+}
+
+.browser-page-context-menu {
+  position: fixed;
+  z-index: 5000;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+}
+
+.browser-page-context-divider {
+  height: 1px;
+  margin: 4px 8px;
+  background: rgba(148, 163, 184, 0.28);
 }
 
 .browser-view-webview {

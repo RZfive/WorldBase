@@ -1,5 +1,3 @@
-import { app } from 'electron'
-import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import mammoth from 'mammoth'
@@ -9,35 +7,14 @@ import type {
   DocumentRenderPreview
 } from '../ai-engine/agent/tools/document-types.js'
 import { getMainLocale, t } from '../i18n/main-i18n.js'
-
-const RENDER_CACHE_DIRNAME = 'document-render-cache'
-
-function getRenderCacheRoot (): string {
-  return path.join(app.getPath('userData'), RENDER_CACHE_DIRNAME)
-}
-
-function buildCacheKey (filePath: string, size: number, mtimeMs: number): string {
-  return createHash('sha1')
-    .update(filePath)
-    .update(':')
-    .update(String(size))
-    .update(':')
-    .update(String(Math.floor(mtimeMs)))
-    .digest('hex')
-}
-
-async function ensureDirectory (dirPath: string): Promise<void> {
-  await fs.mkdir(dirPath, { recursive: true })
-}
-
-async function fileExists (filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath)
-    return true
-  } catch {
-    return false
-  }
-}
+import {
+  ensureDirectory,
+  fileExists,
+  resolveHtmlPreviewCachePath,
+  writeHtmlPreviewCache
+} from './preview-cache.js'
+import { buildExcelHtmlPreview } from './excel-html-preview.js'
+import { buildPptxHtmlPreview } from './pptx-html-preview.js'
 
 function sanitizePreviewHtml (html: string): string {
   return html
@@ -75,16 +52,13 @@ function buildHtmlDocument (title: string, bodyHtml: string): string {
 }
 
 async function buildWordHtmlPreview (filePath: string): Promise<string> {
-  const stat = await fs.stat(filePath)
-  const cacheKey = buildCacheKey(filePath, stat.size, stat.mtimeMs)
-  const cacheDir = path.join(getRenderCacheRoot(), cacheKey)
-  const outputPath = path.join(cacheDir, `${path.parse(filePath).name}.${getMainLocale()}.preview.html`)
+  const outputPath = await resolveHtmlPreviewCachePath(filePath)
 
   if (await fileExists(outputPath)) {
     return outputPath
   }
 
-  await ensureDirectory(cacheDir)
+  await ensureDirectory(path.dirname(outputPath))
 
   const htmlResult = await mammoth.convertToHtml({ path: filePath })
   const htmlBody = sanitizePreviewHtml(htmlResult.value || '') || t('mainDialog.emptyDocumentPreviewText')
@@ -101,6 +75,20 @@ export async function buildDocumentRenderPreview (filePath: string, fileType: Do
       source: 'original',
       status: 'ready',
       mimeType: 'application/pdf',
+      assetPath: filePath,
+      generatedAt
+    }
+  }
+
+  if (fileType === 'md') {
+    // The renderer replays the original Markdown through the chat pipeline
+    // (renderMarkdown + mermaid + global .markdown-body styles), so the file
+    // itself is the preview asset — restore needs no generated cache.
+    return {
+      kind: 'markdown',
+      source: 'original',
+      status: 'ready',
+      mimeType: 'text/markdown; charset=utf-8',
       assetPath: filePath,
       generatedAt
     }
@@ -128,12 +116,47 @@ export async function buildDocumentRenderPreview (filePath: string, fileType: Do
     }
   }
 
-  if (fileType === 'xlsx' || fileType === 'pptx') {
-    return {
-      kind: 'structured',
-      source: 'generated',
-      status: 'ready',
-      generatedAt
+  if (fileType === 'xlsx') {
+    try {
+      const assetPath = await buildExcelHtmlPreview(filePath)
+      return {
+        kind: 'html',
+        source: 'generated',
+        status: 'ready',
+        mimeType: 'text/html; charset=utf-8',
+        assetPath,
+        generatedAt
+      }
+    } catch (error) {
+      return {
+        kind: 'structured',
+        source: 'fallback',
+        status: 'unavailable',
+        error: t('mainDialog.excelPreviewFallbackError', { message: (error as Error).message || String(error) }),
+        generatedAt
+      }
+    }
+  }
+
+  if (fileType === 'pptx') {
+    try {
+      const assetPath = await buildPptxHtmlPreview(filePath)
+      return {
+        kind: 'html',
+        source: 'generated',
+        status: 'ready',
+        mimeType: 'text/html; charset=utf-8',
+        assetPath,
+        generatedAt
+      }
+    } catch (error) {
+      return {
+        kind: 'structured',
+        source: 'fallback',
+        status: 'unavailable',
+        error: t('mainDialog.pptxPreviewFallbackError', { message: (error as Error).message || String(error) }),
+        generatedAt
+      }
     }
   }
 

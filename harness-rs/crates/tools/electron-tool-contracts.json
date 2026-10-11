@@ -184,10 +184,14 @@
           "reasoning_strength": {
             "type": "string",
             "enum": [
+              "none",
+              "minimal",
               "low",
               "medium",
               "high",
-              "max"
+              "xhigh",
+              "max",
+              "ultra"
             ]
           },
           "skill_ids": {
@@ -1916,6 +1920,43 @@
         },
         "required": [
           "project_id"
+        ]
+      }
+    },
+    {
+      "name": "open_workspace_tab",
+      "description": "Open a tab in the user's right-side workspace panel next to the chat. Use kind \"folder\" with root_path to bind a code directory; kind \"document\" with file_path to open one document (PDF/Excel/Word/...); kind \"browser\" with url to open a web page the user can watch and you can operate with the page tools (read_current_page / interact_current_page). The panel stays visible after the reply finishes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "folder",
+              "document",
+              "browser"
+            ],
+            "description": "Which workspace tab to open."
+          },
+          "root_path": {
+            "type": "string",
+            "description": "folder only: absolute directory path to bind as the code workspace root. Omit to let the user pick a folder interactively."
+          },
+          "file_path": {
+            "type": "string",
+            "description": "document only: absolute path of the document file to open as its own tab. Reopening a bound path just focuses its tab."
+          },
+          "url": {
+            "type": "string",
+            "description": "browser only: URL to load in the embedded browser tab."
+          },
+          "active_file_path": {
+            "type": "string",
+            "description": "Optional: file path (relative to root_path for folder tabs) to select after opening."
+          }
+        },
+        "required": [
+          "kind"
         ]
       }
     },

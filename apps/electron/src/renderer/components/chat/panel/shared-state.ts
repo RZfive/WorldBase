@@ -19,11 +19,6 @@ import type {
   SkillItem,
   SudoPasswordRequestPayload
 } from './types'
-import {
-  DEFAULT_DOCUMENT_WORKSPACE_WIDTH,
-  DEFAULT_FOLDER_WORKSPACE_WIDTH
-} from './workspace-state'
-
 export const DEFAULT_REASONING_STRENGTH: ReasoningStrength = 'max'
 
 export const sharedChatPanelState = {
@@ -74,15 +69,8 @@ export const sharedChatPanelState = {
   // Shared macOS TCC startup snapshot. Changes take effect on app restart.
   computerUsePermissionGranted: computerUsePermissions.granted,
   syncingProviderOptions: ref(false),
-  documentDockVisible: ref(false),
-  documentWorkspaceDocuments: ref<ConversationDocumentReference[]>([]),
-  documentWorkspaceActiveFilePath: ref<string | null>(null),
-  documentWorkspaceWidth: ref(DEFAULT_DOCUMENT_WORKSPACE_WIDTH),
-  folderWorkspaceVisible: ref(false),
-  folderWorkspaceRootPath: ref<string | null>(null),
-  folderWorkspaceRootName: ref<string | null>(null),
-  folderWorkspaceActiveFilePath: ref<string | null>(null),
-  folderWorkspaceWidth: ref(DEFAULT_FOLDER_WORKSPACE_WIDTH),
+  // Workspace panel state (tabs, widths, folder/document bindings) lives in
+  // components/workspace/workspace-store.ts.
   streamingConversationIds: reactive(new Set<string>()),
   pendingAuthRequestsByConversation: reactive(new Map<string, AuthRequestPayload[]>()),
   pendingSudoPasswordRequestsByConversation: reactive(new Map<string, SudoPasswordRequestPayload[]>()),

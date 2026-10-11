@@ -4,6 +4,14 @@ import { generateId } from './message-blocks'
 import { ensureMessageIds } from './message-branching'
 import { getPinnedAgentConversation, getPinnedGroupConversation } from './provider-utils'
 import { DEFAULT_REASONING_STRENGTH } from './shared-state'
+import {
+  applyFolderWorkspaceState,
+  applyWorkspaceState,
+  buildCurrentDocumentWorkspaceState,
+  buildCurrentFolderWorkspaceState,
+  buildCurrentWorkspaceState,
+  resetWorkspaceState
+} from '../../workspace/workspace-store'
 import type {
   AgentDefinition,
   AgentGroupDefinition,
@@ -53,12 +61,6 @@ interface ChatConversationNavigationOptions {
   loadConversations: () => Promise<void>
   saveConversation: (conversationId: string, messages: ChatMessage[], options?: SaveConversationOptions) => Promise<void>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
-  applyDocumentWorkspaceState: (state?: ConversationDocumentWorkspaceState | null) => void
-  applyFolderWorkspaceState: (state?: ConversationFolderWorkspaceState | null) => void
-  buildCurrentDocumentWorkspaceState: () => ConversationDocumentWorkspaceState | undefined
-  buildCurrentFolderWorkspaceState: () => ConversationFolderWorkspaceState | undefined
-  resetDocumentWorkspaceState: () => void
-  resetFolderWorkspaceState: () => void
   resetTransientStreamState: () => void
 }
 
@@ -98,12 +100,6 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     loadConversations,
     saveConversation,
     setConversationTarget,
-    applyDocumentWorkspaceState,
-    applyFolderWorkspaceState,
-    buildCurrentDocumentWorkspaceState,
-    buildCurrentFolderWorkspaceState,
-    resetDocumentWorkspaceState,
-    resetFolderWorkspaceState,
     resetTransientStreamState
   } = options
 
@@ -124,8 +120,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     pendingImages.value = []
     pendingFiles.value = []
     uploadFeedback.value = ''
-    resetDocumentWorkspaceState()
-    resetFolderWorkspaceState()
+    resetWorkspaceState()
   }
 
   function resolveConversationAgentSelection (value: {
@@ -154,7 +149,8 @@ export function createChatConversationNavigation (options: ChatConversationNavig
       groupId: selectedGroupId.value || null,
       channelBindingId: selectedChannelBindingId.value || null,
       documentWorkspace: buildCurrentDocumentWorkspaceState(),
-      folderWorkspace: buildCurrentFolderWorkspaceState()
+      folderWorkspace: buildCurrentFolderWorkspaceState(),
+      workspace: buildCurrentWorkspaceState()
     })
     // The running stream owns persistence. Navigation only keeps references;
     // serializing a multi-MB history here used to freeze every chat switch.
@@ -238,8 +234,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     pendingFiles.value = []
     uploadFeedback.value = ''
     resetTransientStreamState()
-    resetDocumentWorkspaceState()
-    resetFolderWorkspaceState()
+    resetWorkspaceState()
     setConversationTarget(conversationId, projectId)
 
     await saveConversation(conversationId, [], {
@@ -291,8 +286,10 @@ export function createChatConversationNavigation (options: ChatConversationNavig
       selectedAgentId.value = resolveConversationAgentSelection(backgroundState)
       selectedGroupId.value = backgroundState.groupId || ''
       selectedChannelBindingId.value = backgroundState.channelBindingId || ''
-      applyDocumentWorkspaceState(backgroundState.documentWorkspace)
-      applyFolderWorkspaceState(backgroundState.folderWorkspace)
+      applyWorkspaceState(backgroundState.workspace, {
+        folderWorkspace: backgroundState.folderWorkspace,
+        documentWorkspace: backgroundState.documentWorkspace
+      })
       setConversationTarget(conversationId, backgroundState.targetProjectId)
       backgroundStreamMessages.delete(conversationId)
       resetTransientStreamState()
@@ -321,8 +318,10 @@ export function createChatConversationNavigation (options: ChatConversationNavig
       selectedAgentId.value = resolveConversationAgentSelection(conversation)
       selectedGroupId.value = conversation.groupId || ''
       selectedChannelBindingId.value = conversation.channelBindingId || ''
-      applyDocumentWorkspaceState(conversation.documentWorkspace)
-      applyFolderWorkspaceState(conversation.folderWorkspace)
+      applyWorkspaceState(conversation.workspace, {
+        folderWorkspace: conversation.folderWorkspace,
+        documentWorkspace: conversation.documentWorkspace
+      })
       setConversationTarget(conversation.id, conversation.targetProjectId || null)
       resetTransientStreamState()
       pendingFiles.value = []
@@ -349,8 +348,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     pendingFiles.value = []
     pendingImages.value = []
     uploadFeedback.value = ''
-    resetDocumentWorkspaceState()
-    resetFolderWorkspaceState()
+    resetWorkspaceState()
   }
 
   async function deleteConversation (conversationId: string): Promise<void> {
@@ -364,8 +362,8 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     await loadConversations()
   }
 
-  function updateDocumentWorkspaceState (state: ConversationDocumentWorkspaceState): void {
-    applyDocumentWorkspaceState(state)
+  function updateFolderWorkspaceState (state: ConversationFolderWorkspaceState | null): void {
+    applyFolderWorkspaceState(state)
     if (!currentConversationId.value) return
     void saveConversation(currentConversationId.value, messages.value, {
       targetProjectId: targetProjectId.value,
@@ -373,8 +371,8 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     })
   }
 
-  function updateFolderWorkspaceState (state: ConversationFolderWorkspaceState | null): void {
-    applyFolderWorkspaceState(state)
+  /** Persists generic (non folder/document) tab state written onto the tab instance. */
+  function updateWorkspaceTabState (): void {
     if (!currentConversationId.value) return
     void saveConversation(currentConversationId.value, messages.value, {
       targetProjectId: targetProjectId.value,
@@ -392,7 +390,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     openGroupWorkspaceConversation,
     prepareLongTermGoalWorkspace,
     startOptimizationConversation,
-    updateDocumentWorkspaceState,
-    updateFolderWorkspaceState
+    updateFolderWorkspaceState,
+    updateWorkspaceTabState
   }
 }

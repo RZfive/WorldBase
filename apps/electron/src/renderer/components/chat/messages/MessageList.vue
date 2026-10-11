@@ -700,6 +700,12 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* With sidebar + workspace open the panel can drop to its protected
+     minimum; nothing inside the stream may widen it into a horizontal
+     scrollbar (wide children scroll themselves). `clip` avoids turning the
+     list into a horizontal scroll container; `hidden` is the fallback. */
+  overflow-x: hidden;
+  overflow-x: clip;
   padding: calc(17px + var(--chat-header-height, 0px)) var(--chat-message-gutter, 27px) calc(8px + var(--chat-input-overlap, 0px));
   scrollbar-gutter: stable;
   overscroll-behavior-y: contain;
