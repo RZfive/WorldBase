@@ -105,7 +105,7 @@ jobs:
         shell: pwsh
         env:
           HOT_PAYLOAD_PRIVATE_KEY: ${{ secrets.HOT_PAYLOAD_PRIVATE_KEY }}
-        run: node apps/electron/scripts/build-hot-payload.mjs
+        run: node apps/electron/scripts/build-hot-payload.mjs --require-signature
 
       - name: Verify hot payload
         shell: pwsh
@@ -183,7 +183,8 @@ jobs:
           node apps/electron/scripts/build-hot-payload.mjs \
             --platform=darwin --arch=arm64 \
             --source=apps/electron/release/mac-arm64/WorldBase.app/Contents/Resources \
-            --output=apps/electron/release
+            --output=apps/electron/release \
+            --require-signature
 
       - name: Verify hot payload
         run: |
@@ -256,7 +257,8 @@ jobs:
           node apps/electron/scripts/build-hot-payload.mjs \
             --platform=linux --arch=x64 \
             --source=apps/electron/release/linux-unpacked/resources \
-            --output=apps/electron/release
+            --output=apps/electron/release \
+            --require-signature
 
       - name: Verify hot payload
         run: |

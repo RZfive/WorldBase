@@ -17,8 +17,9 @@ permissions:
 
 jobs:
   build:
-    # 仅真正合并的 PR 触发；手动关闭（未合并）的 PR 不构建
-    if: github.event.pull_request.merged == true
+    # 仅真正合并的 PR 或手动触发才构建；手动关闭（未合并）的 PR 不构建。
+    # workflow_dispatch 事件里没有 pull_request 上下文，条件必须先判事件名，否则手动触发整条被 skip。
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     uses: ./.github/workflows/reusable-build.yml
     # reusable workflow 默认不继承 secrets；缺失会导致热更包缺 manifest.sig
     secrets: inherit

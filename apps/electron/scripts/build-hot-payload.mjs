@@ -47,13 +47,14 @@ function defaultPackagedResources () {
 
 function parseArgs (argv) {
   const defaultPlatform = process.platform === 'darwin' ? 'darwin' : process.platform === 'linux' ? 'linux' : 'win32'
-  const options = { platform: defaultPlatform, arch: process.arch, minBaseVersion: '', source: '', output: '' }
+  const options = { platform: defaultPlatform, arch: process.arch, minBaseVersion: '', source: '', output: '', requireSignature: false }
   for (const arg of argv) {
     if (arg.startsWith('--platform=')) options.platform = arg.slice('--platform='.length)
     else if (arg.startsWith('--arch=')) options.arch = arg.slice('--arch='.length)
     else if (arg.startsWith('--min-base-version=')) options.minBaseVersion = arg.slice('--min-base-version='.length)
     else if (arg.startsWith('--source=')) options.source = arg.slice('--source='.length)
     else if (arg.startsWith('--output=')) options.output = arg.slice('--output='.length)
+    else if (arg === '--require-signature') options.requireSignature = true
   }
   return options
 }
@@ -216,6 +217,9 @@ async function main () {
   let signature = null
   if (signingKey) {
     signature = sign(null, manifestBytes, signingKey).toString('base64')
+  } else if (options.requireSignature) {
+    // CI 必须产出带 manifest.sig 的热更包；缺密钥时宁可构建失败，也不能发出客户端必拒的未签名包
+    throw new Error('HOT_PAYLOAD_PRIVATE_KEY is not set; refusing to build an unsigned hot payload with --require-signature.')
   } else {
     console.warn('[hot-payload] HOT_PAYLOAD_PRIVATE_KEY is not set; manifest.sig will not be generated.')
   }
