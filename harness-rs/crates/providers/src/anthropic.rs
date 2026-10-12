@@ -501,12 +501,14 @@ impl Provider for AnthropicProvider {
     ) -> Result<ChunkStream> {
         let body = self.request_body(system, &messages, &tools, max_tokens, &options);
         let url = crate::urls::anthropic_messages_url(&self.base_url, DEFAULT_BASE_URL)?;
+        let headers = crate::http::session_headers(&url, options.session_id.as_deref())?;
         let resp = crate::http::send_with_retry("anthropic", || {
             self.client
                 .post(url.clone())
                 .header("x-api-key", &self.api_key)
                 .bearer_auth(&self.api_key)
                 .header("anthropic-version", API_VERSION)
+                .headers(headers.clone())
                 .json(&body)
         })
         .await?;
@@ -589,6 +591,19 @@ impl Provider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn opencode_anthropic_sessions_survive_retries_and_turns() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut provider = AnthropicProvider::new(
+            "test-key".into(),
+            "test-model".into(),
+            Some(format!("http://opencode.ai:{}/zen/go/v1", address.port())),
+        )
+        .unwrap();
+        provider.client = crate::test_support::opencode_client(address);
+        crate::test_support::assert_opencode_sessions(&provider, listener, "/zen/go/v1/messages", "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n").await;
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
@@ -644,6 +659,7 @@ mod tests {
                 temperature: Some(0.2),
                 enable_thinking: true,
                 reasoning_effort: Some("high".into()),
+                ..ChatOptions::default()
             },
         );
         assert_eq!(body["thinking"]["budget_tokens"], 16_384);
@@ -1019,6 +1035,7 @@ mod tests {
                     temperature: Some(0.9),
                     enable_thinking: true,
                     reasoning_effort: Some("low".into()),
+                    ..ChatOptions::default()
                 },
             )
             .await
