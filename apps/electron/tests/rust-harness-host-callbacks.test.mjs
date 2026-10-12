@@ -151,7 +151,13 @@ test('project file tools are Rust-native and register no Node override', async (
     'delete_project_file',
     'list_project_files',
     'glob_search',
-    'grep_search'
+    'grep_search',
+    'run_workspace_command',
+    'get_workspace_command_status',
+    'run_project_command',
+    'get_project_command_status',
+    'query_project_database',
+    'analyze_project_data'
   ]) {
     assert.equal(
       registrations.some(tool => tool.definition.name === name),
@@ -351,8 +357,8 @@ test('all canonical Electron tools have an explicit execution owner', async () =
     runSubagents: async () => []
   }).getToolDefinitions()
   const canonicalNames = catalog.map(tool => tool.name).sort()
-  assert.equal(canonicalNames.length, 49)
-  assert.equal(new Set(canonicalNames).size, 49)
+  assert.equal(canonicalNames.length, 43)
+  assert.equal(new Set(canonicalNames).size, 43)
   // Rust-intrinsic plan controls and Rust-native image/workspace/project-file
   // tools never appear in the Node canonical catalog; Rust advertises and
   // executes them itself.
@@ -376,7 +382,13 @@ test('all canonical Electron tools have an explicit execution owner', async () =
     'delete_project_file',
     'list_project_files',
     'glob_search',
-    'grep_search'
+    'grep_search',
+    'run_workspace_command',
+    'get_workspace_command_status',
+    'run_project_command',
+    'get_project_command_status',
+    'query_project_database',
+    'analyze_project_data'
   ]) {
     assert.equal(canonicalNames.includes(name), false, `${name} must be Rust-owned and absent from the Node catalog`)
   }
@@ -514,46 +526,30 @@ test('a server installed during a Rust turn is immediately available to generic 
   assert.deepEqual(calls[0][4], ['mcp_docs'])
 })
 
-test('Rust project command callbacks share the exact Electron command status registry', async () => {
-  const projectsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'worldbase-rust-command-'))
-  try {
-    await fs.mkdir(path.join(projectsDir, 'project-alpha'))
-    const services = createServices({
-      projectFS: {
-        projectsDir,
-        async readFile () { return '' },
-        async writeFile () {},
-        async listProjects () { return [] }
-      },
-      builderService: {
-        async syncManualBuildState () { return { synced: true } }
-      }
-    })
-    const registrations = await collectHostTools(
-      createHarnessEngine(services, ['run_project_command', 'get_project_command_status']),
-      { authMode: 'auto' }
+test('project command tools are Rust-native and register no Node override', async () => {
+  // run/get_project_command_status and the workspace pair execute in Rust
+  // (`electron_native`) with the same validators, output caps, and
+  // timeout-to-background semantics the Electron registry used to own.
+  const services = createServices()
+  const registrations = await collectHostTools(
+    createHarnessEngine(services, [
+      { name: 'run_project_command', description: 'Rust run_project_command', inputSchema: { type: 'object' }, electronNative: true },
+      { name: 'get_project_command_status', description: 'Rust get_project_command_status', inputSchema: { type: 'object' }, electronNative: true }
+    ]),
+    { authMode: 'auto' }
+  )
+
+  for (const name of [
+    'run_project_command',
+    'get_project_command_status',
+    'run_workspace_command',
+    'get_workspace_command_status'
+  ]) {
+    assert.equal(
+      registrations.some(tool => tool.definition.name === name),
+      false,
+      `${name} must execute in Rust, not through a Node host override`
     )
-
-    for (const name of ['run_project_command', 'get_project_command_status']) {
-      assert.equal(getTool(registrations, name).domain, 'electron_host_override')
-    }
-    const started = await dispatchToolExecute(registrations, 'run_project_command', {
-      project_id: 'project-alpha',
-      command: 'node -e "process.stdout.write(\'node-exact-command\')"',
-      timeout_seconds: 5
-    })
-    assert.equal(started.result.status, 'completed')
-    assert.equal(started.result.exitCode, 0)
-    assert.equal(started.result.stdout, 'node-exact-command')
-
-    const polled = await dispatchToolExecute(registrations, 'get_project_command_status', {
-      command_id: started.result.command_id
-    })
-    assert.equal(polled.result.command_id, started.result.command_id)
-    assert.equal(polled.result.status, 'completed')
-    assert.equal(polled.result.stdout, 'node-exact-command')
-  } finally {
-    await fs.rm(projectsDir, { recursive: true, force: true })
   }
 })
 

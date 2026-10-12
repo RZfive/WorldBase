@@ -1,8 +1,5 @@
 import { toolCallApi } from './tool-call-api.js'
-import { toolQueryDb } from './tool-query-db.js'
-import { toolGetProjectCommandStatus, toolRunCommand } from './tool-run-command.js'
 import { toolListProjects } from './tool-list-projects.js'
-import { toolAnalyzeData } from './tool-analyze-data.js'
 import { toolCreateProject } from './tool-create-project.js'
 import { toolLocalFileRead } from './tool-local-file-read.js'
 import { toolLocalCommand } from './tool-local-command.js'
@@ -17,7 +14,6 @@ import { toolRestartProjectServer } from './tool-restart-server.js'
 import { toolOpenProjectApp } from './tool-open-project-app.js'
 import { toolOpenWorkspaceTab } from './tool-open-workspace-tab.js'
 import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
-import { toolRunWorkspaceCommand, toolGetWorkspaceCommandStatus } from './tool-workspace-command.js'
 import { toolWebSearch } from './tool-web-search.js'
 import { toolFetchWebpage } from './tool-fetch-webpage.js'
 import { toolInteractCurrentPage, toolReadCurrentPage, toolFillCurrentPageForm, toolSaveCurrentPageAsDocument } from './tool-active-page.js'
@@ -87,17 +83,12 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
   // SafeWriter-style backup that Electron's handlers used to own.
   const tools = [
     toolCallApi(services),
-    toolQueryDb(services),
-    toolRunCommand(services),
-    toolGetProjectCommandStatus(),
-    toolListProjects(services),
-    toolGetProjectStatus(services),
+    toolListProjects(services),    toolGetProjectStatus(services),
     toolGetProjectLogs(services),
     toolStartProjectServer(services),
     toolRestartProjectServer(services),
     toolOpenProjectApp(services),
     toolOpenWorkspaceTab(services),
-    toolAnalyzeData(services),
     toolCreateProject(services, getSessionState),
     toolRebuildProject(services),
     toolFinalizeProject(services),
@@ -123,16 +114,6 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolCreateAgent(services, () => agent.getToolDefinitions()),
     toolCreateAgentGroup(services)
   ]
-
-  // The folder-workspace file tools are Rust-native (`electron_native`); only
-  // the command runner stays in the host because its bundled-runtime PATH
-  // shims and foreground/background task registry are Electron-owned.
-  if (services.workspaceRoot) {
-    tools.push(
-      toolRunWorkspaceCommand(services),
-      toolGetWorkspaceCommandStatus()
-    )
-  }
 
   if (services.readActivePage) {
     tools.push(toolReadCurrentPage(services))

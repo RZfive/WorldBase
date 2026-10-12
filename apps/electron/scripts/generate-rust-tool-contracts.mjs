@@ -45,9 +45,9 @@ if (new Set(names).size !== names.length) {
 }
 // Rust-native ownership (`electron_native` / intrinsic plan controls):
 // enter_plan_mode, exit_plan_mode, generate_image, edit_image, the eight
-// folder-workspace tools, and the six project-file tools plus project glob/grep search. Electron never registers handlers for them, so they
+// folder-workspace tools, the six project-file tools plus project glob/grep search, and the command runners with project database access. Electron never registers handlers for them, so they
 // are absent from the host contract.
-const EXPECTED_TOOL_COUNT = 49
+const EXPECTED_TOOL_COUNT = 43
 if (tools.length !== EXPECTED_TOOL_COUNT) {
   throw new Error(`Electron tool registry produced ${tools.length} public tools; expected exactly ${EXPECTED_TOOL_COUNT}`)
 }

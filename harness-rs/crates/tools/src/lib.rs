@@ -878,7 +878,6 @@ mod tests {
         // `registerAllTools`. Keep it explicit so a compatibility wrapper is
         // not accidentally implemented but omitted from builtin_tools().
         let electron_tools = [
-            "analyze_project_data",
             "ask_user",
             "call_project_api",
             "clear_project_build_flag",
@@ -893,11 +892,9 @@ mod tests {
             "fill_current_page_form",
             "finalize_project",
             "generate_image",
-            "get_project_command_status",
             "get_project_logs",
             "get_project_status",
             "get_task_status",
-            "get_workspace_command_status",
             "install_mcp_server",
             "install_skill",
             "interact_current_page",
@@ -912,15 +909,12 @@ mod tests {
             "manage_todo_list",
             "open_project_app",
             "open_workspace_tab",
-            "query_project_database",
             "read_active_terminal",
             "read_current_page",
             "read_document",
             "rebuild_project",
             "restart_project_server",
-            "run_project_command",
             "run_skill",
-            "run_workspace_command",
             "save_current_page_as_document",
             "start_async_task",
             "start_project_server",
@@ -948,8 +942,8 @@ mod tests {
 
         assert_eq!(
             contracts.len(),
-            49,
-            "expected the exact Electron tool catalog (Rust-native plan/image/workspace/project-file tools are excluded)"
+            43,
+            "expected the exact Electron tool catalog (Rust-native plan/image/workspace/project-file/command/data tools are excluded)"
         );
         let mut actual_by_name = std::collections::HashMap::new();
         for descriptor in actual {

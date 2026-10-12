@@ -1158,6 +1158,15 @@ async fn run_managed_command(
         "started_at": now,
         "stdout": "",
         "stderr": "",
+        "workspace_root": if project_id.is_none() {
+            Value::from(
+                project_root
+                    .map(|root| root.display().to_string())
+                    .unwrap_or_default(),
+            )
+        } else {
+            Value::Null
+        },
         "timedOut": false,
         "outputTruncated": false,
         "background": false
@@ -2398,16 +2407,19 @@ impl Tool for WorkspaceCommandTool {
         "run_workspace_command"
     }
     fn description(&self) -> &str {
-        "Run a short-lived command inside the selected folder workspace."
+        "Run a short-lived install, build, test, lint, type-check, or diagnostic command inside the selected folder workspace. Do not start long-lived dev servers."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_seconds":{"type":"integer"}},"required":["command"]})
+        json!({"type":"object","properties":{"command":{"type":"string","description":"The command to run, e.g. \"npm test\", \"pnpm build\", \"npx tsc --noEmit\"."},"cwd":{"type":"string","description":"Working subdirectory relative to the workspace root."},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout. Default 90, max 180."}},"required":["command"]})
     }
     fn domain(&self) -> &str {
         "desktop"
     }
     fn permission(&self) -> &str {
         "ask"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let command = require_str(&input, "command")?;
@@ -2418,12 +2430,14 @@ impl Tool for WorkspaceCommandTool {
             .map(|value| services.folder_workspace_path(value))
             .unwrap_or_else(|| root.to_path_buf());
         services.ensure_folder_workspace_path(&cwd)?;
+        // Node's handlers never sandboxed these commands, and package
+        // managers legitimately write caches under $HOME — keep parity.
         run_managed_command(
             command,
             &cwd,
             timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
             None,
-            true,
+            false,
             Some(&root),
             None,
         )
@@ -2438,10 +2452,13 @@ impl Tool for GetProjectCommandStatusTool {
         "get_project_command_status"
     }
     fn description(&self) -> &str {
-        "Get the latest status and output for a project command."
+        "Get the latest status, output, and final result for a command started by run_project_command."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command_id":{"type":"string"}},"required":["command_id"]})
+        json!({"type":"object","properties":{"command_id":{"type":"string","description":"Command execution ID returned by run_project_command"}},"required":["command_id"]})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, _services: &ToolServices) -> Result<Value> {
         let id = require_str(&input, "command_id")?;
@@ -2461,10 +2478,13 @@ impl Tool for GetWorkspaceCommandStatusTool {
         "get_workspace_command_status"
     }
     fn description(&self) -> &str {
-        "Get the latest status and output for a workspace command."
+        "Get the latest status and output for a command started by run_workspace_command."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command_id":{"type":"string"}},"required":["command_id"]})
+        json!({"type":"object","properties":{"command_id":{"type":"string","description":"Command execution ID returned by run_workspace_command"}},"required":["command_id"]})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, _services: &ToolServices) -> Result<Value> {
         let id = require_str(&input, "command_id")?;
@@ -3352,16 +3372,19 @@ impl Tool for RunProjectCommandTool {
         "run_project_command"
     }
     fn description(&self) -> &str {
-        "Run a short-lived diagnostic command inside a managed project."
+        "Run a short-lived command inside the project directory for diagnostics: type-check, lint, tests, or quick one-off commands (e.g. \"npx tsc --noEmit\", \"npm test\", \"npx eslint .\"). Do NOT use this tool to run `npm run build`, `npm install`, `npm start`, or `npm run dev` for project install/build/serve — those have dedicated tools: create_project (auto install + build + start on creation), rebuild_project (atomic install + build + restart, preserves caches), and start_project_server / restart_project_server (long-lived servers). Only fall back to a manual `npm install` / `npm run build` here when those dedicated tools are unavailable or have explicitly failed. Allowed commands include npm / npx / pnpm / yarn / bun / node / tsx, the tsc / eslint / prettier / vitest / jest / playwright runners, read-only git (status, diff, log, show, branch), and read-only shell utilities. Prefer dedicated tools (read_project_file, grep_search, list_project_files) over cat / grep / ls. Run ONE command per call; chaining with && | ; or redirects requires developer command mode (THE_WORLD_DEV_COMMANDS=1). If the foreground wait times out the command keeps running in the background and returns a command_id; poll it with get_project_command_status instead of retrying."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"command":{"type":"string"},"cwd":{"type":"string"},"timeout_seconds":{"type":"integer"}},"required":["project_id","command"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string","description":"Project ID"},"command":{"type":"string","description":"The command to run, e.g. \"npm test\", \"npx tsc --noEmit\", \"npx eslint .\". A single command unless developer command mode is enabled."},"cwd":{"type":"string","description":"Working subdirectory (defaults to the project root)"},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout in seconds. Default 90, maximum 180."}},"required":["project_id","command"]})
     }
     fn domain(&self) -> &str {
         "desktop"
     }
     fn permission(&self) -> &str {
         "ask"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let (id, root) = project_path(&input, services)?;
@@ -3377,7 +3400,7 @@ impl Tool for RunProjectCommandTool {
             &cwd,
             timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
             Some(&id),
-            true,
+            false,
             Some(&root),
             Some(Arc::clone(&services.projects)),
         )
@@ -3531,10 +3554,13 @@ impl Tool for QueryProjectDatabaseTool {
         "query_project_database"
     }
     fn description(&self) -> &str {
-        "Run a read-only SQL query against a project database."
+        "Run a read-only SQL query against the specified project database. SELECT only."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"sql":{"type":"string"},"database_path":{"type":"string"}},"required":["project_id","sql"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string","description":"Project ID"},"sql":{"type":"string","description":"SELECT query"},"database_path":{"type":"string"}},"required":["project_id","sql"]})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let (id, _root) = project_path(&input, services)?;
@@ -3716,32 +3742,37 @@ impl Tool for AnalyzeProjectDataTool {
         "analyze_project_data"
     }
     fn description(&self) -> &str {
-        "Inspect the schema and basic statistics of a project database."
+        "Analyze project data and return statistics. Supported types: summary, trend, distribution, comparison."
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "project_id": {"type": "string"},
-                "analysis_type": {"type": "string", "enum": ["summary", "trend", "distribution", "comparison"]},
+                "project_id": {"type": "string", "description": "Project ID"},
+                "analysis_type": {"type": "string", "enum": ["summary", "trend", "distribution", "comparison"], "description": "Analysis type"},
                 "database_path": {"type": "string"},
                 "options": {
                     "type": "object",
+                    "description": "Analysis options. trend needs {table, dateColumn, valueColumn}; distribution needs {table, column}; comparison needs {table, groupColumn, valueColumn}.",
                     "properties": {
-                        "table": {"type": "string"},
-                        "dateColumn": {"type": "string"},
-                        "valueColumn": {"type": "string"},
+                        "table": {"type": "string", "description": "Table name"},
+                        "dateColumn": {"type": "string", "description": "Date column (trend)"},
+                        "valueColumn": {"type": "string", "description": "Value column"},
                         "groupBy": {"type": "string"},
-                        "column": {"type": "string"},
-                        "groupColumn": {"type": "string"},
-                        "aggregation": {"type": "string", "enum": ["SUM", "AVG", "COUNT", "MIN", "MAX"]}
+                        "column": {"type": "string", "description": "Column to analyze (distribution)"},
+                        "groupColumn": {"type": "string", "description": "Group column (comparison)"},
+                        "aggregation": {"type": "string", "enum": ["SUM", "AVG", "COUNT", "MIN", "MAX"], "description": "Aggregation function (comparison): SUM/AVG/COUNT/MIN/MAX"}
                     }
                 }
             },
             "required": ["project_id", "analysis_type"]
         })
     }
-    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        fn electron_native(&self) -> bool {
+        true
+    }
+
+async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let analysis_type = supported_project_analysis_type(&input)?;
         let (id, _root) = project_path(&input, services)?;
         let requested_database = input.get("database_path").and_then(Value::as_str);
