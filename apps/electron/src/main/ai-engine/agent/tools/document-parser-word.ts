@@ -45,5 +45,22 @@ export async function parseWordToNodes (buffer: Buffer): Promise<DocumentNode[]>
     })
   }
 
+  // 图片占位节点：让 AI 与变更清单"看得见"图片（追加在段落之后，段落
+  // 节点 id 保持稳定）。media 部件存在即占位，不区分是否被正文引用。
+  const mediaNames = Object.keys(zip.files)
+    .filter(name => /^word\/media\/.+/i.test(name))
+    .sort()
+  for (const mediaPath of mediaNames) {
+    const fileName = mediaPath.split('/').pop() || mediaPath
+    nodes.push({
+      id: nextId(),
+      type: 'image_placeholder',
+      text: fileName,
+      level: 0,
+      pageIndex: 1,
+      meta: { mediaPath }
+    })
+  }
+
   return nodes
 }

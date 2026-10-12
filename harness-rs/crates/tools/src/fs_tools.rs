@@ -215,6 +215,8 @@ impl Tool for WriteFileTool {
         let content = require_str(&input, "content")?;
         let full = services.workspace_path(path);
         services.ensure_workspace_path(&full)?;
+        // 已导入文档 / 已存在 Office 文件禁止直写，改走 doc_draft。
+        crate::document_artifacts::ensure_document_write_allowed(&services.workspace, &full)?;
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -299,6 +301,8 @@ impl Tool for EditFileTool {
         let new = require_str(&input, "new_string")?;
         let full = services.workspace_path(path);
         services.ensure_workspace_path(&full)?;
+        // 已导入文档 / 已存在 Office 文件禁止直写，改走 doc_draft。
+        crate::document_artifacts::ensure_document_write_allowed(&services.workspace, &full)?;
         let content = tokio::fs::read_to_string(&full).await?;
         let count = content.matches(old).count();
         let replace_all = input

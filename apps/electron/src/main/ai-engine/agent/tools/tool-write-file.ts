@@ -3,6 +3,7 @@ import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { ReadFileTracker } from './read-tracker.js'
 import { streamFilePreview } from './file-preview-progress.js'
+import { assertTextToolNotOfficeTarget } from './office-write-guard.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -48,6 +49,7 @@ export function toolWriteFile (services: ToolServices, readTracker?: ReadFileTra
     },
     handler: async (args, onProgress) => {
       const { project_id, file_path, content } = args as unknown as WriteFileArgs
+      assertTextToolNotOfficeTarget(file_path)
       // Read the prior version (if any) so the UI can show a real +/- change amount.
       let previousContent: string | undefined
       try {

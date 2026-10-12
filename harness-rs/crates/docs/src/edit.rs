@@ -29,7 +29,7 @@ pub struct Slide {
     pub content: Vec<String>,
 }
 
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -255,7 +255,7 @@ pub fn write_pptx(path: &Path, slides: &[Slide]) -> Result<()> {
     Ok(())
 }
 
-fn text_shape(id: u32, x: u32, y: u32, cx: u32, cy: u32, text: &str, size: u32) -> String {
+pub(crate) fn text_shape(id: u32, x: u32, y: u32, cx: u32, cy: u32, text: &str, size: u32) -> String {
     let paragraphs = text
         .lines()
         .map(|line| {

@@ -6,6 +6,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 pub mod edit;
+pub mod ops;
 pub mod parse;
 
 /// Return whether the document engine has a parser for the path's extension.

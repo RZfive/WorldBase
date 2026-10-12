@@ -36,6 +36,9 @@ import {
   activateWorkspaceTab,
   ensureWorkspaceTab,
   getActiveWorkspaceTab,
+  getDocumentTabFilePath,
+  getDocumentTabs,
+  getWorkspaceDocumentDraft,
   removeWorkspaceTab,
   stageWorkspaceDocumentDraft,
   workspaceBrowserSurfaces,
@@ -945,6 +948,25 @@ watch(
   },
   { immediate: true }
 )
+
+// Draft notifications can be lost (window routing, harness restart). When a
+// chat stream settles, re-pull pending drafts for every open document tab so
+// the banner still appears without depending on the push event.
+watch(isLoading, async (loading, previous) => {
+  if (!previous || loading) return
+  for (const tab of getDocumentTabs()) {
+    const filePath = getDocumentTabFilePath(tab)
+    if (!filePath || getWorkspaceDocumentDraft(filePath)) continue
+    try {
+      const record = await window.electronAPI?.getDocumentDraft?.(filePath)
+      if (record && !getWorkspaceDocumentDraft(filePath)) {
+        stageWorkspaceDocumentDraft(record)
+      }
+    } catch {
+      // Harness unavailable or no draft for this path: leave the tab as is.
+    }
+  }
+})
 
 // Window sizing follows the panel: the minimum width tracks the active tab
 // kind's bounds, and an opening (or activating) tab re-expands the window.

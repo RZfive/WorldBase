@@ -1,9 +1,20 @@
 # 文档编辑实时预览与保真架构方案（Draft 2.0）
 
-**版本**: v1（方案定稿，未实施）
-**日期**: 2026-10-12
+**版本**: v2（P0 + P1 已实施，2026-10-12）
+**日期**: 2026-10-12（v1 方案）· 2026-10-12（v2 实施）
 **范围**: Rust harness（`doc_draft` / 文档 artifact 存储）· Electron 主进程（IPC / 文件监听 / OOXML 手术）· 渲染层（文档工作区页）
 **关联文档**: `rust-harness-architecture.md`（Rust/宿主边界）、`ai-agent-tools.md`（工具契约）
+
+> **实施状态（v2）**：P0-1～P0-4 与 P1-1～P1-5 已全部落地（P2 除外）。
+> - Rust：`worldbase_docs::ops`（`apply_ops` 手术式编辑：docx/pptx 文本替换、插删段落、插图、增删页，media 字节保留 + 写后完整性自检）；`parse` 输出 `paragraphItems`/`images`/`imageCount`；`stage_document_draft` 产出 `changes`（ops 精确推导 / patience-diff 推导）与 `dataLossRisk`；`doc_draft` 支持 `ops`/`summary` 入参与 `notified` 返回；`ensure_document_write_allowed` 直写守卫接入 `doc_write`/`local_write_file`/`write_file`/`edit_file`。
+> - Electron：`document-file-watcher.ts`（引用计数 + 去抖 + 轮询兜底）+ `document:watchFile`/`unwatchFile`/`workspace:documentFileChanged`；`office-write-guard.ts` 拦截 `local_write_file` 与三个项目文本工具；pptx/docx 解析器补图片占位节点与 `pptxSlideParagraphIndex`；草稿横幅变更清单/高亮、dataLossRisk 二次确认、窗口聚焦补拉草稿、磁盘过期提示条。
+> - 测试：Rust docs 14 + tools 126 全过；electron 新增 `test:document-editing`（7 项）+ 既有回归全过；工具契约快照已再生（进入 Rust 原生所有权后为 65 项：enter/exit_plan_mode 为 Rust 内在控制，generate/edit_image 为 `electron_native`，均不再出现在 Electron 宿主契约中）。
+>
+> **v2.1 补充（2026-10-12 下午，针对"PPT 修改后仍无预览/无横幅"反馈）**：
+> - 通知丢失自愈：聊天流结束（`isLoading` true→false）时，ChatPanelContainer 对所有已打开文档页按路径调用 `doc.draft.get` 补拉待决草稿（`getDocumentTabFilePath` 改为导出），不再单纯依赖 `document.draftStaged` 推送。
+> - 模型引导修正：工作区上下文提示词从"全文重写"改为引导 `doc_parse` → `doc_draft` + `ops` 操作列表（全文重建仅在用户明确要求整份重做时使用，会触发丢失警示）；被直写守卫拦截后错误信息含 `doc_draft` 引导。
+> - 工具级 E2E 测试落地：`doc_draft_pptx_ops_end_to_end_preserves_media`（未导入文件自动导入 → ops 手术 → media 保留 → changes 生成 → `doc.draft.get` 可取回）与 `local_write_file_refuses_existing_office_document`。
+> - 部署校验：`resources/harness/worldbase-app-server` 已确认包含新代码（`dataLossRisk`/ops kinds 在二进制内），`pnpm electron:dev` 每次启动经 `build:harness` 重建，无旧二进制问题。
 
 ---
 

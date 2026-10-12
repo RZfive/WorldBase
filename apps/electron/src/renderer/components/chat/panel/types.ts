@@ -87,7 +87,7 @@ export interface ChatPanelProps {
   /** Latest AI-originated workspace tab open request; consumed on first watch. */
   workspaceTabRequest?: { kind: string; payload?: Record<string, unknown>; seq: number } | null
   /** Latest AI-staged document draft; consumed on first watch. */
-  workspaceDraftRequest?: { payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }; seq: number } | null
+  workspaceDraftRequest?: { payload: DocumentDraftPayloadDTO; seq: number } | null
 }
 
 export interface ChatPanelEmit {

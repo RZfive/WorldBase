@@ -364,32 +364,3 @@ export async function readFolderWorkspaceFile (rootPath: string, relativePath: s
     truncated
   }
 }
-
-export async function writeFolderWorkspaceFile (rootPath: string, relativePath: string, content: string): Promise<void> {
-  const resolvedRoot = await assertFolderWorkspaceRoot(rootPath)
-  const normalizedRelativePath = normalizeWorkspaceRelativePath(relativePath)
-  if (!normalizedRelativePath) {
-    throw new Error('file_path is required')
-  }
-
-  const fullPath = resolveFolderWorkspacePath(resolvedRoot, normalizedRelativePath)
-  await fs.mkdir(path.dirname(fullPath), { recursive: true })
-  const tempPath = path.join(path.dirname(fullPath), `.${path.basename(fullPath)}.the-world-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`)
-  await fs.writeFile(tempPath, content, 'utf-8')
-  await fs.rename(tempPath, fullPath)
-}
-
-export async function deleteFolderWorkspaceFile (rootPath: string, relativePath: string): Promise<void> {
-  const resolvedRoot = await assertFolderWorkspaceRoot(rootPath)
-  const normalizedRelativePath = normalizeWorkspaceRelativePath(relativePath)
-  if (!normalizedRelativePath) {
-    throw new Error('file_path is required')
-  }
-
-  const fullPath = resolveFolderWorkspacePath(resolvedRoot, normalizedRelativePath)
-  const stat = await fs.stat(fullPath)
-  if (!stat.isFile()) {
-    throw new Error(`Path is not a file: ${normalizedRelativePath}`)
-  }
-  await fs.unlink(fullPath)
-}

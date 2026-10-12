@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use calamine::Reader;
 use serde_json::{json, Value};
+use std::io::Read;
 
 pub fn xlsx(path: &std::path::Path) -> Result<Value> {
     let mut workbook = calamine::open_workbook_auto(path)
@@ -98,15 +99,8 @@ pub fn docx(path: &std::path::Path) -> Result<Value> {
     let file =
         std::fs::File::open(path).with_context(|| format!("open docx {}", path.display()))?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let mut document_xml = String::new();
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        if entry.name() == "word/document.xml" {
-            use std::io::Read;
-            entry.read_to_string(&mut document_xml)?;
-            break;
-        }
-    }
+    let document_xml = read_zip_entry(&mut archive, "word/document.xml")
+        .context("docx missing word/document.xml")?;
     anyhow::ensure!(!document_xml.is_empty(), "docx missing word/document.xml");
 
     let paragraph_details = extract_docx_paragraph_details(&document_xml);
@@ -129,12 +123,22 @@ pub fn docx(path: &std::path::Path) -> Result<Value> {
             })
         })
         .collect();
-    let text = paragraphs.join("\n");
+    let images = {
+        let rels_xml = read_zip_entry(&mut archive, "word/_rels/document.xml.rels")
+            .unwrap_or_default();
+        extract_office_images(&document_xml, &rels_xml, "word/media/")
+    };
+    let mut text = paragraphs.join("\n");
+    for image in &images {
+        text.push_str(&format!("\n[图片 {}]", image["name"].as_str().unwrap_or("")));
+    }
     Ok(json!({
         "kind": "docx",
         "text": text,
         "paragraphs": paragraphs,
         "paragraphMetadata": paragraph_metadata,
+        "images": images,
+        "imageCount": images.len(),
     }))
 }
 
@@ -247,7 +251,7 @@ fn find_xml_tag_end(xml: &str, start: usize) -> Option<usize> {
     None
 }
 
-fn find_xml_tag_fragment<'a>(xml: &'a str, tag_name: &str) -> Option<&'a str> {
+pub(crate) fn find_xml_tag_fragment<'a>(xml: &'a str, tag_name: &str) -> Option<&'a str> {
     let mut cursor = 0;
     while let Some(relative_start) = xml[cursor..].find(&format!("<{tag_name}")) {
         let start = cursor + relative_start;
@@ -269,7 +273,7 @@ fn contains_xml_tag(xml: &str, tag_name: &str) -> bool {
     find_xml_tag_fragment(xml, tag_name).is_some()
 }
 
-fn extract_xml_attribute(tag: &str, names: &[&str]) -> Option<String> {
+pub(crate) fn extract_xml_attribute(tag: &str, names: &[&str]) -> Option<String> {
     for name in names {
         let mut cursor = 0;
         while let Some(relative_start) = tag[cursor..].find(name) {
@@ -304,7 +308,7 @@ fn extract_xml_attribute(tag: &str, names: &[&str]) -> Option<String> {
     None
 }
 
-fn extract_xml_tag_text(xml: &str, tag_name: &str) -> String {
+pub(crate) fn extract_xml_tag_text(xml: &str, tag_name: &str) -> String {
     let mut text = String::new();
     let mut cursor = 0;
     while let Some(relative_start) = xml[cursor..].find(&format!("<{tag_name}")) {
@@ -369,19 +373,39 @@ pub fn pptx(path: &std::path::Path) -> Result<Value> {
 
     let mut slides = Vec::new();
     let mut text = String::new();
+    let mut image_count = 0usize;
     for (index, name) in slide_names.iter().enumerate() {
-        let mut entry = archive.by_name(name)?;
-        let mut xml = String::new();
-        use std::io::Read;
-        entry.read_to_string(&mut xml)?;
+        let xml = read_zip_entry(&mut archive, name)
+            .with_context(|| format!("read slide part {name}"))?;
+        let rels_name = slide_rels_name(name);
+        let rels_xml = read_zip_entry(&mut archive, &rels_name).unwrap_or_default();
         let paragraphs = extract_pptx_paragraphs(&xml);
+        let paragraph_items = extract_pptx_paragraph_items(&xml)
+            .into_iter()
+            .map(|(paragraph_index, item_text)| {
+                json!({ "paragraphIndex": paragraph_index, "text": item_text })
+            })
+            .collect::<Vec<_>>();
+        let images = extract_office_images(&xml, &rels_xml, "ppt/media/");
+        image_count += images.len();
         let slide = index + 1;
         text.push_str(&format!("## 幻灯片 {slide}\n"));
         for paragraph in &paragraphs {
             text.push_str(paragraph);
             text.push('\n');
         }
-        slides.push(json!({ "number": slide, "paragraphs": paragraphs }));
+        for image in &images {
+            text.push_str(&format!(
+                "[图片 {}]\n",
+                image["name"].as_str().unwrap_or("")
+            ));
+        }
+        slides.push(json!({
+            "number": slide,
+            "paragraphs": paragraphs,
+            "paragraphItems": paragraph_items,
+            "images": images,
+        }));
     }
     anyhow::ensure!(!slides.is_empty(), "pptx contains no slides");
     Ok(json!({
@@ -389,7 +413,99 @@ pub fn pptx(path: &std::path::Path) -> Result<Value> {
         "text": text.trim(),
         "slides": slides.len(),
         "items": slides,
+        "imageCount": image_count,
     }))
+}
+
+/// `ppt/slides/slide3.xml` → `ppt/slides/_rels/slide3.xml.rels`
+fn slide_rels_name(slide_name: &str) -> String {
+    match slide_name.rsplit_once('/') {
+        Some((directory, file)) => format!("{directory}/_rels/{file}.rels"),
+        None => format!("_rels/{slide_name}.rels"),
+    }
+}
+
+/// Shared media/image extraction: resolve `r:embed`/`r:link` relationship ids
+/// through a `.rels` document into zip part paths.  `media_prefix` is only
+/// used to normalize `../media/x.png` style relative targets.
+pub(crate) fn extract_office_images(xml: &str, rels_xml: &str, media_prefix: &str) -> Vec<Value> {
+    let mut target_by_rid = std::collections::HashMap::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = rels_xml[cursor..].find("<Relationship ") {
+        let start = cursor + relative_start;
+        let Some(end) = rels_xml[start..].find("/>") else {
+            break;
+        };
+        let element = &rels_xml[start..start + end];
+        if let (Some(id), Some(target)) = (
+            extract_xml_attribute(element, &["Id", "id"]),
+            extract_xml_attribute(element, &["Target", "target"]),
+        ) {
+            target_by_rid.insert(id, target);
+        }
+        cursor = start + end + 1;
+    }
+
+    let mut images = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for rid in collect_rid_references(xml, &["r:embed", "r:link"]) {
+        if let Some(target) = target_by_rid.get(&rid) {
+            let zip_path = normalize_media_target(target, media_prefix);
+            if seen.insert(zip_path.clone()) {
+                images.push(json!({
+                    "name": zip_path.rsplit('/').next().unwrap_or(&zip_path),
+                    "zipPath": zip_path,
+                }));
+            }
+        }
+    }
+    images
+}
+
+/// Attribute-style relationship references (`r:embed="rId2"`) in document order.
+fn collect_rid_references(xml: &str, rid_names: &[&str]) -> Vec<String> {
+    let mut rids = Vec::new();
+    for name in rid_names {
+        let mut cursor = 0;
+        while let Some(relative_start) = xml[cursor..].find(name) {
+            let start = cursor + relative_start;
+            let rest = &xml[start + name.len()..];
+            let Some(rest) = rest.strip_prefix("=\"").or_else(|| rest.strip_prefix("='")) else {
+                cursor = start + name.len();
+                continue;
+            };
+            let Some(length) = rest.find(['"', '\'']) else {
+                break;
+            };
+            rids.push(rest[..length].to_string());
+            cursor = start + name.len() + 2 + length;
+        }
+    }
+    rids
+}
+
+fn normalize_media_target(target: &str, media_prefix: &str) -> String {
+    let trimmed = target.trim();
+    if let Some(rest) = trimmed.strip_prefix("../") {
+        return format!("{media_prefix}{rest}");
+    }
+    if let Some(rest) = trimmed.strip_prefix("/ppt/") {
+        return format!("ppt/{rest}");
+    }
+    if let Some(rest) = trimmed.strip_prefix("/word/") {
+        return format!("word/{rest}");
+    }
+    if trimmed.starts_with("media/") {
+        return format!("{media_prefix}{}", trimmed.trim_start_matches("media/"));
+    }
+    trimmed.to_string()
+}
+
+fn read_zip_entry(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<String> {
+    let mut entry = archive.by_name(name).ok()?;
+    let mut value = String::new();
+    entry.read_to_string(&mut value).ok()?;
+    Some(value)
 }
 
 fn slide_number(name: &str) -> Option<u32> {
@@ -399,20 +515,24 @@ fn slide_number(name: &str) -> Option<u32> {
         .ok()
 }
 
-pub fn extract_pptx_paragraphs(xml: &str) -> Vec<String> {
-    let mut paragraphs = Vec::new();
+/// Byte spans (start, end-exclusive) of every `<prefix>…</close>` element in
+/// document order, including self-closing ones.  `open_prefix` (e.g. `<w:p`)
+/// must be followed by a name-boundary character so `<w:pPr` is not matched.
+pub(crate) fn scan_ooxml_elements(
+    xml: &str,
+    open_prefix: &str,
+    close_tag: &str,
+) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
     let mut cursor = 0;
-    while let Some(relative_start) = xml[cursor..].find("<a:p") {
+    while let Some(relative_start) = xml[cursor..].find(open_prefix) {
         let start = cursor + relative_start;
-        let after_name = xml.as_bytes().get(start + 4).copied();
-        // `<a:pPr>` and similar tags are not paragraphs.  The previous
-        // split-based implementation treated them as paragraph starts and
-        // consequently duplicated all following text.
+        let after_name = xml.as_bytes().get(start + open_prefix.len()).copied();
         if !matches!(
             after_name,
             Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
         ) {
-            cursor = start + 3;
+            cursor = start + 1;
             continue;
         }
 
@@ -422,26 +542,46 @@ pub fn extract_pptx_paragraphs(xml: &str) -> Vec<String> {
         let opening_tag = &xml[start..=open_end];
         let content_start = open_end + 1;
         if opening_tag.trim_end().ends_with("/>") {
+            spans.push((start, content_start));
             cursor = content_start;
             continue;
         }
-        let Some(relative_close) = xml[content_start..].find("</a:p>") else {
+        let Some(relative_close) = xml[content_start..].find(close_tag) else {
             break;
         };
-        let content_end = content_start + relative_close;
-        let text = extract_xml_tag_text_trimmed_parts(&xml[content_start..content_end], "a:t");
-        if !text.trim().is_empty() {
-            paragraphs.push(text.trim().to_string());
-        }
-        cursor = content_end + "</a:p>".len();
+        let end = content_start + relative_close + close_tag.len();
+        spans.push((start, end));
+        cursor = end;
     }
-    paragraphs
+    spans
+}
+
+/// (document-order `<a:p>` index, trimmed text) pairs.  Empty and self-closing
+/// paragraphs consume an index but are not emitted, so the indices stay stable
+/// for source-aware (surgical) editing.
+pub fn extract_pptx_paragraph_items(xml: &str) -> Vec<(usize, String)> {
+    let mut items = Vec::new();
+    for (index, (start, end)) in scan_ooxml_elements(xml, "<a:p", "</a:p>").into_iter().enumerate()
+    {
+        let text = extract_xml_tag_text_trimmed_parts(&xml[start..end], "a:t");
+        if !text.trim().is_empty() {
+            items.push((index, text.trim().to_string()));
+        }
+    }
+    items
+}
+
+pub fn extract_pptx_paragraphs(xml: &str) -> Vec<String> {
+    extract_pptx_paragraph_items(xml)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect()
 }
 
 /// Extract text from repeated XML tags while applying the same per-run
 /// trimming as Electron's PPTX parser.  Word text runs intentionally use the
 /// raw helper above because `xml:space="preserve"` is meaningful there.
-fn extract_xml_tag_text_trimmed_parts(xml: &str, tag_name: &str) -> String {
+pub(crate) fn extract_xml_tag_text_trimmed_parts(xml: &str, tag_name: &str) -> String {
     let mut text = String::new();
     let mut cursor = 0;
     while let Some(relative_start) = xml[cursor..].find(&format!("<{tag_name}")) {

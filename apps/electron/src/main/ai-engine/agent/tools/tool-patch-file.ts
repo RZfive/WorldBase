@@ -1,6 +1,7 @@
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
+import { assertTextToolNotOfficeTarget } from './office-write-guard.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -129,6 +130,7 @@ export function toolPatchFile (services: ToolServices): Tool {
 
       const newContent = lines.join('\n')
       onProgress?.('📝 正在写入文件...', `${patches.length} 个补丁, ${linesModified} 行修改`)
+      assertTextToolNotOfficeTarget(file_path)
       await services.projectFS.writeFile(project_id, file_path, newContent)
       onProgress?.('✅ 文件已保存', file_path)
 

@@ -92,11 +92,6 @@ export interface SelectionRef {
   selectedText: string
 }
 
-/** Result returned by the document import IPC. */
-export interface DocumentImportResult {
-  artifact: DocumentArtifact
-}
-
 /** Binary render asset delivered to the renderer on demand. */
 export interface DocumentRenderAsset {
   mimeType: string

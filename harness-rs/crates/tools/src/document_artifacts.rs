@@ -1096,12 +1096,17 @@ pub fn edit_source_state(workspace: &Path, id: &str) -> Result<Value> {
 // ---------------------------------------------------------------------------
 
 /// Fully-authored draft content, mirroring the `doc_write` argument families.
+/// `OfficeOps` is the fidelity-preserving form: the draft is produced by
+/// copying the source package and applying surgical operations, so media and
+/// untouched styling survive; the other variants rebuild the file from full
+/// content (flagged by `dataLossRisk` when the source carries media).
 #[derive(Debug, Clone)]
 pub enum DraftContent {
     Text { kind: &'static str, body: String },
     Docx(Vec<worldbase_docs::edit::DocBlock>),
     Xlsx(Vec<worldbase_docs::edit::Sheet>),
     Pptx(Vec<worldbase_docs::edit::Slide>),
+    OfficeOps(Vec<worldbase_docs::ops::OfficeOp>),
 }
 
 fn draft_dir(workspace: &Path) -> PathBuf {
@@ -1117,8 +1122,6 @@ fn file_sha256(path: &Path) -> Result<String> {
         .with_context(|| format!("read document source {}", path.display()))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
-
-const DRAFTABLE_TYPES: &[&str] = &["md", "markdown", "txt", "text", "docx", "xlsx", "pptx"];
 
 fn normalize_draft_type(raw: &str) -> Option<&'static str> {
     match raw.to_ascii_lowercase().as_str() {
@@ -1137,6 +1140,10 @@ fn artifact_type_matches_draft(file_type: &str, content: &DraftContent) -> Resul
         DraftContent::Docx(_) => "docx",
         DraftContent::Xlsx(_) => "xlsx",
         DraftContent::Pptx(_) => "pptx",
+        DraftContent::OfficeOps(ops) => ops
+            .first()
+            .map(|op| op.family())
+            .unwrap_or("docx"),
     };
     let Some(target_kind) = normalize_draft_type(file_type) else {
         anyhow::bail!(
@@ -1211,12 +1218,16 @@ fn draft_record_value(
 /// Author a full draft rewrite of a document.  Writes the draft bytes below
 /// `.worldbase/document-drafts/`, prunes older drafts of the same artifact,
 /// fingerprints the source file, and records the pending draft on the
-/// artifact.  Returns the draft descriptor for host/UI notification.
+/// artifact together with a change list (`changes`), the model's own summary
+/// and — for full-content drafts of media-bearing files — a `dataLossRisk`
+/// marker surfaced by the desktop UI.  Returns the draft descriptor for
+/// host/UI notification.
 pub fn stage_document_draft(
     workspace: &Path,
     artifact_id: Option<&str>,
     file_path: Option<&str>,
     content: DraftContent,
+    summary: Option<String>,
 ) -> Result<Value> {
     let mut artifact = resolve_artifact_for_draft(workspace, artifact_id, file_path)?;
     if is_virtual_artifact(&artifact) {
@@ -1247,6 +1258,10 @@ pub fn stage_document_draft(
         DraftContent::Docx(_) => "docx",
         DraftContent::Xlsx(_) => "xlsx",
         DraftContent::Pptx(_) => "pptx",
+        DraftContent::OfficeOps(ops) => ops
+            .first()
+            .map(|op| op.family())
+            .unwrap_or("docx"),
     };
 
     let directory = draft_dir(workspace);
@@ -1270,20 +1285,67 @@ pub fn stage_document_draft(
         .unwrap_or(0);
     let draft_path = directory.join(format!("{}-{}.{}", artifact.id, stamp, draft_extension));
 
-    match &content {
-        DraftContent::Text { body, .. } => worldbase_docs::edit::write_text(&draft_path, body)?,
-        DraftContent::Docx(blocks) => worldbase_docs::edit::write_docx(&draft_path, blocks)?,
-        DraftContent::Xlsx(sheets) => worldbase_docs::edit::write_xlsx(&draft_path, sheets)?,
-        DraftContent::Pptx(slides) => worldbase_docs::edit::write_pptx(&draft_path, slides)?,
+    // Fidelity-preserving path: copy the source package and apply ops, so
+    // media/untouched styling survive verbatim.
+    if let DraftContent::OfficeOps(ops) = &content {
+        worldbase_docs::ops::apply_ops(&source, &draft_path, ops)
+            .with_context(|| format!("apply document edit ops to {}", source.display()))?;
+    } else {
+        match &content {
+            DraftContent::Text { body, .. } => worldbase_docs::edit::write_text(&draft_path, body)?,
+            DraftContent::Docx(blocks) => worldbase_docs::edit::write_docx(&draft_path, blocks)?,
+            DraftContent::Xlsx(sheets) => worldbase_docs::edit::write_xlsx(&draft_path, sheets)?,
+            DraftContent::Pptx(slides) => worldbase_docs::edit::write_pptx(&draft_path, slides)?,
+            DraftContent::OfficeOps(_) => unreachable!("ops handled above"),
+        }
     }
 
+    // Change list: op-derived when available (exact), otherwise computed by
+    // diffing the source parse against the draft parse.
+    let changes = match &content {
+        DraftContent::OfficeOps(ops) => changes_from_ops(ops),
+        _ => {
+            let draft_parsed = worldbase_docs::parse_file(&draft_path)?;
+            let draft_text = draft_parsed
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            compute_draft_changes(
+                &artifact.file_type,
+                &artifact.parsed,
+                &artifact.plain_text,
+                &draft_parsed,
+                draft_text,
+            )
+        }
+    };
+
+    // A full-content rebuild drops every media part of the source package;
+    // surface that to the user before they overwrite the original.
+    let data_loss_risk = match &content {
+        DraftContent::OfficeOps(_) | DraftContent::Text { .. } => None,
+        _ => match worldbase_docs::ops::count_media_parts(&source) {
+            Ok(count) if count > 0 => Some(json!({ "mediaCount": count })),
+            _ => None,
+        },
+    };
+
     let source_sha256 = file_sha256(&source)?;
-    let record = json!({
+    let mut record = json!({
         "path": draft_path.to_string_lossy(),
         "fileType": draft_extension,
         "sourceSha256": source_sha256,
         "createdAt": worldbase_protocol::event::now_rfc3339(),
     });
+    if let Some(object) = record.as_object_mut() {
+        object.insert("changes".into(), changes);
+        if let Some(summary) = summary.as_deref().filter(|value| !value.trim().is_empty()) {
+            object.insert("summary".into(), json!(summary.trim()));
+        }
+        if let Some(risk) = data_loss_risk {
+            object.insert("dataLossRisk".into(), risk);
+        }
+    }
     artifact.draft = Some(record.clone());
     write_artifact(workspace, &artifact)?;
 
@@ -1294,7 +1356,458 @@ pub fn stage_document_draft(
         "fileType": draft_extension,
         "sourceSha256": source_sha256,
         "createdAt": record.get("createdAt").cloned().unwrap_or(Value::Null),
+        "changes": record.get("changes").cloned().unwrap_or(Value::Array(Vec::new())),
+        "summary": record.get("summary").cloned().unwrap_or(Value::Null),
+        "dataLossRisk": record.get("dataLossRisk").cloned().unwrap_or(Value::Null),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Draft change list（变更清单）
+//
+// 两种来源：ops 草稿由操作直接推导（精确）；全文草稿由原文/草稿解析结果做
+// patience-diff 推导（段落级）。输出统一为
+// `{ items: [...], counts: { added, removed, modified, total }, truncated }`，
+// 渲染层据此展示"改了什么"。
+// ---------------------------------------------------------------------------
+
+const MAX_DRAFT_CHANGES: usize = 200;
+
+/// One comparable text unit: display text + 1-based page/sheet index.
+#[derive(Debug, Clone)]
+struct DiffUnit {
+    page: i32,
+    text: String,
+}
+
+fn extract_diff_units(file_type: &str, parsed: &Value, plain_text: &str) -> Vec<DiffUnit> {
+    let mut units = Vec::new();
+    let push_unit = |units: &mut Vec<DiffUnit>, page: i32, text: &str| {
+        if !text.trim().is_empty() {
+            units.push(DiffUnit { page, text: text.to_string() });
+        }
+    };
+    match file_type {
+        "pptx" | "ppt" => {
+            for slide in parsed
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let page = slide
+                    .get("number")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .min(i32::MAX as u64) as i32;
+                for paragraph in slide
+                    .get("paragraphs")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(text) = paragraph.as_str() {
+                        push_unit(&mut units, page, text);
+                    }
+                }
+            }
+        }
+        "xlsx" | "xls" => {
+            for (index, sheet) in parsed
+                .get("sheets")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let page = index as i32 + 1;
+                for row in sheet.get("rows").and_then(Value::as_array).into_iter().flatten() {
+                    let text = row
+                        .as_array()
+                        .map(|cells| {
+                            cells
+                                .iter()
+                                .map(|cell| match cell {
+                                    Value::String(value) => value.clone(),
+                                    Value::Null => String::new(),
+                                    other => other.to_string(),
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\t")
+                        })
+                        .unwrap_or_default();
+                    push_unit(&mut units, page, &text);
+                }
+            }
+        }
+        "docx" | "doc" => {
+            for paragraph in parsed
+                .get("paragraphs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(text) = paragraph.as_str() {
+                    push_unit(&mut units, 1, text);
+                }
+            }
+        }
+        "csv" => {
+            if let Some(header) = parsed.get("header").and_then(Value::as_array) {
+                let text = header
+                    .iter()
+                    .map(|cell| cell.as_str().unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                push_unit(&mut units, 1, &text);
+            }
+            for row in parsed.get("rows").and_then(Value::as_array).into_iter().flatten() {
+                let text = row
+                    .as_array()
+                    .map(|cells| {
+                        cells
+                            .iter()
+                            .map(|cell| cell.as_str().unwrap_or_default())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                push_unit(&mut units, 1, &text);
+            }
+        }
+        _ => {
+            for line in plain_text.lines() {
+                push_unit(&mut units, 1, line);
+            }
+        }
+    }
+    units
+}
+
+/// Patience diff on text units: trim common prefix/suffix, anchor on units
+/// unique to both sides, recurse; leaf regions become delete+insert runs that
+/// are later paired into `modify` entries.
+fn diff_range(
+    old: &[DiffUnit],
+    old_start: usize,
+    old_end: usize,
+    new: &[DiffUnit],
+    new_start: usize,
+    new_end: usize,
+    events: &mut Vec<(bool, DiffUnit)>,
+) {
+    let mut os = old_start;
+    let mut ns = new_start;
+    while os < old_end && ns < new_end && old[os].text == new[ns].text {
+        os += 1;
+        ns += 1;
+    }
+    let mut oe = old_end;
+    let mut ne = new_end;
+    while oe > os && ne > ns && old[oe - 1].text == new[ne - 1].text {
+        oe -= 1;
+        ne -= 1;
+    }
+    if os == oe {
+        events.extend(new[ns..ne].iter().cloned().map(|unit| (false, unit)));
+        return;
+    }
+    if ns == ne {
+        events.extend(old[os..oe].iter().cloned().map(|unit| (true, unit)));
+        return;
+    }
+
+    // Anchor on texts unique in both slices (in order).
+    fn count_by_text(slice: &[DiffUnit], range: std::ops::Range<usize>) -> std::collections::HashMap<&str, usize> {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for unit in &slice[range] {
+            *counts.entry(unit.text.as_str()).or_default() += 1;
+        }
+        counts
+    }
+    let old_counts = count_by_text(old, os..oe);
+    let new_counts = count_by_text(new, ns..ne);
+
+    let old_anchor_indices: Vec<usize> = (os..oe)
+        .filter(|index| {
+            old_counts.get(old[*index].text.as_str()) == Some(&1)
+                && new_counts.get(old[*index].text.as_str()) == Some(&1)
+        })
+        .collect();
+    let anchors: Vec<(usize, usize)> = if old_anchor_indices.is_empty() {
+        Vec::new()
+    } else {
+        let mut new_pointer = ns;
+        let mut pairs = Vec::with_capacity(old_anchor_indices.len());
+        'outer: for old_index in old_anchor_indices {
+            let text = &old[old_index].text;
+            while new_pointer < ne {
+                if new[new_pointer].text == *text {
+                    pairs.push((old_index, new_pointer));
+                    new_pointer += 1;
+                    continue 'outer;
+                }
+                new_pointer += 1;
+            }
+            break;
+        }
+        pairs
+    };
+
+    if anchors.is_empty() {
+        events.extend(old[os..oe].iter().cloned().map(|unit| (true, unit)));
+        events.extend(new[ns..ne].iter().cloned().map(|unit| (false, unit)));
+        return;
+    }
+
+    let mut cursor_old = os;
+    let mut cursor_new = ns;
+    for (anchor_old, anchor_new) in anchors {
+        diff_range(old, cursor_old, anchor_old, new, cursor_new, anchor_new, events);
+        cursor_old = anchor_old + 1;
+        cursor_new = anchor_new + 1;
+    }
+    diff_range(old, cursor_old, oe, new, cursor_new, ne, events);
+}
+
+fn change_item(kind: &str, page: i32, before: Option<&str>, after: Option<&str>) -> Value {
+    let anchor_source = before.or(after).unwrap_or_default();
+    let anchor: String = anchor_source.chars().take(60).collect();
+    let mut item = json!({ "kind": kind, "pageIndex": page, "anchor": anchor });
+    if let Some(object) = item.as_object_mut() {
+        if let Some(before) = before {
+            object.insert("before".into(), json!(truncate_change_text(before)));
+        }
+        if let Some(after) = after {
+            object.insert("after".into(), json!(truncate_change_text(after)));
+        }
+    }
+    item
+}
+
+/// Full diff-derived change record for a rewritten draft.
+fn compute_draft_changes(
+    file_type: &str,
+    old_parsed: &Value,
+    old_text: &str,
+    new_parsed: &Value,
+    new_text: &str,
+) -> Value {
+    let old_units = extract_diff_units(file_type, old_parsed, old_text);
+    let new_units = extract_diff_units(file_type, new_parsed, new_text);
+    let mut events = Vec::new();
+    diff_range(&old_units, 0, old_units.len(), &new_units, 0, new_units.len(), &mut events);
+    changes_record_from_events(events)
+}
+
+fn changes_record_from_events(events: Vec<(bool, DiffUnit)>) -> Value {
+    let mut items = Vec::new();
+    let (mut added, mut removed, mut modified) = (0usize, 0usize, 0usize);
+    let mut cursor = 0usize;
+    while cursor < events.len() {
+        let mut deletes: Vec<DiffUnit> = Vec::new();
+        while cursor < events.len() && events[cursor].0 {
+            deletes.push(events[cursor].1.clone());
+            cursor += 1;
+        }
+        let mut inserts: Vec<DiffUnit> = Vec::new();
+        while cursor < events.len() && !events[cursor].0 {
+            inserts.push(events[cursor].1.clone());
+            cursor += 1;
+        }
+
+        let paired = deletes.len().min(inserts.len());
+        for index in 0..paired {
+            modified += 1;
+            if items.len() < MAX_DRAFT_CHANGES {
+                let before = deletes[index].text.as_str();
+                let after = inserts[index].text.as_str();
+                items.push(change_item("modify", inserts[index].page, Some(before), Some(after)));
+            }
+        }
+        for delete in deletes.iter().skip(paired) {
+            removed += 1;
+            if items.len() < MAX_DRAFT_CHANGES {
+                items.push(change_item("delete", delete.page, Some(&delete.text), None));
+            }
+        }
+        for insert in inserts.iter().skip(paired) {
+            added += 1;
+            if items.len() < MAX_DRAFT_CHANGES {
+                items.push(change_item("insert", insert.page, None, Some(&insert.text)));
+            }
+        }
+    }
+
+    json!({
+        "items": items,
+        "counts": {
+            "added": added,
+            "removed": removed,
+            "modified": modified,
+            "total": added + removed + modified,
+        },
+        "truncated": (added + removed + modified) > items.len(),
+    })
+}
+
+fn truncate_change_text(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHANGE_TEXT_CHARS: usize = 240;
+    if normalized.chars().count() <= MAX_CHANGE_TEXT_CHARS {
+        normalized
+    } else {
+        let cut: String = normalized.chars().take(MAX_CHANGE_TEXT_CHARS).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Op-derived change record: exact by construction (no diffing needed).
+fn changes_from_ops(ops: &[worldbase_docs::ops::OfficeOp]) -> Value {
+    let mut items = Vec::new();
+    let (mut added, mut removed, mut modified) = (0usize, 0usize, 0usize);
+    for op in ops {
+        if items.len() >= MAX_DRAFT_CHANGES {
+            break;
+        }
+        let item = match op {
+            worldbase_docs::ops::OfficeOp::DocxReplaceText { paragraph_index, after_text, expect_before } => {
+                modified += 1;
+                let mut item = change_item(
+                    "modify",
+                    1,
+                    expect_before.as_deref(),
+                    Some(after_text.as_str()),
+                );
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("after".into(), json!(truncate_change_text(after_text)));
+                    object.insert("opIndex".into(), json!(paragraph_index));
+                }
+                item
+            }
+            worldbase_docs::ops::OfficeOp::DocxInsertParagraphAfter { paragraph_index, text, style } => {
+                added += 1;
+                let mut item = change_item("insert", 1, None, Some(text));
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("after".into(), json!(truncate_change_text(text)));
+                    object.insert("opIndex".into(), json!(paragraph_index));
+                    if let worldbase_docs::ops::ParagraphStyle::Heading(level) = style {
+                        object.insert("headingLevel".into(), json!(level));
+                    }
+                }
+                item
+            }
+            worldbase_docs::ops::OfficeOp::DocxDeleteParagraph { paragraph_index } => {
+                removed += 1;
+                let mut item = change_item("delete", 1, None, None);
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("opIndex".into(), json!(paragraph_index));
+                }
+                item
+            }
+            worldbase_docs::ops::OfficeOp::DocxInsertImage { paragraph_index, image_path, .. } => {
+                added += 1;
+                let name = image_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("image");
+                let mut item = change_item("insert", 1, None, Some(&format!("[图片 {name}]")));
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("opIndex".into(), json!(paragraph_index));
+                    object.insert("image".into(), json!(name));
+                }
+                item
+            }
+            worldbase_docs::ops::OfficeOp::PptxReplaceText { slide, paragraph_index, after_text, expect_before } => {
+                modified += 1;
+                let mut item = change_item(
+                    "modify",
+                    *slide as i32,
+                    expect_before.as_deref(),
+                    Some(after_text.as_str()),
+                );
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("after".into(), json!(truncate_change_text(after_text)));
+                    object.insert("opIndex".into(), json!(paragraph_index));
+                }
+                item
+            }
+            worldbase_docs::ops::OfficeOp::PptxInsertImage { slide, image_path, .. } => {
+                added += 1;
+                let name = image_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("image");
+                let mut item = change_item(
+                    "insert",
+                    *slide as i32,
+                    None,
+                    Some(&format!("[图片 {name}]")),
+                );
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("image".into(), json!(name));
+                }
+                item
+            }
+            worldbase_docs::ops::OfficeOp::PptxInsertSlideAfter { index, title, content } => {
+                added += 1;
+                let preview = if title.trim().is_empty() {
+                    content.first().map(String::as_str).unwrap_or("(新页面)")
+                } else {
+                    title.as_str()
+                };
+                change_item("insert", *index as i32 + 1, None, Some(preview))
+            }
+            worldbase_docs::ops::OfficeOp::PptxDeleteSlide { index } => {
+                removed += 1;
+                change_item("delete", *index as i32, None, None)
+            }
+        };
+        items.push(item);
+    }
+    let total = added + removed + modified;
+    json!({
+        "items": items,
+        "counts": { "added": added, "removed": removed, "modified": modified, "total": total },
+        "truncated": total > items.len(),
+    })
+}
+
+/// Direct-write guard：已导入工作区的文档与已存在的 Office 文件一律禁止
+/// 直写工具覆写（全文重建会丢失图片/样式），必须改走 `doc_draft`。
+pub fn ensure_document_write_allowed(workspace: &Path, absolute_path: &Path) -> Result<()> {
+    let office_extension = matches!(
+        absolute_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("docx" | "doc" | "pptx" | "ppt" | "xlsx" | "xls")
+    );
+
+    // 已导入的文档：无论扩展名（含用户改名的场景）都拒绝直写。
+    if let Ok(canonical) = absolute_path.canonicalize() {
+        for artifact in list_documents(workspace)? {
+            if artifact_source_path(workspace, &artifact) == canonical {
+                anyhow::bail!(
+                    "「{}」已导入工作区，直接覆写会丢失图片与样式；请使用 doc_draft 生成修改草稿",
+                    artifact.file_name
+                );
+            }
+        }
+    }
+
+    // 已存在的 Office 文件：重建必然破坏内容，同样拒绝。
+    if office_extension && absolute_path.is_file() {
+        anyhow::bail!(
+            "「{}」是已存在的 Office 文档，直接覆写会丢失图片与样式；请使用 doc_draft 生成修改草稿",
+            absolute_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("document")
+        );
+    }
+    Ok(())
 }
 
 /// Overwrite the document source with its staged draft.  The original file is
@@ -1940,6 +2453,7 @@ mod tests {
             Some(artifact.id.as_str()),
             None,
             DraftContent::Text { kind: "md", body: "# 新标题\n\n改写后的内容\n".into() },
+            None,
         )
         .unwrap();
         assert_eq!(staged["fileType"], "md");
@@ -2005,6 +2519,7 @@ mod tests {
             Some(artifact.id.as_str()),
             None,
             DraftContent::Docx(vec![worldbase_docs::edit::DocBlock::Paragraph("x".into())]),
+            None,
         )
         .is_err());
 
@@ -2014,6 +2529,7 @@ mod tests {
             Some(artifact.id.as_str()),
             None,
             DraftContent::Text { kind: "text", body: "x".into() },
+            None,
         )
         .is_err());
 
@@ -2028,6 +2544,7 @@ mod tests {
             Some(pdf_artifact.id.as_str()),
             None,
             DraftContent::Text { kind: "text", body: "x".into() },
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("暂不支持"), "pdf gets a clear message");
@@ -2047,6 +2564,7 @@ mod tests {
             Some(artifact.id.as_str()),
             None,
             DraftContent::Text { kind: "md", body: "v2".into() },
+            None,
         )
         .unwrap();
         let second = stage_document_draft(
@@ -2054,6 +2572,7 @@ mod tests {
             Some(artifact.id.as_str()),
             None,
             DraftContent::Text { kind: "md", body: "v3".into() },
+            None,
         )
         .unwrap();
         assert_ne!(first["draftPath"], second["draftPath"], "new draft file");
@@ -2081,6 +2600,7 @@ mod tests {
             Some(artifact.id.as_str()),
             None,
             DraftContent::Text { kind: "md", body: "改写稿".into() },
+            None,
         )
         .unwrap();
 
@@ -2113,6 +2633,7 @@ mod tests {
             None,
             Some(unknown.to_str().unwrap()),
             DraftContent::Text { kind: "md", body: "草稿".into() },
+            None,
         )
         .unwrap();
         assert!(staged["artifactId"].as_str().is_some());
@@ -2127,6 +2648,7 @@ mod tests {
             None,
             Some(source.to_str().unwrap()),
             DraftContent::Text { kind: "md", body: "按路径".into() },
+            None,
         )
         .unwrap();
         assert!(!by_path["artifactId"].as_str().unwrap().is_empty());
@@ -2383,4 +2905,146 @@ mod tests {
         assert!(list_selections(root.path()).unwrap().is_empty());
         assert!(!remove_selection(root.path(), &region.id).unwrap());
     }
+
+    // -------------------------------------------------------------------
+    // Draft changes / dataLossRisk / direct-write guard
+    // -------------------------------------------------------------------
+
+    /// 与 docs crate 测试一致的含图 docx fixture。
+    fn write_docx_with_media(path: &std::path::Path) {
+        use std::io::Write as _;
+        const TINY_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49,
+            0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
+            0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44,
+            0x41, 0x54, 0x78, 0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D,
+            0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
+            0x60, 0x82,
+        ];
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        for (name, content) in [
+            ("[Content_Types].xml", "<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"png\" ContentType=\"image/png\"/></Types>"),
+            ("word/document.xml", concat!(
+                "<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body>",
+                "<w:p><w:r><w:t>第一段</w:t></w:r></w:p>",
+                "<w:p><w:r><w:t>第二段</w:t></w:r></w:p>",
+                "</w:body></w:document>")),
+            ("word/_rels/document.xml.rels", "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"media/image1.png\"/></Relationships>"),
+        ] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.start_file("word/media/image1.png", options).unwrap();
+        zip.write_all(TINY_PNG).unwrap();
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn full_text_md_draft_computes_change_list() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("notes.md");
+        std::fs::write(&source, "# 标题\n\n第一段\n第二段\n\n结尾\n").unwrap();
+        let artifact = import_parsed_document(
+            root.path(),
+            &source,
+            &json!({ "kind": "markdown", "text": "# 标题\n\n第一段\n第二段\n\n结尾" }),
+        )
+        .unwrap();
+
+        let staged = stage_document_draft(
+            root.path(),
+            Some(artifact.id.as_str()),
+            None,
+            DraftContent::Text {
+                kind: "md",
+                body: "# 标题\n\n第一段改写\n第二段\n\n结尾\n新增尾巴\n".into(),
+            },
+            Some("改写第一段并新增结尾".into()),
+        )
+        .unwrap();
+
+        let changes = &staged["changes"];
+        assert_eq!(changes["counts"]["modified"], 1);
+        assert_eq!(changes["counts"]["added"], 1);
+        assert_eq!(staged["summary"], "改写第一段并新增结尾");
+        let items = changes["items"].as_array().unwrap();
+        let modified = items
+            .iter()
+            .find(|item| item["kind"] == "modify")
+            .expect("modify entry present");
+        assert!(modified["before"].as_str().unwrap().contains("第一段"));
+        assert!(modified["after"].as_str().unwrap().contains("第一段改写"));
+
+        // doc.draft.get 也带回 changes（渲染层恢复路径）
+        let record = get_document_draft(root.path(), source.to_str().unwrap()).unwrap();
+        assert_eq!(record["changes"]["counts"]["modified"], 1);
+    }
+
+    #[test]
+    fn media_bearing_docx_marks_data_loss_for_full_text_and_ops_preserve_media() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("with-image.docx");
+        write_docx_with_media(&source);
+        let parsed = worldbase_docs::parse_file(&source).unwrap();
+        let artifact = import_parsed_document(root.path(), &source, &parsed).unwrap();
+
+        // 全文重建 → dataLossRisk 标记
+        let full_text = stage_document_draft(
+            root.path(),
+            Some(artifact.id.as_str()),
+            None,
+            DraftContent::Docx(vec![worldbase_docs::edit::DocBlock::Paragraph("全新内容".into())]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(full_text["dataLossRisk"]["mediaCount"], 1);
+
+        // ops 草稿 → 无风险标记，media 字节保留
+        let image = root.path().join("insert.png");
+        std::fs::write(&image, b"not-a-real-png").unwrap(); // 占位；插图在 docs crate 测试覆盖
+        let ops_draft = stage_document_draft(
+            root.path(),
+            Some(artifact.id.as_str()),
+            None,
+            DraftContent::OfficeOps(vec![worldbase_docs::ops::OfficeOp::DocxReplaceText {
+                paragraph_index: 0,
+                after_text: "第一段改写".into(),
+                expect_before: Some("第一段".into()),
+            }]),
+            Some("改第一段".into()),
+        )
+        .unwrap();
+        assert!(ops_draft["dataLossRisk"].is_null(), "ops drafts carry no data loss");
+        assert_eq!(ops_draft["changes"]["counts"]["modified"], 1);
+        let draft_path = Path::new(ops_draft["draftPath"].as_str().unwrap());
+        let package = worldbase_docs::ops::count_media_parts(draft_path).unwrap();
+        assert_eq!(package, 1, "media survives into the ops draft");
+        let _ = image;
+    }
+
+    #[test]
+    fn direct_write_guard_blocks_imported_and_existing_office_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("doc.md");
+        std::fs::write(&source, "内容").unwrap();
+        let artifact =
+            import_parsed_document(root.path(), &source, &json!({ "kind": "text", "text": "内容" }))
+                .unwrap();
+
+        // 已导入路径拒绝
+        assert!(ensure_document_write_allowed(root.path(), &source).is_err());
+        // 新文本文件放行
+        assert!(ensure_document_write_allowed(root.path(), &root.path().join("new.txt")).is_ok());
+        let _ = artifact;
+
+        // 已存在的 office 文件拒绝（即使未导入）
+        let office = root.path().join("untracked.docx");
+        write_docx_with_media(&office);
+        assert!(ensure_document_write_allowed(root.path(), &office).is_err());
+        // 不存在的 office 路径放行（新建文档语义）
+        assert!(ensure_document_write_allowed(root.path(), &root.path().join("fresh.docx")).is_ok());
+    }
 }
+

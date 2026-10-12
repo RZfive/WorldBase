@@ -4,7 +4,7 @@
 //! tool calls continue to work while the underlying services migrate to Rust.
 
 use crate::host_tools::{interact_page_actions, normalize_page_actions};
-use crate::{require_str, EditFileTool, PatchFileTool, Tool, ToolServices, WriteFileTool};
+use crate::{require_str, Tool, ToolServices};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use regex::Regex;
@@ -26,7 +26,6 @@ use worldbase_exec::{ExecOptions, ExecRequest};
 use worldbase_protocol::types::{SkillArgument, SkillContext};
 
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
-const MAX_RETURN_CHARS: usize = 50_000;
 const MAX_COMMAND_CHARS: usize = 20_000;
 const MAX_COMMAND_STDOUT_CHARS: usize = 20_000;
 const MAX_COMMAND_STDERR_CHARS: usize = 10_000;
@@ -191,22 +190,6 @@ fn selected_folder_workspace(services: &ToolServices) -> Result<&Path> {
         .folder_workspace
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("no folder workspace is selected for this conversation"))
-}
-
-fn folder_path_arg(input: &Value, key: &str, services: &ToolServices) -> Result<(String, PathBuf)> {
-    let rel = require_str(input, key)?.to_string();
-    let _ = selected_folder_workspace(services)?;
-    let path = services.folder_workspace_path(&rel);
-    services.ensure_folder_workspace_path(&path)?;
-    Ok((rel, path))
-}
-
-fn folder_scoped_services(services: &ToolServices) -> Result<ToolServices> {
-    let root = selected_folder_workspace(services)?.to_path_buf();
-    let mut scoped = services.clone();
-    scoped.workspace = root.clone();
-    scoped.folder_workspace = Some(root);
-    Ok(scoped)
 }
 
 fn project_path(input: &Value, services: &ToolServices) -> Result<(String, PathBuf)> {
@@ -1605,6 +1588,187 @@ fn output_mode_name(mode: worldbase_search::GrepOutputMode) -> &'static str {
 
 // -------------------------------------------------------------------------
 // Folder workspace and local filesystem tools
+//
+// These tools own `electron_native` execution for the desktop host. Their
+// behavior, validation messages, and result shapes mirror the retired
+// Electron `tool-workspace-files.ts` handlers one-for-one so model prompts
+// and UI invalidation (via the facade's `onNativeToolResult`) stay stable.
+
+const WORKSPACE_PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
+const WORKSPACE_BINARY_PREVIEW_EXTENSIONS: &[&str] = &[
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".avif",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".zip", ".tar", ".gz", ".bz2", ".rar", ".7z",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac",
+    ".exe", ".dll", ".so", ".dylib", ".o",
+    ".sqlite", ".db",
+];
+const WORKSPACE_GLOB_IGNORED_DIRS: &[&str] = &[
+    "node_modules", ".next", ".git", "dist", "build", ".cache",
+    ".turbo", "coverage", ".output", "__pycache__", ".venv",
+];
+
+/// Normalize a workspace-relative path exactly like the Electron host:
+/// trim, convert backslashes, and strip leading slashes.
+fn normalize_workspace_rel(rel: &str) -> String {
+    rel.trim().replace('\\', "/").trim_start_matches('/').to_string()
+}
+
+fn workspace_preview_extension_is_binary(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_lowercase();
+    WORKSPACE_BINARY_PREVIEW_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Durable temp-file-then-rename write, same as the Electron host's folder
+/// workspace writer: a crash mid-write leaves the original file intact.
+async fn write_workspace_file_atomic(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temp = path.with_file_name(format!(
+        ".{file_name}.the-world-{nanos}-{}.tmp",
+        std::process::id()
+    ));
+    tokio::fs::write(&temp, content).await?;
+    if let Err(error) = tokio::fs::rename(&temp, path).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn workspace_glob_escape_char(ch: char) -> String {
+    if matches!(ch, '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '\\') {
+        format!("\\{ch}")
+    } else {
+        ch.to_string()
+    }
+}
+
+fn workspace_glob_escape_part(part: &str) -> String {
+    part.chars().map(workspace_glob_escape_char).collect()
+}
+
+/// Port of the Electron host's globToRegex: case-insensitive and anchored,
+/// `**` crosses directories, `{a,b}` alternates, `[abc]` classes are kept.
+fn workspace_glob_regex(pattern: &str) -> Result<Regex> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut re = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '*' {
+            if chars.get(i + 1) == Some(&'*') {
+                re.push_str(".*");
+                i += 2;
+                if chars.get(i) == Some(&'/') {
+                    i += 1;
+                }
+            } else {
+                re.push_str("[^/]*");
+                i += 1;
+            }
+        } else if ch == '?' {
+            re.push_str("[^/]");
+            i += 1;
+        } else if ch == '{' {
+            let close = chars[i + 1..]
+                .iter()
+                .position(|&c| c == '}')
+                .map(|offset| i + 1 + offset);
+            if let Some(close) = close {
+                let group = chars[i + 1..close]
+                    .iter()
+                    .collect::<String>()
+                    .split(',')
+                    .map(workspace_glob_escape_part)
+                    .collect::<Vec<_>>()
+                    .join("|");
+                re.push_str(&format!("(?:{group})"));
+                i = close + 1;
+            } else {
+                re.push_str("\\{");
+                i += 1;
+            }
+        } else if ch == '[' {
+            let close = chars[i + 1..]
+                .iter()
+                .position(|&c| c == ']')
+                .map(|offset| i + 1 + offset);
+            if let Some(close) = close {
+                re.push_str(&chars[i..=close].iter().collect::<String>());
+                i = close + 1;
+            } else {
+                re.push_str("\\[");
+                i += 1;
+            }
+        } else {
+            re.push_str(&workspace_glob_escape_char(ch));
+            i += 1;
+        }
+    }
+    Ok(Regex::new(&format!("(?i)^{re}$"))?)
+}
+
+fn walk_workspace_glob(
+    base: &Path,
+    relative: &str,
+    matcher: &Regex,
+    results: &mut Vec<Value>,
+    cap: usize,
+) -> std::io::Result<()> {
+    if results.len() >= cap {
+        return Ok(());
+    }
+    let directory = if relative.is_empty() {
+        base.to_path_buf()
+    } else {
+        base.join(relative)
+    };
+    let reader = match std::fs::read_dir(&directory) {
+        Ok(reader) => reader,
+        Err(_) => return Ok(()),
+    };
+    for entry in reader.flatten() {
+        if results.len() >= cap {
+            break;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let entry_relative = if relative.is_empty() {
+            name.clone()
+        } else {
+            format!("{relative}/{name}")
+        };
+        if file_type.is_dir() {
+            if WORKSPACE_GLOB_IGNORED_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            if matcher.is_match(&entry_relative) || matcher.is_match(&format!("{entry_relative}/")) {
+                results.push(json!({ "path": entry_relative, "size": 0, "type": "directory" }));
+            }
+            walk_workspace_glob(base, &entry_relative, matcher, results, cap)?;
+        } else if matcher.is_match(&entry_relative) {
+            let size = std::fs::metadata(entry.path()).map(|meta| meta.len()).unwrap_or(0);
+            results.push(json!({ "path": entry_relative, "size": size, "type": "file" }));
+        }
+    }
+    Ok(())
+}
 
 pub struct WorkspaceListFilesTool;
 #[async_trait]
@@ -1613,39 +1777,31 @@ impl Tool for WorkspaceListFilesTool {
         "list_workspace_files"
     }
     fn description(&self) -> &str {
-        "List files and folders in the selected conversation folder workspace."
+        "List files and folders in the selected conversation folder workspace. Paths are relative to the workspace root."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"dir_path":{"type":"string"}}})
+        json!({"type":"object","properties":{"dir_path":{"type":"string","description":"Directory path relative to the workspace root. Defaults to the root."}}})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let rel = input
-            .get("dir_path")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .trim_matches('/')
-            .to_string();
+        let rel = normalize_workspace_rel(
+            input.get("dir_path").and_then(Value::as_str).unwrap_or(""),
+        );
         let root = selected_folder_workspace(services)?;
-        let directory = if rel.is_empty() {
-            root.to_path_buf()
-        } else {
-            services.folder_workspace_path(&rel)
-        };
-        services.ensure_folder_workspace_path(&directory)?;
         let mut total = 0;
         let mut truncated = false;
-        let full_tree = list_workspace_tree(root, "", 0, &mut total, &mut truncated)?;
-        let mut entries = full_tree;
+        let mut entries = list_workspace_tree(root, "", 0, &mut total, &mut truncated)?;
         if !rel.is_empty() {
             for segment in rel.split('/').filter(|segment| !segment.is_empty()) {
-                let Some(entry) = entries.iter().find(|entry| {
+                let Some(next) = entries.iter().find(|entry| {
                     entry["type"] == "directory" && entry["name"].as_str() == Some(segment)
                 }) else {
                     entries = Vec::new();
                     break;
                 };
-                entries = entry["children"].as_array().cloned().unwrap_or_default();
+                entries = next["children"].as_array().cloned().unwrap_or_default();
             }
         }
         let root_name = root
@@ -1653,14 +1809,17 @@ impl Tool for WorkspaceListFilesTool {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string());
         let total_entries = if rel.is_empty() { total } else { entries.len() };
-        Ok(json!({
+        let mut result = json!({
             "rootPath": root,
             "rootName": root_name,
-            "dir_path": rel,
             "entries": entries,
             "totalEntries": total_entries,
             "truncated": truncated,
-        }))
+        });
+        if !rel.is_empty() {
+            result["dir_path"] = json!(rel);
+        }
+        Ok(result)
     }
 }
 
@@ -1671,52 +1830,146 @@ impl Tool for WorkspaceReadFileTool {
         "read_workspace_file"
     }
     fn description(&self) -> &str {
-        "Read a file from the selected conversation folder workspace."
+        "Read a file from the selected folder workspace. Large files can be read in line-based segments via start_line / max_lines. Results are returned in cat -n format with absolute 1-based line numbers. Do not include line-number prefixes when editing."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"file_path":{"type":"string"},"start_line":{"type":"integer"},"max_lines":{"type":"integer"}},"required":["file_path"]})
+        json!({"type":"object","properties":{"file_path":{"type":"string","description":"File path relative to the workspace root"},"start_line":{"type":"integer","description":"Start line number (1-based)."},"max_lines":{"type":"integer","description":"Maximum lines to read. Default 1000, maximum 2000."}},"required":["file_path"]})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let (rel, path) = folder_path_arg(&input, "file_path", services)?;
-        let content = tokio::fs::read_to_string(&path).await?;
+        const MAX_RETURN_CHARS: usize = 50_000;
+        const EDGE_RETURN_CHARS: usize = 25_000;
+        const DEFAULT_SEGMENT_LINES: usize = 1_000;
+        const MAX_SEGMENT_LINES: usize = 2_000;
+
+        let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
+        anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        let _root = selected_folder_workspace(services)?;
+        let path = services.folder_workspace_path(&rel);
+        services.ensure_folder_workspace_path(&path)?;
+        let metadata = tokio::fs::metadata(&path).await?;
+        anyhow::ensure!(metadata.is_file(), "Path is not a file: {rel}");
+        anyhow::ensure!(
+            !workspace_preview_extension_is_binary(&path),
+            "Cannot preview binary file: {rel}"
+        );
+        // Read at most the first 1 MiB, then refuse when the head looks binary.
+        let cap = metadata.len().min(WORKSPACE_PREVIEW_MAX_BYTES) as usize;
+        let mut file = tokio::fs::File::open(&path).await?;
+        let mut buffer = vec![0u8; cap];
+        let mut read = 0usize;
+        while read < cap {
+            let chunk = file.read(&mut buffer[read..]).await?;
+            if chunk == 0 {
+                break;
+            }
+            read += chunk;
+        }
+        anyhow::ensure!(
+            !buffer[..read].iter().take(4096).any(|byte| *byte == 0),
+            "Cannot preview binary file: {rel}"
+        );
+        let preview = String::from_utf8_lossy(&buffer[..read]).into_owned();
+        let preview_truncated = metadata.len() > WORKSPACE_PREVIEW_MAX_BYTES;
         services.mark_file_read(&path.canonicalize().unwrap_or(path.clone()));
-        let lines: Vec<&str> = if content.is_empty() {
+
+        let lines: Vec<&str> = if preview.is_empty() {
             Vec::new()
         } else {
-            content.split('\n').collect()
+            preview.split('\n').collect()
         };
+        if lines.is_empty() {
+            return Ok(json!({
+                "file_path": rel,
+                "content": "(This file exists but is empty - 0 lines.)",
+                "truncated": preview_truncated,
+                "total_chars": 0,
+                "total_lines": 0,
+                "start_line": 0,
+                "end_line": 0,
+                "has_more": false,
+                "next_start_line": Value::Null,
+            }));
+        }
+
         let start = input
             .get("start_line")
             .and_then(Value::as_u64)
-            .unwrap_or(1)
-            .max(1) as usize;
+            .filter(|value| *value > 0)
+            .unwrap_or(1) as usize;
+        let default_max = if preview.len() > MAX_RETURN_CHARS {
+            DEFAULT_SEGMENT_LINES
+        } else {
+            lines.len()
+        };
         let max = input
             .get("max_lines")
             .and_then(Value::as_u64)
-            .unwrap_or(lines.len().max(1) as u64)
-            .clamp(1, 2000) as usize;
-        let from = (start - 1).min(lines.len());
+            .filter(|value| *value > 0)
+            .map(|value| value as usize)
+            .unwrap_or(default_max)
+            .clamp(1, MAX_SEGMENT_LINES);
+        let from = (start - 1).min(lines.len() - 1);
         let to = (from + max).min(lines.len());
-        let numbered = lines[from..to]
+        let numbered_content = lines[from..to]
             .iter()
             .enumerate()
             .map(|(i, line)| format!("{:>6}\t{}", from + i + 1, line))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut shown = numbered;
-        let mut truncated = false;
-        if shown.len() > MAX_RETURN_CHARS {
-            let mut boundary = MAX_RETURN_CHARS;
-            while boundary > 0 && !shown.is_char_boundary(boundary) {
-                boundary -= 1;
-            }
-            shown.truncate(boundary);
-            shown.push_str("\n...[truncated]");
-            truncated = true;
+        let start_line_number = from + 1;
+        let end_line_number = to;
+        let has_more = to < lines.len() || preview_truncated;
+        let next_start_line = if has_more && to < lines.len() {
+            json!(to + 1)
+        } else {
+            Value::Null
+        };
+
+        if numbered_content.len() <= MAX_RETURN_CHARS {
+            return Ok(json!({
+                "file_path": rel,
+                "content": numbered_content,
+                "truncated": preview_truncated,
+                "total_chars": preview.len(),
+                "total_lines": lines.len(),
+                "start_line": start_line_number,
+                "end_line": end_line_number,
+                "has_more": has_more,
+                "next_start_line": next_start_line,
+            }));
         }
-        Ok(
-            json!({"file_path": rel, "content": shown, "total_chars": content.len(), "total_lines": lines.len(), "start_line": if lines.is_empty() { 0 } else { from + 1 }, "end_line": to, "has_more": to < lines.len() || truncated, "next_start_line": if to < lines.len() { Some(to + 1) } else { None }, "truncated": truncated}),
-        )
+
+        let mut head_end = EDGE_RETURN_CHARS;
+        while head_end > 0 && !numbered_content.is_char_boundary(head_end) {
+            head_end -= 1;
+        }
+        let mut tail_start = numbered_content.len() - EDGE_RETURN_CHARS;
+        while tail_start < numbered_content.len()
+            && !numbered_content.is_char_boundary(tail_start)
+        {
+            tail_start += 1;
+        }
+        let truncated_chars = numbered_content
+            .len()
+            .saturating_sub(EDGE_RETURN_CHARS * 2);
+        Ok(json!({
+            "file_path": rel,
+            "content": format!(
+                "{}\n\n...[truncated {truncated_chars} characters within requested segment lines {start_line_number}-{end_line_number}; narrow the range with start_line / max_lines to read the middle]...\n\n{}",
+                &numbered_content[..head_end],
+                &numbered_content[tail_start..]
+            ),
+            "truncated": true,
+            "total_chars": preview.len(),
+            "total_lines": lines.len(),
+            "start_line": start_line_number,
+            "end_line": end_line_number,
+            "has_more": has_more,
+            "next_start_line": next_start_line,
+        }))
     }
 }
 
@@ -1727,26 +1980,29 @@ impl Tool for WorkspaceWriteFileTool {
         "write_workspace_file"
     }
     fn description(&self) -> &str {
-        "Create or rewrite a file in the selected folder workspace."
+        "Create or rewrite a file in the selected folder workspace. Use targeted edit tools for small changes to existing files."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"]})
+        json!({"type":"object","properties":{"file_path":{"type":"string","description":"File path relative to the workspace root"},"content":{"type":"string","description":"Full file content"}},"required":["file_path","content"]})
     }
     fn permission(&self) -> &str {
         "ask"
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let file_path = require_str(&input, "file_path")?.to_string();
         let content = require_str(&input, "content")?.to_string();
-        let (_, full_path) = folder_path_arg(&input, "file_path", services)?;
-        let overwritten = full_path.is_file();
-        let scoped = folder_scoped_services(services)?;
-        let mut translated = input;
-        translated["path"] = json!(file_path);
-        WriteFileTool.execute(translated, &scoped).await?;
-        services.mark_file_read(&full_path.canonicalize().unwrap_or(full_path));
+        let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
+        anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        let _root = selected_folder_workspace(services)?;
+        let path = services.folder_workspace_path(&rel);
+        services.ensure_folder_workspace_path(&path)?;
+        let overwritten = path.is_file();
+        write_workspace_file_atomic(&path, &content).await?;
+        services.mark_file_read(&path.canonicalize().unwrap_or(path.clone()));
         Ok(
-            json!({"success": true, "file_path": file_path, "bytes_written": content.len(), "overwritten": overwritten}),
+            json!({"success": true, "file_path": rel, "bytes_written": content.len(), "overwritten": overwritten}),
         )
     }
 }
@@ -1758,29 +2014,129 @@ impl Tool for WorkspaceEditFileTool {
         "edit_workspace_file"
     }
     fn description(&self) -> &str {
-        "Apply an exact-string edit to a workspace file."
+        "Perform exact string replacements in a workspace file. This is preferred for targeted edits. You must read the file with read_workspace_file earlier in this session. old_string must match exactly and must not include line-number prefixes."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["file_path","old_string","new_string"]})
+        json!({"type":"object","properties":{"file_path":{"type":"string","description":"File path relative to the workspace root"},"old_string":{"type":"string","description":"Exact text to replace. Must be unique unless replace_all is true."},"new_string":{"type":"string","description":"Replacement text."},"replace_all":{"type":"boolean","description":"Replace all occurrences instead of requiring a unique match."}},"required":["file_path","old_string","new_string"]})
     }
     fn permission(&self) -> &str {
         "ask"
     }
-    async fn execute(&self, mut input: Value, services: &ToolServices) -> Result<Value> {
-        let path = require_str(&input, "file_path")?.to_string();
-        let (_, full_path) = folder_path_arg(&input, "file_path", services)?;
-        let tracked_path = full_path.canonicalize().unwrap_or(full_path.clone());
+    fn electron_native(&self) -> bool {
+        true
+    }
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let old = require_str(&input, "old_string")?.to_string();
+        let new = require_str(&input, "new_string")?.to_string();
+        let replace_all = input
+            .get("replace_all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
+        anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        anyhow::ensure!(
+            !old.is_empty(),
+            "old_string must not be empty. To create a new file, use write_workspace_file instead."
+        );
+        anyhow::ensure!(
+            old != new,
+            "old_string and new_string are identical - nothing to change."
+        );
+        let _root = selected_folder_workspace(services)?;
+        let path = services.folder_workspace_path(&rel);
+        services.ensure_folder_workspace_path(&path)?;
+        let tracked_path = path.canonicalize().unwrap_or(path.clone());
         anyhow::ensure!(
             services.has_read_file(&tracked_path),
-            "You must read {path} with read_workspace_file before editing it."
+            "You must read {rel} with read_workspace_file before editing it."
         );
-        let scoped = folder_scoped_services(services)?;
-        input["path"] = json!(path.clone());
-        EditFileTool.execute(input, &scoped).await.map(|value| {
-            services.mark_file_read(&tracked_path);
-            json!({"success": true, "file_path": path, "replaced": value["replaced"]})
-        })
+        let content = tokio::fs::read_to_string(&path).await?;
+        let occurrences = content.matches(&old).count();
+        anyhow::ensure!(
+            occurrences > 0,
+            "old_string was not found in {rel}. Re-read the file and copy the exact snippet without line numbers."
+        );
+        anyhow::ensure!(
+            replace_all || occurrences == 1,
+            "old_string is not unique in {rel} ({occurrences} matches). Add context or set replace_all: true."
+        );
+        let updated = if replace_all {
+            content.replace(&old, &new)
+        } else {
+            let index = content.find(&old).expect("occurrence already checked");
+            format!(
+                "{}{}{}",
+                &content[..index],
+                new,
+                &content[index + old.len()..]
+            )
+        };
+        write_workspace_file_atomic(&path, &updated).await?;
+        services.mark_file_read(&tracked_path);
+        Ok(
+            json!({"success": true, "file_path": rel, "replacements": if replace_all { occurrences } else { 1 }}),
+        )
     }
+}
+
+struct WorkspacePatchEntry {
+    start_line: usize,
+    end_line: usize,
+    content: String,
+}
+
+fn workspace_patch_number(value: Option<&Value>) -> Option<f64> {
+    match value {
+        Some(Value::Number(number)) => number.as_f64(),
+        Some(Value::String(text)) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn normalize_workspace_patches(raw: Option<&Value>) -> Result<Vec<WorkspacePatchEntry>> {
+    const SHAPE: &str =
+        "patches must be an array of { start_line, end_line, content } objects.";
+    let Some(value) = raw else {
+        anyhow::bail!("{SHAPE}");
+    };
+    let array = if let Some(array) = value.as_array() {
+        array.clone()
+    } else if let Some(text) = value.as_str() {
+        let parsed: Value = serde_json::from_str(text).map_err(|_| anyhow::anyhow!("{SHAPE}"))?;
+        parsed
+            .as_array()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("{SHAPE}"))?
+    } else {
+        anyhow::bail!("{SHAPE}");
+    };
+    let mut patches = Vec::with_capacity(array.len());
+    for (index, entry) in array.iter().enumerate() {
+        let Some(object) = entry.as_object() else {
+            anyhow::bail!("patches[{index}] must be an object with start_line, end_line, and content.");
+        };
+        let start_line = workspace_patch_number(object.get("start_line"))
+            .ok_or_else(|| anyhow::anyhow!("patches[{index}].start_line must be a positive integer."))?;
+        let end_line = workspace_patch_number(object.get("end_line"))
+            .ok_or_else(|| anyhow::anyhow!("patches[{index}].end_line must be an integer."))?;
+        let Some(content) = object.get("content").and_then(Value::as_str) else {
+            anyhow::bail!("patches[{index}].content must be a string.");
+        };
+        anyhow::ensure!(
+            start_line.is_finite() && start_line >= 1.0,
+            "patches[{index}].start_line must be a positive integer."
+        );
+        anyhow::ensure!(
+            end_line.is_finite(),
+            "patches[{index}].end_line must be an integer."
+        );
+        patches.push(WorkspacePatchEntry {
+            start_line: start_line.floor() as usize,
+            end_line: end_line.floor() as usize,
+            content: content.to_string(),
+        });
+    }
+    Ok(patches)
 }
 
 pub struct WorkspacePatchFileTool;
@@ -1790,23 +2146,77 @@ impl Tool for WorkspacePatchFileTool {
         "patch_workspace_file"
     }
     fn description(&self) -> &str {
-        "Apply line-range patches to a workspace file."
+        "Apply line-range patches to a workspace file. Patches are applied bottom-to-top and must not overlap."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"file_path":{"type":"string"},"patches":{"type":"array","items":{"type":"object"}}},"required":["file_path","patches"]})
+        json!({"type":"object","properties":{"file_path":{"type":"string","description":"File path relative to the workspace root"},"patches":{"type":"array","description":"Array of { start_line, end_line, content } patches. Lines are 1-based inclusive; end_line < start_line inserts before start_line.","items":{"type":"object","properties":{"start_line":{"type":"integer"},"end_line":{"type":"integer"},"content":{"type":"string"}},"required":["start_line","end_line","content"]}}},"required":["file_path","patches"]})
     }
     fn permission(&self) -> &str {
         "ask"
     }
-    async fn execute(&self, mut input: Value, services: &ToolServices) -> Result<Value> {
-        let path = require_str(&input, "file_path")?.to_string();
-        let (_, full_path) = folder_path_arg(&input, "file_path", services)?;
-        let scoped = folder_scoped_services(services)?;
-        input["path"] = json!(path.clone());
-        PatchFileTool.execute(input, &scoped).await.map(|value| {
-            services.mark_file_read(&full_path.canonicalize().unwrap_or(full_path));
-            json!({"success": true, "file_path": path, "patches_applied": value["patches_applied"]})
-        })
+    fn electron_native(&self) -> bool {
+        true
+    }
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
+        anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        let patches = normalize_workspace_patches(input.get("patches"))?;
+        anyhow::ensure!(
+            !patches.is_empty(),
+            "patch_workspace_file requires at least one patch entry."
+        );
+        let _root = selected_folder_workspace(services)?;
+        let path = services.folder_workspace_path(&rel);
+        services.ensure_folder_workspace_path(&path)?;
+        let content = tokio::fs::read_to_string(&path).await?;
+        let mut lines: Vec<String> = content.split('\n').map(ToOwned::to_owned).collect();
+        let total_lines = lines.len();
+        let mut sorted = patches;
+        sorted.sort_by(|left, right| right.start_line.cmp(&left.start_line));
+        for index in 0..sorted.len().saturating_sub(1) {
+            let current = &sorted[index];
+            let next = &sorted[index + 1];
+            let current_effective_start = current.start_line.max(1);
+            let next_effective_end = if next.end_line < next.start_line {
+                next.start_line - 1
+            } else {
+                next.end_line
+            };
+            anyhow::ensure!(
+                next_effective_end < current_effective_start,
+                "Patches overlap: lines {}-{} and {}-{}.",
+                next.start_line,
+                next.end_line,
+                current.start_line,
+                current.end_line
+            );
+        }
+        for patch in &sorted {
+            let start_index = (patch.start_line - 1).min(total_lines);
+            let is_insert = patch.end_line < patch.start_line;
+            let end_index = if is_insert {
+                start_index
+            } else {
+                patch.end_line.min(total_lines)
+            };
+            let new_lines: Vec<String> = if patch.content.is_empty() {
+                Vec::new()
+            } else {
+                patch.content.split('\n').map(ToOwned::to_owned).collect()
+            };
+            let range = if is_insert || end_index < start_index {
+                start_index..start_index
+            } else {
+                start_index..end_index
+            };
+            lines.splice(range, new_lines);
+        }
+        let new_content = lines.join("\n");
+        write_workspace_file_atomic(&path, &new_content).await?;
+        services.mark_file_read(&path.canonicalize().unwrap_or(path.clone()));
+        Ok(
+            json!({"success": true, "file_path": rel, "patches_applied": sorted.len(), "original_lines": total_lines, "new_lines": lines.len()}),
+        )
     }
 }
 
@@ -1820,18 +2230,24 @@ impl Tool for WorkspaceDeleteFileTool {
         "Delete a file from the selected folder workspace."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]})
+        json!({"type":"object","properties":{"file_path":{"type":"string","description":"File path relative to the workspace root"}},"required":["file_path"]})
     }
     fn permission(&self) -> &str {
         "ask"
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let (rel, path) = folder_path_arg(&input, "file_path", services)?;
-        let existed = path.is_file();
-        if existed {
-            tokio::fs::remove_file(path).await?;
-        }
-        Ok(json!({"success": true, "file_path": rel, "deleted": existed}))
+        let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
+        anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        let _root = selected_folder_workspace(services)?;
+        let path = services.folder_workspace_path(&rel);
+        services.ensure_folder_workspace_path(&path)?;
+        let metadata = tokio::fs::metadata(&path).await?;
+        anyhow::ensure!(metadata.is_file(), "Path is not a file: {rel}");
+        tokio::fs::remove_file(&path).await?;
+        Ok(json!({"success": true, "file_path": rel}))
     }
 }
 
@@ -1842,34 +2258,49 @@ impl Tool for WorkspaceGlobTool {
         "glob_workspace"
     }
     fn description(&self) -> &str {
-        "Search for files in the selected folder workspace using a glob pattern."
+        "Search for files in the selected folder workspace using glob patterns like \"**/*.ts\"."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"pattern":{"type":"string"},"dir_path":{"type":"string"},"max_results":{"type":"integer"}},"required":["pattern"]})
+        json!({"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match relative file paths."},"dir_path":{"type":"string","description":"Directory to search within, relative to workspace root."},"max_results":{"type":"integer","description":"Default 100, max 500."}},"required":["pattern"]})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let pattern = require_str(&input, "pattern")?;
-        let dir = input.get("dir_path").and_then(Value::as_str).unwrap_or("");
+        const DEFAULT_GLOB_RESULTS: usize = 100;
+        const MAX_GLOB_RESULTS: usize = 500;
+        let pattern = require_str(&input, "pattern")?.to_string();
+        let rel = normalize_workspace_rel(
+            input.get("dir_path").and_then(Value::as_str).unwrap_or(""),
+        );
         let root = selected_folder_workspace(services)?;
-        let base = if dir.is_empty() {
+        let base = if rel.is_empty() {
             root.to_path_buf()
         } else {
-            services.folder_workspace_path(dir)
+            services.folder_workspace_path(&rel)
         };
         services.ensure_folder_workspace_path(&base)?;
         let limit = input
             .get("max_results")
             .and_then(Value::as_u64)
-            .unwrap_or(100)
-            .clamp(1, 500) as usize;
-        let paths = worldbase_search::glob(&base, pattern, limit)?;
-        let matches = paths.into_iter().map(|path| {
-            let rel = path.strip_prefix(&base).unwrap_or(&path).to_string_lossy().replace('\\', "/");
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            json!({"path": rel, "size": size, "type": if path.is_dir() { "directory" } else { "file" }})
-        }).collect::<Vec<_>>();
+            .unwrap_or(DEFAULT_GLOB_RESULTS as u64)
+            .clamp(1, MAX_GLOB_RESULTS as u64) as usize;
+        let matcher = workspace_glob_regex(&pattern)?;
+        // Probe one past the limit so the model can see the truncation.
+        let mut matches = Vec::new();
+        walk_workspace_glob(&base, "", &matcher, &mut matches, limit + 1)?;
+        let truncated = matches.len() > limit;
+        if truncated {
+            matches.truncate(limit);
+        }
         Ok(
-            json!({"pattern": pattern, "dir_path": dir, "matches": matches, "total_matches": matches.len(), "truncated": matches.len() >= limit}),
+            json!({
+                "pattern": pattern,
+                "dir_path": if rel.is_empty() { Value::from(".") } else { Value::from(rel) },
+                "matches": matches,
+                "total_matches": if truncated { limit + 1 } else { matches.len() },
+                "truncated": truncated,
+            }),
         )
     }
 }
@@ -1881,19 +2312,24 @@ impl Tool for WorkspaceGrepTool {
         "grep_workspace"
     }
     fn description(&self) -> &str {
-        "Search text or regular expressions inside the selected folder workspace."
+        "Search text or regex patterns inside the selected folder workspace."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"pattern":{"type":"string"},"dir_path":{"type":"string"},"include_pattern":{"type":"string"},"is_regexp":{"type":"boolean"},"case_sensitive":{"type":"boolean"},"max_results":{"type":"integer"},"context_lines":{"type":"integer"}},"required":["pattern"]})
+        json!({"type":"object","properties":{"pattern":{"type":"string","description":"Search text or regex pattern"},"dir_path":{"type":"string","description":"Directory to search within, relative to workspace root."},"include_pattern":{"type":"string","description":"Only search files matching this pattern, e.g. \"*.ts\"."},"is_regexp":{"type":"boolean","description":"Whether pattern is a regular expression."},"case_sensitive":{"type":"boolean","description":"Whether search is case-sensitive."},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"max_results":{"type":"integer","description":"Default 50, max 200."},"context_lines":{"type":"integer","description":"Default 2, max 5."}},"required":["pattern"]})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let pattern = require_str(&input, "pattern")?;
-        let dir = input.get("dir_path").and_then(Value::as_str).unwrap_or("");
+        let pattern = require_str(&input, "pattern")?.to_string();
+        let rel = normalize_workspace_rel(
+            input.get("dir_path").and_then(Value::as_str).unwrap_or(""),
+        );
         let root = selected_folder_workspace(services)?;
-        let base = if dir.is_empty() {
+        let base = if rel.is_empty() {
             root.to_path_buf()
         } else {
-            services.folder_workspace_path(dir)
+            services.folder_workspace_path(&rel)
         };
         services.ensure_folder_workspace_path(&base)?;
         let literal = !input
@@ -1912,7 +2348,7 @@ impl Tool for WorkspaceGrepTool {
             .clamp(1, 200) as usize;
         let summary = worldbase_search::grep_with_options(
             &base,
-            pattern,
+            &pattern,
             worldbase_search::GrepOptions {
                 literal,
                 case_sensitive,
@@ -1943,7 +2379,7 @@ impl Tool for WorkspaceGrepTool {
             .into_iter()
             .map(|(file, count)| json!({"file": file, "count": count}))
             .collect::<Vec<_>>();
-        let mut result = json!({"pattern": pattern, "dir_path": dir, "output_mode": output_mode_name(output_mode), "case_sensitive": case_sensitive, "total_matches": total_matches, "files_searched": files_searched, "files_matched": files_matched, "truncated": truncated});
+        let mut result = json!({"pattern": pattern, "dir_path": if rel.is_empty() { Value::from(".") } else { Value::from(rel.clone()) }, "output_mode": output_mode_name(output_mode), "case_sensitive": case_sensitive, "total_matches": total_matches, "files_searched": files_searched, "files_matched": files_matched, "truncated": truncated});
         if output_mode == worldbase_search::GrepOutputMode::Content {
             result["matches"] = Value::Array(matches);
         } else if output_mode == worldbase_search::GrepOutputMode::FilesWithMatches {
@@ -2383,13 +2819,16 @@ impl Tool for LocalWriteFileTool {
     fn permission(&self) -> &str {
         "ask"
     }
-    async fn execute(&self, input: Value, _services: &ToolServices) -> Result<Value> {
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let requested_path = PathBuf::from(require_str(&input, "file_path")?);
         let path = if requested_path.is_absolute() {
             requested_path
         } else {
             std::env::current_dir()?.join(requested_path)
         };
+        // 已导入工作区的文档 / 已存在的 Office 文件禁止直写（全文重建会丢图），
+        // 必须改走 doc_draft 生成修改草稿。
+        crate::document_artifacts::ensure_document_write_allowed(&services.workspace, &path)?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -2845,7 +3284,7 @@ impl Tool for GrepSearchTool {
             .clamp(1, 200) as usize;
         let summary = worldbase_search::grep_with_options(
             &base,
-            pattern,
+            &pattern,
             worldbase_search::GrepOptions {
                 literal,
                 case_sensitive,
@@ -7616,3 +8055,252 @@ mod image_provider_tests {
 }
 
 fn _keep_types_linked(_: Option<Duration>) {}
+
+#[cfg(test)]
+mod workspace_native_parity_tests {
+    use super::{
+        WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool,
+        WorkspacePatchFileTool, WorkspaceReadFileTool, WorkspaceWriteFileTool,
+    };
+    use crate::{Tool, ToolServices};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    fn services(root: &std::path::Path) -> ToolServices {
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(root.join("projects")).unwrap();
+        let store = Arc::new(worldbase_memory::Store::open(&root.join("store.sqlite")).unwrap());
+        ToolServices {
+            host: Arc::new(crate::HostBridge::new()),
+            current_stream: Arc::new(Mutex::new(String::new())),
+            abort: None,
+            workspace: workspace.clone(),
+            folder_workspace: Some(workspace),
+            target_project_id: None,
+            allowed_mcp_server_ids: None,
+            plan_goal: Arc::new(Mutex::new(None)),
+            todo_items: Arc::new(Mutex::new(Vec::new())),
+            read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            visible_tool_catalog: None,
+            store: store.clone(),
+            memory_queue: None,
+            memory_scopes: Vec::new(),
+            skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
+            scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
+            mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(root.join("projects"))),
+            group_collaboration: None,
+            subagent_runtime: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn read_workspace_file_matches_electron_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::write(temp.path().join("ws/notes.md"), "alpha\nbeta\ngamma").unwrap();
+        std::fs::write(temp.path().join("ws/empty.md"), "").unwrap();
+
+        let empty = WorkspaceReadFileTool
+            .execute(json!({ "file_path": "empty.md" }), &service)
+            .await
+            .unwrap();
+        assert_eq!(empty["content"], "(This file exists but is empty - 0 lines.)");
+        assert_eq!(empty["total_lines"], 0);
+
+        let segment = WorkspaceReadFileTool
+            .execute(
+                json!({ "file_path": "notes.md", "start_line": 2, "max_lines": 1 }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(segment["content"], "     2\tbeta");
+        assert_eq!(segment["start_line"], 2);
+        assert_eq!(segment["end_line"], 2);
+        assert_eq!(segment["has_more"], true);
+        assert_eq!(segment["next_start_line"], 3);
+
+        std::fs::write(temp.path().join("ws/logo.png"), b"\x89PNG\r\n").unwrap();
+        let binary = WorkspaceReadFileTool
+            .execute(json!({ "file_path": "logo.png" }), &service)
+            .await;
+        assert!(binary
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot preview binary file: logo.png"));
+    }
+
+    #[tokio::test]
+    async fn edit_workspace_file_enforces_read_first_and_electron_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::write(temp.path().join("ws/dup.txt"), "dup and dup").unwrap();
+
+        let denied = WorkspaceEditFileTool
+            .execute(
+                json!({ "file_path": "dup.txt", "old_string": "dup", "new_string": "hi" }),
+                &service,
+            )
+            .await;
+        assert!(denied
+            .unwrap_err()
+            .to_string()
+            .contains("You must read dup.txt with read_workspace_file before editing it."));
+
+        WorkspaceReadFileTool
+            .execute(json!({ "file_path": "dup.txt" }), &service)
+            .await
+            .unwrap();
+
+        let missing = WorkspaceEditFileTool
+            .execute(
+                json!({ "file_path": "dup.txt", "old_string": "nope", "new_string": "hi" }),
+                &service,
+            )
+            .await;
+        assert!(missing
+            .unwrap_err()
+            .to_string()
+            .contains("old_string was not found in dup.txt."));
+
+        let ambiguous = WorkspaceEditFileTool
+            .execute(
+                json!({ "file_path": "dup.txt", "old_string": "dup", "new_string": "hi" }),
+                &service,
+            )
+            .await;
+        assert!(ambiguous
+            .unwrap_err()
+            .to_string()
+            .contains("old_string is not unique in dup.txt (2 matches). Add context or set replace_all: true."));
+
+        let replaced = WorkspaceEditFileTool
+            .execute(
+                json!({ "file_path": "dup.txt", "old_string": "dup", "new_string": "hi", "replace_all": true }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(replaced["replacements"], 2);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("ws/dup.txt")).unwrap(),
+            "hi and hi"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_workspace_file_rejects_overlap_and_reports_line_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::write(temp.path().join("ws/list.txt"), "a\nb\nc\nd").unwrap();
+        WorkspaceReadFileTool
+            .execute(json!({ "file_path": "list.txt" }), &service)
+            .await
+            .unwrap();
+
+        let overlap = WorkspacePatchFileTool
+            .execute(
+                json!({ "file_path": "list.txt", "patches": [
+                    { "start_line": 1, "end_line": 2, "content": "X" },
+                    { "start_line": 2, "end_line": 3, "content": "Y" }
+                ] }),
+                &service,
+            )
+            .await;
+        assert!(overlap
+            .unwrap_err()
+            .to_string()
+            .contains("Patches overlap: lines 1-2 and 2-3."));
+
+        let applied = WorkspacePatchFileTool
+            .execute(
+                json!({ "file_path": "list.txt", "patches": [
+                    { "start_line": 1, "end_line": 2, "content": "X" },
+                    { "start_line": 4, "end_line": 4, "content": "" }
+                ] }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied["patches_applied"], 2);
+        assert_eq!(applied["original_lines"], 4);
+        assert_eq!(applied["new_lines"], 2);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("ws/list.txt")).unwrap(),
+            "X\nc"
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_workspace_matches_case_insensitively_and_includes_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::create_dir_all(temp.path().join("ws/src")).unwrap();
+        std::fs::create_dir_all(temp.path().join("ws/Docs")).unwrap();
+        std::fs::write(temp.path().join("ws/src/App.TS"), "export {}").unwrap();
+
+        let files = WorkspaceGlobTool
+            .execute(json!({ "pattern": "src/*.ts" }), &service)
+            .await
+            .unwrap();
+        assert_eq!(files["matches"][0]["path"], "src/App.TS");
+        assert_eq!(files["matches"][0]["type"], "file");
+
+        let dirs = WorkspaceGlobTool
+            .execute(json!({ "pattern": "docs", "max_results": 1 }), &service)
+            .await
+            .unwrap();
+        assert_eq!(dirs["matches"][0]["type"], "directory");
+        assert_eq!(dirs["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn write_marks_read_and_reports_overwrite_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+
+        let created = WorkspaceWriteFileTool
+            .execute(json!({ "file_path": "app.txt", "content": "one" }), &service)
+            .await
+            .unwrap();
+        assert_eq!(created["overwritten"], false);
+
+        let updated = WorkspaceWriteFileTool
+            .execute(json!({ "file_path": "app.txt", "content": "two" }), &service)
+            .await
+            .unwrap();
+        assert_eq!(updated["overwritten"], true);
+
+        // The write marks the file read, so an exact edit passes immediately.
+        let edited = WorkspaceEditFileTool
+            .execute(
+                json!({ "file_path": "app.txt", "old_string": "two", "new_string": "three" }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited["replacements"], 1);
+    }
+
+    #[tokio::test]
+    async fn delete_workspace_file_errors_like_electron_on_missing_and_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::create_dir_all(temp.path().join("ws/folder")).unwrap();
+
+        let missing = WorkspaceDeleteFileTool
+            .execute(json!({ "file_path": "gone.txt" }), &service)
+            .await;
+        assert!(missing.is_err());
+
+        let directory = WorkspaceDeleteFileTool
+            .execute(json!({ "file_path": "folder" }), &service)
+            .await;
+        assert!(directory
+            .unwrap_err()
+            .to_string()
+            .contains("Path is not a file: folder"));
+    }
+}

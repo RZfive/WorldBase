@@ -7,9 +7,8 @@
  * types so they stay independent of any concrete loop implementation.
  */
 
-import type { ChatMessage, ToolDefinition } from '../providers/openai-provider.js'
+import type { ToolDefinition } from '../providers/openai-provider.js'
 import type { AIExecutionAuthMode } from '../../settings/settings-store.js'
-import type { PlanEngine, Plan } from './plan-mode.js'
 import type { SkillEngine } from './skill-engine.js'
 import type { PermissionRule, PermissionContext } from './permissions/permission-engine.js'
 
@@ -25,23 +24,6 @@ export interface ProgressCallback {
   (stage: string, detail?: string): void
   (event: ProgressEvent): void
 }
-
-export type StreamEvent =
-  | { type: 'token'; content: string }
-  | { type: 'thinking'; content: string }
-  | { type: 'tool_start'; name: string }
-  | { type: 'tool_end'; name: string }
-  | { type: 'progress'; stage: string; detail?: string }
-  | { type: 'todo_update'; items: Array<{ id: number; title: string; status: 'not-started' | 'in-progress' | 'completed' }> }
-  | { type: 'file_preview_start'; filePath: string }
-  | { type: 'file_preview_end'; filePath: string; lineCount?: number; added?: number; removed?: number }
-  | { type: 'web_search_result'; query: string; engine: string; results: Array<{ rank: number; title: string; url: string; snippet: string; source: string; published_at?: string }> }
-  | { type: 'web_fetch_result'; query?: string; result: { url: string; final_url?: string; ok: boolean; status?: number; status_text?: string; content_type?: string; title?: string; description?: string; content: string; excerpt_strategy?: 'query_snippets' | 'leading_text'; query_snippets?: string[]; query_match_count?: number; truncated: boolean; fetched_at: string; error?: string } }
-  | { type: 'reset' }
-  | { type: 'plan_mode'; active: boolean; plan?: Plan }
-  | { type: 'cost_update'; totalCost: number; inputTokens: number; outputTokens: number }
-  | { type: 'done'; message: ChatMessage; thinking?: string }
-  | { type: 'error'; error: string }
 
 export interface SessionState {
   /** The project ID created during this session (prevents duplicates). */
@@ -97,7 +79,6 @@ export interface AgentCore {
   sessionState: SessionState
   getAbortSignal (): AbortSignal | null
   getEffectiveAuthMode (): AIExecutionAuthMode
-  getPlanEngine (): PlanEngine
   getSkillEngine (): SkillEngine
   getToolDefinitions (): ToolDefinition[]
   registerTool (name: string, definition: ToolDefinition, handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>): void

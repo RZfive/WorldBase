@@ -24,24 +24,12 @@ import { toolRestartProjectServer } from './tool-restart-server.js'
 import { toolOpenProjectApp } from './tool-open-project-app.js'
 import { toolOpenWorkspaceTab } from './tool-open-workspace-tab.js'
 import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
+import { toolRunWorkspaceCommand, toolGetWorkspaceCommandStatus } from './tool-workspace-command.js'
 import { toolGlobSearch } from './tool-glob-search.js'
 import { toolGrepSearch } from './tool-grep-search.js'
-import {
-  toolDeleteWorkspaceFile,
-  toolEditWorkspaceFile,
-  toolGetWorkspaceCommandStatus,
-  toolGlobWorkspace,
-  toolGrepWorkspace,
-  toolListWorkspaceFiles,
-  toolPatchWorkspaceFile,
-  toolReadWorkspaceFile,
-  toolRunWorkspaceCommand,
-  toolWriteWorkspaceFile
-} from './tool-workspace-files.js'
 import { toolWebSearch } from './tool-web-search.js'
 import { toolFetchWebpage } from './tool-fetch-webpage.js'
 import { toolInteractCurrentPage, toolReadCurrentPage, toolFillCurrentPageForm, toolSaveCurrentPageAsDocument } from './tool-active-page.js'
-import { toolEnterPlanMode, toolExitPlanMode } from './tool-plan-mode.js'
 import { toolRunSkill, toolListSkills } from './tool-run-skill.js'
 import { toolInstallSkill } from './tool-install-skill.js'
 import { toolInstallMcpServer } from './tool-install-mcp-server.js'
@@ -49,7 +37,6 @@ import { toolCreateScheduledTask, toolListScheduledTasks } from './tool-schedule
 import { toolCreateAgent, toolCreateAgentGroup, toolListAgentWorkspaceCatalog } from './tool-agent-workspace.js'
 import { toolManageTodoList, type TodoItem } from './tool-manage-todo-list.js'
 import { toolAskUser } from './tool-ask-user.js'
-import { toolGenerateImage, toolEditImage } from './tool-generate-image.js'
 import type { AsyncTaskManager } from './async-task-manager.js'
 import type { DocumentStore } from './document-store.js'
 import type { AgentCore, SessionState, SubagentService } from '../agent-core.js'
@@ -62,15 +49,12 @@ import type { AgentStore } from '../../../settings/agent-store.js'
 import type { AgentGroupStore } from '../../../settings/agent-group-store.js'
 import type { SkillStore } from '../../../settings/skill-store.js'
 import type { SettingsStore } from '../../../settings/settings-store.js'
-import type { ImageLibraryStore } from '../../../settings/image-library-store.js'
-import type { ImageStudioGenerateRequest } from '../../../../shared/image-studio-types.js'
 import type { MCPService } from '../../../mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-service.js'
 import type { BrowserWindow } from 'electron'
 
 import { toolSpawnSubagents } from './tool-spawn-subagent.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
-import type { FolderWorkspaceChangeEvent } from '../../../../shared/folder-workspace-types.js'
 
 export interface ToolServices {
   projectFS: ProjectFS
@@ -84,15 +68,11 @@ export interface ToolServices {
   agentStore?: AgentStore
   agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
-  imageLibraryStore?: ImageLibraryStore
-  /** Hand image generation/edit requests to the drawing studio's task queue. */
-  enqueueStudioImageTasks?: (requests: ImageStudioGenerateRequest[]) => void
   getMainWindow?: () => BrowserWindow | null
   readActivePage?: () => Promise<BrowserAutomationSnapshot>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
-  notifyFolderWorkspaceChanged?: (event: FolderWorkspaceChangeEvent) => void
   mcpService?: MCPService
   scheduledTaskService?: ScheduledTaskService
   /** Optional subagent service — injects the spawn_subagents tool when provided. */
@@ -144,8 +124,6 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolGrepSearch(services),
     toolWebSearch(),
     toolFetchWebpage(),
-    toolEnterPlanMode(() => agent.getPlanEngine()),
-    toolExitPlanMode(() => agent.getPlanEngine()),
     toolRunSkill(() => agent.getSkillEngine()),
     toolListSkills(() => agent.getSkillEngine()),
     toolInstallSkill(services, () => agent.getSkillEngine()),
@@ -163,40 +141,18 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolCreateAgentGroup(services)
   ]
 
+  // The folder-workspace file tools are Rust-native (`electron_native`); only
+  // the command runner stays in the host because its bundled-runtime PATH
+  // shims and foreground/background task registry are Electron-owned.
   if (services.workspaceRoot) {
-    const workspaceServices = {
-      workspaceRoot: services.workspaceRoot,
-      notifyFolderWorkspaceChanged: services.notifyFolderWorkspaceChanged
-    }
     tools.push(
-      toolListWorkspaceFiles(workspaceServices),
-      toolReadWorkspaceFile(workspaceServices, readTracker),
-      toolWriteWorkspaceFile(workspaceServices, readTracker),
-      toolEditWorkspaceFile(workspaceServices, readTracker),
-      toolPatchWorkspaceFile(workspaceServices, readTracker),
-      toolDeleteWorkspaceFile(workspaceServices),
-      toolGlobWorkspace(workspaceServices),
-      toolGrepWorkspace(workspaceServices),
-      toolRunWorkspaceCommand(workspaceServices),
+      toolRunWorkspaceCommand(services),
       toolGetWorkspaceCommandStatus()
     )
   }
 
   if (services.readActivePage) {
     tools.push(toolReadCurrentPage(services))
-  }
-
-  // Image generation / editing tools resolve a capable provider (settings store) and
-  // resolve edit inputs (image library), then hand tasks to the studio's queue rather
-  // than running them here — so the workbench owns scheduling, concurrency, and display.
-  if (services.settingsStore && services.imageLibraryStore && services.enqueueStudioImageTasks) {
-    const settingsStore = services.settingsStore
-    const imageLibraryStore = services.imageLibraryStore
-    const enqueueStudioImageTasks = services.enqueueStudioImageTasks
-    tools.push(
-      toolGenerateImage(settingsStore, imageLibraryStore, enqueueStudioImageTasks),
-      toolEditImage(settingsStore, imageLibraryStore, enqueueStudioImageTasks)
-    )
   }
 
   if (services.readActivePage && services.interactWithActivePage) {

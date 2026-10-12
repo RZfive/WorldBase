@@ -42,6 +42,7 @@ import { mainState, activeChatSessions, pendingPageAutomationRequests, projectWi
 import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH } from './constants.js'
 import { readUploadedAttachmentFromBuffer, readUploadedAttachmentFromPath, type UploadedAttachmentBufferPayload } from './media/attachments.js'
 import { ensureDocumentRenderPreview } from './media/document-preview.js'
+import { DocumentFileWatcher } from './document-file-watcher.js'
 import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, notifyAiTaskStatus, refreshProviderReasoningMetadata, resolveAgentRuntimeContext, resolveMemoryEmbeddingRuntimeConfig, resolveProviderConfig } from './ai/agent-context.js'
 import { startSelectedRustHarness } from './ai/selected-execution-engine.js'
 import type { JsonRpcResult } from './rust-harness-client.js'
@@ -58,6 +59,9 @@ import {
 import { drainPendingStudioImageTasks } from './media/image-studio-queue.js'
 import { attachProjectRuntimeLogForwarding, broadcastToAppWindows, buildActivePagePromptSection, buildActiveTerminalPromptSection, buildRendererWindowUrl, createProjectPackageDefaultName, ensureWindowHasMinimumWidth, getPreferredLanIpv4Addresses, getProjectsDir, getSenderWindow, guessImageExtension, resolveImageBuffer, runWithAiRequestWindow, setWindowMinimumWidth } from './windows.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
+
+/** 打开中的文档页文件监听（引用计数共享；变化广播给所有应用窗口）。 */
+const documentFileWatcher = new DocumentFileWatcher()
 
 const AGENT_WORKSPACE_TOOL_DESCRIPTION_KEYS: Record<string, string> = {
   run_skill: 'settings.agentWorkspace.toolDescriptionRunSkill',
@@ -281,6 +285,10 @@ export function setupIPC (): void {
   const scheduledTaskService = mainState.scheduledTaskService!
   const longTermGoalService = mainState.longTermGoalService!
   const documentStore = mainState.documentStore!
+  // 文档文件监听：变化广播给所有应用窗口，由打开对应文档页的渲染层过滤。
+  documentFileWatcher.onChange((change) => {
+    broadcastToAppWindows('workspace:documentFileChanged', change)
+  })
   const imageLibraryStore = mainState.imageLibraryStore
   const studioTaskStore = mainState.studioTaskStore
   const usageStore = mainState.usageStore
@@ -1720,6 +1728,20 @@ export function setupIPC (): void {
 
   ipcMain.handle('document:get', async (_event: IpcMainInvokeEvent, artifactId: string) => {
     return documentStore!.getArtifact(artifactId)
+  })
+
+  // ─── 文件监听：覆盖草稿流之外的磁盘变化（外部编辑器/其他程序写盘） ───
+
+  ipcMain.handle('document:watchFile', (_event: IpcMainInvokeEvent, filePath: string) => {
+    if (typeof filePath !== 'string' || !filePath.trim()) return { watched: false }
+    return { watched: documentFileWatcher.watch(filePath) }
+  })
+
+  ipcMain.handle('document:unwatchFile', (_event: IpcMainInvokeEvent, filePath: string) => {
+    if (typeof filePath === 'string' && filePath.trim()) {
+      documentFileWatcher.unwatch(filePath)
+    }
+    return { watched: false }
   })
 
   ipcMain.handle('document:getRenderData', async (_event: IpcMainInvokeEvent, artifactId: string) => {

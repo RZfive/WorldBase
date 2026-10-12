@@ -1,5 +1,4 @@
 import type { BrowserWindow } from 'electron'
-import { PlanEngine } from '../ai-engine/agent/plan-mode.js'
 import { SkillEngine } from '../ai-engine/agent/skill-engine.js'
 import { PermissionEngine } from '../ai-engine/agent/permissions/permission-engine.js'
 import { registerAllTools, type ToolServices } from '../ai-engine/agent/tools/index.js'
@@ -68,7 +67,6 @@ interface AgentShim {
   }
   registerTool: (name: string, definition: ToolDefinition, handler: RegisteredTool['handler']) => void
   getToolDefinitions: () => ToolDefinition[]
-  getPlanEngine: () => PlanEngine
   getSkillEngine: () => SkillEngine
   getEffectiveAuthMode: () => AIExecutionAuthMode
   getAbortSignal: () => AbortSignal | undefined
@@ -151,7 +149,6 @@ export class ElectronToolRegistry {
 
   private collect (context: ElectronToolRunContext, includeHandlers: boolean): RegisteredTool[] {
     const registered = new Map<string, RegisteredTool>()
-    const planEngine = new PlanEngine()
     const skillEngine = new SkillEngine()
     for (const content of context.activeSkillContents || []) {
       if (content.trim()) skillEngine.registerFromContent(content)
@@ -175,7 +172,6 @@ export class ElectronToolRegistry {
         registered.set(name, { definition, handler })
       },
       getToolDefinitions: getKnownToolDefinitions,
-      getPlanEngine: () => planEngine,
       getSkillEngine: () => skillEngine,
       getEffectiveAuthMode: () => this.resolveAuthMode(context),
       getAbortSignal: () => context.abortSignal

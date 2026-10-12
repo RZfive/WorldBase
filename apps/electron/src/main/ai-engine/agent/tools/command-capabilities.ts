@@ -16,15 +16,6 @@ export const PROJECT_COMMAND_WHITELIST = [
   'find', 'grep', 'sort', 'uniq', 'env', 'printenv', 'true', 'date'
 ]
 
-export const LOCAL_COMMAND_DISCOVERY_CANDIDATES = [
-  'node', 'npm', 'npx', 'git',
-  'python', 'python3', 'pip', 'pip3',
-  'bash', 'sh', 'zsh',
-  'pwsh', 'powershell', 'cmd',
-  'ls', 'cat', 'grep', 'find', 'head', 'tail', 'wc', 'echo', 'pwd',
-  'curl', 'wget'
-]
-
 /**
  * Patterns that are ALWAYS rejected — even in developer command mode — because
  * they are destructive, exfiltrating, or escalate privileges. They are matched

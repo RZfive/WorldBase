@@ -268,6 +268,7 @@ async function resolveDocumentArtifact (): Promise<void> {
       status: 'ready'
     }
     await loadSelectedArtifact(summary.id)
+    void registerFileWatch()
   } finally {
     if (token === resolveToken) isResolving.value = false
   }
@@ -330,13 +331,17 @@ function scoreNodeTextMatch (nodeText: string, normalizedExcerpt: string, excerp
 }
 
 function resolveSelectionNodeIds (excerpt: string, pageIndex?: number): string[] {
-  if (!activeArtifact.value) return []
+  return resolveNodeIdsInArtifact(activeArtifact.value, excerpt, pageIndex)
+}
+
+function resolveNodeIdsInArtifact (artifact: DocumentArtifact | null, excerpt: string, pageIndex?: number): string[] {
+  if (!artifact) return []
 
   const normalizedExcerpt = normalizeSelectionText(excerpt)
   if (!normalizedExcerpt) return []
   const excerptTokens = new Set(tokenizeSelectionText(excerpt))
 
-  const searchNodes = (pageFilter?: number) => collectAllNodes(activeArtifact.value!.nodes)
+  const searchNodes = (pageFilter?: number) => collectAllNodes(artifact.nodes)
     .filter(node => !pageFilter || node.pageIndex === pageFilter)
     .map(node => ({ node, score: scoreNodeTextMatch(node.text, normalizedExcerpt, excerptTokens) }))
     .filter(candidate => candidate.score >= 0.45)
@@ -436,6 +441,78 @@ let draftToken = 0
 /** The tab previews the draft while one is pending, otherwise the original. */
 const previewArtifact = computed(() => (draft.value ? draftArtifact.value : activeArtifact.value))
 
+// --- Draft change list / highlight / data-loss confirm -----------------------
+
+const draftChanges = computed(() => draft.value?.changes ?? null)
+const draftChangesCounts = computed(() => draftChanges.value?.counts ?? null)
+const draftDataLoss = computed(() => draft.value?.dataLossRisk ?? null)
+const draftSummary = computed(() => draft.value?.summary?.trim() || '')
+const draftChangesExpanded = ref(false)
+const activeChangeKey = ref(-1)
+const confirmingDataLoss = ref(false)
+let confirmingDataLossTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * 高亮：把变更条目解析为草稿预览节点（新增/修改匹配 after 文本，删除匹配
+ * before），以临时 selection 形式注入渲染宿主，不落 selection 存储。
+ */
+const previewSelections = computed<SelectionRegion[]>(() => {
+  if (!draft.value || !draftArtifact.value || activeChangeKey.value < 0) {
+    return activeSelections.value
+  }
+  const change = draftChanges.value?.items[activeChangeKey.value]
+  if (!change) return activeSelections.value
+
+  const anchorText = change.kind === 'delete' ? change.before : (change.after || change.before)
+  const nodeIds = anchorText
+    ? resolveNodeIdsInArtifact(draftArtifact.value, anchorText, change.pageIndex)
+    : []
+  if (nodeIds.length === 0) return activeSelections.value
+
+  const color = change.kind === 'insert' ? '#10b981' : change.kind === 'delete' ? '#ef4444' : '#f59e0b'
+  return [
+    ...activeSelections.value,
+    {
+      id: `draft-change-${activeChangeKey.value}`,
+      artifactId: draftArtifact.value.id,
+      nodeIds,
+      label: anchorText?.slice(0, 24) || change.kind,
+      color,
+      excerpt: anchorText || undefined,
+      createdAt: ''
+    } as SelectionRegion
+  ]
+})
+
+function toggleChangeHighlight (index: number): void {
+  activeChangeKey.value = activeChangeKey.value === index ? -1 : index
+}
+
+function resetDraftDecisionState (): void {
+  draftChangesExpanded.value = false
+  activeChangeKey.value = -1
+  confirmingDataLoss.value = false
+  if (confirmingDataLossTimer) {
+    clearTimeout(confirmingDataLossTimer)
+    confirmingDataLossTimer = null
+  }
+}
+
+/** 丢失风险下的两步确认：第一次点击只亮起确认态，几秒后自动回落。 */
+function requestApplyDraft (): void {
+  if (draftDataLoss.value && !confirmingDataLoss.value) {
+    confirmingDataLoss.value = true
+    if (confirmingDataLossTimer) clearTimeout(confirmingDataLossTimer)
+    confirmingDataLossTimer = setTimeout(() => {
+      confirmingDataLoss.value = false
+      confirmingDataLossTimer = null
+    }, 6000)
+    return
+  }
+  resetDraftDecisionState()
+  void applyDraftToSource()
+}
+
 const draftTimeLabel = computed(() => {
   if (!draft.value) return ''
   const date = new Date(draft.value.createdAt)
@@ -445,6 +522,7 @@ const draftTimeLabel = computed(() => {
 watch(draft, (value) => {
   const token = ++draftToken
   draftNotice.value = ''
+  resetDraftDecisionState()
   if (!value) {
     draftError.value = ''
     draftArtifact.value = null
@@ -485,6 +563,7 @@ async function applyDraftToSource (): Promise<void> {
   draftBusy.value = true
   draftError.value = ''
   draftNotice.value = ''
+  diskSuppressUntil = Date.now() + DISK_SUPPRESS_MS
   try {
     await window.electronAPI.applyDocumentDraft({
       artifactId: current.artifactId,
@@ -517,6 +596,7 @@ async function saveDraftAsCopy (): Promise<void> {
   draftBusy.value = true
   draftError.value = ''
   draftNotice.value = ''
+  diskSuppressUntil = Date.now() + DISK_SUPPRESS_MS
   try {
     const result = await window.electronAPI.saveDocumentDraftAs({
       artifactId: current.artifactId,
@@ -572,6 +652,62 @@ function insertDocumentContextTag (): void {
   emit('insertSelectionTag', `[[docfile:${artifactId}|${fileName}]]`)
 }
 
+// ---------------------------------------------------------------------------
+// Disk staleness（文件在磁盘上被外部修改）+ window focus 草稿恢复
+// ---------------------------------------------------------------------------
+
+const DISK_SUPPRESS_MS = 4000
+let diskSuppressUntil = 0
+const diskChange = ref<DocumentFileChangedDTO | null>(null)
+let fileChangedCleanup: (() => void) | null = null
+
+function handleDiskFileChanged (payload: DocumentFileChangedDTO): void {
+  if (normalizeDocumentFileKey(payload.filePath) !== normalizeDocumentFileKey(filePath)) return
+  // 自身触发的写盘（应用/另存/重载）在抑制窗口内不提示。
+  if (Date.now() < diskSuppressUntil) return
+  diskChange.value = payload
+}
+
+async function registerFileWatch (): Promise<void> {
+  if (!filePath || !window.electronAPI?.watchDocumentFile) return
+  try {
+    await window.electronAPI.watchDocumentFile(filePath)
+  } catch {
+    // 监听失败不影响预览；外部修改只会在下次打开时被 refresh 发现。
+  }
+}
+
+async function reloadFromDisk (): Promise<void> {
+  if (!window.electronAPI?.refreshDocumentFromDisk) return
+  diskSuppressUntil = Date.now() + DISK_SUPPRESS_MS
+  diskChange.value = null
+  try {
+    const { artifact } = await window.electronAPI.refreshDocumentFromDisk(filePath)
+    if (artifact) {
+      activeArtifact.value = artifact
+      documentSummary.value = {
+        ...documentSummary.value,
+        artifactId: artifact.id,
+        fileType: artifact.fileType,
+        fileSize: artifact.fileSize,
+        status: 'ready',
+        error: undefined
+      }
+    }
+  } catch (error) {
+    importError.value = (error as Error).message || ''
+  }
+}
+
+function dismissDiskChange (): void {
+  diskChange.value = null
+}
+
+function handleWindowFocus (): void {
+  // 草稿通知丢失时的兜底：窗口重新聚焦时按路径补拉待决草稿。
+  void restorePendingDraft()
+}
+
 watch(
   () => props.tab.state,
   () => {
@@ -591,16 +727,35 @@ onActivated(() => {
   isActiveTab.value = true
   if (documentSummary.value.status === 'resolving' || !documentSummary.value.artifactId) {
     void resolveDocumentArtifact()
+  } else {
+    void registerFileWatch()
   }
   void restorePendingDraft()
+  window.addEventListener('focus', handleWindowFocus)
+  if (!fileChangedCleanup && window.electronAPI?.onDocumentFileChanged) {
+    fileChangedCleanup = window.electronAPI.onDocumentFileChanged(handleDiskFileChanged)
+  }
 })
 
 onDeactivated(() => {
   isActiveTab.value = false
+  window.removeEventListener('focus', handleWindowFocus)
+  fileChangedCleanup?.()
+  fileChangedCleanup = null
+  diskChange.value = null
+  if (window.electronAPI?.unwatchDocumentFile) {
+    void window.electronAPI.unwatchDocumentFile(filePath)
+  }
 })
 
 onBeforeUnmount(() => {
   isActiveTab.value = false
+  window.removeEventListener('focus', handleWindowFocus)
+  fileChangedCleanup?.()
+  fileChangedCleanup = null
+  if (window.electronAPI?.unwatchDocumentFile) {
+    void window.electronAPI.unwatchDocumentFile(filePath)
+  }
 })
 
 defineExpose({
@@ -619,7 +774,7 @@ defineExpose({
             <div class="doc-paper">
               <DocumentRenderHost
                 :artifact="previewArtifact"
-                :selections="activeSelections"
+                :selections="previewSelections"
                 @highlight-selection="handleHighlightSelection"
               />
             </div>
@@ -667,17 +822,70 @@ defineExpose({
         <span v-if="importError" class="doc-context-error" :title="importError">{{ importError }}</span>
       </div>
 
+      <!-- Disk staleness: the file changed outside the draft flow. -->
+      <div v-if="diskChange" class="doc-stale-banner" role="alert">
+        <span class="doc-stale-text">{{ $t('chatUi.documentFileChangedBanner') }}</span>
+        <button class="doc-stale-btn primary" type="button" @click="reloadFromDisk">
+          {{ $t('chatUi.documentFileChangedReload') }}
+        </button>
+        <button class="doc-stale-btn" type="button" @click="dismissDiskChange">
+          {{ $t('chatUi.documentFileChangedDismiss') }}
+        </button>
+      </div>
+
       <!-- Pending AI draft: floating decision bar above the previewed draft file. -->
       <div v-if="draft" class="doc-draft-banner" role="status">
         <div class="doc-draft-head">
           <span class="doc-draft-badge">{{ $t('chatUi.documentDraftBadge') }}</span>
           <span class="doc-draft-meta">{{ $t('chatUi.documentDraftMeta') }}<template v-if="draftTimeLabel"> · {{ draftTimeLabel }}</template></span>
         </div>
+        <div v-if="draftSummary" class="doc-draft-summary">{{ draftSummary }}</div>
+        <div v-if="draftDataLoss" class="doc-draft-loss-warning">
+          {{ $t('chatUi.documentDraftDataLossWarning', { count: draftDataLoss.mediaCount }) }}
+        </div>
+        <button
+          v-if="draftChangesCounts && draftChangesCounts.total > 0"
+          class="doc-draft-changes-toggle"
+          type="button"
+          @click="draftChangesExpanded = !draftChangesExpanded"
+        >
+          <span class="doc-draft-changes-arrow">{{ draftChangesExpanded ? '▾' : '▸' }}</span>
+          {{ $t('chatUi.documentDraftChangesSummary', {
+            total: draftChangesCounts.total,
+            added: draftChangesCounts.added,
+            removed: draftChangesCounts.removed,
+            modified: draftChangesCounts.modified
+          }) }}
+        </button>
+        <div v-if="draftChangesExpanded && draftChanges" class="doc-draft-change-list">
+          <button
+            v-for="(item, index) in draftChanges.items"
+            :key="index"
+            class="doc-draft-change-item"
+            :class="[item.kind, { active: activeChangeKey === index }]"
+            type="button"
+            @click="toggleChangeHighlight(index)"
+          >
+            <span class="doc-draft-change-kind">{{ $t(`chatUi.documentDraftChange_${item.kind}`) }}</span>
+            <span class="doc-draft-change-text">{{ item.before || item.after || item.anchor }}</span>
+          </button>
+          <div v-if="draftChanges.truncated" class="doc-draft-change-truncated">
+            {{ $t('chatUi.documentDraftChangesTruncated') }}
+          </div>
+        </div>
         <div v-if="draftError" class="doc-draft-error">{{ draftError }}</div>
         <div v-else-if="draftNotice" class="doc-draft-notice">{{ draftNotice }}</div>
         <div class="doc-draft-actions">
-          <button class="doc-draft-btn primary" type="button" :disabled="draftBusy" @click="applyDraftToSource">
-            {{ $t('chatUi.documentDraftApply') }}
+          <button
+            class="doc-draft-btn primary"
+            :class="{ danger: confirmingDataLoss }"
+            type="button"
+            :disabled="draftBusy"
+            @click="requestApplyDraft"
+          >
+            {{ confirmingDataLoss
+              ? $t('chatUi.documentDraftApplyConfirmLoss', { count: draftDataLoss?.mediaCount ?? 0 })
+              : $t('chatUi.documentDraftApply') }}
           </button>
           <button class="doc-draft-btn" type="button" :disabled="draftBusy" @click="saveDraftAsCopy">
             {{ $t('chatUi.documentDraftSaveAs') }}
@@ -743,6 +951,156 @@ defineExpose({
   background: color-mix(in srgb, var(--app-panel) 96%, transparent);
   backdrop-filter: blur(14px);
   box-shadow: 0 16px 38px rgba(15, 23, 42, 0.22);
+}
+
+.doc-stale-banner {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, #f59e0b 42%, transparent);
+  background: color-mix(in srgb, var(--app-panel) 96%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.22);
+}
+
+.doc-stale-text {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: #92400e;
+}
+
+.doc-stale-btn {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  background: color-mix(in srgb, var(--app-panel) 92%, transparent);
+  color: var(--app-text);
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.doc-stale-btn.primary {
+  color: #fff;
+  background: #d97706;
+  border-color: transparent;
+}
+
+.doc-draft-summary {
+  font-size: 0.76rem;
+  line-height: 1.55;
+  color: var(--app-text-muted);
+  word-break: break-word;
+}
+
+.doc-draft-loss-warning {
+  font-size: 0.76rem;
+  line-height: 1.55;
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: #b91c1c;
+  background: color-mix(in srgb, #ef4444 14%, transparent);
+  border: 1px solid color-mix(in srgb, #ef4444 30%, transparent);
+  word-break: break-word;
+}
+
+.doc-draft-changes-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  border: none;
+  background: color-mix(in srgb, var(--app-accent-soft) 40%, transparent);
+  color: var(--app-text-strong);
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.doc-draft-changes-toggle:hover {
+  background: color-mix(in srgb, var(--app-accent-soft) 70%, transparent);
+}
+
+.doc-draft-changes-arrow {
+  font-size: 0.7rem;
+}
+
+.doc-draft-change-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.doc-draft-change-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  text-align: left;
+  border: 1px solid color-mix(in srgb, var(--app-border) 70%, transparent);
+  background: color-mix(in srgb, var(--app-panel) 90%, transparent);
+  border-radius: 8px;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.doc-draft-change-item:hover,
+.doc-draft-change-item.active {
+  border-color: color-mix(in srgb, var(--app-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--app-accent-soft) 30%, var(--app-panel));
+}
+
+.doc-draft-change-kind {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  font-weight: 700;
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+.doc-draft-change-item.insert .doc-draft-change-kind {
+  color: #065f46;
+  background: color-mix(in srgb, #10b981 18%, transparent);
+}
+
+.doc-draft-change-item.delete .doc-draft-change-kind {
+  color: #991b1b;
+  background: color-mix(in srgb, #ef4444 18%, transparent);
+}
+
+.doc-draft-change-item.modify .doc-draft-change-kind {
+  color: #92400e;
+  background: color-mix(in srgb, #f59e0b 20%, transparent);
+}
+
+.doc-draft-change-text {
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--app-text-muted);
+  word-break: break-word;
+}
+
+.doc-draft-change-truncated {
+  font-size: 0.7rem;
+  color: var(--app-text-muted);
+  padding: 2px 4px;
 }
 
 .doc-draft-head {
@@ -816,6 +1174,14 @@ defineExpose({
 
 .doc-draft-btn.primary:hover:not(:disabled) {
   background: color-mix(in srgb, var(--app-accent, #2563eb) 86%, #000);
+}
+
+.doc-draft-btn.danger {
+  background: #dc2626;
+}
+
+.doc-draft-btn.danger:hover:not(:disabled) {
+  background: #b91c1c;
 }
 
 .doc-draft-btn.ghost {

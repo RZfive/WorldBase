@@ -630,7 +630,10 @@ export interface ElectronAPI {
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
   onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
   onWorkspaceOpenTab: (callback: (event: { kind: string; payload?: Record<string, unknown> }) => void) => () => void
-  onWorkspaceDocumentDraft: (callback: (payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }) => void) => () => void
+  onWorkspaceDocumentDraft: (callback: (payload: Record<string, unknown>) => void) => () => void
+  watchDocumentFile: (filePath: string) => Promise<{ watched: boolean }>
+  unwatchDocumentFile: (filePath: string) => Promise<{ watched: boolean }>
+  onDocumentFileChanged: (callback: (payload: { filePath: string; mtimeMs: number; size: number }) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
   getComputerUsePermissions: () => Promise<{ platform: string; screen: string; accessibility: boolean; granted: boolean }>
   requestComputerUsePermissions: () => Promise<{ granted: boolean }>
@@ -980,10 +983,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('workspace:openTab', handler)
     return () => { ipcRenderer.removeListener('workspace:openTab', handler) }
   },
-  onWorkspaceDocumentDraft: (callback: (payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }) => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }) => callback(payload)
+  onWorkspaceDocumentDraft: (callback: (payload: Record<string, unknown>) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: Record<string, unknown>) => callback(payload)
     ipcRenderer.on('workspace:documentDraft', handler)
     return () => { ipcRenderer.removeListener('workspace:documentDraft', handler) }
+  },
+  watchDocumentFile: (filePath: string) => ipcRenderer.invoke('document:watchFile', filePath),
+  unwatchDocumentFile: (filePath: string) => ipcRenderer.invoke('document:unwatchFile', filePath),
+  onDocumentFileChanged: (callback: (payload: { filePath: string; mtimeMs: number; size: number }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { filePath: string; mtimeMs: number; size: number }) => callback(payload)
+    ipcRenderer.on('workspace:documentFileChanged', handler)
+    return () => { ipcRenderer.removeListener('workspace:documentFileChanged', handler) }
   },
   getSystemStatus: () => ipcRenderer.invoke('system:getStatus'),
   getComputerUsePermissions: () => ipcRenderer.invoke('permissions:getComputerUse'),

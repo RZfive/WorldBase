@@ -1073,6 +1073,45 @@ interface DocumentSummaryDTO {
   importedAt: string
 }
 
+interface DocumentDraftChangeDTO {
+  kind: 'insert' | 'delete' | 'modify'
+  pageIndex?: number
+  /** 变更处摘要（≤60 字符），列表展示与定位用 */
+  anchor?: string
+  before?: string
+  after?: string
+  /** ops 草稿：目标段落/页内索引（渲染层定位辅助） */
+  opIndex?: number
+  headingLevel?: number
+  image?: string
+}
+
+interface DocumentDraftChangesDTO {
+  items: DocumentDraftChangeDTO[]
+  counts: { added: number; removed: number; modified: number; total: number }
+  truncated: boolean
+}
+
+interface DocumentDraftPayloadDTO {
+  artifactId: string
+  filePath: string
+  draftPath: string
+  fileType: string
+  sourceSha256: string
+  createdAt: string
+  changes?: DocumentDraftChangesDTO | null
+  /** 模型自述的修改说明（仅展示） */
+  summary?: string | null
+  /** 全文重建将丢失的媒体统计；ops 草稿为 null */
+  dataLossRisk?: { mediaCount: number } | null
+}
+
+interface DocumentFileChangedDTO {
+  filePath: string
+  mtimeMs: number
+  size: number
+}
+
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<{ role: string; content: MessageContent }>
@@ -1320,10 +1359,13 @@ interface ElectronAPI {
   applyDocumentDraft: (payload: { artifactId: string; sourceSha256?: string }) => Promise<{ artifact: unknown; backupPath?: string }>
   saveDocumentDraftAs: (payload: { artifactId: string; defaultName?: string }) => Promise<{ canceled: boolean; filePath?: string; artifact?: unknown }>
   discardDocumentDraft: (artifactId: string) => Promise<{ discarded: boolean }>
-  getDocumentDraft: (filePath: string) => Promise<{ artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string } | null>
+  getDocumentDraft: (filePath: string) => Promise<DocumentDraftPayloadDTO | null>
   refreshDocumentFromDisk: (filePath: string) => Promise<{ artifact: DocumentArtifactDTO }>
   buildDocumentFileContextPrompt: (artifactIds: string[]) => Promise<string>
-  onWorkspaceDocumentDraft: (callback: (payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }) => void) => () => void
+  onWorkspaceDocumentDraft: (callback: (payload: DocumentDraftPayloadDTO) => void) => () => void
+  watchDocumentFile: (filePath: string) => Promise<{ watched: boolean }>
+  unwatchDocumentFile: (filePath: string) => Promise<{ watched: boolean }>
+  onDocumentFileChanged: (callback: (payload: DocumentFileChangedDTO) => void) => () => void
   createDocumentSelection: (payload: { artifactId: string; nodeIds: string[]; label: string; color: string; excerpt?: string }) => Promise<DocumentSelectionDTO>
   removeDocumentSelection: (regionId: string) => Promise<boolean>
   updateDocumentSelectionLabel: (regionId: string, label: string) => Promise<DocumentSelectionDTO | null>

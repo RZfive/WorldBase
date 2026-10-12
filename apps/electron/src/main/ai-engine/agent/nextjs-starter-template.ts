@@ -334,21 +334,6 @@ function getStarterTypeScriptDevDependencies (profile: ReturnType<typeof getNext
   }
 }
 
-export function getNextJsStarterArchitectureDescription (): string {
-  return [
-    'Use the built-in Next.js starter template as the base for every generated app and only modify the files that need to change.',
-    '- Runtime layer: package.json provides npm run build / npm start, next.config.js enables standalone output, and .world-meta.json points runtime.backend.command to node .next/standalone/server.js.',
-    '- App shell: app/layout.(js|tsx) is the only root layout entry and must import app/globals.css.',
-    '- Page entry: app/page.(js|tsx) is the initial screen and should be replaced with the requested product UI instead of deleted without a replacement.',
-    '- Styling layer: app/globals.css contains resets, design tokens, spacing, and responsive defaults so generated apps never launch without styles.',
-    '- Data layer: browser components call WorldBase host APIs and project data endpoints instead of creating their own local infrastructure.',
-    '- Persistence rule: any app that needs data saving must declare tables in .world-meta.json dataSchema and use WorldBase host SQLite APIs only.',
-    '- Forbidden persistence patterns: do not add better-sqlite3, sqlite3, Prisma, Drizzle, Sequelize, TypeORM, custom SQLite bootstrap code, or ad hoc local file storage for business data.',
-    '',
-    'Template architecture diagram:',
-    STARTER_MERMAID_DIAGRAM
-  ].join('\n')
-}
 
 export function applyNextJsStarterTemplate (
   files: Record<string, string>,

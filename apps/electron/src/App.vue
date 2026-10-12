@@ -330,7 +330,7 @@ let workspaceTabRequestSeq = 0
 const workspaceTabRequest = ref<{ kind: string; payload?: Record<string, unknown>; seq: number } | null>(null)
 /** Bumped on every AI-staged document draft; consumed by the chat shell once. */
 let workspaceDraftRequestSeq = 0
-const workspaceDraftRequest = ref<{ payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }; seq: number } | null>(null)
+const workspaceDraftRequest = ref<{ payload: DocumentDraftPayloadDTO; seq: number } | null>(null)
 let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
 let runningAppsInterval: ReturnType<typeof setInterval> | null = null

@@ -174,89 +174,58 @@ test('Rust tool.execute falls back to the Electron project handler when Rust doe
   assert.ok(progress.some(frame => frame.kind === 'progress' && frame.stage === '__electron_progress__'))
 })
 
-test('Rust tool.execute falls back to the selected Electron folder workspace when needed', async () => {
+test('folder-workspace file tools are Rust-native and register no Node override', async () => {
+  // list/read/write/edit/patch/delete/glob/grep workspace tools execute in
+  // Rust (`electron_native`); the facade's onNativeToolResult hook broadcasts
+  // folderWorkspace:changed from the Rust result shapes.
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'worldbase-rust-workspace-'))
-  const workspaceChanges = []
   try {
-    const services = createServices({
-      notifyFolderWorkspaceChanged: event => workspaceChanges.push(event)
-    })
+    const services = createServices()
     const registrations = await collectHostTools(createHarnessEngine(services), {
       authMode: 'strict',
       workspaceRoot
     })
-    const workspaceTool = getTool(registrations, 'write_workspace_file')
 
-    assert.equal(workspaceTool.domain, 'electron_host_override')
-    const { result } = await dispatchToolExecute(registrations, 'write_workspace_file', {
-      file_path: 'notes/from-rust.md',
-      content: '# Rust host callback\n'
-    })
-
-    assert.deepEqual(result, { success: true, file_path: 'notes/from-rust.md' })
-    assert.equal(await fs.readFile(path.join(workspaceRoot, 'notes/from-rust.md'), 'utf8'), '# Rust host callback\n')
-    assert.deepEqual(workspaceChanges, [{
-      action: 'created',
-      rootPath: path.resolve(workspaceRoot),
-      filePath: 'notes/from-rust.md'
-    }])
+    for (const name of [
+      'list_workspace_files',
+      'read_workspace_file',
+      'write_workspace_file',
+      'edit_workspace_file',
+      'patch_workspace_file',
+      'delete_workspace_file',
+      'glob_workspace',
+      'grep_workspace'
+    ]) {
+      assert.equal(
+        registrations.some(tool => tool.definition.name === name),
+        false,
+        `${name} must execute in Rust, not through a Node host override`
+      )
+    }
   } finally {
     await fs.rm(workspaceRoot, { recursive: true, force: true })
   }
 })
 
-test('Rust tool.execute falls back to Electron Studio image services when needed', async () => {
-  const imageBatches = []
+test('Rust-native image tools no longer register a Node Studio fallback', async () => {
+  // generate_image / edit_image are Rust-native (`electron_native`): requests
+  // land in the Rust `studio_pending_tasks` queue that the renderer drains.
+  // A Node host override would write to a dead in-memory buffer, so the
+  // facade must not register one even when Studio services are present.
   const services = createServices({
-    settingsStore: {
-      getProviders: () => ({
-        providers: [{
-          id: 'image-provider',
-          name: 'Image Provider',
-          apiKey: 'test-key',
-          baseUrl: 'https://images.example.test/v1',
-          models: ['image-model'],
-          activeModel: 'image-model',
-          modelCapabilities: { 'image-model': { imageGeneration: true } }
-        }],
-        activeProviderId: 'image-provider',
-        enabledProviderIds: ['image-provider']
-      })
-    },
+    settingsStore: {},
     imageLibraryStore: {},
-    enqueueStudioImageTasks: requests => imageBatches.push(requests)
+    enqueueStudioImageTasks: () => {}
   })
   const registrations = await collectHostTools(createHarnessEngine(services), { authMode: 'strict' })
-  const imageTool = getTool(registrations, 'generate_image')
 
-  assert.equal(imageTool.domain, 'electron_host_override')
-  const { result } = await dispatchToolExecute(registrations, 'generate_image', {
-    tasks: [{
-      prompt: 'A red lantern over a rainy city',
-      aspect_ratio: '1:1',
-      resolution: '1K',
-      n: 2,
-      folder: 'rust-runs',
-      tags: ['host-callback']
-    }]
-  })
-
-  assert.equal(result.ok, true)
-  assert.equal(result.queued, 1)
-  assert.deepEqual(imageBatches, [[{
-    providerId: 'image-provider',
-    model: 'image-model',
-    mode: 'generate',
-    prompt: 'A red lantern over a rainy city',
-    negativePrompt: undefined,
-    aspectRatio: '1:1',
-    size: '1024x1024',
-    quality: 'high',
-    outputFormat: 'png',
-    n: 2,
-    folder: 'rust-runs',
-    tags: ['host-callback']
-  }]])
+  for (const name of ['generate_image', 'edit_image']) {
+    assert.equal(
+      registrations.some(tool => tool.definition.name === name),
+      false,
+      `${name} must execute in Rust, not through a Node host override`
+    )
+  }
 })
 
 test('Rust-advertised Electron domain tools use Node overrides while plan controls stay native', async () => {
@@ -288,7 +257,7 @@ test('Rust-advertised Electron domain tools use Node overrides while plan contro
   }
 })
 
-test('canonical discovery includes intrinsic plan schemas without registering Node plan handlers', () => {
+test('canonical Node catalog excludes Rust-intrinsic plan controls and Rust-native image tools', () => {
   const registry = new ElectronToolRegistry({
     services: createServices(),
     getNativeToolDefinitions: () => []
@@ -296,11 +265,12 @@ test('canonical discovery includes intrinsic plan schemas without registering No
   const definitions = registry.getToolDefinitions()
   const registrations = registry.createRegistrations({})
 
-  for (const name of ['enter_plan_mode', 'exit_plan_mode']) {
-    const definition = definitions.find(tool => tool.name === name)
-    assert.ok(definition, `${name} must be part of the canonical contract catalog`)
-    assert.equal(definition.parameters.type, 'object')
-    assert.equal(registrations.some(tool => tool.definition.name === name), false)
+  // enter/exit_plan_mode are Rust-intrinsic and generate/edit_image are
+  // Rust-native (`electron_native`): the model-facing schemas come from the
+  // Rust catalog and no Node handler may exist for them.
+  for (const name of ['enter_plan_mode', 'exit_plan_mode', 'generate_image', 'edit_image']) {
+    assert.equal(definitions.some(tool => tool.name === name), false, `${name} must be owned by Rust, not the Node catalog`)
+    assert.equal(registrations.some(tool => tool.definition.name === name), false, `${name} must not register a Node handler`)
   }
 })
 
@@ -369,15 +339,13 @@ test('new electronNative tools need no frozen Node registry entry', async () => 
   assert.equal(registrations.some(tool => tool.definition.name === nativeTool.name), false)
 })
 
-test('all 69 canonical Electron tools have an explicit execution owner', async () => {
+test('all canonical Electron tools have an explicit execution owner', async () => {
   const services = createServices({
     documentStore: {},
     skillStore: {},
     agentStore: {},
     agentGroupStore: {},
     settingsStore: {},
-    imageLibraryStore: {},
-    enqueueStudioImageTasks: () => {},
     readActivePage: async () => ({
       title: '',
       url: '',
@@ -396,8 +364,26 @@ test('all 69 canonical Electron tools have an explicit execution owner', async (
     runSubagents: async () => []
   }).getToolDefinitions()
   const canonicalNames = catalog.map(tool => tool.name).sort()
-  assert.equal(canonicalNames.length, 69)
-  assert.equal(new Set(canonicalNames).size, 69)
+  assert.equal(canonicalNames.length, 57)
+  assert.equal(new Set(canonicalNames).size, 57)
+  // Rust-intrinsic plan controls and Rust-native image/workspace tools never
+  // appear in the Node canonical catalog; Rust advertises and executes them.
+  for (const name of [
+    'enter_plan_mode',
+    'exit_plan_mode',
+    'generate_image',
+    'edit_image',
+    'list_workspace_files',
+    'read_workspace_file',
+    'write_workspace_file',
+    'edit_workspace_file',
+    'patch_workspace_file',
+    'delete_workspace_file',
+    'glob_workspace',
+    'grep_workspace'
+  ]) {
+    assert.equal(canonicalNames.includes(name), false, `${name} must be Rust-owned and absent from the Node catalog`)
+  }
 
   const registrations = await collectHostTools(
     createHarnessEngine(services, canonicalNames),
@@ -407,11 +393,8 @@ test('all 69 canonical Electron tools have an explicit execution owner', async (
     .filter(tool => tool.domain === 'electron_host_override')
     .map(tool => tool.definition.name)
     .sort()
-  const nativeNames = ['enter_plan_mode', 'exit_plan_mode']
-  const expectedHostNames = canonicalNames.filter(name => !nativeNames.includes(name))
 
-  assert.deepEqual(hostNames, expectedHostNames)
-  assert.deepEqual(canonicalNames.filter(name => !hostNames.includes(name)), nativeNames)
+  assert.deepEqual(hostNames, canonicalNames)
 })
 
 test('missing optional Electron services remain explicit host errors instead of Rust fallbacks', async () => {
@@ -435,16 +418,14 @@ test('missing optional Electron services remain explicit host errors instead of 
       .map(tool => tool.definition.name)
   )
 
-  for (const name of canonicalNames.filter(name => !['enter_plan_mode', 'exit_plan_mode'].includes(name))) {
+  for (const name of canonicalNames) {
     assert.equal(hostNames.has(name), true, `${name} must retain an explicit Electron owner`)
   }
 
   for (const name of [
     'list_documents',
     'read_document',
-    'read_current_page',
-    'generate_image',
-    'list_workspace_files'
+    'read_current_page'
   ]) {
     const { result } = await dispatchToolExecute(registrations, name, {})
     assert.deepEqual(result, {

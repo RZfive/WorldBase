@@ -78,7 +78,8 @@ export function normalizeDocumentFileKey (filePath?: string | null): string {
     .toLowerCase()
 }
 
-function getDocumentTabFilePath (tab: WorkspaceTabInstance): string | null {
+/** Open document tab for a path, if any (draft-restore fallback uses this). */
+export function getDocumentTabFilePath (tab: WorkspaceTabInstance): string | null {
   const filePath = tab.state?.filePath
   return typeof filePath === 'string' && filePath.trim() ? filePath.trim() : null
 }
@@ -405,6 +406,12 @@ export interface WorkspaceDocumentDraft {
   fileType: string
   sourceSha256: string
   createdAt: string
+  /** harness 计算的变更清单（ops 草稿精确、全文草稿为 diff 推导） */
+  changes?: DocumentDraftChangesDTO | null
+  /** 模型自述的修改说明（仅展示） */
+  summary?: string | null
+  /** 全文重建将丢失的媒体统计；存在时 UI 必须二次确认 */
+  dataLossRisk?: { mediaCount: number } | null
 }
 
 const documentDrafts = ref(new Map<string, WorkspaceDocumentDraft>())
@@ -521,7 +528,8 @@ async function buildDocumentWorkspaceContextPrompt (): Promise<string | null> {
       : '- This conversation has document workspace files bound from an earlier workspace state.',
     '- If the user asks about "the document", "the opened file", "the workbench document", or similar phrasing, treat the files below as the relevant document context.',
     '- Use `list_documents` to verify available imported artifacts when needed, then `read_document` with the matching artifact_id to inspect document content. Do not claim no document is available before checking this context and the document tools.',
-    '- To modify a document at the user\'s request, ALWAYS call the `doc_draft` tool with the complete rewritten content (kind must match the file format: markdown/text/docx/xlsx/pptx). It stages a draft the user previews live in the workspace and then decides to save onto the original or to save as a copy. NEVER overwrite document files directly with write tools.'
+    '- To modify a document at the user\'s request, ALWAYS call the `doc_draft` tool; NEVER overwrite document files directly with write tools (they are blocked and destroy embedded images).',
+    '- For docx/pptx modifications run `doc_parse` first, then call `doc_draft` with the `ops` operation list (docx_replace_text / docx_insert_paragraph_after / docx_delete_paragraph / docx_insert_image / pptx_replace_text / pptx_insert_image / pptx_insert_slide_after / pptx_delete_slide) using the parse output\'s stable indices. Full-content rebuilds (blocks/slides/sheets) destroy embedded images and trigger a data-loss warning for the user — only use them when the user explicitly asks to recreate the whole file.'
   ]
 
   lines.push('Current document workspace files:')

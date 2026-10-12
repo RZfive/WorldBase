@@ -47,6 +47,7 @@
     "test:message-branching": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-branching.test.mjs",
     "test:computer-use-permissions": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/computer-use-permissions.test.mjs",
     "test:document-html-preview": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/document-html-preview.test.mjs",
+    "test:document-editing": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/office-write-guard.test.mjs tests/document-file-watcher.test.mjs",
     "test:mcp-settings": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/mcp-settings-toggle.test.mjs",
     "test:daily-suggestions": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/daily-suggestions.test.mjs",
     "test:provider-templates": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/provider-templates.test.mjs",

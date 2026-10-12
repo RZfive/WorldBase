@@ -5,6 +5,7 @@ import type { ProgressCallback, SessionState } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { requestUserAuth } from './user-auth.js'
 import { writeExcelFile, writeWordFile, writePptxFile } from './office-utils.js'
+import { assertOfficeWriteAllowed } from './office-write-guard.js'
 
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
@@ -124,6 +125,9 @@ export function toolLocalWriteFile (services: ToolServices, getSessionState?: ()
     handler: async (args, onProgress) => {
       const { file_path, content, office_data } = args as unknown as LocalWriteFileArgs
       const resolvedPath = path.resolve(file_path)
+
+      // Office 直写守卫：已存在的 docx/pptx/xlsx 一律改走 doc_draft 草稿流。
+      await assertOfficeWriteAllowed(resolvedPath)
 
       // Request user authorization
       const authorized = await requestUserAuth(

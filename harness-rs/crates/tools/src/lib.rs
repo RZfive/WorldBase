@@ -887,10 +887,8 @@ mod tests {
             "create_project",
             "create_scheduled_task",
             "delete_project_file",
-            "delete_workspace_file",
             "edit_image",
             "edit_project_file",
-            "edit_workspace_file",
             "enter_plan_mode",
             "exit_plan_mode",
             "fetch_webpage",
@@ -903,9 +901,7 @@ mod tests {
             "get_task_status",
             "get_workspace_command_status",
             "glob_search",
-            "glob_workspace",
             "grep_search",
-            "grep_workspace",
             "install_mcp_server",
             "install_skill",
             "interact_current_page",
@@ -915,7 +911,6 @@ mod tests {
             "list_projects",
             "list_scheduled_tasks",
             "list_skills",
-            "list_workspace_files",
             "local_read_file",
             "local_run_command",
             "local_write_file",
@@ -923,13 +918,11 @@ mod tests {
             "open_project_app",
             "open_workspace_tab",
             "patch_project_file",
-            "patch_workspace_file",
             "query_project_database",
             "read_active_terminal",
             "read_current_page",
             "read_document",
             "read_project_file",
-            "read_workspace_file",
             "rebuild_project",
             "restart_project_server",
             "run_project_command",
@@ -941,7 +934,6 @@ mod tests {
             "web_search",
             "write_active_terminal",
             "write_project_file",
-            "write_workspace_file",
         ];
         let names: std::collections::HashSet<String> = builtin_tools()
             .iter()
@@ -964,8 +956,8 @@ mod tests {
 
         assert_eq!(
             contracts.len(),
-            69,
-            "expected the exact Electron tool catalog"
+            57,
+            "expected the exact Electron tool catalog (Rust-native plan/image/workspace tools are excluded)"
         );
         let mut actual_by_name = std::collections::HashMap::new();
         for descriptor in actual {

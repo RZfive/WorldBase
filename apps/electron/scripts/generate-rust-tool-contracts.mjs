@@ -24,8 +24,6 @@ const services = {
   agentStore: {},
   agentGroupStore: {},
   settingsStore: {},
-  imageLibraryStore: {},
-  enqueueStudioImageTasks: () => {},
   readActivePage: noOp,
   interactWithActivePage: noOp,
   mcpService: new MCPService(),
@@ -45,8 +43,13 @@ const names = tools.map(tool => tool.name)
 if (new Set(names).size !== names.length) {
   throw new Error('Electron tool registry produced duplicate public tool names')
 }
-if (tools.length !== 69) {
-  throw new Error(`Electron tool registry produced ${tools.length} public tools; expected exactly 69`)
+// Rust-native ownership (`electron_native` / intrinsic plan controls):
+// enter_plan_mode, exit_plan_mode, generate_image, edit_image, and the eight
+// folder-workspace tools. Electron never registers handlers for them, so they
+// are absent from the host contract.
+const EXPECTED_TOOL_COUNT = 57
+if (tools.length !== EXPECTED_TOOL_COUNT) {
+  throw new Error(`Electron tool registry produced ${tools.length} public tools; expected exactly ${EXPECTED_TOOL_COUNT}`)
 }
 for (const tool of tools) {
   if (!tool.name || !tool.description || tool.parameters?.type !== 'object') {

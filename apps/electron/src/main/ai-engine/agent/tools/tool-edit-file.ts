@@ -2,6 +2,7 @@ import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { ToolDefinition } from '../../providers/openai-provider.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { ReadFileTracker } from './read-tracker.js'
+import { assertTextToolNotOfficeTarget } from './office-write-guard.js'
 
 interface ToolServices {
   projectFS: ProjectFS
@@ -126,6 +127,7 @@ export function toolEditFile (services: ToolServices, readTracker?: ReadFileTrac
 
       const replacements = replace_all ? occurrences : 1
       onProgress?.('📝 正在写入文件...', `${replacements} 处替换`)
+      assertTextToolNotOfficeTarget(file_path)
       await services.projectFS.writeFile(project_id, file_path, newContent)
 
       // The file's current content is now known to the agent.
