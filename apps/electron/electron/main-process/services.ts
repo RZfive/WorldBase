@@ -46,7 +46,6 @@ import { TerminalManager } from './terminal/terminal-manager.js'
 import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, refreshProviderReasoningMetadata, resolveMemoryEmbeddingRuntimeConfig, resolveProviderConfig } from './ai/agent-context.js'
 import { getSelectedExecutionEngine, startSelectedRustHarness } from './ai/selected-execution-engine.js'
 
-import { enqueueStudioImageTasks } from './media/image-studio-queue.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
 import { normalizeRustAskUserQuestions, normalizeRustAskUserResponse } from './ai/rust-ask-user-contract.js'
 import { broadcastToAppWindows, getActiveAiRequestWindow, getProjectsDir, getSnapshotsDir, requestPageAutomationFromRenderer } from './windows.js'
@@ -672,7 +671,6 @@ export async function initializeServices (): Promise<void> {
     settingsStore: mainState.settingsStore!,
     imageLibraryStore: mainState.imageLibraryStore ?? undefined,
     usageStore: mainState.usageStore ?? undefined,
-    enqueueStudioImageTasks,
     getMainWindow: () => getActiveAiRequestWindow(),
     readActivePage: async () => {
       return await requestPageAutomationFromRenderer<BrowserAutomationSnapshot>({ type: 'snapshot' })

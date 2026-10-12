@@ -1,5 +1,5 @@
 import type { AIHarness, AIRequestOptions, ProgressEvent } from '../../../src/main/ai-harness/types.js'
-import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
+import type { MessageContent } from '../../../src/main/ai-harness/contracts.js'
 import type { AgentDefinition, AgentGroupCollaborationMode, AgentGroupCollaborationPlan, AgentGroupDefinition, AgentGroupParticipant, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupTranscriptToolCall, AgentMemoryScope, AgentSidechatSession, ChannelBinding } from '../../../src/shared/agent-workspace-types.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
 import { mainState } from '../state.js'

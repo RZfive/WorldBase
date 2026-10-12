@@ -1,7 +1,7 @@
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { ToolServices } from './index.js'
-import type { ToolDefinition as RuntimeToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition as RuntimeToolDefinition } from '../../../ai-harness/contracts.js'
 import type { AgentDefinition, AgentGroupDefinition } from '../../../../shared/agent-workspace-types.js'
 
 interface Tool {

@@ -1,4 +1,4 @@
-import type { MessageContent } from '../../src/main/ai-engine/providers/openai-provider.js'
+import type { MessageContent } from '../../src/main/ai-harness/contracts.js'
 import { t } from '../../src/main/i18n/main-i18n.js'
 
 export function getMessageText (content: MessageContent): string {

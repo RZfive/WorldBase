@@ -1,5 +1,5 @@
 import type { ProjectApiClient } from '../../../project-api-bridge/api-client.js'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 
 interface ToolServices {
   apiClient: ProjectApiClient

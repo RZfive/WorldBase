@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { ProgressCallback, SessionState } from '../agent-core.js'
 import type { BrowserWindow } from 'electron'
 import { requestUserAuth } from './user-auth.js'

@@ -3,7 +3,7 @@ import path from 'node:path'
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
 import type { BuilderService } from '../../../project-runtime/builder-service.js'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 
 interface ToolServices {
   projectFS: ProjectFS

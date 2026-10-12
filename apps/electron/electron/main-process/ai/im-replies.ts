@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
+import type { MessageContent } from '../../../src/main/ai-harness/contracts.js'
 import type { AgentDefinition, ChannelBinding, ChannelEvent } from '../../../src/shared/agent-workspace-types.js'
 import { mainState } from '../state.js'
 import { getLastUserMessageText, getMessageText } from '../chat-message-utils.js'

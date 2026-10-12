@@ -1,14 +1,7 @@
-import { toolReadFile } from './tool-read-file.js'
-import { toolDeleteFile } from './tool-delete-file.js'
-import { toolWriteFile } from './tool-write-file.js'
-import { toolPatchFile } from './tool-patch-file.js'
-import { toolEditFile } from './tool-edit-file.js'
-import { ReadFileTracker } from './read-tracker.js'
 import { toolCallApi } from './tool-call-api.js'
 import { toolQueryDb } from './tool-query-db.js'
 import { toolGetProjectCommandStatus, toolRunCommand } from './tool-run-command.js'
 import { toolListProjects } from './tool-list-projects.js'
-import { toolListProjectFiles } from './tool-list-project-files.js'
 import { toolAnalyzeData } from './tool-analyze-data.js'
 import { toolCreateProject } from './tool-create-project.js'
 import { toolLocalFileRead } from './tool-local-file-read.js'
@@ -25,8 +18,6 @@ import { toolOpenProjectApp } from './tool-open-project-app.js'
 import { toolOpenWorkspaceTab } from './tool-open-workspace-tab.js'
 import { toolReadDocument, toolListDocuments } from './tool-read-document.js'
 import { toolRunWorkspaceCommand, toolGetWorkspaceCommandStatus } from './tool-workspace-command.js'
-import { toolGlobSearch } from './tool-glob-search.js'
-import { toolGrepSearch } from './tool-grep-search.js'
 import { toolWebSearch } from './tool-web-search.js'
 import { toolFetchWebpage } from './tool-fetch-webpage.js'
 import { toolInteractCurrentPage, toolReadCurrentPage, toolFillCurrentPageForm, toolSaveCurrentPageAsDocument } from './tool-active-page.js'
@@ -91,21 +82,15 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
   })
   const getAbortSignal = (): AbortSignal | undefined => agent.getAbortSignal() ?? undefined
   const todoState: { items: TodoItem[] } = { items: [] }
-  // Shared across read/write/edit so exact-string edits can require the file to
-  // have been read (or written) earlier in this agent's lifetime.
-  const readTracker = new ReadFileTracker()
+  // Project file CRUD and project glob/grep search are Rust-native
+  // (`electron_native`), including the Office direct-write guard and the
+  // SafeWriter-style backup that Electron's handlers used to own.
   const tools = [
-    toolReadFile(services, readTracker),
-    toolDeleteFile(services),
-    toolWriteFile(services, readTracker),
-    toolPatchFile(services),
-    toolEditFile(services, readTracker),
     toolCallApi(services),
     toolQueryDb(services),
     toolRunCommand(services),
     toolGetProjectCommandStatus(),
     toolListProjects(services),
-    toolListProjectFiles(services),
     toolGetProjectStatus(services),
     toolGetProjectLogs(services),
     toolStartProjectServer(services),
@@ -120,8 +105,6 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     toolLocalFileRead(services, getSessionState, getAbortSignal),
     toolLocalCommand(services, getSessionState, getAbortSignal),
     toolLocalWriteFile(services, getSessionState, getAbortSignal),
-    toolGlobSearch(services),
-    toolGrepSearch(services),
     toolWebSearch(),
     toolFetchWebpage(),
     toolRunSkill(() => agent.getSkillEngine()),

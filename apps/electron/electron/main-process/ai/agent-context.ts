@@ -1,5 +1,5 @@
 import type { AIExecutionPreferences, AIProvidersConfig, AIProvider } from '../../../src/main/settings/settings-store.js'
-import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
+import type { MessageContent } from '../../../src/main/ai-harness/contracts.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, MemoryEmbeddingRuntimeConfig } from '../../../src/shared/agent-workspace-types.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
 import { clampReasoningEffort, fetchProviderCatalog, type ProviderModelMetadata } from '../../../src/main/settings/provider-model-service.js'

@@ -3214,32 +3214,47 @@ impl Tool for GlobSearchTool {
         "glob_search"
     }
     fn description(&self) -> &str {
-        "Search for files in a managed project using glob patterns."
+        "Search for files in a project using glob patterns (e.g. \"**/*.ts\", \"src/**/index.*\", \"*.{js,ts}\"). Returns matching file paths with sizes. Use this to quickly locate files by name or extension pattern."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"pattern":{"type":"string"},"dir_path":{"type":"string"},"max_results":{"type":"integer"}},"required":["project_id","pattern"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string","description":"Project ID"},"pattern":{"type":"string","description":"Glob pattern to match file paths. Supports: * (any chars), ** (any path), ? (single char), {a,b} (alternation), [abc] (char class)."},"dir_path":{"type":"string","description":"Directory to search within (relative to project root). Defaults to project root."},"max_results":{"type":"integer","description":"Maximum number of results. Default 100, maximum 500."}},"required":["project_id","pattern"]})
     }
     fn domain(&self) -> &str {
         "desktop"
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let (id, root) = project_path(&input, services)?;
-        let pattern = require_str(&input, "pattern")?;
-        let base = input
+        let pattern = require_str(&input, "pattern")?.to_string();
+        let dir = input
             .get("dir_path")
             .and_then(Value::as_str)
-            .map(|value| project_relative_path(services, &id, value))
-            .transpose()?
-            .unwrap_or(root.clone());
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let base = if dir.is_empty() {
+            root.clone()
+        } else {
+            project_relative_path(services, &id, &dir)?
+        };
         let limit = input
             .get("max_results")
             .and_then(Value::as_u64)
             .unwrap_or(100)
             .clamp(1, 500) as usize;
-        let paths = worldbase_search::glob(&base, pattern, limit)?;
-        let matches = paths.into_iter().map(|path| json!({"path": path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().replace('\\', "/"), "size": std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0), "type": "file"})).collect::<Vec<_>>();
+        // Same case-insensitive walk as the Electron host: directories match
+        // too, and the limit is probed one-past so truncation is observable.
+        let matcher = workspace_glob_regex(&pattern)?;
+        let mut matches = Vec::new();
+        walk_workspace_glob(&base, "", &matcher, &mut matches, limit + 1)?;
+        let truncated = matches.len() > limit;
+        if truncated {
+            matches.truncate(limit);
+        }
         Ok(
-            json!({"project_id": id, "pattern": pattern, "dir_path": input.get("dir_path").and_then(Value::as_str).unwrap_or("."), "matches": matches, "total_matches": matches.len(), "truncated": matches.len() >= limit}),
+            json!({"pattern": pattern, "dir_path": if dir.is_empty() { Value::from(".") } else { Value::from(dir) }, "matches": matches, "total_matches": if truncated { limit + 1 } else { matches.len() }, "truncated": truncated}),
         )
     }
 }
@@ -3251,13 +3266,16 @@ impl Tool for GrepSearchTool {
         "grep_search"
     }
     fn description(&self) -> &str {
-        "Search text or regular expressions inside a managed project."
+        "Search for text or a regex pattern in project source code. Use this to find function definitions, variable usages, imports, or any text pattern across the project. Search is case-insensitive by default (set case_sensitive: true to change). output_mode selects the result shape: \"content\" (default) returns matching lines with context, \"files_with_matches\" returns only the list of files that match (cheapest — good for a first pass before reading), and \"count\" returns per-file match counts."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"pattern":{"type":"string"},"dir_path":{"type":"string"},"is_regexp":{"type":"boolean"},"case_sensitive":{"type":"boolean"},"max_results":{"type":"integer"},"context_lines":{"type":"integer"}},"required":["project_id","pattern"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string","description":"Project ID"},"pattern":{"type":"string","description":"Search text or regex pattern"},"dir_path":{"type":"string","description":"Directory to search within (relative to project root). Defaults to project root."},"include_pattern":{"type":"string","description":"Only search files matching this pattern (e.g. \"*.ts\", \"*.{js,jsx}\")."},"is_regexp":{"type":"boolean","description":"Whether the pattern is a regular expression. Default: false (plain text search)."},"case_sensitive":{"type":"boolean","description":"Whether the search is case-sensitive. Default: false (case-insensitive)."},"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"description":"Result shape. \"content\" (default) = matching lines with context; \"files_with_matches\" = list of matching files only; \"count\" = per-file match counts."},"max_results":{"type":"integer","description":"Maximum items to return. In \"content\" mode this caps matching lines; in \"files_with_matches\"/\"count\" it caps files. Default 50, maximum 200."},"context_lines":{"type":"integer","description":"Number of context lines before and after each match (content mode only). Default 2, maximum 5."}},"required":["project_id","pattern"]})
     }
     fn domain(&self) -> &str {
         "desktop"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let (id, root) = project_path(&input, services)?;
@@ -3315,7 +3333,7 @@ impl Tool for GrepSearchTool {
             .into_iter()
             .map(|(file, count)| json!({"file": file, "count": count}))
             .collect::<Vec<_>>();
-        let mut result = json!({"project_id": id, "pattern": pattern, "dir_path": input.get("dir_path").and_then(Value::as_str).unwrap_or("."), "output_mode": output_mode_name(output_mode), "case_sensitive": case_sensitive, "total_matches": total_matches, "files_searched": files_searched, "files_matched": files_matched, "truncated": truncated});
+        let mut result = json!({"pattern": pattern, "dir_path": input.get("dir_path").and_then(Value::as_str).unwrap_or("."), "output_mode": output_mode_name(output_mode), "case_sensitive": case_sensitive, "total_matches": total_matches, "files_searched": files_searched, "files_matched": files_matched, "truncated": truncated});
         if output_mode == worldbase_search::GrepOutputMode::Content {
             result["matches"] = Value::Array(matches);
         } else if output_mode == worldbase_search::GrepOutputMode::FilesWithMatches {
@@ -5752,7 +5770,12 @@ async fn agent_workspace_tool_catalog(services: &ToolServices) -> Vec<Value> {
     } else {
         crate::builtin_tools()
             .into_iter()
-            .filter(|tool| crate::is_electron_tool_name(tool.name()))
+            .filter(|tool| {
+                // Same visibility rule as `filter_tools` for the Electron
+                // platform: frozen-contract tools plus explicit Rust-native
+                // ownership, so agents can still pin flipped tool names.
+                crate::is_electron_tool_name(tool.name()) || tool.electron_native()
+            })
             .map(|tool| {
                 json!({
                     "name": tool.name(),

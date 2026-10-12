@@ -1,4 +1,4 @@
-import type { EmbeddingDistanceMetric } from '../../../shared/agent-workspace-types.js'
+import type { EmbeddingDistanceMetric } from '../../shared/agent-workspace-types.js'
 
 export interface EmbeddingProbeResult {
   ok: boolean

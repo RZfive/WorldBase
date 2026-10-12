@@ -1,6 +1,6 @@
 import type { ProjectFS } from '../../../project-fs/project-fs.js'
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 
 interface ToolServices {
   projectFS: ProjectFS

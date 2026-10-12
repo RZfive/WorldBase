@@ -1,4 +1,4 @@
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { AsyncTaskManager, AsyncTaskType } from './async-task-manager.js'
 import type { ProgressCallback } from '../agent-core.js'
 

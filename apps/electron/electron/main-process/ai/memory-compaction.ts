@@ -1,7 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { createProvider } from '../../../src/main/ai-engine/providers/index.js'
-import type { ChatProvider } from '../../../src/main/ai-engine/providers/index.js'
-import type { ChatMessage } from '../../../src/main/ai-engine/providers/openai-provider.js'
+import type { ChatMessage } from '../../../src/main/ai-harness/contracts.js'
 import type { AIExecutionEngine } from '../../../src/main/ai-harness/types.js'
 import type { MemoryCompactionPlan, MemoryCompactionResult, MemoryCompactionStatus, MemoryEntry } from '../../../src/shared/agent-workspace-types.js'
 import { MEMORY_AI_COMPACTION_TIMEOUT_MS } from '../constants.js'
@@ -63,38 +61,6 @@ export function updateMemoryCompactionStatus (patch: Partial<MemoryCompactionSta
 export interface MemoryCompactionModelSelection {
   providerId?: string
   modelId?: string
-}
-
-export function createMemoryCompactionProvider (selection?: MemoryCompactionModelSelection): ChatProvider {
-  const providerConfig = resolveProviderConfig(selection?.providerId, selection?.modelId, 'low')
-  if (!providerConfig?.apiKey || !providerConfig.baseUrl || !providerConfig.model) {
-    throw new Error(t('mainDialog.memoryCompactionProviderIncomplete'))
-  }
-
-  const provider = createProvider({
-    baseUrl: providerConfig.baseUrl,
-    apiProtocol: providerConfig.apiProtocol
-  })
-  provider.setApiKey(providerConfig.apiKey)
-  provider.setBaseUrl(providerConfig.baseUrl)
-  provider.setModel(providerConfig.model)
-  provider.setEnableThinking(false)
-  provider.setTemperature(0.1)
-  if (providerConfig.contextWindow) {
-    provider.setContextWindow(providerConfig.contextWindow)
-  }
-  return provider
-}
-
-export async function requestMemoryCompactionPlanChunk (provider: ChatProvider, entries: MemoryEntry[], index: number, total: number): Promise<MemoryCompactionPlan> {
-  const messages = buildMemoryCompactionMessages(entries, index, total)
-
-  return await withSingleRetry(async () => {
-    const response = await provider.chatCompletion(messages, [], undefined, { timeoutMs: MEMORY_AI_COMPACTION_TIMEOUT_MS })
-    const text = getMessageText(response.content)
-    if (!text) throw new Error(t('mainDialog.memoryCompactionEmptyResponse'))
-    return parseMemoryCompactionPlan(text, entries)
-  }, index, total)
 }
 
 function buildMemoryCompactionMessages (entries: MemoryEntry[], index: number, total: number): ChatMessage[] {
@@ -162,13 +128,12 @@ async function withSingleRetry (request: () => Promise<MemoryCompactionPlan>, in
 
 export async function buildMemoryCompactionPlanWithAi (
   entries: MemoryEntry[],
-  onProgress?: (progress: { stage: string; detail?: string; totalChunks: number; completedChunks: number }) => void,
-  engine?: AIExecutionEngine,
-  selection?: MemoryCompactionModelSelection
+  engine: AIExecutionEngine,
+  selection: MemoryCompactionModelSelection | undefined,
+  onProgress?: (progress: { stage: string; detail?: string; totalChunks: number; completedChunks: number }) => void
 ): Promise<MemoryCompactionPlan> {
   if (entries.length === 0) return { deleteIds: [], mergeGroups: [], updates: [] }
 
-  const provider = engine ? null : createMemoryCompactionProvider(selection)
   const chunks = chunkMemoryEntriesForAiCompaction(entries)
   const plans: MemoryCompactionPlan[] = []
   onProgress?.({
@@ -185,9 +150,7 @@ export async function buildMemoryCompactionPlanWithAi (
       totalChunks: chunks.length,
       completedChunks: index
     })
-    plans.push(engine
-      ? await requestMemoryCompactionPlanChunkWithEngine(engine, chunks[index], index, chunks.length, selection)
-      : await requestMemoryCompactionPlanChunk(provider!, chunks[index], index, chunks.length))
+    plans.push(await requestMemoryCompactionPlanChunkWithEngine(engine, chunks[index], index, chunks.length, selection))
     onProgress?.({
       stage: t('mainDialog.memoryCompactionAnalyzing'),
       detail: t('mainDialog.memoryCompactionBatchDone', { current: index + 1, total: chunks.length }),
@@ -241,7 +204,7 @@ export async function runMemoryCompactionWithStatus (selection?: MemoryCompactio
       completedChunks: 0
     })
 
-    const plan = await buildMemoryCompactionPlanWithAi(planEntries, (progress) => {
+    const plan = await buildMemoryCompactionPlanWithAi(planEntries, analysisEngine, selection, (progress) => {
       updateMemoryCompactionStatus({
         id: taskId,
         status: 'running',
@@ -251,7 +214,7 @@ export async function runMemoryCompactionWithStatus (selection?: MemoryCompactio
         totalChunks: progress.totalChunks,
         completedChunks: progress.completedChunks
       })
-    }, analysisEngine || undefined, selection)
+    })
 
     updateMemoryCompactionStatus({
       id: taskId,

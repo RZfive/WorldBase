@@ -1,4 +1,4 @@
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { SkillEngine } from '../skill-engine.js'
 import type { SkillStore } from '../../../settings/skill-store.js'

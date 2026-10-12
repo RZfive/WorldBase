@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { MessageContent } from '../../../src/main/ai-engine/providers/openai-provider.js'
+import type { MessageContent } from '../../../src/main/ai-harness/contracts.js'
 import type {
   AgentDefinition,
   AgentGroupDefinition,

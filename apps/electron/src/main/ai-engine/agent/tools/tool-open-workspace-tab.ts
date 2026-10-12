@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null

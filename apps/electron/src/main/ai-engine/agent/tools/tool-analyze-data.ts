@@ -1,5 +1,5 @@
 import type { ProjectDataAccess } from '../../../project-data-access/data-access.js'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 
 interface ToolServices {
   dataAccess: ProjectDataAccess

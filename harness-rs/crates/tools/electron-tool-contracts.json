@@ -466,62 +466,6 @@
       }
     },
     {
-      "name": "delete_project_file",
-      "description": "Delete a single file from the specified project.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "project_id": {
-            "type": "string",
-            "description": "Project ID"
-          },
-          "file_path": {
-            "type": "string",
-            "description": "File path relative to the project root"
-          }
-        },
-        "required": [
-          "project_id",
-          "file_path"
-        ]
-      }
-    },
-    {
-      "name": "edit_project_file",
-      "description": "Performs exact string replacements in a project file. This is the preferred way to edit existing files. You must use read_project_file on the file earlier in the conversation before editing it; editing an unread file is rejected. old_string must match the current file content exactly, character for character (including indentation and whitespace). Do NOT include the line-number + tab prefix that read_project_file adds — match only the real content after it. If old_string is not unique in the file, the edit fails: provide a larger snippet with enough surrounding context to be unique, or set replace_all: true to replace every occurrence (useful for renaming a variable across a file). Use write_project_file only when creating a new file or rewriting most of a file. Do not add unrequested comments or emoji in the replacement.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "project_id": {
-            "type": "string",
-            "description": "Project ID"
-          },
-          "file_path": {
-            "type": "string",
-            "description": "File path relative to the project root"
-          },
-          "old_string": {
-            "type": "string",
-            "description": "The exact text to replace. Must match the file content verbatim and be unique unless replace_all is true."
-          },
-          "new_string": {
-            "type": "string",
-            "description": "The text to replace it with. Must differ from old_string."
-          },
-          "replace_all": {
-            "type": "boolean",
-            "description": "Replace all occurrences of old_string instead of requiring a unique match. Default: false."
-          }
-        },
-        "required": [
-          "project_id",
-          "file_path",
-          "old_string",
-          "new_string"
-        ]
-      }
-    },
-    {
       "name": "fetch_webpage",
       "description": "Fetch public http(s) web pages and extract readable text or JSON content. Useful for reading external documentation, release notes, API docs, or blog posts. Blocks localhost and private-network targets.",
       "parameters": {
@@ -707,89 +651,6 @@
         },
         "required": [
           "command_id"
-        ]
-      }
-    },
-    {
-      "name": "glob_search",
-      "description": "Search for files in a project using glob patterns (e.g. \"**/*.ts\", \"src/**/index.*\", \"*.{js,ts}\"). Returns matching file paths with sizes. Use this to quickly locate files by name or extension pattern.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "project_id": {
-            "type": "string",
-            "description": "Project ID"
-          },
-          "pattern": {
-            "type": "string",
-            "description": "Glob pattern to match file paths. Supports: * (any chars), ** (any path), ? (single char), {a,b} (alternation), [abc] (char class)."
-          },
-          "dir_path": {
-            "type": "string",
-            "description": "Directory to search within (relative to project root). Defaults to project root."
-          },
-          "max_results": {
-            "type": "integer",
-            "description": "Maximum number of results. Default 100, maximum 500."
-          }
-        },
-        "required": [
-          "project_id",
-          "pattern"
-        ]
-      }
-    },
-    {
-      "name": "grep_search",
-      "description": "Search for text or a regex pattern in project source code. Use this to find function definitions, variable usages, imports, or any text pattern across the project. Search is case-insensitive by default (set case_sensitive: true to change). output_mode selects the result shape: \"content\" (default) returns matching lines with context, \"files_with_matches\" returns only the list of files that match (cheapest — good for a first pass before reading), and \"count\" returns per-file match counts.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "project_id": {
-            "type": "string",
-            "description": "Project ID"
-          },
-          "pattern": {
-            "type": "string",
-            "description": "Search text or regex pattern"
-          },
-          "dir_path": {
-            "type": "string",
-            "description": "Directory to search within (relative to project root). Defaults to project root."
-          },
-          "include_pattern": {
-            "type": "string",
-            "description": "Only search files matching this pattern (e.g. \"*.ts\", \"*.{js,jsx}\")."
-          },
-          "is_regexp": {
-            "type": "boolean",
-            "description": "Whether the pattern is a regular expression. Default: false (plain text search)."
-          },
-          "case_sensitive": {
-            "type": "boolean",
-            "description": "Whether the search is case-sensitive. Default: false (case-insensitive)."
-          },
-          "output_mode": {
-            "type": "string",
-            "enum": [
-              "content",
-              "files_with_matches",
-              "count"
-            ],
-            "description": "Result shape. \"content\" (default) = matching lines with context; \"files_with_matches\" = list of matching files only; \"count\" = per-file match counts."
-          },
-          "max_results": {
-            "type": "integer",
-            "description": "Maximum items to return. In \"content\" mode this caps matching lines; in \"files_with_matches\"/\"count\" it caps files. Default 50, maximum 200."
-          },
-          "context_lines": {
-            "type": "integer",
-            "description": "Number of context lines before and after each match (content mode only). Default 2, maximum 5."
-          }
-        },
-        "required": [
-          "project_id",
-          "pattern"
         ]
       }
     },
@@ -1011,26 +872,6 @@
       "parameters": {
         "type": "object",
         "properties": {}
-      }
-    },
-    {
-      "name": "list_project_files",
-      "description": "List files and folders in the specified project directory.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "project_id": {
-            "type": "string",
-            "description": "Project ID"
-          },
-          "dir_path": {
-            "type": "string",
-            "description": "Directory path relative to the project root. Defaults to the root directory."
-          }
-        },
-        "required": [
-          "project_id"
-        ]
       }
     },
     {
@@ -1427,54 +1268,6 @@
       }
     },
     {
-      "name": "patch_project_file",
-      "description": "Apply incremental line-range patches to a project file. Much more token-efficient than rewriting the whole file with write_project_file when only a few sections need to change. Patches are applied in reverse line order so that later patches do not shift the line numbers of earlier ones.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "project_id": {
-            "type": "string",
-            "description": "Project ID"
-          },
-          "file_path": {
-            "type": "string",
-            "description": "File path relative to the project root"
-          },
-          "patches": {
-            "type": "array",
-            "description": "Array of patches. Each patch replaces lines start_line..end_line (1-based, inclusive) with the given content. For pure insertion before a line without removing anything, set end_line to a value less than start_line (e.g. end_line = 0). Patches must not overlap.",
-            "items": {
-              "type": "object",
-              "properties": {
-                "start_line": {
-                  "type": "integer",
-                  "description": "First line to replace (1-based, inclusive). For insertions, the line before which to insert."
-                },
-                "end_line": {
-                  "type": "integer",
-                  "description": "Last line to replace (1-based, inclusive). Set to a value less than start_line (e.g. 0) for pure insertion before start_line without removing any existing line."
-                },
-                "content": {
-                  "type": "string",
-                  "description": "Replacement content (may be multi-line). An empty string removes the selected lines."
-                }
-              },
-              "required": [
-                "start_line",
-                "end_line",
-                "content"
-              ]
-            }
-          }
-        },
-        "required": [
-          "project_id",
-          "file_path",
-          "patches"
-        ]
-      }
-    },
-    {
       "name": "query_project_database",
       "description": "Run a read-only SQL query against the specified project database. SELECT only.",
       "parameters": {
@@ -1536,35 +1329,6 @@
         },
         "required": [
           "artifact_id"
-        ]
-      }
-    },
-    {
-      "name": "read_project_file",
-      "description": "Read file content from the specified project. Large files can be read in line-based segments via start_line / max_lines. Results are returned in `cat -n` format: each line is prefixed with a right-aligned line number and a tab, then the original content. Line numbers are 1-based and absolute within the file. When you later edit this file (edit_project_file / patch_project_file), do NOT include the line-number + tab prefix — match or write only the real file content that follows it. Defaults read up to 1000 lines (max 2000); small and medium files are returned in full in one call.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "project_id": {
-            "type": "string",
-            "description": "Project ID"
-          },
-          "file_path": {
-            "type": "string",
-            "description": "File path relative to the project root"
-          },
-          "start_line": {
-            "type": "integer",
-            "description": "Start line number (1-based). Use segments for large files."
-          },
-          "max_lines": {
-            "type": "integer",
-            "description": "Maximum lines to read. Default 1000, maximum 2000."
-          }
-        },
-        "required": [
-          "project_id",
-          "file_path"
         ]
       }
     },
@@ -1854,32 +1618,6 @@
         },
         "required": [
           "query"
-        ]
-      }
-    },
-    {
-      "name": "write_project_file",
-      "description": "Modify a file in the specified project. A backup is created automatically.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "project_id": {
-            "type": "string",
-            "description": "Project ID"
-          },
-          "file_path": {
-            "type": "string",
-            "description": "File path relative to the project root"
-          },
-          "content": {
-            "type": "string",
-            "description": "Full file content"
-          }
-        },
-        "required": [
-          "project_id",
-          "file_path",
-          "content"
         ]
       }
     }

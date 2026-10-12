@@ -68,6 +68,51 @@ fn char_boundary_after(text: &str, index: usize) -> usize {
     index
 }
 
+/// Office 直写守卫（移植自 Electron 的 office-write-guard）：文本写入工具
+/// 一律不得以 Office 二进制包为目标——无论文件是否已存在，全文重建都会
+/// 损坏包内的图片与样式。
+fn assert_text_tool_not_office_target(file_path: &str) -> Result<()> {
+    let extension = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    if matches!(extension.as_str(), "docx" | "doc" | "pptx" | "ppt" | "xlsx" | "xls") {
+        let file_name = file_path
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty())
+            .last()
+            .unwrap_or("document");
+        anyhow::bail!("「{file_name}」是 Office 文档，文本写入工具无法处理（会损坏文件）。修改已有文档请使用 doc_draft 生成草稿；新建 Office 文档请使用 local_write_file 的 office_data 参数。");
+    }
+    Ok(())
+}
+
+/// Mirror the Electron SafeWriter: copy an existing file into the shared
+/// `snapshots/_backups` directory before an overwrite. Best-effort — a backup
+/// failure must never block the write. The snapshots directory sits next to
+/// the projects directory under the host data root, matching
+/// `<userData>/projects/<id>` beside `<userData>/snapshots`.
+fn backup_project_file_before_overwrite(project_root: &Path, full: &Path) {
+    let Some(projects_dir) = project_root.parent() else { return };
+    let Some(user_data) = projects_dir.parent() else { return };
+    let backup_dir = user_data.join("snapshots").join("_backups");
+    if std::fs::create_dir_all(&backup_dir).is_err() {
+        return;
+    }
+    let digest = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        full.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())[..12].to_string()
+    };
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let name = full
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let _ = std::fs::copy(full, backup_dir.join(format!("{name}.{digest}.{millis}.bak")));
+}
+
 #[derive(Debug)]
 struct LinePatch {
     start: i64,
@@ -235,16 +280,16 @@ impl Tool for ProjectWriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "写入当前项目文件"
+        "Modify a file in the specified project. A backup is created automatically."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
-                "file_path": { "type": "string" },
-                "content": { "type": "string" }
+                "project_id": { "type": "string", "description": "Project ID" },
+                "file_path": { "type": "string", "description": "File path relative to the project root" },
+                "content": { "type": "string", "description": "Full file content" }
             },
             "required": ["project_id", "file_path", "content"]
         })
@@ -254,9 +299,18 @@ impl Tool for ProjectWriteFileTool {
         "ask"
     }
 
+    fn electron_native(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let (_, file_path, full) = project_file_path(&input, "file_path", services)?;
+        let (project_id, file_path, full) = project_file_path(&input, "file_path", services)?;
         let content = require_str(&input, "content")?;
+        assert_text_tool_not_office_target(&file_path)?;
+        if full.is_file() {
+            let project_root = services.projects.project_root(&project_id)?;
+            backup_project_file_before_overwrite(&project_root, &full);
+        }
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -375,7 +429,7 @@ impl Tool for ProjectEditFileTool {
         let occurrences = original.matches(old).count();
         anyhow::ensure!(
             occurrences > 0,
-            "old_string was not found in {file_path}; re-read the file and use an exact snippet"
+            "old_string was not found in {file_path}. It must match the current file content exactly (including whitespace) and must not include the line-number prefix from read_project_file. Re-read the file and copy the exact snippet."
         );
         let replace_all = input
             .get("replace_all")
@@ -383,7 +437,7 @@ impl Tool for ProjectEditFileTool {
             .unwrap_or(false);
         anyhow::ensure!(
             replace_all || occurrences == 1,
-            "old_string is not unique in {file_path} ({occurrences} matches); add context or set replace_all"
+            "old_string is not unique in {file_path} ({occurrences} matches). Add more surrounding context to make it unique, or set replace_all: true to replace all {occurrences} occurrences."
         );
         let replacements = if replace_all { occurrences } else { 1 };
         let updated = if replace_all {
@@ -391,6 +445,12 @@ impl Tool for ProjectEditFileTool {
         } else {
             original.replacen(old, new, 1)
         };
+        assert_text_tool_not_office_target(&file_path)?;
+        if full.is_file() {
+            let project_id = input["project_id"].as_str().unwrap_or_default();
+            let project_root = services.projects.project_root(project_id)?;
+            backup_project_file_before_overwrite(&project_root, &full);
+        }
         tokio::fs::write(&full, updated).await?;
         services.mark_file_read(&tracked_path);
         Ok(json!({
@@ -412,20 +472,24 @@ impl Tool for ProjectReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "读取当前项目文件"
+        "Read file content from the specified project. Large files can be read in line-based segments via start_line / max_lines. Results are returned in `cat -n` format: each line is prefixed with a right-aligned line number and a tab, then the original content. Line numbers are 1-based and absolute within the file. When you later edit this file (edit_project_file / patch_project_file), do NOT include the line-number + tab prefix — match or write only the real file content that follows it. Defaults read up to 1000 lines (max 2000); small and medium files are returned in full in one call."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
-                "file_path": { "type": "string" },
-                "start_line": { "type": "integer" },
-                "max_lines": { "type": "integer" }
+                "project_id": { "type": "string", "description": "Project ID" },
+                "file_path": { "type": "string", "description": "File path relative to the project root" },
+                "start_line": { "type": "integer", "description": "Start line number (1-based). Use segments for large files." },
+                "max_lines": { "type": "integer", "description": "Maximum lines to read. Default 1000, maximum 2000." }
             },
             "required": ["project_id", "file_path"]
         })
+    }
+
+    fn electron_native(&self) -> bool {
+        true
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
@@ -440,7 +504,7 @@ impl Tool for ProjectReadFileTool {
         if lines.is_empty() {
             return Ok(json!({
                 "file_path": file_path,
-                "content": "(This file exists but is empty - 0 lines.)",
+                "content": "(This file exists but is empty — 0 lines.)",
                 "truncated": false,
                 "total_chars": 0,
                 "total_lines": 0,
@@ -548,18 +612,22 @@ impl Tool for ProjectListFilesTool {
     }
 
     fn description(&self) -> &str {
-        "列出当前项目目录内容"
+        "List files and folders in the specified project directory."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
-                "dir_path": { "type": "string" }
+                "project_id": { "type": "string", "description": "Project ID" },
+                "dir_path": { "type": "string", "description": "Directory path relative to the project root. Defaults to the project root." }
             },
             "required": ["project_id"]
         })
+    }
+
+    fn electron_native(&self) -> bool {
+        true
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
@@ -653,15 +721,15 @@ impl Tool for ProjectDeleteFileTool {
     }
 
     fn description(&self) -> &str {
-        "删除当前项目中的单个文件"
+        "Delete a single file from the specified project."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
-                "file_path": { "type": "string" }
+                "project_id": { "type": "string", "description": "Project ID" },
+                "file_path": { "type": "string", "description": "File path relative to the project root" }
             },
             "required": ["project_id", "file_path"]
         })
@@ -669,6 +737,10 @@ impl Tool for ProjectDeleteFileTool {
 
     fn permission(&self) -> &str {
         "ask"
+    }
+
+    fn electron_native(&self) -> bool {
+        true
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
@@ -753,16 +825,16 @@ impl Tool for ProjectPatchFileTool {
     }
 
     fn description(&self) -> &str {
-        "按行号增量修改当前项目文件"
+        "Apply incremental line-range patches to a project file. Much more token-efficient than rewriting the whole file with write_project_file when only a few sections need to change. Patches are applied in reverse line order so that later patches do not shift the line numbers of earlier ones."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string" },
-                "file_path": { "type": "string" },
-                "patches": { "type": "array", "items": { "type": "object" } }
+                "project_id": { "type": "string", "description": "Project ID" },
+                "file_path": { "type": "string", "description": "File path relative to the project root" },
+                "patches": { "type": "array", "description": "Array of { start_line, end_line, content } patches. Lines are 1-based inclusive; end_line < start_line inserts before start_line.", "items": { "type": "object", "properties": { "start_line": { "type": "integer" }, "end_line": { "type": "integer" }, "content": { "type": "string" } }, "required": ["start_line", "end_line", "content"] } }
             },
             "required": ["project_id", "file_path", "patches"]
         })
@@ -772,18 +844,103 @@ impl Tool for ProjectPatchFileTool {
         "ask"
     }
 
+    fn electron_native(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let (_, file_path, full) = project_file_path(&input, "file_path", services)?;
-        let (patches_applied, original_lines, new_lines) =
-            apply_line_patches(&full, &input).await?;
-        services.mark_file_read(&full.canonicalize().unwrap_or(full.clone()));
+        const SHAPE: &str = "patches must be an array of { start_line, end_line, content } objects.";
+        let (project_id, file_path, full) = project_file_path(&input, "file_path", services)?;
+        anyhow::ensure!(!file_path.trim().is_empty(), "file_path is required");
+
+        let raw = input.get("patches").ok_or_else(|| anyhow::anyhow!("{SHAPE}"))?;
+        let array = if let Some(array) = raw.as_array() {
+            array.clone()
+        } else if let Some(text) = raw.as_str() {
+            let parsed: Value = serde_json::from_str(text).map_err(|_| anyhow::anyhow!("{SHAPE}"))?;
+            parsed.as_array().cloned().ok_or_else(|| anyhow::anyhow!("{SHAPE}"))?
+        } else {
+            anyhow::bail!("{SHAPE}");
+        };
+        let mut patches = Vec::with_capacity(array.len());
+        for (index, entry) in array.iter().enumerate() {
+            let Some(object) = entry.as_object() else {
+                anyhow::bail!("patches[{index}] must be an object with start_line, end_line, and content.");
+            };
+            let number = |key: &str| -> Option<f64> {
+                match object.get(key) {
+                    Some(Value::Number(number)) => number.as_f64(),
+                    Some(Value::String(text)) => text.trim().parse::<f64>().ok(),
+                    _ => None,
+                }
+            };
+            let start_line = number("start_line")
+                .ok_or_else(|| anyhow::anyhow!("patches[{index}].start_line must be a positive integer."))?;
+            let end_line = number("end_line")
+                .ok_or_else(|| anyhow::anyhow!("patches[{index}].end_line must be an integer."))?;
+            let Some(content) = object.get("content").and_then(Value::as_str) else {
+                anyhow::bail!("patches[{index}].content must be a string.");
+            };
+            anyhow::ensure!(
+                start_line.is_finite() && start_line >= 1.0,
+                "patches[{index}].start_line must be a positive integer."
+            );
+            anyhow::ensure!(
+                end_line.is_finite(),
+                "patches[{index}].end_line must be an integer."
+            );
+            patches.push((start_line.floor() as usize, end_line.floor() as usize, content.to_string()));
+        }
+        anyhow::ensure!(
+            !patches.is_empty(),
+            "patch_project_file requires at least one patch entry."
+        );
+
+        let original = tokio::fs::read_to_string(&full).await?;
+        let mut lines: Vec<String> = original.split('\n').map(ToOwned::to_owned).collect();
+        let total_lines = lines.len();
+        patches.sort_by(|left, right| right.0.cmp(&left.0));
+        for index in 0..patches.len().saturating_sub(1) {
+            let (current_start, current_end, _) = patches[index];
+            let (next_start, next_end, _) = patches[index + 1];
+            let current_effective_start = current_start.max(1);
+            let next_effective_end = if next_end < next_start { next_start - 1 } else { next_end };
+            anyhow::ensure!(
+                next_effective_end < current_effective_start,
+                "Patches overlap: lines {next_start}-{next_end} and {current_start}-{current_end}. Split into non-overlapping ranges."
+            );
+        }
+        for (start_line, end_line, content) in &patches {
+            let start_index = (start_line - 1).min(total_lines);
+            let is_insert = end_line < start_line;
+            let end_index = if is_insert { start_index } else { (*end_line).min(total_lines) };
+            let replacement: Vec<String> = if content.is_empty() {
+                Vec::new()
+            } else {
+                content.split('\n').map(ToOwned::to_owned).collect()
+            };
+            if is_insert || end_index < start_index {
+                lines.splice(start_index..start_index, replacement);
+            } else {
+                lines.splice(start_index..end_index, replacement);
+            }
+        }
+        let new_lines = lines.len();
+
+        assert_text_tool_not_office_target(&file_path)?;
+        if full.is_file() {
+            let project_root = services.projects.project_root(&project_id)?;
+            backup_project_file_before_overwrite(&project_root, &full);
+        }
+        tokio::fs::write(&full, lines.join("\n")).await?;
+        let patches_applied = patches.len();
         Ok(json!({
             "success": true,
             "file_path": file_path,
             "patches_applied": patches_applied,
-            "original_lines": original_lines,
+            "original_lines": total_lines,
             "new_lines": new_lines,
-            "message": format!("Applied {patches_applied} patch(es) to {file_path}. File went from {original_lines} to {new_lines} lines.")
+            "message": format!("Applied {patches_applied} patch(es) to {file_path}. File went from {total_lines} to {new_lines} lines.")
         }))
     }
 }
@@ -949,5 +1106,263 @@ mod tests {
         assert!(result["truncated"].as_bool().unwrap());
         assert!(shown.contains("truncated"));
         assert!(std::str::from_utf8(shown.as_bytes()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod project_native_parity_tests {
+    use super::{
+        ProjectDeleteFileTool, ProjectEditFileTool, ProjectListFilesTool,
+        ProjectPatchFileTool, ProjectReadFileTool, ProjectWriteFileTool,
+    };
+    use crate::{Tool, ToolServices};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    fn services(root: &std::path::Path) -> ToolServices {
+        let workspace = root.join("projects");
+        std::fs::create_dir_all(workspace.join("alpha")).unwrap();
+        let store = Arc::new(worldbase_memory::Store::open(&root.join("store.sqlite")).unwrap());
+        ToolServices {
+            host: Arc::new(crate::HostBridge::new()),
+            current_stream: Arc::new(Mutex::new(String::new())),
+            abort: None,
+            workspace: workspace.clone(),
+            folder_workspace: None,
+            target_project_id: None,
+            allowed_mcp_server_ids: None,
+            plan_goal: Arc::new(Mutex::new(None)),
+            todo_items: Arc::new(Mutex::new(Vec::new())),
+            read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            visible_tool_catalog: None,
+            store: store.clone(),
+            memory_queue: None,
+            memory_scopes: Vec::new(),
+            skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
+            scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
+            mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(workspace)),
+            group_collaboration: None,
+            subagent_runtime: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn write_project_file_blocks_office_targets_like_electron_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        let blocked = ProjectWriteFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "docs/report.docx", "content": "x" }),
+                &service,
+            )
+            .await;
+        assert!(blocked
+            .unwrap_err()
+            .to_string()
+            .contains("「report.docx」是 Office 文档，文本写入工具无法处理（会损坏文件）"));
+
+        let ok = ProjectWriteFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "src/main.ts", "content": "const a = 1;\n" }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok["message"], "File src/main.ts written successfully");
+    }
+
+    #[tokio::test]
+    async fn write_project_file_backs_up_existing_file_before_overwrite() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        ProjectWriteFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "notes.txt", "content": "v1" }),
+                &service,
+            )
+            .await
+            .unwrap();
+        ProjectWriteFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "notes.txt", "content": "v2" }),
+                &service,
+            )
+            .await
+            .unwrap();
+
+        let backups = temp.path().join("snapshots").join("_backups");
+        let entries: Vec<_> = std::fs::read_dir(backups)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1, "one .bak file expected");
+        assert!(
+            entries[0].file_name().to_string_lossy().starts_with("notes.txt."),
+            "backup keeps the original file name prefix"
+        );
+        assert_eq!(std::fs::read_to_string(entries[0].path()).unwrap(), "v1");
+    }
+
+    #[tokio::test]
+    async fn edit_project_file_enforces_read_first_and_electron_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::write(temp.path().join("projects/alpha/dup.txt"), "dup and dup").unwrap();
+
+        let denied = ProjectEditFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "dup.txt", "old_string": "dup", "new_string": "hi" }),
+                &service,
+            )
+            .await;
+        assert!(denied
+            .unwrap_err()
+            .to_string()
+            .contains("You must read dup.txt with read_project_file before editing it, so the edit matches its current content."));
+
+        ProjectReadFileTool
+            .execute(json!({ "project_id": "alpha", "file_path": "dup.txt" }), &service)
+            .await
+            .unwrap();
+
+        let ambiguous = ProjectEditFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "dup.txt", "old_string": "dup", "new_string": "hi" }),
+                &service,
+            )
+            .await;
+        assert!(ambiguous
+            .unwrap_err()
+            .to_string()
+            .contains("old_string is not unique in dup.txt (2 matches). Add more surrounding context to make it unique, or set replace_all: true to replace all 2 occurrences."));
+
+        let replaced = ProjectEditFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "dup.txt", "old_string": "dup", "new_string": "hi", "replace_all": true }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(replaced["replacements"], 2);
+        assert_eq!(replaced["message"], "Replaced 2 occurrence(s) in dup.txt.");
+    }
+
+    #[tokio::test]
+    async fn patch_project_file_rejects_overlap_and_office_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::write(temp.path().join("projects/alpha/list.txt"), "a\nb\nc\nd").unwrap();
+
+        let overlap = ProjectPatchFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "list.txt", "patches": [
+                    { "start_line": 1, "end_line": 2, "content": "X" },
+                    { "start_line": 2, "end_line": 3, "content": "Y" }
+                ] }),
+                &service,
+            )
+            .await;
+        assert!(overlap
+            .unwrap_err()
+            .to_string()
+            .contains("Patches overlap: lines 1-2 and 2-3. Split into non-overlapping ranges."));
+
+        let applied = ProjectPatchFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "list.txt", "patches": [
+                    { "start_line": 1, "end_line": 2, "content": "X" },
+                    { "start_line": 4, "end_line": 4, "content": "" }
+                ] }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied["patches_applied"], 2);
+        assert_eq!(
+            applied["message"],
+            "Applied 2 patch(es) to list.txt. File went from 4 to 2 lines."
+        );
+
+        // The office guard fires after the read, exactly like the Electron
+        // handler: an existing (readable) Office target is refused.
+        std::fs::write(temp.path().join("projects/alpha/book.xlsx"), "PK").unwrap();
+        let office = ProjectPatchFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "book.xlsx", "patches": [
+                    { "start_line": 1, "end_line": 1, "content": "X" }
+                ] }),
+                &service,
+            )
+            .await;
+        assert!(office
+            .unwrap_err()
+            .to_string()
+            .contains("是 Office 文档，文本写入工具无法处理"));
+    }
+
+    #[tokio::test]
+    async fn read_project_file_uses_electron_empty_placeholder_and_paging() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::write(temp.path().join("projects/alpha/empty.md"), "").unwrap();
+        std::fs::write(temp.path().join("projects/alpha/app.txt"), "l1\nl2\nl3").unwrap();
+
+        let empty = ProjectReadFileTool
+            .execute(json!({ "project_id": "alpha", "file_path": "empty.md" }), &service)
+            .await
+            .unwrap();
+        assert_eq!(
+            empty["content"],
+            "(This file exists but is empty \u{2014} 0 lines.)"
+        );
+
+        let segment = ProjectReadFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "app.txt", "start_line": 2, "max_lines": 1 }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(segment["content"], "     2\tl2");
+        assert_eq!(segment["has_more"], true);
+        assert_eq!(segment["next_start_line"], 3);
+    }
+
+    #[tokio::test]
+    async fn delete_and_list_project_files_match_electron_shapes() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::write(temp.path().join("projects/alpha/gone.txt"), "x").unwrap();
+
+        let deleted = ProjectDeleteFileTool
+            .execute(json!({ "project_id": "alpha", "file_path": "gone.txt" }), &service)
+            .await
+            .unwrap();
+        assert_eq!(deleted["message"], "File gone.txt deleted successfully");
+
+        let skipped = ProjectDeleteFileTool
+            .execute(json!({ "project_id": "alpha", "file_path": "gone.txt" }), &service)
+            .await
+            .unwrap();
+        assert_eq!(skipped["skipped"], true);
+        assert_eq!(skipped["message"], "File gone.txt does not exist");
+
+        std::fs::create_dir_all(temp.path().join("projects/alpha/src")).unwrap();
+        std::fs::write(temp.path().join("projects/alpha/src/index.ts"), "").unwrap();
+        std::fs::create_dir_all(temp.path().join("projects/alpha/.hidden")).unwrap();
+        std::fs::write(temp.path().join("projects/alpha/stay.txt"), "").unwrap();
+        let listing = ProjectListFilesTool
+            .execute(json!({ "project_id": "alpha" }), &service)
+            .await
+            .unwrap();
+        let names: Vec<&str> = listing["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        // node_modules and dot entries are skipped, entries sort by name.
+        assert_eq!(names, vec!["src", "stay.txt"]);
     }
 }

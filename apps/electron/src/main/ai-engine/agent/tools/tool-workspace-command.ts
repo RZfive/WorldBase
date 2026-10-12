@@ -5,7 +5,7 @@ import { PROJECT_COMMAND_WHITELIST, DANGEROUS_COMMAND_PATTERNS, isDeveloperComma
 import { createBundledRuntimeEnv } from '../../../project-runtime/bundled-runtime.js'
 import { scanCommandSegments, splitCommandSegments, tokenizeCommand } from './command-parser.js'
 import type { ProgressCallback } from '../agent-core.js'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import { resolveFolderWorkspacePath } from '../../../folder-workspace/folder-workspace-fs.js'
 import type { ToolServices } from './index.js'
 

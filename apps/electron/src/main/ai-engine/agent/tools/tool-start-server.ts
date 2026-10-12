@@ -1,5 +1,5 @@
 import type { RuntimeManager } from '../../../project-runtime/runtime-manager.js'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { ProgressCallback } from '../agent-core.js'
 
 interface ToolServices {

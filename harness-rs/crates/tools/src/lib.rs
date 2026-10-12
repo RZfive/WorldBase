@@ -886,9 +886,7 @@ mod tests {
             "create_agent_group",
             "create_project",
             "create_scheduled_task",
-            "delete_project_file",
             "edit_image",
-            "edit_project_file",
             "enter_plan_mode",
             "exit_plan_mode",
             "fetch_webpage",
@@ -900,14 +898,11 @@ mod tests {
             "get_project_status",
             "get_task_status",
             "get_workspace_command_status",
-            "glob_search",
-            "grep_search",
             "install_mcp_server",
             "install_skill",
             "interact_current_page",
             "list_agent_workspace_catalog",
             "list_documents",
-            "list_project_files",
             "list_projects",
             "list_scheduled_tasks",
             "list_skills",
@@ -917,12 +912,10 @@ mod tests {
             "manage_todo_list",
             "open_project_app",
             "open_workspace_tab",
-            "patch_project_file",
             "query_project_database",
             "read_active_terminal",
             "read_current_page",
             "read_document",
-            "read_project_file",
             "rebuild_project",
             "restart_project_server",
             "run_project_command",
@@ -933,7 +926,6 @@ mod tests {
             "start_project_server",
             "web_search",
             "write_active_terminal",
-            "write_project_file",
         ];
         let names: std::collections::HashSet<String> = builtin_tools()
             .iter()
@@ -956,8 +948,8 @@ mod tests {
 
         assert_eq!(
             contracts.len(),
-            57,
-            "expected the exact Electron tool catalog (Rust-native plan/image/workspace tools are excluded)"
+            49,
+            "expected the exact Electron tool catalog (Rust-native plan/image/workspace/project-file tools are excluded)"
         );
         let mut actual_by_name = std::collections::HashMap::new();
         for descriptor in actual {

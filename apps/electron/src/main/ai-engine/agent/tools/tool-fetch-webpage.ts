@@ -1,4 +1,4 @@
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { ProgressCallback } from '../agent-core.js'
 import {
   ABSOLUTE_FETCH_MAX_CHARS,

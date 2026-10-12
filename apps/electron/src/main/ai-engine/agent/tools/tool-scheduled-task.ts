@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-service.js'
 import type { ScheduledTaskDefinition, ScheduledTaskSchedule } from '../../../settings/scheduled-task-store.js'

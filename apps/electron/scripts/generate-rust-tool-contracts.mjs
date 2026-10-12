@@ -44,10 +44,10 @@ if (new Set(names).size !== names.length) {
   throw new Error('Electron tool registry produced duplicate public tool names')
 }
 // Rust-native ownership (`electron_native` / intrinsic plan controls):
-// enter_plan_mode, exit_plan_mode, generate_image, edit_image, and the eight
-// folder-workspace tools. Electron never registers handlers for them, so they
+// enter_plan_mode, exit_plan_mode, generate_image, edit_image, the eight
+// folder-workspace tools, and the six project-file tools plus project glob/grep search. Electron never registers handlers for them, so they
 // are absent from the host contract.
-const EXPECTED_TOOL_COUNT = 57
+const EXPECTED_TOOL_COUNT = 49
 if (tools.length !== EXPECTED_TOOL_COUNT) {
   throw new Error(`Electron tool registry produced ${tools.length} public tools; expected exactly ${EXPECTED_TOOL_COUNT}`)
 }

@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron'
-import type { ToolDefinition } from '../../providers/openai-provider.js'
+import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { ProgressCallback, SessionState } from '../agent-core.js'
 import { requestUserQuestions, type AskUserQuestion } from './user-question.js'
 

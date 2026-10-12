@@ -7,7 +7,7 @@
  * types so they stay independent of any concrete loop implementation.
  */
 
-import type { ToolDefinition } from '../providers/openai-provider.js'
+import type { ToolDefinition } from '../../ai-harness/contracts.js'
 import type { AIExecutionAuthMode } from '../../settings/settings-store.js'
 import type { SkillEngine } from './skill-engine.js'
 import type { PermissionRule, PermissionContext } from './permissions/permission-engine.js'

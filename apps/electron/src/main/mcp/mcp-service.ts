@@ -7,7 +7,7 @@ import {
 } from '@modelcontextprotocol/client'
 import type { Prompt, Resource, Tool } from '@modelcontextprotocol/client'
 import type { ProgressCallback } from '../ai-engine/agent/agent-core.js'
-import type { ToolDefinition } from '../ai-engine/providers/openai-provider.js'
+import type { ToolDefinition } from '../ai-harness/contracts.js'
 import type { MCPServerConfig } from '../settings/settings-store.js'
 import { t } from '../i18n/main-i18n.js'
 

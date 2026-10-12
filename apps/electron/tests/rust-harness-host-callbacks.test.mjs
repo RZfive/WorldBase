@@ -136,42 +136,29 @@ async function dispatchToolExecute (registrations, name, args, onProgress) {
   return { result: responses[0].result, progress }
 }
 
-test('Rust tool.execute falls back to the Electron project handler when Rust does not advertise it', async () => {
-  const writes = []
-  const services = createServices({
-    projectFS: {
-      async readFile (projectId, filePath) {
-        assert.equal(projectId, 'project-alpha')
-        assert.equal(filePath, 'src/main.ts')
-        return 'const previous = true\n'
-      },
-      async writeFile (...args) {
-        writes.push(args)
-      },
-      async listProjects () { return [] }
-    }
-  })
+test('project file tools are Rust-native and register no Node override', async () => {
+  // read/write/edit/patch/delete/list project files plus project glob/grep
+  // search execute in Rust (`electron_native`), including the Office
+  // direct-write guard and the SafeWriter-style backup.
+  const services = createServices()
   const registrations = await collectHostTools(createHarnessEngine(services), { authMode: 'strict' })
-  const projectTool = getTool(registrations, 'write_project_file')
 
-  assert.equal(projectTool.domain, 'electron_host_override')
-  const { result, progress } = await dispatchToolExecute(registrations, 'write_project_file', {
-    project_id: 'project-alpha',
-    file_path: 'src/main.ts',
-    content: 'export const fromRust = true\n'
-  })
-
-  assert.deepEqual(writes, [[
-    'project-alpha',
-    'src/main.ts',
-    'export const fromRust = true\n'
-  ]])
-  assert.deepEqual(result, {
-    success: true,
-    file_path: 'src/main.ts',
-    message: 'File src/main.ts written successfully'
-  })
-  assert.ok(progress.some(frame => frame.kind === 'progress' && frame.stage === '__electron_progress__'))
+  for (const name of [
+    'read_project_file',
+    'write_project_file',
+    'edit_project_file',
+    'patch_project_file',
+    'delete_project_file',
+    'list_project_files',
+    'glob_search',
+    'grep_search'
+  ]) {
+    assert.equal(
+      registrations.some(tool => tool.definition.name === name),
+      false,
+      `${name} must execute in Rust, not through a Node host override`
+    )
+  }
 })
 
 test('folder-workspace file tools are Rust-native and register no Node override', async () => {
@@ -364,10 +351,11 @@ test('all canonical Electron tools have an explicit execution owner', async () =
     runSubagents: async () => []
   }).getToolDefinitions()
   const canonicalNames = catalog.map(tool => tool.name).sort()
-  assert.equal(canonicalNames.length, 57)
-  assert.equal(new Set(canonicalNames).size, 57)
-  // Rust-intrinsic plan controls and Rust-native image/workspace tools never
-  // appear in the Node canonical catalog; Rust advertises and executes them.
+  assert.equal(canonicalNames.length, 49)
+  assert.equal(new Set(canonicalNames).size, 49)
+  // Rust-intrinsic plan controls and Rust-native image/workspace/project-file
+  // tools never appear in the Node canonical catalog; Rust advertises and
+  // executes them itself.
   for (const name of [
     'enter_plan_mode',
     'exit_plan_mode',
@@ -380,7 +368,15 @@ test('all canonical Electron tools have an explicit execution owner', async () =
     'patch_workspace_file',
     'delete_workspace_file',
     'glob_workspace',
-    'grep_workspace'
+    'grep_workspace',
+    'read_project_file',
+    'write_project_file',
+    'edit_project_file',
+    'patch_project_file',
+    'delete_project_file',
+    'list_project_files',
+    'glob_search',
+    'grep_search'
   ]) {
     assert.equal(canonicalNames.includes(name), false, `${name} must be Rust-owned and absent from the Node catalog`)
   }
@@ -564,7 +560,7 @@ test('Rust project command callbacks share the exact Electron command status reg
 test('Rust-advertised spawn_subagents is always executed by the Electron Rust facade', async () => {
   const childRuns = []
   const client = {
-    ...createNativeToolClient(['spawn_subagents']),
+    ...createNativeToolClient(['spawn_subagents', 'read_project_file']),
     async chatStream (sessionId, conversationId, text, options, onFrame) {
       childRuns.push({ sessionId, conversationId, text, options })
       onFrame({ kind: 'assistant_message', content: 'Child result' })

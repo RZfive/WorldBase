@@ -6,16 +6,14 @@ import type { ComputerUsePermissionTarget } from '../../src/shared/computer-use-
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { USER_ABORT_MESSAGE } from '../../src/main/ai-engine/abort-utils.js'
-import { createProvider } from '../../src/main/ai-engine/providers/index.js'
-import type { MessageContent } from '../../src/main/ai-engine/providers/openai-provider.js'
+import type { MessageContent } from '../../src/main/ai-harness/contracts.js'
 import { PROJECT_PACKAGE_EXTENSION } from '../../src/main/project-fs/project-package-service.js'
 import { isOfficeFile, readOfficeFile, detectOfficeType } from '../../src/main/ai-engine/agent/tools/office-utils.js'
-import { probeEmbeddingModel } from '../../src/main/ai-engine/providers/embedding-probe.js'
+import { probeEmbeddingModel } from '../../src/main/settings/embedding-probe.js'
 import { parseDocument, isSupportedDocument } from '../../src/main/ai-engine/agent/tools/document-parser.js'
 import type { CreateSelectionPayload } from '../../src/main/ai-engine/agent/tools/document-types.js'
 import { readDocumentRenderAsset } from '../../src/main/document-preview/document-render-service.js'
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../../src/main/settings/settings-transfer.js'
-import { runImageStudioRequest } from '../../src/main/settings/image-generation-service.js'
 import { fetchProviderCatalog } from '../../src/main/settings/provider-model-service.js'
 import { isAllowedExternalUrl } from '../../src/shared/provider-templates.js'
 import type { AIExecutionAuthMode, AIExecutionPreferences, AIProvidersConfig, ChatFontPreferences, LanguagePreference, LaunchpadLayout, PinnedDockApp, PortableSettingsConfig, WebAppShortcut } from '../../src/main/settings/settings-store.js'
@@ -56,7 +54,6 @@ import {
   getMcpStateForSelectedHarness,
   refreshMcpServerForSelectedHarness
 } from './services.js'
-import { drainPendingStudioImageTasks } from './media/image-studio-queue.js'
 import { attachProjectRuntimeLogForwarding, broadcastToAppWindows, buildActivePagePromptSection, buildActiveTerminalPromptSection, buildRendererWindowUrl, createProjectPackageDefaultName, ensureWindowHasMinimumWidth, getPreferredLanIpv4Addresses, getProjectsDir, getSenderWindow, guessImageExtension, resolveImageBuffer, runWithAiRequestWindow, setWindowMinimumWidth } from './windows.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
 
@@ -293,8 +290,9 @@ export function setupIPC (): void {
   const studioTaskStore = mainState.studioTaskStore
   const usageStore = mainState.usageStore
   const selectedRustProjectClient = async () => {
-    const harness = await startSelectedRustHarness()
-    return harness ? mainState.rustHarness : null
+    // Throws when the harness is unavailable; availability implies a client.
+    await startSelectedRustHarness()
+    return mainState.rustHarness!
   }
   ipcMain.on('pageAutomation:response', (_event, payload: PageAutomationResponseEnvelope) => {
     const pending = pendingPageAutomationRequests.get(payload.requestId)
@@ -1190,36 +1188,31 @@ export function setupIPC (): void {
     // A selected and successfully started Rust harness is the execution
     // authority for Studio too. Electron only indexes the image files Rust
     // wrote into the shared user-data/image-library directory.
-    const rustHarness = await startSelectedRustHarness()
-    if (rustHarness && mainState.rustHarness) {
-      try {
-        const generated = await mainState.rustHarness.studioGenerate(rustStudioParams(req))
-        const entries = generated.entries
-          .map(entry => rustStudioImageEntry(entry, req))
-          .filter((entry): entry is ImageLibraryEntry => Boolean(entry))
-        if (entries.length === 0) {
-          throw new Error('Rust Studio completed without image entries')
-        }
-        broadcastToAppWindows('image:library:changed', { source: 'rust' })
-        return { ok: true, entries }
-      } catch (error) {
-        // Do not execute the same request again through TypeScript after Rust
-        // accepted it; that would duplicate a billable generation/edit task.
-        return { ok: false, error: rustStudioError(req, error) }
+    // A selected and successfully started Rust harness is the execution
+    // authority for Studio too. Electron only indexes the image files Rust
+    // wrote into the shared user-data/image-library directory.
+    await startSelectedRustHarness()
+    try {
+      const generated = await mainState.rustHarness!.studioGenerate(rustStudioParams(req))
+      const entries = generated.entries
+        .map(entry => rustStudioImageEntry(entry, req))
+        .filter((entry): entry is ImageLibraryEntry => Boolean(entry))
+      if (entries.length === 0) {
+        throw new Error('Rust Studio completed without image entries')
       }
+      broadcastToAppWindows('image:library:changed', { source: 'rust' })
+      return { ok: true, entries }
+    } catch (error) {
+      // Do not execute the same request again through TypeScript after Rust
+      // accepted it; that would duplicate a billable generation/edit task.
+      return { ok: false, error: rustStudioError(req, error) }
     }
-
-    if (!imageLibraryStore) return { ok: false, error: t('mainDialog.imageLibraryNotInitialized') }
-    return runImageStudioRequest(req, {
-      getProvidersConfig: () => settingsStore!.getProviders(),
-      imageLibraryStore
-    })
   })
 
   ipcMain.handle('image:library:query', async (_event: IpcMainInvokeEvent, opts: ImageLibraryQuery): Promise<ImageLibraryPage> => {
     const rustHarness = await startSelectedRustHarness()
-    if (rustHarness && mainState.rustHarness) {
-      const page = await mainState.rustHarness.studioLibraryQuery({ ...(opts ?? {}) })
+    {
+      const page = await mainState.rustHarness!.studioLibraryQuery({ ...(opts ?? {}) })
       const items = (page.images || [])
         .map(rustStudioImageItem)
         .filter((item): item is ImageLibraryItem => Boolean(item))
@@ -1230,34 +1223,27 @@ export function setupIPC (): void {
         nextOffset: typeof page.nextOffset === 'number' ? page.nextOffset : null
       }
     }
-    return imageLibraryStore?.query(opts ?? {}) ?? { items: [], total: 0, nextOffset: null }
   })
 
   // Hand off any AI-agent-queued generation/edit tasks to the studio and clear the
   // buffer atomically, so two concurrent drains never double-enqueue.
   ipcMain.handle('image:studio:drainPendingTasks', async (): Promise<ImageStudioGenerateRequest[]> => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.studioTasksDrain()
-    return drainPendingStudioImageTasks()
+    return await rustClient.studioTasksDrain()
   })
 
   // Persist the studio task queue across app restarts so failed/queued tasks are
   // still there (and retryable) the next time the studio opens.
   ipcMain.handle('image:studio:loadTasks', async (): Promise<ImageStudioTask[]> => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.studioTasksLoad()
-    return studioTaskStore?.load() ?? []
+    return await rustClient.studioTasksLoad()
   })
 
   ipcMain.handle('image:studio:saveTasks', async (_event: IpcMainInvokeEvent, tasks: ImageStudioTask[]): Promise<void> => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) {
-      await rustClient.studioTasksSave(Array.isArray(tasks) ? tasks : [])
-      // Keep a handoff mirror for an explicit Rust -> TypeScript transition;
-      // Rust remains the source of truth while it is selected.
-      studioTaskStore?.save(Array.isArray(tasks) ? tasks : [])
-      return
-    }
+    await rustClient.studioTasksSave(Array.isArray(tasks) ? tasks : [])
+    // Keep a handoff mirror for an explicit Rust -> TypeScript transition;
+    // Rust remains the source of truth while it is selected.
     studioTaskStore?.save(Array.isArray(tasks) ? tasks : [])
   })
 
@@ -1510,32 +1496,16 @@ export function setupIPC (): void {
       const userContent = `【选中的对话内容】\n${req.selection}\n【选中内容结束】\n\n问题：${req.question}`
 
       const rustHarness = await startSelectedRustHarness()
-      let answer = ''
-      if (rustHarness) {
-        answer = getMessageText((await rustHarness.chat([
-          { role: 'user', content: userContent }
-        ], {
-          providerConfig,
-          systemPromptSections: [systemPrompt],
-          // Intentionally a JSON-free, tool-free completion.
-          allowedToolNames: ['__quick_ask_no_tools__']
-        })).content).trim()
-      } else {
-        const aiProvider = createProvider({
-          baseUrl: providerConfig.baseUrl,
-          apiProtocol: providerConfig.apiProtocol
-        })
-        aiProvider.setApiKey(providerConfig.apiKey)
-        aiProvider.setBaseUrl(providerConfig.baseUrl)
-        aiProvider.setModel(providerConfig.model)
-        aiProvider.setEnableThinking(providerConfig.enableThinking === true)
-        if (providerConfig.reasoningEffort) aiProvider.setReasoningEffort(providerConfig.reasoningEffort)
-        const result = await aiProvider.chatCompletion([
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userContent }
-        ])
-        answer = typeof result.content === 'string' ? result.content.trim() : ''
-      }
+      // The Rust harness is the only execution backend; startSelectedRustHarness
+      // throws when it is unavailable instead of degrading to Node providers.
+      const answer = getMessageText((await rustHarness.chat([
+        { role: 'user', content: userContent }
+      ], {
+        providerConfig,
+        systemPromptSections: [systemPrompt],
+        // Intentionally a JSON-free, tool-free completion.
+        allowedToolNames: ['__quick_ask_no_tools__']
+      })).content).trim()
       if (!answer) throw new Error(t('mainDialog.aiNoValidResult'))
 
       return { ok: true, answer }
@@ -1557,47 +1527,27 @@ export function setupIPC (): void {
         ? '你是一个专业的AI绘画提示词优化专家。用户会给你一段负向提示词（negative prompt），请优化它使其更加专业、精确、有效。负向提示词用于描述不希望在图片中出现的元素。请直接返回优化后的负向提示词文本，不要添加任何解释或前缀。保持与用户输入相同的语言。'
         : '你是一个专业的AI绘画提示词优化专家。用户会给你一段图片生成提示词（prompt），请优化它使其更加专业、详细、生动，能够帮助AI模型生成更高质量的图片。请直接返回优化后的提示词文本，不要添加任何解释或前缀。保持与用户输入相同的语言。'
 
-      const messages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: req.prompt }
-      ]
 
-      // Prompt optimization is a model request too. Honor the selected
-      // harness so the image workflow exercises Rust provider execution when
-      // Rust is enabled, while retaining the legacy provider as startup
-      // fallback during the migration.
       const rustHarness = await startSelectedRustHarness()
-      let optimized = ''
-      if (rustHarness) {
-        optimized = getMessageText((await rustHarness.chat([
-            { role: 'user', content: req.prompt }
-          ], {
-            providerConfig: {
-              apiKey: provider.apiKey,
-              baseUrl: provider.baseUrl,
-              model,
-              // Auto entries carry their probe result; never guess from the URL.
-              apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined,
-              providerId: provider.id,
-              providerName: provider.name
-            },
-            systemPromptSections: [systemPrompt],
-            // This is intentionally a JSON-free, tool-free completion.
-            // Supplying an unmatched allow-list disables both native and
-            // Electron-hosted tools in the Rust loop.
-            allowedToolNames: ['__image_prompt_optimization_no_tools__']
-          })).content).trim()
-      } else {
-        const aiProvider = createProvider({
+      // Rust-only, same rationale as the quick-ask handler above.
+      const optimized = getMessageText((await rustHarness.chat([
+        { role: 'user', content: req.prompt }
+      ], {
+        providerConfig: {
+          apiKey: provider.apiKey,
           baseUrl: provider.baseUrl,
-          apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined
-        })
-        aiProvider.setApiKey(provider.apiKey)
-        aiProvider.setBaseUrl(provider.baseUrl)
-        aiProvider.setModel(model)
-        const result = await aiProvider.chatCompletion(messages)
-        optimized = typeof result.content === 'string' ? result.content.trim() : ''
-      }
+          model,
+          // Auto entries carry their probe result; never guess from the URL.
+          apiProtocol: provider.apiProtocol || provider.detectedApiProtocol || undefined,
+          providerId: provider.id,
+          providerName: provider.name
+        },
+        systemPromptSections: [systemPrompt],
+        // This is intentionally a JSON-free, tool-free completion.
+        // Supplying an unmatched allow-list disables both native and
+        // Electron-hosted tools in the Rust loop.
+        allowedToolNames: ['__image_prompt_optimization_no_tools__']
+      })).content).trim()
       if (!optimized) throw new Error(t('mainDialog.aiNoValidResult'))
 
       return { ok: true, optimizedPrompt: optimized }

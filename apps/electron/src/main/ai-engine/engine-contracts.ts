@@ -8,7 +8,7 @@
  */
 
 import type { BrowserWindow } from 'electron'
-import type { ToolDefinition } from './providers/openai-provider.js'
+import type { ToolDefinition } from '../ai-harness/contracts.js'
 import type { ProgressCallback } from './agent/agent-core.js'
 import type { ProjectFS } from '../project-fs/project-fs.js'
 import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
@@ -25,7 +25,6 @@ import type { AgentStore } from '../settings/agent-store.js'
 import type { AgentGroupStore } from '../settings/agent-group-store.js'
 import type { ImageLibraryStore } from '../settings/image-library-store.js'
 import type { UsageStore } from '../settings/usage-store.js'
-import type { ImageStudioGenerateRequest } from '../../shared/image-studio-types.js'
 import type { FolderWorkspaceChangeEvent } from '../../shared/folder-workspace-types.js'
 
 export interface CustomToolRegistration {
@@ -48,8 +47,6 @@ export interface AIEngineServices {
   agentGroupStore?: AgentGroupStore
   settingsStore?: SettingsStore
   imageLibraryStore?: ImageLibraryStore
-  /** Hand image generation/edit requests to the drawing studio's task queue. */
-  enqueueStudioImageTasks?: (requests: ImageStudioGenerateRequest[]) => void
   getMainWindow?: () => BrowserWindow | null
   readActivePage?: () => Promise<BrowserAutomationSnapshot>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
