@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { ProviderApiProtocol } from './settings-store.js'
 import { clampReasoningEffort } from '../../shared/reasoning-effort.js'
 
@@ -132,8 +133,11 @@ function responseErrorMessage (body: string): string {
   return body.trim().slice(0, 300)
 }
 
-async function fetchCatalogWithStyle (baseUrl: string, apiKey: string, style: ModelCatalogStyle): Promise<unknown> {
+async function fetchCatalogWithStyle (baseUrl: string, apiKey: string, style: ModelCatalogStyle, sessionId: string): Promise<unknown> {
   const url = buildProviderModelsUrl(baseUrl, style)
+  const sessionHeaders: Record<string, string> = new URL(url).hostname === 'opencode.ai'
+    ? { 'x-opencode-session': sessionId, 'User-Agent': 'WorldBase/provider-catalog' }
+    : {}
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
@@ -144,9 +148,10 @@ async function fetchCatalogWithStyle (baseUrl: string, apiKey: string, style: Mo
       headers: style === 'anthropic'
         ? {
             'x-api-key': apiKey,
-            'anthropic-version': ANTHROPIC_VERSION
+            'anthropic-version': ANTHROPIC_VERSION,
+            ...sessionHeaders
           }
-        : { Authorization: `Bearer ${apiKey}` }
+        : { Authorization: `Bearer ${apiKey}`, ...sessionHeaders }
     })
     const body = await response.text()
     if (!response.ok) {
@@ -205,17 +210,19 @@ export async function fetchProviderModels (input: FetchProviderModelsInput): Pro
 }
 
 async function fetchCatalogPayload (input: FetchProviderModelsInput, baseUrl: string, apiKey: string): Promise<unknown> {
+  // Keep one identity across authentication-style fallbacks for this lookup.
+  const sessionId = randomUUID()
   if (input.apiProtocol === 'anthropic') {
-    return fetchCatalogWithStyle(baseUrl, apiKey, 'anthropic')
+    return fetchCatalogWithStyle(baseUrl, apiKey, 'anthropic', sessionId)
   }
   if (input.apiProtocol === 'openai-chat' || input.apiProtocol === 'openai-responses') {
-    return fetchCatalogWithStyle(baseUrl, apiKey, 'openai')
+    return fetchCatalogWithStyle(baseUrl, apiKey, 'openai', sessionId)
   }
 
   try {
-    return await fetchCatalogWithStyle(baseUrl, apiKey, 'openai')
+    return await fetchCatalogWithStyle(baseUrl, apiKey, 'openai', sessionId)
   } catch (error) {
     if (!catalogErrorMightBeHeaderStyle(error)) throw error
-    return fetchCatalogWithStyle(baseUrl, apiKey, 'anthropic')
+    return fetchCatalogWithStyle(baseUrl, apiKey, 'anthropic', sessionId)
   }
 }

@@ -2,7 +2,7 @@
 
 use crate::api_protocol::ApiProtocol;
 use anyhow::{bail, Context, Result};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -25,8 +25,8 @@ pub async fn fetch_remote_models(
     }
 
     let protocol = resolve_remote_protocol(api_protocol);
-    let endpoint = remote_models_url(base_url, protocol)?;
-    let mut headers = HeaderMap::new();
+    let endpoint = reqwest::Url::parse(&remote_models_url(base_url, protocol)?)?;
+    let mut headers = crate::http::session_headers(&endpoint, None)?;
     if protocol == ApiProtocol::Anthropic {
         headers.insert(
             "x-api-key",

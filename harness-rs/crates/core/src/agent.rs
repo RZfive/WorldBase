@@ -585,6 +585,7 @@ async fn provider_context_summary(
     provider: &dyn Provider,
     previous: Option<&str>,
     messages: &[LlmMessage],
+    session_id: Option<&str>,
     abort: &CancellationToken,
 ) -> Result<String> {
     let summary_messages = context_summary_prompt(previous, messages);
@@ -595,7 +596,10 @@ async fn provider_context_summary(
                 summary_messages,
                 Vec::new(),
                 2_048,
-                ChatOptions::default(),
+                ChatOptions {
+                    session_id: session_id.map(str::to_owned),
+                    ..ChatOptions::default()
+                },
             )
             .await?;
         let mut deltas = String::new();
@@ -687,6 +691,7 @@ async fn compress_context_with_provider(
     state: &mut ContextCompressionState,
     force: bool,
     provider: &dyn Provider,
+    session_id: Option<&str>,
     abort: &CancellationToken,
 ) -> bool {
     state.observe_messages(messages);
@@ -710,6 +715,7 @@ async fn compress_context_with_provider(
         provider,
         state.summary.as_deref(),
         &original_messages,
+        session_id,
         abort,
     )
     .await
@@ -1947,6 +1953,7 @@ mod tests {
     struct ProtocolRequest {
         messages: Vec<LlmMessage>,
         tools: Vec<LlmTool>,
+        options: ChatOptions,
     }
 
     struct ProtocolProvider {
@@ -2022,12 +2029,13 @@ mod tests {
             messages: Vec<LlmMessage>,
             tools: Vec<LlmTool>,
             _max_tokens: u32,
-            _options: ChatOptions,
+            options: ChatOptions,
         ) -> Result<ChunkStream> {
-            self.requests
-                .lock()
-                .unwrap()
-                .push(ProtocolRequest { messages, tools });
+            self.requests.lock().unwrap().push(ProtocolRequest {
+                messages,
+                tools,
+                options,
+            });
             let assistant = self
                 .turns
                 .lock()
@@ -3079,6 +3087,7 @@ mod tests {
                 &mut state,
                 false,
                 &provider,
+                Some("summary-conversation"),
                 &abort,
             )
             .await
@@ -3086,6 +3095,10 @@ mod tests {
         assert_eq!(state.summary.as_deref(), Some("model summary"));
         let requests = provider.requests();
         assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].options.session_id.as_deref(),
+            Some("summary-conversation")
+        );
         assert!(requests[0].tools.is_empty());
         assert_eq!(requests[0].messages.len(), 1);
         assert!(requests[0].messages[0]
@@ -3114,6 +3127,7 @@ mod tests {
                 &mut state,
                 false,
                 &provider,
+                None,
                 &abort,
             )
             .await
@@ -3168,6 +3182,10 @@ mod tests {
         let events = run_protocol_chat(hub.clone(), &conversation_id).await;
         let requests = provider.requests();
         assert_eq!(requests.len(), 1, "simple chat must finish in one turn");
+        assert_eq!(
+            requests[0].options.session_id.as_deref(),
+            Some(conversation_id.as_str())
+        );
         assert!(request_nudges(&requests[0]).is_empty());
         let finish_tools = requests[0]
             .tools
@@ -3227,6 +3245,9 @@ mod tests {
         let events = run_protocol_chat(hub.clone(), &conversation_id).await;
         let requests = provider.requests();
         assert_eq!(requests.len(), 4);
+        assert!(requests.iter().all(|request| {
+            request.options.session_id.as_deref() == Some(conversation_id.as_str())
+        }));
         assert!(request_nudges(&requests[0]).is_empty());
         assert!(request_nudges(&requests[1]).is_empty());
         let first_nudge = request_nudges(&requests[2]);
@@ -4408,6 +4429,7 @@ async fn run_chat_inner(
                 &mut context_compression,
                 true,
                 provider.as_ref(),
+                Some(&conversation_id),
                 &abort,
             )
             .await;
@@ -4484,6 +4506,7 @@ async fn run_chat_inner(
             &mut context_compression,
             force_proactive_compression,
             provider.as_ref(),
+            Some(&conversation_id),
             &abort,
         )
         .await
@@ -4548,6 +4571,7 @@ async fn run_chat_inner(
                     tools_meta.clone(),
                     MAX_TOKENS,
                     ChatOptions {
+                        session_id: Some(conversation_id.clone()),
                         temperature: context
                             .temperature
                             .or_else(|| provider_entry.as_ref().and_then(|entry| entry.temperature)),

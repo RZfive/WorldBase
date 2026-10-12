@@ -22,6 +22,36 @@ async function withServer (handler, run) {
   }
 }
 
+test('OpenCode catalog requests identify the client and keep a session across fallback', async t => {
+  const seen = []
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const headers = new Headers(init.headers)
+    assert.equal(new URL(url).hostname, 'opencode.ai')
+    assert.match(headers.get('user-agent'), /^WorldBase\//)
+    assert.match(headers.get('x-opencode-session'), /^[0-9a-f-]{36}$/)
+    seen.push(headers.get('x-opencode-session'))
+    if (seen.length === 1) return new Response('{"error":{"message":"use x-api-key"}}', { status: 401 })
+    return new Response('{"data":[{"id":"test-model"}]}', { status: 200 })
+  })
+  const input = { baseUrl: 'https://opencode.ai/zen/go/v1', apiKey: 'test-key' }
+  assert.deepEqual(await fetchProviderModels(input), ['test-model'])
+  assert.equal(seen[0], seen[1])
+  await fetchProviderModels(input)
+  assert.notEqual(seen[1], seen[2])
+})
+
+test('catalog requests do not send OpenCode identity to other providers', async t => {
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    const headers = new Headers(init.headers)
+    assert.equal(headers.get('x-opencode-session'), null)
+    assert.equal(headers.get('user-agent'), null)
+    return new Response('{"data":[{"id":"test-model"}]}', { status: 200 })
+  })
+  for (const baseUrl of ['https://api.openai.com/v1', 'https://opencode.ai.example.org/v1']) {
+    await fetchProviderModels({ baseUrl, apiKey: 'test-key' })
+  }
+})
+
 test('buildProviderModelsUrl handles OpenAI and Anthropic version paths', () => {
   assert.equal(buildProviderModelsUrl('https://api.openai.com/v1/', 'openai'), 'https://api.openai.com/v1/models')
   assert.equal(buildProviderModelsUrl('https://api.anthropic.com', 'anthropic'), 'https://api.anthropic.com/v1/models')
