@@ -1,7 +1,10 @@
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use reqwest::{header::RETRY_AFTER, Client, RequestBuilder, Response, StatusCode};
+use reqwest::{
+    header::{HeaderMap, HeaderValue, RETRY_AFTER, USER_AGENT},
+    Client, RequestBuilder, Response, StatusCode, Url,
+};
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -10,6 +13,7 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_ATTEMPTS: usize = 3;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+const CLIENT_USER_AGENT: &str = concat!("WorldBase/", env!("CARGO_PKG_VERSION"));
 
 pub(crate) type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send + 'static>>;
 
@@ -24,6 +28,28 @@ pub(crate) fn client() -> Client {
         .read_timeout(STREAM_IDLE_TIMEOUT)
         .build()
         .expect("static provider HTTP client configuration must be valid")
+}
+
+/// Go uses a stable conversation ID for routing and prompt caching. Build
+/// headers once per operation so retries and protocol fallbacks keep that ID.
+/// Do not disclose conversation IDs to other providers or lookalike hosts.
+/// https://opencode.ai/docs/go/#where-can-i-use-it
+pub(crate) fn session_headers(url: &Url, session_id: Option<&str>) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    if url.host_str() != Some("opencode.ai") {
+        return Ok(headers);
+    }
+    let session = session_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    headers.insert(
+        "x-opencode-session",
+        HeaderValue::from_str(&session).context("invalid provider session ID")?,
+    );
+    headers.insert(USER_AGENT, HeaderValue::from_static(CLIENT_USER_AGENT));
+    Ok(headers)
 }
 
 pub(crate) async fn send_with_retry<F>(provider: &str, request: F) -> Result<Response>
@@ -142,6 +168,22 @@ fn backoff(attempt: usize) -> Duration {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn opencode_session_headers_are_scoped_and_validate_ids() {
+        let url = Url::parse("https://opencode.ai/zen/go/v1/responses").unwrap();
+        assert_eq!(
+            session_headers(&url, Some("conversation-a")).unwrap()["x-opencode-session"],
+            "conversation-a"
+        );
+        assert!(session_headers(&url, Some("bad\r\nheader")).is_err());
+        for host in ["api.openai.com", "opencode.ai.example.org", "example.org"] {
+            let url = Url::parse(&format!("https://{host}/v1")).unwrap();
+            assert!(session_headers(&url, Some("conversation-a"))
+                .unwrap()
+                .is_empty());
+        }
+    }
 
     #[test]
     fn retry_statuses_cover_transient_http_failures_only() {

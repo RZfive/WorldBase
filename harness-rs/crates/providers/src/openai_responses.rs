@@ -216,7 +216,13 @@ impl OpenAIResponsesProvider {
         body
     }
 
-    async fn send_request(&self, url: reqwest::Url, mut body: Value) -> Result<Response> {
+    async fn send_request(
+        &self,
+        url: reqwest::Url,
+        mut body: Value,
+        session_id: Option<&str>,
+    ) -> Result<Response> {
+        let headers = crate::http::session_headers(&url, session_id)?;
         let rejected = self.rejected_optional_parameters.lock().unwrap().clone();
         if let Some(object) = body.as_object_mut() {
             for key in rejected {
@@ -229,6 +235,7 @@ impl OpenAIResponsesProvider {
                 self.client
                     .post(url.clone())
                     .bearer_auth(&self.api_key)
+                    .headers(headers.clone())
                     .json(&body)
             })
             .await?;
@@ -298,7 +305,9 @@ impl Provider for OpenAIResponsesProvider {
     ) -> Result<ChunkStream> {
         let body = self.request_body(system, &messages, &tools, &options);
         let url = crate::urls::responses_url(&self.base_url)?;
-        let resp = self.send_request(url, body).await?;
+        let resp = self
+            .send_request(url, body, options.session_id.as_deref())
+            .await?;
 
         // 累积状态：output_text 增量 + 按 item_id 的 function_call 参数分片。
         struct StreamState {
@@ -554,6 +563,18 @@ impl Provider for OpenAIResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn opencode_responses_sessions_survive_retries_and_turns() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut provider = OpenAIResponsesProvider::new(
+            "test-key".into(),
+            "test-model".into(),
+            Some(format!("http://opencode.ai:{}/zen/go/v1", address.port())),
+        );
+        provider.client = crate::test_support::opencode_client(address);
+        crate::test_support::assert_opencode_sessions(&provider, listener, "/zen/go/v1/responses", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n").await;
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> (String, String) {

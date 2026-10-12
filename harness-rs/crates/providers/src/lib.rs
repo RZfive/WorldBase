@@ -28,6 +28,8 @@ pub mod openai;
 pub mod openai_responses;
 mod remote_models;
 pub mod sse;
+#[cfg(test)]
+mod test_support;
 mod tool_input;
 mod urls;
 
@@ -150,6 +152,9 @@ pub struct LlmTool {
 /// from leaking into another conversation.
 #[derive(Debug, Clone, Default)]
 pub struct ChatOptions {
+    /// Stable conversation identity for provider routing; stays the same
+    /// across turns, tool continuations, retries and context summaries.
+    pub session_id: Option<String>,
     pub temperature: Option<f32>,
     /// Reasoning controls are opt-in. An effort value can remain selected in
     /// the UI while thinking is disabled, so providers must check this flag

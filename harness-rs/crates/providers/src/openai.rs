@@ -579,7 +579,13 @@ impl OpenAIProvider {
         body
     }
 
-    async fn send_compatible_request(&self, url: Url, mut body: Value) -> Result<Response> {
+    async fn send_compatible_request(
+        &self,
+        url: Url,
+        mut body: Value,
+        session_id: Option<&str>,
+    ) -> Result<Response> {
+        let headers = crate::http::session_headers(&url, session_id)?;
         // Compatibility gateways frequently reject one OpenAI extension while
         // supporting the rest of chat/completions. Prefer an explicitly named
         // optional field. Some gateways instead return the generic
@@ -597,6 +603,7 @@ impl OpenAIProvider {
                 self.client
                     .post(url.clone())
                     .bearer_auth(&self.api_key)
+                    .headers(headers.clone())
                     .json(&body)
             })
             .await?;
@@ -824,6 +831,24 @@ impl OpenAIProvider {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn opencode_chat_sessions_survive_retries_and_turns() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut provider = OpenAIProvider::new(
+            "test-key".into(),
+            "test-model".into(),
+            Some(format!("http://opencode.ai:{}/zen/go/v1", address.port())),
+        );
+        provider.client = crate::test_support::opencode_client(address);
+        crate::test_support::assert_opencode_sessions(
+            &provider,
+            listener,
+            "/zen/go/v1/chat/completions",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+        )
+        .await;
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
@@ -911,6 +936,7 @@ mod tests {
                 temperature: None,
                 enable_thinking: false,
                 reasoning_effort: Some("max".into()),
+                ..ChatOptions::default()
             },
         );
         assert_eq!(disabled["temperature"], json!(CODING_TEMPERATURE));
@@ -931,6 +957,7 @@ mod tests {
                 temperature: Some(0.8),
                 enable_thinking: true,
                 reasoning_effort: Some("high".into()),
+                ..ChatOptions::default()
             },
         );
         assert_eq!(enabled["reasoning_effort"], "medium");
@@ -1229,6 +1256,7 @@ mod tests {
                     temperature: None,
                     enable_thinking: false,
                     reasoning_effort: Some("max".into()),
+                    ..ChatOptions::default()
                 },
             )
             .await
@@ -1583,7 +1611,9 @@ impl Provider for OpenAIProvider {
         }
         let body = self.request_body(system, &messages, &tools, &options);
         let url = crate::urls::chat_completions_url(&self.base_url)?;
-        let resp = self.send_compatible_request(url, body).await?;
+        let resp = self
+            .send_compatible_request(url, body, options.session_id.as_deref())
+            .await?;
 
         // 累积状态：content 文本 + 按 index 的 tool_calls 参数分片。
         struct StreamState {

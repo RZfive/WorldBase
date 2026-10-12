@@ -26,6 +26,16 @@ pub struct DetectProtocolResult {
 }
 
 pub async fn detect_protocol(base_url: &str, api_key: &str, model: &str) -> DetectProtocolResult {
+    detect_protocol_with_client(&crate::http::client(), base_url, api_key, model).await
+}
+
+async fn detect_protocol_with_client(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) -> DetectProtocolResult {
+    let session_id = uuid::Uuid::new_v4().to_string();
     let order = [
         ApiProtocol::OpenAiResponses,
         ApiProtocol::OpenAiChat,
@@ -33,7 +43,7 @@ pub async fn detect_protocol(base_url: &str, api_key: &str, model: &str) -> Dete
     ];
     let mut probes = Vec::new();
     for protocol in order {
-        match probe_protocol(protocol, base_url, api_key, model).await {
+        match probe_protocol(client, protocol, base_url, api_key, model, &session_id).await {
             Ok(()) => {
                 probes.push(ProtocolProbe {
                     protocol,
@@ -46,7 +56,7 @@ pub async fn detect_protocol(base_url: &str, api_key: &str, model: &str) -> Dete
             }
             Err(error) => probes.push(ProtocolProbe {
                 protocol,
-                error: Some(error.to_string()),
+                error: Some(format!("{error:#}")),
             }),
         }
     }
@@ -57,10 +67,12 @@ pub async fn detect_protocol(base_url: &str, api_key: &str, model: &str) -> Dete
 }
 
 async fn probe_protocol(
+    client: &reqwest::Client,
     protocol: ApiProtocol,
     base_url: &str,
     api_key: &str,
     model: &str,
+    session_id: &str,
 ) -> Result<()> {
     let base_url = base_url.trim();
     let api_key = api_key.trim();
@@ -94,11 +106,15 @@ async fn probe_protocol(
         ),
     };
 
-    let client = crate::http::client();
     // A probe is a single best-effort attempt: no retry loop, so a dead
     // endpoint costs at most one timeout instead of three retries × three
     // protocols.
-    let mut request = client.post(url).timeout(PROBE_TIMEOUT).json(&body);
+    let headers = crate::http::session_headers(&url, Some(session_id))?;
+    let mut request = client
+        .post(url)
+        .headers(headers)
+        .timeout(PROBE_TIMEOUT)
+        .json(&body);
     request = match protocol {
         ApiProtocol::Anthropic => request
             .header("x-api-key", api_key)
@@ -186,6 +202,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opencode_detection_keeps_one_session_across_protocols() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut sessions = Vec::new();
+            for _ in 0..6 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (head, _) = read_http_request(&mut socket).await;
+                let session = head.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("x-opencode-session")
+                        .then(|| value.trim().to_string())
+                });
+                sessions.push(session.clone());
+                if session.as_deref().unwrap_or_default().is_empty() {
+                    write_response(
+                        &mut socket,
+                        "400 Bad Request",
+                        r#"{"error":{"message":"Request is missing x-opencode-session and cannot be routed efficiently."}}"#,
+                    )
+                    .await;
+                } else if head.starts_with("POST /zen/go/v1/messages") {
+                    assert!(head.to_lowercase().contains("user-agent: worldbase/"));
+                    write_response(&mut socket, "200 OK", r#"{"content":[]}"#).await;
+                } else {
+                    write_response(
+                        &mut socket,
+                        "404 Not Found",
+                        r#"{"error":{"message":"no such endpoint"}}"#,
+                    )
+                    .await;
+                }
+            }
+            sessions
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("opencode.ai", address)
+            .build()
+            .unwrap();
+        let base_url = format!("http://opencode.ai:{}/zen/go/v1", address.port());
+        let first = detect_protocol_with_client(&client, &base_url, "test-key", "test-model").await;
+        let second =
+            detect_protocol_with_client(&client, &base_url, "test-key", "test-model").await;
+        let sessions = server.await.unwrap();
+        assert_eq!(
+            first.detected,
+            Some(ApiProtocol::Anthropic),
+            "{:?}",
+            first.probes.iter().map(|p| &p.error).collect::<Vec<_>>()
+        );
+        assert_eq!(second.detected, Some(ApiProtocol::Anthropic));
+        assert!(sessions[..3].iter().all(|session| session == &sessions[0]));
+        assert!(sessions[3..].iter().all(|session| session == &sessions[3]));
+        assert_ne!(
+            sessions[0], sessions[3],
+            "independent detections need independent sessions"
+        );
+    }
+
+    #[tokio::test]
     async fn prefers_responses_and_sends_only_hi() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -219,6 +296,28 @@ mod tests {
             "later protocols are not probed after a hit"
         );
         assert!(result.probes[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn network_probe_errors_include_the_underlying_cause() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let _ = read_http_request(&mut socket).await;
+                // Close before response headers, matching a failed send.
+            }
+        });
+        let result =
+            detect_protocol(&format!("http://{address}/v1"), "test-key", "test-model").await;
+        server.await.unwrap();
+        assert!(result.detected.is_none());
+        assert!(result.probes.iter().all(|probe| probe
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("probe request failed: ")));
     }
 
     #[tokio::test]

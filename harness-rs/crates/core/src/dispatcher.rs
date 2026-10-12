@@ -4214,6 +4214,7 @@ async fn studio_prompt_optimize(hub: &Arc<Hub>, params: Value) -> Result<Value, 
                 temperature: Some(0.8),
                 enable_thinking: false,
                 reasoning_effort: None,
+                ..worldbase_providers::ChatOptions::default()
             },
         )
         .await
