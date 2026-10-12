@@ -44,7 +44,11 @@ await build({
   external: [
     'electron',
     'sharp',
-    'pnpm'
+    'pnpm',
+    // Native modules must stay runtime-required: their JS loaders resolve
+    // platform binaries (build/Release, prebuilds) relative to the real
+    // node_modules location, which breaks once bundled into dist-electron.
+    'node-pty'
   ],
   target: ['node22'],
   treeShaking: true,

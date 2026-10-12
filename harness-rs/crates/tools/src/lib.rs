@@ -48,7 +48,7 @@ pub use compat_tools::{
     WorkspaceListFilesTool, WorkspacePatchFileTool, WorkspaceReadFileTool, WorkspaceWriteFileTool,
 };
 pub use computer_use::{ComputerActionTool, ComputerObserveTool};
-pub use document::{DocParseTool, DocWriteTool};
+pub use document::{DocDraftTool, DocParseTool, DocWriteTool};
 pub use fs_tools::{
     DeleteFileTool, EditFileTool, ListDirTool, PatchFileTool, ProjectDeleteFileTool,
     ProjectEditFileTool, ProjectListFilesTool, ProjectPatchFileTool, ProjectReadFileTool,
@@ -59,7 +59,10 @@ pub use group_tools::{
     ReplyToUserTool, UpdateBoardTool,
 };
 pub use host_bridge::HostBridge;
-pub use host_tools::{AskUserTool, InteractCurrentPageTool, ReadCurrentPageTool};
+pub use host_tools::{
+    AskUserTool, InteractCurrentPageTool, ReadActiveTerminalTool, ReadCurrentPageTool,
+    WriteActiveTerminalTool,
+};
 pub use lightapp_tool::CreateLightAppTool;
 pub use mcp_tools::{
     dynamic_mcp_tools, McpCallTool, McpGetPromptTool, McpListPromptsTool, McpListResourcesTool,
@@ -601,6 +604,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(TodoWriteTool),
         Arc::new(DocParseTool),
         Arc::new(DocWriteTool),
+        Arc::new(DocDraftTool),
         Arc::new(MemoryAddTool),
         Arc::new(MemorySearchTool),
         Arc::new(MemoryDeleteTool),
@@ -619,6 +623,8 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(AskUserTool),
         Arc::new(ReadCurrentPageTool),
         Arc::new(InteractCurrentPageTool),
+        Arc::new(ReadActiveTerminalTool),
+        Arc::new(WriteActiveTerminalTool),
         Arc::new(ComputerObserveTool),
         Arc::new(ComputerActionTool),
         Arc::new(ProjectListTool),
@@ -919,6 +925,7 @@ mod tests {
             "patch_project_file",
             "patch_workspace_file",
             "query_project_database",
+            "read_active_terminal",
             "read_current_page",
             "read_document",
             "read_project_file",
@@ -932,6 +939,7 @@ mod tests {
             "start_async_task",
             "start_project_server",
             "web_search",
+            "write_active_terminal",
             "write_project_file",
             "write_workspace_file",
         ];

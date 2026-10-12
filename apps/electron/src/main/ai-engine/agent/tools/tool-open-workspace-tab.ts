@@ -11,6 +11,7 @@ interface OpenWorkspaceTabArgs {
   file_path?: string
   url?: string
   active_file_path?: string
+  project_id?: string
 }
 
 export interface Tool {
@@ -22,13 +23,13 @@ export function toolOpenWorkspaceTab (services: ToolServices): Tool {
   return {
     definition: {
       name: 'open_workspace_tab',
-      description: 'Open a tab in the user\'s right-side workspace panel next to the chat. Use kind "folder" with root_path to bind a code directory; kind "document" with file_path to open one document (PDF/Excel/Word/...); kind "browser" with url to open a web page the user can watch and you can operate with the page tools (read_current_page / interact_current_page). The panel stays visible after the reply finishes.',
+      description: 'Open a tab in the user\'s right-side workspace panel next to the chat. Use kind "folder" with root_path to bind a code directory; kind "document" with file_path to open one document (PDF/Excel/Word/...); kind "browser" with url to open a web page the user can watch and you can operate with the page tools (read_current_page / interact_current_page); kind "terminal" to open a shell terminal you can operate with read_active_terminal / write_active_terminal; kind "project" with project_id to open one of the user\'s developed apps (you can operate its UI with the page tools). The panel stays visible after the reply finishes.',
       parameters: {
         type: 'object',
         properties: {
           kind: {
             type: 'string',
-            enum: ['folder', 'document', 'browser'],
+            enum: ['folder', 'document', 'browser', 'terminal', 'project'],
             description: 'Which workspace tab to open.'
           },
           root_path: {
@@ -42,6 +43,10 @@ export function toolOpenWorkspaceTab (services: ToolServices): Tool {
           url: {
             type: 'string',
             description: 'browser only: URL to load in the embedded browser tab.'
+          },
+          project_id: {
+            type: 'string',
+            description: 'project only: id of one of the user\'s developed apps (from list_projects). Its UI opens in the workspace panel.'
           },
           active_file_path: {
             type: 'string',
@@ -57,10 +62,11 @@ export function toolOpenWorkspaceTab (services: ToolServices): Tool {
         root_path: rootPath,
         file_path: filePath,
         url,
-        active_file_path: activeFilePath
+        active_file_path: activeFilePath,
+        project_id: projectId
       } = args as unknown as OpenWorkspaceTabArgs
-      if (kind !== 'folder' && kind !== 'document' && kind !== 'browser') {
-        throw new Error('open_workspace_tab: kind must be "folder", "document" or "browser"')
+      if (kind !== 'folder' && kind !== 'document' && kind !== 'browser' && kind !== 'terminal' && kind !== 'project') {
+        throw new Error('open_workspace_tab: kind must be "folder", "document", "browser", "terminal" or "project"')
       }
 
       const mainWindow = services.getMainWindow?.()
@@ -79,6 +85,7 @@ export function toolOpenWorkspaceTab (services: ToolServices): Tool {
       if (typeof filePath === 'string' && filePath.trim()) payload.filePath = filePath.trim()
       if (typeof url === 'string' && url.trim()) payload.url = url.trim()
       if (typeof activeFilePath === 'string' && activeFilePath.trim()) payload.activeFilePath = activeFilePath.trim()
+      if (typeof projectId === 'string' && projectId.trim()) payload.projectId = projectId.trim()
 
       onProgress?.('Opening workspace panel...', `${kind}`)
       mainWindow.webContents.send('workspace:openTab', {

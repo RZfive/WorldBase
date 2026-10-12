@@ -80,6 +80,13 @@ pub const DOC_PREVIEW_READ: &str = "doc.preview.read";
 pub const DOC_OPEN_ORIGINAL: &str = "doc.openOriginal";
 pub const DOC_REMOVE: &str = "doc.remove";
 pub const DOC_EDIT_SOURCE: &str = "doc.editSource";
+/// AI draft lifecycle for the desktop document workbench.  Staging happens
+/// through the `doc_draft` Agent tool; these methods let the desktop host
+/// apply / export / discard the pending draft after the user decides.
+pub const DOC_DRAFT_APPLY: &str = "doc.draft.apply";
+pub const DOC_DRAFT_SAVE_AS: &str = "doc.draft.saveAs";
+pub const DOC_DRAFT_DISCARD: &str = "doc.draft.discard";
+pub const DOC_DRAFT_GET: &str = "doc.draft.get";
 /// Durable document-selection APIs shared by Electron's document workbench
 /// and the Flutter client.  The artifact itself is created by `doc.parse` or
 /// the document tools; these methods only manage its user-created regions.

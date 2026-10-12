@@ -186,6 +186,7 @@ app.on('before-quit', (event) => {
 
   void (async () => {
     try {
+      mainState.terminalManager?.disposeAll()
       if (mainState.lanServer) {
         await mainState.lanServer.stop()
       }

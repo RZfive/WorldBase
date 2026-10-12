@@ -3,6 +3,8 @@ import { normalizeDocumentFileKey, workspaceStore } from './workspace-store'
 import FolderWorkspaceTab from './tabs/FolderWorkspaceTab.vue'
 import DocumentFileTab from './tabs/DocumentFileTab.vue'
 import BrowserWorkspaceTab from './tabs/BrowserWorkspaceTab.vue'
+import TerminalWorkspaceTab from './tabs/TerminalWorkspaceTab.vue'
+import ProjectAppWorkspaceTab from './tabs/ProjectAppWorkspaceTab.vue'
 
 /**
  * Built-in workspace tab kinds. Folder keeps its conversation binding in the
@@ -30,6 +32,20 @@ const BROWSER_ICON = `
   <path d="M12 2.5c-2.7 2.6-4.2 6-4.2 9.5s1.5 6.9 4.2 9.5c2.7-2.6 4.2-6 4.2-9.5s-1.5-6.9-4.2-9.5Z" fill="none" stroke="currentColor" stroke-width="2"/>
 `
 
+const TERMINAL_ICON = `
+  <path d="M4 5.5h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+  <path d="m7 10 2.2 2L7 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M11.5 14.5h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+`
+
+const PROJECT_APP_ICON = `
+  <rect x="3.5" y="4" width="17" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/>
+  <path d="M3.5 9h17" fill="none" stroke="currentColor" stroke-width="2"/>
+  <circle cx="7" cy="6.5" r="0.9" fill="currentColor"/>
+  <circle cx="10" cy="6.5" r="0.9" fill="currentColor"/>
+  <path d="m10.5 13-1.8 1.8 1.8 1.8M14 16.5h1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+`
+
 function normalizeUrlKey (value: unknown): string {
   if (typeof value !== 'string') return ''
   try {
@@ -39,6 +55,11 @@ function normalizeUrlKey (value: unknown): string {
   } catch {
     return value.trim().replace(/\/+$/, '')
   }
+}
+
+function normalizeCwdKey (value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return value.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 }
 
 let registered = false
@@ -81,6 +102,7 @@ export function ensureBuiltinWorkspaceTabsRegistered (): void {
     matches: (tab, payload) => normalizeDocumentFileKey(tab.state?.filePath as string | undefined)
       === normalizeDocumentFileKey(payload?.filePath as string | undefined),
     getActions: () => [
+      { id: 'insertDocumentContextTag', labelKey: 'chatUi.workspaceActionQuoteToChat' },
       { id: 'openOriginalFile', labelKey: 'chatUi.openOriginalFile' },
       { id: 'copyFilePath', labelKey: 'chatUi.workspaceActionCopyPath' }
     ]
@@ -96,6 +118,50 @@ export function ensureBuiltinWorkspaceTabsRegistered (): void {
     defaultWidth: 1100,
     component: BrowserWorkspaceTab,
     matches: (tab, payload) => normalizeUrlKey(tab.state?.url) === normalizeUrlKey(payload?.url),
+    getActions: () => [
+      { id: 'reload', labelKey: 'chatUi.workspaceActionReload' },
+      { id: 'copyUrl', labelKey: 'chatUi.workspaceActionCopyUrl' },
+      { id: 'aiOperate', labelKey: 'chatUi.workspaceActionAiOperate' }
+    ]
+  })
+
+  registerWorkspaceTab({
+    kind: 'terminal',
+    titleKey: 'chatUi.workspaceTabTerminal',
+    icon: TERMINAL_ICON,
+    singleton: false,
+    minWidth: 420,
+    maxWidth: 1320,
+    defaultWidth: 760,
+    component: TerminalWorkspaceTab,
+    matches: (tab, payload) => {
+      const tabCwd = normalizeCwdKey(tab.state?.cwd)
+      const payloadCwd = normalizeCwdKey(payload?.cwd)
+      // Two payload-less terminals are the "default" terminal - dedupe them.
+      if (!tabCwd && !payloadCwd) return true
+      return Boolean(tabCwd) && tabCwd === payloadCwd
+    },
+    getActions: () => [
+      { id: 'clear', labelKey: 'chatUi.terminalActionClear' },
+      { id: 'copyOutput', labelKey: 'chatUi.terminalActionCopyOutput' },
+      { id: 'aiOperate', labelKey: 'chatUi.workspaceActionAiOperate' }
+    ]
+  })
+
+  registerWorkspaceTab({
+    kind: 'project',
+    titleKey: 'chatUi.workspaceTabProject',
+    icon: PROJECT_APP_ICON,
+    singleton: false,
+    minWidth: 520,
+    maxWidth: 1800,
+    defaultWidth: 1100,
+    component: ProjectAppWorkspaceTab,
+    matches: (tab, payload) => {
+      const tabProject = typeof tab.state?.projectId === 'string' ? tab.state.projectId : ''
+      const payloadProject = typeof payload?.projectId === 'string' ? payload.projectId : ''
+      return Boolean(tabProject) && tabProject === payloadProject
+    },
     getActions: () => [
       { id: 'reload', labelKey: 'chatUi.workspaceActionReload' },
       { id: 'copyUrl', labelKey: 'chatUi.workspaceActionCopyUrl' },

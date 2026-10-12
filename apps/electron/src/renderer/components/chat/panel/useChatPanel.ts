@@ -442,6 +442,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const { sendMessage, stopCurrentStream } = createChatMessageSender({
     t,
     getActivePageContext: () => props.activePageContext,
+    getActiveTerminalContext: () => props.activeTerminalContext,
     messages,
     inputText,
     currentConversationId,

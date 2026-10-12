@@ -10,6 +10,7 @@ import type {
   DocumentSummary,
   CreateSelectionPayload
 } from './document-types.js'
+import { buildDocfileContextPrompt } from '../../../../shared/document-context-tag.js'
 
 interface DocumentChunkEntry {
   nodeId: string
@@ -171,6 +172,22 @@ export class DocumentStore {
     return refs.map(ref => {
       return `【文档选区：${ref.fileName} — ${ref.label}】\n${ref.selectedText}\n【选区结束】`
     }).join('\n\n')
+  }
+
+  /**
+   * Build the full-text prompt for `[[docfile:]]` references so the model can
+   * rewrite a referenced document without a separate read round trip.
+   */
+  buildFileContextPrompt (artifactIds: string[]): string {
+    const entries = (artifactIds || [])
+      .map(id => this.artifacts.get(id))
+      .filter((artifact): artifact is DocumentArtifact => Boolean(artifact))
+      .map(artifact => ({
+        fileName: artifact.fileName,
+        fileType: artifact.fileType,
+        plainText: artifact.plainText
+      }))
+    return buildDocfileContextPrompt(entries)
   }
 
   /** Get the full text of a specific artifact (for agent tools). */

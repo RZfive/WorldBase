@@ -52,6 +52,14 @@ export const workspaceStore = {
 /** Live automation surfaces of mounted browser tabs, keyed by tab id. */
 export const workspaceBrowserSurfaces = reactive(new Map<string, WorkspaceBrowserSurface>())
 
+/** Live terminal surfaces of mounted terminal tabs, keyed by tab id. */
+export interface WorkspaceTerminalSurface {
+  sessionId: string
+  cwd: string
+}
+
+export const workspaceTerminalSurfaces = reactive(new Map<string, WorkspaceTerminalSurface>())
+
 // ---------------------------------------------------------------------------
 // Document tab helpers (one document per tab; binding derives from the tabs)
 // ---------------------------------------------------------------------------
@@ -234,6 +242,13 @@ export function removeWorkspaceTab (tabId: string): WorkspaceTabInstance | null 
   // state needs an explicit reset.
   if (tab.kind === 'folder') resetFolderWorkspaceState()
   workspaceBrowserSurfaces.delete(tabId)
+  if (tab.kind === 'terminal') {
+    const sessionId = tab.state?.sessionId
+    if (typeof sessionId === 'string' && window.electronAPI?.killTerminalSession) {
+      void window.electronAPI.killTerminalSession(sessionId)
+    }
+    workspaceTerminalSurfaces.delete(tabId)
+  }
 
   if (workspaceStore.activeTabId.value === tabId) {
     workspaceStore.activeTabId.value = workspaceStore.tabs.value[workspaceStore.tabs.value.length - 1]?.id ?? null
@@ -379,6 +394,43 @@ export function resetWorkspaceState (): void {
 }
 
 // ---------------------------------------------------------------------------
+// AI document drafts (authoritative state lives in the Rust harness; this is
+// the UI mirror that routes workspace tabs into draft preview mode)
+// ---------------------------------------------------------------------------
+
+export interface WorkspaceDocumentDraft {
+  artifactId: string
+  filePath: string
+  draftPath: string
+  fileType: string
+  sourceSha256: string
+  createdAt: string
+}
+
+const documentDrafts = ref(new Map<string, WorkspaceDocumentDraft>())
+
+export function getWorkspaceDocumentDraft (filePath?: string | null): WorkspaceDocumentDraft | null {
+  const key = normalizeDocumentFileKey(filePath)
+  return (key && documentDrafts.value.get(key)) || null
+}
+
+export function stageWorkspaceDocumentDraft (payload: WorkspaceDocumentDraft): boolean {
+  const key = normalizeDocumentFileKey(payload.filePath)
+  if (!key) return false
+  documentDrafts.value.set(key, payload)
+  // Reassign so computed readers of the Map observe the change.
+  documentDrafts.value = new Map(documentDrafts.value)
+  return true
+}
+
+export function clearWorkspaceDocumentDraft (filePath?: string | null): void {
+  const key = normalizeDocumentFileKey(filePath)
+  if (!key || !documentDrafts.value.has(key)) return
+  documentDrafts.value.delete(key)
+  documentDrafts.value = new Map(documentDrafts.value)
+}
+
+// ---------------------------------------------------------------------------
 // Restore prefetch
 // ---------------------------------------------------------------------------
 
@@ -468,7 +520,8 @@ async function buildDocumentWorkspaceContextPrompt (): Promise<string | null> {
       ? '- The user currently has a document tab open in this conversation.'
       : '- This conversation has document workspace files bound from an earlier workspace state.',
     '- If the user asks about "the document", "the opened file", "the workbench document", or similar phrasing, treat the files below as the relevant document context.',
-    '- Use `list_documents` to verify available imported artifacts when needed, then `read_document` with the matching artifact_id to inspect document content. Do not claim no document is available before checking this context and the document tools.'
+    '- Use `list_documents` to verify available imported artifacts when needed, then `read_document` with the matching artifact_id to inspect document content. Do not claim no document is available before checking this context and the document tools.',
+    '- To modify a document at the user\'s request, ALWAYS call the `doc_draft` tool with the complete rewritten content (kind must match the file format: markdown/text/docx/xlsx/pptx). It stages a draft the user previews live in the workspace and then decides to save onto the original or to save as a copy. NEVER overwrite document files directly with write tools.'
   ]
 
   lines.push('Current document workspace files:')

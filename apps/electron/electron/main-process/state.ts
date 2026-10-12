@@ -32,6 +32,7 @@ import type { DocumentStore } from '../../src/main/ai-engine/agent/tools/documen
 import type { AsyncTaskManager } from '../../src/main/ai-engine/agent/tools/async-task-manager.js'
 import type { MCPService } from '../../src/main/mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
+import type { TerminalManager } from './terminal/terminal-manager.js'
 import type { LongTermGoalService } from '../../src/main/long-term-goals/long-term-goal-service.js'
 import type { DailySuggestionStore } from '../../src/main/settings/daily-suggestion-store.js'
 import type { DailySuggestionService } from '../../src/main/suggestions/daily-suggestion-service.js'
@@ -114,6 +115,7 @@ export const mainState = {
   usageStore: null as UsageStore | null,
   pendingStudioImageTasks: [] as ImageStudioGenerateRequest[],
   mcpService: null as MCPService | null,
+  terminalManager: null as TerminalManager | null,
   isClosingMainWindow: false,
   isQuitCleanupRunning: false,
   hasFinishedQuitCleanup: false

@@ -182,6 +182,10 @@ pub async fn dispatch(
         DOC_OPEN_ORIGINAL => doc_open_original(hub, params).await,
         DOC_REMOVE => doc_remove(hub, params),
         DOC_EDIT_SOURCE => doc_edit_source(hub, params),
+        DOC_DRAFT_APPLY => doc_draft_apply(hub, params),
+        DOC_DRAFT_SAVE_AS => doc_draft_save_as(hub, params),
+        DOC_DRAFT_DISCARD => doc_draft_discard(hub, params),
+        DOC_DRAFT_GET => doc_draft_get(hub, params),
         DOC_SELECTION_LIST => doc_selection_list(hub, params),
         DOC_SELECTION_CREATE => doc_selection_create(hub, params),
         DOC_SELECTION_UPDATE => doc_selection_update(hub, params),
@@ -3167,6 +3171,48 @@ fn doc_remove(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 fn doc_edit_source(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let id = document_id_param(&params)?;
     worldbase_tools::document_artifacts::edit_source_state(&hub.workspace, id).map_err(internal)
+}
+
+fn doc_draft_apply(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = document_id_param(&params)?;
+    let expected_sha = optional_string_param_strict(
+        &params,
+        &["sourceSha256", "source_sha256"],
+        "sourceSha256",
+    )?;
+    worldbase_tools::document_artifacts::apply_document_draft(
+        &hub.workspace,
+        id,
+        expected_sha.as_deref(),
+    )
+    .map_err(internal)
+}
+
+fn doc_draft_save_as(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = document_id_param(&params)?;
+    let target = required_string_param(&params, &["targetPath", "target_path"], "targetPath")?;
+    let target_path = Path::new(target);
+    let resolved = if target_path.is_absolute() {
+        target_path.to_path_buf()
+    } else {
+        hub.workspace.join(target_path)
+    };
+    worldbase_tools::document_artifacts::save_document_draft_as(&hub.workspace, id, &resolved)
+        .map_err(internal)
+}
+
+fn doc_draft_discard(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = document_id_param(&params)?;
+    worldbase_tools::document_artifacts::discard_document_draft(&hub.workspace, id)
+        .map_err(internal)
+}
+
+fn doc_draft_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let file_path = required_string_param(&params, &["filePath", "file_path"], "filePath")?;
+    // Desktop-host-only helper: returns absolute paths so Electron can import
+    // the draft file for preview. Mobile clients have no use for drafts.
+    worldbase_tools::document_artifacts::get_document_draft(&hub.workspace, file_path)
+        .map_err(internal)
 }
 
 fn doc_selection_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {

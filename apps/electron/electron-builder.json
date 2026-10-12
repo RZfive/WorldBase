@@ -13,7 +13,8 @@
   "asarUnpack": [
     "**/node_modules/sharp/**",
     "**/node_modules/@img/**",
-    "**/node_modules/pnpm/**"
+    "**/node_modules/pnpm/**",
+    "**/node_modules/node-pty/**"
   ],
   "extraResources": [
     {

@@ -599,6 +599,132 @@ fn page_interaction_output(action_result: Value, snapshot: Value) -> Value {
     output
 }
 
+// -------------------------------------------------------------------------
+// Active terminal (shared PTY with the user's workspace terminal tab)
+
+const TERMINAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub struct ReadActiveTerminalTool;
+
+#[async_trait]
+impl Tool for ReadActiveTerminalTool {
+    fn name(&self) -> &str {
+        "read_active_terminal"
+    }
+    fn description(&self) -> &str {
+        "读取用户当前激活的工作区终端会话（工作目录 + 清洗后的屏幕输出尾部）"
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "lines": {
+                    "type": "integer",
+                    "description": "Keep only the last N non-empty output lines."
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Clamp the returned text to this many characters (tail)."
+                }
+            }
+        })
+    }
+    fn domain(&self) -> &str {
+        "host"
+    }
+    fn electron_native(&self) -> bool {
+        true
+    }
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let lines = optional_u64(&input, "lines")?;
+        let max_chars = optional_u64(&input, "max_chars")?;
+        let stream = services.current_stream.lock().unwrap().clone();
+        let mut payload = json!({ "action": "read" });
+        if let Some(lines) = lines {
+            payload["lines"] = json!(lines);
+        }
+        if let Some(max_chars) = max_chars {
+            payload["maxChars"] = json!(max_chars);
+        }
+        tools_host_bridge(services)
+            .request(&stream, "terminal_automation", payload, TERMINAL_TIMEOUT)
+            .await
+    }
+}
+
+pub struct WriteActiveTerminalTool;
+
+#[async_trait]
+impl Tool for WriteActiveTerminalTool {
+    fn name(&self) -> &str {
+        "write_active_terminal"
+    }
+    fn description(&self) -> &str {
+        "向用户当前激活的工作区终端写入内容。execute=true 时作为命令执行（追加回车），wait_ms 后返回增量输出。命令会实时显示在用户终端里。"
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Text to type into the terminal; with execute=true a command line."
+                },
+                "execute": {
+                    "type": "boolean",
+                    "description": "Append a carriage return so the shell runs the line (default true)."
+                },
+                "wait_ms": {
+                    "type": "integer",
+                    "description": "Wait this long after writing, then return the incremental output (0-10000)."
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Clamp the returned incremental output to this many characters (tail)."
+                }
+            },
+            "required": ["text"]
+        })
+    }
+    fn domain(&self) -> &str {
+        "host"
+    }
+    fn permission(&self) -> &str {
+        "ask"
+    }
+    fn electron_native(&self) -> bool {
+        true
+    }
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let text = input
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("text must be a string"))?;
+        anyhow::ensure!(
+            !text.is_empty(),
+            "text must not be empty"
+        );
+        let execute = input.get("execute").and_then(Value::as_bool).unwrap_or(true);
+        let wait_ms = optional_u64(&input, "wait_ms")?.unwrap_or(1_500).min(10_000);
+        let max_chars = optional_u64(&input, "max_chars")?;
+        let stream = services.current_stream.lock().unwrap().clone();
+        let mut payload = json!({
+            "action": "write",
+            "text": text,
+            "execute": execute,
+            "waitMs": wait_ms
+        });
+        if let Some(max_chars) = max_chars {
+            payload["maxChars"] = json!(max_chars);
+        }
+        // Writes may wait for output; give the host headroom over wait_ms.
+        let timeout = TERMINAL_TIMEOUT + Duration::from_millis(wait_ms);
+        tools_host_bridge(services)
+            .request(&stream, "terminal_automation", payload, timeout)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

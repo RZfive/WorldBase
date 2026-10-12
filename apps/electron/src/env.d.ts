@@ -11,6 +11,13 @@ type AppUpdateWebsiteKind = import('./shared/app-update-types.js').AppUpdateWebs
 type PageAutomationRequestEnvelope = import('./shared/page-automation-types.js').PageAutomationRequestEnvelope
 type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js').PageAutomationResponseEnvelope
 type BrowserPageContextMenuPayload = import('./shared/page-automation-types.js').BrowserPageContextMenuPayload
+type TerminalSessionCreateOptions = import('./shared/terminal-types.js').TerminalSessionCreateOptions
+type TerminalSessionInfo = import('./shared/terminal-types.js').TerminalSessionInfo
+type TerminalSnapshot = import('./shared/terminal-types.js').TerminalSnapshot
+type TerminalSnapshotRequest = import('./shared/terminal-types.js').TerminalSnapshotRequest
+type TerminalDataEvent = import('./shared/terminal-types.js').TerminalDataEvent
+type TerminalExitEvent = import('./shared/terminal-types.js').TerminalExitEvent
+type ActiveTerminalContext = import('./shared/terminal-types.js').ActiveTerminalContext
 type ImageStudioGenerateRequest = import('./shared/image-studio-types.js').ImageStudioGenerateRequest
 type ImageStudioGenerateResponse = import('./shared/image-studio-types.js').ImageStudioGenerateResponse
 type ImageStudioTask = import('./shared/image-studio-types.js').ImageStudioTask
@@ -1069,7 +1076,7 @@ interface DocumentSummaryDTO {
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -1309,6 +1316,14 @@ interface ElectronAPI {
   getDocumentRenderData: (artifactId: string) => Promise<{ mimeType: string; bytes: Uint8Array } | null>
   openDocumentOriginal: (artifactId: string) => Promise<{ success: boolean; supported?: boolean; error?: string }>
   removeDocument: (artifactId: string) => Promise<boolean>
+  // AI draft lifecycle (state owned by the Rust harness)
+  applyDocumentDraft: (payload: { artifactId: string; sourceSha256?: string }) => Promise<{ artifact: unknown; backupPath?: string }>
+  saveDocumentDraftAs: (payload: { artifactId: string; defaultName?: string }) => Promise<{ canceled: boolean; filePath?: string; artifact?: unknown }>
+  discardDocumentDraft: (artifactId: string) => Promise<{ discarded: boolean }>
+  getDocumentDraft: (filePath: string) => Promise<{ artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string } | null>
+  refreshDocumentFromDisk: (filePath: string) => Promise<{ artifact: DocumentArtifactDTO }>
+  buildDocumentFileContextPrompt: (artifactIds: string[]) => Promise<string>
+  onWorkspaceDocumentDraft: (callback: (payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }) => void) => () => void
   createDocumentSelection: (payload: { artifactId: string; nodeIds: string[]; label: string; color: string; excerpt?: string }) => Promise<DocumentSelectionDTO>
   removeDocumentSelection: (regionId: string) => Promise<boolean>
   updateDocumentSelectionLabel: (regionId: string, label: string) => Promise<DocumentSelectionDTO | null>
@@ -1323,6 +1338,16 @@ interface ElectronAPI {
   listFolderWorkspaceFiles: (rootPath: string) => Promise<FolderWorkspaceListResult>
   readFolderWorkspaceFile: (rootPath: string, filePath: string) => Promise<FolderWorkspaceReadResult>
   onFolderWorkspaceChanged: (callback: (event: FolderWorkspaceChangeEvent) => void) => () => void
+
+  // Terminal sessions (workspace terminal tabs)
+  createTerminalSession: (options: TerminalSessionCreateOptions) => Promise<TerminalSessionInfo>
+  writeTerminalSession: (sessionId: string, data: string) => Promise<{ ok: boolean }>
+  resizeTerminalSession: (sessionId: string, cols: number, rows: number) => Promise<{ ok: boolean }>
+  killTerminalSession: (sessionId: string) => Promise<{ ok: boolean }>
+  snapshotTerminalSession: (sessionId: string, request?: TerminalSnapshotRequest) => Promise<TerminalSnapshot>
+  setActiveTerminalSession: (sessionId: string | null) => Promise<{ ok: boolean }>
+  onTerminalData: (sessionId: string, callback: (event: TerminalDataEvent) => void) => () => void
+  onTerminalExit: (sessionId: string, callback: (event: TerminalExitEvent) => void) => () => void
 
   // Daily suggestions (chat empty state)
   getDailySuggestionSnapshot: () => Promise<DailySuggestionSnapshot>

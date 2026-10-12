@@ -2,7 +2,13 @@
 import { computed, nextTick, onActivated, onDeactivated, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DocumentRenderHost from '../../chat/blocks/DocumentRenderHost.vue'
-import { normalizeDocumentFileKey } from '../workspace-store'
+import {
+  clearWorkspaceDocumentDraft,
+  ensureWorkspaceTab,
+  getWorkspaceDocumentDraft,
+  normalizeDocumentFileKey,
+  stageWorkspaceDocumentDraft
+} from '../workspace-store'
 import type { WorkspaceTabInstance } from '../tab-registry'
 
 type DocumentArtifact = DocumentArtifactDTO
@@ -83,7 +89,8 @@ const canvasStyle = computed(() => ({
 }))
 
 const hasRenderableDocument = computed(() => (
-  documentSummary.value.status === 'ready' && Boolean(activeArtifact.value)
+  (documentSummary.value.status === 'ready' && Boolean(activeArtifact.value)) ||
+  Boolean(draft.value && draftArtifact.value)
 ))
 
 function clampZoom (value: number): number {
@@ -415,6 +422,156 @@ async function copyFilePath (): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// AI draft preview (draft state owned by the Rust harness; UI mirrors it)
+// ---------------------------------------------------------------------------
+
+const draft = computed(() => getWorkspaceDocumentDraft(filePath))
+const draftArtifact = ref<DocumentArtifact | null>(null)
+const draftBusy = ref(false)
+const draftError = ref('')
+const draftNotice = ref('')
+let draftToken = 0
+
+/** The tab previews the draft while one is pending, otherwise the original. */
+const previewArtifact = computed(() => (draft.value ? draftArtifact.value : activeArtifact.value))
+
+const draftTimeLabel = computed(() => {
+  if (!draft.value) return ''
+  const date = new Date(draft.value.createdAt)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString()
+})
+
+watch(draft, (value) => {
+  const token = ++draftToken
+  draftNotice.value = ''
+  if (!value) {
+    draftError.value = ''
+    draftArtifact.value = null
+    return
+  }
+
+  void (async () => {
+    const api = window.electronAPI
+    if (!api?.importDocument) {
+      draftError.value = t('chatUi.documentDraftLoadFailed')
+      return
+    }
+    draftError.value = ''
+    const previousDraftId = draftArtifact.value?.id
+    try {
+      const { artifact } = await api.importDocument(value.draftPath)
+      if (token !== draftToken) return
+      draftArtifact.value = artifact
+      if (previousDraftId && previousDraftId !== artifact.id && api.removeDocument) {
+        // Draft re-imports are throwaway workbench entries; drop the stale one.
+        void api.removeDocument(previousDraftId).catch(() => {})
+      }
+      if (!artifact.render || artifact.render.status !== 'ready') {
+        const updated = await api.ensureDocumentRenderPreview(artifact.id)
+        if (token === draftToken && updated) draftArtifact.value = updated
+      }
+    } catch (error) {
+      if (token !== draftToken) return
+      draftArtifact.value = null
+      draftError.value = (error as Error).message || t('chatUi.documentDraftLoadFailed')
+    }
+  })()
+}, { immediate: true })
+
+async function applyDraftToSource (): Promise<void> {
+  const current = draft.value
+  if (!current || draftBusy.value || !window.electronAPI?.applyDocumentDraft) return
+  draftBusy.value = true
+  draftError.value = ''
+  draftNotice.value = ''
+  try {
+    await window.electronAPI.applyDocumentDraft({
+      artifactId: current.artifactId,
+      sourceSha256: current.sourceSha256
+    })
+    const { artifact } = await window.electronAPI.refreshDocumentFromDisk(filePath)
+    clearWorkspaceDocumentDraft(filePath)
+    if (artifact) {
+      activeArtifact.value = artifact
+      documentSummary.value = {
+        ...documentSummary.value,
+        artifactId: artifact.id,
+        fileType: artifact.fileType,
+        fileSize: artifact.fileSize,
+        status: 'ready',
+        error: undefined
+      }
+    }
+    draftNotice.value = t('chatUi.documentDraftApplied')
+  } catch (error) {
+    draftError.value = (error as Error).message || t('chatUi.documentDraftActionFailed')
+  } finally {
+    draftBusy.value = false
+  }
+}
+
+async function saveDraftAsCopy (): Promise<void> {
+  const current = draft.value
+  if (!current || draftBusy.value || !window.electronAPI?.saveDocumentDraftAs) return
+  draftBusy.value = true
+  draftError.value = ''
+  draftNotice.value = ''
+  try {
+    const result = await window.electronAPI.saveDocumentDraftAs({
+      artifactId: current.artifactId,
+      defaultName: fileName
+    })
+    if (!result.canceled && result.filePath) {
+      clearWorkspaceDocumentDraft(filePath)
+      draftNotice.value = t('chatUi.documentDraftSavedAs')
+      const copyName = result.filePath.split(/[\\/]/).filter(Boolean).pop() || result.filePath
+      const opened = ensureWorkspaceTab('document', { filePath: result.filePath, fileName: copyName })
+      if (opened) opened.tab.title = copyName
+    }
+  } catch (error) {
+    draftError.value = (error as Error).message || t('chatUi.documentDraftActionFailed')
+  } finally {
+    draftBusy.value = false
+  }
+}
+
+async function discardDraft (): Promise<void> {
+  const current = draft.value
+  if (!current || draftBusy.value || !window.electronAPI?.discardDocumentDraft) return
+  draftBusy.value = true
+  draftError.value = ''
+  draftNotice.value = ''
+  try {
+    await window.electronAPI.discardDocumentDraft(current.artifactId)
+    clearWorkspaceDocumentDraft(filePath)
+  } catch (error) {
+    draftError.value = (error as Error).message || t('chatUi.documentDraftActionFailed')
+  } finally {
+    draftBusy.value = false
+  }
+}
+
+/** Surfaces a pending draft again after an app restart / conversation switch. */
+async function restorePendingDraft (): Promise<void> {
+  if (!window.electronAPI?.getDocumentDraft) return
+  try {
+    const record = await window.electronAPI.getDocumentDraft(filePath)
+    if (record && getWorkspaceDocumentDraft(filePath) === null) {
+      stageWorkspaceDocumentDraft(record)
+    }
+  } catch {
+    // Harness unavailable or no draft: silent, the original preview stays.
+  }
+}
+
+/** Inserts a whole-document reference the chat resolves into full text context. */
+function insertDocumentContextTag (): void {
+  const artifactId = documentSummary.value.artifactId
+  if (!artifactId) return
+  emit('insertSelectionTag', `[[docfile:${artifactId}|${fileName}]]`)
+}
+
 watch(
   () => props.tab.state,
   () => {
@@ -435,6 +592,7 @@ onActivated(() => {
   if (documentSummary.value.status === 'resolving' || !documentSummary.value.artifactId) {
     void resolveDocumentArtifact()
   }
+  void restorePendingDraft()
 })
 
 onDeactivated(() => {
@@ -447,7 +605,8 @@ onBeforeUnmount(() => {
 
 defineExpose({
   openOriginalFile,
-  copyFilePath
+  copyFilePath,
+  insertDocumentContextTag
 })
 </script>
 
@@ -456,10 +615,10 @@ defineExpose({
     <div class="doc-preview-stack">
       <div ref="viewportRef" class="doc-viewport" :class="{ 'pdf-active': documentSummary.fileType === 'pdf' }">
         <div ref="canvasRef" class="doc-canvas" :style="canvasStyle">
-          <template v-if="hasRenderableDocument && activeArtifact">
+          <template v-if="hasRenderableDocument && previewArtifact">
             <div class="doc-paper">
               <DocumentRenderHost
-                :artifact="activeArtifact"
+                :artifact="previewArtifact"
                 :selections="activeSelections"
                 @highlight-selection="handleHighlightSelection"
               />
@@ -508,6 +667,27 @@ defineExpose({
         <span v-if="importError" class="doc-context-error" :title="importError">{{ importError }}</span>
       </div>
 
+      <!-- Pending AI draft: floating decision bar above the previewed draft file. -->
+      <div v-if="draft" class="doc-draft-banner" role="status">
+        <div class="doc-draft-head">
+          <span class="doc-draft-badge">{{ $t('chatUi.documentDraftBadge') }}</span>
+          <span class="doc-draft-meta">{{ $t('chatUi.documentDraftMeta') }}<template v-if="draftTimeLabel"> · {{ draftTimeLabel }}</template></span>
+        </div>
+        <div v-if="draftError" class="doc-draft-error">{{ draftError }}</div>
+        <div v-else-if="draftNotice" class="doc-draft-notice">{{ draftNotice }}</div>
+        <div class="doc-draft-actions">
+          <button class="doc-draft-btn primary" type="button" :disabled="draftBusy" @click="applyDraftToSource">
+            {{ $t('chatUi.documentDraftApply') }}
+          </button>
+          <button class="doc-draft-btn" type="button" :disabled="draftBusy" @click="saveDraftAsCopy">
+            {{ $t('chatUi.documentDraftSaveAs') }}
+          </button>
+          <button class="doc-draft-btn ghost" type="button" :disabled="draftBusy" @click="discardDraft">
+            {{ $t('chatUi.documentDraftDiscard') }}
+          </button>
+        </div>
+      </div>
+
       <div class="doc-zoom-cluster">
         <button class="doc-zoom-btn" type="button" :title="$t('chatUi.workspaceZoomOut')" @click="zoomOut">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -545,6 +725,107 @@ defineExpose({
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+.doc-draft-banner {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 8;
+  width: min(560px, calc(100% - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 32%, transparent);
+  background: color-mix(in srgb, var(--app-panel) 96%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.22);
+}
+
+.doc-draft-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.doc-draft-badge {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--app-text-strong);
+  background: color-mix(in srgb, var(--app-accent-soft) 62%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 30%, transparent);
+}
+
+.doc-draft-meta {
+  color: var(--app-text-muted);
+  font-size: 0.76rem;
+}
+
+.doc-draft-error,
+.doc-draft-notice {
+  font-size: 0.76rem;
+  border-radius: 8px;
+  padding: 6px 9px;
+  word-break: break-all;
+}
+
+.doc-draft-error {
+  color: #b91c1c;
+  background: color-mix(in srgb, #ef4444 12%, transparent);
+}
+
+.doc-draft-notice {
+  color: #166534;
+  background: color-mix(in srgb, #22c55e 14%, transparent);
+}
+
+.doc-draft-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.doc-draft-btn {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  background: color-mix(in srgb, var(--app-panel) 92%, transparent);
+  color: var(--app-text);
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.doc-draft-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--app-accent) 36%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 38%, var(--app-panel));
+}
+
+.doc-draft-btn.primary {
+  color: #fff;
+  background: var(--app-accent, #2563eb);
+  border-color: transparent;
+}
+
+.doc-draft-btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--app-accent, #2563eb) 86%, #000);
+}
+
+.doc-draft-btn.ghost {
+  background: transparent;
+  color: var(--app-text-muted);
+}
+
+.doc-draft-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .doc-viewport {

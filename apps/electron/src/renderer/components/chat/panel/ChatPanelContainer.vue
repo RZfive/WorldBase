@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ConversationSidebar from '../layout/ConversationSidebar.vue'
 import SidebarIcon from '../layout/SidebarIcon.vue'
@@ -37,8 +37,10 @@ import {
   ensureWorkspaceTab,
   getActiveWorkspaceTab,
   removeWorkspaceTab,
+  stageWorkspaceDocumentDraft,
   workspaceBrowserSurfaces,
-  workspaceStore
+  workspaceStore,
+  workspaceTerminalSurfaces
 } from '../../workspace/workspace-store'
 import { getWorkspaceTabDefinition, type WorkspaceTabInstance } from '../../workspace/tab-registry'
 
@@ -788,7 +790,70 @@ async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>
     return
   }
 
+  if (kind === 'terminal') {
+    const cwd = typeof payload?.cwd === 'string' && payload.cwd.trim() ? payload.cwd.trim() : ''
+    await revealWorkspaceTab(ensureWorkspaceTab('terminal', cwd ? { cwd } : undefined))
+    return
+  }
+
+  if (kind === 'project') {
+    const projectId = typeof payload?.projectId === 'string' ? payload.projectId.trim() : ''
+    if (projectId) {
+      const name = typeof payload?.name === 'string' && payload.name.trim() ? payload.name.trim() : ''
+      const result = ensureWorkspaceTab('project', { projectId, ...(name ? { name } : {}) })
+      if (result && name) result.tab.title = name
+      await revealWorkspaceTab(result)
+      return
+    }
+    // No target project: let the user pick from the developed-app catalog.
+    await openProjectPicker()
+    return
+  }
+
   await revealWorkspaceTab(ensureWorkspaceTab(kind, payload))
+}
+
+interface ProjectPickerEntry {
+  id: string
+  name: string
+  icon?: string
+}
+
+const projectPicker = reactive({
+  visible: false,
+  loading: false,
+  error: '',
+  entries: [] as ProjectPickerEntry[]
+})
+
+async function openProjectPicker (): Promise<void> {
+  projectPicker.visible = true
+  projectPicker.error = ''
+  if (projectPicker.entries.length > 0) return
+
+  projectPicker.loading = true
+  try {
+    const projects = await window.electronAPI?.listProjects() || []
+    projectPicker.entries = projects
+      .filter(project => typeof project?.id === 'string' && project.id)
+      .map(project => ({
+        id: String(project.id),
+        name: typeof project.name === 'string' && project.name.trim() ? project.name : String(project.id),
+        icon: typeof project.icon === 'string' ? project.icon : undefined
+      }))
+    if (projectPicker.entries.length === 0) {
+      projectPicker.error = t('chatUi.projectPickerEmpty')
+    }
+  } catch (error) {
+    projectPicker.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    projectPicker.loading = false
+  }
+}
+
+function pickProject (entry: ProjectPickerEntry): void {
+  projectPicker.visible = false
+  void openWorkspaceTab('project', { projectId: entry.id, name: entry.name })
 }
 
 function closeWorkspaceTab (tabId: string): void {
@@ -838,29 +903,22 @@ watch(workspaceBrowserSurface, (surface) => {
   emit('pageSurfaceChange', null)
 }, { immediate: true })
 
-// AI page-operation shell banner: shown while the active workspace browser
-// tab is the AI-operable page. Dismissal is per page and resets on switch.
-const dismissedActivePageAppId = ref<string | null>(null)
-const activeWorkspacePageBanner = computed(() => {
-  const context = props.activePageContext
-  if (!context || context.kind !== 'browser') return null
-  if (!context.appId.startsWith('wsb-')) return null
-  if (dismissedActivePageAppId.value === context.appId) return null
-  return context
+// The active terminal tab doubles as the AI's "current terminal": its session
+// is forwarded to the app shell for the read/write_active_terminal tools.
+const workspaceTerminalSurface = computed(() => {
+  if (!workspaceStore.visible.value) return null
+  const tab = getActiveWorkspaceTab()
+  if (!tab || tab.kind !== 'terminal') return null
+  return workspaceTerminalSurfaces.get(tab.id) || null
 })
 
-watch(() => props.activePageContext?.appId, () => {
-  dismissedActivePageAppId.value = null
-})
-
-function focusComposerForActivePage (): void {
-  window.dispatchEvent(new CustomEvent('world:focus-composer'))
-}
-
-function dismissActivePageBanner (): void {
-  const context = props.activePageContext
-  if (context) dismissedActivePageAppId.value = context.appId
-}
+watch(workspaceTerminalSurface, (surface) => {
+  if (surface) {
+    emit('terminalSurfaceChange', { sessionId: surface.sessionId, cwd: surface.cwd })
+    return
+  }
+  emit('terminalSurfaceChange', null)
+}, { immediate: true })
 
 // AI-originated requests arrive as a prop (seq-bumped) from the app shell and
 // are consumed exactly once; `immediate` covers requests that landed while the
@@ -871,6 +929,19 @@ watch(
     if (!request || typeof request.kind !== 'string') return
     void openWorkspaceTab(request.kind, request.payload)
     emit('workspaceTabRequestConsumed')
+  },
+  { immediate: true }
+)
+
+// A staged draft opens (or focuses) its document tab, which switches the tab
+// into live draft preview via the workspace store mirror.
+watch(
+  () => props.workspaceDraftRequest,
+  async (request) => {
+    if (!request?.payload) return
+    stageWorkspaceDocumentDraft(request.payload)
+    await openWorkspaceTab('document', { filePath: request.payload.filePath })
+    emit('workspaceDraftRequestConsumed')
   },
   { immediate: true }
 )
@@ -1146,28 +1217,6 @@ watch(
             />
           </div>
 
-          <div
-            v-if="activeWorkspacePageBanner"
-            class="active-page-banner"
-            role="button"
-            tabindex="0"
-            :title="$t('chatUi.activePageBannerHint')"
-            @click="focusComposerForActivePage"
-            @keydown.enter.prevent="focusComposerForActivePage"
-          >
-            <div class="active-page-banner-copy">
-              <span class="active-page-banner-kicker">{{ $t('chatUi.activePageBannerTitle') }}</span>
-              <span class="active-page-banner-title">{{ activeWorkspacePageBanner.title }}</span>
-              <span class="active-page-banner-subtitle">{{ activeWorkspacePageBanner.origin || activeWorkspacePageBanner.url }}</span>
-            </div>
-            <button
-              class="active-page-banner-close"
-              type="button"
-              :title="$t('common.close')"
-              @click.stop="dismissActivePageBanner"
-            >×</button>
-          </div>
-
           <ChatInput
             ref="chatInputRef"
             v-model="inputText"
@@ -1209,6 +1258,31 @@ watch(
             @close="handleCloseQuickAsk"
             @ask="handleQuickAskAsk"
           />
+
+          <Teleport to="body">
+            <div v-if="projectPicker.visible" class="project-picker-backdrop" @click="projectPicker.visible = false">
+              <div class="project-picker" role="dialog" @click.stop>
+                <p class="project-picker-title">{{ $t('chatUi.projectPickerTitle') }}</p>
+                <div v-if="projectPicker.loading" class="project-picker-hint">{{ $t('chatUi.projectPickerLoading') }}</div>
+                <div v-else-if="projectPicker.error" class="project-picker-hint project-picker-error">{{ projectPicker.error }}</div>
+                <div v-else class="project-picker-list">
+                  <button
+                    v-for="entry in projectPicker.entries"
+                    :key="entry.id"
+                    class="project-picker-option"
+                    type="button"
+                    @click="pickProject(entry)"
+                  >
+                    <span class="project-picker-icon">{{ entry.icon || '🧩' }}</span>
+                    <span class="project-picker-name">{{ entry.name }}</span>
+                  </button>
+                </div>
+                <button class="project-picker-close" type="button" @click="projectPicker.visible = false">
+                  {{ $t('common.cancel') }}
+                </button>
+              </div>
+            </div>
+          </Teleport>
         </template>
       </div>
 
@@ -1684,79 +1758,91 @@ watch(
   flex-shrink: 0;
 }
 
-/* Mirrors the app shell's chat-overlay banner (launchpad page-operation chat). */
-.active-page-banner {
+.project-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0 14px 10px;
-  padding: 10px 12px 10px 14px;
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
-  cursor: pointer;
-  background:
-    linear-gradient(
-      135deg,
-      color-mix(in srgb, var(--app-accent-soft) 92%, transparent),
-      color-mix(in srgb, var(--app-shell-tint-2, var(--app-panel)) 88%, transparent)
-    ),
-    var(--app-panel);
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.32);
 }
 
-.active-page-banner-copy {
-  min-width: 0;
+.project-picker {
+  width: min(360px, 86vw);
+  max-height: min(420px, 70vh);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-panel);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.24);
 }
 
-.active-page-banner-kicker,
-.active-page-banner-title,
-.active-page-banner-subtitle {
+.project-picker-title {
+  margin: 0;
+  color: var(--app-text-strong);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.project-picker-hint {
+  color: var(--app-text-muted);
+  font-size: 0.82rem;
+  padding: 8px 2px;
+}
+
+.project-picker-error {
+  overflow-wrap: anywhere;
+}
+
+.project-picker-list {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.project-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font-size: 0.86rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-picker-option:hover {
+  background: var(--app-accent-soft);
+}
+
+.project-picker-icon {
+  flex-shrink: 0;
+}
+
+.project-picker-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.active-page-banner-kicker {
-  color: var(--app-accent-strong);
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.active-page-banner-title {
+.project-picker-close {
+  align-self: flex-end;
+  padding: 7px 14px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 999px;
+  background: var(--app-panel-muted);
   color: var(--app-text-strong);
-  font-size: 0.84rem;
-  font-weight: 700;
-}
-
-.active-page-banner-subtitle {
-  color: var(--app-text-muted);
-  font-size: 0.74rem;
-}
-
-.active-page-banner-close {
-  flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--app-text-muted);
-  font-size: 1rem;
-  line-height: 1;
   cursor: pointer;
-}
-
-.active-page-banner-close:hover {
-  background: var(--app-panel-muted, rgba(148, 163, 184, 0.18));
-  color: var(--app-text-strong);
 }
 </style>

@@ -8,6 +8,7 @@ import { PROJECT_PACKAGE_EXTENSION } from '../../src/main/project-fs/project-pac
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
 import { t } from '../../src/main/i18n/main-i18n.js'
 import type { ActivePageAutomationContext, PageAutomationRendererRequest, PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
+import type { ActiveTerminalContext } from '../../src/shared/terminal-types.js'
 import { forwardProjectRuntimeLog } from './project-runtime-log-routing.js'
 import {
   ALLOWED_WEBVIEW_POPUP_PROTOCOLS,
@@ -452,6 +453,22 @@ export function buildActivePagePromptSection (activePageContext?: ActivePageAuto
     '- For filling multiple form fields at once, use fill_current_page_form with the selectors returned by read_current_page.',
     '- For long pages, either paginate with interact_current_page action="extract" plus offset/max_chars, or call save_current_page_as_document to persist the page as a chunked document and read it with read_document.',
     '- Do not use fetch_webpage for this active in-app page. fetch_webpage is only for public external references, not the live embedded browser surface.'
+  ]
+
+  return lines.join('\n')
+}
+
+export function buildActiveTerminalPromptSection (activeTerminalContext?: ActiveTerminalContext | null): string | null {
+  if (!activeTerminalContext) return null
+
+  const lines = [
+    '## Active terminal',
+    '- The user currently has a live terminal session open in the workspace panel.',
+    `- Terminal working directory: ${activeTerminalContext.cwd || '(home directory)'}`,
+    '- This is a SHARED terminal: whatever you write appears in the user\'s terminal in real time, and everything the user types is visible to you.',
+    '- Use read_active_terminal to inspect the terminal screen (cleaned text tail) before acting, and write_active_terminal with execute=true to run a command, then read the returned output.',
+    '- Prefer dedicated tools (run_project_command, run_workspace_command, file tools) for non-interactive work; use the shared terminal only when the user asks you to operate it or for interactive programs (dev servers, REPLs, paged installers).',
+    '- Commands executed here are approved by the user in real time; do not repeat a command whose output already shows it ran, and avoid destructive commands.'
   ]
 
   return lines.join('\n')

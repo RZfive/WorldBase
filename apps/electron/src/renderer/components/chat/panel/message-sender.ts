@@ -6,6 +6,7 @@ import {
   extractDocumentTagRefs,
   extractProjectTagRefs
 } from './attachment-utils'
+import { extractDocfileTagRefs } from '../../../../shared/document-context-tag.js'
 import {
   getSelectionQuoteText,
   pruneSelectionQuotes,
@@ -76,6 +77,7 @@ import type {
 interface ChatMessageSenderOptions {
   t: ComposerTranslation
   getActivePageContext: () => ChatPanelProps['activePageContext']
+  getActiveTerminalContext: () => ChatPanelProps['activeTerminalContext']
   messages: Ref<ChatMessage[]>
   inputText: Ref<string>
   currentConversationId: Ref<string | null>
@@ -156,6 +158,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
   const {
     t,
     getActivePageContext,
+    getActiveTerminalContext,
     messages,
     inputText,
     currentConversationId,
@@ -268,7 +271,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
         setConversationTarget(currentConversationId.value || '', taggedProjectId)
       }
       const { regionIds: referencedDocumentRegionIds, normalizedText: textAfterDocuments } = extractDocumentTagRefs(textAfterProject, DOCUMENT_TAG_PATTERN)
-      const codeExtract = extractCodeTagRefs(textAfterDocuments, CODE_TAG_PATTERN)
+      const docfileExtract = extractDocfileTagRefs(textAfterDocuments)
+      const codeExtract = extractCodeTagRefs(docfileExtract.normalizedText, CODE_TAG_PATTERN)
       const quoteExtract = extractSelectionQuoteRefs(codeExtract.normalizedText, SELECTION_QUOTE_TAG_PATTERN)
       const webQuoteExtract = extractWebQuoteRefs(quoteExtract.normalizedText, WEB_QUOTE_TAG_PATTERN)
       const normalizedText = webQuoteExtract.normalizedText
@@ -280,13 +284,20 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
         } catch { /* ignore */ }
       }
 
+      let docfileContextPrompt = ''
+      if (docfileExtract.artifactIds.length > 0 && window.electronAPI?.buildDocumentFileContextPrompt) {
+        try {
+          docfileContextPrompt = await window.electronAPI.buildDocumentFileContextPrompt(docfileExtract.artifactIds)
+        } catch { /* ignore */ }
+      }
+
       const quotesPrompt = buildSelectionQuotesPrompt(quoteExtract.quoteIds)
       pruneSelectionQuotes([])
 
       const webQuotesPrompt = buildWebQuotesPrompt(webQuoteExtract.quoteIds)
       pruneWebQuotes([])
 
-      const combinedText = [quotesPrompt, webQuotesPrompt, normalizedText, filePrompt, docSelectionsPrompt].filter(Boolean).join('\n\n')
+      const combinedText = [quotesPrompt, webQuotesPrompt, normalizedText, filePrompt, docSelectionsPrompt, docfileContextPrompt].filter(Boolean).join('\n\n')
 
       if (normalizedText) {
         userBlocks.push(createContentBlock(normalizedText))
@@ -655,7 +666,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           getActivePageContext() ?? undefined,
           conversationTemperature.value ?? undefined,
           buildCurrentFolderWorkspaceState()?.rootPath,
-          computerUseEnabled.value
+          computerUseEnabled.value,
+          getActiveTerminalContext() ?? undefined
         )
 
         if (streamingConvIds.has(convId)) {

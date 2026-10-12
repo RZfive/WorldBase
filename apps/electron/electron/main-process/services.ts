@@ -42,6 +42,7 @@ import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAut
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AgentDefinition, AgentGroupDefinition } from '../../src/shared/agent-workspace-types.js'
 import { mainState } from './state.js'
+import { TerminalManager } from './terminal/terminal-manager.js'
 import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, refreshProviderReasoningMetadata, resolveMemoryEmbeddingRuntimeConfig, resolveProviderConfig } from './ai/agent-context.js'
 import { getSelectedExecutionEngine, startSelectedRustHarness } from './ai/selected-execution-engine.js'
 
@@ -442,12 +443,15 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
     const win = getActiveAiRequestWindow()
     if (!win || win.isDestroyed()) throw new Error('No active Electron window for open_workspace_tab')
     const kind = typeof request.payload.kind === 'string' ? request.payload.kind : ''
-    if (kind !== 'folder' && kind !== 'document' && kind !== 'browser') throw new Error('open_workspace_tab requires kind "folder", "document" or "browser"')
+    if (kind !== 'folder' && kind !== 'document' && kind !== 'browser' && kind !== 'terminal' && kind !== 'project') {
+      throw new Error('open_workspace_tab requires kind "folder", "document", "browser", "terminal" or "project"')
+    }
     const payload: Record<string, unknown> = {}
     if (typeof request.payload.rootPath === 'string' && request.payload.rootPath.trim()) payload.rootPath = request.payload.rootPath
     if (typeof request.payload.filePath === 'string' && request.payload.filePath.trim()) payload.filePath = request.payload.filePath
     if (typeof request.payload.url === 'string' && request.payload.url.trim()) payload.url = request.payload.url
     if (typeof request.payload.activeFilePath === 'string' && request.payload.activeFilePath.trim()) payload.activeFilePath = request.payload.activeFilePath
+    if (typeof request.payload.projectId === 'string' && request.payload.projectId.trim()) payload.projectId = request.payload.projectId
     if (win.isMinimized()) win.restore()
     win.focus()
     win.webContents.send('workspace:openTab', { kind, ...(Object.keys(payload).length > 0 ? { payload } : {}) })
@@ -463,6 +467,22 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
       : { success: true, supported: true }
   }
 
+  if (request.requestKind === 'document.draftStaged') {
+    // Thin forward: the Rust harness owns the draft; the renderer only needs
+    // the descriptor to swap its workspace tab into draft preview mode.
+    const win = getActiveAiRequestWindow()
+    if (!win || win.isDestroyed()) return { success: false }
+    const artifactId = optionalString(request.payload, 'artifactId')
+    const filePath = optionalString(request.payload, 'filePath')
+    const draftPath = optionalString(request.payload, 'draftPath')
+    if (!artifactId || !filePath || !draftPath) {
+      throw new Error('document.draftStaged requires artifactId, filePath and draftPath')
+    }
+    if (win.isMinimized()) win.restore()
+    win.webContents.send('workspace:documentDraft', request.payload)
+    return { success: true }
+  }
+
   if (request.requestKind === 'document.preview.ensure') {
     const filePath = optionalString(request.payload, 'filePath') || optionalString(request.payload, 'file_path')
     const fileType = optionalString(request.payload, 'fileType') || optionalString(request.payload, 'file_type')
@@ -476,6 +496,38 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
       render,
       ...(asset ? { bytes: Array.from(asset.bytes) } : {})
     }
+  }
+
+  if (request.requestKind === 'terminal_automation') {
+    const manager = mainState.terminalManager
+    if (!manager) throw new Error('terminal_automation requires the terminal manager')
+    const action = request.payload.action
+    if (action === 'read') {
+      const snapshot = manager.readActiveTerminal({
+        lines: typeof request.payload.lines === 'number' ? request.payload.lines : undefined,
+        maxChars: typeof request.payload.maxChars === 'number' ? request.payload.maxChars : undefined
+      })
+      return {
+        ok: true,
+        sessionId: snapshot.id,
+        cwd: snapshot.cwd,
+        exited: snapshot.exited,
+        text: snapshot.text,
+        truncated: snapshot.truncated
+      }
+    }
+    if (action === 'write') {
+      const text = typeof request.payload.text === 'string' ? request.payload.text : ''
+      if (!text.trim()) throw new Error('terminal_automation write requires text')
+      const result = await manager.writeActiveTerminal({
+        text,
+        execute: request.payload.execute !== false,
+        waitMs: typeof request.payload.waitMs === 'number' ? request.payload.waitMs : undefined,
+        maxChars: typeof request.payload.maxChars === 'number' ? request.payload.maxChars : undefined
+      })
+      return result as unknown as JsonRpcResult
+    }
+    throw new Error('terminal_automation requires action "read" or "write"')
   }
 
   throw new Error(`Unsupported Rust host request: ${request.requestKind}`)
@@ -576,6 +628,7 @@ export async function initializeServices (): Promise<void> {
   mainState.mcpService.on('stateChanged', (state: MCPStateSnapshot) => {
     broadcastToAppWindows('settings:mcpStateChanged', state)
   })
+  mainState.terminalManager = new TerminalManager()
 
   mainState.projectFS = new ProjectFS(projectsDir, snapshotsDir)
   mainState.runtimeManager = new RuntimeManager(projectsDir)

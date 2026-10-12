@@ -4,6 +4,15 @@ import type { ConversationMetadataPatch } from '../src/shared/conversation-metad
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, BrowserPageContextMenuPayload, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
+import type {
+  TerminalDataEvent,
+  TerminalExitEvent,
+  TerminalSessionCreateOptions,
+  TerminalSessionInfo,
+  TerminalSnapshot,
+  TerminalSnapshotRequest
+} from '../src/shared/terminal-types.js'
+import type { ActiveTerminalContext } from '../src/shared/terminal-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../src/shared/image-studio-types.js'
 import type { UsageRecord, UsageSummary } from '../src/main/settings/usage-store.js'
 import type { ConversationFolderWorkspaceState, FolderWorkspaceChangeEvent, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
@@ -513,7 +522,7 @@ interface SystemStatusSnapshot {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -621,6 +630,7 @@ export interface ElectronAPI {
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
   onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
   onWorkspaceOpenTab: (callback: (event: { kind: string; payload?: Record<string, unknown> }) => void) => () => void
+  onWorkspaceDocumentDraft: (callback: (payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
   getComputerUsePermissions: () => Promise<{ platform: string; screen: string; accessibility: boolean; granted: boolean }>
   requestComputerUsePermissions: () => Promise<{ granted: boolean }>
@@ -757,6 +767,12 @@ export interface ElectronAPI {
   getDocumentRenderData: (artifactId: string) => Promise<{ mimeType: string; bytes: Uint8Array } | null>
   openDocumentOriginal: (artifactId: string) => Promise<{ success: boolean; supported?: boolean; error?: string }>
   removeDocument: (artifactId: string) => Promise<boolean>
+  applyDocumentDraft: (payload: { artifactId: string; sourceSha256?: string }) => Promise<Record<string, unknown>>
+  saveDocumentDraftAs: (payload: { artifactId: string; defaultName?: string }) => Promise<{ canceled: boolean; filePath?: string; artifact?: unknown }>
+  discardDocumentDraft: (artifactId: string) => Promise<{ discarded: boolean }>
+  getDocumentDraft: (filePath: string) => Promise<Record<string, unknown> | null>
+  refreshDocumentFromDisk: (filePath: string) => Promise<{ artifact: unknown }>
+  buildDocumentFileContextPrompt: (artifactIds: string[]) => Promise<string>
   createDocumentSelection: (payload: { artifactId: string; nodeIds: string[]; label: string; color: string; excerpt?: string }) => Promise<unknown>
   removeDocumentSelection: (regionId: string) => Promise<boolean>
   updateDocumentSelectionLabel: (regionId: string, label: string) => Promise<unknown | null>
@@ -771,6 +787,16 @@ export interface ElectronAPI {
   listFolderWorkspaceFiles: (rootPath: string) => Promise<FolderWorkspaceListResult>
   readFolderWorkspaceFile: (rootPath: string, filePath: string) => Promise<FolderWorkspaceReadResult>
   onFolderWorkspaceChanged: (callback: (event: FolderWorkspaceChangeEvent) => void) => () => void
+
+  // Terminal sessions (workspace terminal tabs)
+  createTerminalSession: (options: TerminalSessionCreateOptions) => Promise<TerminalSessionInfo>
+  writeTerminalSession: (sessionId: string, data: string) => Promise<{ ok: boolean }>
+  resizeTerminalSession: (sessionId: string, cols: number, rows: number) => Promise<{ ok: boolean }>
+  killTerminalSession: (sessionId: string) => Promise<{ ok: boolean }>
+  snapshotTerminalSession: (sessionId: string, request?: TerminalSnapshotRequest) => Promise<TerminalSnapshot>
+  setActiveTerminalSession: (sessionId: string | null) => Promise<{ ok: boolean }>
+  onTerminalData: (sessionId: string, callback: (event: TerminalDataEvent) => void) => () => void
+  onTerminalExit: (sessionId: string, callback: (event: TerminalExitEvent) => void) => () => void
 
   // Daily suggestions (chat empty state)
   getDailySuggestionSnapshot: () => Promise<DailySuggestionSnapshot>
@@ -790,7 +816,7 @@ export interface ElectronAPI {
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext, folderWorkspaceRoot),
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot, computerUseEnabled),
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot, computerUseEnabled, activeTerminalContext),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => ipcRenderer.invoke('ai:groupInject', sessionId, groupId, content, targetAgentIds),
@@ -953,6 +979,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_e: Electron.IpcRendererEvent, event: { kind: string; payload?: Record<string, unknown> }) => callback(event)
     ipcRenderer.on('workspace:openTab', handler)
     return () => { ipcRenderer.removeListener('workspace:openTab', handler) }
+  },
+  onWorkspaceDocumentDraft: (callback: (payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }) => callback(payload)
+    ipcRenderer.on('workspace:documentDraft', handler)
+    return () => { ipcRenderer.removeListener('workspace:documentDraft', handler) }
   },
   getSystemStatus: () => ipcRenderer.invoke('system:getStatus'),
   getComputerUsePermissions: () => ipcRenderer.invoke('permissions:getComputerUse'),
@@ -1154,6 +1185,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pickOfficeFiles: () => ipcRenderer.invoke('office:pickFiles'),
   importDocument: (filePath: string) => ipcRenderer.invoke('document:import', filePath),
   listDocuments: () => ipcRenderer.invoke('document:list'),
+  applyDocumentDraft: (payload: { artifactId: string; sourceSha256?: string }) => ipcRenderer.invoke('document:applyDraft', payload),
+  saveDocumentDraftAs: (payload: { artifactId: string; defaultName?: string }) => ipcRenderer.invoke('document:saveDraftAs', payload),
+  discardDocumentDraft: (artifactId: string) => ipcRenderer.invoke('document:discardDraft', artifactId),
+  getDocumentDraft: (filePath: string) => ipcRenderer.invoke('document:getDraft', filePath),
+  refreshDocumentFromDisk: (filePath: string) => ipcRenderer.invoke('document:refreshFromDisk', filePath),
+  buildDocumentFileContextPrompt: (artifactIds: string[]) => ipcRenderer.invoke('document:buildFileContextPrompt', artifactIds),
   getDocument: (artifactId: string) => ipcRenderer.invoke('document:get', artifactId),
   ensureDocumentRenderPreview: (artifactId: string) => ipcRenderer.invoke('document:ensureRenderPreview', artifactId),
   getDocumentRenderData: (artifactId: string) => ipcRenderer.invoke('document:getRenderData', artifactId),
@@ -1176,6 +1213,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_e: Electron.IpcRendererEvent, event: FolderWorkspaceChangeEvent) => callback(event)
     ipcRenderer.on('folderWorkspace:changed', handler)
     return () => { ipcRenderer.removeListener('folderWorkspace:changed', handler) }
+  },
+
+  // Terminal sessions (workspace terminal tabs)
+  createTerminalSession: (options: TerminalSessionCreateOptions) => ipcRenderer.invoke('terminal:create', options),
+  writeTerminalSession: (sessionId: string, data: string) => ipcRenderer.invoke('terminal:write', sessionId, data),
+  resizeTerminalSession: (sessionId: string, cols: number, rows: number) => ipcRenderer.invoke('terminal:resize', sessionId, cols, rows),
+  killTerminalSession: (sessionId: string) => ipcRenderer.invoke('terminal:kill', sessionId),
+  snapshotTerminalSession: (sessionId: string, request?: TerminalSnapshotRequest) => ipcRenderer.invoke('terminal:snapshot', sessionId, request),
+  setActiveTerminalSession: (sessionId: string | null) => ipcRenderer.invoke('terminal:setActive', sessionId),
+  onTerminalData: (sessionId: string, callback: (event: TerminalDataEvent) => void) => {
+    const channel = `terminal:data:${sessionId}`
+    const handler = (_e: Electron.IpcRendererEvent, event: TerminalDataEvent) => callback(event)
+    ipcRenderer.on(channel, handler)
+    return () => { ipcRenderer.removeListener(channel, handler) }
+  },
+  onTerminalExit: (sessionId: string, callback: (event: TerminalExitEvent) => void) => {
+    const channel = `terminal:exit:${sessionId}`
+    const handler = (_e: Electron.IpcRendererEvent, event: TerminalExitEvent) => callback(event)
+    ipcRenderer.on(channel, handler)
+    return () => { ipcRenderer.removeListener(channel, handler) }
   },
 
   // Daily suggestions (chat empty state)

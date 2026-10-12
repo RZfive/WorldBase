@@ -133,6 +133,14 @@ function startResize (event: MouseEvent): void {
   document.body.style.userSelect = 'none'
 }
 
+/** Double-clicking the handle snaps the panel back to the kind's default width. */
+function resetToDefaultWidth (): void {
+  const defaultWidth = activeDefinition.value?.defaultWidth
+  if (typeof defaultWidth === 'number') {
+    emit('updateWidth', clampWidth(defaultWidth))
+  }
+}
+
 function onResizeMove (event: MouseEvent): void {
   const delta = resizeStartX - event.clientX
   emit('updateWidth', clampWidth(resizeStartWidth + delta))
@@ -225,9 +233,11 @@ function runTabAction (actionId: string): void {
     class="workspace-panel"
     :style="{ width: `${workspaceWidth}px`, flexBasis: `${workspaceWidth}px`, maxWidth: `${workspaceWidth}px` }"
   >
-    <div class="workspace-resize-handle" @mousedown.prevent="startResize">
-      <div class="resize-grip"></div>
-    </div>
+    <div
+      class="workspace-resize-handle"
+      @mousedown.prevent="startResize"
+      @dblclick.prevent="resetToDefaultWidth"
+    ></div>
 
     <div class="workspace-panel-shell">
       <header class="workspace-tab-strip">
@@ -355,7 +365,8 @@ function runTabAction (actionId: string): void {
   flex: 0 0 auto;
   min-width: 0;
   height: 100%;
-  border-left: 1px solid var(--app-border);
+  /* The divider is drawn by .workspace-resize-handle (single 1px hairline that
+     doubles as the drag affordance) instead of a border here. */
   background: var(--app-panel);
   color: var(--app-text);
   overflow: hidden;
@@ -381,37 +392,50 @@ function runTabAction (actionId: string): void {
   top: 0;
   bottom: 0;
   z-index: 6;
-  width: 12px;
+  /* The ::before hairline below is the visible divider; this invisible
+     full-height band overlays it so the drag can start anywhere along the seam.
+     Narrow enough (8px) to stay clear of the tab strip's 10px inset. */
+  width: 8px;
   cursor: ew-resize;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  touch-action: none;
 }
 
-.resize-grip {
-  width: 3px;
-  height: 44px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--app-border) 72%, transparent);
+/* Hover affordance: the hairline tints accent and thickens to 2px in place. */
+.workspace-resize-handle::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--app-border);
+  transition: width 0.14s ease, background 0.14s ease;
+}
+
+.workspace-resize-handle:hover::before,
+.workspace-resize-handle:active::before {
+  width: 2px;
+  background: color-mix(in srgb, var(--app-accent-strong, #3b82f6) 62%, transparent);
 }
 
 .workspace-panel-shell {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding-left: 12px;
   min-width: 0;
 }
 
 .workspace-tab-strip {
   flex: 0 0 auto;
-  min-height: 44px;
+  /* Mirrors ChatHeader's 49px so both top bars and their hairlines align
+     across the divider when the workspace is open. */
+  height: 49px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding: 6px 8px 6px 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 55%, transparent);
   background: linear-gradient(180deg, var(--app-panel-subtle), var(--app-panel));
 }
 

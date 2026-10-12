@@ -3904,7 +3904,7 @@ impl Tool for OpenWorkspaceTabTool {
         "open_workspace_tab"
     }
     fn description(&self) -> &str {
-        "Open a tab in the user's right-side workspace panel (folder / document / browser)."
+        "Open a tab in the user's right-side workspace panel (folder / document / browser / terminal / project app)."
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -3912,7 +3912,7 @@ impl Tool for OpenWorkspaceTabTool {
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["folder", "document", "browser"],
+                    "enum": ["folder", "document", "browser", "terminal", "project"],
                     "description": "Which workspace tab to open."
                 },
                 "root_path": {
@@ -3926,6 +3926,10 @@ impl Tool for OpenWorkspaceTabTool {
                 "url": {
                     "type": "string",
                     "description": "browser only: URL to load in the embedded browser tab."
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "project only: id of one of the user's developed apps (from list_projects). Its UI opens in the workspace panel."
                 },
                 "active_file_path": {
                     "type": "string",
@@ -3950,6 +3954,7 @@ impl Tool for OpenWorkspaceTabTool {
         let file_path = optional_path("file_path");
         let url = optional_path("url");
         let active_file_path = optional_path("active_file_path");
+        let project_id = optional_path("project_id");
         let stream = services.current_stream.lock().unwrap().clone();
         let mut payload = json!({"kind": kind});
         if let Some(root) = root_path {
@@ -3963,6 +3968,9 @@ impl Tool for OpenWorkspaceTabTool {
         }
         if let Some(active) = active_file_path {
             payload["activeFilePath"] = Value::String(active.to_string());
+        }
+        if let Some(project) = project_id {
+            payload["projectId"] = Value::String(project.to_string());
         }
         services
             .host

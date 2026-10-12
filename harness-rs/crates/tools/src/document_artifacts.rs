@@ -50,6 +50,11 @@ pub struct DocumentArtifact {
     pub parsed: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<Value>,
+    /// Pending AI-authored draft for this artifact.  The draft bytes live in
+    /// the workspace-owned draft directory; the original file is untouched
+    /// until the user explicitly applies or saves the draft elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<Value>,
     pub imported_at: String,
 }
 
@@ -590,6 +595,14 @@ pub fn artifact_public_value(workspace: &Path, artifact: &DocumentArtifact) -> V
                 );
             }
         }
+        if let Some(draft) = object.get_mut("draft").and_then(Value::as_object_mut) {
+            if let Some(draft_path) = draft.get("path").and_then(Value::as_str) {
+                draft.insert(
+                    "path".into(),
+                    Value::String(public_path(workspace, draft_path)),
+                );
+            }
+        }
     }
     value
 }
@@ -776,6 +789,7 @@ pub fn import_parsed_document(
         nodes,
         parsed: parsed.clone(),
         render: None,
+        draft: None,
         imported_at: worldbase_protocol::event::now_rfc3339(),
     };
     write_artifact(workspace, &artifact)?;
@@ -805,6 +819,7 @@ pub fn import_text_document(
         nodes,
         parsed,
         render: None,
+        draft: None,
         imported_at: worldbase_protocol::event::now_rfc3339(),
     };
     write_artifact(workspace, &artifact)?;
@@ -1069,6 +1084,418 @@ pub fn edit_source_state(workspace: &Path, id: &str) -> Result<Value> {
         "size": metadata.len(),
         "mtimeMs": mtime_ms,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// AI draft lifecycle
+//
+// The AI authors a full rewrite of an imported document into a workspace-owned
+// draft file; the original source is never touched until the user explicitly
+// applies the draft (with an automatic backup) or saves it to another path.
+// Draft state is persisted on the artifact record so it survives restarts.
+// ---------------------------------------------------------------------------
+
+/// Fully-authored draft content, mirroring the `doc_write` argument families.
+#[derive(Debug, Clone)]
+pub enum DraftContent {
+    Text { kind: &'static str, body: String },
+    Docx(Vec<worldbase_docs::edit::DocBlock>),
+    Xlsx(Vec<worldbase_docs::edit::Sheet>),
+    Pptx(Vec<worldbase_docs::edit::Slide>),
+}
+
+fn draft_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".worldbase").join("document-drafts")
+}
+
+fn document_backup_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".worldbase").join("document-backups")
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("read document source {}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+const DRAFTABLE_TYPES: &[&str] = &["md", "markdown", "txt", "text", "docx", "xlsx", "pptx"];
+
+fn normalize_draft_type(raw: &str) -> Option<&'static str> {
+    match raw.to_ascii_lowercase().as_str() {
+        "md" | "markdown" => Some("md"),
+        "txt" | "text" => Some("text"),
+        "docx" | "doc" => Some("docx"),
+        "xlsx" | "xls" => Some("xlsx"),
+        "pptx" | "ppt" => Some("pptx"),
+        _ => None,
+    }
+}
+
+fn artifact_type_matches_draft(file_type: &str, content: &DraftContent) -> Result<()> {
+    let content_kind = match content {
+        DraftContent::Text { kind, .. } => *kind,
+        DraftContent::Docx(_) => "docx",
+        DraftContent::Xlsx(_) => "xlsx",
+        DraftContent::Pptx(_) => "pptx",
+    };
+    let Some(target_kind) = normalize_draft_type(file_type) else {
+        anyhow::bail!(
+            "该文档类型（{file_type}）暂不支持 AI 改写；PDF 可先让 AI 输出 markdown 后另存"
+        );
+    };
+    anyhow::ensure!(
+        target_kind == content_kind,
+        "草稿内容类型（{content_kind}）与文档类型（{target_kind}）不一致；请按文档原格式提交完整内容"
+    );
+    Ok(())
+}
+
+/// Find an artifact whose source resolves to `file_path`, or import the file
+/// as a new artifact when the store has not seen it yet.
+fn resolve_artifact_for_draft(
+    workspace: &Path,
+    artifact_id: Option<&str>,
+    file_path: Option<&str>,
+) -> Result<DocumentArtifact> {
+    if let Some(id) = artifact_id.filter(|value| !value.trim().is_empty()) {
+        return get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"));
+    }
+    let Some(raw_path) = file_path.map(str::trim).filter(|value| !value.is_empty()) else {
+        anyhow::bail!("doc_draft 需要 artifact_id 或 file_path 之一");
+    };
+    let candidate = Path::new(raw_path);
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        workspace.join(candidate)
+    };
+    if let Ok(canonical) = absolute.canonicalize() {
+        for artifact in list_documents(workspace)? {
+            if artifact_source_path(workspace, &artifact) == canonical {
+                return Ok(artifact);
+            }
+        }
+    }
+    // The store has not seen this file yet — import it so the draft has an
+    // artifact record and later apply/saveAs calls have something to update.
+    let parsed = worldbase_docs::parse_file(&absolute)?;
+    import_parsed_document(workspace, &absolute, &parsed)
+}
+
+fn clear_draft_state(mut artifact: DocumentArtifact) -> DocumentArtifact {
+    artifact.draft = None;
+    artifact
+}
+
+fn draft_record_value(
+    workspace: &Path,
+    artifact: &DocumentArtifact,
+) -> Value {
+    let draft = artifact.draft.clone().unwrap_or(Value::Null);
+    if draft.is_null() {
+        return Value::Null;
+    }
+    let mut value = draft;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("artifactId".into(), json!(artifact.id));
+        object.insert(
+            "filePath".into(),
+            json!(public_path(workspace, &artifact.file_path)),
+        );
+        object.insert("fileName".into(), json!(artifact.file_name));
+        object.insert("fileType".into(), json!(artifact.file_type));
+    }
+    value
+}
+
+/// Author a full draft rewrite of a document.  Writes the draft bytes below
+/// `.worldbase/document-drafts/`, prunes older drafts of the same artifact,
+/// fingerprints the source file, and records the pending draft on the
+/// artifact.  Returns the draft descriptor for host/UI notification.
+pub fn stage_document_draft(
+    workspace: &Path,
+    artifact_id: Option<&str>,
+    file_path: Option<&str>,
+    content: DraftContent,
+) -> Result<Value> {
+    let mut artifact = resolve_artifact_for_draft(workspace, artifact_id, file_path)?;
+    if is_virtual_artifact(&artifact) {
+        anyhow::bail!("虚拟文档没有源文件，无法生成修改草稿");
+    }
+    let source = artifact_source_path(workspace, &artifact);
+    anyhow::ensure!(
+        source.is_file(),
+        "文档源文件不存在: {}",
+        source.display()
+    );
+    if let Err(message) = artifact_type_matches_draft(&artifact.file_type, &content) {
+        return Err(message);
+    }
+
+    let draft_extension = match &content {
+        DraftContent::Text { kind, .. } => {
+            if *kind == "md" {
+                if artifact.file_type.eq_ignore_ascii_case("markdown") {
+                    "markdown"
+                } else {
+                    "md"
+                }
+            } else {
+                "txt"
+            }
+        }
+        DraftContent::Docx(_) => "docx",
+        DraftContent::Xlsx(_) => "xlsx",
+        DraftContent::Pptx(_) => "pptx",
+    };
+
+    let directory = draft_dir(workspace);
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create document draft directory {}", directory.display()))?;
+
+    // One live draft per artifact: prune earlier draft files before writing.
+    let draft_prefix = format!("{}-", artifact.id);
+    if let Ok(entries) = std::fs::read_dir(&directory) {
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&draft_prefix) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let draft_path = directory.join(format!("{}-{}.{}", artifact.id, stamp, draft_extension));
+
+    match &content {
+        DraftContent::Text { body, .. } => worldbase_docs::edit::write_text(&draft_path, body)?,
+        DraftContent::Docx(blocks) => worldbase_docs::edit::write_docx(&draft_path, blocks)?,
+        DraftContent::Xlsx(sheets) => worldbase_docs::edit::write_xlsx(&draft_path, sheets)?,
+        DraftContent::Pptx(slides) => worldbase_docs::edit::write_pptx(&draft_path, slides)?,
+    }
+
+    let source_sha256 = file_sha256(&source)?;
+    let record = json!({
+        "path": draft_path.to_string_lossy(),
+        "fileType": draft_extension,
+        "sourceSha256": source_sha256,
+        "createdAt": worldbase_protocol::event::now_rfc3339(),
+    });
+    artifact.draft = Some(record.clone());
+    write_artifact(workspace, &artifact)?;
+
+    Ok(json!({
+        "artifactId": artifact.id,
+        "filePath": artifact.file_path,
+        "draftPath": draft_path.to_string_lossy(),
+        "fileType": draft_extension,
+        "sourceSha256": source_sha256,
+        "createdAt": record.get("createdAt").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// Overwrite the document source with its staged draft.  The original file is
+/// backed up first (newest 5 kept per artifact), the store record is re-parsed
+/// from the new bytes, and the render preview is invalidated so the workbench
+/// shows the saved content immediately.
+pub fn apply_document_draft(
+    workspace: &Path,
+    id: &str,
+    expected_source_sha256: Option<&str>,
+) -> Result<Value> {
+    let artifact = get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"))?;
+    let draft = artifact.draft.clone().ok_or_else(|| {
+        anyhow::anyhow!("该文档没有待处理的修改草稿")
+    })?;
+    anyhow::ensure!(
+        !is_virtual_artifact(&artifact),
+        "virtual documents have no applyable draft"
+    );
+    let source = artifact_source_path(workspace, &artifact);
+    anyhow::ensure!(source.is_file(), "文档源文件不存在: {}", source.display());
+
+    let draft_path = Path::new(
+        draft
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    anyhow::ensure!(
+        !draft_path.as_os_str().is_empty() && draft_path.is_file(),
+        "草稿文件已丢失，请放弃该草稿后重新生成"
+    );
+    let recorded_sha = draft.get("sourceSha256").and_then(Value::as_str);
+    if let (Some(expected), Some(recorded)) = (expected_source_sha256, recorded_sha) {
+        anyhow::ensure!(
+            expected.eq_ignore_ascii_case(recorded),
+            "draftConflict: 草稿基于旧版本文件生成，请放弃后重新生成"
+        );
+    }
+    let current_sha = file_sha256(&source)?;
+    if let Some(recorded) = recorded_sha {
+        anyhow::ensure!(
+            recorded.eq_ignore_ascii_case(&current_sha),
+            "draftSourceChanged: 文件在草稿生成后被修改过，请重新生成草稿或先另存为副本"
+        );
+    }
+
+    // Backup the original before the first overwrite of this draft generation.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let backup_dir = document_backup_dir(workspace).join(&artifact.id);
+    std::fs::create_dir_all(&backup_dir)?;
+    let backup_extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let backup_path = backup_dir.join(format!("{stamp}{backup_extension}"));
+    std::fs::copy(&source, &backup_path)
+        .with_context(|| format!("backup document source {}", backup_path.display()))?;
+    prune_document_backups(&backup_dir, 5)?;
+
+    // Atomic overwrite: copy the draft next to the source, then rename onto it.
+    let temporary = source.with_extension(format!(
+        "{}.{}.tmp",
+        source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::copy(draft_path, &temporary)
+        .with_context(|| format!("stage draft write {}", temporary.display()))?;
+    if let Err(error) = std::fs::rename(&temporary, &source) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error)
+            .with_context(|| format!("commit draft overwrite {}", source.display()));
+    }
+
+    // Re-parse the saved file so the stored artifact reflects the new content.
+    let parsed = worldbase_docs::parse_file(&source)?;
+    let text = parsed
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let file_type = artifact.file_type.clone();
+    let metadata = std::fs::metadata(&source)?;
+    let mut updated = clear_draft_state(artifact);
+    updated.plain_text = text.clone();
+    updated.nodes = build_document_nodes(&parsed, &file_type, &text);
+    updated.parsed = parsed;
+    updated.file_size = metadata.len();
+    updated.render = None;
+    write_artifact(workspace, &updated)?;
+    ensure_render_preview(workspace, &updated.id)?;
+
+    let _ = std::fs::remove_file(draft_path);
+
+    Ok(json!({
+        "artifact": artifact_public_value(workspace, &updated),
+        "backupPath": public_path(workspace, &backup_path.to_string_lossy()),
+    }))
+}
+
+/// Write the staged draft to a user-chosen path without touching the original.
+pub fn save_document_draft_as(
+    workspace: &Path,
+    id: &str,
+    target_path: &Path,
+) -> Result<Value> {
+    let artifact = get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"))?;
+    let draft = artifact
+        .draft
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("该文档没有待处理的修改草稿"))?;
+    let draft_path = Path::new(
+        draft
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    anyhow::ensure!(
+        !draft_path.as_os_str().is_empty() && draft_path.is_file(),
+        "草稿文件已丢失，请放弃该草稿后重新生成"
+    );
+    let source = artifact_source_path(workspace, &artifact);
+    anyhow::ensure!(
+        target_path != source,
+        "另存为路径与原文件相同；如需覆盖请使用保存操作"
+    );
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create save-as directory {}", parent.display()))?;
+    }
+    std::fs::copy(draft_path, target_path)
+        .with_context(|| format!("write draft copy {}", target_path.display()))?;
+
+    let parsed = worldbase_docs::parse_file(target_path)?;
+    let imported = import_parsed_document(workspace, target_path, &parsed)?;
+    let _ = std::fs::remove_file(draft_path);
+    write_artifact(workspace, &clear_draft_state(artifact))?;
+
+    Ok(json!({
+        "artifact": artifact_public_value(workspace, &imported),
+    }))
+}
+
+/// Drop the staged draft: delete the draft bytes and clear the record.
+pub fn discard_document_draft(workspace: &Path, id: &str) -> Result<Value> {
+    let artifact = get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"))?;
+    let draft = artifact.draft.clone();
+    if let Some(draft) = &draft {
+        if let Some(path) = draft.get("path").and_then(Value::as_str) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    write_artifact(workspace, &clear_draft_state(artifact))?;
+    Ok(json!({ "discarded": draft.is_some() }))
+}
+
+/// Draft pending for a source file, looked up by path (host/UI restore path).
+/// This RPC-facing helper intentionally returns absolute paths: it is only
+/// consumed by the desktop host process on the same machine.
+pub fn get_document_draft(workspace: &Path, file_path: &str) -> Result<Value> {
+    let candidate = Path::new(file_path);
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        workspace.join(candidate)
+    };
+    let Ok(canonical) = absolute.canonicalize() else {
+        return Ok(Value::Null);
+    };
+    for artifact in list_documents(workspace)? {
+        if artifact.draft.is_some() && artifact_source_path(workspace, &artifact) == canonical {
+            return Ok(draft_record_value(workspace, &artifact));
+        }
+    }
+    Ok(Value::Null)
+}
+
+fn prune_document_backups(directory: &Path, keep: usize) -> Result<()> {
+    let mut backups: Vec<(u128, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(directory)?.filter_map(|entry| entry.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stamp_text) = name.split('.').next() else {
+            continue;
+        };
+        if let Ok(stamp) = stamp_text.parse::<u128>() {
+            backups.push((stamp, entry.path()));
+        }
+    }
+    backups.sort_by_key(|(stamp, _)| *stamp);
+    while backups.len() > keep {
+        let (_, oldest) = backups.remove(0);
+        let _ = std::fs::remove_file(oldest);
+    }
+    Ok(())
 }
 
 fn read_selections_unlocked(workspace: &Path) -> Result<Vec<SelectionRegion>> {
@@ -1496,6 +1923,216 @@ mod tests {
     fn artifact_ids_cannot_escape_the_store() {
         let root = tempfile::tempdir().unwrap();
         assert!(get_document(root.path(), "../outside").is_err());
+    }
+
+    #[test]
+    fn draft_stage_apply_roundtrip_with_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("notes.md");
+        std::fs::write(&source, "# 原始标题\n\n原文内容\n").unwrap();
+        let artifact =
+            import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "# 原始标题\n\n原文内容" }))
+                .unwrap();
+
+        // Stage a markdown draft.
+        let staged = stage_document_draft(
+            root.path(),
+            Some(artifact.id.as_str()),
+            None,
+            DraftContent::Text { kind: "md", body: "# 新标题\n\n改写后的内容\n".into() },
+        )
+        .unwrap();
+        assert_eq!(staged["fileType"], "md");
+        let draft_path = Path::new(staged["draftPath"].as_str().unwrap());
+        assert!(draft_path.is_file(), "draft bytes written");
+        assert!(draft_path.starts_with(root.path().join(".worldbase/document-drafts")));
+
+        // The artifact record carries the pending draft.
+        let with_draft = get_document(root.path(), &artifact.id).unwrap().unwrap();
+        assert!(with_draft.draft.is_some());
+        assert_eq!(
+            get_document_draft(root.path(), source.to_str().unwrap()).unwrap()["artifactId"],
+            artifact.id
+        );
+
+        // Wrong sha is rejected before any write happens.
+        assert!(apply_document_draft(root.path(), &artifact.id, Some("deadbeef")).is_err());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "# 原始标题\n\n原文内容\n");
+
+        // Apply overwrites the source, backs it up, and re-parses the record.
+        let applied = apply_document_draft(root.path(), &artifact.id, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "# 新标题\n\n改写后的内容\n"
+        );
+        let backup_path = applied["backupPath"].as_str().unwrap();
+        assert!(
+            !backup_path.is_empty(),
+            "backup path returned (public form may be relative)"
+        );
+        let applied_artifact = applied["artifact"]["id"].as_str().unwrap();
+        let refreshed = get_document(root.path(), applied_artifact).unwrap().unwrap();
+        assert!(refreshed.draft.is_none(), "draft state cleared after apply");
+        assert!(refreshed.plain_text.contains("改写后的内容"));
+        // The backup lives under the workspace backups dir and holds the ORIGINAL bytes.
+        let backup_dir = root.path().join(".worldbase/document-backups").join(&artifact.id);
+        let backups: Vec<_> = std::fs::read_dir(&backup_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert_eq!(backups.len(), 1, "one backup kept");
+        assert_eq!(
+            std::fs::read_to_string(backups[0].path()).unwrap(),
+            "# 原始标题\n\n原文内容\n"
+        );
+
+        // No pending draft remains.
+        assert!(get_document_draft(root.path(), source.to_str().unwrap()).unwrap().is_null());
+    }
+
+    #[test]
+    fn draft_stage_rejects_type_mismatch_and_pdf() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("doc.md");
+        std::fs::write(&source, "原文").unwrap();
+        let artifact =
+            import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "原文" }))
+                .unwrap();
+
+        // docx content onto a markdown file is rejected.
+        assert!(stage_document_draft(
+            root.path(),
+            Some(artifact.id.as_str()),
+            None,
+            DraftContent::Docx(vec![worldbase_docs::edit::DocBlock::Paragraph("x".into())]),
+        )
+        .is_err());
+
+        // text content onto a markdown file is rejected (strict format match).
+        assert!(stage_document_draft(
+            root.path(),
+            Some(artifact.id.as_str()),
+            None,
+            DraftContent::Text { kind: "text", body: "x".into() },
+        )
+        .is_err());
+
+        // pdf sources are not draftable.
+        let pdf = root.path().join("doc.pdf");
+        std::fs::write(&pdf, b"%PDF-1.4").unwrap();
+        let pdf_artifact =
+            import_parsed_document(root.path(), &pdf, &json!({ "kind": "pdf", "text": "" }))
+                .unwrap();
+        let error = stage_document_draft(
+            root.path(),
+            Some(pdf_artifact.id.as_str()),
+            None,
+            DraftContent::Text { kind: "text", body: "x".into() },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("暂不支持"), "pdf gets a clear message");
+    }
+
+    #[test]
+    fn draft_restages_replace_older_drafts_and_discard_clears_state() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("doc.md");
+        std::fs::write(&source, "v1").unwrap();
+        let artifact =
+            import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "v1" }))
+                .unwrap();
+
+        let first = stage_document_draft(
+            root.path(),
+            Some(artifact.id.as_str()),
+            None,
+            DraftContent::Text { kind: "md", body: "v2".into() },
+        )
+        .unwrap();
+        let second = stage_document_draft(
+            root.path(),
+            Some(artifact.id.as_str()),
+            None,
+            DraftContent::Text { kind: "md", body: "v3".into() },
+        )
+        .unwrap();
+        assert_ne!(first["draftPath"], second["draftPath"], "new draft file");
+        assert!(!Path::new(first["draftPath"].as_str().unwrap()).is_file(), "old draft pruned");
+
+        let discarded = discard_document_draft(root.path(), &artifact.id).unwrap();
+        assert_eq!(discarded["discarded"], true);
+        assert!(!Path::new(second["draftPath"].as_str().unwrap()).is_file());
+        let cleared = get_document(root.path(), &artifact.id).unwrap().unwrap();
+        assert!(cleared.draft.is_none());
+        assert!(get_document_draft(root.path(), source.to_str().unwrap()).unwrap().is_null());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "v1", "source untouched");
+    }
+
+    #[test]
+    fn draft_save_as_writes_a_copy_and_imports_it() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("report.md");
+        std::fs::write(&source, "原稿").unwrap();
+        let artifact =
+            import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "原稿" }))
+                .unwrap();
+        stage_document_draft(
+            root.path(),
+            Some(artifact.id.as_str()),
+            None,
+            DraftContent::Text { kind: "md", body: "改写稿".into() },
+        )
+        .unwrap();
+
+        let target = root.path().join("export").join("report-v2.md");
+        let saved = save_document_draft_as(root.path(), &artifact.id, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "改写稿");
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "原稿",
+            "original untouched by save-as"
+        );
+        let new_id = saved["artifact"]["id"].as_str().unwrap();
+        assert_ne!(new_id, artifact.id, "save-as imports a new artifact");
+        // Both the original (draft cleared) and the new copy exist in the store.
+        assert!(get_document(root.path(), new_id).unwrap().is_some());
+        let cleared = get_document(root.path(), &artifact.id).unwrap().unwrap();
+        assert!(cleared.draft.is_none());
+    }
+
+    #[test]
+    fn draft_can_target_the_store_by_file_path_without_an_id() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("auto.md");
+        std::fs::write(&source, "内容").unwrap();
+        // Unknown path auto-imports, then stages.
+        let unknown = root.path().join("fresh.md");
+        std::fs::write(&unknown, "自动导入").unwrap();
+        let staged = stage_document_draft(
+            root.path(),
+            None,
+            Some(unknown.to_str().unwrap()),
+            DraftContent::Text { kind: "md", body: "草稿".into() },
+        )
+        .unwrap();
+        assert!(staged["artifactId"].as_str().is_some());
+        let staged_id = staged["artifactId"].as_str().unwrap();
+        assert!(get_document(root.path(), staged_id).unwrap().is_some());
+
+        // Existing artifacts are matched by canonical source path.
+        let _ = import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "内容" }))
+            .unwrap();
+        let by_path = stage_document_draft(
+            root.path(),
+            None,
+            Some(source.to_str().unwrap()),
+            DraftContent::Text { kind: "md", body: "按路径".into() },
+        )
+        .unwrap();
+        assert!(!by_path["artifactId"].as_str().unwrap().is_empty());
+        let applied = apply_document_draft(root.path(), by_path["artifactId"].as_str().unwrap(), None).unwrap();
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "按路径");
+        assert!(applied["artifact"].is_object());
     }
 
     #[test]

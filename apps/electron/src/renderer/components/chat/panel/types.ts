@@ -7,6 +7,7 @@ import type {
   ChannelBinding
 } from '../../../../shared/agent-workspace-types.js'
 import type { ActivePageAutomationContext } from '../../../../shared/page-automation-types.js'
+import type { ActiveTerminalContext } from '../../../../shared/terminal-types.js'
 import type {
   BrowserAutomationAction,
   BrowserAutomationActionResult,
@@ -79,17 +80,22 @@ export interface ConversationSummary {
 export interface ChatPanelProps {
   projectContext?: Record<string, unknown> | null
   activePageContext?: ActivePageAutomationContext | null
+  activeTerminalContext?: ActiveTerminalContext | null
   computerUseEnabled?: boolean
   /** null until the first macOS permission query lands; false gates the toggle. */
   computerUsePermissionGranted?: boolean | null
   /** Latest AI-originated workspace tab open request; consumed on first watch. */
   workspaceTabRequest?: { kind: string; payload?: Record<string, unknown>; seq: number } | null
+  /** Latest AI-staged document draft; consumed on first watch. */
+  workspaceDraftRequest?: { payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }; seq: number } | null
 }
 
 export interface ChatPanelEmit {
   (e: 'contextConsumed'): void
   (e: 'workspaceTabRequestConsumed'): void
+  (e: 'workspaceDraftRequestConsumed'): void
   (e: 'pageSurfaceChange', surface: WorkspacePageSurfaceSummary | null): void
+  (e: 'terminalSurfaceChange', surface: WorkspaceTerminalSurfaceSummary | null): void
   (e: 'openWebLink', url: string): void
   (e: 'statusChange', status: ChatSurfaceStatusSummary): void
   (e: 'openSettings', category?: string, options?: OpenSettingsOptions): void
@@ -108,6 +114,12 @@ export interface WorkspacePageSurfaceSummary {
     captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
     runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   } | null
+}
+
+/** Live state of the active workspace terminal tab, forwarded to the app shell. */
+export interface WorkspaceTerminalSurfaceSummary {
+  sessionId: string
+  cwd: string
 }
 
 export interface ChatSurfaceStatusSummary {

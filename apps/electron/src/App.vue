@@ -14,9 +14,10 @@ import BrowserWebView, { type BrowserContextAddPayload } from './renderer/compon
 import FloatingTaskBubble from './renderer/components/app/FloatingTaskBubble.vue'
 import ProjectWindowShell from './renderer/components/app/ProjectWindowShell.vue'
 import ScheduledTaskReportDialog from './renderer/components/settings/ScheduledTaskReportDialog.vue'
-import type { ChatSurfaceStatusSummary, WorkspacePageSurfaceSummary } from './renderer/components/chat/panel/types'
+import type { ChatSurfaceStatusSummary, WorkspacePageSurfaceSummary, WorkspaceTerminalSurfaceSummary } from './renderer/components/chat/panel/types'
 import { sharedChatPanelState } from './renderer/components/chat/panel/shared-state'
 import { addWebQuote } from './renderer/components/chat/panel/web-quote-state'
+import type { ActiveTerminalContext } from './shared/terminal-types'
 import type {
   ActivePageAutomationContext,
   BrowserAutomationAction,
@@ -297,6 +298,18 @@ const activePageAutomationContext = computed<ActivePageAutomationContext | null>
 /** Live surface of the active workspace browser tab, forwarded by the chat panel. */
 const workspacePageSurface = ref<WorkspacePageSurfaceSummary | null>(null)
 
+/** Live surface of the active workspace terminal tab, forwarded by the chat panel. */
+const workspaceTerminalSurface = ref<WorkspaceTerminalSurfaceSummary | null>(null)
+
+const activeTerminalContext = computed<ActiveTerminalContext | null>(() => {
+  const surface = workspaceTerminalSurface.value
+  if (!surface) return null
+  return {
+    sessionId: surface.sessionId,
+    cwd: surface.cwd
+  }
+})
+
 const dockCtx = ref<{ visible: boolean; x: number; y: number; app: RunningApp | null }>({
   visible: false,
   x: 0,
@@ -309,11 +322,15 @@ let windowClosedCleanup: (() => void) | null = null
 let projectOpenInShellCleanup: (() => void) | null = null
 let browserOpenInDockCleanup: (() => void) | null = null
 let workspaceOpenTabCleanup: (() => void) | null = null
+let workspaceDocumentDraftCleanup: (() => void) | null = null
 let schedulerReportRequestedCleanup: (() => void) | null = null
 let pageAutomationRequestCleanup: (() => void) | null = null
 /** Bumped on every AI-originated workspace tab request; consumed by the chat shell once. */
 let workspaceTabRequestSeq = 0
 const workspaceTabRequest = ref<{ kind: string; payload?: Record<string, unknown>; seq: number } | null>(null)
+/** Bumped on every AI-staged document draft; consumed by the chat shell once. */
+let workspaceDraftRequestSeq = 0
+const workspaceDraftRequest = ref<{ payload: { artifactId: string; filePath: string; draftPath: string; fileType: string; sourceSha256: string; createdAt: string }; seq: number } | null>(null)
 let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
 let runningAppsInterval: ReturnType<typeof setInterval> | null = null
@@ -1326,6 +1343,14 @@ onMounted(async () => {
     })
   }
 
+  if (window.electronAPI?.onWorkspaceDocumentDraft) {
+    workspaceDocumentDraftCleanup = window.electronAPI.onWorkspaceDocumentDraft((payload) => {
+      if (currentView.value !== 'chat') openChat()
+      workspaceDraftRequestSeq += 1
+      workspaceDraftRequest.value = { payload, seq: workspaceDraftRequestSeq }
+    })
+  }
+
   if (window.electronAPI?.onScheduledTaskReportRequested) {
     schedulerReportRequestedCleanup = window.electronAPI.onScheduledTaskReportRequested((report) => {
       scheduledTaskReport.value = report
@@ -1355,6 +1380,7 @@ onUnmounted(() => {
   projectOpenInShellCleanup?.()
   browserOpenInDockCleanup?.()
   workspaceOpenTabCleanup?.()
+  workspaceDocumentDraftCleanup?.()
   schedulerReportRequestedCleanup?.()
   pageAutomationRequestCleanup?.()
 })
@@ -1443,10 +1469,14 @@ onUnmounted(() => {
                 <ChatPanel
                   :projectContext="chatProjectContext"
                   :active-page-context="activePageAutomationContext"
+                  :active-terminal-context="activeTerminalContext"
                   :workspace-tab-request="workspaceTabRequest"
+                  :workspace-draft-request="workspaceDraftRequest"
                   @contextConsumed="chatProjectContext = null"
                   @workspace-tab-request-consumed="workspaceTabRequest = null"
+                  @workspace-draft-request-consumed="workspaceDraftRequest = null"
                   @page-surface-change="workspacePageSurface = $event"
+                  @terminal-surface-change="workspaceTerminalSurface = $event"
                   @open-web-link="openWebLinkInApp"
                   @status-change="handleChatSurfaceStatusChange"
                   @open-settings="(category, options) => openSettingsCategory(category, options)"
