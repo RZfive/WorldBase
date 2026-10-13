@@ -429,4 +429,24 @@ export class ScheduledTaskStore {
       reports: normalizeSnapshot({ reports }).reports
     })
   }
+
+  /**
+   * Merge recovered run reports (e.g. from a pre-migration JSON backup),
+   * deduplicating by report id. Returns the number of newly added reports.
+   */
+  mergeReports (incoming: unknown[]): number {
+    const snapshot = this.readSnapshot()
+    const known = new Set(snapshot.reports.map(report => report.id))
+    const merged = [...snapshot.reports]
+    for (const report of incoming) {
+      const normalized = normalizeReport(report)
+      if (!normalized || known.has(normalized.id)) continue
+      known.add(normalized.id)
+      merged.push(normalized)
+    }
+    if (merged.length === snapshot.reports.length) return 0
+    merged.sort((left, right) => right.startedAt.localeCompare(left.startedAt))
+    this.writeSnapshot({ ...snapshot, reports: merged })
+    return merged.length - snapshot.reports.length
+  }
 }

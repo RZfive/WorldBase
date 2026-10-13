@@ -23,7 +23,7 @@ import type { ChannelBindingStore } from '../../src/main/im/channel-binding-stor
 import type { ImGatewayService } from '../../src/main/im/im-gateway-service.js'
 import type { RustHarnessClient } from './rust-harness-client.js'
 import type { MemoryCompactionResult, MemoryCompactionStatus } from '../../src/shared/agent-workspace-types.js'
-import type { DocumentStore } from '../../src/main/ai-engine/agent/tools/document-store.js'
+import type { DocumentStore } from '../../src/main/document-workbench/document-store.js'
 import type { MCPService } from '../../src/main/mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
 import type { TerminalManager } from './terminal/terminal-manager.js'

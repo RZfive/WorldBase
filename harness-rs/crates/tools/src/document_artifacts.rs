@@ -1178,7 +1178,12 @@ fn resolve_artifact_for_draft(
     };
     if let Ok(canonical) = absolute.canonicalize() {
         for artifact in list_documents(workspace)? {
-            if artifact_source_path(workspace, &artifact) == canonical {
+            let stored = artifact_source_path(workspace, &artifact);
+            let stored_canonical = stored
+                .canonicalize()
+                .or_else(|_| canonicalize_existing_ancestor(&stored))
+                .unwrap_or(stored);
+            if stored_canonical == canonical {
                 return Ok(artifact);
             }
         }
@@ -1202,6 +1207,10 @@ fn draft_record_value(
     if draft.is_null() {
         return Value::Null;
     }
+    let draft_path = draft
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let mut value = draft;
     if let Some(object) = value.as_object_mut() {
         object.insert("artifactId".into(), json!(artifact.id));
@@ -1211,6 +1220,12 @@ fn draft_record_value(
         );
         object.insert("fileName".into(), json!(artifact.file_name));
         object.insert("fileType".into(), json!(artifact.file_type));
+        // The desktop draft banner re-imports the draft file for preview, so
+        // the pull path (doc.draft.get) must carry the same absolute draft
+        // path the push notification (document.draftStaged) does.
+        if let Some(draft_path) = draft_path {
+            object.insert("draftPath".into(), json!(draft_path));
+        }
     }
     value
 }
@@ -3048,3 +3063,62 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod draft_pull_path_tests {
+    use super::*;
+
+    #[test]
+    fn draft_record_value_exposes_absolute_draft_path_for_ui_pull() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path();
+        let source = workspace.join("notes.md");
+        std::fs::write(&source, "# Title\nbody").unwrap();
+        let staged = stage_document_draft(
+            workspace,
+            None,
+            Some(source.to_str().unwrap()),
+            DraftContent::Text { kind: "md", body: "# Title\nchanged".to_string() },
+            None,
+        )
+        .unwrap();
+        let artifact_id = staged["artifactId"].as_str().unwrap().to_string();
+
+        let pulled = get_document_draft(workspace, source.to_str().unwrap()).unwrap();
+        assert!(!pulled.is_null(), "draft must be pullable");
+        assert_eq!(
+            pulled["draftPath"].as_str().unwrap(),
+            staged["draftPath"].as_str().unwrap(),
+            "pull and push payloads must agree on draftPath"
+        );
+        assert_eq!(pulled["artifactId"].as_str().unwrap(), artifact_id);
+    }
+
+    #[test]
+    fn staging_twice_reuses_the_same_artifact_for_one_source() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path();
+        let source = workspace.join("report.md");
+        std::fs::write(&source, "v1").unwrap();
+        let first = stage_document_draft(
+            workspace,
+            None,
+            Some(source.to_str().unwrap()),
+            DraftContent::Text { kind: "md", body: "a".into() },
+            None,
+        )
+        .unwrap();
+        let second = stage_document_draft(
+            workspace,
+            None,
+            Some(source.to_str().unwrap()),
+            DraftContent::Text { kind: "md", body: "b".into() },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            first["artifactId"].as_str().unwrap(),
+            second["artifactId"].as_str().unwrap(),
+            "re-staging the same source must not create a duplicate artifact"
+        );
+    }
+}

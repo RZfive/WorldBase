@@ -14,11 +14,15 @@ export interface AskUserPanelRequest {
 
 const props = defineProps<{
   request: AskUserPanelRequest
+  /** Controlled by the attention-zone accordion; undefined keeps the panel
+      self-managed (standalone usage). */
+  expanded?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'submit', requestId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }>): void
   (e: 'cancel', requestId: string): void
+  (e: 'toggle'): void
 }>()
 
 interface DraftAnswer {
@@ -29,12 +33,14 @@ interface DraftAnswer {
 const drafts = reactive<Record<string, DraftAnswer>>({})
 const collapsed = ref(false)
 
-function ensureDraft (questionId: string): DraftAnswer {
-  if (!drafts[questionId]) {
-    drafts[questionId] = { selectedOption: null, customAnswer: '' }
-  }
-  return drafts[questionId]
-}
+// The attention-zone accordion owns expansion when wired up; follow it.
+watch(
+  () => props.expanded,
+  (value) => {
+    if (typeof value === 'boolean') collapsed.value = !value
+  },
+  { immediate: true }
+)
 
 watch(
   () => props.request.requestId,
@@ -42,10 +48,17 @@ watch(
     for (const key of Object.keys(drafts)) {
       delete drafts[key]
     }
-    collapsed.value = false
+    if (props.expanded === undefined) collapsed.value = false
   },
   { immediate: true }
 )
+
+function ensureDraft (questionId: string): DraftAnswer {
+  if (!drafts[questionId]) {
+    drafts[questionId] = { selectedOption: null, customAnswer: '' }
+  }
+  return drafts[questionId]
+}
 
 const allAnswered = computed(() => {
   return props.request.questions.every((q) => {
@@ -101,6 +114,7 @@ function cancel () {
 
 function toggleCollapsed () {
   collapsed.value = !collapsed.value
+  emit('toggle')
 }
 </script>
 

@@ -1,6 +1,6 @@
 import type { BrowserWindow } from 'electron'
-import { PermissionEngine } from '../ai-engine/agent/permissions/permission-engine.js'
-import { registerAllTools, type ToolServices } from '../ai-engine/agent/tools/index.js'
+import { PermissionEngine } from '../ai-host/agent/permissions/permission-engine.js'
+import { registerAllTools, type ToolServices } from '../ai-host/agent/tools/index.js'
 import type { AIExecutionAuthMode } from '../settings/settings-store.js'
 import type { RustCustomToolRegistration, RustProgressCallback } from '../../../electron/main-process/rust-harness-client.js'
 import type {

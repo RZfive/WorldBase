@@ -1,8 +1,8 @@
 import { app, ipcMain, shell } from 'electron'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import type { AIEngineServices } from '../../src/main/ai-engine/engine-contracts.js'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import type { AIEngineServices } from '../../src/main/ai-host/engine-contracts.js'
 import { RustHarnessEngine } from '../../src/main/ai-harness/rust-harness-engine.js'
 import { ProjectFS } from '../../src/main/project-fs/project-fs.js'
 import { ProjectPackageService } from '../../src/main/project-fs/project-package-service.js'
@@ -26,7 +26,7 @@ import { ScheduledTaskStore, type ScheduledTaskDefinition, type ScheduledTaskRun
 import { LongTermGoalStore } from '../../src/main/settings/long-term-goal-store.js'
 import { ChannelBindingStore } from '../../src/main/im/channel-binding-store.js'
 import { ImGatewayService } from '../../src/main/im/im-gateway-service.js'
-import { DocumentStore } from '../../src/main/ai-engine/agent/tools/document-store.js'
+import { DocumentStore } from '../../src/main/document-workbench/document-store.js'
 import { MCPService, type MCPServerSnapshot, type MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
 import { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
 import { LongTermGoalService } from '../../src/main/long-term-goals/long-term-goal-service.js'
@@ -48,7 +48,7 @@ import { broadcastToAppWindows, getActiveAiRequestWindow, getProjectsDir, getSna
 import { migrateUserDataForRename } from './user-data-migration.js'
 import { RustHarnessClient, type JsonRpcResult, type RustHostRequest } from './rust-harness-client.js'
 import { buildDocumentRenderPreview, readDocumentRenderAsset } from '../../src/main/document-preview/document-render-service.js'
-import type { DocumentFileType } from '../../src/main/ai-engine/agent/tools/document-types.js'
+import type { DocumentFileType } from '../../src/main/document-workbench/document-types.js'
 
 let electronMcpParkedForRust = false
 
@@ -406,6 +406,12 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
         settled = true
         ipcMain.removeListener('askUser:response', onResponse)
         clearTimeout(timeout)
+        // The native Rust ask_user has its own timeout upstream; when this
+        // side gives up (or the run was aborted) the panel must not linger
+        // collecting answers nobody will read.
+        if (value === null && !win.isDestroyed()) {
+          win.webContents.send('askUser:cancelled', { requestId: request.requestId })
+        }
         resolve(value)
       }
       const onResponse = (_event: unknown, payload: { requestId?: string; answers?: unknown }) => {
@@ -496,12 +502,16 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
   if (request.requestKind === 'scheduler.report') {
     // The Rust scheduler loop owns AI-created task execution; reports come
     // back over this host request so the desktop store stays the single UI
-    // history (same shape as Node-executed task reports).
+    // history (same shape as Node-executed task reports). Manual
+    // `schedule.run` executions report with trigger=manual and an error text
+    // when the run failed.
     mainState.scheduledTaskService?.ingestRustReport({
       scheduleId: String(request.payload.scheduleId || ''),
       taskName: String(request.payload.taskName || ''),
       conversationId: typeof request.payload.conversationId === 'string' ? request.payload.conversationId : undefined,
-      resultText: typeof request.payload.resultText === 'string' ? request.payload.resultText : undefined
+      resultText: typeof request.payload.resultText === 'string' ? request.payload.resultText : undefined,
+      error: typeof request.payload.error === 'string' ? request.payload.error : undefined,
+      trigger: request.payload.trigger === 'manual' ? 'manual' : 'schedule'
     })
     return { success: true }
   }
@@ -621,8 +631,10 @@ export async function refreshRustScheduledTasks (): Promise<void> {
 /**
  * One-shot migration: push every task from the legacy JSON store into the
  * Rust scheduler store, preserving IDs, hidden flags, provider/model pinning
- * and next-run deadlines. The JSON file is renamed (not deleted) after a
- * fully successful push so a partial failure can be retried.
+ * and next-run deadlines. The JSON file stays in place as the run-report
+ * (执行日志) store — only tasks move to Rust — and its task list is emptied
+ * after a fully successful push so the migration is one-shot and a partial
+ * failure can be retried.
  */
 export async function migrateScheduledTasksToRust (): Promise<void> {
   const client = mainState.rustHarness
@@ -657,28 +669,96 @@ export async function migrateScheduledTasksToRust (): Promise<void> {
   }
   if (migrated === legacyTasks.length) {
     await refreshRustScheduledTasks()
-    // Rename the legacy file so the migration is one-shot and auditable.
+    // Keep the report history (执行日志) in this file; only the task list
+    // moves to Rust. Emptying the task list makes re-migration a no-op.
     try {
-      const legacyPath = path.join(app.getPath('userData'), 'scheduled-tasks.json')
-      if (existsSync(legacyPath)) {
-        await fsPromises.rename(legacyPath, `${legacyPath}.migrated-${Date.now()}`)
-      }
+      store.saveTasks([])
+      mainState.scheduledTaskService?.clearLocalTasks()
     } catch (error) {
-      console.warn('[main:scheduler] Legacy schedule file rename failed:', error)
+      console.warn('[main:scheduler] Failed to retire legacy task list:', error)
     }
-    } else {
+  } else {
     console.warn(`[main:scheduler] Schedule migration incomplete: ${migrated}/${legacyTasks.length}`)
   }
 }
 
+/**
+ * Run reports never moved to Rust: the one-shot migration used to rename the
+ * legacy JSON store away, discarding the run history it still carried. Import
+ * reports from any `scheduled-tasks.json.migrated-*` backup so the 执行日志
+ * view and goal reconciliation see the old history again. Re-imports are
+ * deduplicated by report id; the backup files are kept for auditability.
+ */
+export async function recoverMigratedScheduledTaskReports (): Promise<void> {
+  const store = mainState.scheduledTaskStore
+  const service = mainState.scheduledTaskService
+  if (!store || !service) return
+  const userDataDir = app.getPath('userData')
+  let backups: string[] = []
+  try {
+    backups = (await fsPromises.readdir(userDataDir))
+      .filter(name => name.startsWith('scheduled-tasks.json.migrated-'))
+      .sort()
+  } catch {
+    return
+  }
+  if (backups.length === 0) return
+
+  const liveTasks = service.listTasks({ includeHidden: true })
+  const liveTaskIds = new Set(liveTasks.map(task => task.id))
+  const liveTasksByTitle = new Map(liveTasks.map(task => [task.title, task]))
+  const recovered: Record<string, unknown>[] = []
+  for (const name of backups) {
+    let parsed: { reports?: unknown } | null = null
+    try {
+      parsed = JSON.parse(await fsPromises.readFile(path.join(userDataDir, name), 'utf-8'))
+    } catch (error) {
+      console.warn(`[main:scheduler] Report recovery read failed for ${name}:`, (error as Error).message)
+      continue
+    }
+    const reports = Array.isArray(parsed?.reports) ? parsed.reports : []
+    for (const report of reports) {
+      const record = (report && typeof report === 'object' && !Array.isArray(report)
+        ? report
+        : {}) as Record<string, unknown>
+      const taskId = typeof record.taskId === 'string' ? record.taskId : ''
+      if (taskId && !liveTaskIds.has(taskId)) {
+        // The task was re-keyed during migration: re-attach the history by
+        // title so it shows up under the surviving task again.
+        const match = typeof record.taskTitle === 'string'
+          ? liveTasksByTitle.get(record.taskTitle)
+          : undefined
+        if (match) record.taskId = match.id
+      }
+      recovered.push(record)
+    }
+  }
+  if (recovered.length === 0) return
+  try {
+    const added = store.mergeReports(recovered)
+    if (added > 0) {
+      service.start()
+      console.log(`[main:scheduler] Recovered ${added} run reports from migration backups`)
+    }
+  } catch (error) {
+    console.warn('[main:scheduler] Report recovery merge failed:', (error as Error).message)
+  }
+}
+
+/** Long-term-goal backing tasks carry these title markers and must never
+    surface in the scheduler UI, even if their hidden flag was lost in a
+    migration performed by an older build. */
+const LONG_TERM_GOAL_TITLE_MARKER_PATTERN = /^\[LongTermGoal(Review)?\]/
+
 function normalizeRustScheduleTask (task: Record<string, unknown>): ScheduledTaskDefinition {
   const schedule = (task.schedule && typeof task.schedule === 'object' ? task.schedule : {}) as Record<string, unknown>
   const scheduleKind = String(schedule.kind || 'cron')
+  const title = String(task.title || '')
   return {
     id: String(task.id || ''),
-    title: String(task.title || ''),
+    title,
     enabled: task.enabled === true,
-    hidden: task.hidden === true,
+    hidden: task.hidden === true || LONG_TERM_GOAL_TITLE_MARKER_PATTERN.test(title),
     createdBy: task.createdBy === 'manual' ? 'manual' as const : 'ai' as const,
     prompt: String(task.prompt || ''),
     schedule: schedule as unknown as ScheduledTaskDefinition['schedule'],
@@ -960,6 +1040,8 @@ export async function initializeServices (): Promise<void> {
     } finally {
       scheduledTaskServiceRetireNodeLoop()
       await refreshRustScheduledTasks()
+      // Restore run reports discarded by the earlier rename-based migration.
+      await recoverMigratedScheduledTaskReports()
     }
   })()
 

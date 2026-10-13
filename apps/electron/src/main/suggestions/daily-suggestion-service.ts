@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import type { AIConfigInput } from '../ai-engine/engine-contracts.js'
+import type { AIConfigInput } from '../ai-host/engine-contracts.js'
 import type { AIExecutionEngine } from '../ai-harness/types.js'
 import type { DailySuggestionStore } from '../settings/daily-suggestion-store.js'
 import {

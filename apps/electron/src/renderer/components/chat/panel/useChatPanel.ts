@@ -93,7 +93,9 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     currentPendingAuthRequest,
     currentPendingSudoPasswordCount,
     currentSudoPasswordRequest,
+    clearPendingAskUserRequests,
     getPendingAuthCount,
+    handleAskUserCancellation,
     handleAskUserRequest,
     handleAuthRequest,
     handleAuthResolution,
@@ -473,7 +475,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     setConversationTarget,
     resolveAssistantSpeakerName,
     saveConversation: (conversationId, chatMessages) => doSaveConversation(conversationId, chatMessages),
-    resetTransientStreamState
+    resetTransientStreamState,
+    clearPendingAskUserRequests
   })
 
   const {
@@ -515,6 +518,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       handleAuthRequest,
       handleSudoPasswordRequest,
       handleAskUserRequest,
+      handleAskUserCancellation,
       handleAuthResolution,
       loadSkills,
       loadAgentWorkspaceOptions,

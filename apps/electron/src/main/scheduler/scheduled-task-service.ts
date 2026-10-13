@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import { type BrowserWindow } from 'electron'
-import type { AIConfigInput, CustomToolRegistration } from '../ai-engine/engine-contracts.js'
+import type { AIConfigInput, CustomToolRegistration } from '../ai-host/engine-contracts.js'
 import type { ProgressEvent } from '../ai-harness/types.js'
 import type { AIExecutionEngine } from '../ai-harness/types.js'
 import { t } from '../i18n/main-i18n.js'
@@ -11,6 +11,7 @@ import {
   type ScheduledTaskDefinition,
   type ScheduledTaskProgressEntry,
   type ScheduledTaskRunReport,
+  type ScheduledTaskRunStatus,
   type ScheduledTaskStatus,
   type ScheduledTaskTrigger
 } from '../settings/scheduled-task-store.js'
@@ -226,9 +227,12 @@ export class ScheduledTaskService {
   }
 
   listReports (taskId?: string, options: ScheduledTaskListOptions = {}): ScheduledTaskRunReport[] {
+    // Visible ids must cover the Rust overlay too: after the JSON → Rust
+    // migration most tasks only exist there, and their reports would
+    // otherwise be filtered out of the 执行日志 view.
     const visibleTaskIds = options.includeHidden
       ? null
-      : new Set(this.tasks.filter(task => task.hidden !== true).map(task => task.id))
+      : new Set([...this.tasks, ...this.rustTasks].filter(task => task.hidden !== true).map(task => task.id))
     const filtered = taskId
       ? this.reports.filter(report => report.taskId === taskId)
       : this.reports.filter(report => visibleTaskIds?.has(report.taskId) ?? true)
@@ -563,43 +567,84 @@ export class ScheduledTaskService {
     this.emitTasksChanged()
   }
 
+  /**
+   * Drop the local (JSON store) task list after a successful JSON → Rust
+   * migration. Tasks live in the Rust store from then on; the JSON file
+   * remains the run-report history store only.
+   */
+  clearLocalTasks (): void {
+    if (this.tasks.length === 0) return
+    this.tasks = []
+    this.persistTasks()
+    this.emitTasksChanged()
+  }
+
+  /** Find a task across the local JSON store and the Rust scheduler overlay. */
+  private findTask (taskId: string): ScheduledTaskDefinition | undefined {
+    return this.tasks.find(item => item.id === taskId) ||
+      this.rustTasks.find(item => item.id === taskId)
+  }
+
   ingestRustReport (payload: {
     scheduleId: string
     taskName: string
     conversationId?: string
     resultText?: string
+    error?: string
+    trigger?: ScheduledTaskTrigger
   }): void {
-    const task = this.tasks.find(item => item.id === payload.scheduleId)
+    const task = this.findTask(payload.scheduleId)
     const now = new Date().toISOString()
     const resultText = String(payload.resultText || '')
-    const report: ScheduledTaskRunReport = {
-      id: `task_report_${crypto.randomUUID()}`,
-      taskId: payload.scheduleId,
-      taskTitle: task?.title || payload.taskName,
-      trigger: 'schedule',
-      status: 'completed',
-      scheduledFor: task?.nextRunAt || null,
-      startedAt: now,
-      finishedAt: now,
-      attempt: 1,
-      prompt: task?.prompt || payload.taskName,
-      summary: resultText.slice(0, 200) || t('mainDialog.scheduledTaskCompletedSummary'),
-      resultText,
-      progress: [],
-      providerId: task?.providerId || null,
-      modelId: task?.modelId || null,
-      selectedSkillIds: task ? [...task.selectedSkillIds] : [],
-      selectedMcpServerIds: task ? [...task.selectedMcpServerIds] : [],
-      retryScheduledAt: null,
-      createdAt: now,
-      updatedAt: now
+    const errorText = String(payload.error || '')
+    const status: ScheduledTaskRunStatus = errorText ? 'failed' : 'completed'
+    const summary = buildSummary(errorText || resultText, t('mainDialog.scheduledTaskCompletedSummary'))
+    const trigger: ScheduledTaskTrigger = payload.trigger === 'manual' ? 'manual' : 'schedule'
+
+    // Finalize the live report the progress bridge created instead of leaving
+    // a ghost 'running' entry next to the finished one.
+    const runningReport = this.reports.find(report =>
+      report.taskId === payload.scheduleId && report.status === 'running')
+    let report: ScheduledTaskRunReport
+    if (runningReport) {
+      report = this.updateReport(runningReport.id, (current) => {
+        current.status = status
+        current.finishedAt = now
+        current.summary = summary
+        current.resultText = resultText
+        current.error = errorText || undefined
+      })
+    } else {
+      report = {
+        id: `task_report_${crypto.randomUUID()}`,
+        taskId: payload.scheduleId,
+        taskTitle: task?.title || payload.taskName,
+        trigger,
+        status,
+        scheduledFor: task?.nextRunAt || null,
+        startedAt: now,
+        finishedAt: now,
+        attempt: 1,
+        prompt: task?.prompt || payload.taskName,
+        summary,
+        resultText,
+        error: errorText || undefined,
+        progress: [],
+        providerId: task?.providerId || null,
+        modelId: task?.modelId || null,
+        selectedSkillIds: task ? [...task.selectedSkillIds] : [],
+        selectedMcpServerIds: task ? [...task.selectedMcpServerIds] : [],
+        retryScheduledAt: null,
+        createdAt: now,
+        updatedAt: now
+      }
+      this.reports = sortReports([report, ...this.reports]).slice(0, MAX_REPORT_HISTORY)
+      this.persistReports()
     }
-    this.reports = sortReports([report, ...this.reports]).slice(0, MAX_REPORT_HISTORY)
-    this.persistReports()
     const rustTask = this.rustTasks.find(item => item.id === payload.scheduleId)
     if (rustTask) {
       rustTask.lastRunAt = now
-      rustTask.lastStatus = 'completed'
+      rustTask.lastStatus = status
       rustTask.lastReportId = report.id
     }
     this.emitTasksChanged()
@@ -614,7 +659,7 @@ export class ScheduledTaskService {
    */
   ingestRustProgress (payload: { scheduleId: string; stage: string; toolName?: string }): void {
     if (payload.stage !== 'tool_start' && payload.stage !== 'tool_end' && payload.stage !== 'tool_error') return
-    const task = this.tasks.find(item => item.id === payload.scheduleId)
+    const task = this.findTask(payload.scheduleId)
     const toolName = payload.toolName || 'tool'
     let runningReport = this.reports.find(report =>
       report.taskId === payload.scheduleId && report.status === 'running')

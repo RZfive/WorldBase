@@ -188,6 +188,20 @@ export function createChatAuthorizationState (options: ChatAuthorizationStateOpt
     if (currentConversationId.value !== conversationId) unreadConversationIds.add(conversationId)
   }
 
+  /** The host settled the tool call without this panel's answers (abort,
+      timeout, window gone). Drop the panel — answering it would write into
+      the void. */
+  function handleAskUserCancellation (requestId: string): void {
+    removeQueuedRequest(pendingAskUserRequestsByConversation, requestId)
+  }
+
+  /** A stream reached its terminal state, so no pending panel of this
+      conversation can still be answered by the model. */
+  function clearPendingAskUserRequests (conversationId?: string | null): void {
+    if (!conversationId) return
+    pendingAskUserRequestsByConversation.delete(conversationId)
+  }
+
   function respondToAskUserRequest (requestId: string, answers: AskUserAnswerPayload[] | null): void {
     removeQueuedRequest(pendingAskUserRequestsByConversation, requestId)
     window.electronAPI?.respondAskUser(requestId, answers)
@@ -199,7 +213,9 @@ export function createChatAuthorizationState (options: ChatAuthorizationStateOpt
     currentPendingAuthRequest,
     currentPendingSudoPasswordCount,
     currentSudoPasswordRequest,
+    clearPendingAskUserRequests,
     getPendingAuthCount,
+    handleAskUserCancellation,
     handleAskUserRequest,
     handleAuthRequest,
     handleAuthResolution,

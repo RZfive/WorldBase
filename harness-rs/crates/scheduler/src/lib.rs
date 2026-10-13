@@ -46,11 +46,24 @@ impl Scheduler {
     }
 
     pub fn create(&self, name: &str, cron_expr: &str, task: &str) -> Result<ScheduleEntry> {
+        self.create_with_id(&uuid::Uuid::new_v4().to_string(), name, cron_expr, task)
+    }
+
+    /// Create a cron entry while retaining a caller-provided durable ID, so
+    /// JSON → Rust migration and Electron edits stay keyed on the original id.
+    pub fn create_with_id(
+        &self,
+        id: &str,
+        name: &str,
+        cron_expr: &str,
+        task: &str,
+    ) -> Result<ScheduleEntry> {
+        let id = normalize_entry_id(id)?;
         validate_cron(cron_expr)?;
         let now = Utc::now();
         let now_text = now.to_rfc3339();
         let entry = ScheduleEntry {
-            id: uuid::Uuid::new_v4().to_string(),
+            id,
             name: name.into(),
             cron: cron_expr.into(),
             task: task.into(),
@@ -77,11 +90,22 @@ impl Scheduler {
     }
 
     pub fn create_task(&self, request: ScheduledTaskRequest) -> Result<ScheduleEntry> {
-        self.create_task_at(request, Utc::now())
+        self.create_task_with_id(&uuid::Uuid::new_v4().to_string(), request)
+    }
+
+    /// Create a structured-cadence entry while retaining a caller-provided
+    /// durable ID (migration and Electron edits key on the original id).
+    pub fn create_task_with_id(
+        &self,
+        id: &str,
+        request: ScheduledTaskRequest,
+    ) -> Result<ScheduleEntry> {
+        self.create_task_at(Some(id), request, Utc::now())
     }
 
     fn create_task_at(
         &self,
+        explicit_id: Option<&str>,
         mut request: ScheduledTaskRequest,
         now: DateTime<Utc>,
     ) -> Result<ScheduleEntry> {
@@ -98,8 +122,12 @@ impl Scheduler {
             .retry_delay_minutes
             .clamp(1, 7 * 24 * 60);
         let now_text = now.to_rfc3339();
+        let entry_id = match explicit_id {
+            Some(id) => normalize_entry_id(id)?,
+            None => normalize_entry_id(&uuid::Uuid::new_v4().to_string())?,
+        };
         let mut entry = ScheduleEntry {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: entry_id,
             name: title.to_string(),
             cron: legacy_cron_hint(&request.schedule),
             task: prompt.to_string(),
@@ -355,6 +383,15 @@ fn normalized_ids(values: Vec<String>) -> Vec<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty() && seen.insert(value.clone()))
         .collect()
+}
+
+/// Durable schedule IDs come from migration/edit callers; keep them non-empty
+/// and within the SQLite key budget.
+fn normalize_entry_id(id: &str) -> Result<String> {
+    let id = id.trim();
+    anyhow::ensure!(!id.is_empty(), "schedule id must not be empty");
+    anyhow::ensure!(id.len() <= 128, "schedule id is too long");
+    Ok(id.to_string())
 }
 
 fn parse_datetime(value: &str) -> Option<DateTime<Utc>> {
@@ -625,9 +662,14 @@ pub fn electron_task_value(entry: &ScheduleEntry) -> Value {
         "id": entry.id,
         "title": entry.name,
         "enabled": entry.enabled,
+        // Electron filters hidden backing tasks (long-term-goal internals)
+        // out of the scheduler UI; dropping the flag here made them leak.
+        "hidden": entry.hidden,
         "createdBy": if entry.created_by.is_empty() { "manual" } else { &entry.created_by },
         "prompt": entry.task,
         "schedule": schedule,
+        "providerId": entry.provider_id,
+        "modelId": entry.model_id,
         "selectedSkillIds": entry.selected_skill_ids,
         "selectedMcpServerIds": entry.selected_mcp_server_ids,
         "retryPolicy": entry.retry_policy,
@@ -637,6 +679,7 @@ pub fn electron_task_value(entry: &ScheduleEntry) -> Value {
         "retryScheduledAt": entry.retry_scheduled_at,
         "lastRunAt": entry.last_run_at,
         "lastStatus": if entry.last_status.is_empty() { "idle" } else { &entry.last_status },
+        "lastReportId": entry.last_report_id,
     })
 }
 
@@ -750,6 +793,42 @@ mod tests {
         assert!(sched.list().unwrap().is_empty());
     }
 
+    #[test]
+    fn create_with_id_keeps_caller_id_and_hidden_flag() {
+        let dir = std::env::temp_dir().join(format!("ws-sched-id-{}", uuid::Uuid::new_v4()));
+        let sched = Scheduler::new(Arc::new(Store::open(&dir.join("db.sqlite")).unwrap()));
+        let entry = sched
+            .create_task_with_id(
+                "task_goal_abc",
+                ScheduledTaskRequest {
+                    title: "[LongTermGoal] 目标".into(),
+                    prompt: "推进".into(),
+                    enabled: true,
+                    schedule: ScheduledTaskSchedule::Daily { time_of_day: "21:30".into() },
+                    selected_skill_ids: Vec::new(),
+                    selected_mcp_server_ids: Vec::new(),
+                    retry_policy: ScheduledTaskRetryPolicy::default(),
+                    created_by: "ai".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(entry.id, "task_goal_abc");
+        // The dispatcher applies Electron's hidden flag via update() after
+        // create; mirror that flow here.
+        let mut entry = entry;
+        entry.hidden = true;
+        sched.update(entry).unwrap();
+        let mut listed = sched.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        let listed = listed.pop().unwrap();
+        assert_eq!(listed.id, "task_goal_abc");
+        assert!(matches!(listed.schedule, Some(ScheduledTaskSchedule::Daily { .. })));
+        // electron_task_value must round-trip the hidden flag so the Electron
+        // overlay keeps long-term-goal backing tasks out of the scheduler UI.
+        let view = electron_task_value(&listed);
+        assert_eq!(view["hidden"], serde_json::Value::Bool(true));
+    }
+
     #[tokio::test]
     async fn due_tick_uses_persisted_deadline_and_advances_it() {
         let dir = std::env::temp_dir().join(format!("ws-sched-due-{}", uuid::Uuid::new_v4()));
@@ -845,6 +924,7 @@ mod tests {
         let scheduler = Scheduler::new(Arc::new(Store::open(&path).unwrap()));
         let entry = scheduler
             .create_task_at(
+                None,
                 structured_request(
                     ScheduledTaskSchedule::Interval {
                         every_minutes: 15,
@@ -882,6 +962,7 @@ mod tests {
             .with_timezone(&Utc);
         scheduler
             .create_task_at(
+                None,
                 structured_request(
                     ScheduledTaskSchedule::Dates {
                         dates: vec!["2030-01-02T09:00:00Z".into(), "2030-01-01T09:00:00Z".into()],
@@ -932,6 +1013,7 @@ mod tests {
             .with_timezone(&Utc);
         scheduler
             .create_task_at(
+                None,
                 structured_request(
                     ScheduledTaskSchedule::Once {
                         run_at: "2030-01-01T09:00:00Z".into(),

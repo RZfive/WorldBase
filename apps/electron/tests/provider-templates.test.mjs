@@ -12,7 +12,7 @@ import {
   providerTemplateHosts
 } from '../src/shared/provider-templates.ts'
 import { SettingsStore } from '../src/main/settings/settings-store.ts'
-import { resolveDefaultModelPricing } from '../src/main/ai-engine/cost-tracker.ts'
+import { resolveDefaultModelPricing } from '../src/main/ai-harness/cost-tracker.ts'
 import zhCN from '../src/locales/zh-CN/index.ts'
 import enUS from '../src/locales/en-US/index.ts'
 

@@ -109,6 +109,8 @@ interface ChatMessageSenderOptions {
   resolveAssistantSpeakerName: (sourceText: string) => string
   saveConversation: (conversationId: string, messages: ChatMessage[]) => Promise<void>
   resetTransientStreamState: () => void
+  /** Drops ask-user panels that can no longer be answered once a stream ends. */
+  clearPendingAskUserRequests: (conversationId?: string | null) => void
 }
 
 const DOCUMENT_TAG_PATTERN = /\[\[doc:([A-Za-z0-9_-]+)(?:\|([^\]]*))?\]\]/g
@@ -189,7 +191,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     setConversationTarget,
     resolveAssistantSpeakerName,
     saveConversation: doSaveConversation,
-    resetTransientStreamState
+    resetTransientStreamState,
+    clearPendingAskUserRequests
   } = options
 
   const getAssistantStopCopy = (): AssistantStopCopy => ({
@@ -447,6 +450,9 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           const finishSession = (saveConversation = false) => {
             flushPendingStreamText()
             releaseStreamSession(convId, sessionId)
+            // No pending panel of this conversation can be answered by the
+            // model anymore; keep stale panels from stacking above the input.
+            clearPendingAskUserRequests(convId)
             if (saveConversation) {
               void doSaveConversation(convId, targetMessages)
             }

@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { parseDocument, parseDocumentBuffer, isSupportedDocument } from '../../../src/main/ai-engine/agent/tools/document-parser.js'
+import { parseDocument, parseDocumentBuffer, isSupportedDocument } from '../../../src/main/document-workbench/document-parser.js'
 import { t } from '../../../src/main/i18n/main-i18n.js'
 import {
   MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES,

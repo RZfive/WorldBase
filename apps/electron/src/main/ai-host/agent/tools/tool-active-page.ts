@@ -1,7 +1,7 @@
 import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { ProgressCallback } from '../agent-core.js'
 import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationInputField, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
-import type { DocumentArtifact } from './document-types.js'
+import type { DocumentArtifact } from '../../../document-workbench/document-types.js'
 import type { ToolServices } from './index.js'
 
 interface ReadCurrentPageArgs {

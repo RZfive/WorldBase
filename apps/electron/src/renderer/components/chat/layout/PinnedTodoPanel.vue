@@ -6,6 +6,13 @@ import type { TodoItem } from "../types";
 const props = defineProps<{
   items: TodoItem[];
   isLoading: boolean;
+  /** Controlled by the attention-zone accordion; undefined keeps the panel
+      self-managed (standalone usage). */
+  expanded?: boolean;
+}>();
+
+const emit = defineEmits<{
+  (e: "toggle"): void;
 }>();
 
 const { t } = useI18n();
@@ -35,13 +42,22 @@ const progressPercent = computed(() => {
   return Math.round((completedCount.value / props.items.length) * 100);
 });
 
+// The attention-zone accordion owns expansion when wired up; follow it.
+watch(
+  () => props.expanded,
+  (value) => {
+    if (typeof value === "boolean") collapsed.value = !value;
+  },
+  { immediate: true },
+);
+
 watch(
   () =>
     props.items
       .map((item) => `${item.id}:${item.status}:${item.title}`)
       .join("|"),
   (_next, previous) => {
-    if (!previous && props.items.length > 0) {
+    if (!previous && props.items.length > 0 && props.expanded === undefined) {
       collapsed.value = true;
     }
   },
@@ -56,6 +72,7 @@ function getStatusLabel(status: TodoItem["status"]): string {
 
 function toggleCollapsed(): void {
   collapsed.value = !collapsed.value;
+  emit("toggle");
 }
 </script>
 

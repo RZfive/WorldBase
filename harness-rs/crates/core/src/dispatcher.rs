@@ -156,7 +156,7 @@ pub async fn dispatch(
         SCHEDULE_CREATE => schedule_create(hub, params),
         SCHEDULE_UPDATE => schedule_update(hub, params),
         SCHEDULE_DELETE => schedule_delete(hub, params),
-        SCHEDULE_RUN => schedule_run(hub, ctx, params),
+        SCHEDULE_RUN => schedule_run(hub, ctx, params).await,
 
         GROUP_CREATE => group_create(hub, params),
         GROUP_GET => group_get(hub, params),
@@ -1378,6 +1378,24 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
     // Keep the original name/cron/task contract, but accept Electron's
     // structured scheduler payload when callers need skills, MCP allowlists,
     // or retry policy. The scheduler remains the validation authority.
+    // Callers may pin the durable id (JSON → Rust migration, Electron panel
+    // edits). An existing id turns the call into an update so re-migration
+    // and edits never spawn duplicate schedules.
+    let requested_id = optional_string_value(&params, &["id"])?
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(id) = &requested_id {
+        let exists = hub
+            .scheduler
+            .list()
+            .map_err(internal)?
+            .iter()
+            .any(|entry| &entry.id == id);
+        if exists {
+            return schedule_update(hub, params);
+        }
+    }
     let name = required_string_param(&params, &["name", "title"], "name or title")?;
     let task = required_string_param(&params, &["task", "prompt"], "task or prompt")?;
     let enabled = optional_bool_param(&params, &["enabled"], true, "enabled")?;
@@ -1409,7 +1427,14 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
             } else {
                 required_string_param(&params, &["cron"], "cron expression")?
             };
-            let mut entry = hub.scheduler.create(name, cron, task).map_err(internal)?;
+            let mut entry = match &requested_id {
+                Some(id) => {
+                    hub.scheduler
+                        .create_with_id(id, name, cron, task)
+                        .map_err(internal)?
+                }
+                None => hub.scheduler.create(name, cron, task).map_err(internal)?,
+            };
             entry.enabled = enabled;
             entry.selected_skill_ids = selected_skill_ids;
             entry.selected_mcp_server_ids = selected_mcp_server_ids;
@@ -1430,16 +1455,29 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
                 retry_policy,
                 created_by: created_by.clone(),
             };
-            let mut entry = hub
-                .scheduler
-                .create_task(request)
-                .map_err(|error| params_err(format!("invalid schedule: {error}")))?;
+            let mut entry = match &requested_id {
+                Some(id) => hub
+                    .scheduler
+                    .create_task_with_id(id, request)
+                    .map_err(|error| params_err(format!("invalid schedule: {error}")))?,
+                None => hub
+                    .scheduler
+                    .create_task(request)
+                    .map_err(|error| params_err(format!("invalid schedule: {error}")))?,
+            };
             apply_schedule_migration_fields(&mut entry, &params);
             hub.scheduler.update(entry).map_err(internal)?
         }
     } else {
         let cron = required_string_param(&params, &["cron"], "cron")?;
-        let mut entry = hub.scheduler.create(name, cron, task).map_err(internal)?;
+        let mut entry = match &requested_id {
+            Some(id) => {
+                hub.scheduler
+                    .create_with_id(id, name, cron, task)
+                    .map_err(internal)?
+            }
+            None => hub.scheduler.create(name, cron, task).map_err(internal)?,
+        };
         entry.enabled = enabled;
         entry.selected_skill_ids = selected_skill_ids;
         entry.selected_mcp_server_ids = selected_mcp_server_ids;
@@ -1720,13 +1758,13 @@ fn schedule_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
     Ok(json!({ "deleted": deleted }))
 }
 
-fn schedule_run(
+async fn schedule_run(
     hub: &Arc<Hub>,
     ctx: &ConnectionContext,
     params: Value,
 ) -> Result<Value, ErrorObject> {
-    let (task, schedule_id) = if let Some(task) = optional_string_value(&params, &["task"])? {
-        (task.to_string(), None)
+    let (task, schedule_id, name) = if let Some(task) = optional_string_value(&params, &["task"])? {
+        (task.to_string(), None, String::new())
     } else {
         let id = required_string_param(&params, &["id"], "task or id")?;
         let entry = hub
@@ -1736,8 +1774,18 @@ fn schedule_run(
             .into_iter()
             .find(|entry| entry.id == id)
             .ok_or_else(|| ErrorObject::invalid_params(format!("schedule not found: {id}")))?;
-        (entry.task, Some(entry.id))
+        let name = entry.name.clone();
+        (entry.task, Some(entry.id), name)
     };
+    if let Some(schedule_id) = &schedule_id {
+        // Running a stored schedule goes through the scheduled-task bridge so
+        // tool progress and the final report reach the desktop 执行日志.
+        let (stream_id, conversation_id) =
+            crate::agent::start_scheduled_task(hub.clone(), schedule_id, &name, &task)
+                .await
+                .map_err(internal)?;
+        return Ok(json!({ "streamId": stream_id, "conversationId": conversation_id, "scheduleId": schedule_id }));
+    }
     let conv = hub
         .store
         .create_conversation("[手动任务]", None)

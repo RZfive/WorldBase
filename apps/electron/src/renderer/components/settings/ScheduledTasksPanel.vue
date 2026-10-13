@@ -697,6 +697,13 @@ onMounted(async () => {
   if (window.electronAPI?.onScheduledTaskReportsChanged) {
     cleanupReportsChanged = window.electronAPI.onScheduledTaskReportsChanged((nextReports) => {
       reports.value = nextReports
+      // Auto-open the live report of the manually run task. Rust executions
+      // create their report lazily on the first tool event, so the run-now
+      // response carries no report id for this path.
+      if (!activeReportId.value && selectedTaskId.value) {
+        const live = nextReports.find(report => report.taskId === selectedTaskId.value && report.status === 'running')
+        if (live) activeReportId.value = live.id
+      }
       if (activeReportId.value && !nextReports.some(report => report.id === activeReportId.value)) {
         activeReportId.value = null
       }

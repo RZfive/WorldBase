@@ -16,6 +16,7 @@ import AuthPermissionPanel from '../layout/AuthPermissionPanel.vue'
 import SudoPasswordPanel from '../layout/SudoPasswordPanel.vue'
 import LongTermGoalPanel from '../layout/LongTermGoalPanel.vue'
 import { useChatPanel } from './useChatPanel'
+import { createAttentionAccordion, type AttentionPanelId } from './attention-accordion'
 import {
   dailySuggestionSnapshot,
   dismissDailySuggestion,
@@ -390,6 +391,31 @@ onMounted(() => {
 watch(chatInputRef, () => {
   measureChatInputCard()
 }, { flush: 'post' })
+
+// Attention-zone accordion: instead of stacking every pending capsule
+// expanded — which pushed the pile arbitrarily far up the message list —
+// exactly one panel shows its detail (highest-priority actionable request
+// by default, or the one the user picked on its strip) and the rest stay
+// collapsed. Any new request id surfaces again by clearing the pick.
+const pendingAttentionPanels = computed<AttentionPanelId[]>(() => {
+  const ids: AttentionPanelId[] = []
+  if (currentPendingAuthRequest.value) ids.push('auth')
+  if (currentSudoPasswordRequest.value) ids.push('sudo')
+  if (currentAskUserRequest.value) ids.push('ask')
+  if (activeTodoItems.value.length > 0) ids.push('todo')
+  return ids
+})
+const attentionSignature = computed(() => [
+  currentPendingAuthRequest.value?.requestId ?? '-',
+  currentSudoPasswordRequest.value?.requestId ?? '-',
+  currentAskUserRequest.value?.requestId ?? '-',
+  activeTodoItems.value.length > 0 ? 'todo' : '-'
+].join('|'))
+const { expandedPanel: expandedAttentionPanel, togglePanel: toggleAttentionPanel } =
+  createAttentionAccordion(
+    () => pendingAttentionPanels.value,
+    () => attentionSignature.value
+  )
 
 onBeforeUnmount(() => {
   headerResizeObserver?.disconnect()
@@ -1215,6 +1241,8 @@ watch(
               v-if="currentPendingAuthRequest"
               :request="currentPendingAuthRequest"
               :pending-count="currentPendingAuthCount"
+              :expanded="expandedAttentionPanel === 'auth'"
+              @toggle="toggleAttentionPanel('auth')"
               @respond="respondToAuthRequest"
             />
 
@@ -1222,12 +1250,16 @@ watch(
               v-if="currentSudoPasswordRequest"
               :request="currentSudoPasswordRequest"
               :pending-count="currentPendingSudoPasswordCount"
+              :expanded="expandedAttentionPanel === 'sudo'"
+              @toggle="toggleAttentionPanel('sudo')"
               @respond="respondToSudoPasswordRequest"
             />
 
             <AskUserPanel
               v-if="currentAskUserRequest"
               :request="currentAskUserRequest"
+              :expanded="expandedAttentionPanel === 'ask'"
+              @toggle="toggleAttentionPanel('ask')"
               @submit="(requestId, answers) => respondToAskUserRequest(requestId, answers)"
               @cancel="(requestId) => respondToAskUserRequest(requestId, null)"
             />
@@ -1236,6 +1268,8 @@ watch(
               v-if="activeTodoItems.length > 0"
               :items="activeTodoItems"
               :is-loading="isLoading"
+              :expanded="expandedAttentionPanel === 'todo'"
+              @toggle="toggleAttentionPanel('todo')"
             />
           </div>
 
@@ -1726,7 +1760,11 @@ watch(
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  max-height: min(52vh, 460px);
+  /* Bottom-anchored on purpose: capping the height here would spill the
+   * overflow downward onto the input card (the expanded ask panel alone is
+   * taller than the old 460px cap). Stacked panels grow upward instead and
+   * each one scrolls internally; .chat-panel's overflow:hidden clips the top.
+   */
   pointer-events: none;
 }
 

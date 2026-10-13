@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { ModelPricing } from '../../../main/ai-engine/cost-tracker'
-import { resolveDefaultModelPricing } from '../../../main/ai-engine/cost-tracker'
+import type { ModelPricing } from '../../../main/ai-harness/cost-tracker'
+import { resolveDefaultModelPricing } from '../../../main/ai-harness/cost-tracker'
 import {
   PROVIDER_TEMPLATES,
   getProviderTemplate,

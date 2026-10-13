@@ -1343,6 +1343,7 @@ interface ElectronAPI {
 
   // Ask-user (in-app clarification questions surfaced above the chat input)
   onAskUserRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; questions: Array<{ id: string; question: string; options: string[] }> }) => void) => () => void
+  onAskUserCancelled: (callback: (payload: { requestId: string }) => void) => () => void
   respondAskUser: (requestId: string, answers: Array<{ questionId: string; selectedOption: string | null; customAnswer: string | null }> | null) => void
 
   // Document import / preview / selection

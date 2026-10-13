@@ -5,21 +5,34 @@ import type { SudoPasswordRequestPayload } from '../panel/types'
 const props = defineProps<{
   request: SudoPasswordRequestPayload
   pendingCount: number
+  /** Controlled by the attention-zone accordion; undefined keeps the panel
+      self-managed (standalone usage). */
+  expanded?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'respond', requestId: string, password: string | null): void
+  (e: 'toggle'): void
 }>()
 
 const collapsed = ref(false)
 const passwordInput = ref('')
 
+// The attention-zone accordion owns expansion when wired up; follow it.
+watch(
+  () => props.expanded,
+  (value) => {
+    if (typeof value === 'boolean') collapsed.value = !value
+  },
+  { immediate: true }
+)
+
 // Reset to expanded + clear any stale input whenever a new request takes the foreground.
 watch(
   () => props.request.requestId,
   () => {
-    collapsed.value = false
     passwordInput.value = ''
+    if (props.expanded === undefined) collapsed.value = false
   },
   { immediate: true }
 )
@@ -41,6 +54,7 @@ function cancel () {
 
 function toggleCollapsed (): void {
   collapsed.value = !collapsed.value
+  emit('toggle')
 }
 </script>
 

@@ -5,7 +5,7 @@ import type {
   DocumentFileType,
   DocumentRenderAsset,
   DocumentRenderPreview
-} from '../ai-engine/agent/tools/document-types.js'
+} from '../document-workbench/document-types.js'
 import { getMainLocale, t } from '../i18n/main-i18n.js'
 import {
   ensureDirectory,

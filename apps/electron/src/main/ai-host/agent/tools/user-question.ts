@@ -49,6 +49,7 @@ export async function requestUserQuestions (
     let handler: Handler | null = null
     let abortSignal: AbortSignal | undefined
     let abortListener: (() => void) | null = null
+    let timeout: NodeJS.Timeout | null = null
 
     function cleanup () {
       if (handler) {
@@ -59,12 +60,23 @@ export async function requestUserQuestions (
         abortSignal.removeEventListener('abort', abortListener)
         abortListener = null
       }
+      if (timeout) {
+        clearTimeout(timeout)
+        timeout = null
+      }
     }
 
     const finish = (answers: AskUserAnswer[] | null) => {
       if (settled) return
       settled = true
       cleanup()
+      // The panel must not outlive the tool call: Rust abandons host tool
+      // requests after its own timeout and the model keeps running, so a
+      // panel left on screen would collect answers no one reads. Tell the
+      // renderer to drop it whenever we settle without a user reply.
+      if (answers === null && win && !win.isDestroyed()) {
+        win.webContents.send('askUser:cancelled', { requestId })
+      }
       resolve(answers)
     }
 
@@ -81,5 +93,9 @@ export async function requestUserQuestions (
     }
     abortListener = () => finish(null)
     abortSignal?.addEventListener('abort', abortListener, { once: true })
+
+    // Stay below Rust's 1800s host-tool timeout so this handler always
+    // settles first and the panel never becomes a zombie.
+    timeout = setTimeout(() => finish(null), 1_500_000)
   })
 }

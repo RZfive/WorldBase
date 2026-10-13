@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { USER_ABORT_MESSAGE } from '../ai-engine/abort-utils.js'
+import { USER_ABORT_MESSAGE } from './abort-utils.js'
 import type { UsageStore } from '../settings/usage-store.js'
 import type { ChatContentPart, ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
 import {

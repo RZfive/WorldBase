@@ -27,6 +27,7 @@ interface ChatLifecycleBindingsOptions {
   handleAuthRequest: (request: AuthRequestPayload) => void
   handleSudoPasswordRequest: (request: SudoPasswordRequestPayload) => void
   handleAskUserRequest: (request: AskUserRequestPayload) => void
+  handleAskUserCancellation: (requestId: string) => void
   handleAuthResolution: (payload: AuthResolutionPayload) => void
   loadSkills: () => Promise<void>
   loadAgentWorkspaceOptions: () => Promise<void>
@@ -50,6 +51,7 @@ export function ensureSharedChatPanelLifecycleBindings (options: ChatLifecycleBi
     handleAuthRequest,
     handleSudoPasswordRequest,
     handleAskUserRequest,
+    handleAskUserCancellation,
     handleAuthResolution,
     loadSkills,
     loadAgentWorkspaceOptions,
@@ -74,6 +76,13 @@ export function ensureSharedChatPanelLifecycleBindings (options: ChatLifecycleBi
     }
     if (window.electronAPI?.onAskUserRequest) {
       lifecycle.askUserRequestCleanup = window.electronAPI.onAskUserRequest(handleAskUserRequest)
+    }
+    if (window.electronAPI?.onAskUserCancelled) {
+      // The host settled the tool call without answers (abort/timeout): the
+      // panel would otherwise stay above the input forever.
+      lifecycle.askUserCancelledCleanup = window.electronAPI.onAskUserCancelled((payload) => {
+        handleAskUserCancellation(payload.requestId)
+      })
     }
     if (window.electronAPI?.onAuthResolved) {
       lifecycle.authResolvedCleanup = window.electronAPI.onAuthResolved(handleAuthResolution)

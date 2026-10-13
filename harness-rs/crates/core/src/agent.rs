@@ -3867,6 +3867,38 @@ pub async fn run_scheduled_task(
     run_scheduled_task_with_context(hub, schedule_id, name, task, ChatRunContext::default()).await
 }
 
+/// Manual `schedule.run` entry: prepare the run, then execute it in the
+/// background with the same progress/report bridge as the scheduler loop, so
+/// the desktop 执行日志 updates live for 立即执行 too. Returns the stream and
+/// conversation ids immediately instead of blocking until the task finishes.
+pub async fn start_scheduled_task(
+    hub: Arc<Hub>,
+    schedule_id: &str,
+    name: &str,
+    task: &str,
+) -> Result<(String, String)> {
+    let setup = prepare_scheduled_run(
+        hub.clone(),
+        schedule_id,
+        name,
+        task,
+        ChatRunContext::default(),
+    )
+    .await?;
+    let stream_id = setup.stream_id.clone();
+    let conversation_id = setup.conversation_id.clone();
+    let schedule_id_owned = schedule_id.to_string();
+    let name_owned = name.to_string();
+    tokio::spawn(async move {
+        if let Err(error) =
+            execute_scheduled_run(hub, &schedule_id_owned, &name_owned, setup, "manual").await
+        {
+            tracing::warn!(error = %error, "manual schedule run failed");
+        }
+    });
+    Ok((stream_id, conversation_id))
+}
+
 /// 调度任务入口：把任务保存的 Skill/MCP 策略作为本次运行上下文。
 pub async fn run_scheduled_task_with_context(
     hub: Arc<Hub>,
@@ -3875,6 +3907,30 @@ pub async fn run_scheduled_task_with_context(
     task: &str,
     context: ChatRunContext,
 ) -> Result<()> {
+    let setup = prepare_scheduled_run(hub.clone(), schedule_id, name, task, context).await?;
+    execute_scheduled_run(hub, schedule_id, name, setup, "schedule")
+        .await
+        .map(|_| ())
+}
+
+/// Everything a scheduled run needs before execution starts: conversation,
+/// stream, persisted user message and run handle. The scheduler loop awaits
+/// the execution (it needs the outcome for retries); manual `schedule.run`
+/// spawns it so the RPC can answer before the task finishes.
+pub struct ScheduledRunSetup {
+    pub stream_id: String,
+    pub conversation_id: String,
+    channel: Arc<StreamChannel>,
+    abort: CancellationToken,
+}
+
+async fn prepare_scheduled_run(
+    hub: Arc<Hub>,
+    schedule_id: &str,
+    name: &str,
+    task: &str,
+    context: ChatRunContext,
+) -> Result<ScheduledRunSetup> {
     let conv = hub
         .store
         .create_conversation(&format!("[定时] {name}"), None)?;
@@ -3934,10 +3990,35 @@ pub async fn run_scheduled_task_with_context(
         .map(|run| run.abort.clone())
         .unwrap_or_else(CancellationToken::new);
     let conversation_id = conv.id.clone();
+    Ok(ScheduledRunSetup {
+        stream_id,
+        conversation_id,
+        channel,
+        abort,
+    })
+}
+
+/// Run the prepared scheduled task and stream tool-level progress plus the
+/// final outcome to the desktop host over the host bridge. The scheduler loop
+/// runs outside any chat session, so without this bridge the UI would show no
+/// activity until the task finished. Returns the final result text; failures
+/// are reported to the host (so the UI records them) and still returned to the
+/// caller for retry handling.
+async fn execute_scheduled_run(
+    hub: Arc<Hub>,
+    schedule_id: &str,
+    name: &str,
+    setup: ScheduledRunSetup,
+    trigger: &str,
+) -> Result<String> {
+    let ScheduledRunSetup {
+        stream_id,
+        conversation_id,
+        channel,
+        abort,
+    } = setup;
 
     // Stream tool-level progress to the desktop host while the run executes.
-    // The scheduler loop runs outside any chat session, so without this bridge
-    // the UI would show no activity until the task finished.
     let progress_hub = hub.clone();
     let progress_host_stream = format!("worldbase-scheduler-{schedule_id}");
     let progress_channel = channel.clone();
@@ -3994,17 +4075,30 @@ pub async fn run_scheduled_task_with_context(
         }
     });
 
-    let result_text = run_chat_inner(hub.clone(), stream_id.clone(), conv.id, channel, abort).await?;
+    let run_result = run_chat_inner(
+        hub.clone(),
+        stream_id.clone(),
+        conversation_id.clone(),
+        channel,
+        abort,
+    )
+    .await;
     progress_task.abort();
 
     // Report the outcome to the desktop host over the host bridge. The
     // scheduler loop runs outside any chat stream, so it publishes on a
     // synthetic stream the client can route by request kind alone.
+    let (result_text, error_text) = match run_result {
+        Ok(text) => (text, None),
+        Err(error) => (String::new(), Some(error.to_string())),
+    };
     let report = json!({
         "scheduleId": schedule_id,
         "taskName": name,
         "conversationId": conversation_id,
         "resultText": result_text,
+        "error": error_text,
+        "trigger": trigger,
     });
     let services = hub.services_for_run(None, None, None);
     let host = services.host.clone();
@@ -4022,7 +4116,10 @@ pub async fn run_scheduled_task_with_context(
             tracing::warn!(error = %error, "scheduler report delivery failed");
         }
     });
-    Ok(())
+    match error_text {
+        Some(error) => Err(anyhow::anyhow!(error)),
+        None => Ok(result_text),
+    }
 }
 
 async fn run_chat(

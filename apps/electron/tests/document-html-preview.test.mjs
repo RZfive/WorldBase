@@ -17,7 +17,7 @@ import path from 'node:path'
 import ExcelJS from 'exceljs'
 
 const ROOT = new URL('..', import.meta.url).pathname
-const { writeExcelFile, writePptxFile } = await import(`${ROOT}src/main/ai-engine/agent/tools/office-utils.ts`)
+const { writeExcelFile, writePptxFile } = await import(`${ROOT}src/main/document-workbench/office-utils.ts`)
 const { buildExcelHtmlPreview } = await import(`${ROOT}src/main/document-preview/excel-html-preview.ts`)
 const { buildPptxHtmlPreview } = await import(`${ROOT}src/main/document-preview/pptx-html-preview.ts`)
 const { buildDocumentRenderPreview } = await import(`${ROOT}src/main/document-preview/document-render-service.ts`)
@@ -395,7 +395,7 @@ test('markdown documents parse to nodes and preview through the original file as
     ''
   ].join('\n'))
 
-  const { parseDocument } = await import(`${ROOT}src/main/ai-engine/agent/tools/document-parser.ts`)
+  const { parseDocument } = await import(`${ROOT}src/main/document-workbench/document-parser.ts`)
   const artifact = await parseDocument(mdPath)
   assert.equal(artifact.fileType, 'md')
   const types = artifact.nodes.map(node => node.type)

@@ -329,17 +329,35 @@ async function replenishPool (): Promise<void> {
   }
 }
 
+/** One-line per-type / per-source breakdown of what a run just produced. */
+function generationReport (snapshotAfter: DailySuggestionSnapshot): string {
+  const parts: string[] = []
+  for (const type of SUGGESTION_TYPES) {
+    const count = snapshotAfter.daily.filter(item => item.type === type).length
+    if (count > 0) parts.push(`${t(`chatUi.suggestions.types.${type}.label`)} ×${count}`)
+  }
+  for (const source of KNOWLEDGE_SOURCES) {
+    const count = snapshotAfter.knowledge.filter(item => item.knowledge?.source === source).length
+    if (count > 0) parts.push(`${t(`chatUi.suggestions.knowledgeSources.${source}.label`)} ×${count}`)
+  }
+  return parts.join('、')
+}
+
 async function generateNow (): Promise<void> {
   if (generateDisabled.value || !window.electronAPI?.generateDailySuggestionsNow) return
   generating.value = true
   try {
     dailySuggestionSnapshot.value = await window.electronAPI.generateDailySuggestionsNow()
-    const state = dailySuggestionSnapshot.value.lastGeneration
-    // The random card may be a generated seed; only count items this run produced.
-    const count = dailySuggestionSnapshot.value.daily.length + dailySuggestionSnapshot.value.knowledge.filter(item => item.source === 'llm' && item.knowledge?.source !== 'random').length
-    setFeedback(state?.status === 'failed'
-      ? t('settings.dailySuggestions.generateFailed')
-      : t('settings.dailySuggestions.generateDone', { count }))
+    const snapshotAfter = dailySuggestionSnapshot.value
+    const state = snapshotAfter.lastGeneration
+    if (state?.status === 'failed') {
+      setFeedback(t('settings.dailySuggestions.generateFailed'))
+      return
+    }
+    const detail = generationReport(snapshotAfter)
+    setFeedback(detail
+      ? t('settings.dailySuggestions.generateDoneDetail', { detail })
+      : t('settings.dailySuggestions.generateDone', { count: snapshotAfter.daily.length + snapshotAfter.knowledge.length }))
   } catch (error) {
     setFeedback(t('settings.dailySuggestions.generateFailedWith', { message: (error as Error).message }))
   } finally {
@@ -364,298 +382,322 @@ onMounted(() => {
       <p v-if="feedback" class="ds-feedback">{{ feedback }}</p>
     </header>
 
-    <section class="ds-card ds-toggle-card">
-      <div class="ds-card-copy">
-        <span class="ds-card-title">{{ $t('settings.dailySuggestions.enableTitle') }}</span>
-        <p class="ds-card-hint">{{ $t('settings.dailySuggestions.enableHint') }}</p>
-      </div>
-      <button
-        type="button"
-        class="ds-switch"
-        role="switch"
-        :aria-checked="enabled"
-        :disabled="saving || !loaded"
-        @click="toggleEnabled"
-      >
-        <span class="ds-switch-track" :class="{ on: enabled }"><span class="ds-switch-thumb" /></span>
-      </button>
-    </section>
-
-    <div class="ds-body" :class="{ disabled: !enabled }" :aria-disabled="!enabled">
-      <section class="ds-card">
-        <div class="ds-section-head">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.typesTitle') }}</span>
-          <span class="ds-section-meta">{{ $t('settings.dailySuggestions.typesSelected', { count: preferences.types.length }) }}</span>
-        </div>
-        <p class="ds-card-hint">{{ $t('settings.dailySuggestions.typesHint') }}</p>
-        <div class="ds-type-grid">
-          <button
-            v-for="option in typeOptions"
-            :key="option.id"
-            type="button"
-            class="ds-type-card"
-            :class="{ active: preferences.types.includes(option.id) }"
-            :disabled="!enabled || saving"
-            :aria-pressed="preferences.types.includes(option.id)"
-            @click="toggleType(option.id)"
-          >
-            <span class="ds-type-check" aria-hidden="true">{{ preferences.types.includes(option.id) ? '✓' : '' }}</span>
-            <span class="ds-type-copy">
-              <strong>{{ option.label }}</strong>
-              <small>{{ option.description }}</small>
-              <em>{{ $t('settings.dailySuggestions.typeUses', { data: option.uses }) }}</em>
-            </span>
-          </button>
-        </div>
-      </section>
-
-      <div class="ds-grid-two">
-        <section class="ds-card">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.countTitle') }}</span>
-          <p class="ds-card-hint">{{ $t('settings.dailySuggestions.countHint') }}</p>
-          <div class="ds-segmented" role="radiogroup">
+    <!-- ── One card per row: switches on the left, shared generation on the right ── -->
+    <section class="ds-card">
+      <div class="ds-split">
+        <div class="ds-pane">
+          <div class="ds-toggle-row">
+            <div class="ds-card-copy">
+              <span class="ds-card-title">{{ $t('settings.dailySuggestions.enableTitle') }}</span>
+              <p class="ds-card-hint">{{ $t('settings.dailySuggestions.enableHint') }}</p>
+            </div>
             <button
-              v-for="count in COUNT_OPTIONS"
-              :key="count"
               type="button"
-              class="ds-segment"
-              :class="{ active: preferences.countPerType === count }"
-              role="radio"
-              :aria-checked="preferences.countPerType === count"
-              :disabled="!enabled || saving"
-              @click="setCount(count)"
+              class="ds-switch"
+              role="switch"
+              :aria-checked="enabled"
+              :disabled="saving || !loaded"
+              @click="toggleEnabled"
             >
-              {{ count }}
+              <span class="ds-switch-track" :class="{ on: enabled }"><span class="ds-switch-thumb" /></span>
             </button>
           </div>
-        </section>
-
-        <section class="ds-card">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.triggerTitle') }}</span>
-          <p class="ds-card-hint">{{ $t('settings.dailySuggestions.triggerHint') }}</p>
-          <div class="ds-trigger">
-            <label class="ds-radio">
-              <input v-model="triggerKind" type="radio" value="first-open" :disabled="!enabled || saving" />
-              <span>{{ $t('settings.dailySuggestions.triggerFirstOpen') }}</span>
-            </label>
-            <label class="ds-radio">
-              <input v-model="triggerKind" type="radio" value="time" :disabled="!enabled || saving" />
-              <span>{{ $t('settings.dailySuggestions.triggerTime') }}</span>
-              <input
-                v-model.lazy="triggerTime"
-                class="ds-time"
-                type="time"
-                :disabled="!enabled || saving || triggerKind !== 'time'"
-              />
-            </label>
+          <div class="ds-toggle-row">
+            <div class="ds-card-copy">
+              <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.title') }}</span>
+              <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.hint') }}</p>
+            </div>
+            <button
+              type="button"
+              class="ds-switch"
+              role="switch"
+              :aria-checked="knowledgeEnabled"
+              :disabled="saving || !loaded"
+              @click="toggleKnowledgeEnabled"
+            >
+              <span class="ds-switch-track" :class="{ on: knowledgeEnabled }"><span class="ds-switch-thumb" /></span>
+            </button>
           </div>
-        </section>
-      </div>
-
-      <div class="ds-grid-two">
-        <section class="ds-card">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.modelTitle') }}</span>
-          <p class="ds-card-hint">{{ $t('settings.dailySuggestions.modelHint') }}</p>
-          <div class="ds-fields">
+        </div>
+        <div class="ds-pane">
+          <span class="ds-card-title">{{ $t('settings.dailySuggestions.generationTitle') }}</span>
+          <p class="ds-card-hint">{{ $t('settings.dailySuggestions.generationHint') }}</p>
+          <div class="ds-fields-row">
             <label class="ds-field">
               <span>{{ $t('settings.dailySuggestions.provider') }}</span>
-              <select :value="preferences.providerId || ''" :disabled="!enabled || saving" @change="onProviderChange">
+              <select :value="preferences.providerId || ''" :disabled="saving" @change="onProviderChange">
                 <option value="">{{ $t('settings.dailySuggestions.followDefault') }}</option>
                 <option v-for="provider in providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
               </select>
             </label>
             <label class="ds-field">
               <span>{{ $t('settings.dailySuggestions.model') }}</span>
-              <select :value="preferences.modelId || ''" :disabled="!enabled || saving || !selectedProvider" @change="onModelChange">
+              <select :value="preferences.modelId || ''" :disabled="saving || !selectedProvider" @change="onModelChange">
                 <option value="">{{ $t('settings.dailySuggestions.followDefault') }}</option>
                 <option v-for="model in modelChoices" :key="model" :value="model">{{ model }}</option>
               </select>
             </label>
           </div>
-        </section>
-
-        <section class="ds-card">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.contextTitle') }}</span>
-          <p class="ds-card-hint">{{ $t('settings.dailySuggestions.contextHint') }}</p>
-          <div class="ds-checks">
-            <label class="ds-check">
-              <input type="checkbox" :checked="preferences.context.projects" :disabled="!enabled || saving" @change="toggleContext('projects')" />
-              <span>
-                <strong>{{ $t('settings.dailySuggestions.contextProjects') }}</strong>
-                <small>{{ $t('settings.dailySuggestions.contextProjectsHint') }}</small>
-              </span>
-            </label>
-            <label class="ds-check">
-              <input type="checkbox" :checked="preferences.context.conversationTitles" :disabled="!enabled || saving" @change="toggleContext('conversationTitles')" />
-              <span>
-                <strong>{{ $t('settings.dailySuggestions.contextTitles') }}</strong>
-                <small>{{ $t('settings.dailySuggestions.contextTitlesHint') }}</small>
-              </span>
-            </label>
-            <label class="ds-check">
-              <input type="checkbox" :checked="preferences.context.conversationSummaries" :disabled="!enabled || saving || !preferences.context.conversationTitles" @change="toggleContext('conversationSummaries')" />
-              <span>
-                <strong>{{ $t('settings.dailySuggestions.contextSummaries') }}</strong>
-                <small>{{ $t('settings.dailySuggestions.contextSummariesHint') }}</small>
-              </span>
-            </label>
+          <div class="ds-status-row">
+            <div class="ds-card-copy">
+              <span class="ds-card-title ds-sub-title">{{ $t('settings.dailySuggestions.statusTitle') }}</span>
+              <p class="ds-card-hint" :class="{ failed: lastGeneration?.status === 'failed' }">{{ lastGenerationLabel }}</p>
+            </div>
+            <div class="ds-status-actions">
+              <button type="button" class="ds-primary-btn" :disabled="generateDisabled" @click="generateNow">
+                {{ generating || snapshot?.generating ? $t('settings.dailySuggestions.generating') : $t('settings.dailySuggestions.generateNow') }}
+              </button>
+              <button
+                type="button"
+                class="ds-secondary-btn"
+                :disabled="replenishDisabled"
+                :title="knowledgePoolStatus"
+                @click="replenishPool"
+              >
+                {{ replenishing || knowledgePool?.replenishing ? $t('settings.dailySuggestions.knowledge.poolReplenishing') : $t('settings.dailySuggestions.knowledge.poolReplenishNow') }}
+              </button>
+            </div>
           </div>
-        </section>
-      </div>
-
-      <section class="ds-card ds-status-card">
-        <div class="ds-card-copy">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.statusTitle') }}</span>
-          <p class="ds-card-hint" :class="{ failed: lastGeneration?.status === 'failed' }">{{ lastGenerationLabel }}</p>
         </div>
-        <button type="button" class="ds-primary-btn" :disabled="generateDisabled" @click="generateNow">
-          {{ generating || snapshot?.generating ? $t('settings.dailySuggestions.generating') : $t('settings.dailySuggestions.generateNow') }}
-        </button>
+      </div>
+    </section>
+
+    <!-- ── Daily picks: which cards ∥ scope + cadence, one card ────────────── -->
+    <div class="ds-body" :class="{ disabled: !enabled }" :aria-disabled="!enabled">
+      <section class="ds-card">
+        <div class="ds-split">
+          <div class="ds-pane">
+            <div class="ds-section-head">
+              <span class="ds-card-title">{{ $t('settings.dailySuggestions.typesTitle') }}</span>
+              <span class="ds-section-meta">{{ $t('settings.dailySuggestions.typesSelected', { count: preferences.types.length }) }}</span>
+            </div>
+            <p class="ds-card-hint">{{ $t('settings.dailySuggestions.typesHint') }}</p>
+            <div class="ds-opt-grid">
+              <button
+                v-for="option in typeOptions"
+                :key="option.id"
+                type="button"
+                class="ds-opt-card"
+                :class="{ active: preferences.types.includes(option.id) }"
+                :disabled="!enabled || saving"
+                :aria-pressed="preferences.types.includes(option.id)"
+                :title="option.description + ' · ' + $t('settings.dailySuggestions.typeUses', { data: option.uses })"
+                @click="toggleType(option.id)"
+              >
+                <span class="ds-opt-check" aria-hidden="true">{{ preferences.types.includes(option.id) ? '✓' : '' }}</span>
+                <span class="ds-opt-copy">
+                  <strong><span class="ds-opt-label">{{ option.label }}</span></strong>
+                  <small>{{ option.description }}</small>
+                </span>
+              </button>
+            </div>
+          </div>
+          <div class="ds-pane">
+            <span class="ds-card-title">{{ $t('settings.dailySuggestions.contextTitle') }}</span>
+            <p class="ds-card-hint">{{ $t('settings.dailySuggestions.contextHint') }}</p>
+            <div class="ds-check-grid">
+              <label class="ds-check">
+                <input type="checkbox" :checked="preferences.context.projects" :disabled="!enabled || saving" @change="toggleContext('projects')" />
+                <span>
+                  <strong>{{ $t('settings.dailySuggestions.contextProjects') }}</strong>
+                  <small>{{ $t('settings.dailySuggestions.contextProjectsHint') }}</small>
+                </span>
+              </label>
+              <label class="ds-check">
+                <input type="checkbox" :checked="preferences.context.conversationTitles" :disabled="!enabled || saving" @change="toggleContext('conversationTitles')" />
+                <span>
+                  <strong>{{ $t('settings.dailySuggestions.contextTitles') }}</strong>
+                  <small>{{ $t('settings.dailySuggestions.contextTitlesHint') }}</small>
+                </span>
+              </label>
+              <label class="ds-check">
+                <input type="checkbox" :checked="preferences.context.conversationSummaries" :disabled="!enabled || saving || !preferences.context.conversationTitles" @change="toggleContext('conversationSummaries')" />
+                <span>
+                  <strong>{{ $t('settings.dailySuggestions.contextSummaries') }}</strong>
+                  <small>{{ $t('settings.dailySuggestions.contextSummariesHint') }}</small>
+                </span>
+              </label>
+            </div>
+            <div class="ds-inline-row">
+              <div class="ds-inline-field" :title="$t('settings.dailySuggestions.countHint')">
+                <span class="ds-inline-label">{{ $t('settings.dailySuggestions.countTitle') }}</span>
+                <div class="ds-segmented" role="radiogroup">
+                  <button
+                    v-for="count in COUNT_OPTIONS"
+                    :key="count"
+                    type="button"
+                    class="ds-segment"
+                    :class="{ active: preferences.countPerType === count }"
+                    role="radio"
+                    :aria-checked="preferences.countPerType === count"
+                    :disabled="!enabled || saving"
+                    @click="setCount(count)"
+                  >
+                    {{ count }}
+                  </button>
+                </div>
+              </div>
+              <div class="ds-inline-field" :title="$t('settings.dailySuggestions.triggerHint')">
+                <span class="ds-inline-label">{{ $t('settings.dailySuggestions.triggerTitle') }}</span>
+                <div class="ds-trigger">
+                  <label class="ds-radio">
+                    <input v-model="triggerKind" type="radio" value="first-open" :disabled="!enabled || saving" />
+                    <span>{{ $t('settings.dailySuggestions.triggerFirstOpen') }}</span>
+                  </label>
+                  <label class="ds-radio">
+                    <input v-model="triggerKind" type="radio" value="time" :disabled="!enabled || saving" />
+                    <span>{{ $t('settings.dailySuggestions.triggerTime') }}</span>
+                    <input
+                      v-model.lazy="triggerTime"
+                      class="ds-time"
+                      type="time"
+                      :disabled="!enabled || saving || triggerKind !== 'time'"
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
     </div>
 
-    <!-- Knowledge exploration: independent of the daily-picks switch because the random seed needs no model. -->
-    <section class="ds-card ds-toggle-card ds-knowledge-head">
-      <div class="ds-card-copy">
-        <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.title') }}</span>
-        <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.hint') }}</p>
-      </div>
-      <button
-        type="button"
-        class="ds-switch"
-        role="switch"
-        :aria-checked="knowledgeEnabled"
-        :disabled="saving || !loaded"
-        @click="toggleKnowledgeEnabled"
-      >
-        <span class="ds-switch-track" :class="{ on: knowledgeEnabled }"><span class="ds-switch-thumb" /></span>
-      </button>
-    </section>
-
+    <!-- ── Knowledge: sources ∥ per-source count + supplement info, one card ── -->
     <div class="ds-body" :class="{ disabled: !knowledgeEnabled }" :aria-disabled="!knowledgeEnabled">
-      <!-- Today's knowledge cards; each one can be swapped for the next pool entry right here. -->
-      <section v-if="knowledgeCards.length > 0" class="ds-card">
-        <div class="ds-section-head">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.todayTitle') }}</span>
-          <span class="ds-section-meta">{{ $t('settings.dailySuggestions.knowledge.todayMeta', { count: knowledgeCards.length }) }}</span>
-        </div>
-        <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.todayHint') }}</p>
-        <div class="ds-today-list">
-          <div v-for="item in knowledgeCards" :key="item.id" class="ds-today-item">
-            <div class="ds-today-copy">
-              <span class="ds-today-source">{{ knowledgeCardSourceLabel(item) }}</span>
-              <span class="ds-today-title">{{ knowledgeCardText(item, 'title') }}</span>
-              <p class="ds-card-hint">{{ knowledgeCardText(item, 'description') }}</p>
-            </div>
-            <button
-              type="button"
-              class="ds-secondary-btn"
-              :disabled="knowledgeShuffling"
-              :title="$t('chatUi.suggestions.shuffleHint')"
-              @click="refreshCard(item)"
-            >↻ {{ $t('chatUi.suggestions.shuffle') }}</button>
-          </div>
-        </div>
-      </section>
-
-      <!-- Pools: built-in seeds cover the cold start; the model tops both pools up once a provider exists. -->
-      <section v-if="knowledgePool" class="ds-card ds-status-card">
-        <div class="ds-card-copy">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.poolTitle') }}</span>
-          <p class="ds-card-hint">{{ knowledgePoolLabel }}</p>
-          <p class="ds-card-hint">{{ knowledgeCardsLabel }}</p>
-          <p class="ds-card-hint" :class="{ failed: !!knowledgePool.lastReplenishError }">{{ knowledgePoolStatus }}</p>
-        </div>
-        <button type="button" class="ds-primary-btn" :disabled="replenishDisabled" @click="replenishPool">
-          {{ replenishing || knowledgePool.replenishing ? $t('settings.dailySuggestions.knowledge.poolReplenishing') : $t('settings.dailySuggestions.knowledge.poolReplenishNow') }}
-        </button>
-      </section>
-
       <section class="ds-card">
-        <div class="ds-section-head">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.sourcesTitle') }}</span>
-          <span class="ds-section-meta">{{ $t('settings.dailySuggestions.typesSelected', { count: knowledge.sources.length }) }}</span>
-        </div>
-        <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.sourcesHint') }}</p>
-        <p v-if="!hasProviders" class="ds-card-hint ds-inline-warn">{{ $t('settings.dailySuggestions.knowledge.needsProvider') }}</p>
-        <div class="ds-type-grid">
-          <button
-            v-for="option in knowledgeSourceOptions"
-            :key="option.id"
-            type="button"
-            class="ds-type-card"
-            :class="{ active: knowledge.sources.includes(option.id) }"
-            :disabled="!knowledgeEnabled || saving || (option.needsModel && !hasProviders && !knowledge.sources.includes(option.id))"
-            :aria-pressed="knowledge.sources.includes(option.id)"
-            @click="toggleKnowledgeSource(option.id)"
-          >
-            <span class="ds-type-check" aria-hidden="true">{{ knowledge.sources.includes(option.id) ? '✓' : '' }}</span>
-            <span class="ds-type-copy">
-              <strong>{{ option.label }}</strong>
-              <small>{{ option.description }}</small>
-              <em>{{ option.needsModel ? $t('settings.dailySuggestions.knowledge.needsModel') : $t('settings.dailySuggestions.knowledge.noModel') }}</em>
-            </span>
-          </button>
+        <div class="ds-split">
+          <div class="ds-pane">
+            <div class="ds-section-head">
+              <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.sourcesTitle') }}</span>
+              <span class="ds-section-meta">{{ $t('settings.dailySuggestions.typesSelected', { count: knowledge.sources.length }) }}</span>
+            </div>
+            <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.sourcesHint') }}</p>
+            <p v-if="!hasProviders" class="ds-card-hint ds-inline-warn">{{ $t('settings.dailySuggestions.knowledge.needsProvider') }}</p>
+            <div class="ds-opt-grid">
+              <button
+                v-for="option in knowledgeSourceOptions"
+                :key="option.id"
+                type="button"
+                class="ds-opt-card"
+                :class="{ active: knowledge.sources.includes(option.id) }"
+                :disabled="!knowledgeEnabled || saving || (option.needsModel && !hasProviders && !knowledge.sources.includes(option.id))"
+                :aria-pressed="knowledge.sources.includes(option.id)"
+                :title="option.description"
+                @click="toggleKnowledgeSource(option.id)"
+              >
+                <span class="ds-opt-check" aria-hidden="true">{{ knowledge.sources.includes(option.id) ? '✓' : '' }}</span>
+                <span class="ds-opt-copy">
+                  <strong>
+                    <span class="ds-opt-label">{{ option.label }}</span>
+                    <em class="ds-opt-flag" :class="{ free: !option.needsModel }">{{ option.needsModel ? $t('settings.dailySuggestions.knowledge.needsModel') : $t('settings.dailySuggestions.knowledge.noModel') }}</em>
+                  </strong>
+                  <small>{{ option.description }}</small>
+                </span>
+              </button>
+            </div>
+          </div>
+          <div class="ds-pane">
+            <span class="ds-card-title">{{ $t('settings.dailySuggestions.supplementTitle') }}</span>
+            <p class="ds-card-hint">{{ $t('settings.dailySuggestions.supplementHint') }}</p>
+            <div class="ds-fields">
+              <label class="ds-field">
+                <span>{{ $t('settings.dailySuggestions.knowledge.professionTitle') }}</span>
+                <input
+                  v-model="professionInput"
+                  class="ds-input"
+                  type="text"
+                  :maxlength="KNOWLEDGE_PROFESSION_MAX_LENGTH"
+                  :placeholder="$t('settings.dailySuggestions.knowledge.professionPlaceholder')"
+                  :disabled="!knowledgeEnabled || saving"
+                  @keydown.enter.prevent="commitProfession"
+                  @blur="commitProfession"
+                />
+                <small>{{ $t('settings.dailySuggestions.knowledge.professionHint') }}</small>
+              </label>
+              <div class="ds-field">
+                <span>{{ $t('settings.dailySuggestions.knowledge.interestsTitle') }}</span>
+                <div class="ds-tags">
+                  <span v-for="interest in knowledge.interests" :key="interest" class="ds-tag">
+                    {{ interest }}
+                    <button type="button" class="ds-tag-rm" :disabled="!knowledgeEnabled || saving" :aria-label="$t('common.delete')" @click="removeInterest(interest)">×</button>
+                  </span>
+                </div>
+                <input
+                  v-model="interestInput"
+                  class="ds-input"
+                  type="text"
+                  :maxlength="KNOWLEDGE_INTEREST_MAX_LENGTH"
+                  :placeholder="$t('settings.dailySuggestions.knowledge.interestsPlaceholder')"
+                  :disabled="!knowledgeEnabled || saving"
+                  @keydown.enter.prevent="addInterest"
+                  @blur="addInterest"
+                />
+                <small :class="{ 'ds-inline-warn': needsInterests }">
+                  {{ needsInterests
+                    ? $t('settings.dailySuggestions.knowledge.interestsRequired')
+                    : $t('settings.dailySuggestions.knowledge.interestsHint', { max: KNOWLEDGE_MAX_INTERESTS }) }}
+                </small>
+              </div>
+            </div>
+            <div class="ds-inline-row">
+              <div class="ds-inline-field" :title="$t('settings.dailySuggestions.knowledge.countHint')">
+                <span class="ds-inline-label">{{ $t('settings.dailySuggestions.knowledge.countTitle') }}</span>
+                <div class="ds-segmented ds-segmented-two" role="radiogroup">
+                  <button
+                    v-for="count in ([1, 2] as KnowledgeCountPerSource[])"
+                    :key="count"
+                    type="button"
+                    class="ds-segment"
+                    :class="{ active: knowledge.countPerSource === count }"
+                    role="radio"
+                    :aria-checked="knowledge.countPerSource === count"
+                    :disabled="!knowledgeEnabled || saving"
+                    @click="setKnowledgeCount(count)"
+                  >
+                    {{ count }}
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p class="ds-card-hint ds-privacy-note">{{ $t('settings.dailySuggestions.knowledge.privacyNote') }}</p>
+          </div>
         </div>
       </section>
 
-      <div class="ds-grid-two">
-        <section class="ds-card">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.interestsTitle') }}</span>
-          <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.interestsHint', { max: KNOWLEDGE_MAX_INTERESTS }) }}</p>
-          <p v-if="needsInterests" class="ds-card-hint ds-inline-warn">{{ $t('settings.dailySuggestions.knowledge.interestsRequired') }}</p>
-          <div class="ds-tags">
-            <span v-for="interest in knowledge.interests" :key="interest" class="ds-tag">
-              {{ interest }}
-              <button type="button" class="ds-tag-rm" :disabled="!knowledgeEnabled || saving" :aria-label="$t('common.delete')" @click="removeInterest(interest)">×</button>
-            </span>
+      <!-- ── Today's preview ∥ pool status, one card ─────────────────────────── -->
+      <section v-if="knowledgeCards.length > 0 || knowledgePool" class="ds-card">
+        <div class="ds-split">
+          <div v-if="knowledgeCards.length > 0" class="ds-pane">
+            <div class="ds-section-head">
+              <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.todayTitle') }}</span>
+              <span class="ds-section-meta">{{ $t('settings.dailySuggestions.knowledge.todayMeta', { count: knowledgeCards.length }) }}</span>
+            </div>
+            <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.todayHint') }}</p>
+            <div class="ds-today-list">
+              <div v-for="item in knowledgeCards" :key="item.id" class="ds-today-item">
+                <div class="ds-today-copy">
+                  <span class="ds-today-source">{{ knowledgeCardSourceLabel(item) }}</span>
+                  <span class="ds-today-title">{{ knowledgeCardText(item, 'title') }}</span>
+                  <p class="ds-card-hint">{{ knowledgeCardText(item, 'description') }}</p>
+                </div>
+                <button
+                  type="button"
+                  class="ds-secondary-btn"
+                  :disabled="knowledgeShuffling"
+                  :title="$t('chatUi.suggestions.shuffleHint')"
+                  @click="refreshCard(item)"
+                >↻ {{ $t('chatUi.suggestions.shuffle') }}</button>
+              </div>
+            </div>
           </div>
-          <input
-            v-model="interestInput"
-            class="ds-input"
-            type="text"
-            :maxlength="KNOWLEDGE_INTEREST_MAX_LENGTH"
-            :placeholder="$t('settings.dailySuggestions.knowledge.interestsPlaceholder')"
-            :disabled="!knowledgeEnabled || saving"
-            @keydown.enter.prevent="addInterest"
-            @blur="addInterest"
-          />
-        </section>
-
-        <section class="ds-card">
-          <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.professionTitle') }}</span>
-          <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.professionHint') }}</p>
-          <input
-            v-model="professionInput"
-            class="ds-input"
-            type="text"
-            :maxlength="KNOWLEDGE_PROFESSION_MAX_LENGTH"
-            :placeholder="$t('settings.dailySuggestions.knowledge.professionPlaceholder')"
-            :disabled="!knowledgeEnabled || saving"
-            @keydown.enter.prevent="commitProfession"
-            @blur="commitProfession"
-          />
-          <span class="ds-card-title ds-sub-title">{{ $t('settings.dailySuggestions.knowledge.countTitle') }}</span>
-          <p class="ds-card-hint">{{ $t('settings.dailySuggestions.knowledge.countHint') }}</p>
-          <div class="ds-segmented ds-segmented-two" role="radiogroup">
-            <button
-              v-for="count in ([1, 2] as KnowledgeCountPerSource[])"
-              :key="count"
-              type="button"
-              class="ds-segment"
-              :class="{ active: knowledge.countPerSource === count }"
-              role="radio"
-              :aria-checked="knowledge.countPerSource === count"
-              :disabled="!knowledgeEnabled || saving"
-              @click="setKnowledgeCount(count)"
-            >
-              {{ count }}
-            </button>
+          <div v-if="knowledgePool" class="ds-pane">
+            <span class="ds-card-title">{{ $t('settings.dailySuggestions.knowledge.poolTitle') }}</span>
+            <p class="ds-card-hint">{{ knowledgePoolLabel }}</p>
+            <p class="ds-card-hint">{{ knowledgeCardsLabel }}</p>
+            <p class="ds-card-hint" :class="{ failed: !!knowledgePool.lastReplenishError }">{{ knowledgePoolStatus }}</p>
           </div>
-        </section>
-      </div>
-
-      <p class="ds-card-hint ds-privacy-note">{{ $t('settings.dailySuggestions.knowledge.privacyNote') }}</p>
+        </div>
+      </section>
     </div>
   </div>
 </template>
@@ -664,7 +706,7 @@ onMounted(() => {
 .ds-root {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   height: 100%;
   min-height: 0;
   padding: 20px 24px;
@@ -710,7 +752,35 @@ onMounted(() => {
   background: rgba(14, 165, 233, 0.12);
   border: 1px solid rgba(14, 165, 233, 0.24);
   font-size: 0.8rem;
-  white-space: nowrap;
+  max-width: 55%;
+}
+
+/* ── One card per row; each card splits into a left and a right pane ──── */
+.ds-split {
+  display: grid;
+  /* min(100%, 340px) keeps two panes side by side on wide cards and stacks
+     them when the settings window is narrow. */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: 12px 32px;
+  align-items: stretch;
+}
+
+.ds-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ds-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: opacity 0.16s ease;
+}
+
+.ds-body.disabled {
+  opacity: 0.55;
 }
 
 .ds-card {
@@ -721,14 +791,6 @@ onMounted(() => {
   border: 1px solid var(--app-border);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
-}
-
-.ds-toggle-card,
-.ds-status-card {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
 }
 
 .ds-card-copy {
@@ -756,15 +818,21 @@ onMounted(() => {
   color: var(--app-text-faint);
 }
 
-.ds-body {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  transition: opacity 0.16s ease;
+.ds-sub-title {
+  font-size: 0.84rem;
 }
 
-.ds-body.disabled {
-  opacity: 0.55;
+/* ── Toggle rows (left pane of the first card) ────────────────────────── */
+.ds-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 8px 0;
+}
+
+.ds-toggle-row + .ds-toggle-row {
+  border-top: 1px solid var(--app-border);
 }
 
 .ds-switch {
@@ -811,20 +879,23 @@ onMounted(() => {
   transform: translateX(24px);
 }
 
-.ds-type-grid {
+/* ── Selectable option cards: one shared style for types and sources ────
+   Compact list-item density: title row + one clamped description line; the
+   long copy (uses / description) lives on the hover tooltip. */
+.ds-opt-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
   margin-top: 4px;
 }
 
-.ds-type-card {
+.ds-opt-card {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 8px;
+  padding: 8px 10px;
   border: 1px solid var(--app-border);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--app-panel);
   color: var(--app-text);
   text-align: left;
@@ -832,73 +903,116 @@ onMounted(() => {
   transition: border-color 0.12s ease, background 0.12s ease;
 }
 
-.ds-type-card:hover:not(:disabled) {
+.ds-opt-card:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--app-accent) 45%, var(--app-border));
 }
 
-.ds-type-card.active {
+.ds-opt-card.active {
   border-color: var(--app-accent);
   background: var(--app-accent-soft);
 }
 
-.ds-type-card:disabled {
+.ds-opt-card:disabled {
   cursor: default;
 }
 
-.ds-type-check {
+.ds-opt-check {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   margin-top: 1px;
-  border-radius: 6px;
+  border-radius: 5px;
   border: 1px solid var(--app-border-strong);
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   color: #fff;
   background: transparent;
 }
 
-.ds-type-card.active .ds-type-check {
+.ds-opt-card.active .ds-opt-check {
   background: var(--app-accent);
   border-color: var(--app-accent);
 }
 
-.ds-type-copy {
+.ds-opt-copy {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
-.ds-type-copy strong {
-  font-size: 0.86rem;
+.ds-opt-copy strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.82rem;
   color: var(--app-text-strong);
 }
 
-.ds-type-copy small {
-  font-size: 0.76rem;
-  color: var(--app-text-soft);
-  line-height: 1.5;
+.ds-opt-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.ds-type-copy em {
+.ds-opt-copy small {
+  font-size: 0.72rem;
+  color: var(--app-text-soft);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-opt-flag {
+  flex: 0 0 auto;
   font-style: normal;
-  font-size: 0.7rem;
+  font-size: 0.62rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-accent) 18%, transparent);
+  color: var(--app-accent);
+}
+
+.ds-opt-flag.free {
+  background: transparent;
   color: var(--app-text-faint);
 }
 
-.ds-grid-two {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 14px;
+/* ── Compact inline settings inside a pane ────────────────────────────── */
+.ds-inline-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px 32px;
+  margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--app-border);
+}
+
+.ds-inline-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ds-inline-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--app-text-soft);
 }
 
 .ds-segmented {
   display: inline-grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  width: min(100%, 240px);
+  width: min(100%, 180px);
   gap: 4px;
   padding: 4px;
   border: 1px solid var(--app-border);
@@ -925,6 +1039,11 @@ onMounted(() => {
   cursor: default;
 }
 
+.ds-segmented-two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(100%, 120px);
+}
+
 .ds-trigger {
   display: flex;
   flex-direction: column;
@@ -940,7 +1059,6 @@ onMounted(() => {
 }
 
 .ds-time {
-  margin-left: auto;
   padding: 4px 8px;
   border: 1px solid var(--app-border);
   border-radius: 6px;
@@ -949,33 +1067,12 @@ onMounted(() => {
   font-size: 0.82rem;
 }
 
-.ds-fields {
+/* ── Context checkboxes ───────────────────────────────────────────────── */
+.ds-check-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 10px;
-}
-
-.ds-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 0.78rem;
-  color: var(--app-text-soft);
-}
-
-.ds-field select {
-  padding: 7px 9px;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  background: var(--app-panel);
-  color: var(--app-text);
-  font-size: 0.82rem;
-}
-
-.ds-checks {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px 18px;
+  margin-top: 2px;
 }
 
 .ds-check {
@@ -1007,6 +1104,62 @@ onMounted(() => {
   line-height: 1.5;
 }
 
+/* ── Shared fields (model config, supplement info) ────────────────────── */
+.ds-fields-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+
+.ds-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px 18px;
+}
+
+.ds-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--app-text-soft);
+}
+
+.ds-field > span {
+  font-weight: 600;
+}
+
+.ds-field small {
+  font-size: 0.72rem;
+  color: var(--app-text-faint);
+  line-height: 1.5;
+}
+
+.ds-field select {
+  padding: 7px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-panel);
+  color: var(--app-text);
+  font-size: 0.82rem;
+}
+
+.ds-input {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-panel);
+  color: var(--app-text);
+  font-size: 0.82rem;
+}
+
+.ds-input:focus {
+  outline: none;
+  border-color: var(--app-accent);
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
 .ds-primary-btn {
   flex: 0 0 auto;
   min-height: 34px;
@@ -1024,55 +1177,9 @@ onMounted(() => {
   opacity: 0.55;
 }
 
-/* ── Knowledge exploration ────────────────────────────────────────────── */
-.ds-knowledge-head {
-  margin-top: 6px;
-}
-
-.ds-today-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.ds-today-item {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, #f59e0b 32%, var(--app-border));
-  border-radius: 10px;
-  background: color-mix(in srgb, #f59e0b 7%, transparent);
-}
-
-.ds-today-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-
-.ds-today-source {
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  color: #b45309;
-}
-
-:root[data-theme='dark'] .ds-today-source {
-  color: #fbbf24;
-}
-
-.ds-today-title {
-  font-size: 0.92rem;
-  font-weight: 600;
-  color: var(--app-text-strong);
-}
-
 .ds-secondary-btn {
   flex: 0 0 auto;
-  min-height: 30px;
+  min-height: 34px;
   padding: 5px 12px;
   border: 1px solid var(--app-border-strong);
   border-radius: 8px;
@@ -1093,14 +1200,75 @@ onMounted(() => {
   opacity: 0.55;
 }
 
+/* ── Status row: text left, actions right ─────────────────────────────── */
+.ds-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--app-border);
+}
+
+.ds-status-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Today's knowledge cards ──────────────────────────────────────────── */
+.ds-today-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ds-today-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-panel);
+}
+
+.ds-today-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ds-today-source {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--app-accent);
+}
+
+.ds-today-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
 .ds-inline-warn {
   color: #b45309;
 }
 
+/* ── Interest tags ────────────────────────────────────────────────────── */
 .ds-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.ds-tags:empty {
+  display: none;
 }
 
 .ds-tag {
@@ -1131,31 +1299,10 @@ onMounted(() => {
   background: color-mix(in srgb, var(--app-accent) 20%, transparent);
 }
 
-.ds-input {
-  width: 100%;
-  padding: 7px 10px;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  background: var(--app-panel);
-  color: var(--app-text);
-  font-size: 0.82rem;
-}
-
-.ds-input:focus {
-  outline: none;
-  border-color: var(--app-accent);
-}
-
-.ds-sub-title {
-  margin-top: 6px;
-}
-
-.ds-segmented-two {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  width: min(100%, 160px);
-}
-
 .ds-privacy-note {
-  padding: 0 4px;
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--app-border);
+  font-size: 0.74rem;
 }
 </style>

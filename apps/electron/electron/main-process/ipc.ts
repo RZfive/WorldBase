@@ -5,13 +5,13 @@ import { createComputerUsePermissionService } from './permissions/computer-use.j
 import type { ComputerUsePermissionTarget } from '../../src/shared/computer-use-permissions.js'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { USER_ABORT_MESSAGE } from '../../src/main/ai-engine/abort-utils.js'
+import { USER_ABORT_MESSAGE } from '../../src/main/ai-harness/abort-utils.js'
 import type { MessageContent } from '../../src/main/ai-harness/contracts.js'
 import { PROJECT_PACKAGE_EXTENSION } from '../../src/main/project-fs/project-package-service.js'
-import { isOfficeFile, readOfficeFile, detectOfficeType } from '../../src/main/ai-engine/agent/tools/office-utils.js'
+import { isOfficeFile, readOfficeFile, detectOfficeType } from '../../src/main/document-workbench/office-utils.js'
 import { probeEmbeddingModel } from '../../src/main/settings/embedding-probe.js'
-import { parseDocument, isSupportedDocument } from '../../src/main/ai-engine/agent/tools/document-parser.js'
-import type { CreateSelectionPayload } from '../../src/main/ai-engine/agent/tools/document-types.js'
+import { parseDocument, isSupportedDocument } from '../../src/main/document-workbench/document-parser.js'
+import type { CreateSelectionPayload } from '../../src/main/document-workbench/document-types.js'
 import { readDocumentRenderAsset } from '../../src/main/document-preview/document-render-service.js'
 import { decryptPortableSettingsConfig, encryptPortableSettingsConfig, PORTABLE_SETTINGS_APP_ID, PORTABLE_SETTINGS_EXTENSION } from '../../src/main/settings/settings-transfer.js'
 import { fetchProviderCatalog } from '../../src/main/settings/provider-model-service.js'
@@ -2735,7 +2735,8 @@ export function setupIPC (): void {
     if (rustClient) {
       await refreshRustScheduledTasks()
     }
-    return scheduledTaskService!.listTasks({ includeHidden: true })
+    // Hidden backing tasks (long-term-goal internals) stay out of the panel.
+    return scheduledTaskService!.listTasks()
   })
 
   ipcMain.handle('scheduler:saveTask', async (_event: IpcMainInvokeEvent, task: ScheduledTaskDefinition) => {

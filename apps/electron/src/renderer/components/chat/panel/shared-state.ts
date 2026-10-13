@@ -88,6 +88,7 @@ export const sharedChatPanelLifecycle = {
   authRequestCleanup: null as (() => void) | null,
   sudoPasswordRequestCleanup: null as (() => void) | null,
   askUserRequestCleanup: null as (() => void) | null,
+  askUserCancelledCleanup: null as (() => void) | null,
   authResponseCleanup: null as (() => void) | null,
   authResolvedCleanup: null as (() => void) | null,
   skillsChangedCleanup: null as (() => void) | null,
@@ -111,6 +112,7 @@ export function cleanupSharedChatPanelResources (): void {
   lifecycle.authRequestCleanup?.()
   lifecycle.sudoPasswordRequestCleanup?.()
   lifecycle.askUserRequestCleanup?.()
+  lifecycle.askUserCancelledCleanup?.()
   lifecycle.authResolvedCleanup?.()
   lifecycle.skillsChangedCleanup?.()
   lifecycle.agentWorkspaceChangeCleanup?.()
@@ -124,6 +126,7 @@ export function cleanupSharedChatPanelResources (): void {
   lifecycle.authRequestCleanup = null
   lifecycle.sudoPasswordRequestCleanup = null
   lifecycle.askUserRequestCleanup = null
+  lifecycle.askUserCancelledCleanup = null
   lifecycle.authResolvedCleanup = null
   lifecycle.skillsChangedCleanup = null
   lifecycle.agentWorkspaceChangeCleanup = null

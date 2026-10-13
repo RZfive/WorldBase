@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import type { AIConfigInput, CustomToolRegistration } from '../ai-engine/engine-contracts.js'
+import type { AIConfigInput, CustomToolRegistration } from '../ai-host/engine-contracts.js'
 import type { AIExecutionEngine } from '../ai-harness/types.js'
 import type { ChatMessage } from '../ai-harness/contracts.js'
 import type { LongTermGoalStore } from '../settings/long-term-goal-store.js'

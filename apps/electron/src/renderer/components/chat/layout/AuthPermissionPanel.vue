@@ -7,10 +7,14 @@ import { translateAuthDetail, translateAuthTitle } from '../auth-i18n'
 const props = defineProps<{
   request: AuthRequestPayload
   pendingCount: number
+  /** Controlled by the attention-zone accordion; undefined keeps the panel
+      self-managed (standalone usage). */
+  expanded?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'respond', requestId: string, approved: boolean): void
+  (e: 'toggle'): void
 }>()
 
 const collapsed = ref(false)
@@ -18,12 +22,21 @@ const { t } = useI18n()
 const translatedTitle = computed(() => translateAuthTitle(props.request.title, t))
 const translatedDetail = computed(() => translateAuthDetail(props.request.detail, t))
 
+// The attention-zone accordion owns expansion when wired up; follow it.
+watch(
+  () => props.expanded,
+  (value) => {
+    if (typeof value === 'boolean') collapsed.value = !value
+  },
+  { immediate: true }
+)
+
 // Reset to expanded whenever a brand-new request takes the foreground so the user
 // always sees the action they need to approve without an extra click.
 watch(
   () => props.request.requestId,
   () => {
-    collapsed.value = false
+    if (props.expanded === undefined) collapsed.value = false
   },
   { immediate: true }
 )
@@ -38,6 +51,7 @@ function deny () {
 
 function toggleCollapsed (): void {
   collapsed.value = !collapsed.value
+  emit('toggle')
 }
 </script>
 

@@ -10,7 +10,7 @@ import type {
   DocumentSummary,
   CreateSelectionPayload
 } from './document-types.js'
-import { buildDocfileContextPrompt } from '../../../../shared/document-context-tag.js'
+import { buildDocfileContextPrompt } from '../../shared/document-context-tag.js'
 
 interface DocumentChunkEntry {
   nodeId: string

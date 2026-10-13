@@ -59,7 +59,7 @@ for (const tool of tools) {
 
 const document = {
   version: 1,
-  source: 'apps/electron/src/main/ai-engine/agent/tools',
+  source: 'apps/electron/src/main/ai-host/agent/tools',
   tools
 }
 const serialized = `${JSON.stringify(document, null, 2)}\n`
