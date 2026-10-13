@@ -2881,6 +2881,10 @@ impl Store {
                     created_at: String::new(),
                     updated_at: String::new(),
                     last_status: String::new(),
+                    hidden: false,
+                    provider_id: None,
+                    model_id: None,
+                    last_report_id: None,
                 }
             });
             // The indexed columns remain authoritative so legacy update paths

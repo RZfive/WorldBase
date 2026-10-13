@@ -2,6 +2,7 @@
 
 use crate::hub::{Hub, RunHandle};
 use crate::subagents::{CoreSubagentRuntime, MAX_SUBAGENT_NESTING_DEPTH};
+use serde_json::json;
 use anyhow::Result;
 use futures::{future::join_all, StreamExt};
 use std::path::Path;
@@ -3932,9 +3933,96 @@ pub async fn run_scheduled_task_with_context(
         .get(&stream_id)
         .map(|run| run.abort.clone())
         .unwrap_or_else(CancellationToken::new);
-    run_chat_inner(hub, stream_id, conv.id, channel, abort)
-        .await
-        .map(|_| ())
+    let conversation_id = conv.id.clone();
+
+    // Stream tool-level progress to the desktop host while the run executes.
+    // The scheduler loop runs outside any chat session, so without this bridge
+    // the UI would show no activity until the task finished.
+    let progress_hub = hub.clone();
+    let progress_host_stream = format!("worldbase-scheduler-{schedule_id}");
+    let progress_channel = channel.clone();
+    let schedule_id_owned = schedule_id.to_string();
+    let progress_task = tokio::spawn(async move {
+        let mut receiver = progress_channel.tx.subscribe();
+        let mut after_seq = progress_channel.latest_seq().await;
+        let services = progress_hub.services_for_run(None, None, None);
+        let host = services.host.clone();
+        loop {
+            let received = tokio::select! {
+                biased;
+                received = receiver.recv() => received,
+            };
+            let frame = match received {
+                Ok(frame) => frame,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => return,
+            };
+            if (frame.seq as i64) <= after_seq {
+                continue;
+            }
+            after_seq = frame.seq as i64;
+            let (stage, tool_name) = match frame.kind {
+                worldbase_protocol::event::EventKind::ToolCall { ref name, .. } => {
+                    ("tool_start", name.clone())
+                }
+                worldbase_protocol::event::EventKind::ToolResult {
+                    ref name,
+                    is_error,
+                    ..
+                } => (
+                    if is_error { "tool_error" } else { "tool_end" },
+                    name.clone(),
+                ),
+                _ => continue,
+            };
+            let payload = json!({
+                "scheduleId": schedule_id_owned,
+                "stage": stage,
+                "toolName": tool_name,
+            });
+            if let Err(error) = host
+                .request(
+                    &progress_host_stream,
+                    "scheduler.progress",
+                    payload,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+            {
+                tracing::warn!(error = %error, "scheduler progress delivery failed");
+            }
+        }
+    });
+
+    let result_text = run_chat_inner(hub.clone(), stream_id.clone(), conv.id, channel, abort).await?;
+    progress_task.abort();
+
+    // Report the outcome to the desktop host over the host bridge. The
+    // scheduler loop runs outside any chat stream, so it publishes on a
+    // synthetic stream the client can route by request kind alone.
+    let report = json!({
+        "scheduleId": schedule_id,
+        "taskName": name,
+        "conversationId": conversation_id,
+        "resultText": result_text,
+    });
+    let services = hub.services_for_run(None, None, None);
+    let host = services.host.clone();
+    let host_stream = format!("worldbase-scheduler-{schedule_id}");
+    tokio::spawn(async move {
+        if let Err(error) = host
+            .request(
+                &host_stream,
+                "scheduler.report",
+                report,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+        {
+            tracing::warn!(error = %error, "scheduler report delivery failed");
+        }
+    });
+    Ok(())
 }
 
 async fn run_chat(

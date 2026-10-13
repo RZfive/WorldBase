@@ -145,12 +145,6 @@ function resolveRuntimePortFromUrl (value: string): number | null {
   }
 }
 
-export function resolveProjectIdFromRuntimeUrl (value: string): string | null {
-  const port = resolveRuntimePortFromUrl(value)
-  if (!port || !mainState.runtimeManager) return null
-  return mainState.runtimeManager.findProjectIdByPort(port)
-}
-
 function forwardRuntimeLog (port: number, type: 'stdout' | 'stderr', text: string): void {
   const rustClient = mainState.rustHarness
   forwardProjectRuntimeLog({
@@ -170,12 +164,7 @@ function forwardRuntimeLog (port: number, type: 'stdout' | 'stderr', text: strin
           }
         }
       : null,
-    typeScript: mainState.runtimeManager
-      ? {
-          findProjectIdByPort: port => mainState.runtimeManager!.findProjectIdByPort(port),
-          appendExternalLog: (projectId, logType, logText) => mainState.runtimeManager!.appendExternalLog(projectId, logType, logText)
-        }
-      : null,
+    typeScript: null,
     onRustAppendError: error => {
       // A handoff or app-server shutdown can race with Chromium console events.
       console.warn('[rust-harness] Failed to append project renderer log:', error)

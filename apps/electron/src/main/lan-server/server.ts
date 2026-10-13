@@ -6,8 +6,6 @@ import { projectsRouter, type LanProjectControl } from './routes/projects.js'
 import { aiRouter } from './routes/ai.js'
 import { systemRouter } from './routes/system.js'
 import type { ProjectFS } from '../project-fs/project-fs.js'
-import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
-import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { AIExecutionEngine } from '../ai-harness/types.js'
 import type { SettingsStore } from '../settings/settings-store.js'
@@ -147,8 +145,6 @@ async function forwardProxyRequest (target: URL, req: Request, res: Response, me
 export interface LanServerConfig {
   port?: number
   projectFS: ProjectFS
-  runtimeManager: RuntimeManager
-  apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
   aiEngine: AIExecutionEngine
   resolveAiEngine?: () => Promise<AIExecutionEngine>
@@ -352,12 +348,9 @@ export class LanServer {
       const { projectId } = req.params
       try {
         const rust = await this.services.resolveRustProjectControl?.()
-        const native = rust
-          ? await rust.call<Record<string, unknown>>('project.status', { projectId })
-          : null
-        const port = rust
-          ? (typeof native?.port === 'number' ? native.port : undefined)
-          : this.services.runtimeManager.getPort(projectId)
+        if (!rust) throw new Error('Rust harness is unavailable.')
+        const native = await rust.call<Record<string, unknown>>('project.status', { projectId })
+        const port = typeof native?.port === 'number' ? native.port : undefined
 
         if (!port) {
           res.status(404).json({

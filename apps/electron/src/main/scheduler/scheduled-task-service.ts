@@ -163,8 +163,16 @@ function isFixedLocalTimeSchedule (kind: ScheduledTaskDefinition['schedule']['ki
 
 export class ScheduledTaskService {
   private tasks: ScheduledTaskDefinition[] = []
+  /**
+   * Tasks created by the AI tool live in the Rust scheduler store (SQLite)
+   * and execute on its run_loop. They are overlaid onto the JSON store's
+   * UI/goal tasks for listing; never re-armed by the Node timers.
+   */
+  private rustTasks: ScheduledTaskDefinition[] = []
   private reports: ScheduledTaskRunReport[] = []
   private readonly timers = new Map<string, NodeJS.Timeout>()
+  /** True after the JSON → Rust migration; no further Node timer arming. */
+  private nodeLoopRetired = false
   private readonly runningTaskIds = new Set<string>()
   private readonly deferredTaskSaves = new Map<string, ScheduledTaskDefinition>()
 
@@ -182,9 +190,21 @@ export class ScheduledTaskService {
     this.emitTasksChanged()
     this.emitReportsChanged()
 
-    for (const task of this.tasks) {
-      this.scheduleTask(task)
+    // Execution moved to the Rust scheduler run_loop; the Node timers are
+    // only armed for as long as `nodeLoopRetired` is false (legacy sessions).
+  }
+
+  /**
+   * Stop arming Node timers. Called once the JSON → Rust migration has
+   * finished: the Rust run_loop is then the single execution authority and
+   * the Node loop must never double-run a task.
+   */
+  retireNodeLoop (): void {
+    this.nodeLoopRetired = true
+    for (const timer of this.timers.values()) {
+      clearTimeout(timer)
     }
+    this.timers.clear()
   }
 
   dispose (): void {
@@ -197,8 +217,12 @@ export class ScheduledTaskService {
   }
 
   listTasks (options: ScheduledTaskListOptions = {}): ScheduledTaskDefinition[] {
-    const tasks = options.includeHidden ? this.tasks : this.tasks.filter(task => task.hidden !== true)
-    return clone(sortTasks(tasks))
+    const local = options.includeHidden ? this.tasks : this.tasks.filter(task => task.hidden !== true)
+    // Rust-scheduled tasks (AI-created) are always listed; honor the hidden
+    // flag the same way the JSON store does.
+    const rustVisible = this.rustTasks.filter(task => options.includeHidden || task.hidden !== true)
+    const localIds = new Set(local.map(task => task.id))
+    return clone(sortTasks([...local, ...rustVisible.filter(task => !localIds.has(task.id))]))
   }
 
   listReports (taskId?: string, options: ScheduledTaskListOptions = {}): ScheduledTaskRunReport[] {
@@ -445,6 +469,7 @@ export class ScheduledTaskService {
   }
 
   private scheduleTask (task: ScheduledTaskDefinition): void {
+    if (this.nodeLoopRetired) return
     this.clearTaskTimer(task.id)
     if (!task.enabled || this.runningTaskIds.has(task.id) || task.retryScheduledAt) {
       return
@@ -478,6 +503,7 @@ export class ScheduledTaskService {
   }
 
   private scheduleRetry (task: ScheduledTaskDefinition, retryAt: string, context: ScheduledTaskExecutionContext): void {
+    if (this.nodeLoopRetired) return
     this.clearTaskTimer(task.id)
     const timer = setTimeout(() => {
       this.timers.delete(task.id)
@@ -519,6 +545,124 @@ export class ScheduledTaskService {
     this.persistReports()
     this.emitReportsChanged()
     return report
+  }
+
+  /**
+   * Ingest a run report from the Rust scheduler loop (host bridge
+   * `scheduler.report`). Rust executes AI-created tasks stored in SQLite;
+   * Electron persists the report so the UI and long-term-goal reconcile see
+   * the same history as Node-executed tasks.
+   */
+  /**
+   * Replace the Rust-scheduled overlay from the authoritative Rust catalog
+   * (`schedule.list`). Called on startup, after native create/list, and when
+   * reports arrive.
+   */
+  upsertRustTasks (tasks: ScheduledTaskDefinition[]): void {
+    this.rustTasks = tasks.map(task => ({ ...task, hidden: task.hidden === true }))
+    this.emitTasksChanged()
+  }
+
+  ingestRustReport (payload: {
+    scheduleId: string
+    taskName: string
+    conversationId?: string
+    resultText?: string
+  }): void {
+    const task = this.tasks.find(item => item.id === payload.scheduleId)
+    const now = new Date().toISOString()
+    const resultText = String(payload.resultText || '')
+    const report: ScheduledTaskRunReport = {
+      id: `task_report_${crypto.randomUUID()}`,
+      taskId: payload.scheduleId,
+      taskTitle: task?.title || payload.taskName,
+      trigger: 'schedule',
+      status: 'completed',
+      scheduledFor: task?.nextRunAt || null,
+      startedAt: now,
+      finishedAt: now,
+      attempt: 1,
+      prompt: task?.prompt || payload.taskName,
+      summary: resultText.slice(0, 200) || t('mainDialog.scheduledTaskCompletedSummary'),
+      resultText,
+      progress: [],
+      providerId: task?.providerId || null,
+      modelId: task?.modelId || null,
+      selectedSkillIds: task ? [...task.selectedSkillIds] : [],
+      selectedMcpServerIds: task ? [...task.selectedMcpServerIds] : [],
+      retryScheduledAt: null,
+      createdAt: now,
+      updatedAt: now
+    }
+    this.reports = sortReports([report, ...this.reports]).slice(0, MAX_REPORT_HISTORY)
+    this.persistReports()
+    const rustTask = this.rustTasks.find(item => item.id === payload.scheduleId)
+    if (rustTask) {
+      rustTask.lastRunAt = now
+      rustTask.lastStatus = 'completed'
+      rustTask.lastReportId = report.id
+    }
+    this.emitTasksChanged()
+    this.emitReportsChanged()
+    this.notifyCompletion(report)
+  }
+
+  /**
+   * Ingest mid-run tool progress from the Rust scheduler loop (host bridge
+   * `scheduler.progress`). Upserts a running report so the UI (goal panel,
+   * reports list) sees live tool activity exactly like Node-executed tasks.
+   */
+  ingestRustProgress (payload: { scheduleId: string; stage: string; toolName?: string }): void {
+    if (payload.stage !== 'tool_start' && payload.stage !== 'tool_end' && payload.stage !== 'tool_error') return
+    const task = this.tasks.find(item => item.id === payload.scheduleId)
+    const toolName = payload.toolName || 'tool'
+    let runningReport = this.reports.find(report =>
+      report.taskId === payload.scheduleId && report.status === 'running')
+
+    if (!runningReport) {
+      const now = new Date().toISOString()
+      const report: ScheduledTaskRunReport = {
+        id: `task_report_${crypto.randomUUID()}`,
+        taskId: payload.scheduleId,
+        taskTitle: task?.title || payload.scheduleId,
+        trigger: 'schedule',
+        status: 'running',
+        scheduledFor: task?.nextRunAt || null,
+        startedAt: now,
+        finishedAt: null,
+        attempt: 1,
+        prompt: task?.prompt || '',
+        summary: t('mainDialog.scheduledTaskRunningSummary'),
+        resultText: '',
+        progress: [],
+        providerId: task?.providerId || null,
+        modelId: task?.modelId || null,
+        selectedSkillIds: task ? [...task.selectedSkillIds] : [],
+        selectedMcpServerIds: task ? [...task.selectedMcpServerIds] : [],
+        retryScheduledAt: null,
+        createdAt: now,
+        updatedAt: now
+      }
+      this.reports = sortReports([report, ...this.reports]).slice(0, MAX_REPORT_HISTORY)
+      runningReport = report
+    }
+
+    const stageText = payload.stage === 'tool_start'
+      ? t('mainDialog.scheduledTaskToolStartStage')
+      : payload.stage === 'tool_error'
+        ? t('mainDialog.scheduledTaskFailedSummary')
+        : t('mainDialog.scheduledTaskToolEndStage')
+    const updated = runningReport
+    updated.progress = [...(updated.progress || []), {
+      at: new Date().toISOString(),
+      stage: stageText,
+      detail: toolName,
+      kind: payload.stage === 'tool_start' ? 'tool_start' : 'tool_end',
+      toolName
+    }]
+    updated.updatedAt = new Date().toISOString()
+    this.persistReports()
+    this.emitReportsChanged()
   }
 
   private updateReport (reportId: string, updater: (report: ScheduledTaskRunReport) => void): ScheduledTaskRunReport {

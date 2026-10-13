@@ -219,29 +219,6 @@ fn shell_program(command: &str) -> (String, Vec<String>) {
     }
 }
 
-async fn run_shell_with_options(
-    command: &str,
-    cwd: &Path,
-    timeout: Option<u64>,
-    sandbox: bool,
-) -> Result<Value> {
-    anyhow::ensure!(!command.trim().is_empty(), "command is required");
-    anyhow::ensure!(command.len() <= MAX_COMMAND_CHARS, "command is too long");
-    let (program, args) = shell_program(command);
-    let req = worldbase_exec::ExecRequest {
-        program,
-        args,
-        cwd: Some(cwd.display().to_string()),
-        env: Default::default(),
-        timeout_secs: Some(timeout.unwrap_or(90).max(1)),
-        sandbox,
-    };
-    Ok(serde_json::to_value(worldbase_exec::run(&req, cwd).await?)?)
-}
-
-async fn run_shell(command: &str, cwd: &Path, timeout: Option<u64>) -> Result<Value> {
-    run_shell_with_options(command, cwd, timeout, true).await
-}
 
 #[derive(Debug, Clone)]
 struct ParsedCommand {
@@ -2520,6 +2497,7 @@ mod command_status_tests {
             workspace,
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: Arc::new(Mutex::new(None)),
             todo_items: Arc::new(Mutex::new(Vec::new())),
@@ -2733,7 +2711,7 @@ impl Tool for LocalReadFileTool {
         "local_read_file"
     }
     fn description(&self) -> &str {
-        "Read a file from the user's local computer."
+        "Read a file from the user's local computer. User approval is required. Office files are parsed automatically."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"file_path":{"type":"string"},"encoding":{"type":"string"}},"required":["file_path"]})
@@ -2783,7 +2761,10 @@ impl Tool for LocalReadFileTool {
         let content = decode_local_file_bytes(&bytes, encoding)?;
         let content: String = content.chars().take(100_000).collect();
         Ok(json!({"file_path": path, "size": meta.len(), "content": content}))
+    }    fn electron_native(&self) -> bool {
+        true
     }
+
 }
 
 pub struct LocalWriteFileTool;
@@ -2793,7 +2774,7 @@ impl Tool for LocalWriteFileTool {
         "local_write_file"
     }
     fn description(&self) -> &str {
-        "Create or write a file on the user's local computer."
+        "Create or write a file on the user's local computer. User approval is required. Supports office files and plain text files."
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -2976,7 +2957,10 @@ impl Tool for LocalWriteFileTool {
             "size": content.len(),
             "message": format!("File saved: {}", path.display())
         }))
+    }    fn electron_native(&self) -> bool {
+        true
     }
+
 }
 
 fn value_to_cell(value: &Value) -> String {
@@ -3005,6 +2989,7 @@ mod local_file_tests {
             workspace,
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: Arc::new(Mutex::new(None)),
             todo_items: Arc::new(Mutex::new(Vec::new())),
@@ -3144,7 +3129,7 @@ impl Tool for LocalCommandTool {
         "local_run_command"
     }
     fn description(&self) -> &str {
-        "Run a command on the local computer after user approval."
+        "Run a shell command on the user's local computer. User approval is required."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]})
@@ -3224,7 +3209,10 @@ impl Tool for LocalCommandTool {
         };
         local_command_output(&mut result);
         Ok(result)
+    }    fn electron_native(&self) -> bool {
+        true
     }
+
 }
 
 pub struct GlobSearchTool;
@@ -3422,31 +3410,94 @@ impl Tool for CallProjectApiTool {
         "Call a running HTTP API exposed by a project."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"method":{"type":"string","enum":["GET","POST","PUT","DELETE"]},"path":{"type":"string"},"body":{"type":"object"}},"required":["project_id","method","path"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string","description":"Project ID"},"method":{"type":"string","enum":["GET","POST","PUT","DELETE"],"description":"HTTP method"},"path":{"type":"string","description":"API path, for example /api/records"},"body":{"type":"object","description":"Request body for POST or PUT requests"}},"required":["project_id","method","path"]})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let (id, _) = project_path(&input, services)?;
         let status = services.projects.status(&id).await?;
-        let base = status
+        let mut base = status
             .get("url")
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("project server is not running"))?;
+            .map(str::to_string);
+        // Electron auto-started a stopped project before proxying; the dev
+        // server now lives in the same runtime, so the start is visible here.
+        if base.is_none() {
+            let info = services.projects.start_dev(&id).await?;
+            base = Some(info.url);
+        }
+        let base = base.ok_or_else(|| anyhow::anyhow!("project server is not running"))?;
         let path = require_str(&input, "path")?;
         anyhow::ensure!(path.starts_with('/'), "path must start with '/'");
         let method = require_str(&input, "method")?.to_uppercase();
         let client = reqwest::Client::new();
+        // GET bodies become URL query parameters, matching the TS bridge.
+        let mut url = format!("{base}{path}");
+        let body = input.get("body").filter(|value| !value.is_null());
+        if method == "GET" {
+            if let Some(body) = body.and_then(Value::as_object) {
+                let query = body
+                    .iter()
+                    .filter(|(_, value)| !value.is_null())
+                    .map(|(key, value)| {
+                        let text = value
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| value.to_string());
+                        let encoded = text
+                            .chars()
+                            .flat_map(|c| {
+                                if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
+                                    c.to_string().into_bytes()
+                                } else {
+                                    c.to_string().into_bytes()
+                                        .iter()
+                                        .flat_map(|b| format!("%{:02X}", b).into_bytes())
+                                        .collect()
+                                }
+                            })
+                            .collect::<Vec<u8>>();
+                        let encoded = String::from_utf8(encoded).unwrap_or_default();
+                        format!("{key}={encoded}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&");
+                if !query.is_empty() {
+                    url.push('?');
+                    url.push_str(&query);
+                }
+            }
+        }
         let mut request = match method.as_str() {
-            "GET" => client.get(format!("{base}{path}")),
-            "POST" => client.post(format!("{base}{path}")),
-            "PUT" => client.put(format!("{base}{path}")),
-            "DELETE" => client.delete(format!("{base}{path}")),
+            "GET" => client.get(&url),
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "DELETE" => client.delete(&url),
             _ => anyhow::bail!("unsupported method: {method}"),
         };
-        if let Some(body) = input.get("body") {
-            request = request.json(body);
+        // The internal header authenticates harness-originated calls to the
+        // generated app's API layer.
+        request = request
+            .header("Content-Type", "application/json")
+            .header("X-TheWorld-Internal", "true");
+        if method != "GET" {
+            if let Some(body) = body {
+                request = request.json(body);
+            }
         }
         let response = request.timeout(Duration::from_secs(30)).send().await?;
         let status_code = response.status().as_u16();
+        let headers = {
+            let mut map = serde_json::Map::new();
+            for (name, value) in response.headers() {
+                if let Ok(text) = value.to_str() {
+                    map.insert(name.to_string(), json!(text));
+                }
+            }
+            Value::Object(map)
+        };
         let content_type = response
             .headers()
             .get("content-type")
@@ -3460,7 +3511,7 @@ impl Tool for CallProjectApiTool {
             json!(text)
         };
         Ok(
-            json!({"project_id": id, "status": status_code, "ok": (200..300).contains(&status_code), "body": body}),
+            json!({"project_id": id, "status": status_code, "ok": (200..300).contains(&status_code), "headers": headers, "body": body}),
         )
     }
 }
@@ -4001,6 +4052,7 @@ mod project_analysis_tests {
             workspace,
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: Arc::new(Mutex::new(None)),
             todo_items: Arc::new(Mutex::new(Vec::new())),
@@ -4123,48 +4175,6 @@ mod project_analysis_tests {
     }
 }
 
-async fn project_build(input: &Value, services: &ToolServices, finalize: bool) -> Result<Value> {
-    let (id, root) = project_path(input, services)?;
-    let clean = input
-        .get("clean_install")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let mut commands = Vec::new();
-    if clean {
-        commands.push("rm -rf node_modules .next".to_string());
-    }
-    if clean || !root.join("node_modules").is_dir() {
-        commands.push("npm install".to_string());
-    }
-    commands.push("npm run build".to_string());
-    let mut results = Vec::new();
-    for command in commands {
-        results.push(
-            json!({"command": command, "result": run_shell(&command, &root, Some(180)).await?}),
-        );
-    }
-    let server = services.projects.start_dev(&id).await.ok();
-    if finalize {
-        if input
-            .get("cleanup_dependencies")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-        {
-            let _ = tokio::fs::remove_dir_all(root.join("node_modules")).await;
-        }
-        if input
-            .get("cleanup_build_cache")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-        {
-            let _ = tokio::fs::remove_dir_all(root.join(".next/cache")).await;
-        }
-    }
-    Ok(
-        json!({"success": true, "project_id": id, "commands": results, "runtime": server, "finalized": finalize}),
-    )
-}
-
 pub struct RebuildProjectTool;
 #[async_trait]
 impl Tool for RebuildProjectTool {
@@ -4172,19 +4182,43 @@ impl Tool for RebuildProjectTool {
         "rebuild_project"
     }
     fn description(&self) -> &str {
-        "Rebuild and restart a project."
+        "Rebuild and restart a project. By default this preserves installed dependencies and build caches so iterative development stays fast. Use clean_install only when you need a full reinstall, and use cleanup_*_after_success only when finalizing a project and you explicitly want to reclaim disk space afterwards."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"clean_install":{"type":"boolean"},"cleanup_dependencies_after_success":{"type":"boolean"},"cleanup_build_cache_after_success":{"type":"boolean"}},"required":["project_id"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string","description":"Project ID"},"clean_install":{"type":"boolean","description":"When true, remove node_modules and build cache before reinstalling dependencies. Leave false for normal hot-update rebuilds."},"cleanup_dependencies_after_success":{"type":"boolean","description":"When true, remove node_modules after a successful rebuild/restart. Use only when the project is finalized and you no longer need fast iterative rebuilds."},"cleanup_build_cache_after_success":{"type":"boolean","description":"When true, remove build caches such as .next/cache after a successful rebuild to save disk space."}},"required":["project_id"]})
     }
     fn domain(&self) -> &str {
         "desktop"
     }
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        project_build(&input, services, false).await
+        let (id, _) = project_path(&input, services)?;
+        let clean_install = input
+            .get("clean_install")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        // `rebuild_project_for_ui` mirrors Electron's BuilderService.rebuild:
+        // stop → optional clean → install → build → guarded cleanup → restart.
+        Ok(services
+            .projects
+            .rebuild_project_for_ui(
+                &id,
+                clean_install,
+                input
+                    .get("cleanup_dependencies_after_success")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                input
+                    .get("cleanup_build_cache_after_success")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?)
     }
 }
 
@@ -4195,19 +4229,65 @@ impl Tool for FinalizeProjectTool {
         "finalize_project"
     }
     fn description(&self) -> &str {
-        "Rebuild a project and reclaim dependency/cache disk space."
+        "Finalize a project after development is complete. This performs a rebuild/restart and then reclaims disk space by cleaning dependencies and build caches when safe. Use this only at the end of delivery, not for normal iterative development."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"clean_install":{"type":"boolean"},"cleanup_dependencies":{"type":"boolean"},"cleanup_build_cache":{"type":"boolean"}},"required":["project_id"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string","description":"Project ID"},"clean_install":{"type":"boolean","description":"When true, perform a full clean install before the final rebuild. Leave false unless you specifically need a fresh dependency reinstall."},"cleanup_dependencies":{"type":"boolean","description":"When true, remove node_modules after the final successful rebuild when the runtime can continue without them. Defaults to true."},"cleanup_build_cache":{"type":"boolean","description":"When true, remove build caches such as .next/cache after the final successful rebuild. Defaults to true."}},"required":["project_id"]})
     }
     fn domain(&self) -> &str {
         "desktop"
     }
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        project_build(&input, services, true).await
+        let (id, _) = project_path(&input, services)?;
+        // Finalize defaults its cleanup flags to true (rebuild defaults them
+        // to false) — Electron kept the same inverted defaults.
+        let result = services
+            .projects
+            .rebuild_project_for_ui(
+                &id,
+                input
+                    .get("clean_install")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                input
+                    .get("cleanup_dependencies")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                input
+                    .get("cleanup_build_cache")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            )
+            .await?;
+        let finalized = result
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut value = result;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("finalized".into(), json!(finalized));
+            object.insert(
+                "cleanup_dependencies".into(),
+                json!(input
+                    .get("cleanup_dependencies")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)),
+            );
+            object.insert(
+                "cleanup_build_cache".into(),
+                json!(input
+                    .get("cleanup_build_cache")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)),
+            );
+        }
+        Ok(value)
     }
 }
 
@@ -4218,13 +4298,16 @@ impl Tool for ClearProjectBuildFlagTool {
         "clear_project_build_flag"
     }
     fn description(&self) -> &str {
-        "Re-sync a project's build state from disk."
+        "Force the platform to re-sync its cached build state from disk after a successful manual build. Use this when get_project_status still reports needs_rebuild or missing node_modules even though you have already built the project manually via run_project_command."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"}},"required":["project_id"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string","description":"Project ID"}},"required":["project_id"]})
     }
     fn domain(&self) -> &str {
         "desktop"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let (id, _) = project_path(&input, services)?;
@@ -4275,13 +4358,16 @@ impl Tool for GetProjectLogsTool {
         "get_project_logs"
     }
     fn description(&self) -> &str {
-        "Read recent project runtime logs."
+        "Read recent project logs, optionally filtered by stdout, stderr, or all logs."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"project_id":{"type":"string"},"lines":{"type":"integer"},"type":{"type":"string","enum":["stdout","stderr","all"]}},"required":["project_id"]})
+        json!({"type":"object","properties":{"project_id":{"type":"string","description":"Project ID"},"lines":{"type":"integer","description":"How many recent log lines to return. Default 50, maximum 200."},"type":{"type":"string","enum":["stdout","stderr","all"],"description":"Log type filter. Defaults to all."}},"required":["project_id"]})
     }
     fn domain(&self) -> &str {
         "desktop"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let (id, _) = project_path(&input, services)?;
@@ -4555,10 +4641,13 @@ impl Tool for ManageTodoListTool {
         "manage_todo_list"
     }
     fn description(&self) -> &str {
-        "Create or replace the working todo list for the current task."
+        "Create or update the working todo list for the current task. Provide the complete list each time. Use this for non-trivial multi-step work and keep statuses current as you progress."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer"},"title":{"type":"string"},"status":{"type":"string","enum":["not-started","in-progress","completed"]}},"required":["id","title","status"]}}},"required":["items"]})
+        json!({"type":"object","properties":{"items":{"type":"array","description":"The complete todo list for the current task. Replace the full list on every update. At most one item should be in-progress.","items":{"type":"object","properties":{"id":{"type":"integer"},"title":{"type":"string"},"status":{"type":"string","enum":["not-started","in-progress","completed"]}},"required":["id","title","status"]}}},"required":["items"]})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let items = input
@@ -4940,10 +5029,13 @@ impl Tool for InstallSkillTool {
         "install_skill"
     }
     fn description(&self) -> &str {
-        "Install a skill into the harness skill registry."
+        "Install a Skill into the app from raw markdown/text content or from a local file path (md, txt, zip, or directory). After user approval, the skill is saved locally and can be activated immediately for the current conversation."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"content":{"type":"string"},"file_path":{"type":"string"},"activate_now":{"type":"boolean"}}})
+        json!({"type":"object","properties":{"name":{"type":"string","description":"Optional display name for the Skill. If omitted, the skill title/frontmatter is used when available."},"content":{"type":"string","description":"Full skill markdown/text content to install. Either content or file_path must be provided."},"file_path":{"type":"string","description":"Absolute path to a local skill file (.md, .txt, .zip) or directory to import. Either content or file_path must be provided."},"description":{"type":"string","description":"Optional short description override."},"activate_now":{"type":"boolean","description":"Whether to register the installed skill into the current conversation immediately. Defaults to true."}}})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     fn permission(&self) -> &str {
         "ask"
@@ -5271,7 +5363,7 @@ impl Tool for CreateScheduledTaskTool {
         "create_scheduled_task"
     }
     fn description(&self) -> &str {
-        "Create a persistent scheduled AI task."
+        "Create a persistent scheduled AI task. The task can run once, repeat by minute interval, repeat daily or weekly at a local time, or run on specific dates. It can be limited to selected MCP servers and Skills."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"title":{"type":"string"},"prompt":{"type":"string"},"schedule_kind":{"type":"string","enum":["once","interval","daily","weekly","dates"]},"run_at":{"type":"string"},"every_minutes":{"type":"integer"},"start_at":{"type":"string"},"time_of_day":{"type":"string"},"weekdays":{"type":"array"},"dates":{"type":"array"},"enabled":{"type":"boolean"},"selected_skill_ids":{"type":"array","items":{"type":"string"}},"selected_mcp_server_ids":{"type":"array","items":{"type":"string"}},"max_retries":{"type":"integer"},"retry_delay_minutes":{"type":"integer"}},"required":["prompt","schedule_kind"]})
@@ -5315,6 +5407,10 @@ impl Tool for CreateScheduledTaskTool {
             "message": format!("定时任务 {} 已创建。", entry.name),
         }))
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
+
 }
 
 #[cfg(test)]
@@ -5342,7 +5438,7 @@ impl Tool for ListScheduledTasksTool {
         "list_scheduled_tasks"
     }
     fn description(&self) -> &str {
-        "List all saved scheduled AI tasks."
+        "List all saved scheduled AI tasks and their next run state."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{}})
@@ -5356,6 +5452,10 @@ impl Tool for ListScheduledTasksTool {
             .collect::<Vec<_>>();
         Ok(json!({"tasks": tasks}))
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
+
 }
 
 pub struct InstallMcpServerTool;
@@ -5455,7 +5555,7 @@ impl Tool for InstallMcpServerTool {
         "install_mcp_server"
     }
     fn description(&self) -> &str {
-        "Install or update an MCP server configuration."
+        "Install or update an MCP server configuration in the app settings. After user approval, the server entry is saved and enabled so the agent can use it without manual settings-page configuration."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"server_id":{"type":"string","description":"Electron durable MCP server ID. Falls back to name for compatibility."},"name":{"type":"string","description":"Human-facing MCP server name."},"display_name":{"type":"string"},"displayName":{"type":"string"},"enabled":{"type":"boolean"},"transport":{"type":"string","enum":["stdio","streamable-http","sse"]},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"},"env":{"type":"object"},"headers":{"type":"object"},"timeout_ms":{"type":"integer"},"timeoutMs":{"type":"integer"},"url":{"type":"string"},"overwrite_existing":{"type":"boolean","description":"Replace an existing server with the same ID or name. Defaults to true."}},"required":["name","transport"]})
@@ -5625,6 +5725,10 @@ impl Tool for InstallMcpServerTool {
             json!({"success": true, "action": if was_existing { "updated" } else { "installed" }, "server_id": server_id, "server": electron_mcp_server_value(&config), "connection": connection.map(|snapshot| serde_json::to_value(snapshot).unwrap_or(Value::Null))}),
         )
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
+
 }
 
 #[cfg(test)]
@@ -5645,6 +5749,7 @@ mod mcp_install_tests {
             workspace,
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: Arc::new(Mutex::new(None)),
             todo_items: Arc::new(Mutex::new(Vec::new())),
@@ -5921,11 +6026,15 @@ impl Tool for ListAgentWorkspaceCatalogTool {
         "list_agent_workspace_catalog"
     }
     fn description(&self) -> &str {
-        "List providers, skills, existing agents and existing agent groups before creating Agent Workspace entities."
+        "List available providers, models, skills, tool names, existing agents, and existing agent groups before creating or updating agent workspace entities."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{}})
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, _input: Value, services: &ToolServices) -> Result<Value> {
         let providers = agent_workspace_providers(services)?;
         let skills = services.skills.list()?;
@@ -5946,22 +6055,22 @@ impl Tool for CreateAgentTool {
         "create_agent"
     }
     fn description(&self) -> &str {
-        "Create or update a custom Agent Workspace agent. Use list_agent_workspace_catalog first to choose valid provider, model and skill IDs."
+        "Create or update a custom agent in the Agent Workspace. Use list_agent_workspace_catalog first to choose valid provider, model, skill IDs, and tool names."
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Optional existing agent ID to update."},
+                "id": {"type": "string", "description": "Optional existing agent ID to update. Omit to create a new agent."},
                 "name": {"type": "string", "description": "Agent display name."},
                 "description": {"type": "string", "description": "Short description of the agent role."},
                 "system_prompt": {"type": "string", "description": "System prompt for the agent."},
-                "provider_id": {"type": "string", "description": "Provider ID from list_agent_workspace_catalog."},
-                "model_id": {"type": "string", "description": "Model ID under the selected provider."},
-                "reasoning_strength": {"type": "string", "enum": ["low", "medium", "high", "max"]},
-                "skill_ids": {"type": "array", "items": {"type": "string"}},
-                "allowed_tools": {"type": "array", "items": {"type": "string"}},
-                "denied_tools": {"type": "array", "items": {"type": "string"}},
+                "provider_id": {"type": "string", "description": "Existing provider ID from list_agent_workspace_catalog."},
+                "model_id": {"type": "string", "description": "Existing model ID under the selected provider."},
+                "reasoning_strength": {"type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]},
+                "skill_ids": {"type": "array", "items": {"type": "string"}, "description": "Existing skill IDs to bind."},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Allowed tool names. Leave empty for no allow-list restriction."},
+                "denied_tools": {"type": "array", "items": {"type": "string"}, "description": "Denied tool names."},
                 "memory_scopes": {
                     "type": "array",
                     "items": {"type": "string", "enum": ["user", "agent", "project", "group", "channel"]}
@@ -5977,6 +6086,10 @@ impl Tool for CreateAgentTool {
             "additionalProperties": false
         })
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let name = agent_workspace_string(&input, "name");
         let system_prompt = agent_workspace_string(&input, "system_prompt");
@@ -6206,6 +6319,7 @@ mod agent_workspace_tests {
             workspace,
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: Arc::new(Mutex::new(None)),
             todo_items: Arc::new(Mutex::new(Vec::new())),
@@ -6509,10 +6623,13 @@ impl Tool for CreateAgentGroupTool {
         "create_agent_group"
     }
     fn description(&self) -> &str {
-        "Create or update an Agent Workspace group."
+        "Create or update an agent group in the Agent Workspace. Use list_agent_workspace_catalog first to pick valid coordinator and member agent IDs."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"},"description":{"type":"string"},"coordinator_agent_id":{"type":"string"},"member_agent_ids":{"type":"array","items":{"type":"string"}},"max_rounds":{"type":"integer"},"max_parallel_workers":{"type":"integer"},"shared_memory_scopes":{"type":"array","items":{"type":"string"}},"visibility":{"type":"string"}},"required":["name","coordinator_agent_id","member_agent_ids"]})
+        json!({"type":"object","properties":{"id":{"type":"string","description":"Optional existing group ID to update. Omit to create a new group."},"name":{"type":"string","description":"Group display name."},"description":{"type":"string","description":"Short description of the group objective."},"coordinator_agent_id":{"type":"string","description":"Existing agent ID used as coordinator."},"member_agent_ids":{"type":"array","items":{"type":"string"},"description":"Existing member agent IDs."},"max_rounds":{"type":"integer"},"max_parallel_workers":{"type":"integer"},"shared_memory_scopes":{"type":"array","items":{"type":"string"},"description":"Group-shared memory scopes."},"visibility":{"type":"string","enum":["summary_only","expandable_internal_transcript"]}},"required":["name","coordinator_agent_id","member_agent_ids"]})
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let name = require_str(&input, "name")?.trim().to_string();
@@ -6714,7 +6831,7 @@ impl Tool for StartAsyncTaskTool {
         "start_async_task"
     }
     fn description(&self) -> &str {
-        "Start a long-running async project task."
+        "Start a long-running async project task to avoid request timeouts."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"project_id":{"type":"string"},"task":{"type":"string","enum":["rebuild"]}},"required":["project_id","task"]})
@@ -6830,7 +6947,10 @@ impl Tool for StartAsyncTaskTool {
             trim_async_task_history(&mut map);
         });
         Ok(snapshot)
+    }    fn electron_native(&self) -> bool {
+        true
     }
+
 }
 
 pub struct GetTaskStatusTool;
@@ -6840,7 +6960,7 @@ impl Tool for GetTaskStatusTool {
         "get_task_status"
     }
     fn description(&self) -> &str {
-        "Get the status and result of an async task."
+        "Get the current status, progress, and final result of an async task."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]})
@@ -6853,7 +6973,10 @@ impl Tool for GetTaskStatusTool {
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Async task not found: {id}"))
+    }    fn electron_native(&self) -> bool {
+        true
     }
+
 }
 
 pub struct SpawnSubagentsTool;
@@ -6920,7 +7043,10 @@ impl Tool for SpawnSubagentsTool {
         "spawn_subagents"
     }
     fn description(&self) -> &str {
-        "Spawn independent subagents in parallel when the host provides a subagent service."
+        "Spawn independent subagents in parallel when the host provides a subagent service. Prefer this tool when subtasks are independent and can proceed without each other's intermediate results. After the tool returns, inspect the returned task statuses and results before deciding the next step."
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -6991,6 +7117,11 @@ impl Tool for SpawnSubagentsTool {
             .iter()
             .filter(|result| result.status == crate::SubagentTaskStatus::Failed)
             .count();
+        let overall_status = if failed_count > 0 {
+            "completed_with_failures"
+        } else {
+            "completed"
+        };
         let elapsed_seconds = format!("{:.1}", duration_ms as f64 / 1_000.0);
         let results = response
             .results
@@ -6999,11 +7130,7 @@ impl Tool for SpawnSubagentsTool {
             .collect::<Vec<_>>();
 
         Ok(json!({
-            "status": if failed_count > 0 {
-                "completed_with_failures"
-            } else {
-                "completed"
-            },
+            "status": overall_status,
             "all_tasks_finished": true,
             "completed_count": completed_count,
             "failed_count": failed_count,
@@ -7110,14 +7237,17 @@ impl Tool for DocumentListTool {
         "list_documents"
     }
     fn description(&self) -> &str {
-        "List imported document artifacts."
+        "List all imported documents and their selection summaries."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{}})
     }
     async fn execute(&self, _input: Value, services: &ToolServices) -> Result<Value> {
         crate::document_artifacts::list_documents_result(&services.workspace)
+    }    fn electron_native(&self) -> bool {
+        true
     }
+
 }
 
 pub struct DocumentReadTool;
@@ -7127,7 +7257,7 @@ impl Tool for DocumentReadTool {
         "read_document"
     }
     fn description(&self) -> &str {
-        "Read an imported document artifact."
+        "Read imported document content in bounded chunks, or return specific selected regions."
     }
     fn input_schema(&self) -> Value {
         // Keep the native descriptor honest as well as the generated Electron
@@ -7160,7 +7290,10 @@ impl Tool for DocumentReadTool {
             max_chars,
             &region_ids,
         )
+    }    fn electron_native(&self) -> bool {
+        true
     }
+
 }
 
 fn optional_document_number(input: &Value, key: &str) -> Result<Option<f64>> {
@@ -8132,6 +8265,7 @@ mod workspace_native_parity_tests {
             workspace: workspace.clone(),
             folder_workspace: Some(workspace),
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: Arc::new(Mutex::new(None)),
             todo_items: Arc::new(Mutex::new(Vec::new())),

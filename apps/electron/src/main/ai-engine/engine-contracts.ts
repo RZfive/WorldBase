@@ -10,19 +10,10 @@
 import type { BrowserWindow } from 'electron'
 import type { ToolDefinition } from '../ai-harness/contracts.js'
 import type { ProgressCallback } from './agent/agent-core.js'
-import type { ProjectFS } from '../project-fs/project-fs.js'
-import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
-import type { BuilderService } from '../project-runtime/builder-service.js'
-import type { ProjectApiClient } from '../project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
-import type { AsyncTaskManager } from './agent/tools/async-task-manager.js'
 import type { DocumentStore } from './agent/tools/document-store.js'
 import type { AIExecutionAuthMode, SettingsStore } from '../settings/settings-store.js'
-import type { MCPService } from '../mcp/mcp-service.js'
-import type { SkillStore } from '../settings/skill-store.js'
 import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.js'
-import type { AgentStore } from '../settings/agent-store.js'
-import type { AgentGroupStore } from '../settings/agent-group-store.js'
 import type { ImageLibraryStore } from '../settings/image-library-store.js'
 import type { UsageStore } from '../settings/usage-store.js'
 import type { FolderWorkspaceChangeEvent } from '../../shared/folder-workspace-types.js'
@@ -35,16 +26,10 @@ export interface CustomToolRegistration {
 }
 
 export interface AIEngineServices {
-  projectFS: ProjectFS
-  runtimeManager: RuntimeManager
-  builderService: BuilderService
-  apiClient: ProjectApiClient
   dataAccess: ProjectDataAccess
-  asyncTaskManager: AsyncTaskManager
   documentStore?: DocumentStore
-  skillStore?: SkillStore
-  agentStore?: AgentStore
-  agentGroupStore?: AgentGroupStore
+  /** Mirror a UI-created document artifact into the Rust artifact store. */
+  persistDocumentArtifact?: (artifact: Record<string, unknown> & { id: string }) => void
   settingsStore?: SettingsStore
   imageLibraryStore?: ImageLibraryStore
   getMainWindow?: () => BrowserWindow | null
@@ -53,7 +38,6 @@ export interface AIEngineServices {
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
   notifyFolderWorkspaceChanged?: (event: FolderWorkspaceChangeEvent) => void
-  mcpService?: MCPService
   scheduledTaskService?: ScheduledTaskService
   /** 持久化 token 用量统计；注入后每次 provider 调用会记录真实 token。 */
   usageStore?: UsageStore

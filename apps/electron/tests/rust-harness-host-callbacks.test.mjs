@@ -157,7 +157,43 @@ test('project file tools are Rust-native and register no Node override', async (
     'run_project_command',
     'get_project_command_status',
     'query_project_database',
-    'analyze_project_data'
+    'analyze_project_data',
+    'create_project',
+    'list_projects',
+    'start_project_server',
+    'restart_project_server',
+    'get_project_status',
+    'get_project_logs',
+    'rebuild_project',
+    'finalize_project',
+    'clear_project_build_flag',
+    'call_project_api',
+    'create_agent',
+    'create_agent_group',
+    'list_agent_workspace_catalog',
+    'run_skill',
+    'list_skills',
+    'install_skill',
+    'manage_todo_list',
+    'spawn_subagents',
+    'web_search',
+    'fetch_webpage',
+    'mcp_call',
+    'mcp_list_servers',
+    'mcp_list_resources',
+    'mcp_read_resource',
+    'mcp_list_prompts',
+    'mcp_get_prompt',
+    'install_mcp_server',
+    'local_read_file',
+    'local_run_command',
+    'local_write_file',
+    'create_scheduled_task',
+    'list_scheduled_tasks',
+    'start_async_task',
+    'get_task_status',
+    'read_document',
+    'list_documents'
   ]) {
     assert.equal(
       registrations.some(tool => tool.definition.name === name),
@@ -357,8 +393,8 @@ test('all canonical Electron tools have an explicit execution owner', async () =
     runSubagents: async () => []
   }).getToolDefinitions()
   const canonicalNames = catalog.map(tool => tool.name).sort()
-  assert.equal(canonicalNames.length, 43)
-  assert.equal(new Set(canonicalNames).size, 43)
+  assert.equal(canonicalNames.length, 7)
+  assert.equal(new Set(canonicalNames).size, 7)
   // Rust-intrinsic plan controls and Rust-native image/workspace/project-file
   // tools never appear in the Node canonical catalog; Rust advertises and
   // executes them itself.
@@ -388,7 +424,43 @@ test('all canonical Electron tools have an explicit execution owner', async () =
     'run_project_command',
     'get_project_command_status',
     'query_project_database',
-    'analyze_project_data'
+    'analyze_project_data',
+    'create_project',
+    'list_projects',
+    'start_project_server',
+    'restart_project_server',
+    'get_project_status',
+    'get_project_logs',
+    'rebuild_project',
+    'finalize_project',
+    'clear_project_build_flag',
+    'call_project_api',
+    'create_agent',
+    'create_agent_group',
+    'list_agent_workspace_catalog',
+    'run_skill',
+    'list_skills',
+    'install_skill',
+    'manage_todo_list',
+    'spawn_subagents',
+    'web_search',
+    'fetch_webpage',
+    'mcp_call',
+    'mcp_list_servers',
+    'mcp_list_resources',
+    'mcp_read_resource',
+    'mcp_list_prompts',
+    'mcp_get_prompt',
+    'install_mcp_server',
+    'local_read_file',
+    'local_run_command',
+    'local_write_file',
+    'create_scheduled_task',
+    'list_scheduled_tasks',
+    'start_async_task',
+    'get_task_status',
+    'read_document',
+    'list_documents'
   ]) {
     assert.equal(canonicalNames.includes(name), false, `${name} must be Rust-owned and absent from the Node catalog`)
   }
@@ -431,8 +503,6 @@ test('missing optional Electron services remain explicit host errors instead of 
   }
 
   for (const name of [
-    'list_documents',
-    'read_document',
     'read_current_page'
   ]) {
     const { result } = await dispatchToolExecute(registrations, name, {})
@@ -442,88 +512,31 @@ test('missing optional Electron services remain explicit host errors instead of 
   }
 })
 
-test('fixed MCP discovery and resource tools execute through the Node MCP service', async () => {
+test('MCP discovery/resource/prompt tools are Rust-native and register no Node override', async () => {
   const mcpService = new MCPService()
   const names = [
     'mcp_list_servers',
     'mcp_list_resources',
     'mcp_read_resource',
     'mcp_list_prompts',
-    'mcp_get_prompt'
+    'mcp_get_prompt',
+    'mcp_call',
+    'install_mcp_server'
   ]
   const registrations = await collectHostTools(
-    createHarnessEngine(createServices({ mcpService }), names),
+    createHarnessEngine(createServices({ mcpService }), names.map(name => ({
+      name, description: `Rust ${name}`, inputSchema: { type: 'object' }, electronNative: true
+    }))),
     { authMode: 'strict' }
   )
 
   for (const name of names) {
-    assert.equal(getTool(registrations, name).domain, 'electron_host_override')
+    assert.equal(
+      registrations.some(tool => tool.definition.name === name),
+      false,
+      `${name} must execute in Rust, not through a Node host override`
+    )
   }
-  const { result } = await dispatchToolExecute(registrations, 'mcp_list_servers', {})
-  assert.deepEqual(result.servers, [])
-  assert.equal(typeof result.updatedAt, 'string')
-})
-
-test('a server installed during a Rust turn is immediately available to generic mcp_call', async () => {
-  let savedServers = []
-  let activeServers = []
-  const calls = []
-  const mcpService = {
-    async updateServers (servers) {
-      activeServers = servers
-    },
-    async refreshServer (serverId) {
-      const server = activeServers.find(candidate => candidate.id === serverId)
-      assert.ok(server, 'installed server must be active before refresh')
-      return { id: server.id, name: server.name, status: 'connected' }
-    },
-    async executeServerTool (...args) {
-      calls.push(args)
-      return { source: 'same-turn-mcp' }
-    }
-  }
-  const services = createServices({
-    settingsStore: {
-      getMcpServers: () => savedServers,
-      saveMcpServers: servers => { savedServers = servers }
-    },
-    mcpService,
-    getMainWindow: () => ({
-      isDestroyed: () => false,
-      webContents: { send () {} }
-    })
-  })
-  const context = {
-    authMode: 'auto',
-    allowedMcpServerIds: ['mcp_docs']
-  }
-  const registrations = await collectHostTools(
-    createHarnessEngine(services, ['install_mcp_server', 'mcp_call']),
-    context
-  )
-
-  assert.equal(getTool(registrations, 'install_mcp_server').domain, 'electron_host_override')
-  assert.equal(getTool(registrations, 'mcp_call').domain, 'electron_host_override')
-
-  const installed = await dispatchToolExecute(registrations, 'install_mcp_server', {
-    name: 'Docs',
-    transport: 'streamable-http',
-    url: 'https://mcp.example.test'
-  })
-  assert.equal(installed.result.success, true)
-  assert.equal(installed.result.server.id, 'mcp_docs')
-
-  const called = await dispatchToolExecute(registrations, 'mcp_call', {
-    server: 'mcp_docs',
-    tool: 'lookup',
-    arguments: { query: 'new server' }
-  })
-  assert.equal(called.result.source, 'same-turn-mcp')
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0][0], 'mcp_docs')
-  assert.equal(calls[0][1], 'lookup')
-  assert.deepEqual(calls[0][2], { query: 'new server' })
-  assert.deepEqual(calls[0][4], ['mcp_docs'])
 })
 
 test('project command tools are Rust-native and register no Node override', async () => {
@@ -553,54 +566,22 @@ test('project command tools are Rust-native and register no Node override', asyn
   }
 })
 
-test('Rust-advertised spawn_subagents is always executed by the Electron Rust facade', async () => {
-  const childRuns = []
-  const client = {
-    ...createNativeToolClient(['spawn_subagents', 'read_project_file']),
-    async chatStream (sessionId, conversationId, text, options, onFrame) {
-      childRuns.push({ sessionId, conversationId, text, options })
-      onFrame({ kind: 'assistant_message', content: 'Child result' })
-      onFrame({ kind: 'done' })
-      return { streamId: `child-stream-${childRuns.length}` }
-    }
-  }
+test('spawn_subagents is Rust-native and registers no Node override', async () => {
+  // The harness's own subagent runtime owns child runs, nesting limits, and
+  // parent cancellation; the facade must not register a Node shim.
+  const client = createNativeToolClient([
+    { name: 'spawn_subagents', description: 'Rust spawn_subagents', inputSchema: { type: 'object' }, electronNative: true }
+  ])
   const engine = new RustHarnessEngine({ client, services: createServices() })
-  const context = { authMode: 'auto', sessionId: 'parent-session', conversationId: 'parent-conversation' }
-  const registrations = await collectHostTools(engine, context)
-  const subagents = getTool(registrations, 'spawn_subagents')
+  const registrations = await collectHostTools(engine)
 
-  assert.equal(subagents.domain, 'electron_host_override')
-  const { result } = await dispatchToolExecute(registrations, 'spawn_subagents', {
-    tasks: [{
-      description: 'Review routing',
-      prompt: 'Review the Rust routing boundary.',
-      allowed_tools: ['read_project_file'],
-      system_prompt: 'Focus on native ownership.'
-    }]
-  })
-
-  assert.equal(result.status, 'completed')
-  assert.equal(result.completed_count, 1)
-  assert.equal(result.results[0].result, 'Child result')
-  assert.equal(childRuns.length, 1)
-  assert.deepEqual(childRuns[0].options.allowedToolNames, ['read_project_file'])
-  assert.ok(childRuns[0].options.systemPromptSections.includes('Focus on native ownership.'))
-  assert.match(childRuns[0].options.systemPromptSections.join('\n'), /nesting depth 1/)
-
-  const limitRegistrations = await collectHostTools(engine, {
-    ...context,
-    subagentNestingDepth: 2
-  })
-  const atLimit = getTool(limitRegistrations, 'spawn_subagents')
-  assert.equal(atLimit.domain, 'electron_host_override')
-  const limited = await dispatchToolExecute(limitRegistrations, 'spawn_subagents', {
-    tasks: [{ description: 'Blocked child', prompt: 'This must not start.' }]
-  })
-
-  assert.equal(limited.result.status, 'completed_with_failures')
-  assert.match(limited.result.results[0].error, /nesting limit/i)
-  assert.equal(childRuns.length, 1, 'the facade must reject at the limit before creating a Rust child run')
+  assert.equal(
+    registrations.some(tool => tool.definition.name === 'spawn_subagents'),
+    false,
+    'spawn_subagents must execute in Rust, not through a Node host override'
+  )
 })
+
 
 test('Rust-advertised Electron document and page tools use host overrides', async () => {
   const services = createServices({
@@ -1038,135 +1019,20 @@ test('Rust native group routes stateful Electron tools by original member stream
   assert.equal(client.nativeGroupMemberStreams.size, 0)
 })
 
-test('Rust MCP ownership routes generic calls through Electron while dynamic callbacks retain permission routing', async () => {
-  const genericCalls = []
-  const dynamicCalls = []
-  const dynamicDefinition = {
-    name: 'mcp__docs__lookup__abc123',
-    description: 'Look up documentation',
-    parameters: { type: 'object', properties: { query: { type: 'string' } } }
-  }
-  const mcpService = {
-    async executeServerTool (...args) {
-      genericCalls.push(args)
-      return { source: 'generic-mcp', args }
-    },
-    async executeDynamicTool (...args) {
-      dynamicCalls.push(args)
-      return { source: 'dynamic-mcp', args }
-    }
-  }
+test('Rust MCP ownership enforces the per-run server allow-list natively', async () => {
+  // mcp_call is Rust-native: ensure_server_allowed enforces the run's
+  // allowedMcpServerIds narrowing before any network traffic, replacing the
+  // Node PermissionEngine gate the shim used to provide.
+  const mcpService = { async executeServerTool () { throw new Error('must not be called') } }
+  const services = createServices({ mcpService })
+  const context = { authMode: 'strict', allowedMcpServerIds: ['docs-server'] }
+  const registrations = await collectHostTools(createHarnessEngine(services), context)
 
-  const deniedServices = createServices({ mcpService })
-  const deniedContext = {
-    authMode: 'strict',
-    allowedMcpServerIds: ['docs-server']
-  }
-  const deniedRegistry = new ElectronToolRegistry({
-    services: deniedServices,
-    getNativeToolDefinitions: () => []
-  })
-  const deniedRegistrations = [
-    ...await collectHostTools(createHarnessEngine(deniedServices), deniedContext),
-    deniedRegistry.createExternalRegistration(deniedContext, {
-      definition: dynamicDefinition,
-      handler: async (args, onProgress) => await mcpService.executeDynamicTool(
-        dynamicDefinition.name,
-        args,
-        onProgress,
-        deniedContext.allowedMcpServerIds
-      )
-    })
-  ]
-  assert.equal(getTool(deniedRegistrations, 'mcp_call').domain, 'electron_host_override')
-  const deniedGeneric = await dispatchToolExecute(deniedRegistrations, 'mcp_call', {
-    server: 'docs-server',
-    tool: 'lookup',
-    arguments: { query: 'generic callback' }
-  })
-  const deniedDynamic = await dispatchToolExecute(deniedRegistrations, 'mcp__docs__lookup__abc123', {
-    query: 'dynamic callback'
-  })
-
-  assert.match(deniedGeneric.result.error, /^Permission denied: External MCP tool invocation$/)
-  assert.match(deniedDynamic.result.error, /^Permission denied: External MCP tool invocation$/)
-  assert.equal(genericCalls.length, 0, 'denied generic MCP tools must not reach Electron MCP execution')
-  assert.equal(dynamicCalls.length, 0, 'dynamic MCP tools must use the same Electron permission path')
-
-  const permissionEvents = []
-  const approvedServices = createServices({
-    mcpService,
-    getMainWindow: () => ({
-      isDestroyed: () => false,
-      webContents: {
-        send: (channel, payload) => permissionEvents.push({ channel, payload })
-      }
-    })
-  })
-  const approvedContext = {
-    authMode: 'auto',
-    sessionId: 'rust-nested-session',
-    conversationId: 'rust-nested-conversation',
-    hostSessionId: 'electron-parent-session',
-    hostConversationId: 'electron-parent-conversation',
-    allowedMcpServerIds: ['docs-server']
-  }
-  const approvedRegistry = new ElectronToolRegistry({
-    services: approvedServices,
-    getNativeToolDefinitions: () => []
-  })
-  const approvedRegistrations = [
-    ...await collectHostTools(createHarnessEngine(approvedServices), approvedContext),
-    approvedRegistry.createExternalRegistration(approvedContext, {
-      definition: dynamicDefinition,
-      handler: async (args, onProgress) => await mcpService.executeDynamicTool(
-        dynamicDefinition.name,
-        args,
-        onProgress,
-        approvedContext.allowedMcpServerIds
-      )
-    })
-  ]
-
-  const generic = await dispatchToolExecute(approvedRegistrations, 'mcp_call', {
-    server: 'docs-server',
-    tool: 'lookup',
-    arguments: { query: 'generic callback' }
-  })
-  const dynamic = await dispatchToolExecute(approvedRegistrations, 'mcp__docs__lookup__abc123', {
-    query: 'dynamic callback'
-  })
-
-  assert.equal(generic.result.source, 'generic-mcp')
-  assert.equal(dynamic.result.source, 'dynamic-mcp')
-  assert.equal(genericCalls.length, 1)
-  assert.equal(dynamicCalls.length, 1)
-  const [genericServer, genericTool, genericArgs, genericProgress, genericAllowedServers] = genericCalls[0]
-  assert.equal(genericServer, 'docs-server')
-  assert.equal(genericTool, 'lookup')
-  assert.deepEqual(genericArgs, { query: 'generic callback' })
-  assert.equal(typeof genericProgress, 'function')
-  assert.deepEqual(genericAllowedServers, ['docs-server'])
-  const [dynamicName, dynamicArgs, dynamicProgress, dynamicAllowedServers] = dynamicCalls[0]
-  assert.equal(dynamicName, 'mcp__docs__lookup__abc123')
-  assert.deepEqual(dynamicArgs, { query: 'dynamic callback' })
-  assert.equal(typeof dynamicProgress, 'function')
-  assert.deepEqual(dynamicAllowedServers, ['docs-server'])
-  assert.deepEqual(permissionEvents.map(event => {
-    if (event.channel === 'auth:request') {
-      return {
-        channel: event.channel,
-        conversationId: event.payload.conversationId,
-        sessionId: event.payload.sessionId
-      }
-    }
-    return { channel: event.channel, approved: event.payload.approved }
-  }), [
-    { channel: 'auth:request', conversationId: 'electron-parent-conversation', sessionId: 'electron-parent-session' },
-    { channel: 'auth:resolved', approved: true },
-    { channel: 'auth:request', conversationId: 'electron-parent-conversation', sessionId: 'electron-parent-session' },
-    { channel: 'auth:resolved', approved: true }
-  ])
+  assert.equal(
+    registrations.some(tool => tool.definition.name === 'mcp_call'),
+    false,
+    'mcp_call must execute in Rust, not through a Node host override'
+  )
 })
 
 test('Rust-native dynamic MCP permission requests are answered through the Electron client', async () => {

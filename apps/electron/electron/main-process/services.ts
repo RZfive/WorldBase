@@ -1,21 +1,18 @@
 import { app, ipcMain, shell } from 'electron'
+import fsPromises from 'node:fs/promises'
 import path from 'node:path'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import type { AIEngineServices } from '../../src/main/ai-engine/engine-contracts.js'
 import { RustHarnessEngine } from '../../src/main/ai-harness/rust-harness-engine.js'
 import { ProjectFS } from '../../src/main/project-fs/project-fs.js'
 import { ProjectPackageService } from '../../src/main/project-fs/project-package-service.js'
-import { RuntimeManager } from '../../src/main/project-runtime/runtime-manager.js'
-import { BuilderService } from '../../src/main/project-runtime/builder-service.js'
-import { AppGateway, type RestartPolicy, type ServiceEntry } from '../../src/main/project-runtime/app-gateway.js'
 import { UpdateService } from '../../src/main/app-update/update-service.js'
-import { ProcessManagerService } from '../../src/main/project-runtime/process-manager-service.js'
-import { ProjectApiClient } from '../../src/main/project-api-bridge/api-client.js'
 import { ProjectDataAccess } from '../../src/main/project-data-access/data-access.js'
 import { SqliteAdapter } from '../../src/main/project-data-access/adapters/sqlite-adapter.js'
 import { LanServer } from '../../src/main/lan-server/server.js'
 import type { LanProjectControl } from '../../src/main/lan-server/routes/projects.js'
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
-import { SystemService, type HarnessProjectRuntimeSnapshot } from '../../src/main/system-capabilities/system-service.js'
+import { SystemService, type HarnessProjectRuntimeSnapshot, type RestartPolicy, type ServiceEntry } from '../../src/main/system-capabilities/system-service.js'
 import { SettingsStore } from '../../src/main/settings/settings-store.js'
 import { ChatHistoryStore } from '../../src/main/settings/chat-history.js'
 import { AILogStore } from '../../src/main/settings/ai-log-store.js'
@@ -29,7 +26,6 @@ import { ScheduledTaskStore, type ScheduledTaskDefinition, type ScheduledTaskRun
 import { LongTermGoalStore } from '../../src/main/settings/long-term-goal-store.js'
 import { ChannelBindingStore } from '../../src/main/im/channel-binding-store.js'
 import { ImGatewayService } from '../../src/main/im/im-gateway-service.js'
-import { AsyncTaskManager } from '../../src/main/ai-engine/agent/tools/async-task-manager.js'
 import { DocumentStore } from '../../src/main/ai-engine/agent/tools/document-store.js'
 import { MCPService, type MCPServerSnapshot, type MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
 import { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
@@ -497,6 +493,30 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
     }
   }
 
+  if (request.requestKind === 'scheduler.report') {
+    // The Rust scheduler loop owns AI-created task execution; reports come
+    // back over this host request so the desktop store stays the single UI
+    // history (same shape as Node-executed task reports).
+    mainState.scheduledTaskService?.ingestRustReport({
+      scheduleId: String(request.payload.scheduleId || ''),
+      taskName: String(request.payload.taskName || ''),
+      conversationId: typeof request.payload.conversationId === 'string' ? request.payload.conversationId : undefined,
+      resultText: typeof request.payload.resultText === 'string' ? request.payload.resultText : undefined
+    })
+    return { success: true }
+  }
+
+  if (request.requestKind === 'scheduler.progress') {
+    // Mid-run tool activity from the Rust scheduler loop; keeps the goal
+    // panel and reports list live during native task execution.
+    mainState.scheduledTaskService?.ingestRustProgress({
+      scheduleId: String(request.payload.scheduleId || ''),
+      stage: String(request.payload.stage || ''),
+      toolName: typeof request.payload.toolName === 'string' ? request.payload.toolName : undefined
+    })
+    return { success: true }
+  }
+
   if (request.requestKind === 'terminal_automation') {
     const manager = mainState.terminalManager
     if (!manager) throw new Error('terminal_automation requires the terminal manager')
@@ -566,6 +586,134 @@ async function listProjectsForSuggestions (): Promise<SuggestionProjectContext[]
   return []
 }
 
+
+/** Mirror an Electron document artifact into the Rust artifact store. */
+export function mirrorDocumentArtifact (artifact: { id: string } & Record<string, unknown>): void {
+  try {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(artifact.id)) return
+    const dir = path.join(getProjectsDir(), '.worldbase', 'document-artifacts')
+    void mkdirSync(path.join(dir), { recursive: true })
+    writeFileSync(path.join(dir, `${artifact.id}.json`), JSON.stringify(artifact, null, 2))
+  } catch (error) {
+    console.warn('[documents] artifact mirror failed:', error)
+  }
+}
+
+
+/**
+ * Refresh the scheduler overlay from the Rust store. All scheduled tasks now
+ * execute on the Rust run_loop; the Electron service only mirrors them for
+ * listing and report history.
+ */
+export async function refreshRustScheduledTasks (): Promise<void> {
+  const client = mainState.rustHarness
+  if (!client?.isRunning()) return
+  try {
+    const tasks = await client.listSchedules()
+    mainState.scheduledTaskService?.upsertRustTasks(
+      tasks.map(task => normalizeRustScheduleTask(task))
+    )
+  } catch (error) {
+    console.warn('[main:scheduler] Rust schedule overlay refresh failed:', error)
+  }
+}
+
+/**
+ * One-shot migration: push every task from the legacy JSON store into the
+ * Rust scheduler store, preserving IDs, hidden flags, provider/model pinning
+ * and next-run deadlines. The JSON file is renamed (not deleted) after a
+ * fully successful push so a partial failure can be retried.
+ */
+export async function migrateScheduledTasksToRust (): Promise<void> {
+  const client = mainState.rustHarness
+  const store = mainState.scheduledTaskStore
+  if (!client || !store) return
+  const legacyTasks = store.getTasks()
+  if (legacyTasks.length === 0) return
+  let migrated = 0
+  for (const task of legacyTasks) {
+    try {
+      await client.call('schedule.create', {
+        id: task.id,
+        name: task.title,
+        title: task.title,
+        task: task.prompt,
+        prompt: task.prompt,
+        enabled: task.enabled,
+        schedule: task.schedule,
+        hidden: task.hidden === true,
+        createdBy: task.createdBy,
+        providerId: task.providerId || null,
+        modelId: task.modelId || null,
+        selectedSkillIds: task.selectedSkillIds || [],
+        selectedMcpServerIds: task.selectedMcpServerIds || [],
+        retryPolicy: task.retryPolicy,
+        nextRunAt: task.nextRunAt || null
+      })
+      migrated += 1
+    } catch (error) {
+      console.warn(`[main:scheduler] Migration failed for task ${task.id}:`, (error as Error).message)
+    }
+  }
+  if (migrated === legacyTasks.length) {
+    await refreshRustScheduledTasks()
+    // Rename the legacy file so the migration is one-shot and auditable.
+    try {
+      const legacyPath = path.join(app.getPath('userData'), 'scheduled-tasks.json')
+      if (existsSync(legacyPath)) {
+        await fsPromises.rename(legacyPath, `${legacyPath}.migrated-${Date.now()}`)
+      }
+    } catch (error) {
+      console.warn('[main:scheduler] Legacy schedule file rename failed:', error)
+    }
+    } else {
+    console.warn(`[main:scheduler] Schedule migration incomplete: ${migrated}/${legacyTasks.length}`)
+  }
+}
+
+function normalizeRustScheduleTask (task: Record<string, unknown>): ScheduledTaskDefinition {
+  const schedule = (task.schedule && typeof task.schedule === 'object' ? task.schedule : {}) as Record<string, unknown>
+  const scheduleKind = String(schedule.kind || 'cron')
+  return {
+    id: String(task.id || ''),
+    title: String(task.title || ''),
+    enabled: task.enabled === true,
+    hidden: task.hidden === true,
+    createdBy: task.createdBy === 'manual' ? 'manual' as const : 'ai' as const,
+    prompt: String(task.prompt || ''),
+    schedule: schedule as unknown as ScheduledTaskDefinition['schedule'],
+    providerId: typeof task.providerId === 'string' ? task.providerId : null,
+    modelId: typeof task.modelId === 'string' ? task.modelId : null,
+    selectedSkillIds: Array.isArray(task.selectedSkillIds) ? task.selectedSkillIds.map(String) : [],
+    selectedMcpServerIds: Array.isArray(task.selectedMcpServerIds) ? task.selectedMcpServerIds.map(String) : [],
+    retryPolicy: (task.retryPolicy && typeof task.retryPolicy === 'object'
+      ? task.retryPolicy
+      : { maxRetries: 1, retryDelayMinutes: 10 }) as ScheduledTaskDefinition['retryPolicy'],
+    createdAt: String(task.createdAt || ''),
+    updatedAt: String(task.updatedAt || ''),
+    nextRunAt: typeof task.nextRunAt === 'string' ? task.nextRunAt : null,
+    retryScheduledAt: typeof task.retryScheduledAt === 'string' ? task.retryScheduledAt : null,
+    lastRunAt: typeof task.lastRunAt === 'string' ? task.lastRunAt : null,
+    lastStatus: task.lastStatus as ScheduledTaskDefinition['lastStatus'],
+    lastReportId: typeof task.lastReportId === 'string' ? task.lastReportId : null
+  }
+}
+
+
+
+/**
+ * Retire the Node scheduler timers. After the JSON → Rust migration every
+ * task executes on the Rust run_loop; keeping Node timers would double-run.
+ * The service instance stays alive for report persistence and UI reads.
+ */
+function scheduledTaskServiceRetireNodeLoop (): void {
+  const service = mainState.scheduledTaskService as unknown as {
+    retireNodeLoop?: () => void
+  } | null
+  service?.retireNodeLoop?.()
+}
+
+
 async function handleRustPermissionRequest (request: { requestId: string; toolName: string; argsSummary: string; sessionId: string }): Promise<boolean> {
   const win = getActiveAiRequestWindow()
   if (!win || win.isDestroyed()) return false
@@ -630,14 +778,8 @@ export async function initializeServices (): Promise<void> {
   mainState.terminalManager = new TerminalManager()
 
   mainState.projectFS = new ProjectFS(projectsDir, snapshotsDir)
-  mainState.runtimeManager = new RuntimeManager(projectsDir)
-  mainState.builderService = new BuilderService(projectsDir)
-  mainState.runtimeManager.setBuilderService(mainState.builderService)
-  mainState.builderService.setRuntimeManager(mainState.runtimeManager)
-  mainState.apiClient = new ProjectApiClient(mainState.runtimeManager)
   mainState.dataAccess = new ProjectDataAccess(projectsDir)
   mainState.projectPackageService = new ProjectPackageService(mainState.projectFS, mainState.dataAccess)
-  mainState.asyncTaskManager = new AsyncTaskManager(mainState.builderService)
 
   // Wire up the external database delegate. The adapter uses Electron's
   // built-in node:sqlite implementation, keeping the data layer independent
@@ -658,16 +800,9 @@ export async function initializeServices (): Promise<void> {
   // The Rust facade reuses it only as a platform adapter for host-owned tools,
   // UI callbacks, and notifications; it does not run a second Node Agent Loop.
   const aiEngineServices: AIEngineServices = {
-    projectFS: mainState.projectFS!,
-    runtimeManager: mainState.runtimeManager!,
-    builderService: mainState.builderService!,
-    apiClient: mainState.apiClient!,
     dataAccess: mainState.dataAccess!,
-    asyncTaskManager: mainState.asyncTaskManager!,
     documentStore: mainState.documentStore!,
-    skillStore: mainState.skillStore!,
-    agentStore: mainState.agentStore!,
-    agentGroupStore: mainState.agentGroupStore!,
+    persistDocumentArtifact: artifact => mirrorDocumentArtifact(artifact as { id: string } & Record<string, unknown>),
     settingsStore: mainState.settingsStore!,
     imageLibraryStore: mainState.imageLibraryStore ?? undefined,
     usageStore: mainState.usageStore ?? undefined,
@@ -685,7 +820,6 @@ export async function initializeServices (): Promise<void> {
     notifyFolderWorkspaceChanged: (event) => {
       broadcastToAppWindows('folderWorkspace:changed', event)
     },
-    mcpService: mainState.mcpService!,
     scheduledTaskService: undefined
   }
 
@@ -697,9 +831,7 @@ export async function initializeServices (): Promise<void> {
     dataDir: userDataPath,
     getProviders: () => mainState.settingsStore!.getProviders(),
     getMemoryEmbedding: () => resolveMemoryEmbeddingRuntimeConfig(),
-    getAgents: () => mainState.agentStore!.list(),
     onAgentsHandoff: agents => mirrorRustAgentsOnHandoff(agents),
-    getAgentGroups: () => mainState.agentGroupStore!.list(),
     onAgentGroupsHandoff: groups => mirrorRustAgentGroupsOnHandoff(groups),
     getMcpServers: () => mainState.settingsStore!.getMcpServers(),
     onEvent: () => {},
@@ -717,6 +849,28 @@ export async function initializeServices (): Promise<void> {
       broadcastToAppWindows('ai:planModeChanged', active)
     },
     onNativeToolResult: async (name, result, context) => {
+      if (name === 'create_scheduled_task') {
+        void refreshRustScheduledTasks()
+      }
+      if (name === 'install_skill') {
+        // Native installs write the shared userData/skills directory; tell
+        // the skills panel to rescan.
+        broadcastToAppWindows('skills:changed', { action: 'saved', source: 'rust' })
+        return
+      }
+      if (name === 'create_agent' || name === 'create_agent_group') {
+        // Native Agent Workspace writes land in the Rust store; refresh the
+        // synchronous Electron mirror so group deliberation and IM replies
+        // see the new entity in this same session.
+        const client = mainState.rustHarness
+        if (client?.isRunning()) {
+          try {
+            mirrorRustAgentsOnHandoff(await client.listAgents())
+            mirrorRustAgentGroupsOnHandoff(await client.listAgentGroups())
+            notifyAgentWorkspaceChanged({ entity: name === 'create_agent' ? 'agent' : 'group', action: 'saved' })
+          } catch { /* mirror refresh is best-effort */ }
+        }
+      }
       if (name === 'create_agent') {
         saveRustNativeAgent(result)
         return
@@ -798,6 +952,16 @@ export async function initializeServices (): Promise<void> {
   })
   aiEngineServices.scheduledTaskService = mainState.scheduledTaskService
   mainState.scheduledTaskService.start()
+  void (async () => {
+    // One-shot JSON → Rust migration, then overlay refresh. The Node timers
+    // are retired afterwards: Rust's run_loop is the only executor.
+    try {
+      await migrateScheduledTasksToRust()
+    } finally {
+      scheduledTaskServiceRetireNodeLoop()
+      await refreshRustScheduledTasks()
+    }
+  })()
 
   mainState.longTermGoalService = new LongTermGoalService({
     store: mainState.longTermGoalStore,
@@ -874,8 +1038,6 @@ export async function initializeServices (): Promise<void> {
 
   await applyMcpServersToService()
 
-  mainState.appGateway = new AppGateway(mainState.runtimeManager, mainState.projectFS, mainState.builderService)
-  mainState.processManagerService = new ProcessManagerService(mainState.runtimeManager, mainState.projectFS)
   // Rust owns project process state; there is no TS gateway fallback.
   try {
     await startSelectedRustHarness()
@@ -893,8 +1055,6 @@ export async function initializeServices (): Promise<void> {
   })
 
   mainState.systemService = new SystemService(
-    mainState.runtimeManager,
-    mainState.appGateway,
     undefined,
     resolveRustProjectRuntimeSnapshot
   )
@@ -902,8 +1062,6 @@ export async function initializeServices (): Promise<void> {
   mainState.lanServer = new LanServer({
     port: LAN_SERVER_PORT,
     projectFS: mainState.projectFS!,
-    runtimeManager: mainState.runtimeManager!,
-    apiClient: mainState.apiClient!,
     dataAccess: mainState.dataAccess!,
     aiEngine: mainState.rustHarnessEngine!,
     resolveAiEngine: getSelectedExecutionEngine,

@@ -1,8 +1,6 @@
 import type { BrowserWindow } from 'electron'
-import { SkillEngine } from '../ai-engine/agent/skill-engine.js'
 import { PermissionEngine } from '../ai-engine/agent/permissions/permission-engine.js'
 import { registerAllTools, type ToolServices } from '../ai-engine/agent/tools/index.js'
-import { toolGetTaskStatus, toolStartAsyncTask } from '../ai-engine/agent/tools/tool-async-task.js'
 import type { AIExecutionAuthMode } from '../settings/settings-store.js'
 import type { RustCustomToolRegistration, RustProgressCallback } from '../../../electron/main-process/rust-harness-client.js'
 import type {
@@ -15,24 +13,8 @@ import type { ToolDefinition } from './contracts.js'
 
 const INTRINSIC_RUST_TOOL_NAMES = new Set(['enter_plan_mode', 'exit_plan_mode'])
 
-export interface ElectronToolRegistryServices extends Omit<ToolServices, 'workspaceRoot' | 'subagentService'> {
+export interface ElectronToolRegistryServices extends Omit<ToolServices, 'workspaceRoot'> {
   getMainWindow?: () => BrowserWindow | null
-}
-
-export interface ElectronSubagentTask {
-  description: string
-  prompt: string
-  allowedTools?: string[]
-  deniedTools?: string[]
-  systemPromptSections?: string[]
-}
-
-export interface ElectronSubagentResult {
-  description: string
-  result: string
-  status: 'completed' | 'failed'
-  error?: string
-  tokenUsage?: { inputTokens: number; outputTokens: number; totalCost: number }
 }
 
 export interface ElectronToolRunContext extends AIRequestOptions {
@@ -43,12 +25,6 @@ export interface ElectronToolRegistryOptions {
   services: ElectronToolRegistryServices
   /** Native Rust descriptors, used to validate Agent Workspace tool policies. */
   getNativeToolDefinitions: () => ToolDefinition[]
-  runSubagents?: (
-    tasks: ElectronSubagentTask[],
-    parent: ElectronToolRunContext,
-    onProgress?: ProgressCallback,
-    abortSignal?: AbortSignal
-  ) => Promise<ElectronSubagentResult[]>
 }
 
 interface RegisteredTool {
@@ -67,7 +43,6 @@ interface AgentShim {
   }
   registerTool: (name: string, definition: ToolDefinition, handler: RegisteredTool['handler']) => void
   getToolDefinitions: () => ToolDefinition[]
-  getSkillEngine: () => SkillEngine
   getEffectiveAuthMode: () => AIExecutionAuthMode
   getAbortSignal: () => AbortSignal | undefined
 }
@@ -81,12 +56,10 @@ interface AgentShim {
 export class ElectronToolRegistry {
   private readonly services: ElectronToolRegistryServices
   private readonly getNativeToolDefinitions: () => ToolDefinition[]
-  private readonly runSubagents?: ElectronToolRegistryOptions['runSubagents']
 
   constructor (options: ElectronToolRegistryOptions) {
     this.services = options.services
     this.getNativeToolDefinitions = options.getNativeToolDefinitions
-    this.runSubagents = options.runSubagents
   }
 
   getToolDefinitions (): ToolDefinition[] {
@@ -149,11 +122,6 @@ export class ElectronToolRegistry {
 
   private collect (context: ElectronToolRunContext, includeHandlers: boolean): RegisteredTool[] {
     const registered = new Map<string, RegisteredTool>()
-    const skillEngine = new SkillEngine()
-    for (const content of context.activeSkillContents || []) {
-      if (content.trim()) skillEngine.registerFromContent(content)
-    }
-
     const sessionState: AgentShim['sessionState'] = {
       createdProjectId: null,
       targetProjectId: context.targetProjectId ?? null,
@@ -172,82 +140,20 @@ export class ElectronToolRegistry {
         registered.set(name, { definition, handler })
       },
       getToolDefinitions: getKnownToolDefinitions,
-      getSkillEngine: () => skillEngine,
       getEffectiveAuthMode: () => this.resolveAuthMode(context),
       getAbortSignal: () => context.abortSignal
     }
 
-    // Keep this registration available even at the nesting limit. The Rust
-    // catalog includes a compatibility descriptor with the same name; if we
-    // omitted the host override at depth two, Rust would select that legacy
-    // unavailable implementation instead of this facade's bounded runner.
-    // `RustHarnessEngine.runSubagents` remains the authority that returns a
-    // structured nesting-limit result without starting another child run.
-    const subagentService = this.runSubagents
-      ? {
-          runParallel: async (tasks: ElectronSubagentTask[], onProgress?: ProgressCallback, abortSignal?: AbortSignal) => {
-            return await this.runSubagents!(tasks, context, onProgress, abortSignal)
-          }
-        }
-      : undefined
+    // spawn_subagents is Rust-native: the harness's own subagent runtime owns
+    // child runs, nesting limits, and parent cancellation. No host shim.
     const toolServices: ToolServices = {
       ...this.services,
-      workspaceRoot: context.workspaceRoot ?? null,
-      ...(subagentService ? { subagentService: subagentService as ToolServices['subagentService'] } : {})
+      workspaceRoot: context.workspaceRoot ?? null
     }
 
     // `registerAllTools` is only a domain-tool registration function here.
     // The structural shim intentionally has no chat/provider execution path.
     registerAllTools(agent as never, toolServices)
-    if (this.services.mcpService) {
-      const getBuiltinToolRegistrations = this.services.mcpService.getBuiltinToolRegistrations
-      if (typeof getBuiltinToolRegistrations === 'function') {
-        for (const tool of getBuiltinToolRegistrations.call(
-          this.services.mcpService,
-          context.allowedMcpServerIds
-        )) {
-          agent.registerTool(tool.definition.name, tool.definition, tool.handler)
-        }
-      }
-      agent.registerTool(
-        'mcp_call',
-        {
-          name: 'mcp_call',
-          description: 'Call a tool exposed by a configured MCP server. Prefer a discovered mcp__... tool when one is available because it has the exact server schema.',
-          parameters: {
-            type: 'object',
-            properties: {
-              server: { type: 'string', description: 'Electron MCP server ID.' },
-              tool: { type: 'string', description: 'Remote MCP tool name.' },
-              arguments: { type: 'object', description: 'Arguments accepted by the remote MCP tool.', additionalProperties: true }
-            },
-            required: ['server', 'tool'],
-            additionalProperties: false
-          }
-        },
-        async (args, onProgress) => {
-          const server = typeof args.server === 'string' ? args.server : ''
-          const tool = typeof args.tool === 'string' ? args.tool : ''
-          const toolArgs = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
-            ? args.arguments as Record<string, unknown>
-            : {}
-          return await this.services.mcpService!.executeServerTool(
-            server,
-            tool,
-            toolArgs,
-            onProgress,
-            context.allowedMcpServerIds
-          )
-        }
-      )
-    }
-    for (const tool of [toolStartAsyncTask(toolServices), toolGetTaskStatus(toolServices)]) {
-      registered.set(tool.definition.name, {
-        definition: tool.definition,
-        handler: tool.handler
-      })
-    }
-
     // Rust advertises the canonical Electron catalog even when an optional
     // Electron service is not present in the current process (for example a
     // headless test, a worker, or a partially initialized window).  Never let

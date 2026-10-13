@@ -12,8 +12,6 @@ import {
 } from '../../../electron/main-process/rust-harness-client.js'
 import {
   ElectronToolRegistry,
-  type ElectronSubagentResult,
-  type ElectronSubagentTask,
   type ElectronToolRegistryServices,
   type ElectronToolRunContext
 } from './electron-tool-registry.js'
@@ -103,9 +101,6 @@ export class RustHarnessEngine implements AIHarness {
           parameters: tool.inputSchema,
           electronNative: tool.electronNative === true
         })),
-      runSubagents: async (tasks, parent, onProgress, abortSignal) => {
-        return await this.runSubagents(tasks, parent, onProgress, abortSignal)
-      }
     })
   }
 
@@ -239,6 +234,15 @@ export class RustHarnessEngine implements AIHarness {
         nativeSideEffects = nativeSideEffects
           .then(async () => await this.handleNativeToolResult(frame, runOptions))
           .catch(error => console.warn('[rust-harness] Native tool result bridge failed:', error))
+        // The native manage_todo_list result carries the full list; surface
+        // it as the same todo_update stream event the Node handler emitted.
+        if (stringValue(frame.name) === 'manage_todo_list') {
+          const parsed = parseToolResult(frame.content)
+          const items = parsed && typeof parsed === 'object'
+            ? (parsed as Record<string, unknown>).items
+            : undefined
+          if (Array.isArray(items)) emit({ type: 'todo_update', items })
+        }
       }
       if (frame.kind === 'error') {
         streamError = new Error(String(frame.message || 'Rust harness error'))
@@ -476,54 +480,6 @@ export class RustHarnessEngine implements AIHarness {
     // only broadcasts the resulting UI invalidation through onNativeToolResult.
     await this.onNativeToolResult?.(name, result, context)
   }
-
-  private async runSubagents (
-    tasks: ElectronSubagentTask[],
-    parent: ElectronToolRunContext,
-    onProgress?: ProgressCallback,
-    abortSignal?: AbortSignal
-  ): Promise<ElectronSubagentResult[]> {
-    const nestingDepth = parent.subagentNestingDepth ?? 0
-    if (nestingDepth >= 2) {
-      return tasks.map(task => ({
-        description: task.description || 'subagent',
-        result: '',
-        status: 'failed' as const,
-        error: 'Subagent nesting limit reached.'
-      }))
-    }
-    return await Promise.all(tasks.map(async (task) => {
-      const label = task.description || 'subagent'
-      let result = ''
-      try {
-        const progress: ProgressCallback = ((stageOrEvent: string | ProgressEvent, detail?: string) => {
-          if (typeof stageOrEvent === 'string') onProgress?.(`[${label}] ${stageOrEvent}`, detail)
-          else onProgress?.(stageOrEvent)
-        }) as ProgressCallback
-        for await (const event of this.chatStream([{ role: 'user', content: task.prompt }], progress, {
-          ...parent,
-          conversationId: `rust_subagent_${randomUUID()}`,
-          sessionId: `rust_subagent_${randomUUID()}`,
-          abortSignal: abortSignal || parent.abortSignal,
-          allowedToolNames: intersectAllowedTools(parent.allowedToolNames, task.allowedTools),
-          deniedToolNames: mergeStrings(parent.deniedToolNames, task.deniedTools),
-          systemPromptSections: mergeStrings(parent.systemPromptSections, task.systemPromptSections, [buildNestedSubagentPrompt(nestingDepth + 1)]),
-          subagentNestingDepth: nestingDepth + 1
-        })) {
-          if (event.type === 'done') result = textFromContent(event.message.content)
-          if (event.type === 'error') throw new Error(event.error)
-        }
-        return { description: label, result, status: 'completed' as const }
-      } catch (error) {
-        return {
-          description: label,
-          result,
-          status: 'failed' as const,
-          error: error instanceof Error ? error.message : String(error)
-        }
-      }
-    }))
-  }
 }
 
 function toRustCustomTool (tool: CustomToolRegistration): RustCustomToolRegistration {
@@ -579,14 +535,6 @@ function intersectAllowedTools (parent?: string[], child?: string[]): string[] |
   return intersection.length > 0 ? intersection : ['__blocked_subagent_tools__']
 }
 
-function buildNestedSubagentPrompt (depth: number): string {
-  return [
-    '## Nested subagent execution',
-    `- You are a spawned subagent at nesting depth ${depth}.`,
-    '- Finish the assigned task directly. Only spawn independent subtasks when there is clear remaining parallel work.',
-    depth >= 2 ? '- Your nesting limit is reached. Do not spawn more subagents.' : ''
-  ].filter(Boolean).join('\n')
-}
 
 function abortError (signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error('AI request aborted.')

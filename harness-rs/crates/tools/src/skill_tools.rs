@@ -15,10 +15,13 @@ impl Tool for SkillListTool {
         "skill_list"
     }
     fn description(&self) -> &str {
-        "列出可用的 Markdown/YAML 技能"
+        "列出所有可用的 Skills 及其描述和参数信息。"
     }
     fn input_schema(&self) -> Value {
         json!({ "type": "object", "properties": {} })
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, _input: Value, services: &ToolServices) -> Result<Value> {
         let skills = services.skills.list()?;
@@ -34,18 +37,21 @@ impl Tool for SkillRunTool {
         "skill_run"
     }
     fn description(&self) -> &str {
-        "加载技能指令（把 instructions 返回给模型按其执行）"
+        "执行一个预定义的 Skill。Skills 包含领域专家知识和工作流程，能帮助你更好地完成特定类型的任务。调用前先查看可用 Skills 列表。"
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "name": { "type": "string" },
-                "skill_name": { "type": "string" },
-                "arguments": { "type": "object" }
+                "skill_name": { "type": "string", "description": "Skill 名称" },
+                "arguments": { "type": "object", "description": "Skill 参数键值对", "additionalProperties": { "type": "string" } }
             },
             "anyOf": [{ "required": ["name"] }, { "required": ["skill_name"] }]
         })
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let name = input
@@ -157,6 +163,7 @@ mod tests {
             workspace,
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: Arc::new(Mutex::new(None)),
             todo_items: Arc::new(Mutex::new(Vec::new())),

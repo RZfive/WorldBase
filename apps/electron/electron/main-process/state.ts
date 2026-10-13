@@ -3,12 +3,7 @@ import type { BrowserWindow } from 'electron'
 import type { RustHarnessEngine } from '../../src/main/ai-harness/rust-harness-engine.js'
 import type { ProjectFS } from '../../src/main/project-fs/project-fs.js'
 import type { ProjectPackageService } from '../../src/main/project-fs/project-package-service.js'
-import type { RuntimeManager } from '../../src/main/project-runtime/runtime-manager.js'
-import type { BuilderService } from '../../src/main/project-runtime/builder-service.js'
-import type { AppGateway } from '../../src/main/project-runtime/app-gateway.js'
-import type { ProcessManagerService } from '../../src/main/project-runtime/process-manager-service.js'
 import type { UpdateService } from '../../src/main/app-update/update-service.js'
-import type { ProjectApiClient } from '../../src/main/project-api-bridge/api-client.js'
 import type { ProjectDataAccess } from '../../src/main/project-data-access/data-access.js'
 import type { LanServer } from '../../src/main/lan-server/server.js'
 import type { SystemService } from '../../src/main/system-capabilities/system-service.js'
@@ -29,7 +24,6 @@ import type { ImGatewayService } from '../../src/main/im/im-gateway-service.js'
 import type { RustHarnessClient } from './rust-harness-client.js'
 import type { MemoryCompactionResult, MemoryCompactionStatus } from '../../src/shared/agent-workspace-types.js'
 import type { DocumentStore } from '../../src/main/ai-engine/agent/tools/document-store.js'
-import type { AsyncTaskManager } from '../../src/main/ai-engine/agent/tools/async-task-manager.js'
 import type { MCPService } from '../../src/main/mcp/mcp-service.js'
 import type { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-service.js'
 import type { TerminalManager } from './terminal/terminal-manager.js'
@@ -74,16 +68,10 @@ export const mainState = {
   // Rust is the only execution backend (design: harness-rs owns the loop).
   rustHarnessEngine: null as RustHarnessEngine | null,
   projectFS: null as ProjectFS | null,
-  runtimeManager: null as RuntimeManager | null,
-  builderService: null as BuilderService | null,
-  appGateway: null as AppGateway | null,
-  processManagerService: null as ProcessManagerService | null,
   updateService: null as UpdateService | null,
   systemService: null as SystemService | null,
-  apiClient: null as ProjectApiClient | null,
   dataAccess: null as ProjectDataAccess | null,
   projectPackageService: null as ProjectPackageService | null,
-  asyncTaskManager: null as AsyncTaskManager | null,
   lanServer: null as LanServer | null,
   settingsStore: null as SettingsStore | null,
   chatHistory: null as ChatHistoryStore | null,

@@ -1,8 +1,26 @@
 import os from 'node:os'
 import { app } from 'electron'
 import { t } from '../i18n/main-i18n.js'
-import type { AppGateway, ServiceMap } from '../project-runtime/app-gateway.js'
-import type { RuntimeManager } from '../project-runtime/runtime-manager.js'
+export type RestartPolicy = 'always' | 'on-failure' | 'never'
+
+export interface ServiceEntry {
+  projectId: string
+  name: string
+  port: number
+  status: string
+  pid?: number
+  startedAt?: string
+  framework?: string
+  restartPolicy: RestartPolicy
+  restartCount: number
+}
+
+export interface ServiceMap {
+  services: ServiceEntry[]
+  totalRunning: number
+  totalStopped: number
+  totalCrashed: number
+}
 
 interface CpuSample {
   total: number
@@ -105,8 +123,6 @@ export interface HarnessProjectRuntimeSnapshot {
 export type HarnessProjectRuntimeResolver = () => Promise<HarnessProjectRuntimeSnapshot | null>
 
 export class SystemService {
-  private readonly runtimeManager: RuntimeManager
-  private readonly appGateway: AppGateway
   private readonly refreshIntervalMs: number
   private readonly harnessProjectRuntimeResolver?: HarnessProjectRuntimeResolver
   private cachedSnapshot: SystemStatusSnapshot | null = null
@@ -114,13 +130,9 @@ export class SystemService {
   private lastCpuSample: CpuSample | null = null
 
   constructor (
-    runtimeManager: RuntimeManager,
-    appGateway: AppGateway,
     refreshIntervalMs = 5000,
     harnessProjectRuntimeResolver?: HarnessProjectRuntimeResolver
   ) {
-    this.runtimeManager = runtimeManager
-    this.appGateway = appGateway
     this.refreshIntervalMs = refreshIntervalMs
     this.harnessProjectRuntimeResolver = harnessProjectRuntimeResolver
   }
@@ -139,8 +151,9 @@ export class SystemService {
       }
     }
 
-    const projectProcesses = harnessRuntime?.projectProcesses || this.runtimeManager.getProjectProcesses()
-    const services = harnessRuntime?.services || await this.appGateway.getServiceMap()
+    // Rust is the only project runtime; the resolver is mandatory in practice.
+    const projectProcesses = harnessRuntime?.projectProcesses ?? []
+    const services = harnessRuntime?.services ?? { services: [], totalRunning: 0, totalStopped: 0, totalCrashed: 0 }
     const cpu = this.captureCpuInfo(now)
     const memory = this.captureMemoryInfo()
     const gpu = await this.captureGpuInfo()

@@ -67,6 +67,10 @@ impl Scheduler {
             created_at: now_text.clone(),
             updated_at: now_text,
             last_status: "idle".into(),
+            hidden: false,
+            provider_id: None,
+            model_id: None,
+            last_report_id: None,
         };
         self.store.create_schedule(&entry)?;
         Ok(entry)
@@ -116,6 +120,10 @@ impl Scheduler {
             created_at: now_text.clone(),
             updated_at: now_text,
             last_status: "idle".into(),
+            hidden: false,
+            provider_id: None,
+            model_id: None,
+            last_report_id: None,
         };
         entry.next_run_at = initial_next_run(&entry, now)?.map(|time| time.to_rfc3339());
         self.store.create_schedule(&entry)?;
@@ -768,6 +776,10 @@ mod tests {
                 created_at: "2030-01-01T00:00:00+00:00".into(),
                 updated_at: "2030-01-01T00:00:00+00:00".into(),
                 last_status: "idle".into(),
+                hidden: false,
+                provider_id: None,
+                model_id: None,
+                last_report_id: None,
             })
             .unwrap();
         let scheduler = Scheduler::new(store.clone());

@@ -1255,6 +1255,18 @@ pub struct ScheduleEntry {
     pub updated_at: String,
     #[serde(default)]
     pub last_status: String,
+    /// Electron panel: hidden backing tasks (e.g. long-term-goal internal
+    /// schedules) must not appear in the scheduler UI.
+    #[serde(default)]
+    pub hidden: bool,
+    /// Electron panel fields preserved for round-tripping the desktop task
+    /// definition through the Rust store.
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub last_report_id: Option<String>,
 }
 
 /// 群组协作模式（对齐桌面 AgentGroupCollaborationMode 5 模式）。

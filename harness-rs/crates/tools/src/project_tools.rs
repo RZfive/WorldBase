@@ -210,21 +210,21 @@ impl Tool for ProjectCreateTool {
         "create_project"
     }
     fn description(&self) -> &str {
-        "Create a managed project that Electron can list, edit, package and run. Supports incremental files and .world-meta.json metadata."
+        "Create a new project shell or a full AI-generated project. For large projects, prefer development_mode=true so you can create the project first, then add or modify files incrementally with write_project_file / patch_project_file instead of sending every file in one tool call."
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "name": { "type": "string" },
-                "type": { "type": "string", "enum": ["frontend", "backend", "fullstack"] },
-                "files": { "type": "object", "description": "Optional map of relative file paths to full file contents." },
-                "meta": { "type": "object", "description": "Optional .world-meta.json fields." },
-                "development_mode": { "type": "boolean", "description": "Create an incremental project workflow." },
-                "install_dependencies": { "type": "boolean", "description": "Install package dependencies immediately after creation; defaults to true outside development mode when package.json exists." },
-                "build_and_start": { "type": "boolean", "description": "Build Next.js projects and start the runtime immediately; defaults to true outside development mode." },
-                "cleanup_dependencies_on_success": { "type": "boolean", "description": "Remove node_modules after a successful build/start." },
-                "cleanup_build_cache_on_success": { "type": "boolean", "description": "Remove build caches after a successful build/start." }
+                "name": { "type": "string", "description": "Project name, for example: expense tracker" },
+                "type": { "type": "string", "enum": ["frontend", "backend", "fullstack"], "description": "Project type" },
+                "files": { "type": "object", "description": "Optional file content map {relativePath: fileContent}. In development_mode this may be omitted or partial so the AI can continue writing files incrementally afterward." },
+                "meta": { "type": "object", "description": ".world-meta.json content, including runtime config, API definitions, and data schema" },
+                "development_mode": { "type": "boolean", "description": "When true, create the project in incremental development mode. The AI can then call write_project_file / patch_project_file multiple times instead of generating all code in one response." },
+                "install_dependencies": { "type": "boolean", "description": "When true, install dependencies immediately after project creation. Defaults to false in development_mode and true otherwise when package.json exists." },
+                "build_and_start": { "type": "boolean", "description": "When true, build (if needed) and start the project immediately. Defaults to false in development_mode and true otherwise." },
+                "cleanup_dependencies_on_success": { "type": "boolean", "description": "When true, remove node_modules after a successful build/start to save disk space. Leave false during iterative development." },
+                "cleanup_build_cache_on_success": { "type": "boolean", "description": "When true, remove build caches such as .next/cache after a successful build/start to save disk space." }
             },
             "required": ["name", "type"]
         })
@@ -232,10 +232,30 @@ impl Tool for ProjectCreateTool {
     fn domain(&self) -> &str {
         "desktop"
     }
+    // Electron's permission engine default-allows project-scoped lifecycle
+    // tools ("project-scoped tools are safe by design"); keep that UX.
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        // One new project per run, mirroring the TypeScript harness's
+        // sessionState.createdProjectId guard (checked before anything else).
+        if let Some(project_id) = services
+            .created_project_id
+            .lock()
+            .expect("created project lock poisoned")
+            .clone()
+        {
+            return Ok(json!({
+                "success": false,
+                "error": format!(
+                    "本次对话已创建项目 {project_id}，不允许再创建新项目。请使用 write_project_file 工具修改已创建的项目文件，project_id 为 \"{project_id}\"。"
+                )
+            }));
+        }
         if let Some(project_id) = services
             .target_project_id
             .as_deref()
@@ -314,6 +334,10 @@ impl Tool for ProjectCreateTool {
             )
             .await?;
         let project_id = info.id.clone();
+        *services
+            .created_project_id
+            .lock()
+            .expect("created project lock poisoned") = Some(project_id.clone());
         let project = metadata_project_value(services, &project_id);
 
         // Electron initializes declared SQLite tables before any lifecycle
@@ -473,6 +497,134 @@ impl Tool for ProjectCreateTool {
     }
 }
 
+/// Electron's `start_project_server` contract over `start_dev`: returns the
+/// runtime snapshot plus recent startup logs in the frozen Node shape.
+pub struct ProjectStartServerTool;
+
+async fn project_server_result(
+    services: &ToolServices,
+    project_id: &str,
+    status_label: &str,
+    info: &worldbase_protocol::types::DevServerInfo,
+) -> Result<Value> {
+    let runtime = services.projects.status(project_id).await.ok();
+    let port = runtime
+        .as_ref()
+        .and_then(|status| status.get("port"))
+        .and_then(Value::as_u64)
+        .map(|port| port as u16)
+        .unwrap_or(info.port);
+    let started_at = runtime
+        .as_ref()
+        .and_then(|status| status.get("startedAt").cloned());
+    let startup_logs: Vec<Value> = services
+        .projects
+        .logs(project_id, 20)
+        .await
+        .into_iter()
+        .map(|entry| {
+            json!({ "type": entry.kind, "text": entry.text, "time": entry.time })
+        })
+        .collect();
+    Ok(json!({
+        "project_id": project_id,
+        "status": status_label,
+        "port": port,
+        "pid": info.pid,
+        "started_at": started_at,
+        "startup_logs": startup_logs,
+    }))
+}
+
+#[async_trait]
+impl Tool for ProjectStartServerTool {
+    fn name(&self) -> &str {
+        "start_project_server"
+    }
+    fn description(&self) -> &str {
+        "Start a project server in the background and return its runtime info plus recent startup logs."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "project_id": { "type": "string", "description": "Project ID" }
+            },
+            "required": ["project_id"]
+        })
+    }
+    fn domain(&self) -> &str {
+        "desktop"
+    }
+    fn permission(&self) -> &str {
+        "allow"
+    }
+    fn electron_native(&self) -> bool {
+        true
+    }
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let project_id = require_str(&input, "project_id")?;
+        // `start_dev` returns the existing handle when one is active; label
+        // that case the way Electron's StartResult did.
+        let already_running = services
+            .projects
+            .status(project_id)
+            .await
+            .ok()
+            .and_then(|status| {
+                status
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .is_some_and(|status| status == "running");
+        let info = services.projects.start_dev(project_id).await?;
+        let label = if already_running {
+            "already_running"
+        } else {
+            info.status.as_str()
+        };
+        project_server_result(services, project_id, label, &info).await
+    }
+}
+
+/// Electron's `restart_project_server`: force-stop, then a fresh start.
+pub struct ProjectRestartServerTool;
+
+#[async_trait]
+impl Tool for ProjectRestartServerTool {
+    fn name(&self) -> &str {
+        "restart_project_server"
+    }
+    fn description(&self) -> &str {
+        "Force-stop any existing project server process, then start a fresh one and return new runtime info plus startup logs."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "project_id": { "type": "string", "description": "Project ID" }
+            },
+            "required": ["project_id"]
+        })
+    }
+    fn domain(&self) -> &str {
+        "desktop"
+    }
+    fn permission(&self) -> &str {
+        "allow"
+    }
+    fn electron_native(&self) -> bool {
+        true
+    }
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let project_id = require_str(&input, "project_id")?;
+        let _ = services.projects.stop_dev(project_id).await?;
+        let info = services.projects.start_dev(project_id).await?;
+        project_server_result(services, project_id, info.status.as_str(), &info).await
+    }
+}
+
 pub struct ProjectListTool;
 
 #[async_trait]
@@ -481,7 +633,7 @@ impl Tool for ProjectListTool {
         "project_list"
     }
     fn description(&self) -> &str {
-        "列出全部全栈项目"
+        "List all created projects and their runtime status."
     }
     fn input_schema(&self) -> Value {
         json!({ "type": "object", "properties": {} })
@@ -489,9 +641,30 @@ impl Tool for ProjectListTool {
     fn domain(&self) -> &str {
         "desktop"
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
     async fn execute(&self, _input: Value, services: &ToolServices) -> Result<Value> {
         let list = services.projects.list_projects()?;
-        Ok(json!({ "projects": list }))
+        // Electron's list_projects attaches the live runtime status to every
+        // entry; keep that shape for the alias the model sees.
+        let mut projects = Vec::with_capacity(list.len());
+        for project in list {
+            let id = project.id.clone();
+            let runtime = services
+                .projects
+                .status(&id)
+                .await
+                .unwrap_or_else(|error| {
+                    json!({ "projectId": id, "status": "error", "error": error.to_string() })
+                });
+            let mut entry = serde_json::to_value(project)?;
+            if let Some(object) = entry.as_object_mut() {
+                object.insert("runtime".into(), runtime);
+            }
+            projects.push(entry);
+        }
+        Ok(json!({ "projects": projects }))
     }
 }
 
@@ -607,13 +780,16 @@ impl Tool for ProjectDevRestartTool {
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "project_id": { "type": "string" } },
+            "properties": { "project_id": { "type": "string", "description": "Project ID" } },
             "required": ["project_id"]
         })
     }
 
     fn domain(&self) -> &str {
         "desktop"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
 
     fn permission(&self) -> &str {
@@ -861,13 +1037,16 @@ impl Tool for ProjectStatusTool {
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "project_id": { "type": "string" } },
+            "properties": { "project_id": { "type": "string", "description": "Project ID" } },
             "required": ["project_id"]
         })
     }
 
     fn domain(&self) -> &str {
         "desktop"
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
@@ -1042,6 +1221,7 @@ mod tests {
             workspace,
             folder_workspace: None,
             target_project_id: target_project_id.map(ToOwned::to_owned),
+            created_project_id: Arc::new(Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: Arc::new(Mutex::new(None)),
             todo_items: Arc::new(Mutex::new(Vec::new())),

@@ -22,7 +22,7 @@ impl Tool for McpCallTool {
     }
 
     fn description(&self) -> &str {
-        "Call a tool exposed by a configured MCP server. Prefer a discovered mcp__... tool when available because it has the exact server schema."
+        "Call a tool exposed by a configured MCP server. Prefer a discovered mcp__... tool when one is available because it has the exact server schema."
     }
 
     fn input_schema(&self) -> Value {
@@ -56,6 +56,10 @@ impl Tool for McpCallTool {
         let result = services.mcp.call_tool(server, tool, arguments).await?;
         Ok(normalize_tool_result(server, tool, None, result))
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
+
 }
 
 pub struct McpListServersTool;
@@ -67,7 +71,7 @@ impl Tool for McpListServersTool {
     }
 
     fn description(&self) -> &str {
-        "List configured MCP servers, connection state, and transport."
+        "列出当前配置的 MCP 服务器及其连接状态、能力和已发现的工具数量。"
     }
 
     fn input_schema(&self) -> Value {
@@ -84,6 +88,10 @@ impl Tool for McpListServersTool {
         // capabilities and updatedAt), not only a compact server list.
         Ok(serde_json::to_value(state)?)
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
+
 }
 
 pub struct McpListResourcesTool;
@@ -95,7 +103,7 @@ impl Tool for McpListResourcesTool {
     }
 
     fn description(&self) -> &str {
-        "List resources exposed by one MCP server or every authorized enabled MCP server."
+        "列出一个或全部 MCP 服务器提供的资源。"
     }
 
     fn input_schema(&self) -> Value {
@@ -139,6 +147,9 @@ impl Tool for McpListResourcesTool {
         }
         Ok(json!({ "servers": servers }))
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
 }
 
 pub struct McpReadResourceTool;
@@ -150,7 +161,7 @@ impl Tool for McpReadResourceTool {
     }
 
     fn description(&self) -> &str {
-        "Read a resource from an authorized MCP server."
+        "读取 MCP 服务器上的资源内容。"
     }
 
     fn input_schema(&self) -> Value {
@@ -176,6 +187,9 @@ impl Tool for McpReadResourceTool {
             "contents": result.get("contents").cloned().unwrap_or(result),
         }))
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
 }
 
 pub struct McpListPromptsTool;
@@ -187,7 +201,7 @@ impl Tool for McpListPromptsTool {
     }
 
     fn description(&self) -> &str {
-        "List prompt templates exposed by one MCP server or every authorized enabled MCP server."
+        "列出一个或全部 MCP 服务器提供的提示模板。"
     }
 
     fn input_schema(&self) -> Value {
@@ -229,6 +243,9 @@ impl Tool for McpListPromptsTool {
         }
         Ok(json!({ "servers": servers }))
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
 }
 
 pub struct McpGetPromptTool;
@@ -240,7 +257,7 @@ impl Tool for McpGetPromptTool {
     }
 
     fn description(&self) -> &str {
-        "Expand a prompt template from an authorized MCP server."
+        "获取 MCP 服务器上的提示模板展开结果。"
     }
 
     fn input_schema(&self) -> Value {
@@ -274,6 +291,9 @@ impl Tool for McpGetPromptTool {
             "description": result.get("description").cloned(),
             "messages": result.get("messages").cloned().unwrap_or_else(|| json!([])),
         }))
+    }
+    fn electron_native(&self) -> bool {
+        true
     }
 }
 

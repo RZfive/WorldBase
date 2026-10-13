@@ -9,7 +9,6 @@
 
 import type { ToolDefinition } from '../../ai-harness/contracts.js'
 import type { AIExecutionAuthMode } from '../../settings/settings-store.js'
-import type { SkillEngine } from './skill-engine.js'
 import type { PermissionRule, PermissionContext } from './permissions/permission-engine.js'
 
 export type ProgressEvent =
@@ -79,7 +78,6 @@ export interface AgentCore {
   sessionState: SessionState
   getAbortSignal (): AbortSignal | null
   getEffectiveAuthMode (): AIExecutionAuthMode
-  getSkillEngine (): SkillEngine
   getToolDefinitions (): ToolDefinition[]
   registerTool (name: string, definition: ToolDefinition, handler: (args: Record<string, unknown>, onProgress?: ProgressCallback) => Promise<unknown>): void
 }

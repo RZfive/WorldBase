@@ -71,6 +71,7 @@ pub use mcp_tools::{
 pub use memory_tools::{MemoryAddTool, MemoryDeleteTool, MemorySearchTool};
 pub use project_tools::{
     ProjectCreateTool, ProjectDevRestartTool, ProjectDevStartTool, ProjectDevStopTool,
+    ProjectRestartServerTool, ProjectStartServerTool,
     ProjectListTool, ProjectStatusTool,
 };
 pub use schedule_tools::{ScheduleCreateTool, ScheduleDeleteTool, ScheduleListTool};
@@ -101,6 +102,9 @@ pub struct ToolServices {
     pub folder_workspace: Option<PathBuf>,
     /// Existing managed project selected by the conversation, if any.
     pub target_project_id: Option<String>,
+    /// Project created earlier in this run. Mirrors the TypeScript harness's
+    /// per-conversation `createdProjectId` guard: one new project per run.
+    pub created_project_id: Arc<std::sync::Mutex<Option<String>>>,
     /// `None` permits every configured MCP server. Electron normalizes empty
     /// selections to the same unrestricted policy before constructing this.
     pub allowed_mcp_server_ids: Option<Arc<HashSet<String>>>,
@@ -629,6 +633,8 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(ComputerActionTool),
         Arc::new(ProjectListTool),
         Arc::new(ProjectCreateTool),
+        Arc::new(ProjectStartServerTool),
+        Arc::new(ProjectRestartServerTool),
         Arc::new(ProjectDevStartTool),
         Arc::new(ProjectDevStopTool),
         Arc::new(ProjectDevRestartTool),
@@ -689,8 +695,6 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
     // implemented by dedicated wrappers in their source module above.
     for (alias, target) in [
         ("list_projects", "project_list"),
-        ("start_project_server", "project_dev_start"),
-        ("restart_project_server", "project_dev_restart"),
         ("fetch_webpage", "web_fetch"),
         ("list_skills", "skill_list"),
         ("run_skill", "skill_run"),
@@ -702,13 +706,6 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
             continue;
         }
         let schema = match alias {
-            "start_project_server" | "restart_project_server" => json!({
-                "type": "object",
-                "properties": {
-                    "project_id": { "type": "string" }
-                },
-                "required": ["project_id"]
-            }),
             "run_project_command" => json!({
                 "type": "object",
                 "properties": {
@@ -879,46 +876,18 @@ mod tests {
         // not accidentally implemented but omitted from builtin_tools().
         let electron_tools = [
             "ask_user",
-            "call_project_api",
-            "clear_project_build_flag",
-            "create_agent",
-            "create_agent_group",
-            "create_project",
-            "create_scheduled_task",
             "edit_image",
             "enter_plan_mode",
             "exit_plan_mode",
-            "fetch_webpage",
             "fill_current_page_form",
-            "finalize_project",
             "generate_image",
-            "get_project_logs",
-            "get_project_status",
-            "get_task_status",
-            "install_mcp_server",
-            "install_skill",
             "interact_current_page",
-            "list_agent_workspace_catalog",
             "list_documents",
-            "list_projects",
-            "list_scheduled_tasks",
-            "list_skills",
-            "local_read_file",
-            "local_run_command",
-            "local_write_file",
-            "manage_todo_list",
             "open_project_app",
             "open_workspace_tab",
             "read_active_terminal",
             "read_current_page",
-            "read_document",
-            "rebuild_project",
-            "restart_project_server",
-            "run_skill",
             "save_current_page_as_document",
-            "start_async_task",
-            "start_project_server",
-            "web_search",
             "write_active_terminal",
         ];
         let names: std::collections::HashSet<String> = builtin_tools()
@@ -942,8 +911,8 @@ mod tests {
 
         assert_eq!(
             contracts.len(),
-            43,
-            "expected the exact Electron tool catalog (Rust-native plan/image/workspace/project-file/command/data tools are excluded)"
+            7,
+            "expected the exact Electron tool catalog (only UI-anchored host tools remain)"
         );
         let mut actual_by_name = std::collections::HashMap::new();
         for descriptor in actual {
@@ -1062,7 +1031,7 @@ mod tests {
             .collect::<Vec<_>>();
         actual.sort();
 
-        let mut expected = [
+let mut expected = [
             "ask_user",
             "create_agent",
             "create_agent_group",
@@ -1103,10 +1072,10 @@ mod tests {
             "read_document",
             "read_file",
             "run_skill",
+            "save_current_page_as_document",
             "schedule_create",
             "schedule_delete",
             "schedule_list",
-            "save_current_page_as_document",
             "skill_list",
             "skill_run",
             "spawn_subagents",
@@ -1285,6 +1254,7 @@ mod tests {
             workspace: root.clone(),
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: std::sync::Arc::new(std::sync::Mutex::new(None)),
             todo_items: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1330,6 +1300,7 @@ mod tests {
             workspace: root.clone(),
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: std::sync::Arc::new(std::sync::Mutex::new(None)),
             todo_items: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

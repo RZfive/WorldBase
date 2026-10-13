@@ -1415,6 +1415,7 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
             entry.selected_mcp_server_ids = selected_mcp_server_ids;
             entry.retry_policy = retry_policy;
             entry.created_by = created_by;
+            apply_schedule_migration_fields(&mut entry, &params);
             hub.scheduler.update(entry).map_err(internal)?
         } else {
             let schedule: ScheduledTaskSchedule = serde_json::from_value(schedule_value)
@@ -1429,9 +1430,12 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
                 retry_policy,
                 created_by: created_by.clone(),
             };
-            hub.scheduler
+            let mut entry = hub
+                .scheduler
                 .create_task(request)
-                .map_err(|error| params_err(format!("invalid schedule: {error}")))?
+                .map_err(|error| params_err(format!("invalid schedule: {error}")))?;
+            apply_schedule_migration_fields(&mut entry, &params);
+            hub.scheduler.update(entry).map_err(internal)?
         }
     } else {
         let cron = required_string_param(&params, &["cron"], "cron")?;
@@ -1441,6 +1445,7 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
         entry.selected_mcp_server_ids = selected_mcp_server_ids;
         entry.retry_policy = retry_policy;
         entry.created_by = created_by;
+        apply_schedule_migration_fields(&mut entry, &params);
         hub.scheduler.update(entry).map_err(internal)?
     };
     let task_view = worldbase_scheduler::electron_task_value(&entry);
@@ -1638,10 +1643,41 @@ fn schedule_update(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
     if let Some(created_by) = optional_string_value(&params, &["createdBy", "created_by"])? {
         entry.created_by = created_by.trim().to_string();
     }
+    apply_schedule_migration_fields(&mut entry, &params);
 
     let entry = hub.scheduler.update(entry).map_err(internal)?;
     let task = worldbase_scheduler::electron_task_value(&entry);
     Ok(json!({ "entry": entry, "task": task }))
+}
+
+/// Accept Electron panel fields that exist on `ScheduleEntry` but have no
+/// dedicated scheduler semantics (hidden backing tasks, provider/model pinning,
+/// report linkage, and migrated next-run deadlines).
+fn apply_schedule_migration_fields(entry: &mut worldbase_protocol::types::ScheduleEntry, params: &Value) {
+    if let Some(hidden) = params.get("hidden").and_then(Value::as_bool) {
+        entry.hidden = hidden;
+    }
+    if let Ok(Some(provider_id)) = optional_string_value(params, &["providerId", "provider_id"]) {
+        entry.provider_id = Some(provider_id.to_string());
+    }
+    if let Ok(Some(model_id)) = optional_string_value(params, &["modelId", "model_id"]) {
+        entry.model_id = Some(model_id.to_string());
+    }
+    if let Ok(Some(last_report_id)) = optional_string_value(params, &["lastReportId", "last_report_id"]) {
+        entry.last_report_id = Some(last_report_id.to_string());
+    }
+    // A migrated deadline is authoritative: the caller already computed it
+    // against the original store's clock.
+    for key in ["nextRunAt", "next_run_at"] {
+        if let Some(value) = params.get(key) {
+            entry.next_run_at = if value.is_null() {
+                None
+            } else {
+                value.as_str().map(str::to_string)
+            };
+            break;
+        }
+    }
 }
 
 fn parse_retry_policy(params: &Value) -> Result<ScheduledTaskRetryPolicy, ErrorObject> {
@@ -2775,6 +2811,12 @@ async fn mcp_reload(
             }
             supported
         });
+    }
+    // Persist the authoritative catalog into the KV store so native tools
+    // (install_mcp_server's dedup base list) see the same servers the
+    // Electron settings page configured — mcp.reload is the single feed.
+    if !is_mobile {
+        let _ = hub.store.set_setting("mcpServers", &json!(configs));
     }
     hub.mcp.configure(configs).await;
     let servers = hub.mcp.server_names().await;

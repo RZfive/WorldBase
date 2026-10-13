@@ -811,6 +811,7 @@ mod tests {
             workspace,
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: Arc::new(std::sync::Mutex::new(None)),
             todo_items: Arc::new(std::sync::Mutex::new(Vec::new())),

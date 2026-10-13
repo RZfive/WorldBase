@@ -166,12 +166,8 @@ export interface RustHarnessClientOptions {
   getProviders?: () => AIProvidersConfig
   /** Resolve the saved semantic-memory selection; absence disables remote indexing. */
   getMemoryEmbedding?: () => MemoryEmbeddingRuntimeConfig | undefined
-  /** Read the Electron agent catalog used to configure the Rust process. */
-  getAgents?: () => AgentDefinition[]
   /** Persist the Rust agent catalog into Electron's migration mirror. */
   onAgentsHandoff?: (agents: AgentDefinition[]) => void | Promise<void>
-  /** Read the Electron group catalog used to configure the Rust process. */
-  getAgentGroups?: () => AgentGroupDefinition[]
   /** Persist the Rust catalog into Electron's migration mirror on handoff. */
   onAgentGroupsHandoff?: (groups: AgentGroupDefinition[]) => void | Promise<void>
   /** Read the Electron MCP catalog used to configure the Rust process. */
@@ -226,8 +222,6 @@ export class RustHarnessClient {
   private modelPricing: Record<string, ModelPricing> = {}
   private availableTools: RustToolDescriptor[] = []
   private providerSyncFingerprint: string | null = null
-  private agentSyncFingerprint: string | null = null
-  private agentGroupSyncFingerprint: string | null = null
   private mcpSyncFingerprint: string | null = null
   private settingsSync: Promise<void> | null = null
   private memoryEmbeddingSyncFingerprint: string | null = null
@@ -278,6 +272,13 @@ export class RustHarnessClient {
    * it down. This is used while handing project ownership back to the TS
    * RuntimeManager.
    */
+  /** Fetch the Rust scheduler catalog (AI-created tasks) as Electron task shapes. */
+  async listSchedules (): Promise<Array<Record<string, unknown>>> {
+    await this.start()
+    const result = await this.request<{ tasks?: Array<Record<string, unknown>> }>('schedule.list', {})
+    return Array.isArray(result.tasks) ? result.tasks : []
+  }
+
   async stopAllProjects (): Promise<void> {
     if (!this.isRunning()) return
     await this.request('project.gateway.stopAll', {})
@@ -1102,8 +1103,6 @@ export class RustHarnessClient {
     }
     this.terminalWaiters.clear()
     this.providerSyncFingerprint = null
-    this.agentSyncFingerprint = null
-    this.agentGroupSyncFingerprint = null
     this.mcpSyncFingerprint = null
     this.memoryEmbeddingSyncFingerprint = null
     this.settingsSync = null
@@ -1263,60 +1262,24 @@ export class RustHarnessClient {
     this.providerSyncFingerprint = fingerprint
   }
 
-  private async syncAgentSettings (): Promise<void> {
-    const getAgents = this.options.getAgents
-    if (!getAgents) return
-    const agents = getAgents()
-    const fingerprint = JSON.stringify(agents)
-    if (fingerprint === this.agentSyncFingerprint) return
-    const existing = await this.request<{ agents?: Array<{ id?: string }> }>('agent.list')
-    const configuredIds = new Set(agents.map(agent => agent.id))
-    for (const agent of existing.agents || []) {
-      if (agent.id && !configuredIds.has(agent.id)) {
-        await this.request('agent.delete', { id: agent.id })
-      }
-    }
-    for (const agent of agents) {
-      await this.request('agent.save', {
-        agent: {
-          id: agent.id,
-          name: agent.name,
-          icon: agent.icon || '',
-          description: agent.description,
-          systemPrompt: agent.systemPrompt,
-          providerId: agent.providerId || null,
-          modelId: agent.modelId || null,
-          skillIds: agent.skillIds || [],
-          reasoningStrength: agent.reasoningStrength || 'medium',
-          allowedTools: agent.allowedTools || [],
-          deniedTools: agent.deniedTools || [],
-          memoryScopes: agent.memoryScopes || ['user', 'agent', 'project'],
-          memoryWritePolicy: agent.memoryWritePolicy,
-          autoReplyPolicy: agent.autoReplyPolicy,
-          createdAt: agent.createdAt,
-          updatedAt: agent.updatedAt
-        }
-      })
-    }
-    this.agentSyncFingerprint = fingerprint
-  }
-
   /**
-   * Seed Rust's durable Agent Workspace catalog from Electron's migration
-   * mirror.  Once the Rust backend is selected, the public group IPC uses the
-   * dedicated agentGroup.* RPCs; this sync only bridges pre-existing TS files
-   * (and keeps a later TS handoff lossless).
+   * The Rust store is the single write authority for agents (tools and UI
+   * both save there). Electron only mirrors the catalog for synchronous
+   * readers (group deliberation, IM replies), so sync is a pull.
    */
-  private async syncAgentGroupSettings (): Promise<void> {
-    const getAgentGroups = this.options.getAgentGroups
-    if (!getAgentGroups) return
-    const groups = getAgentGroups()
-    const fingerprint = JSON.stringify(groups)
-    if (fingerprint === this.agentGroupSyncFingerprint) return
-    await this.request('settings.set', { key: 'agent_groups', value: groups })
-    this.agentGroupSyncFingerprint = fingerprint
+  private async syncAgentSettings (): Promise<void> {
+    const mirror = this.options.onAgentsHandoff
+    if (!mirror) return
+    const existing = await this.request<{ agents?: AgentDefinition[] }>('agent.list')
+    mirror(existing.agents || [])
   }
 
+  private async syncAgentGroupSettings (): Promise<void> {
+    const mirror = this.options.onAgentGroupsHandoff
+    if (!mirror) return
+    const existing = await this.request<{ groups?: AgentGroupDefinition[] }>('agentGroup.list', {})
+    mirror(existing.groups || [])
+  }
   private async syncMcpSettings (): Promise<void> {
     const getMcpServers = this.options.getMcpServers
     if (!getMcpServers) return
@@ -1613,8 +1576,6 @@ export class RustHarnessClient {
     }
     this.terminalWaiters.clear()
     this.providerSyncFingerprint = null
-    this.agentSyncFingerprint = null
-    this.agentGroupSyncFingerprint = null
     this.mcpSyncFingerprint = null
     this.memoryEmbeddingSyncFingerprint = null
     this.settingsSync = null

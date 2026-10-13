@@ -419,8 +419,8 @@ export function toolSaveCurrentPageAsDocument (services: ToolServices): Tool {
       }
     },
     handler: async (args, onProgress) => {
-      if (!services.documentStore) {
-        throw new Error('Document store is unavailable in this session.')
+      if (!services.persistDocumentArtifact) {
+        throw new Error('Document persistence is unavailable in this session.')
       }
 
       const normalized: SaveCurrentPageAsDocumentArgs = {
@@ -441,7 +441,9 @@ export function toolSaveCurrentPageAsDocument (services: ToolServices): Tool {
       }
 
       const artifact = buildPageDocumentArtifact(normalized, fullText)
-      services.documentStore.addArtifact(artifact)
+      // The renderer document workbench keeps its in-memory catalog via the
+      // store callback; the mirror makes it visible to native read_document.
+      services.persistDocumentArtifact(artifact as unknown as Record<string, unknown> & { id: string })
       onProgress?.('✅ Page saved as document', `${artifact.fileName} (${artifact.plainText.length} chars)`)
       return {
         ok: true,

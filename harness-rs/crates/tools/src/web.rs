@@ -888,6 +888,9 @@ impl Tool for WebSearchTool {
     fn name(&self) -> &str {
         "web_search"
     }
+    fn electron_native(&self) -> bool {
+        true
+    }
     fn description(&self) -> &str {
         "Search the public web for external documentation, changelogs, registry pages, repositories, or other reference material when you do not yet know the exact URL. Uses multiple search sources, reranks results by query relevance, and supports domain allow/block filters similar to Claude Code web search."
     }
@@ -1586,7 +1589,11 @@ impl Tool for FetchWebpageTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch public webpages in a bounded batch."
+        "Fetch public http(s) web pages and extract readable text or JSON content. Useful for reading external documentation, release notes, API docs, or blog posts. Blocks localhost and private-network targets."
+    }
+
+    fn electron_native(&self) -> bool {
+        true
     }
 
     fn input_schema(&self) -> Value {

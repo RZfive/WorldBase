@@ -359,6 +359,7 @@ impl Hub {
             workspace: self.workspace.clone(),
             folder_workspace,
             target_project_id,
+            created_project_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids,
             plan_goal: std::sync::Arc::new(std::sync::Mutex::new(None)),
             todo_items: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

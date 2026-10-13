@@ -1,6 +1,5 @@
 import { Router, type Request, type Response } from 'express'
 import type { ProjectFS } from '../../project-fs/project-fs.js'
-import type { RuntimeManager } from '../../project-runtime/runtime-manager.js'
 import type { ProjectDataAccess } from '../../project-data-access/data-access.js'
 
 /**
@@ -17,7 +16,6 @@ export interface LanProjectControl {
 
 interface ProjectServices {
   projectFS: ProjectFS
-  runtimeManager: RuntimeManager
   dataAccess: ProjectDataAccess
   resolveRustProjectControl?: () => Promise<LanProjectControl | null>
 }
@@ -59,7 +57,7 @@ async function startRustProject (control: LanProjectControl, projectId: string):
  */
 export function projectsRouter (services: ProjectServices): Router {
   const router = Router()
-  const { projectFS, runtimeManager, dataAccess } = services
+  const { projectFS, dataAccess } = services
 
   // List all projects
   router.get('/', async (_req: Request, res: Response) => {
@@ -82,7 +80,7 @@ export function projectsRouter (services: ProjectServices): Router {
       // Enrich with runtime status
       const enriched = projects.map(project => ({
         ...project,
-        runtime: runtimeManager.getStatus(project.id)
+        runtime: { projectId: project.id, status: 'not_started' }
       }))
 
       res.json({ projects: enriched })
@@ -105,7 +103,7 @@ export function projectsRouter (services: ProjectServices): Router {
         return
       }
       const meta = await projectFS.getProjectMeta(req.params.projectId)
-      const status = runtimeManager.getStatus(req.params.projectId)
+      const status: Record<string, unknown> = { projectId: req.params.projectId, status: 'not_started' }
       res.json({ ...meta, runtime: status })
     } catch (err) {
       res.status(404).json({ error: (err as Error).message })
@@ -183,8 +181,7 @@ export function projectsRouter (services: ProjectServices): Router {
         res.json({ ...native, projectId: req.params.projectId, port, status })
         return
       }
-      const result = await runtimeManager.start(req.params.projectId)
-      res.json(result)
+      throw new Error('Rust harness is unavailable.')
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }
@@ -203,8 +200,7 @@ export function projectsRouter (services: ProjectServices): Router {
         })
         return
       }
-      const result = await runtimeManager.stop(req.params.projectId)
-      res.json(result)
+      throw new Error('Rust harness is unavailable.')
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }
@@ -218,7 +214,7 @@ export function projectsRouter (services: ProjectServices): Router {
         res.json(await rust.call<Record<string, unknown>>('project.status', { projectId: req.params.projectId }))
         return
       }
-      res.json(runtimeManager.getStatus(req.params.projectId))
+      throw new Error('Rust harness is unavailable.')
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }
@@ -237,7 +233,7 @@ export function projectsRouter (services: ProjectServices): Router {
         res.json({ logs: Array.isArray(native.logs) ? native.logs : [] })
         return
       }
-      res.json({ logs: runtimeManager.getLogs(req.params.projectId, lines) })
+      throw new Error('Rust harness is unavailable.')
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }

@@ -111,8 +111,48 @@ export class SkillStore {
           skills.push(JSON.parse(raw) as Skill)
         } catch { /* skip corrupted */ }
       }
+      // Flat single-file skills written by the Rust harness's native
+      // install_skill (userData/skills/<id>.yaml|.md|.markdown|.mdx).
+      if (entry.isFile() && /\.(yaml|yml|md|markdown|mdx)$/.test(entry.name)) {
+        const skill = this.loadFlatSkillFile(path.join(this.dir, entry.name))
+        if (skill) skills.push(skill)
+      }
     }
     return skills.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  }
+
+  /** Parse a flat native-harness skill file into the panel Skill shape. */
+  private loadFlatSkillFile (filePath: string): Skill | null {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8')
+      const baseName = path.basename(filePath).replace(/\.(yaml|yml|md|markdown|mdx)$/i, '')
+      // Rust native installs write plain YAML (name/description/instructions),
+      // not markdown frontmatter — read the name/description fields directly.
+      let yamlName = ''
+      let yamlDescription = ''
+      if (/\.(yaml|yml)$/i.test(filePath)) {
+        yamlName = (content.match(/^name:\s*(.+?)\s*$/m)?.[1] || '').replace(/^["']+|["']+$/g, '')
+        yamlDescription = (content.match(/^description:\s*(.+?)\s*$/m)?.[1] || '').replace(/^["']+|["']+$/g, '')
+      }
+      const { name, description, tools } = this.parseSkillMeta(content, yamlName || baseName)
+      const stat = fs.statSync(filePath)
+      const id = baseName
+      return {
+        id,
+        name,
+        description: yamlDescription || description,
+        content,
+        files: [{
+          relativePath: path.basename(filePath),
+          type: 'markdown',
+          size: stat.size
+        }],
+        scripts: [],
+        tools,
+        createdAt: stat.birthtime.toISOString(),
+        updatedAt: stat.mtime.toISOString()
+      }
+    } catch { return null }
   }
 
   /** Get a single skill by ID. */
@@ -132,6 +172,13 @@ export class SkillStore {
         const raw = fs.readFileSync(legacyPath, 'utf-8')
         return this.migrateLegacySkill(JSON.parse(raw))
       } catch { return null }
+    }
+    // Native harness installs are flat single files (<id>.yaml|.md|...)
+    for (const extension of ['.yaml', '.yml', '.md', '.markdown', '.mdx']) {
+      const flatPath = path.join(this.dir, `${id}${extension}`)
+      if (fs.existsSync(flatPath)) {
+        return this.loadFlatSkillFile(flatPath)
+      }
     }
     return null
   }

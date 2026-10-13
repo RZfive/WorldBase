@@ -406,6 +406,7 @@ mod tests {
             workspace: std::env::temp_dir(),
             folder_workspace: None,
             target_project_id: None,
+            created_project_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             allowed_mcp_server_ids: None,
             plan_goal: std::sync::Arc::new(std::sync::Mutex::new(None)),
             todo_items: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

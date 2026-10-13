@@ -52,7 +52,9 @@ import {
   applyMcpServersToService,
   disconnectMcpServerForSelectedHarness,
   getMcpStateForSelectedHarness,
-  refreshMcpServerForSelectedHarness
+  refreshMcpServerForSelectedHarness,
+  mirrorDocumentArtifact,
+  refreshRustScheduledTasks
 } from './services.js'
 import { attachProjectRuntimeLogForwarding, broadcastToAppWindows, buildActivePagePromptSection, buildActiveTerminalPromptSection, buildRendererWindowUrl, createProjectPackageDefaultName, ensureWindowHasMinimumWidth, getPreferredLanIpv4Addresses, getProjectsDir, getSenderWindow, guessImageExtension, resolveImageBuffer, runWithAiRequestWindow, setWindowMinimumWidth } from './windows.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
@@ -264,10 +266,6 @@ export function setupIPC (): void {
   const getMainWindow = () => mainState.mainWindow
   const terminal = () => mainState.terminalManager
   const projectFS = mainState.projectFS!
-  const runtimeManager = mainState.runtimeManager!
-  const builderService = mainState.builderService!
-  const appGateway = mainState.appGateway!
-  const processManagerService = mainState.processManagerService!
   const updateService = mainState.updateService!
   const systemService = mainState.systemService!
   const dataAccess = mainState.dataAccess!
@@ -1637,6 +1635,7 @@ export function setupIPC (): void {
     }
     const artifact = await parseDocument(resolvedPath)
     documentStore!.addArtifact(artifact)
+    mirrorDocumentArtifact(artifact as unknown as { id: string } & Record<string, unknown>)
     return { artifact }
   })
 
@@ -1940,20 +1939,16 @@ export function setupIPC (): void {
         }
       }))
     }
-    const projects = await projectFS!.listProjects()
-    return projects.map(project => ({ ...project, runtime: runtimeManager!.getStatus(project.id) }))
   })
 
   ipcMain.handle('projects:get', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.get', { projectId })
-    return projectFS!.getProjectMeta(projectId)
+    return await rustClient.call<Record<string, unknown>>('project.get', { projectId })
   })
 
   ipcMain.handle('projects:getFileTree', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Array<Record<string, unknown>>>('project.tree', { projectId })
-    return projectFS!.getFileTree(projectId)
+    return await rustClient.call<Array<Record<string, unknown>>>('project.tree', { projectId })
   })
 
   ipcMain.handle('projects:readFile', async (_event: IpcMainInvokeEvent, projectId: string, filePath: string) => {
@@ -1993,13 +1988,7 @@ export function setupIPC (): void {
       throw new TypeError(`Invalid project ID: ${String(projectId)}`)
     }
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) {
-      await rustClient.call<Record<string, unknown>>('project.delete', { projectId })
-    } else {
-      // Stop the project first if running
-      try { await runtimeManager!.stop(projectId) } catch { /* ignore */ }
-      await projectFS!.deleteProject(projectId)
-    }
+    await rustClient.call<Record<string, unknown>>('project.delete', { projectId })
     broadcastToAppWindows('projects:changed', { action: 'deleted', projectId })
     return { success: true }
   })
@@ -2010,9 +1999,7 @@ export function setupIPC (): void {
     }
 
     const rustClient = await selectedRustProjectClient()
-    const meta = rustClient
-      ? await rustClient.call<Record<string, unknown>>('project.get', { projectId })
-      : await projectFS!.getProjectMeta(projectId)
+    const meta = await rustClient.call<Record<string, unknown>>('project.get', { projectId })
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const dialogOptions = {
       title: t('mainDialog.exportAppPackageTitle'),
@@ -2105,71 +2092,54 @@ export function setupIPC (): void {
 
   // Runtime management
   ipcMain.handle('runtime:start', async (_event: IpcMainInvokeEvent, projectId: string) => {
-    const rustHarness = await startSelectedRustHarness()
-    if (rustHarness && mainState.rustHarness) {
-      const start = async (install: boolean): Promise<Record<string, unknown>> => {
-        return await mainState.rustHarness!.call<Record<string, unknown>>('project.dev.start', {
-          project: projectId,
-          install
-        })
-      }
-      let native: Record<string, unknown>
-      try {
-        native = await start(false)
-      } catch (error) {
-        // Match Electron RuntimeManager's first-start behavior without handing
-        // the process to TS: Rust performs the install, then owns the retry.
-        if (!/next not installed|node_modules/i.test(error instanceof Error ? error.message : String(error))) {
-          throw error
-        }
-        await start(true)
-        native = await start(false)
-      }
-      const port = typeof native.port === 'number' ? native.port : undefined
-      const status = typeof native.status === 'string' && native.status.trim()
-        ? native.status
-        : 'starting'
-      if (status === 'starting' || status === 'running' || status === 'already_running') {
-        broadcastToAppWindows('projects:changed', { action: 'started', projectId, port, source: 'rust' })
-      }
-      return {
-        ...native,
-        projectId,
-        port,
-        status
-      }
+    await startSelectedRustHarness()
+    const start = async (install: boolean): Promise<Record<string, unknown>> => {
+      return await mainState.rustHarness!.call<Record<string, unknown>>('project.dev.start', {
+        project: projectId,
+        install
+      })
     }
-    const result = await runtimeManager!.start(projectId)
-    if (result.status === 'running' || result.status === 'already_running') {
-      broadcastToAppWindows('projects:changed', { action: 'started', projectId, port: result.port })
+    let native: Record<string, unknown>
+    try {
+      native = await start(false)
+    } catch (error) {
+      // Match Electron RuntimeManager's first-start behavior without handing
+      // the process to TS: Rust performs the install, then owns the retry.
+      if (!/next not installed|node_modules/i.test(error instanceof Error ? error.message : String(error))) {
+        throw error
+      }
+      await start(true)
+      native = await start(false)
     }
-    return result
+    const port = typeof native.port === 'number' ? native.port : undefined
+    const status = typeof native.status === 'string' && native.status.trim()
+      ? native.status
+      : 'starting'
+    if (status === 'starting' || status === 'running' || status === 'already_running') {
+      broadcastToAppWindows('projects:changed', { action: 'started', projectId, port, source: 'rust' })
+    }
+    return {
+      ...native,
+      projectId,
+      port,
+      status
+    }
   })
 
   ipcMain.handle('runtime:stop', async (_event: IpcMainInvokeEvent, projectId: string) => {
-    const rustHarness = await startSelectedRustHarness()
-    if (rustHarness && mainState.rustHarness) {
-      const native = await mainState.rustHarness.call<Record<string, unknown>>('project.dev.stop', { project: projectId })
-      const stopped = native.stopped === true
-      const status = stopped ? 'stopped' : 'not_running'
-      if (stopped) {
-        broadcastToAppWindows('projects:changed', { action: 'stopped', projectId, source: 'rust' })
-      }
-      return { ...native, projectId, status }
+    await startSelectedRustHarness()
+    const native = await mainState.rustHarness!.call<Record<string, unknown>>('project.dev.stop', { project: projectId })
+    const stopped = native.stopped === true
+    const status = stopped ? 'stopped' : 'not_running'
+    if (stopped) {
+      broadcastToAppWindows('projects:changed', { action: 'stopped', projectId, source: 'rust' })
     }
-    const result = await runtimeManager!.stop(projectId)
-    if (result.status === 'stopped') {
-      broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
-    }
-    return result
+    return { ...native, projectId, status }
   })
 
   ipcMain.handle('runtime:status', async (_event: IpcMainInvokeEvent, projectId: string) => {
-    const rustHarness = await startSelectedRustHarness()
-    if (rustHarness && mainState.rustHarness) {
-      return await mainState.rustHarness.call<Record<string, unknown>>('project.status', { project: projectId })
-    }
-    return runtimeManager!.getStatus(projectId)
+    await startSelectedRustHarness()
+    return await mainState.rustHarness!.call<Record<string, unknown>>('project.status', { project: projectId })
   })
 
   ipcMain.handle('system:getStatus', async () => {
@@ -2190,111 +2160,76 @@ export function setupIPC (): void {
   // Build management
   ipcMain.handle('build:run', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.build.run', { projectId })
-    return builderService!.build(projectId)
+    return await rustClient.call<Record<string, unknown>>('project.build.run', { projectId })
   })
 
   ipcMain.handle('build:cleanup', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.build.cleanup', { projectId })
-    return builderService!.cleanup(projectId)
+    return await rustClient.call<Record<string, unknown>>('project.build.cleanup', { projectId })
   })
 
   ipcMain.handle('build:rebuild', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.build.rebuild', { projectId })
-    return builderService!.rebuild(projectId)
+    return await rustClient.call<Record<string, unknown>>('project.build.rebuild', { projectId })
   })
 
   ipcMain.handle('build:needsRebuild', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) {
-      const native = await rustClient.call<Record<string, unknown>>('project.build.needsRebuild', { projectId })
-      return native.needsRebuild === true
-    }
-    return builderService!.needsRebuild(projectId)
+    const native = await rustClient.call<Record<string, unknown>>('project.build.needsRebuild', { projectId })
+    return native.needsRebuild === true
   })
 
   // Gateway / service management
   ipcMain.handle('gateway:serviceMap', async () => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.gateway.serviceMap', {})
-    return appGateway!.getServiceMap()
+    return await rustClient.call<Record<string, unknown>>('project.gateway.serviceMap', {})
   })
 
   ipcMain.handle('gateway:startAll', async () => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.gateway.startAll', {})
-    return appGateway!.startAll()
+    return await rustClient.call<Record<string, unknown>>('project.gateway.startAll', {})
   })
 
   ipcMain.handle('gateway:stopAll', async () => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.gateway.stopAll', {})
-    await appGateway!.stopAll()
-    return { success: true }
+    return await rustClient.call<Record<string, unknown>>('project.gateway.stopAll', {})
   })
 
   ipcMain.handle('gateway:setRestartPolicy', async (_event: IpcMainInvokeEvent, projectId: string, policy: 'always' | 'on-failure' | 'never') => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.gateway.setRestartPolicy', { projectId, policy })
-    appGateway!.setRestartPolicy(projectId, policy)
-    return { success: true }
+    return await rustClient.call<Record<string, unknown>>('project.gateway.setRestartPolicy', { projectId, policy })
   })
 
   // Process management
   ipcMain.handle('process:getSnapshot', async () => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.process.snapshot', {})
-    return processManagerService!.getSnapshot()
+    return await rustClient.call<Record<string, unknown>>('project.process.snapshot', {})
   })
 
   ipcMain.handle('process:restart', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) {
-      const result = await rustClient.call<Record<string, unknown>>('project.process.restart', { projectId })
-      if (result.success) broadcastToAppWindows('projects:changed', { action: 'started', projectId, source: 'rust' })
-      return result
-    }
-    const result = await processManagerService!.restartProject(projectId)
-    if (result.success) {
-      broadcastToAppWindows('projects:changed', { action: 'started', projectId })
-    }
+    const result = await rustClient.call<Record<string, unknown>>('project.process.restart', { projectId })
+    if (result.success) broadcastToAppWindows('projects:changed', { action: 'started', projectId, source: 'rust' })
     return result
   })
 
   ipcMain.handle('process:stop', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) {
-      const result = await rustClient.call<Record<string, unknown>>('project.process.stop', { projectId })
-      if (result.success) broadcastToAppWindows('projects:changed', { action: 'stopped', projectId, source: 'rust' })
-      return result
-    }
-    const result = await processManagerService!.stopProject(projectId)
-    if (result.success) {
-      broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
-    }
+    const result = await rustClient.call<Record<string, unknown>>('project.process.stop', { projectId })
+    if (result.success) broadcastToAppWindows('projects:changed', { action: 'stopped', projectId, source: 'rust' })
     return result
   })
 
   ipcMain.handle('process:forceKill', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) {
-      const result = await rustClient.call<Record<string, unknown>>('project.process.forceKill', { projectId })
-      if (result.success) broadcastToAppWindows('projects:changed', { action: 'stopped', projectId, source: 'rust' })
-      return result
-    }
-    const result = await processManagerService!.forceKillProject(projectId)
-    if (result.success) {
-      broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
-    }
+    const result = await rustClient.call<Record<string, unknown>>('project.process.forceKill', { projectId })
+    if (result.success) broadcastToAppWindows('projects:changed', { action: 'stopped', projectId, source: 'rust' })
     return result
   })
 
   ipcMain.handle('process:killOrphan', async (_event: IpcMainInvokeEvent, pid: number) => {
     const rustClient = await selectedRustProjectClient()
-    if (rustClient) return await rustClient.call<Record<string, unknown>>('project.process.killOrphan', { pid })
-    return processManagerService!.killOrphanProcess(pid)
+    return await rustClient.call<Record<string, unknown>>('project.process.killOrphan', { pid })
   })
 
   // Data access
@@ -2650,12 +2585,8 @@ export function setupIPC (): void {
   // Get project LAN URL for QR code generation
   ipcMain.handle('projects:getLanUrl', async (_event: IpcMainInvokeEvent, projectId: string) => {
     const rustClient = await selectedRustProjectClient()
-    const native = rustClient
-      ? await rustClient.call<Record<string, unknown>>('project.status', { projectId })
-      : null
-    const port = rustClient
-      ? (typeof native?.port === 'number' ? native.port : undefined)
-      : runtimeManager!.getPort(projectId)
+    const native = await rustClient.call<Record<string, unknown>>('project.status', { projectId })
+    const port = typeof native?.port === 'number' ? native.port : undefined
     const addresses = getPreferredLanIpv4Addresses()
     const lanIp = addresses.length > 0 ? addresses[0] : '127.0.0.1'
     const encodedProjectId = encodeURIComponent(projectId)
@@ -2796,19 +2727,62 @@ export function setupIPC (): void {
     return { success: true }
   })
 
+  // Scheduled tasks are stored and executed in the Rust scheduler. CRUD goes
+  // through JSON-RPC; the Electron service mirrors the catalog and keeps the
+  // report history for the UI.
   ipcMain.handle('scheduler:listTasks', async () => {
-    return scheduledTaskService!.listTasks()
+    const rustClient = await selectedRustProjectClient()
+    if (rustClient) {
+      await refreshRustScheduledTasks()
+    }
+    return scheduledTaskService!.listTasks({ includeHidden: true })
   })
 
   ipcMain.handle('scheduler:saveTask', async (_event: IpcMainInvokeEvent, task: ScheduledTaskDefinition) => {
+    const rustClient = await selectedRustProjectClient()
+    if (rustClient) {
+      const saved = await rustClient.call<Record<string, unknown>>('schedule.create', {
+        id: task.id,
+        name: task.title,
+        title: task.title,
+        task: task.prompt,
+        prompt: task.prompt,
+        enabled: task.enabled,
+        schedule: task.schedule,
+        hidden: task.hidden === true,
+        createdBy: task.createdBy,
+        providerId: task.providerId || null,
+        modelId: task.modelId || null,
+        selectedSkillIds: task.selectedSkillIds || [],
+        selectedMcpServerIds: task.selectedMcpServerIds || [],
+        retryPolicy: task.retryPolicy,
+        nextRunAt: task.nextRunAt || null
+      })
+      await refreshRustScheduledTasks()
+      broadcastToAppWindows('scheduler:tasksChanged', saved.task ?? saved)
+      return saved.task ?? saved
+    }
     return scheduledTaskService!.saveTask(task)
   })
 
   ipcMain.handle('scheduler:deleteTask', async (_event: IpcMainInvokeEvent, taskId: string) => {
+    const rustClient = await selectedRustProjectClient()
+    if (rustClient) {
+      const result = await rustClient.call<{ deleted?: boolean }>('schedule.delete', { id: taskId })
+      await refreshRustScheduledTasks()
+      broadcastToAppWindows('scheduler:tasksChanged', { action: 'deleted', taskId })
+      return result.deleted === true
+    }
     return scheduledTaskService!.deleteTask(taskId)
   })
 
   ipcMain.handle('scheduler:runNow', async (_event: IpcMainInvokeEvent, taskId: string) => {
+    const rustClient = await selectedRustProjectClient()
+    if (rustClient) {
+      const result = await rustClient.call<Record<string, unknown>>('schedule.run', { id: taskId })
+      await refreshRustScheduledTasks()
+      return result
+    }
     return scheduledTaskService!.runNow(taskId)
   })
 
@@ -3003,17 +2977,11 @@ export function setupIPC (): void {
     }
 
     const rustClient = await selectedRustProjectClient()
-    const nativeStatus = rustClient
-      ? await rustClient.call<Record<string, unknown>>('project.status', { projectId })
-      : null
-    const port = rustClient
-      ? (typeof nativeStatus?.port === 'number' ? nativeStatus.port : undefined)
-      : runtimeManager!.getPort(projectId)
+    const nativeStatus = await rustClient.call<Record<string, unknown>>('project.status', { projectId })
+    const port = typeof nativeStatus?.port === 'number' ? nativeStatus.port : undefined
     if (!port) return { success: false, error: 'Project not running' }
 
-    const meta = rustClient
-      ? await rustClient.call<Record<string, unknown>>('project.get', { projectId })
-      : await projectFS!.getProjectMeta(projectId)
+    const meta = await rustClient.call<Record<string, unknown>>('project.get', { projectId })
     const projectName = (meta?.name as string) || projectId
 
     const win = new BrowserWindow({
@@ -3052,16 +3020,9 @@ export function setupIPC (): void {
       void (async () => {
         try {
           const activeRustClient = await selectedRustProjectClient()
-          if (activeRustClient) {
-            const result = await activeRustClient.call<Record<string, unknown>>('project.dev.stop', { projectId })
-            if (result.stopped === true) {
-              broadcastToAppWindows('projects:changed', { action: 'stopped', projectId, source: 'rust' })
-            }
-          } else {
-            const result = await runtimeManager.stop(projectId)
-            if (result.status === 'stopped') {
-              broadcastToAppWindows('projects:changed', { action: 'stopped', projectId })
-            }
+          const result = await activeRustClient.call<Record<string, unknown>>('project.dev.stop', { projectId })
+          if (result.stopped === true) {
+            broadcastToAppWindows('projects:changed', { action: 'stopped', projectId, source: 'rust' })
           }
         } catch (error) {
           console.warn(`[runtime] Failed to stop ${projectId} after window close:`, error)
